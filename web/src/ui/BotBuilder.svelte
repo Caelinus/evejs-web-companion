@@ -25,8 +25,11 @@
     MAX_QTY_ARG,
     MIN_ISK_ARG,
     MIN_QTY_ARG,
+    MAX_TEXT_ARG_LEN,
+    MAX_NOTES_LEN,
     MAX_INTERRUPTS,
-    conditionAllowedAt,
+    DEFAULT_HUNT_MAX_JUMPS,
+    DEFAULT_HUNT_RANGE_AU,
     startingStation,
   } from "../bots/botScript.ts";
   import {
@@ -35,6 +38,21 @@
     categoriesInUse,
     type BlockCategory,
   } from "../bots/macroCatalogView.ts";
+  import {
+    MACRO_ARG_DESCRIPTORS,
+    type ArgDescriptor,
+    UNTIL_CONDITION_KINDS,
+    WATCH_CONDITION_KINDS,
+    CONDITION_NOUN_LABEL,
+    CONDITION_UNTIL_LABEL,
+    RESPONSE_OPTIONS,
+    PLACE_OPTIONS,
+    CONDITION_FRACTION_BOUNDS,
+    ORE_HOLD_FRACTION_MAX,
+    conditionUsesFraction,
+    conditionUsesIsk,
+    conditionUsesCount,
+  } from "../bots/editorOptions.ts";
   import { EXAMPLE_BOTS, type ExampleBot } from "../bots/exampleBots.ts";
   import { insertSavedBotSteps, type FlatProgramNode } from "../bots/scriptEdit.ts";
   import { watchBuilderEdits } from "../bots/builderHandoff.ts";
@@ -66,12 +84,17 @@
   const names = store.names;
   // svelte-ignore state_referenced_locally
   const space = store.space;
+  // svelte-ignore state_referenced_locally
+  const fitting = store.fitting;
+  // svelte-ignore state_referenced_locally
+  const finder = store.finder;
 
   let idSeed = 0;
   const makeId = (): string => `n${(idSeed += 1)}`;
 
   // ── Editor state (the flat "blocks" shape the player thinks in) ──────────────
   let name = $state("My mining bot");
+  let notes = $state("");
   let repeatMode = $state<"forever" | "times" | "once">("times");
   let repeatCount = $state(20);
   let home = $state<WorldRef>(startingStation());
@@ -154,6 +177,9 @@
   const builtDoc = $derived<BotScript>(buildScript());
   const problems = $derived(validateScript(builtDoc));
   const problemsByPath = $derived(groupProblems(problems));
+  // Only BLOCKING problems count toward the header badge and gate Save — an
+  // advisory note is worth reading, never worth stopping a save over.
+  const blockingCount = $derived(problems.filter((p) => p.severity === "blocking").length);
 
   function buildScript(): BotScript {
     // A program the one-list editor cannot hold is returned verbatim (only
@@ -176,14 +202,24 @@
                   body: steps.filter((n): n is LoopBodyNode => n.kind !== "sub-bot"),
                 },
               ];
-    return { format: "evejs-bot-script", version: 1, name, notes: "", home, interrupts: [...watches], program };
+    return {
+      format: "evejs-bot-script",
+      version: 1,
+      name,
+      notes: notes.slice(0, MAX_NOTES_LEN),
+      home,
+      interrupts: [...watches],
+      program,
+    };
   }
 
-  function groupProblems(list: readonly ScriptProblem[]): Map<string, string[]> {
-    const map = new Map<string, string[]>();
+  /** Groups problems by row/path, keeping each one's severity so the row can
+   * mark itself blocking (red, disables Save) or advisory (a quieter note). */
+  function groupProblems(list: readonly ScriptProblem[]): Map<string, ScriptProblem[]> {
+    const map = new Map<string, ScriptProblem[]>();
     for (const p of list) {
       const existing = map.get(p.path) ?? [];
-      existing.push(p.sentence);
+      existing.push(p);
       map.set(p.path, existing);
     }
     return map;
@@ -205,23 +241,6 @@
     return station !== undefined && station.kind === "station" ? station.ref : unboundStation();
   }
 
-  const WATCH_LABEL: Record<string, string> = {
-    "shield-below": "Shields",
-    "armor-below": "Armor",
-    "hull-below": "Hull",
-    "health-below": "Ship health",
-    "capacitor-below": "Capacitor",
-    "drone-health-below": "A drone's health",
-  };
-  const RESPONSE_OPTIONS: readonly { value: InterruptResponse; label: string }[] = [
-    { value: "dock-and-pause", label: "Dock at home and stop" },
-    { value: "pause", label: "Just stop and wait" },
-    { value: "repair", label: "Run the repairers until it recovers" },
-    // "Let me know" changes nothing about the ship, so it is the one response a
-    // player can safely stack ABOVE a real one: it speaks once, then steps aside
-    // and lets the watch below it fire.
-    { value: "alert", label: "Let me know and keep going" },
-  ];
   /** A pirate watch can also fight back, which the health watches cannot. */
   const HOSTILE_RESPONSE_OPTIONS: readonly { value: InterruptResponse; label: string }[] = [
     { value: "launch-drones", label: "Send out combat drones and keep going" },
@@ -229,20 +248,61 @@
     { value: "pause", label: "Just stop and wait" },
     { value: "alert", label: "Let me know and keep going" },
   ];
-  const untilKinds = ["ore-hold-at-least", "hold-empty", "shield-below", "armor-below", "hull-below", "health-below", "capacitor-below"].filter(
-    (k) => conditionAllowedAt(k as ConditionKind, "until"),
-  ) as ConditionKind[];
-  const UNTIL_LABEL: Record<string, string> = {
-    "ore-hold-at-least": "the ore hold is nearly full",
-    "hold-empty": "the hold is empty",
-    "shield-below": "shields drop below…",
-    "armor-below": "armor drops below…",
-    "hull-below": "hull drops below…",
-    "health-below": "ship health drops below…",
-    "capacitor-below": "the capacitor drops below…",
+  /**
+   * The watch-add button's own caption, kept distinct from
+   * `CONDITION_NOUN_LABEL` (the row's noun) so the eleven captions that shipped
+   * before this slice read exactly as they did. `Record<ConditionKind, string>`
+   * over the full union — the same exhaustiveness guarantee as the tables in
+   * `editorOptions.ts` — so a 15th condition kind fails to compile here rather
+   * than leaving the watch-add row one button short again.
+   */
+  const WATCH_BUTTON_LABEL: Readonly<Record<ConditionKind, string>> = {
+    "shield-below": "Watch Shields",
+    "armor-below": "Watch Armor",
+    "hull-below": "Watch Hull",
+    "capacitor-below": "Watch Capacitor",
+    "hostile-on-grid": "Watch for Rats",
+    "wallet-below": "Watch Wallet (low)",
+    "wallet-above": "Watch Wallet (high)",
+    "cargo-full": "Watch Cargo Hold",
+    "players-in-system-above": "Watch for Players",
+    "targeted-by-player": "Watch for Being Targeted",
+    "drone-health-below": "Watch Drones",
+    "health-below": "Watch Ship Health",
+    "ore-hold-at-least": "Watch Ore Hold",
+    "hold-empty": "Watch for an Empty Hold",
   };
-  function untilHasFraction(kind: ConditionKind): boolean {
-    return kind !== "hold-empty" && kind !== "hostile-on-grid";
+  /** A fraction condition's ceiling — the ore hold's "nearly full" is 90%, everything else 95%. */
+  function fractionCap(kind: ConditionKind): number {
+    return kind === "ore-hold-at-least" ? ORE_HOLD_FRACTION_MAX : CONDITION_FRACTION_BOUNDS.max;
+  }
+  /**
+   * A fresh `Condition` of `kind`, reusing `previous`'s own threshold when it
+   * carried the same SHAPE (fraction / ISK / count) — so switching the kind in
+   * an until/watch dropdown keeps whatever number the player already set rather
+   * than resetting it. Shared by `addWatch`, `setStepUntilKind` and
+   * `setBranchWhenKind`, so the three pickers this file offers over a condition
+   * kind can never disagree about what a fresh one of each shape defaults to.
+   */
+  function freshCondition(kind: ConditionKind, previous?: Condition): Condition {
+    if (conditionUsesFraction(kind)) {
+      // Ore hold / cargo hold read naturally as "nearly full" (90%); every
+      // other fraction (shields, armor, hull, health, capacitor) as a lower
+      // safety line (30%) — the same defaults this file has always used.
+      const wantsFull = kind === "ore-hold-at-least" || kind === "cargo-full";
+      const keep = previous !== undefined && "fraction" in previous ? previous.fraction : wantsFull ? 0.9 : 0.3;
+      return { kind, fraction: Math.min(fractionCap(kind), Math.max(CONDITION_FRACTION_BOUNDS.min, keep)) } as Condition;
+    }
+    if (conditionUsesIsk(kind)) {
+      const keep = previous !== undefined && "isk" in previous ? previous.isk : 10_000_000;
+      return { kind, isk: keep } as Condition;
+    }
+    if (conditionUsesCount(kind)) {
+      // Zero = "anyone else at all", the setting a solo miner wants.
+      const keep = previous !== undefined && "count" in previous ? previous.count : 0;
+      return { kind, count: keep } as Condition;
+    }
+    return { kind } as Condition;
   }
 
   // ── Watches ──────────────────────────────────────────────────────────────────
@@ -251,25 +311,21 @@
   }
   function addWatch(kind: ConditionKind): void {
     if (hasWatch(kind)) return;
-    const isWallet = kind === "wallet-below" || kind === "wallet-above";
-    const noFields = kind === "hostile-on-grid" || kind === "targeted-by-player";
-    const when: Condition =
-      noFields
-        ? ({ kind } as Condition)
-        : isWallet
-          ? ({ kind, isk: 10_000_000 } as Condition)
-          : kind === "cargo-full"
-              ? ({ kind, fraction: 0.9 } as Condition)
-              : ({ kind, fraction: 0.3 } as Condition);
-    // Sensible first responses: money and a full hold are not dangers, so they
-    // just stop; a pirate launches drones; being targeted is news rather than
-    // damage, so it tells you; anything about health heads home.
+    const when = freshCondition(kind);
+    // Sensible first responses: money, a full hold and an empty one are not
+    // dangers, so they just stop; a pirate launches drones; being targeted or
+    // joined by players is news rather than damage, so it tells you; anything
+    // about health heads home.
     const respond: InterruptResponse =
       kind === "hostile-on-grid"
         ? "launch-drones"
         : kind === "targeted-by-player"
           ? "alert"
-          : isWallet || kind === "cargo-full"
+          : kind === "wallet-below" ||
+              kind === "wallet-above" ||
+              kind === "cargo-full" ||
+              kind === "ore-hold-at-least" ||
+              kind === "hold-empty"
             ? "pause"
             : "dock-and-pause";
     watches = [...watches, { id: makeId(), when, respond }];
@@ -300,9 +356,10 @@
     return watches.some((w) => w.respond === "alert" && w.when.kind === row.when.kind);
   }
   function setWatchFraction(id: string, percent: number): void {
-    watches = watches.map((w) =>
-      w.id === id && "fraction" in w.when ? { ...w, when: { ...w.when, fraction: clampFraction(percent / 100) } } : w,
-    );
+    watches = watches.map((w) => {
+      if (w.id !== id || !("fraction" in w.when)) return w;
+      return { ...w, when: { ...w.when, fraction: Math.min(fractionCap(w.when.kind), clampFraction(percent / 100)) } };
+    });
   }
   function setWatchIsk(id: string, amount: number): void {
     const value = Math.min(MAX_ISK_ARG, Math.max(MIN_ISK_ARG, Math.trunc(amount) || MIN_ISK_ARG));
@@ -461,20 +518,17 @@
     steps = steps.map((n, idx) => (idx === i && n.kind === "branch" ? fn(n) : n));
   }
   function setBranchWhenKind(i: number, kind: ConditionKind): void {
-    updateBranch(i, (b) => {
-      const keep = "fraction" in b.when ? b.when.fraction : 0.5;
-      const when: Condition = untilHasFraction(kind)
-        ? ({ kind, fraction: kind === "ore-hold-at-least" ? Math.min(keep, 0.9) : keep } as Condition)
-        : ({ kind } as Condition);
-      return { ...b, when };
-    });
+    updateBranch(i, (b) => ({ ...b, when: freshCondition(kind, b.when) }));
   }
   function setBranchWhenFraction(i: number, percent: number): void {
     updateBranch(i, (b) => {
       if (!("fraction" in b.when)) return b;
-      const cap = b.when.kind === "ore-hold-at-least" ? 0.9 : 0.95;
-      return { ...b, when: { ...b.when, fraction: Math.min(cap, clampFraction(percent / 100)) } };
+      return { ...b, when: { ...b.when, fraction: Math.min(fractionCap(b.when.kind), clampFraction(percent / 100)) } };
     });
+  }
+  function setBranchWhenIsk(i: number, amount: number): void {
+    const value = Math.min(MAX_ISK_ARG, Math.max(MIN_ISK_ARG, Math.trunc(amount) || MIN_ISK_ARG));
+    updateBranch(i, (b) => ("isk" in b.when ? { ...b, when: { ...b.when, isk: value } } : b));
   }
   function addToBranchSide(i: number, side: Side, macro: MacroID): void {
     if (!macro) return;
@@ -566,30 +620,22 @@
     );
   }
   function setStepUntilKind(i: number, kind: ConditionKind, side: Side | null = null, j = -1): void {
-    updateStep(
-      i,
-      (s) => {
-        const keep = s.until && "fraction" in s.until ? s.until.fraction : 0.3;
-        const until: Condition = untilHasFraction(kind)
-          ? ({ kind, fraction: kind === "ore-hold-at-least" ? Math.min(keep, 0.9) : keep } as Condition)
-          : ({ kind } as Condition);
-        return { ...s, until };
-      },
-      side,
-      j,
-    );
+    updateStep(i, (s) => ({ ...s, until: freshCondition(kind, s.until) }), side, j);
   }
   function setStepUntilFraction(i: number, percent: number, side: Side | null = null, j = -1): void {
     updateStep(
       i,
       (s) => {
         if (!s.until || !("fraction" in s.until)) return s;
-        const cap = s.until.kind === "ore-hold-at-least" ? 0.9 : 0.95;
-        return { ...s, until: { ...s.until, fraction: Math.min(cap, clampFraction(percent / 100)) } };
+        return { ...s, until: { ...s.until, fraction: Math.min(fractionCap(s.until.kind), clampFraction(percent / 100)) } };
       },
       side,
       j,
     );
+  }
+  function setStepUntilIsk(i: number, amount: number, side: Side | null = null, j = -1): void {
+    const value = Math.min(MAX_ISK_ARG, Math.max(MIN_ISK_ARG, Math.trunc(amount) || MIN_ISK_ARG));
+    updateStep(i, (s) => (s.until && "isk" in s.until ? { ...s, until: { ...s.until, isk: value } } : s), side, j);
   }
 
   // ── The refit block's saved-fitting picker ─────────────────────────────────
@@ -676,6 +722,106 @@
       j,
     );
   }
+  // ── The mine-at-belt block's OPTIONAL equipment picker ──────────────────────
+  // Which fitted modules are the miners — offered from the ACTIVE ship's fitted
+  // slots (store.fitting.slots, the same live read the Fitting window shows),
+  // deduplicated by GROUP so "two strip miners" offers one option, matching the
+  // format's own EquipmentArg (a group, not a single module — see botScript.ts).
+  // Left unset, the block runs every mining module fitted, so an empty ship
+  // read is never a dead end: the picker offers a note rather than a blank list.
+  const fittedEquipment = $derived.by<readonly { groupID: number; label: string }[]>(() => {
+    const seen = new Map<number, string>();
+    for (const slot of $fitting.slots) {
+      const module = slot.module;
+      if (module !== null && module.groupID !== null && !seen.has(module.groupID)) {
+        const label = $names.resolved[nameKey("type", module.typeID)] ?? "Fitted equipment";
+        seen.set(module.groupID, label);
+      }
+    }
+    return [...seen.entries()].map(([groupID, label]) => ({ groupID, label }));
+  });
+  function equipmentArgGroupID(step: MacroStep): number | null {
+    const arg = step.args["equipment"];
+    return arg !== undefined && arg.kind === "equipment" ? arg.equipment.groupID : null;
+  }
+  function setStepEquipment(i: number, groupID: number, side: Side | null = null, j = -1): void {
+    const match = fittedEquipment.find((e) => e.groupID === groupID);
+    if (match === undefined) return;
+    updateStep(
+      i,
+      (s) => ({ ...s, args: { ...s.args, equipment: { kind: "equipment", equipment: { groupID: match.groupID, label: match.label } } } }),
+      side,
+      j,
+    );
+  }
+  /** Clear an optional arg entirely — back to the macro's own default. */
+  function clearStepArg(i: number, key: string, side: Side | null = null, j = -1): void {
+    updateStep(
+      i,
+      (s) => {
+        const { [key]: _dropped, ...rest } = s.args;
+        return { ...s, args: rest };
+      },
+      side,
+      j,
+    );
+  }
+  // ── The distribution/combat agent finders' OPTIONAL corporation picker ─────
+  // No live corporation search exists anywhere in this app (unlike stations,
+  // fittings, bookmarks or pilots), so this is the one arg picker that is a
+  // plain text field — the NAME is all the finder filters on; an empty field
+  // means "any corporation", the shipped default.
+  function corpArgName(step: MacroStep): string {
+    const arg = step.args["corporation"];
+    return arg !== undefined && arg.kind === "corp" ? (arg.name ?? "") : "";
+  }
+  function setStepCorp(i: number, raw: string, side: Side | null = null, j = -1): void {
+    const trimmed = raw.trim();
+    updateStep(
+      i,
+      (s) => {
+        if (trimmed.length === 0) {
+          const { corporation: _dropped, ...rest } = s.args;
+          return { ...s, args: rest };
+        }
+        return { ...s, args: { ...s.args, corporation: { kind: "corp", id: null, name: trimmed } } };
+      },
+      side,
+      j,
+    );
+  }
+  // ── request-mission's OPTIONAL agent picker ─────────────────────────────────
+  // Sourced from the Agent Finder's own results (store.finder.agents) — the
+  // live agent data this app already has, IF the player has searched there this
+  // session. Left unset (the default), the step uses the agent the find block
+  // published on the run's board, which is the common case.
+  function agentArgID(step: MacroStep): number | null {
+    const arg = step.args["agent"];
+    return arg !== undefined && arg.kind === "agent" ? arg.ref.id : null;
+  }
+  function setStepAgent(i: number, raw: string, side: Side | null = null, j = -1): void {
+    if (raw === "") {
+      clearStepArg(i, "agent", side, j);
+      return;
+    }
+    const match = $finder.agents.find((a) => a.agentID === Number(raw));
+    if (match === undefined) return;
+    updateStep(
+      i,
+      (s) => ({
+        ...s,
+        args: {
+          ...s.args,
+          agent: {
+            kind: "agent",
+            ref: { entity: "agent", id: match.agentID, name: match.name, systemName: match.solarSystemName },
+          },
+        },
+      }),
+      side,
+      j,
+    );
+  }
   function fittingArgID(step: MacroStep): number | null {
     const arg = step.args["fitting"];
     return arg !== undefined && arg.kind === "fitting" ? arg.fittingID : null;
@@ -719,11 +865,6 @@
     }
     return [...seen.entries()].map(([typeID, name]) => ({ typeID, name })).sort((a, b) => a.name.localeCompare(b.name));
   });
-  const PLACE_OPTIONS: readonly { value: string; label: string }[] = [
-    { value: "hangar", label: "station hangar" },
-    { value: "cargo", label: "cargo hold" },
-    { value: "ore-hold", label: "ore hold" },
-  ];
   function moveArg(step: MacroStep, key: string): string {
     const arg = step.args[key];
     if (arg === undefined) return "";
@@ -804,6 +945,54 @@
     );
   }
 
+  // ── Arg editors GENERATED from the spec, for the args no hand-written branch
+  // below already covers ─────────────────────────────────────────────────────
+  //
+  // `macroEditors` (in the template) is still a hand-written `{#if step.macro
+  // === "..."}` chain for the arguments it already knew how to draw — moving
+  // THOSE to a generic renderer would reflow every existing sentence's wording,
+  // which this slice is not here to do. What it WAS missing is three widgets
+  // that never existed at all: `equipment` (mine-at-belt), `corporation`
+  // (find-distribution-agent / find-combat-agent) and `agent`
+  // (request-mission) — `request-mission` had no editor branch whatsoever.
+  //
+  // `extraArgEditor` closes that gap STRUCTURALLY rather than by hand-adding
+  // three more `{#if}` branches: it reads `MACRO_ARG_DESCRIPTORS[step.macro]`
+  // (derived from `MACRO_SPECS`, so it can never itself go stale) and renders
+  // whatever argument key is NOT already named in `HANDLED_ARG_KEYS` for that
+  // macro, choosing its widget from `ArgDescriptor.widget` — the same
+  // `ARG_KIND_WIDGET` table that makes a NEW arg kind fail to compile in
+  // `editorOptions.ts` before it can reach here un-widgeted. Every arg this
+  // complement ever renders is optional (`MACRO_SPECS` has no required arg left
+  // uncovered), so it always sits behind "More options" — Apple's Shortcuts
+  // action-summary rule cited in the design doc.
+  const HANDLED_ARG_KEYS: Readonly<Partial<Record<MacroID, readonly string[]>>> = {
+    "travel-to-station": ["station"],
+    "travel-to-belt": ["belt"],
+    "mine-at-belt": ["belt", "pick"],
+    "deliver-ore": ["station"],
+    "find-distribution-agent": ["level", "maxJumps"],
+    "accept-mission": ["maxJumps"],
+    "refit-ship": ["fitting"],
+    "move-items": ["item", "from", "to", "amount"],
+    "warp-to-bookmark": ["bookmark"],
+    "find-combat-agent": ["level", "maxJumps"],
+    "buy-item": ["item", "quantity", "price"],
+    "sell-item": ["item", "price"],
+    "invite-to-fleet": ["who"],
+    "attack-player": ["only"],
+    "hunt-player": ["only", "maxJumps", "range"],
+    "send-chat": ["channel", "message"],
+    "set-destination": ["destination"],
+    "jettison-cargo": ["item"],
+    "jettison-ore": ["item"],
+    wait: ["seconds"],
+  };
+  function extraArgsFor(macro: MacroID): readonly ArgDescriptor[] {
+    const handled = HANDLED_ARG_KEYS[macro] ?? [];
+    return MACRO_ARG_DESCRIPTORS[macro].all.filter((arg) => !handled.includes(arg.key));
+  }
+
   // ── Import / export ──────────────────────────────────────────────────────────
   function exportJson(): void {
     importText = encodeScriptDoc(builtDoc);
@@ -838,6 +1027,7 @@
   }
   function loadFrom(doc: BotScript): void {
     name = doc.name;
+    notes = doc.notes;
     home = doc.home;
     watches = [...doc.interrupts];
     const first = doc.program[0];
@@ -956,10 +1146,10 @@
       {#each EXAMPLE_BOTS as example (example.key)}
         <button class="minor" title={example.blurb} onclick={() => loadExample(example)}>{example.label}</button>
       {/each}
-      {#if problems.length === 0}
+      {#if blockingCount === 0}
         <span class="badge good">Ready</span>
       {:else}
-        <span class="badge warn">{problems.length} thing{problems.length === 1 ? "" : "s"} to fix</span>
+        <span class="badge warn">{blockingCount} thing{blockingCount === 1 ? "" : "s"} to fix</span>
       {/if}
     </div>
   </div>
@@ -970,22 +1160,20 @@
     <label for="bot-name">Name</label>
     <input id="bot-name" bind:value={name} />
   </div>
-  {#each problemsByPath.get("name") ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
+  {#each problemsByPath.get("name") ?? [] as p}<p class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</p>{/each}
+
+  <div class="field-row">
+    <label for="bot-notes">Notes</label>
+    <textarea id="bot-notes" bind:value={notes} maxlength={MAX_NOTES_LEN} rows="2" placeholder="What this bot is for (optional)"></textarea>
+  </div>
 
   <!-- Always watching -->
   <h3>Always watching</h3>
   <p class="subnote">Checked every moment. Add the ones you want — only one of each.</p>
   <div class="watch-buttons">
-    <button onclick={() => addWatch("shield-below")} disabled={hasWatch("shield-below")}>Watch Shields</button>
-    <button onclick={() => addWatch("armor-below")} disabled={hasWatch("armor-below")}>Watch Armor</button>
-    <button onclick={() => addWatch("hull-below")} disabled={hasWatch("hull-below")}>Watch Hull</button>
-    <button onclick={() => addWatch("capacitor-below")} disabled={hasWatch("capacitor-below")}>Watch Capacitor</button>
-    <button onclick={() => addWatch("hostile-on-grid")} disabled={hasWatch("hostile-on-grid")}>Watch for Rats</button>
-    <button onclick={() => addWatch("wallet-below")} disabled={hasWatch("wallet-below")}>Watch Wallet (low)</button>
-    <button onclick={() => addWatch("wallet-above")} disabled={hasWatch("wallet-above")}>Watch Wallet (high)</button>
-    <button onclick={() => addWatch("cargo-full")} disabled={hasWatch("cargo-full")}>Watch Cargo Hold</button>
-    <button onclick={() => addWatch("targeted-by-player")} disabled={hasWatch("targeted-by-player")}>Watch for Being Targeted</button>
-    <button onclick={() => addWatch("drone-health-below")} disabled={hasWatch("drone-health-below")}>Watch Drones</button>
+    {#each WATCH_CONDITION_KINDS as k (k)}
+      <button onclick={() => addWatch(k)} disabled={hasWatch(k)}>{WATCH_BUTTON_LABEL[k]}</button>
+    {/each}
   </div>
   <ul class="rows">
     {#each watches as row (row.id)}
@@ -1036,8 +1224,25 @@
                 {#each RESPONSE_OPTIONS as opt}<option value={opt.value}>{opt.label}</option>{/each}
               </select>
             </span>
+          {:else if row.when.kind === "ore-hold-at-least"}
+            <span class="sentence">If the ore hold reaches</span>
+            <span class="inline-edit">
+              <input class="pct" type="number" min="5" max={pct(ORE_HOLD_FRACTION_MAX)} value={pct(row.when.fraction)} oninput={(e) => setWatchFraction(row.id, Number(e.currentTarget.value))} />% full
+              →
+              <select value={row.respond} onchange={(e) => setWatchResponse(row.id, e.currentTarget.value as InterruptResponse)}>
+                {#each RESPONSE_OPTIONS as opt}<option value={opt.value}>{opt.label}</option>{/each}
+              </select>
+            </span>
+          {:else if row.when.kind === "hold-empty"}
+            <span class="sentence">If the hold is empty</span>
+            <span class="inline-edit">
+              →
+              <select value={row.respond} onchange={(e) => setWatchResponse(row.id, e.currentTarget.value as InterruptResponse)}>
+                {#each RESPONSE_OPTIONS as opt}<option value={opt.value}>{opt.label}</option>{/each}
+              </select>
+            </span>
           {:else if "fraction" in row.when}
-            <span class="sentence">{WATCH_LABEL[row.when.kind]} drop below</span>
+            <span class="sentence">{CONDITION_NOUN_LABEL[row.when.kind]} drop below</span>
             <span class="inline-edit">
               <input class="pct" type="number" min="5" max="95" value={pct(row.when.fraction)} oninput={(e) => setWatchFraction(row.id, Number(e.currentTarget.value))} />%
               →
@@ -1058,7 +1263,7 @@
     <div class="field-row">
       <span class="field-caption">Dock at</span>
       <StationPicker {flow} value={home} current={currentStation} onPick={(ref) => (home = ref)} />
-      {#each problemsByPath.get("home") ?? [] as sentence}<span class="prob">{sentence}</span>{/each}
+      {#each problemsByPath.get("home") ?? [] as p}<span class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</span>{/each}
     </div>
   {/if}
 
@@ -1083,8 +1288,8 @@
       <button class="tiny" onclick={addSubBot} title="Run another saved bot here">+ Saved bot</button>
     </span>
   </div>
-  {#each problemsByPath.get("program") ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
-  {#each problemsByPath.get("main-loop") ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
+  {#each problemsByPath.get("program") ?? [] as p}<p class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</p>{/each}
+  {#each problemsByPath.get("main-loop") ?? [] as p}<p class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</p>{/each}
 
   {#if advancedProgram !== null}
     <p class="note advanced-note">
@@ -1104,10 +1309,12 @@
             <span class="inline-edit">
               stop when
               <select value={step.until?.kind ?? "ore-hold-at-least"} onchange={(e) => setStepUntilKind(i, e.currentTarget.value as ConditionKind, side, j)}>
-                {#each untilKinds as k}<option value={k}>{UNTIL_LABEL[k]}</option>{/each}
+                {#each UNTIL_CONDITION_KINDS as k}<option value={k}>{CONDITION_UNTIL_LABEL[k]}</option>{/each}
               </select>
               {#if step.until && "fraction" in step.until}
-                <input class="pct" type="number" min="5" max="95" value={pct(step.until.fraction)} oninput={(e) => setStepUntilFraction(i, Number(e.currentTarget.value), side, j)} />%
+                <input class="pct" type="number" min="5" max={pct(step.until.kind === "ore-hold-at-least" ? ORE_HOLD_FRACTION_MAX : CONDITION_FRACTION_BOUNDS.max)} value={pct(step.until.fraction)} oninput={(e) => setStepUntilFraction(i, Number(e.currentTarget.value), side, j)} />%
+              {:else if step.until && "isk" in step.until}
+                <input class="isk-in" type="number" min={MIN_ISK_ARG} max={MAX_ISK_ARG} step="1000000" value={step.until.isk} oninput={(e) => setStepUntilIsk(i, Number(e.currentTarget.value), side, j)} /> ISK
               {/if}
             </span>
           {/if}
@@ -1310,6 +1517,49 @@
           {/if}
   {/snippet}
 
+  <!-- The GENERATED complement to macroEditors above: every arg on this step's
+       macro that macroEditors does not already cover by hand, one widget per
+       `ArgDescriptor.widget` — see HANDLED_ARG_KEYS / extraArgsFor. Today that
+       is exactly `equipment`, `corporation` and `agent`, all optional, so this
+       is always the step's "More options" disclosure. -->
+  {#snippet extraArgEditor(step: MacroStep, i: number, side: "then" | "else" | null, j: number)}
+    {@const extra = extraArgsFor(step.macro)}
+    {#if extra.length > 0}
+      <details class="more-options">
+        <summary>More options</summary>
+        {#each extra as arg (arg.key)}
+          <span class="inline-edit">
+            {arg.label}:
+            {#if arg.widget === "equipment-picker"}
+              <select
+                value={equipmentArgGroupID(step) ?? ""}
+                onchange={(e) => (e.currentTarget.value === "" ? clearStepArg(i, arg.key, side, j) : setStepEquipment(i, Number(e.currentTarget.value), side, j))}
+              >
+                <option value="">use everything fitted</option>
+                {#each fittedEquipment as eq (eq.groupID)}<option value={eq.groupID}>{eq.label}</option>{/each}
+              </select>
+            {:else if arg.widget === "corp-picker"}
+              <input
+                type="text"
+                placeholder="any corporation"
+                value={corpArgName(step)}
+                oninput={(e) => setStepCorp(i, e.currentTarget.value, side, j)}
+              />
+            {:else if arg.widget === "agent-picker"}
+              <select value={agentArgID(step) ?? ""} onchange={(e) => setStepAgent(i, e.currentTarget.value, side, j)}>
+                <option value="">use the agent your bot finds</option>
+                {#each $finder.agents as a (a.agentID)}
+                  <option value={a.agentID}>{a.name}{#if a.stationName} · {a.stationName}{/if}</option>
+                {/each}
+              </select>
+              {#if $finder.agents.length === 0}<em>(no agents found yet — open Agent Finder first)</em>{/if}
+            {/if}
+          </span>
+        {/each}
+      </details>
+    {/if}
+  {/snippet}
+
   <ol class="rows program">
     {#each steps as node, i (node.id)}
       <li class="row node" class:is-branch={node.kind === "branch"}>
@@ -1318,16 +1568,19 @@
           {#if node.kind === "macro"}
             <span class="sentence">{stepSentence(node)}</span>
             {@render macroEditors(node, i, null, -1)}
+            {@render extraArgEditor(node, i, null, -1)}
           {:else if node.kind === "branch"}
             <!-- A FORK: the check, then the two sides. -->
             <span class="sentence">{branchSentence(node)}</span>
             <span class="inline-edit">
               if
               <select value={node.when.kind} onchange={(e) => setBranchWhenKind(i, e.currentTarget.value as ConditionKind)}>
-                {#each untilKinds as k}<option value={k}>{UNTIL_LABEL[k]}</option>{/each}
+                {#each UNTIL_CONDITION_KINDS as k}<option value={k}>{CONDITION_UNTIL_LABEL[k]}</option>{/each}
               </select>
               {#if "fraction" in node.when}
-                <input class="pct" type="number" min="5" max="95" value={pct(node.when.fraction)} oninput={(e) => setBranchWhenFraction(i, Number(e.currentTarget.value))} />%
+                <input class="pct" type="number" min="5" max={pct(node.when.kind === "ore-hold-at-least" ? ORE_HOLD_FRACTION_MAX : CONDITION_FRACTION_BOUNDS.max)} value={pct(node.when.fraction)} oninput={(e) => setBranchWhenFraction(i, Number(e.currentTarget.value))} />%
+              {:else if "isk" in node.when}
+                <input class="isk-in" type="number" min={MIN_ISK_ARG} max={MAX_ISK_ARG} step="1000000" value={node.when.isk} oninput={(e) => setBranchWhenIsk(i, Number(e.currentTarget.value))} /> ISK
               {/if}
             </span>
             {#each ["then", "else"] as const as side (side)}
@@ -1343,7 +1596,8 @@
                       <div class="body">
                         <span class="sentence">{stepSentence(sub)}</span>
                         {@render macroEditors(sub, i, side, j)}
-                        {#each problemsByPath.get(sub.id) ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
+                        {@render extraArgEditor(sub, i, side, j)}
+                        {#each problemsByPath.get(sub.id) ?? [] as p}<p class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</p>{/each}
                       </div>
                       <div class="ops">
                         <button class="tiny" onclick={() => moveInBranchSide(i, side, j, -1)} aria-label="Move up">↑</button>
@@ -1381,7 +1635,7 @@
               {/if}
             </span>
           {/if}
-          {#each problemsByPath.get(node.id) ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
+          {#each problemsByPath.get(node.id) ?? [] as p}<p class={p.severity === "blocking" ? "prob" : "note"}>{p.sentence}</p>{/each}
         </div>
         <div class="ops">
           <button class="tiny" onclick={() => moveStep(i, -1)} aria-label="Move up">↑</button>
@@ -1394,7 +1648,7 @@
   </ol>
 
   <div class="save-row">
-    <button class="primary" onclick={saveBot}>Save</button>
+    <button class="primary" onclick={saveBot} disabled={blockingCount > 0}>Save</button>
   </div>
 
   <!-- Copies another saved bot's steps onto the end of this one (never replaces
