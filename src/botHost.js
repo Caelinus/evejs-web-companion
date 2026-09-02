@@ -143,6 +143,11 @@ function createBotHost(options) {
   // and the reads resume() needs to rebuild a bot from its persisted row.
   const persistPath = options.persistPath || null;
   const loadAccount = options.loadAccount || (async () => null);
+  // The saved-script library is platform-wide: any account's characters may
+  // run any account's script. `loadScript(scriptID) -> Record | null` looks a
+  // script up by ID alone — it does NOT check who authored it. Authority over
+  // characters and running bots stays account-scoped elsewhere in this file
+  // (claims, list(), stop()); only the script lookup is global.
   const loadScript = options.loadScript || (() => null);
 
   /** botID -> record, running and ended alike (ended pruned per character). */
@@ -680,7 +685,7 @@ function createBotHost(options) {
           recordResumeFailure(row, "the account is gone or banned.");
           continue;
         }
-        const script = loadScript(Number(account.accountID), String(row.scriptID || ""));
+        const script = loadScript(String(row.scriptID || ""));
         if (!script) {
           recordResumeFailure(row, "the saved bot no longer exists.");
           continue;

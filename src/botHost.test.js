@@ -368,10 +368,8 @@ test("resume restarts a persisted bot on a fresh host (the restart path)", async
   const after = makeHost({
     persistPath: rosterPath,
     loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
-    loadScript: (accountID, scriptID) =>
-      accountID === 7 && scriptID === "s1"
-        ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } }
-        : null,
+    loadScript: (scriptID) =>
+      scriptID === "s1" ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } } : null,
   });
   await after.resume();
   const listed = after.list(7);
@@ -383,6 +381,34 @@ test("resume restarts a persisted bot on a fresh host (the restart path)", async
   const persisted = readRosterFile(rosterPath);
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].startedAt, listed[0].startedAt);
+});
+
+test("resume looks up the script by ID alone — authorship is not account-scoped", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(START);
+  // The saved bot library is platform-wide: this script's record was authored
+  // by a DIFFERENT account (99) than the one flying it (7, from ACCOUNT/START).
+  // loadScript takes scriptID alone and must not be asked to filter by account.
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
+    loadScript: (scriptID) =>
+      scriptID === "s1"
+        ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true }, authorAccountID: 99 }
+        : null,
+  });
+  await after.resume();
+  const listed = after.list(7);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].status, "running");
+  // Authority over the running bot stays with the flying account (7), not the
+  // script's author (99): visible to 7, invisible and unstoppable by 99.
+  assert.equal(after.list(99).length, 0);
+  const stoppedByAuthor = await after.stop(listed[0].botID, 99);
+  assert.equal(stoppedByAuthor.ok, false);
+  assert.equal(stoppedByAuthor.code, "BOT_NOT_FOUND");
+  assert.notEqual(after.claimedBy(140000001), null);
 });
 
 test("resume refuses a script whose saved revision changed after launch", async () => {

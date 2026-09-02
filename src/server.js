@@ -78,7 +78,7 @@ const botHost =
     // botHost.resume() once listening, so a BFF restart brings them back.
     persistPath: path.join(config.dataDir, "server-bots.json"),
     loadAccount: (username) => store.getAccount(username),
-    loadScript: (accountID, scriptID) => botScripts.get(accountID, scriptID),
+    loadScript: (scriptID) => botScripts.get(scriptID),
     // ONE HULL, ONE DRIVER, direction 1: a bot may not take a character any
     // live web session is flying. (Direction 2 — a tab may not take a bot's
     // character — is the guard in /api/bridge/select.)
@@ -18311,19 +18311,27 @@ app.get("/api/agents/find", requireAuth, async (req, res, next) => {
 });
 
 // ── Player Bot Builder library (goal D2) ───────────────────────────────────
-// Per-account CRUD over data/bot-scripts.json. requireAuth gives req.account, so
-// the account is always known; the store enforces ownership, quotas, and the
+// PLATFORM-WIDE CRUD over data/bot-scripts.json. requireAuth still gates every
+// route — you must be signed in — but the library is no longer partitioned by
+// account: every script is visible to every account, and req.account is used
+// only to record who WROTE a new one. The store enforces size, quota, and the
 // optimistic revision. This is WEB-APP data — it never touches eve.js.
+//
+// ⚠ Script visibility is global; AUTHORITY IS NOT. Nothing here grants any right
+// over a character or a running bot. The bot-start route below proves character
+// ownership separately (`getCharacterForAccount`), and botHost keeps its own
+// per-account filter on listing and stopping bots. Do not fold those checks into
+// this lookup.
 app.get("/api/botscripts", requireAuth, (req, res, next) => {
   try {
-    res.json({ ok: true, scripts: botScripts.list(req.account.accountID) });
+    res.json({ ok: true, scripts: botScripts.list() });
   } catch (error) {
     next(error);
   }
 });
 app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
   try {
-    const record = botScripts.get(req.account.accountID, req.params.scriptID);
+    const record = botScripts.get(req.params.scriptID);
     if (!record) {
       res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
       return;
@@ -18331,6 +18339,7 @@ app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
     res.json({
       ok: true,
       scriptID: record.scriptID,
+      authorAccountID: record.authorAccountID,
       rev: record.rev,
       name: record.name,
       updatedAt: record.updatedAt,
@@ -18351,7 +18360,7 @@ app.post("/api/botscripts", requireAuth, (req, res, next) => {
 app.post("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
   try {
     const body = req.body || {};
-    const result = botScripts.update(req.account.accountID, req.params.scriptID, body.doc, body.baseRev);
+    const result = botScripts.update(req.params.scriptID, body.doc, body.baseRev);
     res.json({ ok: true, ...result });
   } catch (error) {
     sendBotScriptError(res, error, next);
@@ -18359,7 +18368,7 @@ app.post("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
 });
 app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
   try {
-    const removed = botScripts.remove(req.account.accountID, req.params.scriptID);
+    const removed = botScripts.remove(req.params.scriptID);
     res.json({ ok: true, removed });
   } catch (error) {
     next(error);
@@ -18425,7 +18434,7 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
-    const record = botScripts.get(req.account.accountID, scriptID);
+    const record = botScripts.get(scriptID);
     if (!record) {
       res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
       return;

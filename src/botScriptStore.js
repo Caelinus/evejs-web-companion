@@ -1,6 +1,6 @@
 "use strict";
 
-// D1 — the Bot Builder library store: per-account CRUD over a single
+// D1 — the Bot Builder library store: platform-wide CRUD over a single
 // web-repo-owned JSON file (data/bot-scripts.json), using the same atomic
 // tmp+rename write as webAuth.js. This is WEB-APP data — it never touches eve.js's
 // gamestore.sqlite or its stale data/*.json, keeping the thin-bridge boundary.
@@ -9,14 +9,17 @@
 // cannot run the browser's TypeScript codec, so it only guards SIZE, OWNERSHIP,
 // and the optimistic revision. The real gate is the browser decoding every doc
 // on read (decode-on-read), and only the browser ever executes a script. Keying
-// is per ACCOUNT (decision 4) so a player's alts share one library.
+// is GLOBAL, not per account: this is a single-operator local deployment, so the
+// account a script was saved from is a login detail, not a tenancy boundary.
+// Every script is visible to every account; `authorAccountID` is kept only so
+// the UI can show who wrote it.
 
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const STORE_FILENAME = "bot-scripts.json";
-const MAX_SCRIPTS_PER_ACCOUNT = 50;
+const MAX_SCRIPTS_TOTAL = 200;
 const MAX_DOC_BYTES = 49152; // 48 KB — the same ceiling the browser codec uses
 const MAX_NAME_LEN = 60;
 
@@ -30,11 +33,25 @@ function createBotScriptStore(options) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
 
+  // Normalizes old-shape records (per-account: `accountID`) into the new
+  // global shape (`authorAccountID`) in memory. Never writes — a GET must
+  // not have a side effect — so this must be idempotent: the normalized
+  // shape only lands on disk the next time something calls writeAll().
+  function normalize(data) {
+    for (const record of Object.values(data.scripts)) {
+      if (record.authorAccountID === undefined && record.accountID !== undefined) {
+        record.authorAccountID = record.accountID;
+        delete record.accountID;
+      }
+    }
+    return data;
+  }
+
   function readAll() {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
       if (parsed && typeof parsed.scripts === "object" && parsed.scripts !== null) {
-        return parsed;
+        return normalize(parsed);
       }
       return { scripts: {} };
     } catch (error) {
@@ -72,6 +89,7 @@ function createBotScriptStore(options) {
   function meta(record) {
     return {
       scriptID: record.scriptID,
+      authorAccountID: record.authorAccountID,
       name: record.name,
       rev: record.rev,
       updatedAt: record.updatedAt,
@@ -91,39 +109,32 @@ function createBotScriptStore(options) {
   }
 
   return {
-    /** Metadata for every script this account owns (no docs). */
-    list(accountID) {
-      const account = Number(accountID);
+    /** Metadata for every script in the deployment (no docs). */
+    list() {
       const all = readAll();
-      return Object.values(all.scripts)
-        .filter((record) => record.accountID === account)
-        .map(meta);
+      return Object.values(all.scripts).map(meta);
     },
 
-    /** The full record, or null when it is missing or owned by another account. */
-    get(accountID, scriptID) {
-      const account = Number(accountID);
+    /** The full record, or null when it does not exist. */
+    get(scriptID) {
       const record = readAll().scripts[String(scriptID)];
-      if (!record || record.accountID !== account) {
-        return null;
-      }
-      return record;
+      return record || null;
     },
 
     /** Save a new script; returns { scriptID, rev }. Throws on quota or size. */
-    create(accountID, doc) {
-      const account = Number(accountID);
+    create(authorAccountID, doc) {
+      const author = Number(authorAccountID);
       const bytes = guardDoc(doc);
       const all = readAll();
-      const owned = Object.values(all.scripts).filter((record) => record.accountID === account).length;
-      if (owned >= MAX_SCRIPTS_PER_ACCOUNT) {
+      const total = Object.keys(all.scripts).length;
+      if (total >= MAX_SCRIPTS_TOTAL) {
         throw fail("BOTSCRIPT_LIMIT_REACHED", "You have reached the limit of saved bots.");
       }
       const scriptID = uuid();
       const timestamp = now();
       all.scripts[scriptID] = {
         scriptID,
-        accountID: account,
+        authorAccountID: author,
         rev: 1,
         name: nameOf(doc),
         bytes,
@@ -136,12 +147,11 @@ function createBotScriptStore(options) {
     },
 
     /** Update in place with optimistic concurrency; returns { rev }. */
-    update(accountID, scriptID, doc, baseRev) {
-      const account = Number(accountID);
+    update(scriptID, doc, baseRev) {
       const bytes = guardDoc(doc);
       const all = readAll();
       const record = all.scripts[String(scriptID)];
-      if (!record || record.accountID !== account) {
+      if (!record) {
         throw fail("BOTSCRIPT_NOT_FOUND", "That bot could not be found.");
       }
       if (Number(baseRev) !== record.rev) {
@@ -159,12 +169,11 @@ function createBotScriptStore(options) {
       return { rev: record.rev };
     },
 
-    /** Delete a script; true when it existed and this account owned it. */
-    remove(accountID, scriptID) {
-      const account = Number(accountID);
+    /** Delete a script; true when it existed. */
+    remove(scriptID) {
       const all = readAll();
       const record = all.scripts[String(scriptID)];
-      if (!record || record.accountID !== account) {
+      if (!record) {
         return false;
       }
       delete all.scripts[String(scriptID)];
@@ -176,7 +185,7 @@ function createBotScriptStore(options) {
 
 module.exports = {
   createBotScriptStore,
-  MAX_SCRIPTS_PER_ACCOUNT,
+  MAX_SCRIPTS_TOTAL,
   MAX_DOC_BYTES,
   STORE_FILENAME,
 };
