@@ -3,7 +3,8 @@
 Successor to [bot-builder-brainstorm.md](bot-builder-brainstorm.md). That doc designed the *language*;
 this one designs where scripts **live** and how runs are **watched**. The language is not reopened here.
 
-Status: design only. Nothing below is built.
+Status: **built** — every slice in §8 has landed. §1 describes the world BEFORE the change and is
+kept as the record of what was reversed and why; read §8 for what the code does now.
 
 ## 1. What exists today
 
@@ -145,20 +146,33 @@ to be durable, and the honest copy in Decision 3 is better than the illusion.
   disambiguates.
 - **Delete `web/src/bots/botLibrary.ts` and `botLibrary.test.ts`.** Dead since D2/D3 shipped.
 
-## 8. Slices
+## 8. Slices — all landed
 
-- **M1** — store re-key + migration + route changes, server-side only, existing UI untouched. Verifiable
-  by `node --test`.
-- **M2** — `Bots.svelte` and `ServerBots.svelte` read the global list. No new screen yet. This alone
-  delivers the ask's second half.
-- **M3** — the `botManager` panel, regions A and B, roster threaded per §4(a). Register in `tabs.ts`,
-  `PanelHost.svelte`, and `panelFirstMount.test.ts`.
-- **M4** — run retention ring + region C.
-- **M5** — retire the duplicate launcher surfaces in `Bots.svelte` now that the manager owns them; keep
-  the built-in mining/mission cards where they are.
+- [x] **M1** — store re-keyed to one platform-wide namespace, records carry `authorAccountID`, old rows
+      normalised on read. Serving stays per account.
+- [x] **M2** — both launchers read the global list. They already did, in fact: the client never filtered
+      by account, so the work was the copy, which still told players the bots were theirs.
+- [x] **M3a** — the `botManager` panel and region B, the library. Author NAMES recorded at save time,
+      since R7d forbids putting a raw id on screen.
+- [x] **M3b** — region A, the pilots, with the roster threaded App → Workspace → Desktop /
+      MobileWorkspace → PanelHost. A server bot wins over a stale tab reading.
+- [x] **M3c** — Start from a pilot row, on ANY held pilot. The run-approval path was extracted to
+      `web/src/bots/startRun.ts` rather than copied.
+- [x] **M4** — the retention ring (last 20 ended runs, in memory, evicted by `endedAt`) and region C.
+- [x] **M5** — the duplicate saved-bot list and embedded server-bot readout are gone from `Bots.svelte`,
+      which is the built-in-bots panel again. The mining and mission cards stayed.
+- [x] **Starter bots** — the six block groups became seeded library records; `blockSnippets.ts` deleted
+      and the builder gained "insert steps from a saved bot" so appending to a bot you are editing
+      survived the move.
 
-Verify each with `npm test` and `npm run typecheck`; the web build is checked in Docker
-(`docker build --target web-build`).
+**A note on verifying any of this.** `npm run typecheck` and the Docker web build check the TypeScript
+modules and compile the templates, but they do NOT check a Svelte component's props or template — there
+is no `svelte-check` here. See [svelte-typecheck-gap.md](svelte-typecheck-gap.md). The SSR tests are the
+real net for components, and a panel whose data loads in `onMount` is never reached by its own panel
+test — test such a row or child component directly, as `botManagerPilotRow.test.ts` does.
+
+Verify with `node --test` (pure modules run natively on the host) and
+`docker build --target web-build` plus a `node --test` inside that image for anything importing Svelte.
 
 ## 9. Open, not decided here
 

@@ -309,21 +309,9 @@ test("R43 — it is a launcher, not an editor: nothing here authors a bot", () =
   }
 });
 
-test("saved-bot launcher calls carry the active flow's complete request options", () => {
-  // The run-approval path itself now lives in ../bots/startRun.ts (shared with
-  // the Bot Manager); this panel only wires that module's deps. So what this
-  // sweep can still verify from here is that every dep closure threads THIS
-  // pilot's full request options / identifiers through, not a stale subset.
-  assert.match(CODE, /listBotScripts\s*\(\s*botOpts\(\)\s*\)/);
-  assert.match(CODE, /getBotScript\s*\(\s*id\s*,\s*botOpts\(\)\s*\)/);
-  assert.match(
-    CODE,
-    /startServerBot\s*\(\s*characterID\s*,\s*sid\s*,\s*grant\s*,\s*botOpts\(\)\s*\)/,
-  );
-  assert.match(
-    CODE,
-    /flow\.startCustomBot\s*\(\s*doc\s*,\s*sourceScriptID\s*\)/,
-  );
+test("R43 — the panel points a player looking for their saved bots at the Bot Manager", () => {
+  const text = visibleText(renderPanel(procurerStore()));
+  assert.match(text, /Bot Manager/, "a player must be told where saved bots went, not left hunting");
 });
 
 // --- 5. the standing invariants ---------------------------------------------
