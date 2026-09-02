@@ -20,6 +20,7 @@ export type TabID =
   | "bots"
   | "botBuilder"
   | "serverBots"
+  | "botManager"
   | "inventory"
   | "market"
   | "industry"
@@ -77,6 +78,7 @@ export const TABS: readonly TabDef[] = [
   // Server-side bots keep flying with the tab closed, so the readout that
   // watches them must be reachable from anywhere, in any state.
   { id: "serverBots", label: "Server Bots", where: "both" },
+  { id: "botManager", label: "Bot Manager", where: "both" },
   // In space only — flying, what's around the ship, mining.
   { id: "flight", label: "Flight", where: "in-space" },
   { id: "overview", label: "Around Your Ship", where: "in-space" },

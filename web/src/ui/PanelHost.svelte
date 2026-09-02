@@ -25,6 +25,7 @@
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
   import ServerBots from "./ServerBots.svelte";
+  import BotManager from "./BotManager.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
   import Standings from "./Standings.svelte";
@@ -97,6 +98,8 @@ import NoticeLog from "./NoticeLog.svelte";
   <BotBuilder {store} {flow} />
 {:else if tab === "serverBots"}
   <ServerBots />
+{:else if tab === "botManager"}
+  <BotManager {store} {flow} onOpen={(id) => onOpen?.(id)} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

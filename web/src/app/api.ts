@@ -2618,10 +2618,17 @@ export interface BotScriptSummary {
    * may well have been written by another account — this says who, and nothing
    * more. It confers no rights: authority over characters and running bots is
    * checked server-side and is still per account. Null when the server did not
-   * say. Not renderable on its own (R7d — never show a raw id); the manager
-   * resolves it to a name before it reaches a screen.
+   * say. NEVER RENDER THIS (R7d — a raw id never reaches a screen); show
+   * `authorName` instead.
    */
   readonly authorAccountID: number | null;
+  /**
+   * The name that account went by when the bot was saved — the renderable half
+   * of authorship, recorded at save time rather than looked up, so the library
+   * never has to enumerate accounts to draw a list. Null for bots saved before
+   * the library went platform-wide; render those as "—", never as a blank.
+   */
+  readonly authorName: string | null;
 }
 
 function asBotScriptSummary(value: JsonValue): BotScriptSummary {
@@ -2632,6 +2639,7 @@ function asBotScriptSummary(value: JsonValue): BotScriptSummary {
     rev: asNumberOrNull(row.rev) ?? 1,
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
     authorAccountID: asNumberOrNull(row.authorAccountID),
+    authorName: typeof row.authorName === "string" && row.authorName.length > 0 ? row.authorName : null,
   };
 }
 
@@ -2643,13 +2651,20 @@ export async function listBotScripts(options: ApiOptions = {}): Promise<BotScrip
 export async function getBotScript(
   scriptID: string,
   options: ApiOptions = {},
-): Promise<{ scriptID: string; rev: number; authorAccountID: number | null; doc: JsonValue } | null> {
+): Promise<{
+  scriptID: string;
+  rev: number;
+  authorAccountID: number | null;
+  authorName: string | null;
+  doc: JsonValue;
+} | null> {
   try {
     const data = await getJson(`/api/botscripts/${encodeURIComponent(scriptID)}`, options);
     return {
       scriptID: typeof data.scriptID === "string" ? data.scriptID : scriptID,
       rev: asNumberOrNull(data.rev) ?? 1,
       authorAccountID: asNumberOrNull(data.authorAccountID),
+      authorName: typeof data.authorName === "string" && data.authorName.length > 0 ? data.authorName : null,
       doc: data.doc ?? null,
     };
   } catch (error) {

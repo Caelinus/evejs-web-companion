@@ -1,0 +1,75 @@
+// SSR render checks for the Bot Manager panel.
+//
+// The SSR harness runs neither `$effect` nor `onMount`, so the panel's fetch
+// never fires here and every render below is the FIRST-MOUNT state. That is on
+// purpose: the loaded/empty/error/no-match wording is decided by the pure
+// module and tested directly in web/src/bots/libraryView.test.ts, which needs
+// no DOM and no seam on the component's props. What is worth asserting here is
+// what only a real render can show — that the panel mounts without throwing,
+// that its shell copy is honest about a shared library, and that no raw id
+// reaches the page (R7d).
+import test from "node:test";
+import assert from "node:assert/strict";
+import { register } from "node:module";
+
+register("./svelteSsrHook.ts", import.meta.url);
+
+const { render } = await import("svelte/server");
+const { createClientStore } = await import("../store/clientStore.ts");
+const BotManager = (await import("./BotManager.svelte")).default;
+
+function fakeFlow(): unknown {
+  return new Proxy({}, { get: () => async () => ({}) });
+}
+
+function visibleText(body: string): string {
+  return body
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function renderPanel(): string {
+  const store = createClientStore();
+  const output = render(BotManager as never, {
+    props: { store, flow: fakeFlow() },
+  } as never);
+  return output.body;
+}
+
+test("the Bot Manager panel renders on first mount without throwing", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /Bot manager/i);
+});
+
+test("the panel says plainly that the library is shared, not private", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /shared/i);
+  assert.match(text, /any account|everyone|anyone/i);
+});
+
+test("first mount reads as loading, never as an empty library", () => {
+  // Before the first read lands we know nothing — claiming "no bots saved"
+  // here would be a lie a player could act on.
+  const text = visibleText(renderPanel());
+  assert.match(text, /Loading/i);
+  assert.doesNotMatch(text, /No bots saved yet/i);
+});
+
+test("the panel offers a search box", () => {
+  assert.match(renderPanel(), /type="search"/);
+});
+
+test("no raw numeric id reaches the page (R7d)", () => {
+  const text = visibleText(renderPanel());
+  // Author account ids are the id most likely to leak here, since the row
+  // carries one right next to the name it is allowed to show.
+  assert.doesNotMatch(text, /\b\d{4,}\b/);
+});
+
+test("the R7d sweep would actually catch a leak", () => {
+  // Guards the assertion above against being vacuously true: if the matcher
+  // could not spot an id in rendered text, the test above would pass forever.
+  const leaked = visibleText("<td>Saved by</td><td>424242</td>");
+  assert.match(leaked, /\b\d{4,}\b/);
+});

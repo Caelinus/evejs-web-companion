@@ -18341,6 +18341,7 @@ app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
       ok: true,
       scriptID: record.scriptID,
       authorAccountID: record.authorAccountID,
+      authorName: record.authorName,
       rev: record.rev,
       name: record.name,
       updatedAt: record.updatedAt,
@@ -18352,7 +18353,11 @@ app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
 });
 app.post("/api/botscripts", requireAuth, (req, res, next) => {
   try {
-    const result = botScripts.create(req.account.accountID, req.body ? req.body.doc : undefined);
+    const result = botScripts.create(
+      req.account.accountID,
+      req.account.username,
+      req.body ? req.body.doc : undefined,
+    );
     res.json({ ok: true, ...result });
   } catch (error) {
     sendBotScriptError(res, error, next);

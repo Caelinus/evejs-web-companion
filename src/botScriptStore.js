@@ -43,6 +43,9 @@ function createBotScriptStore(options) {
         record.authorAccountID = record.accountID;
         delete record.accountID;
       }
+      if (record.authorName === undefined) {
+        record.authorName = null;
+      }
     }
     return data;
   }
@@ -86,10 +89,21 @@ function createBotScriptStore(options) {
     return "Untitled bot";
   }
 
+  // Same cap idiom as nameOf(), but blank/missing collapses to null rather
+  // than a placeholder string — "no author name on file" is a different
+  // thing from "Untitled bot".
+  function authorNameOf(authorName) {
+    if (typeof authorName === "string" && authorName.trim().length > 0) {
+      return authorName.trim().slice(0, MAX_NAME_LEN);
+    }
+    return null;
+  }
+
   function meta(record) {
     return {
       scriptID: record.scriptID,
       authorAccountID: record.authorAccountID,
+      authorName: record.authorName,
       name: record.name,
       rev: record.rev,
       updatedAt: record.updatedAt,
@@ -122,7 +136,7 @@ function createBotScriptStore(options) {
     },
 
     /** Save a new script; returns { scriptID, rev }. Throws on quota or size. */
-    create(authorAccountID, doc) {
+    create(authorAccountID, authorName, doc) {
       const author = Number(authorAccountID);
       const bytes = guardDoc(doc);
       const all = readAll();
@@ -135,6 +149,7 @@ function createBotScriptStore(options) {
       all.scripts[scriptID] = {
         scriptID,
         authorAccountID: author,
+        authorName: authorNameOf(authorName),
         rev: 1,
         name: nameOf(doc),
         bytes,
@@ -160,6 +175,9 @@ function createBotScriptStore(options) {
           "This script was changed in another tab. Reload it, or save yours as a copy.",
         );
       }
+      // authorAccountID / authorName are NOT touched here. The field records
+      // who first saved the script, not who last edited it — an editor other
+      // than the original author must not become the new "saved by".
       record.rev += 1;
       record.name = nameOf(doc);
       record.bytes = bytes;
@@ -187,5 +205,6 @@ module.exports = {
   createBotScriptStore,
   MAX_SCRIPTS_TOTAL,
   MAX_DOC_BYTES,
+  MAX_NAME_LEN,
   STORE_FILENAME,
 };

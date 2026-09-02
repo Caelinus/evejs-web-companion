@@ -11,7 +11,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createBotScriptStore, MAX_SCRIPTS_TOTAL, MAX_DOC_BYTES, STORE_FILENAME } = require("./botScriptStore");
+const { createBotScriptStore, MAX_SCRIPTS_TOTAL, MAX_DOC_BYTES, MAX_NAME_LEN, STORE_FILENAME } = require("./botScriptStore");
 
 function tempStore() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "botstore-"));
@@ -25,9 +25,11 @@ function tempStore() {
   return { store, dataDir };
 }
 
-// Obviously synthetic account ids — not real EVE account/character data.
+// Obviously synthetic account ids/names — not real EVE account/character data.
 const ALICE = 1001;
 const BOB = 2002;
+const ALICE_NAME = "alice-test-pilot";
+const BOB_NAME = "bob-test-pilot";
 
 function doc(name) {
   return { format: "evejs-bot-script", version: 1, name, program: [] };
@@ -35,7 +37,7 @@ function doc(name) {
 
 test("a script created by one account is visible to list() and get() with no account argument", () => {
   const { store } = tempStore();
-  const { scriptID, rev } = store.create(ALICE, doc("Belt runner"));
+  const { scriptID, rev } = store.create(ALICE, ALICE_NAME, doc("Belt runner"));
   assert.equal(rev, 1);
 
   const got = store.get(scriptID);
@@ -56,7 +58,7 @@ test("a script created by one account is visible to list() and get() with no acc
 
 test("create records authorAccountID; meta exposes it", () => {
   const { store } = tempStore();
-  const { scriptID } = store.create(ALICE, doc("Mine and haul"));
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("Mine and haul"));
 
   const record = store.get(scriptID);
   assert.equal(record.authorAccountID, ALICE);
@@ -66,9 +68,51 @@ test("create records authorAccountID; meta exposes it", () => {
   assert.equal(entry.authorAccountID, ALICE);
 });
 
+test("authorName is recorded at create time and exposed via list() and get()", () => {
+  const { store } = tempStore();
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("Named"));
+
+  assert.equal(store.get(scriptID).authorName, ALICE_NAME);
+  const [entry] = store.list();
+  assert.equal(entry.authorName, ALICE_NAME);
+});
+
+test("a blank or missing authorName is stored as null, not the empty string", () => {
+  const { store } = tempStore();
+  const { scriptID: blankID } = store.create(ALICE, "   ", doc("Blank name"));
+  const { scriptID: missingID } = store.create(ALICE, undefined, doc("Missing name"));
+
+  assert.equal(store.get(blankID).authorName, null);
+  assert.equal(store.list().find((m) => m.scriptID === blankID).authorName, null);
+  assert.equal(store.get(missingID).authorName, null);
+});
+
+test("an over-long authorName is capped the same way doc names are", () => {
+  const { store } = tempStore();
+  const longName = "x".repeat(MAX_NAME_LEN + 20);
+  const { scriptID } = store.create(ALICE, longName, doc("Capped"));
+
+  const record = store.get(scriptID);
+  assert.equal(record.authorName, longName.slice(0, MAX_NAME_LEN));
+  assert.equal(record.authorName.length, MAX_NAME_LEN);
+});
+
+test("update() never changes authorAccountID or authorName, even when a different account edits", () => {
+  const { store } = tempStore();
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("v1"));
+
+  // BOB edits Alice's script — the store has no per-edit authority check
+  // (that lives elsewhere); authorship must still stay with Alice.
+  store.update(scriptID, doc("v2, edited by someone else"), 1);
+
+  const record = store.get(scriptID);
+  assert.equal(record.authorAccountID, ALICE);
+  assert.equal(record.authorName, ALICE_NAME);
+});
+
 test("update bumps the revision; a stale baseRev conflicts", () => {
   const { store } = tempStore();
-  const { scriptID } = store.create(ALICE, doc("v1"));
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("v1"));
   const { rev } = store.update(scriptID, doc("v2"), 1);
   assert.equal(rev, 2);
   assert.equal(store.get(scriptID).doc.name, "v2");
@@ -93,29 +137,29 @@ test("the 200-script total quota is enforced across different author accounts", 
   const { store } = tempStore();
   for (let i = 0; i < MAX_SCRIPTS_TOTAL; i += 1) {
     // Alternate authors so the quota is clearly counted platform-wide, not per author.
-    store.create(i % 2 === 0 ? ALICE : BOB, doc(`bot ${i}`));
+    store.create(i % 2 === 0 ? ALICE : BOB, i % 2 === 0 ? ALICE_NAME : BOB_NAME, doc(`bot ${i}`));
   }
   assert.equal(store.list().length, MAX_SCRIPTS_TOTAL);
-  assert.throws(() => store.create(ALICE, doc("one too many")), (e) => e.code === "BOTSCRIPT_LIMIT_REACHED");
+  assert.throws(() => store.create(ALICE, ALICE_NAME, doc("one too many")), (e) => e.code === "BOTSCRIPT_LIMIT_REACHED");
   // The quota is global: a different author is blocked too, once the file is full.
-  assert.throws(() => store.create(BOB, doc("also blocked")), (e) => e.code === "BOTSCRIPT_LIMIT_REACHED");
+  assert.throws(() => store.create(BOB, BOB_NAME, doc("also blocked")), (e) => e.code === "BOTSCRIPT_LIMIT_REACHED");
 });
 
 test("an oversized document is refused", () => {
   const { store } = tempStore();
   const big = { format: "evejs-bot-script", version: 1, name: "huge", blob: "y".repeat(MAX_DOC_BYTES) };
-  assert.throws(() => store.create(ALICE, big), (e) => e.code === "BOTSCRIPT_TOO_BIG");
+  assert.throws(() => store.create(ALICE, ALICE_NAME, big), (e) => e.code === "BOTSCRIPT_TOO_BIG");
 });
 
 test("non-object docs are refused", () => {
   const { store } = tempStore();
-  assert.throws(() => store.create(ALICE, null), (e) => e.code === "BOTSCRIPT_INVALID");
-  assert.throws(() => store.create(ALICE, [1, 2, 3]), (e) => e.code === "BOTSCRIPT_INVALID");
+  assert.throws(() => store.create(ALICE, ALICE_NAME, null), (e) => e.code === "BOTSCRIPT_INVALID");
+  assert.throws(() => store.create(ALICE, ALICE_NAME, [1, 2, 3]), (e) => e.code === "BOTSCRIPT_INVALID");
 });
 
 test("remove returns true then false", () => {
   const { store } = tempStore();
-  const { scriptID } = store.create(ALICE, doc("temp"));
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("temp"));
   assert.equal(store.remove(scriptID), true);
   assert.equal(store.get(scriptID), null);
   assert.equal(store.remove(scriptID), false, "removing again is a no-op");
@@ -123,7 +167,7 @@ test("remove returns true then false", () => {
 
 test("data survives a fresh store instance over the same directory", () => {
   const { store, dataDir } = tempStore();
-  const { scriptID } = store.create(ALICE, doc("persisted"));
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("persisted"));
   const reopened = createBotScriptStore({ dataDir });
   assert.equal(reopened.get(scriptID).doc.name, "persisted");
 });
@@ -168,6 +212,8 @@ test("migration: old per-account records get authorAccountID and stay stable on 
   const got = store.get("old-1");
   assert.equal(got.authorAccountID, ALICE);
   assert.equal(got.accountID, undefined);
+  assert.equal(got.authorName, null, "an old-shape record with no authorName reads back as null, not undefined");
+  assert.equal(byID["old-1"].authorName, null);
 
   // A GET/LIST must not itself write — the file on disk is untouched.
   const fileAfter = fs.readFileSync(path.join(dataDir, STORE_FILENAME), "utf8");
@@ -177,6 +223,7 @@ test("migration: old per-account records get authorAccountID and stay stable on 
   const again = store.get("old-1");
   assert.equal(again.authorAccountID, ALICE);
   assert.equal(again.accountID, undefined);
+  assert.equal(again.authorName, null);
   assert.equal(store.list().length, 2);
 
   // A write after migration persists the new shape.
