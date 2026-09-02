@@ -18752,6 +18752,17 @@ function startServer(options = {}) {
       console.log(`EveJS Web POC listening on http://${host}:${activePort}`);
       console.log(`Using EveJS gateway: ${process.env.EVEJS_GATEWAY_URL || "http://127.0.0.1:26002/_evejs-web/v1"}`);
     }
+    // The ready-made starter bots go into the library once, on first boot.
+    // Deliberately here and not from a read: the store's reads never write, and
+    // the seed is gated on a stored marker rather than on the library looking
+    // empty — a starter the player DELETED must stay deleted, not reappear at
+    // the next restart. A failure to seed is logged and otherwise ignored; it
+    // must never stop the server coming up.
+    try {
+      botScripts.seedStarterBots();
+    } catch (error) {
+      console.error(error);
+    }
     // Bots that were running when the server last stopped come back now —
     // AFTER listen, because every server bot drives this server over loopback.
     if (options.resumeServerBots !== false) {

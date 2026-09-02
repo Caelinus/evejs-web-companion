@@ -11,7 +11,6 @@ register("./svelteSsrHook.ts", import.meta.url);
 
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
-const { BLOCK_SNIPPET_LIST } = await import("../bots/blockSnippets.ts");
 const BotBuilder = (await import("./BotBuilder.svelte")).default;
 
 function fakeFlow(): unknown {
@@ -83,18 +82,15 @@ test("has a Save button and a saved-bots section", () => {
   assert.match(text, /No saved bots yet/);
 });
 
-test("renders every ready-made block group and explains what adding it does", () => {
+test("offers to insert steps from a saved bot, and explains it copies rather than links", () => {
   const text = visibleText(renderPanel());
-  assert.match(text, /Add a ready-made group/);
-  assert.match(text, /end of the blocks you already have/i, "groups explicitly append instead of replacing");
-  for (const group of BLOCK_SNIPPET_LIST) {
-    assert.ok(text.includes(group.label), `${group.label} is missing`);
-    assert.ok(text.includes(group.adds), `${group.label} does not explain its inserted sequence`);
-    if (group.setup !== null) {
-      assert.ok(text.includes(group.setup), `${group.label} hides its required follow-up choice`);
-    }
-  }
-  assert.ok((text.match(/Add group/g) ?? []).length >= BLOCK_SNIPPET_LIST.length);
+  assert.match(text, /Insert steps from a saved bot/);
+  assert.match(text, /end of the blocks you already have/i, "the insert explicitly appends instead of replacing");
+  assert.match(text, /copies them once/i, "the copy says plainly that it copies, not links, the source bot");
+  assert.match(text, /later changes to that saved bot will not change this one/i);
+  // onMount does not run under SSR, so the library starts empty and the panel
+  // says so instead of showing an empty grid.
+  assert.match(text, /No saved bots yet\. Save one below/i);
 });
 
 test("offers the new fleet, exploration, and operations examples", () => {

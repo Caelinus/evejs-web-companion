@@ -11,7 +11,16 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createBotScriptStore, MAX_SCRIPTS_TOTAL, MAX_DOC_BYTES, MAX_NAME_LEN, STORE_FILENAME } = require("./botScriptStore");
+const {
+  createBotScriptStore,
+  MAX_SCRIPTS_TOTAL,
+  MAX_DOC_BYTES,
+  MAX_NAME_LEN,
+  STORE_FILENAME,
+  STARTER_SEED_VERSION,
+  STARTER_AUTHOR_NAME,
+} = require("./botScriptStore");
+const starterBots = require("./starterBots.json");
 
 function tempStore() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "botstore-"));
@@ -231,4 +240,94 @@ test("migration: old per-account records get authorAccountID and stay stable on 
   const persisted = JSON.parse(fs.readFileSync(path.join(dataDir, STORE_FILENAME), "utf8"));
   assert.equal(persisted.scripts["old-1"].authorAccountID, ALICE);
   assert.equal(persisted.scripts["old-1"].accountID, undefined);
+});
+
+// ─── Starter bots (src/starterBots.json) ─────────────────────────────────────
+
+test("a fresh store seeds exactly six starter bots", () => {
+  const { store } = tempStore();
+  const result = store.seedStarterBots();
+  assert.equal(result.seeded, 6);
+  assert.equal(result.alreadySeeded, false);
+
+  const listed = store.list();
+  assert.equal(listed.length, 6);
+  assert.equal(starterBots.bots.length, 6, "sanity: starterBots.json itself carries six bots");
+
+  // Every seeded record is clearly marked as shipped-with-the-app, not authored
+  // by an account.
+  for (const entry of listed) {
+    assert.equal(entry.authorName, STARTER_AUTHOR_NAME);
+    assert.equal(entry.authorAccountID, null);
+  }
+});
+
+test("seeding is idempotent across repeated calls and a second store instance", () => {
+  const { store, dataDir } = tempStore();
+  store.seedStarterBots();
+  const again = store.seedStarterBots();
+  assert.equal(again.seeded, 0);
+  assert.equal(again.alreadySeeded, true);
+  assert.equal(store.list().length, 6);
+
+  const reopened = createBotScriptStore({ dataDir });
+  const fromSecondInstance = reopened.seedStarterBots();
+  assert.equal(fromSecondInstance.seeded, 0);
+  assert.equal(fromSecondInstance.alreadySeeded, true);
+  assert.equal(reopened.list().length, 6);
+});
+
+test("a deleted starter bot stays deleted after the store is reseeded/reopened", () => {
+  const { store, dataDir } = tempStore();
+  store.seedStarterBots();
+  const [firstStarter] = store.list();
+  assert.equal(store.remove(firstStarter.scriptID), true);
+  assert.equal(store.list().length, 5);
+
+  // Seeding again on the same instance must not resurrect it.
+  store.seedStarterBots();
+  assert.equal(store.list().length, 5);
+  assert.equal(store.get(firstStarter.scriptID), null);
+
+  // Nor does a brand-new store instance over the same directory.
+  const reopened = createBotScriptStore({ dataDir });
+  reopened.seedStarterBots();
+  assert.equal(reopened.list().length, 5);
+  assert.equal(reopened.get(firstStarter.scriptID), null);
+});
+
+test("seeding a store that already has user bots adds the starters without touching them", () => {
+  const { store } = tempStore();
+  const { scriptID: userScriptID } = store.create(ALICE, ALICE_NAME, doc("My own hauler"));
+
+  const result = store.seedStarterBots();
+  assert.equal(result.seeded, 6);
+  assert.equal(store.list().length, 7);
+
+  const userRecord = store.get(userScriptID);
+  assert.equal(userRecord.doc.name, "My own hauler");
+  assert.equal(userRecord.authorAccountID, ALICE);
+  assert.equal(userRecord.authorName, ALICE_NAME);
+});
+
+test("seeded starter bots count against the total quota like any other record", () => {
+  const { store } = tempStore();
+  // Leave room for only 3 of the 6 starters.
+  for (let i = 0; i < MAX_SCRIPTS_TOTAL - 3; i += 1) {
+    store.create(ALICE, ALICE_NAME, doc(`bot ${i}`));
+  }
+  assert.equal(store.list().length, MAX_SCRIPTS_TOTAL - 3);
+
+  const result = store.seedStarterBots();
+  assert.equal(result.seeded, 3, "only the remaining quota slots get filled");
+  assert.equal(store.list().length, MAX_SCRIPTS_TOTAL);
+
+  // The marker is still recorded, so a later seed attempt does not retry the
+  // three starters that did not fit.
+  assert.equal(store.seedStarterBots().alreadySeeded, true);
+  assert.equal(store.list().length, MAX_SCRIPTS_TOTAL);
+});
+
+test("the starterBots.json marker constant matches the store's seed version", () => {
+  assert.equal(starterBots.seedVersion, STARTER_SEED_VERSION);
 });

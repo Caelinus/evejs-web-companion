@@ -12,6 +12,8 @@
 // input, so the editor can keep an undo/draft history cheaply.
 
 import type {
+  BotScript,
+  BranchBlock,
   Condition,
   InterruptResponse,
   InterruptRow,
@@ -20,6 +22,7 @@ import type {
   LoopBodyNode,
   MacroStep,
   ProgramNode,
+  SubBotNode,
 } from "./botScript.ts";
 
 /** Supplies fresh unique handles. The editor passes a real generator; tests pass a counter. */
@@ -73,13 +76,40 @@ function moveBy<T>(arr: readonly T[], index: number, delta: number): readonly T[
 }
 
 // ─── Cloning with fresh ids ──────────────────────────────────────────────────
+//
+// ⚠ MUST DESCEND INTO A BRANCH'S then/else. A loop's body can hold a branch
+// (LoopBodyNode = MacroStep | BranchBlock), and a top-level node can be a branch
+// too — either one carries its own nested step ids, which need re-idding exactly
+// like a loop's body does. Missing this produced colliding ids the moment a
+// duplicated node contained a branch (caught by the test below); the recursive
+// shape here matches subBots.ts's re-idder, which had already solved it once.
 
 function cloneWithFreshIds(node: ProgramNode, makeId: IdGen): ProgramNode {
   const cloned = structuredClone(node) as ProgramNode;
   if (cloned.kind === "loop") {
-    return { ...cloned, id: makeId(), body: cloned.body.map((step) => ({ ...step, id: makeId() })) };
+    return {
+      ...cloned,
+      id: makeId(),
+      body: cloned.body.map((element) => cloneLoopBodyWithFreshIds(element, makeId)),
+    };
+  }
+  if (cloned.kind === "branch") {
+    return cloneBranchWithFreshIds(cloned, makeId);
   }
   return { ...cloned, id: makeId() };
+}
+
+function cloneLoopBodyWithFreshIds(node: LoopBodyNode, makeId: IdGen): LoopBodyNode {
+  return node.kind === "branch" ? cloneBranchWithFreshIds(node, makeId) : { ...node, id: makeId() };
+}
+
+function cloneBranchWithFreshIds(branch: BranchBlock, makeId: IdGen): BranchBlock {
+  return {
+    ...branch,
+    id: makeId(),
+    then: branch.then.map((step) => ({ ...step, id: makeId() })),
+    else: branch.else.map((step) => ({ ...step, id: makeId() })),
+  };
 }
 
 // ─── Top-level program operations ────────────────────────────────────────────
@@ -183,4 +213,102 @@ export function setInterruptFraction(
     }
     return { ...r, when: { ...r.when, fraction } };
   });
+}
+
+// ─── Inserting a saved bot's steps by value ──────────────────────────────────
+//
+// The Bot Builder's flat editor holds an ordered list of MacroStep, BranchBlock
+// and SubBotNode — everything a `ProgramNode` can be EXCEPT a top-level LoopBlock
+// (the editor supplies its own single outer loop, or none at all for a run-once
+// bot; a loop nested inside that list has nowhere to go). Copying steps IN FROM
+// a saved bot must respect that same limit rather than quietly flattening a
+// LoopBlock's body into loose steps — that would drop its repeat count, and it
+// would also flatten any branch riding inside it into two loose step lists, which
+// is not the same bot. So a source bot's own top-level loops are left out and
+// reported in plain language; everything else it can legally hold is copied.
+
+/** What the flat editor's list may directly contain. */
+export type FlatProgramNode = MacroStep | BranchBlock | SubBotNode;
+
+export interface InsertSavedBotResult {
+  /** The editor's list with the source bot's copyable steps appended. */
+  readonly steps: readonly FlatProgramNode[];
+  /**
+   * Plain sentences (R9a) about anything from the source bot that could not be
+   * copied in, so the caller can tell the player. Empty when nothing was left out.
+   */
+  readonly left: readonly string[];
+}
+
+/** Every id already in use across a program, including nested loop/branch ids. */
+function collectProgramIDs(nodes: readonly ProgramNode[], into: Set<string>): void {
+  for (const node of nodes) {
+    into.add(node.id);
+    if (node.kind === "loop") {
+      for (const element of node.body) {
+        into.add(element.id);
+        if (element.kind === "branch") {
+          for (const step of element.then) into.add(step.id);
+          for (const step of element.else) into.add(step.id);
+        }
+      }
+    } else if (node.kind === "branch") {
+      for (const step of node.then) into.add(step.id);
+      for (const step of node.else) into.add(step.id);
+    }
+  }
+}
+
+/**
+ * Append copies of a saved bot's steps to the program being edited, with FRESH
+ * ids that cannot collide with anything already in `steps`, in `reservedIDs`
+ * (non-program ids in the same document, such as watch/interrupt ids), or
+ * among the copies themselves.
+ *
+ * Pure and non-destructive: `steps` is returned untouched on the front, the
+ * source document is only read, and nothing about the player's name, watches,
+ * home or repeat setting is touched here — that stays the caller's job.
+ */
+export function insertSavedBotSteps(
+  steps: readonly FlatProgramNode[],
+  source: BotScript,
+  makeId: IdGen,
+  reservedIDs: ReadonlySet<string> = new Set<string>(),
+): InsertSavedBotResult {
+  const used = new Set(reservedIDs);
+  collectProgramIDs(steps, used);
+  const fresh = (): string => {
+    for (let attempt = 0; attempt < 10_000; attempt += 1) {
+      const candidate = makeId().trim();
+      if (candidate.length > 0 && !used.has(candidate)) {
+        used.add(candidate);
+        return candidate;
+      }
+    }
+    throw new Error("Could not make a fresh step id.");
+  };
+
+  const appended: FlatProgramNode[] = [];
+  let loopsLeftOut = 0;
+  for (const node of source.program) {
+    if (node.kind === "loop") {
+      // Not representable in the flat list — see the note above. Skipped, not
+      // flattened, and counted so the caller can say so.
+      loopsLeftOut += 1;
+      continue;
+    }
+    appended.push(cloneWithFreshIds(node, fresh) as FlatProgramNode);
+  }
+
+  const left: string[] = [];
+  if (loopsLeftOut > 0) {
+    const label = source.name.trim().length > 0 ? `"${source.name.trim()}"` : "That saved bot";
+    left.push(
+      loopsLeftOut === 1
+        ? `${label} repeats a group of steps; that repeating part could not be copied in, so add it by hand if you want it.`
+        : `${label} repeats ${loopsLeftOut} groups of steps; those repeating parts could not be copied in, so add them by hand if you want them.`,
+    );
+  }
+
+  return { steps: [...steps, ...appended], left };
 }

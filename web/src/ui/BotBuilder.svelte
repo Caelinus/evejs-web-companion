@@ -36,11 +36,7 @@
     type BlockCategory,
   } from "../bots/macroCatalogView.ts";
   import { EXAMPLE_BOTS, type ExampleBot } from "../bots/exampleBots.ts";
-  import {
-    BLOCK_SNIPPET_LIST,
-    appendBlockSnippet,
-    type BlockSnippetID,
-  } from "../bots/blockSnippets.ts";
+  import { insertSavedBotSteps, type FlatProgramNode } from "../bots/scriptEdit.ts";
   import { branchSentence, stepSentence, subBotSentence } from "../bots/scriptText.ts";
   import { validateScript, type ScriptProblem } from "../bots/validateScript.ts";
   import { decodeScriptText, decodeScriptValue, encodeScriptDoc } from "../bots/scriptCodec.ts";
@@ -103,8 +99,7 @@
   ]);
   let importText = $state("");
   let importNote = $state<string | null>(null);
-  let snippetNote = $state<string | null>(null);
-  let snippetFittingID = $state<number | null>(null);
+  let insertNote = $state<string | null>(null);
 
   // Branches and sub-bots are authored right in the list now. This still catches
   // the shapes the one-list editor cannot hold — several loops, or a loop beside
@@ -379,36 +374,46 @@
     advancedProgram = null;
     steps = [...steps, newStepFor(macro)];
   }
-  function addBlockGroup(id: BlockSnippetID): void {
-    // Like adding one palette block, choosing a group edits the visible list
-    // from this point onward. The pure helper APPENDS and reserves every nested
-    // id already in the bot, so repeated groups cannot collide with each other
-    // or with a loaded/imported branch.
-    const group = BLOCK_SNIPPET_LIST.find((entry) => entry.id === id);
-    const fitting =
-      id === "dock-refit-repair"
-        ? savedFittings.find((row) => row.fittingID === snippetFittingID)
-        : undefined;
-    if (id === "dock-refit-repair" && fitting === undefined) {
-      snippetNote = "Choose a saved fitting before adding the turnaround group.";
-      return;
-    }
-    advancedProgram = null;
-    steps = [
-      ...appendBlockSnippet(
+  /**
+   * Copy another saved bot's steps onto the end of this one — a BY-VALUE insert,
+   * not a live reference. Unlike [+ Saved bot] (which creates a `SubBotNode`
+   * pointing at the other bot, is top-level only, and forces this bot to run
+   * once), this appends independent copies of its steps right into the flat
+   * list: the repeat control keeps working, and later edits to that saved bot
+   * never change this one — because nothing here still points at it.
+   *
+   * The pure helper APPENDS and reserves every id already in the bot (steps +
+   * watches), so repeated inserts cannot collide with each other or with a
+   * loaded/imported branch. A source bot with a top-level repeating group is
+   * not silently flattened — that part is left out and named in `insertNote`.
+   */
+  async function insertSavedBot(meta: BotScriptSummary): Promise<void> {
+    try {
+      const record = await getBotScript(meta.scriptID, botOpts());
+      if (record === null) {
+        insertNote = "That saved bot could not be found.";
+        return;
+      }
+      const decoded = decodeScriptValue(record.doc);
+      if (!decoded.ok) {
+        insertNote = decoded.refusal;
+        return;
+      }
+      advancedProgram = null;
+      const result = insertSavedBotSteps(
         steps,
-        id,
+        decoded.doc,
         makeId,
-        {
-          bindings: fitting === undefined ? {} : { fitting },
-          reservedIDs: new Set(["main-loop", ...watches.map((row) => row.id)]),
-        },
-      ),
-    ];
-    snippetNote =
-      group === undefined
-        ? "Added the block group."
-        : `Added “${group.label}” to the end of this bot.`;
+        new Set(["main-loop", ...watches.map((row) => row.id)]),
+      );
+      steps = result.steps as EditorNode[];
+      insertNote =
+        result.left.length > 0
+          ? `Copied “${decoded.doc.name}”’s steps to the end of this bot. ${result.left.join(" ")}`
+          : `Copied “${decoded.doc.name}”’s steps to the end of this bot. Later changes to that saved bot will not change this one.`;
+    } catch {
+      insertNote = "Could not load that saved bot.";
+    }
   }
   function moveStep(i: number, delta: number): void {
     const j = i + delta;
@@ -1386,43 +1391,29 @@
     <button class="primary" onclick={saveBot}>Save</button>
   </div>
 
-  <!-- Ready-made groups append to (never replace) the current bot. -->
-  <h3>Add a ready-made group</h3>
-  <p class="subnote">Add a whole proven sequence to the end of the blocks you already have.</p>
-  <div class="snippet-grid">
-    {#each BLOCK_SNIPPET_LIST as group (group.id)}
-      <article class="snippet-card">
-        <div class="snippet-name">{group.label}</div>
-        <p>{group.adds}</p>
-        {#if group.id === "dock-refit-repair"}
-          <label class="snippet-setup">
-            {group.setup}
-            {#if savedFittings.length === 0}
-              <em>No saved fittings found.</em>
-            {:else}
-              <select bind:value={snippetFittingID}>
-                <option value={null} disabled>pick a saved fitting…</option>
-                {#each savedFittings as fitting (fitting.fittingID)}
-                  <option value={fitting.fittingID}>{fitting.name}</option>
-                {/each}
-              </select>
-            {/if}
-          </label>
-        {:else if group.setup}
-          <p class="snippet-setup">Before adding: {group.setup}</p>
-        {/if}
-        <button
-          class="primary tiny"
-          disabled={
-            group.id === "dock-refit-repair" &&
-            !savedFittings.some((fitting) => fitting.fittingID === snippetFittingID)
-          }
-          onclick={() => addBlockGroup(group.id)}
-        >Add group</button>
-      </article>
-    {/each}
-  </div>
-  {#if snippetNote}<p class="note snippet-note">{snippetNote}</p>{/if}
+  <!-- Copies another saved bot's steps onto the end of this one (never replaces
+       it) — a one-time copy, not a live link: later edits to that saved bot do
+       not change this one. That is the whole difference from [+ Saved bot]
+       above, which links to the other bot instead of copying it. -->
+  <h3>Insert steps from a saved bot</h3>
+  <p class="subnote">
+    Copy a saved bot's steps onto the end of the blocks you already have. This copies them once — later changes to
+    that saved bot will not change this one.
+  </p>
+  {#if savedList.length === 0}
+    <p class="empty">No saved bots yet. Save one below, then come back here to copy its steps.</p>
+  {:else}
+    <div class="snippet-grid">
+      {#each savedList as meta (meta.scriptID)}
+        <article class="snippet-card">
+          <div class="snippet-name">{meta.name}</div>
+          <p>Copy this bot's steps onto the end of the one you're editing.</p>
+          <button class="primary tiny" onclick={() => insertSavedBot(meta)}>Insert steps</button>
+        </article>
+      {/each}
+    </div>
+  {/if}
+  {#if insertNote}<p class="note snippet-note">{insertNote}</p>{/if}
 
   <!-- Palette -->
   <h3>Add a block</h3>
@@ -1708,13 +1699,6 @@
     color: var(--color-text);
     font-size: 0.85rem;
     flex: 1;
-  }
-  .snippet-card .snippet-setup {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    color: var(--color-muted);
-    font-size: 0.8rem;
   }
   .snippet-card button {
     align-self: flex-end;

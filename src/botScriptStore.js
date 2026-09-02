@@ -23,6 +23,32 @@ const MAX_SCRIPTS_TOTAL = 200;
 const MAX_DOC_BYTES = 49152; // 48 KB — the same ceiling the browser codec uses
 const MAX_NAME_LEN = 60;
 
+// ─── Starter bots ────────────────────────────────────────────────────────────
+//
+// src/starterBots.json holds six ready-made bots, reborn from the Bot Builder's
+// old client-side block snippets (deleted when they moved here, so that JSON is
+// now their only source — do not go looking for the module). They ride the
+// exact same envelope-lite contract as everything else in this file: this
+// module never proves the JSON decodes as a valid BotScript, it only inserts
+// it byte-for-byte. The real gate is still the browser decoding every doc on
+// read (see the file header above) — a separate web-side test decodes
+// starterBots.json through the real codec.
+const STARTER_BOTS_PATH = path.join(__dirname, "starterBots.json");
+// Bumping this forces a re-seed pass (new/changed starters get inserted by id;
+// existing records, including ones the player deleted, are still never
+// resurrected — see seedStarterBots() below).
+const STARTER_SEED_VERSION = 1;
+const STARTER_AUTHOR_NAME = "Shipped with the app";
+
+let starterBotsCache = null;
+function loadStarterBots() {
+  if (starterBotsCache === null) {
+    const parsed = JSON.parse(fs.readFileSync(STARTER_BOTS_PATH, "utf8"));
+    starterBotsCache = Array.isArray(parsed.bots) ? parsed.bots : [];
+  }
+  return starterBotsCache;
+}
+
 function createBotScriptStore(options) {
   const dataDir = options.dataDir;
   const now = options.now || (() => new Date().toISOString());
@@ -198,12 +224,72 @@ function createBotScriptStore(options) {
       writeAll(all);
       return true;
     },
+
+    /**
+     * Insert the six starter bots (src/starterBots.json) on first use, then
+     * never again. This is a deliberate, explicit call — NOT run implicitly
+     * from list()/get()/create() — so a plain read never has the write side
+     * effect those methods already promise not to have.
+     *
+     * The `seededVersion` marker recorded on the store, not per-script
+     * presence, is what makes this idempotent AND makes a deleted starter
+     * stay deleted: once the marker is set, this returns immediately without
+     * looking at which starter scriptIDs still exist. A library that grows
+     * back what the player removed would be a bug, not a feature.
+     *
+     * Starter records use a deterministic scriptID (`starter-<id>`) purely as
+     * a duplicate guard for a single seeding pass (for example a crash
+     * between writeAll and the caller recording success); it is not what
+     * prevents resurrection — the version marker is.
+     *
+     * Quota and byte caps apply exactly as they do to a player's create():
+     * seeding stops (without throwing) once MAX_SCRIPTS_TOTAL is reached, so
+     * a near-full store simply gets as many starters as fit.
+     */
+    seedStarterBots() {
+      const all = readAll();
+      if (all.seededVersion === STARTER_SEED_VERSION) {
+        return { seeded: 0, alreadySeeded: true };
+      }
+      const starters = loadStarterBots();
+      let total = Object.keys(all.scripts).length;
+      let seeded = 0;
+      for (const starter of starters) {
+        const scriptID = `starter-${starter.id}`;
+        if (all.scripts[scriptID]) {
+          continue; // never overwrite or duplicate an existing record
+        }
+        if (total >= MAX_SCRIPTS_TOTAL) {
+          break; // seeds count against the quota like any other record
+        }
+        const bytes = guardDoc(starter.doc);
+        const timestamp = now();
+        all.scripts[scriptID] = {
+          scriptID,
+          authorAccountID: null,
+          authorName: STARTER_AUTHOR_NAME,
+          rev: 1,
+          name: nameOf(starter.doc),
+          bytes,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          doc: starter.doc,
+        };
+        total += 1;
+        seeded += 1;
+      }
+      all.seededVersion = STARTER_SEED_VERSION;
+      writeAll(all);
+      return { seeded, alreadySeeded: false };
+    },
   };
 }
 
 module.exports = {
   createBotScriptStore,
   MAX_SCRIPTS_TOTAL,
+  STARTER_SEED_VERSION,
+  STARTER_AUTHOR_NAME,
   MAX_DOC_BYTES,
   MAX_NAME_LEN,
   STORE_FILENAME,

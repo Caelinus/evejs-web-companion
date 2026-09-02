@@ -1,0 +1,315 @@
+{
+  "seedVersion": 1,
+  "note": "Six ready-made sequences, now the library's starter bots. They began as the client-side block snippets in web/src/bots/blockSnippets.ts, which was deleted when they moved here — this file is their only source now, so edit it directly rather than looking for that module. src/botScriptStore.js reads this and inserts each `doc` verbatim. VALIDATION HERE IS ENVELOPE-LITE, same as the store itself: the server cannot run the browser's TypeScript codec, so nothing on this side proves the JSON decodes as a valid BotScript. These seeds ride the same decode-on-read contract as every player-saved script, and web/src/bots/starterBots.test.ts decodes this file through the real codec — that test is what actually proves them, so run it after any edit here.",
+  "bots": [
+    {
+      "id": "safe-return-home",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Safe return home",
+        "notes": "Fly back to the station where this run began, empty the cargo hold, and repair the ship.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "safe-home-travel",
+            "kind": "macro",
+            "macro": "travel-to-station",
+            "args": {
+              "station": {
+                "kind": "station",
+                "ref": {
+                  "entity": "station",
+                  "id": null,
+                  "name": null,
+                  "systemName": null,
+                  "starting": true
+                }
+              }
+            }
+          },
+          {
+            "id": "safe-home-unload",
+            "kind": "macro",
+            "macro": "unload-cargo",
+            "args": {}
+          },
+          {
+            "id": "safe-home-repair",
+            "kind": "macro",
+            "macro": "repair-ship",
+            "args": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "mine-haul-cycle",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Mine and haul cycle",
+        "notes": "Undock, mine the nearest belt until the ore hold is 90% full, then haul it to the starting station.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "mine-haul-undock",
+            "kind": "macro",
+            "macro": "undock",
+            "args": {}
+          },
+          {
+            "id": "mine-haul-mine",
+            "kind": "macro",
+            "macro": "mine-at-belt",
+            "args": {
+              "belt": {
+                "kind": "belt",
+                "belt": {
+                  "mode": "nearest"
+                }
+              }
+            },
+            "until": {
+              "kind": "ore-hold-at-least",
+              "fraction": 0.9
+            }
+          },
+          {
+            "id": "mine-haul-deliver",
+            "kind": "macro",
+            "macro": "deliver-ore",
+            "args": {
+              "station": {
+                "kind": "station",
+                "ref": {
+                  "entity": "station",
+                  "id": null,
+                  "name": null,
+                  "systemName": null,
+                  "starting": true
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "clear-loot-salvage",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Clear an anomaly",
+        "notes": "Undock, harden the ship, visit the next combat anomaly, clear the rats, loot your wrecks, then salvage them.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "anomaly-undock",
+            "kind": "macro",
+            "macro": "undock",
+            "args": {}
+          },
+          {
+            "id": "anomaly-harden",
+            "kind": "macro",
+            "macro": "hardeners-on",
+            "args": {}
+          },
+          {
+            "id": "anomaly-warp",
+            "kind": "macro",
+            "macro": "warp-to-anomaly",
+            "args": {}
+          },
+          {
+            "id": "anomaly-fight",
+            "kind": "macro",
+            "macro": "fight-the-rats",
+            "args": {}
+          },
+          {
+            "id": "anomaly-loot",
+            "kind": "macro",
+            "macro": "loot-wrecks",
+            "args": {}
+          },
+          {
+            "id": "anomaly-salvage",
+            "kind": "macro",
+            "macro": "salvage-wrecks",
+            "args": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "fleet-logistics",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Fleet logistics support",
+        "notes": "Wait for a fleet invite, undock, harden up, repair fleet-mates, feed capacitor, then orbit close and keep repairing.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "logi-join",
+            "kind": "macro",
+            "macro": "join-fleet",
+            "args": {}
+          },
+          {
+            "id": "logi-undock",
+            "kind": "macro",
+            "macro": "undock",
+            "args": {}
+          },
+          {
+            "id": "logi-harden",
+            "kind": "macro",
+            "macro": "hardeners-on",
+            "args": {}
+          },
+          {
+            "id": "logi-repair",
+            "kind": "macro",
+            "macro": "remote-rep",
+            "args": {}
+          },
+          {
+            "id": "logi-cap",
+            "kind": "macro",
+            "macro": "remote-cap",
+            "args": {}
+          },
+          {
+            "id": "logi-anchor",
+            "kind": "macro",
+            "macro": "orbit-and-boost",
+            "args": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "dock-refit-repair",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Dock, refit, and repair",
+        "notes": "Dock at the nearest station, unload, apply a saved fitting, repair the new hull and modules, then tidy the hangar.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "turnaround-dock",
+            "kind": "macro",
+            "macro": "dock-at-nearest",
+            "args": {}
+          },
+          {
+            "id": "turnaround-unload",
+            "kind": "macro",
+            "macro": "unload-cargo",
+            "args": {}
+          },
+          {
+            "id": "turnaround-refit",
+            "kind": "macro",
+            "macro": "refit-ship",
+            "args": {
+              "fitting": {
+                "kind": "fitting",
+                "fittingID": null,
+                "name": null
+              }
+            }
+          },
+          {
+            "id": "turnaround-repair",
+            "kind": "macro",
+            "macro": "repair-ship",
+            "args": {}
+          },
+          {
+            "id": "turnaround-tidy",
+            "kind": "macro",
+            "macro": "tidy-hangar",
+            "args": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "probe-signature-sweep",
+      "doc": {
+        "format": "evejs-bot-script",
+        "version": 1,
+        "name": "Probe signature sweep",
+        "notes": "Launch the current ship's scan probes, analyze signatures once with their authoritative formation, then recover every probe.",
+        "home": {
+          "entity": "station",
+          "id": null,
+          "name": null,
+          "systemName": null,
+          "starting": true
+        },
+        "interrupts": [],
+        "program": [
+          {
+            "id": "probe-sweep-launch",
+            "kind": "macro",
+            "macro": "launch-scan-probes",
+            "args": {}
+          },
+          {
+            "id": "probe-sweep-analyze",
+            "kind": "macro",
+            "macro": "analyze-signatures",
+            "args": {}
+          },
+          {
+            "id": "probe-sweep-recover",
+            "kind": "macro",
+            "macro": "recover-scan-probes",
+            "args": {}
+          }
+        ]
+      }
+    }
+  ]
+}

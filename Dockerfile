@@ -22,6 +22,12 @@ RUN apt-get update \
 
 COPY tsconfig.json vite.config.ts ./
 COPY web ./web
+# The starter-bot seeds are BFF data, but only the browser's codec can prove
+# they are valid documents — the server is plain JS and cannot run it. So the
+# web-side test that decodes them lives here and needs the file, even though
+# nothing in the bundle imports it. Copied alone rather than all of src/: the
+# web build has no business seeing the rest of the server.
+COPY src/starterBots.json ./src/starterBots.json
 RUN npm run build:web
 
 
