@@ -27,6 +27,7 @@
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
   import type { BotsState, CustomBotState, FlightState } from "../store/types.ts";
+  import ActionButton from "./ActionButton.svelte";
 
   let {
     session,
@@ -287,45 +288,66 @@
     <span class="row-actions">
       {#if isCustomTabRun}
         {#if customStatus === "paused"}
-          <button type="button" onclick={resume}>Resume</button>
+          <ActionButton action="resume" onclick={resume} />
         {:else}
-          <button type="button" disabled={customStatus !== "running"} onclick={pause}>Pause</button>
+          <ActionButton action="pause" disabled={customStatus !== "running"} onclick={pause} />
         {/if}
-        <button type="button" class="danger" onclick={stop}>Stop</button>
+        <ActionButton action="stop" danger onclick={stop} />
       {:else if runState.mode === "server"}
-        <button type="button" class="danger" disabled={busy} onclick={stopServer}>
-          {busy ? "Stopping…" : "Stop"}
-        </button>
+        <ActionButton
+          action="stop"
+          danger
+          disabled={busy}
+          label={busy ? "Stopping…" : undefined}
+          onclick={stopServer}
+        />
       {:else if runState.mode === "none" && session !== undefined}
-        <label>
-          Bot
-          <select bind:value={selectedScriptID} disabled={busy}>
-            <option value={null}>Choose a bot</option>
-            {#each scripts as script (script.scriptID)}
-              <option value={script.scriptID}>{script.name}</option>
-            {/each}
-          </select>
-        </label>
-        <label>
-          Server run limit
-          <select bind:value={runtimeMinutes} disabled={busy}>
-            <option value={60}>1 hour</option>
-            <option value={240}>4 hours</option>
-            <option value={720}>12 hours</option>
-            <option value={1440}>24 hours</option>
-          </select>
-        </label>
-        <button
-          type="button"
-          class="primary"
-          disabled={busy || selectedScriptID === null}
-          onclick={runHere}
-        >
-          Run here
-        </button>
-        <button type="button" disabled={busy || selectedScriptID === null} onclick={runOnServer}>
-          {busy ? "Handing over…" : "Run on server"}
-        </button>
+        <!-- ⚠ NOT `.row-actions`. This is a small FORM — a bot to pick, two
+             different ways to start it, and a limit that governs only one of
+             them — and `.row-actions` lays a flat row of buttons out, so the
+             two labelled selects and the two buttons ran off the end of the
+             cell and collided with the row beneath.
+             The run limit sits WITH "Run on server" because that is the only
+             thing it applies to; beside the bot picker it read as a setting on
+             both, which is the one thing it is not. -->
+        <div class="pilot-launch">
+          <label class="pilot-launch-bot">
+            Bot
+            <select bind:value={selectedScriptID} disabled={busy}>
+              <option value={null}>Choose a bot</option>
+              {#each scripts as script (script.scriptID)}
+                <option value={script.scriptID}>{script.name}</option>
+              {/each}
+            </select>
+          </label>
+          <div class="pilot-launch-run">
+            <ActionButton
+              action="run-here"
+              primary
+              disabled={busy || selectedScriptID === null}
+              onclick={runHere}
+            />
+            <span class="pilot-launch-where">in this tab</span>
+          </div>
+          <div class="pilot-launch-run">
+            <ActionButton
+              action="run-on-server"
+              disabled={busy || selectedScriptID === null}
+              label={busy ? "Handing over…" : undefined}
+              onclick={runOnServer}
+            />
+            <span class="pilot-launch-where">on the server</span>
+            <label class="pilot-launch-limit">
+              for up to
+              <select bind:value={runtimeMinutes} disabled={busy}>
+                <option value={60}>1 hour</option>
+                <option value={240}>4 hours</option>
+                <option value={720}>12 hours</option>
+                <option value={1440}>24 hours</option>
+              </select>
+            </label>
+          </div>
+        </div>
       {:else if runState.mode === "none"}
         <!-- A server-only row: no tab is open here to hold this character, so
              there is nothing this row can start (only stop, once something is
