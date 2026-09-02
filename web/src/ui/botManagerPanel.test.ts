@@ -102,6 +102,24 @@ test("the panel offers a search box", () => {
   assert.match(renderPanel(), /type="search"/);
 });
 
+test("region C (recent runs) heading is present", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /Recent runs/i);
+});
+
+test("region C shows the not-durable caveat", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /remembered only until the server restarts/i);
+});
+
+test("region C reads as loading on first mount, never as 'nothing has finished yet'", () => {
+  // Same fetch as region A (`serverBots`) — the SSR harness never runs
+  // onMount, so this must not guess an empty history before it knows.
+  const text = visibleText(renderPanel());
+  assert.match(text, /Loading recent runs/i);
+  assert.doesNotMatch(text, /Nothing has finished yet/i);
+});
+
 test("no raw numeric id reaches the page (R7d)", () => {
   const text = visibleText(renderPanel());
   // Author account ids are the id most likely to leak here, since the row

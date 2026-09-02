@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  endedRuns,
+  lastAlertPhrase,
   pilotRunState,
+  RECENT_RUNS_ARE_NOT_DURABLE,
+  runOutcomePhrase,
   serverBotFor,
   serverOnlyBots,
   serverRunState,
@@ -251,4 +255,112 @@ test("serverOnlyBots excludes an ended bot even for an un-held character", () =>
 test("serverOnlyBots returns nothing when every server bot's character has a held tab", () => {
   const rows = [serverBot({ botID: "bot-1", characterID: PILOT_ONE_ID })];
   assert.deepEqual(serverOnlyBots(rows, [PILOT_ONE_ID]), []);
+});
+
+// ─── endedRuns ───────────────────────────────────────────────────────────────
+
+test("endedRuns keeps only bots with an endedAt — a running bot is not history", () => {
+  const rows = [
+    serverBot({ botID: "bot-1", status: "running", endedAt: null }),
+    serverBot({ botID: "bot-2", status: "stopped", endedAt: "2026-09-02T10:00:00.000Z" }),
+  ];
+  const result = endedRuns(rows, 10);
+  assert.deepEqual(result.map((row) => row.botID), ["bot-2"]);
+});
+
+test("endedRuns sorts newest-ended first", () => {
+  const rows = [
+    serverBot({ botID: "older", endedAt: "2026-09-02T09:00:00.000Z" }),
+    serverBot({ botID: "newest", endedAt: "2026-09-02T11:00:00.000Z" }),
+    serverBot({ botID: "middle", endedAt: "2026-09-02T10:00:00.000Z" }),
+  ];
+  const result = endedRuns(rows, 10);
+  assert.deepEqual(
+    result.map((row) => row.botID),
+    ["newest", "middle", "older"],
+  );
+});
+
+test("endedRuns caps to the given limit after sorting", () => {
+  const rows = [
+    serverBot({ botID: "a", endedAt: "2026-09-02T09:00:00.000Z" }),
+    serverBot({ botID: "b", endedAt: "2026-09-02T11:00:00.000Z" }),
+    serverBot({ botID: "c", endedAt: "2026-09-02T10:00:00.000Z" }),
+  ];
+  const result = endedRuns(rows, 2);
+  assert.deepEqual(
+    result.map((row) => row.botID),
+    ["b", "c"],
+  );
+});
+
+test("endedRuns does not throw on a malformed endedAt, and does not let it sort to the top", () => {
+  const rows = [
+    serverBot({ botID: "good", endedAt: "2026-09-02T10:00:00.000Z" }),
+    serverBot({ botID: "garbled", endedAt: "not-a-real-timestamp" }),
+  ];
+  const result = endedRuns(rows, 10);
+  assert.deepEqual(
+    result.map((row) => row.botID),
+    ["good", "garbled"],
+  );
+});
+
+// ─── runOutcomePhrase ────────────────────────────────────────────────────────
+
+test("runOutcomePhrase distinguishes finished-on-its-own, stopped, and stopped-after-a-problem", () => {
+  assert.equal(runOutcomePhrase(serverBot({ status: "idle" })), "Finished on its own");
+  assert.equal(runOutcomePhrase(serverBot({ status: "stopped" })), "Stopped");
+  assert.equal(runOutcomePhrase(serverBot({ status: "error" })), "Stopped after a problem");
+});
+
+test("a stopped run never claims WHO stopped it", () => {
+  // botHost sets status "stopped" both for a player's Stop and for its own
+  // run-time cap (it writes the reason into `why`, not the status), so naming a
+  // cause here would be a false statement in the cap case. History is the last
+  // place to guess: the strip shows `why` alongside, and the server writes that.
+  const phrase = runOutcomePhrase(serverBot({ status: "stopped" }));
+  assert.doesNotMatch(phrase, /player|you|cap|time/i);
+});
+
+test("runOutcomePhrase never surfaces a raw status token", () => {
+  const phrase = runOutcomePhrase(serverBot({ status: "idle" }));
+  assert.notEqual(phrase, "idle");
+  assert.notEqual(phrase, "stopped");
+});
+
+test("runOutcomePhrase says so when the server resumed the run after a restart", () => {
+  const phrase = runOutcomePhrase(
+    serverBot({ status: "error", resumedAt: "2026-09-02T09:30:00.000Z" }),
+  );
+  assert.equal(phrase, "Stopped after a problem (resumed after a server restart)");
+});
+
+test("runOutcomePhrase without a resumedAt carries no restart mention", () => {
+  const phrase = runOutcomePhrase(serverBot({ status: "idle", resumedAt: null }));
+  assert.equal(phrase, "Finished on its own");
+});
+
+// ─── lastAlertPhrase ─────────────────────────────────────────────────────────
+
+test("lastAlertPhrase is null when the bot never alerted", () => {
+  assert.equal(lastAlertPhrase(serverBot({ lastAlert: null }), 1_000_000), null);
+});
+
+test("lastAlertPhrase includes the message and a relative age", () => {
+  const nowMs = 1_000_000;
+  const bot = serverBot({ lastAlert: { message: "Cargo hold is full", atMs: nowMs - 5 * 60_000 } });
+  assert.equal(lastAlertPhrase(bot, nowMs), "Cargo hold is full (5 minutes ago)");
+});
+
+test("lastAlertPhrase says 'just now' for a very recent alert", () => {
+  const nowMs = 1_000_000;
+  const bot = serverBot({ lastAlert: { message: "Low on ammo", atMs: nowMs - 2_000 } });
+  assert.equal(lastAlertPhrase(bot, nowMs), "Low on ammo (just now)");
+});
+
+// ─── the not-durable caveat ──────────────────────────────────────────────────
+
+test("the recent-runs caveat is exported once, and says the history is not durable", () => {
+  assert.match(RECENT_RUNS_ARE_NOT_DURABLE, /restart/i);
 });

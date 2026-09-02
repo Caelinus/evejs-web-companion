@@ -1,8 +1,5 @@
 <script lang="ts">
-  // BOT MANAGER — regions A and B (docs/bot-manager-brainstorm.md §4).
-  //
-  // Region C (recent runs) is a separate slice and is NOT built here — see the
-  // brainstorm doc's M3 slice split.
+  // BOT MANAGER — regions A, B and C (docs/bot-manager-brainstorm.md §4).
   //
   // Region A (pilots, top): one row per held session in THIS browser tab, plus
   // one row per character with a live server bot and no held session here
@@ -36,7 +33,14 @@
   import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
   import { lastSavedPhrase, libraryView, savedByLabel } from "../bots/libraryView.ts";
-  import { serverBotFor, serverOnlyBots } from "../bots/pilotRoster.ts";
+  import {
+    serverBotFor,
+    serverOnlyBots,
+    endedRuns,
+    runOutcomePhrase,
+    lastAlertPhrase,
+    RECENT_RUNS_ARE_NOT_DURABLE,
+  } from "../bots/pilotRoster.ts";
   import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
 
   let {
@@ -82,6 +86,12 @@
       .filter((id): id is number => id !== null),
   );
   const extraServerBots = $derived(serverOnlyBots(serverBots, heldCharacterIDs));
+
+  // --- region C: recent runs ---------------------------------------------
+  // Same fetch as region A (`serverBots`), just the ended slice of it — no
+  // second call. 20 matches MAX_ENDED_RUNS in src/botHost.js, the server's
+  // own memory bound, so asking for more can never return more.
+  const recentRuns = $derived(endedRuns(serverBots, 20));
 
   let loaded = $state(false);
   let error = $state<string | null>(null);
@@ -223,6 +233,46 @@
           {/each}
           {#each extraServerBots as bot (bot.botID)}
             <BotManagerPilotRow serverBot={bot} {scripts} onChanged={refreshPilots} />
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Recent runs</h2>
+  </header>
+  <p class="note">{RECENT_RUNS_ARE_NOT_DURABLE}</p>
+
+  {#if pilotsError}
+    <p class="note error">{pilotsError}</p>
+  {:else if !pilotsLoaded}
+    <p class="note">Loading recent runs…</p>
+  {:else if recentRuns.length === 0}
+    <p class="empty">Nothing has finished yet.</p>
+  {:else}
+    <div class="table-wrap overflow-x-auto">
+      <table class="guests reflow">
+        <thead>
+          <tr>
+            <th>Bot</th>
+            <th>Pilot</th>
+            <th>Outcome</th>
+            <th>Last alert</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each recentRuns as bot (bot.botID)}
+            <tr>
+              <td data-label="Bot">{bot.scriptName}</td>
+              <td data-label="Pilot">{bot.characterName ?? "Unknown pilot"}</td>
+              <td data-label="Outcome">
+                {runOutcomePhrase(bot)}{#if bot.why}<br />{bot.why}{/if}
+              </td>
+              <td data-label="Last alert">{lastAlertPhrase(bot, Date.now()) ?? "—"}</td>
+            </tr>
           {/each}
         </tbody>
       </table>

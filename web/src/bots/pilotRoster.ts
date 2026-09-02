@@ -200,3 +200,113 @@ export function serverOnlyBots(
   const held = new Set(heldCharacterIDs);
   return serverBots.filter((bot) => bot.endedAt === null && !held.has(bot.characterID));
 }
+
+// --- recent runs (region C) --------------------------------------------------
+//
+// The same subject as everything above, seen after the fact: a run that used
+// to be "on the server" and now isn't. `listServerBots()` keeps an ended
+// record around (see `serverBotFor`'s note) purely so this strip has
+// something to show — this section is what turns that leftover record into
+// plain words for a history line rather than a live status line.
+
+/**
+ * Recent-runs strips must say this, not imply a durable log: botHost.js keeps
+ * ended runs in memory only, as a deliberate choice — `data/server-bots.json`
+ * stays "what to resume", nothing more — so a restart empties this strip.
+ * Exported once here so no caller re-derives (or forgets) the caveat.
+ */
+export const RECENT_RUNS_ARE_NOT_DURABLE =
+  "Recent runs are remembered only until the server restarts — nothing here is saved.";
+
+/**
+ * `endedAt` parsed to a sortable instant. A malformed or unparseable value
+ * must not throw, and must not be mistaken for "just ended" (which would
+ * float garbage to the top of a newest-first list) — so it sorts as the
+ * oldest possible run instead.
+ */
+function endedAtMs(endedAt: string): number {
+  const parsed = Date.parse(endedAt);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+/** Ended runs, newest first, capped. Running bots are not history. */
+export function endedRuns(serverBots: readonly ServerBot[], limit: number): readonly ServerBot[] {
+  const cap = Math.max(0, limit);
+  return serverBots
+    .filter((bot): bot is ServerBot & { endedAt: string } => bot.endedAt !== null)
+    .slice()
+    .sort((a, b) => endedAtMs(b.endedAt) - endedAtMs(a.endedAt))
+    .slice(0, cap);
+}
+
+/**
+ * How a run ended, in plain words. Reuses `serverStatusWords`' vocabulary for
+ * "error" rather than inventing a second one, but — unlike that function,
+ * which is written for a bot that might still be running — assumes `bot` has
+ * already ended, so it distinguishes the three ways an ended run got there
+ * instead of collapsing them into one "Finished" word.
+ *
+ * `status` is "idle" when the bot's own run loop reached its natural end,
+ * "error" when it stopped after a problem, and "stopped" for every
+ * server-initiated stop — a player's Stop click and the run-time-cap timeout
+ * both set the same status (see botHost.js's `stop()` and its deadline
+ * timer), and `ServerBot` carries no field that tells them apart. So this says
+ * only "Stopped" — the bare fact both cases share. Naming a cause we cannot
+ * read would be a plain false statement in the common-enough case where the
+ * server's run-time cap ended it, and history is exactly where a player goes to
+ * find out what actually happened. `bot.why` carries the real reason ("The
+ * approved run time ended, so the server stopped this bot.") and the strip
+ * shows it alongside; that is where the distinction belongs, because the server
+ * writes it rather than the UI guessing it.
+ */
+export function runOutcomePhrase(bot: ServerBot): string {
+  const outcome =
+    bot.status === "error"
+      ? "Stopped after a problem"
+      : bot.status === "idle"
+        ? "Finished on its own"
+        : bot.status === "stopped"
+          ? "Stopped"
+          : // Not reachable for a genuinely ended run (see ENDED_STATUSES in
+            // botHost.js), but an honest sentence beats a raw token if one
+            // ever gets here.
+            "Finished";
+  if (bot.resumedAt !== null) {
+    // "It ran twice" is exactly the kind of thing a player needs to know
+    // when reading history — the server restarted mid-run and picked this
+    // bot back up before it reached the outcome above.
+    return `${outcome} (resumed after a server restart)`;
+  }
+  return outcome;
+}
+
+/**
+ * The last alert a server bot raised, worded for the history strip's "last
+ * alert" column — null when it never alerted. A server bot has no browser to
+ * notify, so `bot.lastAlert` is the only notification it ever gives; this
+ * keeps the wording in one place rather than each caller re-deciding how to
+ * phrase "how long ago". `nowMs` is a parameter, not `Date.now()`, matching
+ * this module's rule of owning no clock of its own.
+ */
+export function lastAlertPhrase(bot: ServerBot, nowMs: number): string | null {
+  if (bot.lastAlert === null) {
+    return null;
+  }
+  const ageMs = Math.max(0, nowMs - bot.lastAlert.atMs);
+  const ageWords = ageWordsFor(ageMs);
+  return `${bot.lastAlert.message} (${ageWords})`;
+}
+
+/** "just now" / "N minutes ago" / "N hours ago" — same buckets ServerBots.svelte uses for the same fact, minus the direct clock read. */
+function ageWordsFor(ageMs: number): string {
+  const seconds = Math.round(ageMs / 1000);
+  if (seconds < 60) {
+    return "just now";
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+}
