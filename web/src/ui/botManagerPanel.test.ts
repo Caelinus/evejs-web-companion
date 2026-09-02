@@ -79,6 +79,25 @@ test("the panel mounts fine with an explicit empty sessions array too", () => {
   assert.match(text, /Pilots/i);
 });
 
+test("the panel mounts fine with a held pilot session too (the new per-row Start controls never reach a first mount)", () => {
+  // The SSR harness never runs onMount, so region A stays gated behind
+  // "Loading pilots…" regardless of how many sessions are held — a held
+  // session's row (and its new script picker / Run here / Run on server
+  // controls, wired from THAT session's own flow and store) is never
+  // actually rendered here. This only pins that threading a real held
+  // session through — which now also feeds BotManagerPilotRow the shared
+  // `scripts` prop and the renamed `onChanged` callback — does not throw
+  // before that row is ever reached.
+  const store = createClientStore();
+  const pilotSession = { id: "session-1", store: createClientStore(), flow: fakeFlow() };
+  const output = render(BotManager as never, {
+    props: { store, flow: fakeFlow(), sessions: [pilotSession] },
+  } as never);
+  const text = visibleText(output.body);
+  assert.match(text, /Bot manager/i);
+  assert.match(text, /Loading pilots/i);
+});
+
 test("the panel offers a search box", () => {
   assert.match(renderPanel(), /type="search"/);
 });

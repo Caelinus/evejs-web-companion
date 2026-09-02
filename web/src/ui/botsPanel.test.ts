@@ -310,13 +310,20 @@ test("R43 — it is a launcher, not an editor: nothing here authors a bot", () =
 });
 
 test("saved-bot launcher calls carry the active flow's complete request options", () => {
+  // The run-approval path itself now lives in ../bots/startRun.ts (shared with
+  // the Bot Manager); this panel only wires that module's deps. So what this
+  // sweep can still verify from here is that every dep closure threads THIS
+  // pilot's full request options / identifiers through, not a stale subset.
   assert.match(CODE, /listBotScripts\s*\(\s*botOpts\(\)\s*\)/);
-  assert.match(CODE, /getBotScript\s*\(\s*scriptID\s*,\s*botOpts\(\)\s*\)/);
+  assert.match(CODE, /getBotScript\s*\(\s*id\s*,\s*botOpts\(\)\s*\)/);
   assert.match(
     CODE,
-    /startServerBot\s*\(\s*current\.characterID\s*,\s*scriptID\s*,\s*grant\s*,\s*botOpts\(\)\s*\)/,
+    /startServerBot\s*\(\s*characterID\s*,\s*sid\s*,\s*grant\s*,\s*botOpts\(\)\s*\)/,
   );
-  assert.match(CODE, /flow\.startCustomBot\s*\(\s*decoded\.doc\s*,\s*record\.scriptID\s*\)/);
+  assert.match(
+    CODE,
+    /flow\.startCustomBot\s*\(\s*doc\s*,\s*sourceScriptID\s*\)/,
+  );
 });
 
 // --- 5. the standing invariants ---------------------------------------------

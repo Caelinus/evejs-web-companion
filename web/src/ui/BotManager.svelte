@@ -217,11 +217,12 @@
             <BotManagerPilotRow
               {session}
               serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
-              onStopped={refreshPilots}
+              {scripts}
+              onChanged={refreshPilots}
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}
-            <BotManagerPilotRow serverBot={bot} onStopped={refreshPilots} />
+            <BotManagerPilotRow serverBot={bot} {scripts} onChanged={refreshPilots} />
           {/each}
         </tbody>
       </table>

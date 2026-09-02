@@ -19,20 +19,26 @@
   // inside `$effect` (App.svelte's station-watch effect is the precedent for
   // subscribing explicitly rather than with `$store` sugar) instead of once
   // at the top level.
-  import { stopServerBot, type ServerBot } from "../app/api.ts";
+  import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
   import type { Session } from "../app/sessions.ts";
   import { pilotRunState, serverRunState, type PilotRunState } from "../bots/pilotRoster.ts";
+  import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
+  import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
   import type { BotsState, CustomBotState, FlightState } from "../store/types.ts";
 
   let {
     session,
     serverBot,
-    onStopped,
+    scripts,
+    onChanged,
   }: {
     session?: Session;
     serverBot: ServerBot | null;
-    onStopped: () => void;
+    /** The library rows the panel already loaded — this row never fetches its own. */
+    scripts: readonly BotScriptSummary[];
+    /** Fires after a stop OR a start, so the panel refreshes the roster and server-bot list either way. */
+    onChanged: () => void;
   } = $props();
 
   // A tab run with no server claim reads as "nothing running" here — the same
@@ -157,9 +163,87 @@
       // falls back to the tab's active-pilot token, same as any other legacy
       // call without per-session options (see App.svelte's token mirror).
       await stopServerBot(serverBot.botID, session?.flow.requestOptions() ?? {});
-      onStopped();
+      onChanged();
     } catch {
       stopError = "Could not stop that bot — it may have already ended.";
+    } finally {
+      busy = false;
+    }
+  }
+
+  // --- starting a saved bot ON THIS PILOT --------------------------------
+  //
+  // ⚠ THIS ROW'S OWN SESSION, NEVER THE PANEL'S. A pilot row's whole reason
+  // to carry a Start control (rather than leaving that to Bots.svelte) is
+  // that it can start a bot on a pilot who is not the active tab — so every
+  // dep below reads `session.flow` / `session.store`, the row's OWN pilot,
+  // not any `store`/`flow` belonging to the panel around it. Getting this
+  // backwards would start a bot on whatever pilot happens to be active
+  // instead of the one this row is showing.
+  let selectedScriptID = $state<string | null>(null);
+  let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
+  let startError = $state<string | null>(null);
+
+  function applyOutcome(outcome: StartOutcome): void {
+    if (outcome.kind === "refused") {
+      startError = outcome.sentence;
+    } else if (outcome.kind === "started") {
+      startError = null;
+      onChanged();
+    }
+    // "declined" (the player said no at the confirm): do nothing.
+  }
+
+  async function runHere(): Promise<void> {
+    if (session === undefined || selectedScriptID === null || busy) {
+      return;
+    }
+    const pilot = session;
+    busy = true;
+    startError = null;
+    try {
+      const outcome = await startHere(
+        {
+          fetchScript: (scriptID) => getBotScript(scriptID, pilot.flow.requestOptions()),
+          confirm: (message) => window.confirm(message),
+          startCustomBot: (doc, scriptID) => pilot.flow.startCustomBot(doc, scriptID),
+        },
+        selectedScriptID,
+      );
+      applyOutcome(outcome);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function runOnServer(): Promise<void> {
+    if (session === undefined || selectedScriptID === null || busy) {
+      return;
+    }
+    const pilot = session;
+    // THIS ROW'S OWN station reading — the character its own tab currently
+    // holds — never the panel's active pilot.
+    const characterID = pilot.store.station.get().online?.characterID ?? null;
+    if (characterID === null) {
+      startError = "Bring this pilot online first — the server bot flies its current character.";
+      return;
+    }
+    busy = true;
+    startError = null;
+    try {
+      const outcome = await startOnServer(
+        {
+          fetchScript: (scriptID) => getBotScript(scriptID, pilot.flow.requestOptions()),
+          confirm: (message) => window.confirm(message),
+          startServerBot: (charID, scriptID, grant) =>
+            apiStartServerBot(charID, scriptID, grant, pilot.flow.requestOptions()),
+          releaseSession: () => pilot.flow.releaseSession(),
+        },
+        selectedScriptID,
+        characterID,
+        runtimeMinutes,
+      );
+      applyOutcome(outcome);
     } finally {
       busy = false;
     }
@@ -203,10 +287,48 @@
         <button type="button" class="danger" disabled={busy} onclick={stopServer}>
           {busy ? "Stopping…" : "Stop"}
         </button>
+      {:else if runState.mode === "none" && session !== undefined}
+        <label>
+          Bot
+          <select bind:value={selectedScriptID} disabled={busy}>
+            <option value={null}>Choose a bot</option>
+            {#each scripts as script (script.scriptID)}
+              <option value={script.scriptID}>{script.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Server run limit
+          <select bind:value={runtimeMinutes} disabled={busy}>
+            <option value={60}>1 hour</option>
+            <option value={240}>4 hours</option>
+            <option value={720}>12 hours</option>
+            <option value={1440}>24 hours</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="primary"
+          disabled={busy || selectedScriptID === null}
+          onclick={runHere}
+        >
+          Run here
+        </button>
+        <button type="button" disabled={busy || selectedScriptID === null} onclick={runOnServer}>
+          {busy ? "Handing over…" : "Run on server"}
+        </button>
+      {:else if runState.mode === "none"}
+        <!-- A server-only row: no tab is open here to hold this character, so
+             there is nothing this row can start (only stop, once something is
+             running) — said plainly rather than rendering a dead control. -->
+        <span class="note">No tab is open here for this pilot.</span>
       {/if}
     </span>
     {#if stopError}
       <p class="note error">{stopError}</p>
+    {/if}
+    {#if startError}
+      <p class="note error">{startError}</p>
     {/if}
   </td>
 </tr>

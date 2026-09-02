@@ -27,14 +27,8 @@
     startServerBot,
     type BotScriptSummary,
   } from "../app/api.ts";
-  import { decodeScriptValue } from "../bots/scriptCodec.ts";
-  import {
-    analyzeBotRunPolicy,
-    BOT_RISK_LABELS,
-    createBotLaunchGrant,
-    DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
-    type BotRunPolicy,
-  } from "../bots/runPolicy.ts";
+  import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
+  import { startHere, startOnServer } from "../bots/startRun.ts";
   import {
     BOTS,
     MINING_BOT_REQUIREMENTS,
@@ -90,45 +84,24 @@
     }
   }
   async function startSaved(scriptID: string): Promise<void> {
-    try {
-      const record = await getBotScript(scriptID, botOpts());
-      if (record === null) {
-        savedError = "That bot could not be found.";
-        return;
-      }
-      const decoded = decodeScriptValue(record.doc);
-      if (!decoded.ok) {
-        savedError = decoded.refusal;
-        return;
-      }
-      const policy = analyzeBotRunPolicy(decoded.doc);
-      if (!approveRun(decoded.doc.name, policy, null)) {
-        return;
-      }
-      await flow.startCustomBot(decoded.doc, record.scriptID);
-    } catch {
-      savedError = "Could not start that bot.";
+    const outcome = await startHere(
+      {
+        fetchScript: (id) => getBotScript(id, botOpts()),
+        confirm: (message) => window.confirm(message),
+        startCustomBot: (doc, sourceScriptID) => flow.startCustomBot(doc, sourceScriptID),
+      },
+      scriptID,
+    );
+    if (outcome.kind === "refused") {
+      savedError = outcome.sentence;
+    } else if (outcome.kind === "started") {
+      savedError = null;
     }
   }
 
   /** Which saved bot a server start is in flight for (disables its buttons). */
   let serverStartBusy = $state<string | null>(null);
   let serverRunMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
-
-  function approveRun(name: string, policy: BotRunPolicy, runtimeMinutes: number | null): boolean {
-    const permissions =
-      policy.riskClasses.length === 0
-        ? "No spending, destructive, social, fleet, mission, colony, inventory, or combat permission was found."
-        : `This run may ${policy.riskClasses.map((risk) => BOT_RISK_LABELS[risk]).join("; ")}.`;
-    const included = policy.containsSubBots
-      ? "\n\nIt includes other saved bots, whose current contents will be loaded when it starts."
-      : "";
-    const limit =
-      runtimeMinutes === null
-        ? ""
-        : `\n\nThe server will stop it after ${runtimeMinutes < 60 ? `${runtimeMinutes} minutes` : `${runtimeMinutes / 60} hours`}.`;
-    return window.confirm(`Run “${name}”?\n\n${permissions}${included}${limit}`);
-  }
 
   /**
    * Run a saved bot ON THE SERVER, flying THIS TAB's current character.
@@ -154,34 +127,22 @@
     serverStartBusy = scriptID;
     savedError = null;
     try {
-      const record = await getBotScript(scriptID, botOpts());
-      if (record === null) {
-        savedError = "That bot could not be found.";
-        serverStartBusy = null;
-        return;
+      const outcome = await startOnServer(
+        {
+          fetchScript: (id) => getBotScript(id, botOpts()),
+          confirm: (message) => window.confirm(message),
+          startServerBot: (characterID, sid, grant) => startServerBot(characterID, sid, grant, botOpts()),
+          releaseSession: () => flow.releaseSession(),
+        },
+        scriptID,
+        current.characterID,
+        serverRunMinutes,
+      );
+      if (outcome.kind === "refused") {
+        savedError = outcome.sentence;
+      } else if (outcome.kind === "started") {
+        savedError = null;
       }
-      const decoded = decodeScriptValue(record.doc);
-      if (!decoded.ok) {
-        savedError = decoded.refusal;
-        serverStartBusy = null;
-        return;
-      }
-      const policy = analyzeBotRunPolicy(decoded.doc);
-      if (!approveRun(decoded.doc.name, policy, serverRunMinutes)) {
-        serverStartBusy = null;
-        return;
-      }
-      const grant = createBotLaunchGrant(record.rev, policy, serverRunMinutes);
-      await startServerBot(current.characterID, scriptID, grant, botOpts());
-    } catch (cause) {
-      savedError = cause instanceof Error ? cause.message : "Could not start that bot on the server.";
-      serverStartBusy = null;
-      return;
-    }
-    try {
-      await flow.releaseSession();
-    } catch {
-      // The bot has the hull either way; the tab's next read notices.
     } finally {
       serverStartBusy = null;
     }
