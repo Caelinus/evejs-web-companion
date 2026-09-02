@@ -39,15 +39,15 @@
     MAX_INTERRUPTS,
     MAX_NAME_LEN,
     MAX_NOTES_LEN,
-    DEFAULT_HUNT_MAX_JUMPS,
-    DEFAULT_HUNT_RANGE_AU,
     MAX_REPEAT_TIMES,
     MIN_REPEAT_TIMES,
-    startingStation,
   } from "../bots/botScript.ts";
   import { CATEGORY_LABEL, categoriesInUse, type BlockCategory } from "../bots/macroCatalogView.ts";
   import {
+    newBranch,
     newEditorState,
+    newStepFor,
+    newSubBot,
     toEditorState,
     toScript,
     hasSubBot as planHasSubBot,
@@ -355,91 +355,6 @@
   }
 
   // ── Adding to the plan ──────────────────────────────────────────────────────
-  /** A fresh step of this macro, with the starting arguments worth having. */
-  function newStepFor(macro: MacroID): MacroStep {
-    const id = makeId();
-    if (macro === "mine-at-belt") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
-        until: { kind: "ore-hold-at-least", fraction: 0.9 },
-      };
-    }
-    if (macro === "travel-to-belt") {
-      return { id, kind: "macro", macro, args: { belt: { kind: "belt", belt: { mode: "nearest" } } } };
-    }
-    if (macro === "deliver-ore" || macro === "travel-to-station") {
-      return { id, kind: "macro", macro, args: { station: { kind: "station", ref: startingStation() } } };
-    }
-    if (macro === "move-items") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: { from: { kind: "place", place: "hangar" }, to: { kind: "place", place: "cargo" } },
-      };
-    }
-    if (macro === "buy-item") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: {
-          item: { kind: "itemType", typeID: null, name: null },
-          quantity: { kind: "qty", value: 100 },
-          price: { kind: "isk", value: 1000 },
-        },
-      };
-    }
-    if (macro === "sell-item") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: { item: { kind: "itemType", typeID: null, name: null }, price: { kind: "isk", value: 1000 } },
-      };
-    }
-    if (macro === "invite-to-fleet") {
-      return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
-    }
-    if (macro === "hunt-player") {
-      // `only` stays ABSENT (any player); the leash and the scanner reach start
-      // on their shared defaults so the sentence reads honestly from the start.
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: {
-          maxJumps: { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS },
-          range: { kind: "count", value: DEFAULT_HUNT_RANGE_AU },
-        },
-      };
-    }
-    if (macro === "send-chat") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: { channel: { kind: "chatChannel", channel: "local" }, message: { kind: "text", text: "" } },
-      };
-    }
-    if (macro === "set-destination") {
-      // Unbound on purpose: there is no sensible default place to fly to, and
-      // the validator asks for one before the bot can start.
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: {
-          destination: { kind: "destination", ref: { entity: "station", id: null, name: null, systemName: null } },
-        },
-      };
-    }
-    return { id, kind: "macro", macro, args: {} };
-  }
-
   /** Append a node, select it, and open the inspector on it (§3 "Add a step"). */
   function appendNode(node: EditorNode): void {
     advancedProgram = null;
@@ -448,23 +363,15 @@
   }
 
   function addStep(macro: MacroID): void {
-    appendNode(newStepFor(macro));
+    appendNode(newStepFor(macro, makeId));
     stepPickerOpen = false;
     pickerQuery = "";
   }
-  /** A fork: "if <check>, do these; otherwise do those." Starts with one step
-   * on the THEN side so it is valid the moment it appears. */
   function addBranch(): void {
-    appendNode({
-      id: makeId(),
-      kind: "branch",
-      when: { kind: "shield-below", fraction: 0.5 },
-      then: [{ id: makeId(), kind: "macro", macro: "repair-ship", args: {} }],
-      else: [],
-    });
+    appendNode(newBranch(makeId));
   }
   function addSubBot(): void {
-    appendNode({ id: makeId(), kind: "sub-bot", scriptID: null, name: null });
+    appendNode(newSubBot(makeId));
   }
 
   // ── Watches ─────────────────────────────────────────────────────────────────

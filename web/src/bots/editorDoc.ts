@@ -14,16 +14,22 @@
 
 import {
   type BotScript,
+  type BranchBlock,
   type InterruptRow,
   type LoopBlock,
   type LoopBodyNode,
+  type MacroID,
+  type MacroStep,
   type ProgramNode,
   type Repeat,
+  type SubBotNode,
   type WorldRef,
+  DEFAULT_HUNT_MAX_JUMPS,
+  DEFAULT_HUNT_RANGE_AU,
   MAX_NOTES_LEN,
   startingStation,
 } from "./botScript.ts";
-import type { FlatProgramNode } from "./scriptEdit.ts";
+import type { FlatProgramNode, IdGen } from "./scriptEdit.ts";
 
 /** How the top-level repeat reads in the editor's own control. */
 export type RepeatMode = "forever" | "times" | "once";
@@ -203,4 +209,130 @@ function buildProgram(state: EditorState): readonly ProgramNode[] {
 
 function buildRepeat(state: EditorState): Repeat {
   return state.repeatMode === "forever" ? { kind: "forever" } : { kind: "times", count: state.repeatCount };
+}
+
+// ─── What a newly added node is born as ──────────────────────────────────────
+//
+// These decide the JSON a step carries the moment a player adds it, which makes
+// them document logic and not presentation — the reason they live here rather
+// than in the picker that calls them. `editorDoc.test.ts` pins the emitted
+// arguments for ALL of `MACRO_IDS`, so a default cannot be dropped in a rewrite
+// the way `hunt-player`'s leash once was: the step's sentence went on claiming
+// a range it no longer carried, and nothing was comparing the two.
+//
+// The rule these follow: seed an argument only where a sensible default EXISTS
+// and leaving it out would make the step's own sentence a lie or make the step
+// unusable. Where there is no honest default — a station to fly to, an item to
+// trade, a pilot to invite — the argument stays unset and the validator asks
+// for it, which is the visible constraint CodeStruct's finding argues for.
+
+/** A fresh step of this macro, with the starting arguments worth having. */
+export function newStepFor(macro: MacroID, makeId: IdGen): MacroStep {
+  const id = makeId();
+  if (macro === "mine-at-belt") {
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 },
+    };
+  }
+  if (macro === "travel-to-belt") {
+    // "Nearest" like `mine-at-belt`, so the step is not born with a blocking
+    // problem the instant it is added. (This is the one place the rebuilt
+    // editor deliberately emits different JSON from the old one.)
+    return { id, kind: "macro", macro, args: { belt: { kind: "belt", belt: { mode: "nearest" } } } };
+  }
+  if (macro === "deliver-ore" || macro === "travel-to-station") {
+    return { id, kind: "macro", macro, args: { station: { kind: "station", ref: startingStation() } } };
+  }
+  if (macro === "move-items") {
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: { from: { kind: "place", place: "hangar" }, to: { kind: "place", place: "cargo" } },
+    };
+  }
+  if (macro === "buy-item") {
+    // The item stays to pick; the quantity and price get starting values to edit.
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: {
+        item: { kind: "itemType", typeID: null, name: null },
+        quantity: { kind: "qty", value: 100 },
+        price: { kind: "isk", value: 1000 },
+      },
+    };
+  }
+  if (macro === "sell-item") {
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: { item: { kind: "itemType", typeID: null, name: null }, price: { kind: "isk", value: 1000 } },
+    };
+  }
+  if (macro === "invite-to-fleet") {
+    return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
+  }
+  if (macro === "hunt-player") {
+    // `only` stays ABSENT (any player); the leash and the scanner reach start
+    // on their shared defaults so the sentence reads honestly from the start.
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: {
+        maxJumps: { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS },
+        range: { kind: "count", value: DEFAULT_HUNT_RANGE_AU },
+      },
+    };
+  }
+  if (macro === "send-chat") {
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: { channel: { kind: "chatChannel", channel: "local" }, message: { kind: "text", text: "" } },
+    };
+  }
+  if (macro === "set-destination") {
+    // Unbound on purpose: there is no sensible default place to fly to, and the
+    // validator asks for one before the bot can start.
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: {
+        destination: { kind: "destination", ref: { entity: "station", id: null, name: null, systemName: null } },
+      },
+    };
+  }
+  return { id, kind: "macro", macro, args: {} };
+}
+
+/**
+ * A fresh fork: "if <check>, do these; otherwise do those." It starts with one
+ * step on the THEN side so it is VALID the moment it appears — an empty branch
+ * is a blocking problem, and a control that produces a broken node when you
+ * press it teaches that the editor is unsafe to touch.
+ */
+export function newBranch(makeId: IdGen): BranchBlock {
+  return {
+    id: makeId(),
+    kind: "branch",
+    when: { kind: "shield-below", fraction: 0.5 },
+    then: [{ id: makeId(), kind: "macro", macro: "repair-ship", args: {} }],
+    else: [],
+  };
+}
+
+/** A fresh "run another saved bot" node. Which bot is picked in the inspector;
+ * unset, the validator asks for one. */
+export function newSubBot(makeId: IdGen): SubBotNode {
+  return { id: makeId(), kind: "sub-bot", scriptID: null, name: null };
 }
