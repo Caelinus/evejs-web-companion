@@ -800,6 +800,37 @@
   </div>
 {/snippet}
 
+<!-- ─── Region 3: the inspector ──────────────────────────────────────────────
+     Empty means GONE, not a hollow frame — and it is rendered by whichever
+     region owns the selection rather than in one fixed spot, so a watch's
+     settings appear under the WATCHES and a step's under the PLAN. Put in one
+     place it read as belonging to the region it happened to sit below.
+     At or below 640px it becomes a sheet over both (`.sheet-open` in
+     styles.css): a real two-pane layout cannot honour "no sideways scrolling
+     at 360px". -->
+{#snippet inspector(target: InspectorTarget)}
+  <BotInspector
+    {target}
+    {flow}
+    {currentStation}
+    belts={beltsOnGrid}
+    equipment={fittedEquipment}
+    items={knownItems}
+    pilots={knownPilots}
+    agents={$finder.agents}
+    fittings={savedFittings}
+    spots={savedSpots}
+    savedBots={savedList}
+    problems={selectedProblems}
+    onArg={applyArg}
+    onCondition={applyCondition}
+    onRespond={applyRespond}
+    onAddToSide={applyAddToSide}
+    onSubBot={applySubBot}
+    onClose={() => (selection = null)}
+  />
+{/snippet}
+
 {#snippet problemNotes(path: string)}
   {#each problemsForPath(problemIndex, path) as problem (problem.sentence)}
     <p class={problem.severity === "blocking" ? "note error" : "note"}>{problem.sentence}</p>
@@ -820,12 +851,8 @@
         <button type="button" class="primary" disabled={problemIndex.hasBlocking} onclick={saveBot}>Save</button>
       </div>
     </header>
-    <p class="note">
-      Build and save your bot here. Starting one is the Bot Manager's job, in the
-      <strong>Bots</strong> tab — this window never flies anything.
-    </p>
 
-    <div class="controls">
+    <div class="controls identity-row">
       <label>
         Name
         <input id="bot-name" type="text" maxlength={MAX_NAME_LEN} bind:value={name} />
@@ -961,6 +988,10 @@
       {/if}
     </div>
   </section>
+
+  {#if inspectorTarget !== null && inspectorTarget.kind === "watch"}
+    {@render inspector(inspectorTarget)}
+  {/if}
 
   <!-- ─── Region 2: the plan ───────────────────────────────────────────────────
        Numbered sentence rows. The row IS the summary; the top-level repeat sits
@@ -1099,31 +1130,8 @@
     </div>
   </section>
 
-  <!-- ─── Region 3: the inspector ──────────────────────────────────────────────
-       Empty means GONE, not a hollow frame. At or below 640px it becomes a
-       sheet that covers the plan (`.sheet-open` in styles.css): a genuine
-       two-pane layout cannot honour "no sideways scrolling at 360px". -->
-  {#if inspectorTarget !== null}
-    <BotInspector
-      target={inspectorTarget}
-      {flow}
-      {currentStation}
-      belts={beltsOnGrid}
-      equipment={fittedEquipment}
-      items={knownItems}
-      pilots={knownPilots}
-      agents={$finder.agents}
-      fittings={savedFittings}
-      spots={savedSpots}
-      savedBots={savedList}
-      problems={selectedProblems}
-      onArg={applyArg}
-      onCondition={applyCondition}
-      onRespond={applyRespond}
-      onAddToSide={applyAddToSide}
-      onSubBot={applySubBot}
-      onClose={() => (selection = null)}
-    />
+  {#if inspectorTarget !== null && inspectorTarget.kind !== "watch"}
+    {@render inspector(inspectorTarget)}
   {/if}
 
   <!-- ─── Reuse: copy another saved bot's steps in ─────────────────────────── -->

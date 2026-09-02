@@ -12,6 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
 
 register("./svelteSsrHook.ts", import.meta.url);
@@ -105,11 +106,6 @@ test("the header carries the aggregate badge and Save, and the example is Ready"
   assert.match(text, /starting station/i, "home and the haul default to the starting station");
 });
 
-test("the builder says plainly that it does not start bots", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /never flies anything|Bot Manager/i);
-});
-
 test("no world id reaches the screen (R7d)", () => {
   const text = visibleText(renderPanel());
   assert.doesNotMatch(text, /\d{5,}/, "a raw world id rendered");
@@ -136,4 +132,34 @@ test("keeps the examples, the shared library, the by-value insert and the import
 
 test("renders against an empty store without throwing (R18)", () => {
   assert.doesNotThrow(() => renderPanel());
+});
+
+// The inspector is rendered by whichever region owns the selection — a watch's
+// settings under the WATCHES, a step's under the PLAN — rather than in one
+// fixed spot after the plan, where a watch's settings appeared two panels away
+// from the row that opened them and read as belonging to the plan.
+//
+// SSR cannot click, so what is pinned here is the STRUCTURE that makes it
+// possible: exactly one render point per region, each guarded on the selection
+// kind. `botInspector.test.ts` proves what those render points draw.
+test("the inspector has a render point under each region, guarded by kind", () => {
+  const source = readFileSync(new URL("./BotBuilder.svelte", import.meta.url), "utf8");
+  const watchPoint = source.indexOf('inspectorTarget.kind === "watch"');
+  const stepPoint = source.indexOf('inspectorTarget.kind !== "watch"');
+  assert.ok(watchPoint > 0, "no render point for a selected watch");
+  assert.ok(stepPoint > 0, "no render point for a selected step");
+
+  const watchesRegion = source.indexOf('class="panel builder-watches"');
+  const planRegion = source.indexOf('class="panel builder-plan"');
+  assert.ok(watchesRegion > 0 && planRegion > watchesRegion);
+  assert.ok(
+    watchPoint > watchesRegion && watchPoint < planRegion,
+    "a selected watch's settings must render between the watches and the plan, not after both",
+  );
+  assert.ok(stepPoint > planRegion, "a selected step's settings must render after the plan");
+
+  // One component, two guarded call sites — not two copies of the prop list.
+  const renders = source.split("{@render inspector(").length - 1;
+  assert.equal(renders, 2, `expected exactly 2 inspector render points, found ${renders}`);
+  assert.equal(source.split("<BotInspector").length - 1, 1, "the inspector is instantiated more than once");
 });

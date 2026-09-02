@@ -4527,6 +4527,25 @@
     display: flex;
     gap: 0.2rem;
   }
+  /* Stacked control rows need air between them. `.controls` carries an internal
+   * gap but deliberately NO outer margin (the panel head depends on that), so
+   * two rows in a panel body sit flush — and the second row's uppercase label
+   * then reads as a caption belonging to the field above it rather than as the
+   * start of its own field. Only rows in a panel BODY: the header's own
+   * `.controls` must stay at zero. */
+  .botbuilder section > .controls {
+    margin-top: 0.9rem;
+  }
+
+  /* Name beside Notes. The house `.controls` row bottom-aligns its fields,
+   * which is right when they are all one-line inputs and wrong here: the notes
+   * box is two rows tall, so bottom-aligning pushed its LABEL a line above the
+   * name's and the two fields read as though they belonged to different rows.
+   * Top-align this one row instead, and let the taller box grow downwards. */
+  .botbuilder .identity-row {
+    align-items: flex-start;
+  }
+
   /* The repeat control lives in the plan's HEADER, because it wraps everything
    * under it. The house `.controls > label` is a 12rem column, which stacks two
    * of them and makes the header taller than the title it holds — so in this
