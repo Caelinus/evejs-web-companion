@@ -2603,7 +2603,8 @@ export async function findMapLocations(
 }
 
 // ─── Player Bot Builder library (goal D2/D3) ─────────────────────────────────
-// Per-account CRUD over the BFF's data/bot-scripts.json (src/botScriptStore.js).
+// Platform-wide CRUD over the BFF's data/bot-scripts.json (src/botScriptStore.js)
+// — the library is shared by every account, so a row may be someone else's.
 // Web-app data, NOT a bridge/gateway call. The caller decodes a loaded `doc`
 // through the browser codec (decode-on-read) before trusting it.
 
@@ -2612,6 +2613,15 @@ export interface BotScriptSummary {
   readonly name: string;
   readonly rev: number;
   readonly updatedAt: string;
+  /**
+   * Which account SAVED this bot. The library is platform-wide, so a row here
+   * may well have been written by another account — this says who, and nothing
+   * more. It confers no rights: authority over characters and running bots is
+   * checked server-side and is still per account. Null when the server did not
+   * say. Not renderable on its own (R7d — never show a raw id); the manager
+   * resolves it to a name before it reaches a screen.
+   */
+  readonly authorAccountID: number | null;
 }
 
 function asBotScriptSummary(value: JsonValue): BotScriptSummary {
@@ -2621,6 +2631,7 @@ function asBotScriptSummary(value: JsonValue): BotScriptSummary {
     name: typeof row.name === "string" ? row.name : "Untitled bot",
     rev: asNumberOrNull(row.rev) ?? 1,
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
+    authorAccountID: asNumberOrNull(row.authorAccountID),
   };
 }
 
@@ -2632,12 +2643,13 @@ export async function listBotScripts(options: ApiOptions = {}): Promise<BotScrip
 export async function getBotScript(
   scriptID: string,
   options: ApiOptions = {},
-): Promise<{ scriptID: string; rev: number; doc: JsonValue } | null> {
+): Promise<{ scriptID: string; rev: number; authorAccountID: number | null; doc: JsonValue } | null> {
   try {
     const data = await getJson(`/api/botscripts/${encodeURIComponent(scriptID)}`, options);
     return {
       scriptID: typeof data.scriptID === "string" ? data.scriptID : scriptID,
       rev: asNumberOrNull(data.rev) ?? 1,
+      authorAccountID: asNumberOrNull(data.authorAccountID),
       doc: data.doc ?? null,
     };
   } catch (error) {

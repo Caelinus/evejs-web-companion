@@ -54,7 +54,8 @@ const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
-// per account. Never eve.js's store; this is our own JSON file.
+// PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
+// is our own JSON file.
 const botScripts =
   options.botScriptStore || botScriptStoreModule.createBotScriptStore({ dataDir: config.dataDir });
 // Persistent-session handles (goal R2): webSessionID -> the opaque

@@ -78,7 +78,7 @@ test("no built-in health floor, and no world id on screen (R7d)", () => {
 test("has a Save button and a saved-bots section", () => {
   const text = visibleText(renderPanel());
   assert.match(text, /Save/);
-  assert.match(text, /Your saved bots/);
+  assert.match(text, /Saved bots/);
   // onMount does not run under SSR, so the list starts empty.
   assert.match(text, /No saved bots yet/);
 });

@@ -51,7 +51,7 @@ export interface ExpandResult {
 }
 
 const SAY = {
-  noPick: "A step said to run one of your saved bots but none was picked, so it was skipped.",
+  noPick: "A step said to run a saved bot but none was picked, so it was skipped.",
   missing: (name: string): string =>
     `There is no saved bot called "${name}", so that step was skipped.`,
   missingID: "That saved bot no longer exists, so that step was skipped.",

@@ -133,7 +133,8 @@
     });
   });
 
-  // Saved bots — kept per account on the web server (src/botScriptStore.js).
+  // Saved bots — kept platform-wide on the web server (src/botScriptStore.js);
+  // every account can see and load every saved bot.
   let savedList = $state<BotScriptSummary[]>([]);
   let currentSavedId = $state<string | null>(null);
   let currentRev = $state(0);
@@ -444,7 +445,7 @@
     };
     steps = [...steps, branch];
   }
-  /** Add a "run one of my saved bots" step. */
+  /** Add a "run another saved bot" step. */
   function addSubBot(): void {
     advancedProgram = null;
     steps = [...steps, { id: makeId(), kind: "sub-bot", scriptID: null, name: null }];
@@ -868,7 +869,7 @@
     );
   }
 
-  // ── Saved bots (per-account, on the web server) ──────────────────────────────
+  // ── Saved bots (platform-wide, on the web server) ────────────────────────────
   // Saved-bot calls are made directly from this component, so carry the ACTIVE
   // flow's complete options — token, base URL and injected fetch — exactly like
   // calls made inside flow.ts. Reconstructing just the token broke multibox test
@@ -880,7 +881,7 @@
       libraryError = null;
     } catch {
       savedList = [];
-      libraryError = "Could not reach your saved bots — are you still logged in?";
+      libraryError = "Could not reach the saved bots — are you still logged in?";
     }
   }
   async function saveBot(): Promise<void> {
@@ -893,7 +894,7 @@
         const { scriptID, rev } = await createBotScript(builtDoc, botOpts());
         currentSavedId = scriptID;
         currentRev = rev;
-        importNote = `Saved "${name}" to your account.`;
+        importNote = `Saved "${name}".`;
       }
       await refreshSaved();
     } catch (error) {
@@ -1068,7 +1069,7 @@
         {/if}
       {/if}
       <button class="tiny" onclick={addBranch} title="Do one thing or another, depending on a check">+ Branch</button>
-      <button class="tiny" onclick={addSubBot} title="Run one of your other saved bots here">+ Saved bot</button>
+      <button class="tiny" onclick={addSubBot} title="Run another saved bot here">+ Saved bot</button>
     </span>
   </div>
   {#each problemsByPath.get("program") ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
@@ -1355,7 +1356,7 @@
               </div>
             {/each}
           {:else}
-            <!-- Run one of my other saved bots here. -->
+            <!-- Run another saved bot here — anyone's, since the library is shared. -->
             <span class="sentence">{subBotSentence(node)}</span>
             <span class="inline-edit">
               run
@@ -1463,8 +1464,8 @@
   {/if}
 
   <!-- Saved bots -->
-  <h3>Your saved bots</h3>
-  <p class="subnote">Kept on the server against your account, so they follow you to any browser or character.</p>
+  <h3>Saved bots</h3>
+  <p class="subnote">Kept on the server and shared by every account — anyone can load, edit, or delete a bot saved here.</p>
   {#if libraryError}<p class="prob">{libraryError}</p>{/if}
   {#if savedList.length === 0}
     <p class="empty">No saved bots yet. Press Save above to keep one.</p>

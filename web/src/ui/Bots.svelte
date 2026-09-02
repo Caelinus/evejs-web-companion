@@ -75,7 +75,9 @@
   /** Which bot's controls are open. Local view state, never the store's. */
   let opened = $state<BotID | null>(null);
 
-  // The player's saved bots (from the web server) that can be launched here.
+  // The saved bots (from the web server) that can be launched here. The
+  // library is shared platform-wide — every account sees every saved bot,
+  // not just ones it saved itself.
   let savedBots = $state<BotScriptSummary[]>([]);
   let savedError = $state<string | null>(null);
   async function refreshSavedBots(): Promise<void> {
@@ -84,7 +86,7 @@
       savedError = null;
     } catch {
       savedBots = [];
-      savedError = "Could not load your saved bots — are you still logged in?";
+      savedError = "Could not load saved bots — are you still logged in?";
     }
   }
   async function startSaved(scriptID: string): Promise<void> {
@@ -345,7 +347,8 @@
     your ship finishes what it was last told to do and sits. Only one bot can fly
     your ship at a time — starting one stops whatever else was running. A saved
     bot can instead run <em>on the server</em>, which keeps flying after this tab
-    is gone.
+    is gone. Saved bots are shared: anyone with a character here can run any of
+    them.
   </p>
   {#if runningName}
     <p class="stat-line">
@@ -358,7 +361,7 @@
 </section>
 
 <section>
-  <h2>Your bots</h2>
+  <h2>Saved bots</h2>
   <label class="run-limit">
     Server run limit
     <select bind:value={serverRunMinutes} disabled={serverStartBusy !== null}>
