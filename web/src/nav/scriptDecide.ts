@@ -9,7 +9,7 @@
 //   1. If a "dock and stop" interrupt already fired, the ship is flying home;
 //      keep flying it, then pause once docked.
 //   2. Otherwise, interrupts first (A4a): a met one fires; a pirate with an
-//      unreadable ship pauses; the safety floor's blindness feeds the streak.
+//      unreadable ship pauses.
 //   3. Otherwise, the FORWARD SCAN runs the program: consult the active step's
 //      macro, and if the step is finished (its `until` met while the macro is
 //      armed, or the macro reports itself done) advance to the next node and
@@ -363,7 +363,9 @@ export function decideScriptAction(
   const scanMem = spentAlerts === (mem.spentAlerts ?? []) ? mem : { ...mem, spentAlerts };
   const res = resolveInterrupt(script.interrupts, obs, spentAlerts);
   if (res.kind === "safety-override") {
-    return paused(res.reason, scanMem, safetyFloorID(script));
+    // No interrupt row caused this — it is the sealed acute rule firing on its
+    // own, so there is honestly no interrupt id to report.
+    return paused(res.reason, scanMem, null);
   }
   if (res.kind === "fire") {
     return fireInterrupt(script, res.row.id, obs, scanMem, travelHome, registry, false);
@@ -387,8 +389,8 @@ export function decideScriptAction(
     };
   }
 
-  // 3. The program, with the forward scan. `res.safetyBlind` seeds the streak.
-  return runProgram(script, obs, scanMem, registry, res.safetyBlind);
+  // 3. The program, with the forward scan.
+  return runProgram(script, obs, scanMem, registry);
 }
 
 /**
@@ -466,7 +468,7 @@ function fireInterrupt(
 ): ScriptTickResult {
   const row = script.interrupts.find((r) => r.id === rowID);
   if (row === undefined) {
-    return runProgram(script, obs, mem, registry, false);
+    return runProgram(script, obs, mem, registry);
   }
   switch (row.respond) {
     case "pause":
@@ -478,7 +480,7 @@ function fireInterrupt(
     case "launch-drones": {
       if (obs.dronesOut === true) {
         // Already defended — keep working the program.
-        return runProgram(script, obs, mem, registry, false);
+        return runProgram(script, obs, mem, registry);
       }
       return {
         action: { kind: "launchDrones", droneItemIDs: obs.droneBayItemIDs ?? [] },
@@ -513,12 +515,12 @@ function fireInterrupt(
             memory: mem,
           };
         }
-        return runProgram(script, obs, mem, registry, false);
+        return runProgram(script, obs, mem, registry);
       }
       const idle = reps.find((id) => !active.has(id));
       if (idle === undefined) {
         // Nothing to switch on (all running, or none fitted) — keep working.
-        return runProgram(script, obs, mem, registry, false);
+        return runProgram(script, obs, mem, registry);
       }
       return {
         action: { kind: "activate", moduleID: idle, targetID: 0 },
@@ -616,13 +618,12 @@ function runProgram(
   obs: ScriptObservation,
   mem: ScriptMemory,
   registry: MacroRegistry,
-  safetyBlind: boolean,
 ): ScriptTickResult {
   let position = mem.position;
   let loopPass = mem.loopPass;
   let macroMem = mem.macroMem;
   let board = mem.board;
-  let blindThisTick = safetyBlind;
+  let blindThisTick = false;
 
   // A loop RE-ENTERING its own body is the only backward edge, and a single one
   // per tick is normal (the last body step finished, so we wrap to the first). A
@@ -998,10 +999,6 @@ function omit(
 
 function totalSteps(script: BotScript): number {
   return countSteps(script.program);
-}
-
-function safetyFloorID(script: BotScript): string | null {
-  return script.interrupts.find((r) => r.builtIn === "safety-floor")?.id ?? null;
 }
 
 // ─── Result builders ─────────────────────────────────────────────────────────

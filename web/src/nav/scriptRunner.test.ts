@@ -52,7 +52,7 @@ function script(program: readonly ProgramNode[]): BotScript {
   return {
     format: "evejs-bot-script", version: 1, name: "t", notes: "",
     home: { entity: "station", id: 1, name: "Home", systemName: null },
-    interrupts: [{ id: "floor", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
+    interrupts: [{ id: "floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
     program,
   };
 }

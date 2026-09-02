@@ -1,5 +1,6 @@
-// C (pure part) — the editor operations. The two that matter most for safety:
-// the safety floor cannot be deleted, and a loop cannot be emptied into a no-op.
+// C (pure part) — the editor operations. The one that matters most for safety:
+// a loop cannot be emptied into a no-op (every interrupt is deletable — the old
+// non-deletable safety floor was removed on 2026-07-23).
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -30,7 +31,7 @@ function counter(): () => string {
 }
 
 const floor: InterruptRow = {
-  id: "floor", builtIn: "safety-floor",
+  id: "floor",
   when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause",
 };
 
@@ -169,17 +170,17 @@ test("loop-body edits work, and emptying a loop removes it", () => {
   assert.equal(afterBoth.length, 0, "removing the loop's last step removes the loop");
 });
 
-test("the safety floor cannot be deleted, but other interrupts can", () => {
+test("every interrupt can be deleted, including one shaped like the old safety floor", () => {
   const make = counter();
   const shields = newInterrupt({ kind: "shield-below", fraction: 0.3 }, "dock-and-pause", make);
   const list = addInterrupt([floor], shields);
   assert.equal(list.length, 2);
 
-  assert.deepEqual(removeInterrupt(list, floor.id), list, "removing the safety floor is refused");
+  assert.deepEqual(removeInterrupt(list, floor.id).map((r) => r.id), [shields.id]);
   assert.deepEqual(removeInterrupt(list, shields.id).map((r) => r.id), [floor.id]);
 });
 
-test("setInterruptFraction edits the threshold, including on the safety floor", () => {
+test("setInterruptFraction edits the threshold on any fraction-bearing interrupt", () => {
   const updated = setInterruptFraction([floor], floor.id, 0.35);
   const row = updated[0];
   assert.ok(row && row.when.kind === "health-below");

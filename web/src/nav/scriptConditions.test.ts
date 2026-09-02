@@ -36,7 +36,6 @@ function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
 
 const floor: InterruptRow = {
   id: "i0",
-  builtIn: "safety-floor",
   when: { kind: "health-below", fraction: 0.5 },
   respond: "dock-and-pause",
 };
@@ -102,18 +101,14 @@ test("a cannot-tell condition does not fire, and the scan continues past it", ()
   assert.equal(res.row.id, "i1");
 });
 
-test("an unreadable safety floor flags safetyBlind but does not fire", () => {
+test("an unreadable health-below row does not fire", () => {
   const res = resolveInterrupt([floor], obs({ health: null }));
   assert.equal(res.kind, "none");
-  assert.ok(res.kind === "none");
-  assert.equal(res.safetyBlind, true);
 });
 
-test("nothing wrong: no interrupt fires and the ship is not blind", () => {
+test("nothing wrong: no interrupt fires", () => {
   const res = resolveInterrupt([floor], obs());
   assert.equal(res.kind, "none");
-  assert.ok(res.kind === "none");
-  assert.equal(res.safetyBlind, false);
 });
 
 test("a pirate with unreadable health pauses immediately when nothing else handles it", () => {

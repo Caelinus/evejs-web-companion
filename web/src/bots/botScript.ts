@@ -23,9 +23,11 @@
 //
 // And the pieces the operator's decisions pinned (see the doc's "Operator
 // decisions"): a loop repeats a bounded count OR forever (decision 1); a belt is
-// a runtime "nearest" binding or a chosen one (decision 2); the safety floor is
-// interrupt row 0, editable-threshold but not deletable (decision 3); a hostile
-// interrupt lets the player pick drones-or-run (decision 5).
+// a runtime "nearest" binding or a chosen one (decision 2); decision 3 (a
+// non-deletable, auto-injected safety-floor watch) was REVERSED on 2026-07-23 —
+// watches are entirely the player's now, and the codec no longer injects one
+// (docs/bot-builder-progress.md:148); a hostile interrupt lets the player pick
+// drones-or-run (decision 5).
 
 // ─── Format identity ─────────────────────────────────────────────────────────
 
@@ -378,16 +380,11 @@ export const INTERRUPT_RESPONSES: readonly InterruptResponse[] = Object.freeze<I
   "alert",
 ]);
 
-/**
- * One "always watching" row. `builtIn: "safety-floor"` marks the ship-health
- * cut-off (decision 3): its threshold is editable, the row is NOT deletable, and
- * its response is fixed to dock-and-pause. Every other interrupt is player-made.
- */
+/** One "always watching" row. Every interrupt is player-made and player-deletable. */
 export interface InterruptRow {
   readonly id: string;
   readonly when: Condition;
   readonly respond: InterruptResponse;
-  readonly builtIn?: "safety-floor";
 }
 
 // ─── Program nodes ───────────────────────────────────────────────────────────
@@ -706,16 +703,6 @@ export function findStep(script: BotScript, id: string): MacroStep | null {
     // A sub-bot node holds no steps of its own (it is replaced before the run).
   }
   return null;
-}
-
-/** The safety-floor interrupt row, or null when a document is missing it. */
-export function safetyFloorRow(script: BotScript): InterruptRow | null {
-  return script.interrupts.find((row) => row.builtIn === "safety-floor") ?? null;
-}
-
-/** True when the document carries its non-deletable safety floor. */
-export function hasSafetyFloor(script: BotScript): boolean {
-  return safetyFloorRow(script) !== null;
 }
 
 /** True when a bounded `times` count is inside the allowed range. Forever is always valid. */

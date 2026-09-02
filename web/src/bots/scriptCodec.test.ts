@@ -23,7 +23,7 @@ function golden(): BotScript {
     notes: "Mines until 90% then hauls.",
     home: { entity: "station", id: 60000004, name: "Home Station", systemName: "Aunia" },
     interrupts: [
-      { id: "i0", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
+      { id: "i0", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
       { id: "i1", when: { kind: "shield-below", fraction: 0.3 }, respond: "dock-and-pause" },
     ],
     program: [
@@ -212,7 +212,7 @@ test("the current watch kinds round-trip", () => {
     notes: "",
     home: { entity: "station", id: null, name: null, systemName: null, starting: true },
     interrupts: [
-      { id: "w1", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
+      { id: "w1", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
       { id: "w2", when: { kind: "targeted-by-player" }, respond: "alert" },
       { id: "w3", when: { kind: "drone-health-below", fraction: 0.4 }, respond: "pause" },
       { id: "w4", when: { kind: "cargo-full", fraction: 0.85 }, respond: "pause" },
@@ -230,7 +230,7 @@ test("an interrupt-only condition is refused as a step's stop-when", () => {
     name: "Bad",
     notes: "",
     home: { entity: "station", id: null, name: null, systemName: null, starting: true },
-    interrupts: [{ id: "w1", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
+    interrupts: [{ id: "w1", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
     program: [{ id: "s1", kind: "macro", macro: "undock", args: {}, until: { kind: "targeted-by-player" } }],
   };
   assert.equal(decodeScriptValue(bad).ok, false);
@@ -594,6 +594,30 @@ test("interrupts are read exactly as given — no floor is injected", () => {
   assert.equal(doc.interrupts.length, 2, "nothing added, nothing dropped");
   assert.deepEqual(doc.interrupts.map((r) => r.when.kind), ["shield-below", "armor-below"]);
   assert.deepEqual([...warnings], []);
+});
+
+test("an old document's legacy builtIn flag still loads, and is simply dropped", () => {
+  // Old saved bots may carry the retired auto-injected safety-floor flag. The
+  // codec must still LOAD such a document (no import-with-holes refusal for a
+  // key that no longer means anything) — it just drops the flag rather than
+  // preserving it, since nothing in the current format reads it any more.
+  const bad = clone();
+  bad.interrupts = [
+    { id: "w1", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
+  ];
+  const { doc, warnings } = mustAccept(decodeScriptValue(bad));
+  assert.equal(doc.interrupts.length, 1);
+  assert.deepEqual(doc.interrupts[0], {
+    id: "w1",
+    when: { kind: "health-below", fraction: 0.5 },
+    respond: "dock-and-pause",
+  });
+  assert.ok(!("builtIn" in doc.interrupts[0]), "the flag does not survive into the loaded document");
+  assert.deepEqual([...warnings], []);
+
+  // And a re-export never writes the retired key back out.
+  const text = encodeScriptDoc(doc);
+  assert.doesNotMatch(text, /builtIn/);
 });
 
 test("an empty interrupt list stays empty", () => {
