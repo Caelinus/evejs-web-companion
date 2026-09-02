@@ -95,19 +95,19 @@
 <span class="station-picker">
   {#if value.slot !== undefined}
     <span class="picked">{boardSlotPhrase(value.slot)}</span>
-    <button class="tiny" onclick={clearChoice}>Change</button>
+    <button onclick={clearChoice}>Change</button>
   {:else if value.starting === true}
     <span class="picked">Your starting station</span>
-    <button class="tiny" onclick={clearChoice}>Change</button>
+    <button onclick={clearChoice}>Change</button>
   {:else if value.id !== null}
     <span class="picked">
       {value.name ?? (value.entity === "system" ? "A system" : "A station")}{#if value.systemName} · {value.systemName}{/if}
       {#if value.entity === "system"}<span class="kindtag">system</span>{/if}
     </span>
-    <button class="tiny" onclick={clearChoice}>Change</button>
+    <button onclick={clearChoice}>Change</button>
   {:else}
     {#if !allowSystems}
-      <button class="tiny primary" onclick={chooseStarting}>Starting station</button>
+      <button class="primary" onclick={chooseStarting}>Starting station</button>
     {/if}
     <input
       class="q"
@@ -117,15 +117,15 @@
         if (e.key === "Enter") search();
       }}
     />
-    <button class="tiny" onclick={search} disabled={searching}>{searching ? "Searching…" : "Search"}</button>
+    <button onclick={search} disabled={searching}>{searching ? "Searching…" : "Search"}</button>
     {#if current !== null}
-      <button class="tiny" onclick={chooseCurrent}>Use current station</button>
+      <button onclick={chooseCurrent}>Use current station</button>
     {/if}
     <!-- Runtime bindings: follow whatever an earlier block found, instead of a
          station pinned now. Station-only, so not offered on a destination slot. -->
     {#if !allowSystems}
       {#each BOARD_SLOTS as slot (slot)}
-        <button class="tiny" onclick={() => chooseSlot(slot)}>{boardSlotPhrase(slot)}</button>
+        <button onclick={() => chooseSlot(slot)}>{boardSlotPhrase(slot)}</button>
       {/each}
     {/if}
     {#if error}<span class="prob">{error}</span>{/if}
@@ -133,7 +133,7 @@
       <ul class="results">
         {#each results.slice(0, 8) as match (match.id)}
           <li>
-            <button class="tiny result" onclick={() => choose(match)}>
+            <button class="result" onclick={() => choose(match)}>
               {match.name}{#if match.solarSystemName} · {match.solarSystemName}{/if}{#if match.jumps !== null}
                 ({match.jumps} jump{match.jumps === 1 ? "" : "s"}){/if}{#if allowSystems && match.kind === "system"}
                 <span class="kindtag">system</span>{/if}
@@ -158,7 +158,7 @@
   /* A system destination lands you in space, a station docks you — worth saying
      so on the row, since the two read almost identically otherwise. */
   .kindtag {
-    color: var(--color-text-dim);
+    color: var(--color-muted);
     font-size: 0.85em;
   }
   input.q {
@@ -175,10 +175,12 @@
     max-height: 12rem;
     overflow-y: auto;
   }
-  button.tiny {
-    min-height: 32px;
-    padding: 0.1rem 0.5rem;
-  }
+  /* ⚠ NO SIZE OVERRIDE ON THESE BUTTONS, DELIBERATELY. They used to carry a
+     `.tiny` class that set `min-height: 32px`, which was the ONLY thing on the
+     Bot Builder's screen below the 40px touch target the design system makes
+     binding at every width (docs/design-system.md, R8) — measured at 360px.
+     The global `button` rule already sets 2.5rem; letting it apply is the whole
+     fix, so anything added here must not shrink a control again. */
   button.result {
     text-align: left;
     width: 100%;
