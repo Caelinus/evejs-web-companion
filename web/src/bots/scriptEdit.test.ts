@@ -18,6 +18,7 @@ import {
   newLoop,
   newMacroStep,
   removeFromLoop,
+  moveInterrupt,
   removeInterrupt,
   removeNode,
   setInterruptFraction,
@@ -317,4 +318,26 @@ test("insertSavedBotSteps re-ids a copied branch's both sides too", () => {
   assert.notEqual(copy.id, "br");
   assert.notEqual(copy.then[0]?.id, "t1");
   assert.notEqual(copy.else[0]?.id, "e1");
+});
+
+// ─── Watch order is behaviour, so it has to be changeable ───────────────────
+//
+// Watches are first-match-wins at runtime: the row above another one fires
+// INSTEAD of it when both are true. That is why the editor inserts a paired
+// "let me know" row ABOVE the row it pairs with, and it is why a player who
+// can see the order must be able to change it.
+
+test("moveInterrupt reorders by id, and is a no-op at the edges and on a stranger", () => {
+  const rows: InterruptRow[] = [
+    { id: "a", when: { kind: "shield-below", fraction: 0.3 }, respond: "alert" },
+    { id: "b", when: { kind: "shield-below", fraction: 0.3 }, respond: "dock-and-pause" },
+    { id: "c", when: { kind: "hostile-on-grid" }, respond: "launch-drones" },
+  ];
+  assert.deepEqual(moveInterrupt(rows, "b", -1).map((r) => r.id), ["b", "a", "c"]);
+  assert.deepEqual(moveInterrupt(rows, "b", 1).map((r) => r.id), ["a", "c", "b"]);
+  assert.deepEqual(moveInterrupt(rows, "a", -1).map((r) => r.id), ["a", "b", "c"], "top row cannot rise");
+  assert.deepEqual(moveInterrupt(rows, "c", 1).map((r) => r.id), ["a", "b", "c"], "bottom row cannot sink");
+  assert.deepEqual(moveInterrupt(rows, "nobody", -1).map((r) => r.id), ["a", "b", "c"]);
+  // Immutable, like every other operation here.
+  assert.deepEqual(rows.map((r) => r.id), ["a", "b", "c"], "the input was mutated");
 });

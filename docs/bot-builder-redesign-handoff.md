@@ -3,6 +3,12 @@
 Written 2026-09-02, at the end of the session that built everything below it. Self-contained: you should
 not need to read the conversation that produced this.
 
+## ✅ DONE — 2026-09-02, the session after this was written
+
+The rebuild described below shipped. What changed from the plan, and what is left, is at the bottom
+under **[What actually shipped](#what-actually-shipped)**. Everything above that heading is kept as
+written, because it is still the reasoning behind the screen — read it before changing the screen.
+
 ## The job
 
 Rebuild `web/src/ui/BotBuilder.svelte` (2155 lines) to the screen in
@@ -130,3 +136,83 @@ merged there — so it is not independently PR-able upstream the way a `fix/*` b
 - **"Run this on all idle pilots"** in the manager's pilots region — recorded as open in
   bot-manager-brainstorm §9, and worth hesitating over: it is the fastest way to discover a script was
   never safe to run unattended on three hulls at once.
+
+## What actually shipped
+
+Written 2026-09-02, at the end of the session that carried the handoff out.
+
+### The screen
+
+`BotBuilder.svelte` went from 2155 lines to ~1000, and holds no display logic, no sentences, no widget
+table and no edit operations of its own. `editorView.ts` is no longer imported by nothing: it is what
+draws the plan.
+
+- **Watches** are region one, with the cap (`3 of 8`) in the header and each row a sentence from
+  `interruptSentence`. They can be reordered now — see `moveInterrupt` below.
+- **The plan** is region two: numbered sentence rows from `flattenProgram`, branch sides indented and
+  labelled `then` / `otherwise`, the top-level repeat in the region header, a `⚠` in the number column
+  on any row with a blocking problem. Nothing expands in place.
+- **The inspector** is region three, and is `BotInspector.svelte` — see below for why it is a component.
+- The row `⋮` menu is move up / down / to top / to bottom, duplicate, delete, on plan rows and (as
+  move / "also let me know" / delete) on watch rows. No drag anywhere.
+- The step picker is a closed disclosure with a search field and category chips; the 49-macro grid no
+  longer sits permanently under the plan.
+- At ≤640px the inspector covers the plan and watches (`.botbuilder.sheet-open`), with a "Back to the
+  plan" control that exists only there. **This is a `@container` query, not `@media`** — R85: the
+  builder can sit in a floating window on a wide screen, so the question is how wide THIS panel is.
+
+The per-panel `<style>` block is gone; every class lives in `styles.css`.
+
+### The one structural decision this session took on its own
+
+**The inspector is its own component, `BotInspector.svelte`.** The handoff's own trap #1 says to extract
+rather than add a seam, and the inspector is only reachable after a click — which the SSR harness cannot
+do. Left inside the builder, the largest and newest piece of template in the editor would have had zero
+coverage, which is exactly the `BotManagerPilotRow.svelte` situation. It holds no state and no document:
+it reads a node and reports what changed (`onArg`, `onCondition`, `onRespond`, `onAddToSide`,
+`onSubBot`, `onClose`), and `botInspector.test.ts` renders it directly. No test-only prop was added
+anywhere.
+
+It also let the per-macro `{#if step.macro === "..."}` chain finally go: the inspector draws one field
+per `ArgDescriptor`, switching on `ArgDescriptor.widget`. The wording objection recorded in
+`editorOptions.ts` no longer applies, because the inspector's fields are LABELLED (`Belt`, `Stop when`)
+rather than sentence fragments, so generating them reflows nothing a player reads.
+
+### Moved into the pure layer, with tests
+
+- `editorOptions.ts` gained `argBounds(macro, arg)` — the per-argument ranges the component used to
+  hardcode (an agent level is 1–5, not the format's 1–500), including the per-macro override that keeps
+  `hunt-player`'s leash shorter than a courier's trip; `untilOffered`, which decides whether a macro
+  gets a "stop when" control at all; `freshCondition` and the condition clamps, which THREE pickers
+  share and so must not live in a component; `CONDITION_PILOT_COUNT_HINT`.
+- `scriptEdit.ts` gained `moveInterrupt`. Watches are first-match-wins at runtime, which is why the
+  editor inserts a paired "let me know" row ABOVE its twin — a player who can see that order has to be
+  able to change it, and there was no operation for it.
+
+### Two things the design asked for that were not there before
+
+- **The save conflict is two buttons**, not a sentence about a conflict. The server's refusal already
+  said "Reload it, or save yours as a copy"; now Reload and Save-as-a-copy are controls.
+- **Bounded number fields print their range** ("1 to 30", "% — from 5 to 90"). A bound a player cannot
+  see is a rule they can only find by breaking it — the CodeStruct finding in §1, applied to bounds
+  rather than to corrections.
+
+### Verified
+
+`docker build --target web-build` clean, and the full suite green in the image: **3210 tests, 0 fail**,
+including 47 across `botBuilderPanel.test.ts` (rewritten for the new shape) and the new
+`botInspector.test.ts`. The redesign was also rendered to a static page against the real compiled
+stylesheet and looked at: no horizontal overflow at 360px (`scrollWidth === clientWidth === 360`), and
+every control in the builder is ≥40px.
+
+### Still outstanding
+
+- **StationPicker's own `Change` button is 32px tall**, the one sub-40px target on the screen. It is
+  pre-existing and belongs to `StationPicker.svelte`, which four other panels use, so it was left alone
+  rather than changed from here.
+- `botLibrary.ts` / `botLibrary.test.ts` **were deleted** — dead since the server-backed store shipped,
+  as bot-manager-brainstorm §7 asked.
+- The `serverBots` tab and "run this on all idle pilots" are untouched; both are Bot Manager work.
+- Nothing here tests the builder's *interactions* — SSR renders once. The row menus, the pickers and the
+  selection are proven only through the pure modules underneath them. A DOM test runner is still the
+  gap, and it is the same gap `svelte-check` sits behind.

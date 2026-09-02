@@ -4415,6 +4415,319 @@
   }
 
   /* ======================================================================
+   * THE BOT BUILDER — a plan of numbered sentences, plus an inspector
+   * ----------------------------------------------------------------------
+   * docs/bot-builder-interface.md §2. Three stacked regions: the watches, the
+   * numbered plan, and an inspector for the selected row. No canvas, no drag,
+   * and no widget inside a row — a row prints ONE sentence and every edit
+   * happens in the inspector, which is what keeps a 64-step plan readable and
+   * what keeps this stylesheet free of per-row layout special cases.
+   *
+   * ⚠ R85: the width question is `@container`, not `@media`. The builder can
+   * sit in a floating window or a dock column on a wide screen, so "is there
+   * room for a second pane" is a question about THIS panel and not about the
+   * browser window. `.botbuilder` is the container.
+   * ====================================================================*/
+  .botbuilder {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    min-width: 0;
+    container-type: inline-size;
+    container-name: botbuilder;
+  }
+
+  /* The plan and the watch list are the same row idiom, so they look the same
+   * and a player learns one thing, not two. */
+  .plan-list {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .plan-row {
+    /* `--depth` is set inline from the row's own nesting (0 at top level, 1
+     * inside a loop body or a branch side). The stylesheet owns the look; the
+     * component owns the number — the same split as the fitting ring. */
+    margin-left: calc(var(--depth, 0) * 1.1rem);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 2.5rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--color-row-line);
+    border-left: 3px solid transparent;
+    background: var(--color-panel-3);
+  }
+  .plan-row.selected {
+    border-color: var(--color-accent-dim);
+    border-left-color: var(--color-accent);
+    background: var(--color-panel-2);
+  }
+  /* A blocking problem is marked by the ⚠ in the number column AND by this
+   * rim — never by the rim alone, because colour is never the only signal. */
+  .plan-row.blocking {
+    border-left-color: var(--color-warn);
+  }
+  .plan-number,
+  .plan-mark {
+    flex: 0 0 auto;
+    min-width: 1.6rem;
+    text-align: right;
+    color: var(--color-accent-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .plan-mark {
+    color: var(--color-shield);
+  }
+  .plan-warn {
+    color: var(--color-warn);
+  }
+  /* The sentence is the row's own control: clicking it opens the inspector.
+   * A full-height transparent button rather than a link, because it changes
+   * what is selected here and navigates nowhere. */
+  .plan-sentence {
+    flex: 1 1 14rem;
+    min-width: 0;
+    min-height: 2.5rem;
+    text-align: left;
+    overflow-wrap: anywhere;
+    background: none;
+    border: 0;
+    padding: 0.3rem 0.2rem;
+    color: var(--color-text-bright);
+    font: inherit;
+    cursor: pointer;
+  }
+  .plan-sentence:hover {
+    color: var(--color-accent-bright);
+  }
+  /* A row that cannot be selected — a loop header, or any row of a preserved
+   * program the flat list cannot edit — reads as text, not as a control. */
+  .plan-sentence-static {
+    flex: 1 1 14rem;
+    min-width: 0;
+    padding: 0.3rem 0.2rem;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+  }
+  .plan-side-label {
+    margin-left: calc(var(--depth, 0) * 1.1rem);
+    padding-left: 0.4rem;
+    color: var(--color-accent-bright);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+  }
+  .plan-ops {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.2rem;
+  }
+  /* The repeat control lives in the plan's HEADER, because it wraps everything
+   * under it. The house `.controls > label` is a 12rem column, which stacks two
+   * of them and makes the header taller than the title it holds — so in this
+   * one header they size to their content and the count stays a number field. */
+  .builder-plan > .panel-head > .controls {
+    flex: 1 1 22rem;
+    justify-content: flex-end;
+  }
+  .builder-plan > .panel-head > .controls > label {
+    flex: 0 1 auto;
+  }
+  .builder-plan > .panel-head > .controls > label select {
+    min-width: 12rem;
+  }
+  .builder-plan > .panel-head > .controls > label input.num-in {
+    width: 6rem;
+  }
+  .plan-add {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+  }
+
+  /* The per-row action menu. Plain buttons in a bordered stack: the tested
+   * pattern for long-distance moves, and every item stays a 40px target. */
+  .row-menu {
+    position: relative;
+  }
+  .row-menu-toggle {
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+    line-height: 1;
+  }
+  .row-menu-items {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.2rem);
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    min-width: 11rem;
+    padding: 0.25rem;
+    gap: 0.15rem;
+    border: 1px solid var(--color-line-strong);
+    background: var(--color-panel);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  }
+  .row-menu-items button {
+    justify-content: flex-start;
+    text-align: left;
+    width: 100%;
+  }
+
+  /* The step / watch picker: a search field, then category chips, then results
+   * as sentences. Browse AND search — both narrow the same list. */
+  .picker {
+    flex: 1 1 100%;
+    margin-top: 0.5rem;
+    padding: 0.6rem;
+    border: 1px solid var(--color-line);
+    background: var(--color-panel-3);
+  }
+  .picker-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin: 0.4rem 0;
+  }
+  .picker-chips button {
+    min-height: 2.5rem;
+    padding: 0.2rem 0.8rem;
+  }
+  .picker-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
+    gap: 0.4rem;
+    margin-top: 0.4rem;
+  }
+  .picker-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    align-items: flex-start;
+    text-align: left;
+    min-height: 2.5rem;
+    padding: 0.5rem;
+  }
+  .picker-item-name {
+    color: var(--color-text-bright);
+    font-weight: 600;
+  }
+  .picker-item-does {
+    color: var(--color-text);
+    font-size: 0.85rem;
+  }
+  .picker-item-needs {
+    color: var(--color-muted);
+    font-size: 0.8rem;
+  }
+
+  /* The inspector. One labelled control per line, required arguments first and
+   * the rest behind "More options" — Apple's action-summary rule. */
+  .builder-inspector .inspector-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.7rem;
+    max-width: 34rem;
+  }
+  .inspector-label {
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+  }
+  .inspector-optional {
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .inspector-unit {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  /* A bound a player cannot see is a rule they can only find by breaking it,
+   * so every numeric field prints its own range beside itself. */
+  .inspector-suffix {
+    color: var(--color-muted);
+    font-size: 0.8rem;
+  }
+  input.num-in {
+    width: 5rem;
+    font-variant-numeric: tabular-nums;
+  }
+  input.num-in.wide {
+    width: 10rem;
+  }
+  .more-options {
+    margin-top: 0.8rem;
+    border-top: 1px solid var(--color-line);
+    padding-top: 0.4rem;
+  }
+  .more-options > summary {
+    cursor: pointer;
+    min-height: 2.5rem;
+    display: flex;
+    align-items: center;
+    color: var(--color-accent);
+  }
+  /* Only the narrow layout turns the inspector into a sheet, so the control
+   * that closes that sheet only exists there. */
+  .inspector-back {
+    display: none;
+  }
+
+  .save-conflict {
+    margin-top: 0.6rem;
+    border-left: 3px solid var(--color-warn);
+    padding-left: 0.6rem;
+  }
+  .example-label {
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    align-self: center;
+  }
+  .io-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    color: var(--color-muted);
+  }
+  textarea.io {
+    width: 100%;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.8rem;
+  }
+
+  /* Narrow: the inspector becomes a SHEET over the plan. A real two-pane
+   * layout cannot honour "no sideways scrolling at 360px" (R8), so below the
+   * breakpoint the inspector takes the whole width and the plan steps aside
+   * while a row is selected — with a Back control, which is the only place
+   * that control exists. */
+  @container botbuilder (max-width: 640px) {
+    .botbuilder.sheet-open .builder-plan,
+    .botbuilder.sheet-open .builder-watches {
+      display: none;
+    }
+    .inspector-back {
+      display: inline-flex;
+    }
+    .row-menu-items {
+      right: auto;
+      left: 0;
+    }
+  }
+
+  /* ======================================================================
    * 4. REFLOW — the R8 responsive contract
    * ----------------------------------------------------------------------
    * Record-table -> card reflow in any NARROW CONTAINER (<=640px). Each row

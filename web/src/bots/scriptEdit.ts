@@ -194,6 +194,28 @@ export function removeInterrupt(interrupts: readonly InterruptRow[], id: string)
   return interrupts.filter((r) => r.id !== id);
 }
 
+/**
+ * Move a watch up (delta -1) or down (delta +1); a no-op at the edges.
+ *
+ * ⚠ ORDER IS BEHAVIOUR HERE, not presentation. Watches are first-match-wins at
+ * runtime, so the row that sits above another one fires INSTEAD of it when both
+ * are true — which is why `BotBuilder.svelte` inserts a paired "let me know"
+ * row ABOVE the row it pairs with rather than below. A player who can see that
+ * order must be able to change it, so the watch region's row menu needs this
+ * the same way the plan's row menu needs `moveNode`.
+ */
+export function moveInterrupt(
+  interrupts: readonly InterruptRow[],
+  id: string,
+  delta: number,
+): readonly InterruptRow[] {
+  const index = interrupts.findIndex((r) => r.id === id);
+  if (index < 0) {
+    return interrupts;
+  }
+  return moveBy(interrupts, index, delta);
+}
+
 /** Set the threshold on a fraction-bearing interrupt. */
 export function setInterruptFraction(
   interrupts: readonly InterruptRow[],

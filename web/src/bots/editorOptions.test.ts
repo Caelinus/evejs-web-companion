@@ -10,6 +10,17 @@ import {
   COUNT_ARG_BOUNDS,
   ISK_ARG_BOUNDS,
   MACRO_ARG_DESCRIPTORS,
+  MAX_CONDITION_PILOT_COUNT,
+  argBounds,
+  clampConditionCount,
+  clampConditionFraction,
+  clampConditionIsk,
+  conditionFractionCap,
+  conditionUsesCount,
+  conditionUsesFraction,
+  conditionUsesIsk,
+  conditionPercent,
+  freshCondition,
   numericArgBounds,
   PLACE_LABEL,
   PLACE_OPTIONS,
@@ -222,4 +233,131 @@ test("no label reads like a raw enum/token (kebab-case, underscores)", () => {
     assert.ok(!/_/.test(label), `underscore in label: ${label}`);
     assert.ok(!/^[a-z]+(-[a-z]+)+$/.test(label), `looks like a raw token: ${label}`);
   }
+});
+
+// ─── Per-argument numeric bounds ────────────────────────────────────────────
+//
+// `MIN/MAX_COUNT_ARG` is 1..500 for every `count` argument, because that is all
+// the codec can say about a number whose meaning it does not know. These are
+// what the INSPECTOR knows on top of that, and they are the ranges the editor
+// shipped with before the redesign moved them out of the component.
+
+test("argBounds narrows a count argument to what that argument actually means", () => {
+  const level = MACRO_ARG_DESCRIPTORS["find-distribution-agent"].all.find((a) => a.key === "level");
+  assert.ok(level, "find-distribution-agent has no level argument");
+  assert.deepEqual(argBounds("find-distribution-agent", level), { min: 1, max: 5 }, "agent levels run 1-5");
+
+  const seconds = MACRO_ARG_DESCRIPTORS["wait"].all.find((a) => a.key === "seconds");
+  assert.ok(seconds);
+  assert.deepEqual(argBounds("wait", seconds), { min: 1, max: 500 });
+});
+
+test("a per-macro override wins: hunt-player's leash is shorter than a courier's trip", () => {
+  const hunt = MACRO_ARG_DESCRIPTORS["hunt-player"].all.find((a) => a.key === "maxJumps");
+  const find = MACRO_ARG_DESCRIPTORS["find-distribution-agent"].all.find((a) => a.key === "maxJumps");
+  assert.ok(hunt && find, "maxJumps is missing from one of the two macros");
+  assert.deepEqual(argBounds("hunt-player", hunt), { min: 1, max: 30 });
+  assert.deepEqual(argBounds("find-distribution-agent", find), { min: 1, max: 50 });
+});
+
+test("argBounds falls back to the format's own bounds, and is null for a non-number", () => {
+  const price = MACRO_ARG_DESCRIPTORS["buy-item"].all.find((a) => a.key === "price");
+  assert.ok(price);
+  assert.deepEqual(argBounds("buy-item", price), ISK_ARG_BOUNDS);
+
+  const belt = MACRO_ARG_DESCRIPTORS["mine-at-belt"].all.find((a) => a.key === "belt");
+  assert.ok(belt);
+  assert.equal(argBounds("mine-at-belt", belt), null, "a belt is not a number");
+});
+
+test("every numeric argument of every macro has bounds a widget can show", () => {
+  for (const id of MACRO_IDS) {
+    for (const arg of MACRO_ARG_DESCRIPTORS[id].all) {
+      if (arg.kind !== "count" && arg.kind !== "isk" && arg.kind !== "qty") continue;
+      const bounds = argBounds(id, arg);
+      assert.ok(bounds, `${id}.${arg.key} has no bounds`);
+      assert.ok(bounds.min < bounds.max, `${id}.${arg.key} has an empty range`);
+    }
+  }
+});
+
+// ─── Which macros offer a "stop when" at all ────────────────────────────────
+
+test("untilOffered covers what must have one, plus wait, and nothing else", () => {
+  const offered = MACRO_IDS.filter((id) => MACRO_ARG_DESCRIPTORS[id].untilOffered);
+  assert.deepEqual([...offered].sort(), ["mine-at-belt", "wait"]);
+  // Required implies offered — a macro that cannot end on its own must be
+  // able to say when it does.
+  for (const id of MACRO_IDS) {
+    const d = MACRO_ARG_DESCRIPTORS[id];
+    assert.ok(!d.untilRequired || d.untilOffered, `${id} needs an until but is not offered one`);
+  }
+});
+
+// ─── Fresh conditions keep the number the player already set ────────────────
+
+test("freshCondition keeps a threshold of the same SHAPE when the kind changes", () => {
+  const shields = freshCondition("shield-below");
+  assert.deepEqual(shields, { kind: "shield-below", fraction: 0.3 });
+  // Switching the subject is not a change of amount.
+  const armor = freshCondition("armor-below", { kind: "shield-below", fraction: 0.45 });
+  assert.deepEqual(armor, { kind: "armor-below", fraction: 0.45 });
+});
+
+test("freshCondition re-clamps a kept threshold into the new kind's own range", () => {
+  // 95% is legal on shields and impossible on an ore hold.
+  const oreHold = freshCondition("ore-hold-at-least", { kind: "shield-below", fraction: 0.95 });
+  assert.deepEqual(oreHold, { kind: "ore-hold-at-least", fraction: 0.9 });
+});
+
+test("freshCondition starts a hold at 'nearly full' and a defence at a low line", () => {
+  assert.deepEqual(freshCondition("cargo-full"), { kind: "cargo-full", fraction: 0.9 });
+  assert.deepEqual(freshCondition("hull-below"), { kind: "hull-below", fraction: 0.3 });
+});
+
+test("freshCondition does not carry a number across shapes", () => {
+  const wallet = freshCondition("wallet-below", { kind: "shield-below", fraction: 0.3 });
+  assert.deepEqual(wallet, { kind: "wallet-below", isk: 10_000_000 });
+  const pilots = freshCondition("players-in-system-above", { kind: "wallet-below", isk: 5 });
+  assert.deepEqual(pilots, { kind: "players-in-system-above", count: 0 }, "zero means anyone else at all");
+  assert.deepEqual(freshCondition("hostile-on-grid"), { kind: "hostile-on-grid" });
+});
+
+test("every condition kind produces a condition the shape helpers agree with", () => {
+  for (const kind of CONDITION_KINDS) {
+    const condition = freshCondition(kind);
+    assert.equal(condition.kind, kind);
+    assert.equal("fraction" in condition, conditionUsesFraction(kind), `${kind}: fraction disagreement`);
+    assert.equal("isk" in condition, conditionUsesIsk(kind), `${kind}: isk disagreement`);
+    assert.equal("count" in condition, conditionUsesCount(kind), `${kind}: count disagreement`);
+  }
+});
+
+// ─── Clamps ─────────────────────────────────────────────────────────────────
+
+test("the ore hold's ceiling is lower than every other fraction's", () => {
+  assert.equal(conditionFractionCap("ore-hold-at-least"), 0.9);
+  assert.equal(conditionFractionCap("shield-below"), CONDITION_FRACTION_BOUNDS.max);
+  assert.equal(clampConditionFraction(0.99, "ore-hold-at-least"), 0.9);
+  assert.equal(clampConditionFraction(0.99, "shield-below"), CONDITION_FRACTION_BOUNDS.max);
+  // Never zero: a watch that can never fire is not a watch.
+  assert.equal(clampConditionFraction(0, "shield-below"), CONDITION_FRACTION_BOUNDS.min);
+});
+
+test("conditionPercent is what a player types, both ways round", () => {
+  assert.equal(conditionPercent(0.3), 30);
+  assert.equal(conditionPercent(0.9), 90);
+});
+
+test("a pilot count clamps to its range, and zero survives", () => {
+  assert.equal(clampConditionCount(0), 0, "zero means anyone else at all and must not be raised");
+  assert.equal(clampConditionCount(-4), 0);
+  assert.equal(clampConditionCount(9999), MAX_CONDITION_PILOT_COUNT);
+  assert.equal(clampConditionCount(Number.NaN), 0);
+});
+
+test("an ISK threshold clamps to what the codec accepts", () => {
+  assert.equal(clampConditionIsk(0), ISK_ARG_BOUNDS.min);
+  assert.equal(clampConditionIsk(Number.MAX_SAFE_INTEGER), ISK_ARG_BOUNDS.max);
+  assert.equal(clampConditionIsk(5_000_000), 5_000_000);
 });

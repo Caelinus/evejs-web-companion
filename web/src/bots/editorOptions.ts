@@ -29,6 +29,7 @@ import {
   MIN_CONDITION_FRACTION,
   MAX_ORE_HOLD_FRACTION,
   type Arg,
+  type Condition,
   type ConditionKind,
   type InterruptResponse,
   type ItemPlace,
@@ -177,6 +178,20 @@ export interface MacroArgDescriptors {
   readonly optional: readonly ArgDescriptor[];
   /** Whether an `until` is mandatory for this macro (`mine-at-belt`). */
   readonly untilRequired: boolean;
+  /**
+   * Whether the inspector shows a "stop when…" control for this macro at all.
+   * The FORMAT allows an `until` on any step (`scriptCodec.ts` reads one
+   * wherever a step is read), so this is a UI judgement, not a format fact:
+   * offering "Leave the station until your wallet rises above 10m ISK" on all
+   * 49 macros would put a control nobody wants on almost every step. It is
+   * offered where the macro cannot end on its own (`untilRequired`) and on
+   * `wait`, whose own spec names "wait until shields are back above X" as the
+   * intended combination. A step that ALREADY carries an `until` — from an
+   * import, or from a macro this list later stops offering — must still be
+   * editable, so the inspector ORs this with `step.until !== undefined`
+   * rather than treating it as the whole answer.
+   */
+  readonly untilOffered: boolean;
 }
 
 function macroArgDescriptors(id: MacroID): MacroArgDescriptors {
@@ -188,6 +203,7 @@ function macroArgDescriptors(id: MacroID): MacroArgDescriptors {
     required: all.filter((a) => a.required),
     optional: all.filter((a) => !a.required),
     untilRequired: spec.untilRequired,
+    untilOffered: spec.untilRequired || id === "wait",
   };
 }
 
@@ -227,6 +243,53 @@ export function numericArgBounds(kind: Arg["kind"]): NumericBounds | null {
     default:
       return null;
   }
+}
+
+/**
+ * Bounds NARROWER than the format's own, per argument key. `MIN/MAX_COUNT_ARG`
+ * is 1..500 for every `count` argument, because that is all the codec can say
+ * about a number whose meaning it does not know. The inspector knows: an agent
+ * level is 1..5, a scanner reach is measured in AU, a trip is measured in
+ * jumps. Offering a spinner that runs to 500 on all three teaches the wrong
+ * range and lets a player set a value the game can never satisfy.
+ *
+ * These are the exact ranges the editor shipped with before the redesign; they
+ * live here rather than in the component so the numbers are testable and so a
+ * widget asks ONE place what a number may be.
+ */
+const ARG_KEY_BOUNDS: Readonly<Record<string, NumericBounds>> = {
+  level: { min: 1, max: 5 },
+  maxJumps: { min: 1, max: 50 },
+  seconds: { min: 1, max: 500 },
+  range: { min: 1, max: 100 },
+  amount: { min: 1, max: 500 },
+};
+
+/**
+ * Per-macro overrides of the above, for a key whose sensible range genuinely
+ * differs by macro. `hunt-player`'s `maxJumps` is a LEASH on a bot that chases
+ * a player — it is deliberately shorter than the distance a courier bot may
+ * travel to reach an agent, even though both are "maxJumps".
+ */
+const MACRO_ARG_BOUNDS: Readonly<Partial<Record<MacroID, Readonly<Record<string, NumericBounds>>>>> = {
+  "hunt-player": { maxJumps: { min: 1, max: 30 } },
+};
+
+/**
+ * The bounds a numeric widget should enforce for one argument of one macro —
+ * the per-macro override, else the per-key range, else the format's own bounds
+ * for that kind. `null` when the argument is not a plain number at all.
+ */
+export function argBounds(macro: MacroID, arg: ArgDescriptor): NumericBounds | null {
+  const override = MACRO_ARG_BOUNDS[macro]?.[arg.key];
+  if (override !== undefined) {
+    return override;
+  }
+  const byKey = ARG_KEY_BOUNDS[arg.key];
+  if (byKey !== undefined) {
+    return byKey;
+  }
+  return numericArgBounds(arg.kind);
 }
 
 /** A condition threshold's 0..1 fraction bounds — never 0 (a watch that can never fire). */
@@ -311,6 +374,75 @@ export const CONDITION_UNTIL_LABEL: Readonly<Record<ConditionKind, string>> = {
   "targeted-by-player": "another player locks onto your ship",
   "drone-health-below": "one of your drones drops below…",
 };
+
+/**
+ * A condition threshold's ceiling for THIS kind. The ore hold's "nearly full"
+ * stops at 90% (`MAX_ORE_HOLD_FRACTION`, because the last tenth of an ore hold
+ * is not reliably fillable); every other fraction runs to 95%.
+ */
+export function conditionFractionCap(kind: ConditionKind): number {
+  return kind === "ore-hold-at-least" ? ORE_HOLD_FRACTION_MAX : CONDITION_FRACTION_BOUNDS.max;
+}
+
+/** A 0..1 fraction, clamped into the range a condition may legally carry. */
+export function clampConditionFraction(fraction: number, kind: ConditionKind): number {
+  return Math.min(conditionFractionCap(kind), Math.max(CONDITION_FRACTION_BOUNDS.min, fraction));
+}
+
+/** A 0..1 fraction as the whole percent a player types and reads. */
+export function conditionPercent(fraction: number): number {
+  return Math.round(fraction * 100);
+}
+
+/**
+ * A fresh `Condition` of `kind`, reusing `previous`'s own threshold when it
+ * carried the same SHAPE (fraction / ISK / count).
+ *
+ * WHY IT KEEPS THE NUMBER. Changing the kind in a dropdown is a change of
+ * subject, not of amount: a player who set 30% on shields and then switches to
+ * armor meant the same 30%, and resetting it silently would be exactly the
+ * invisible auto-correction CodeStruct measured as the worse failure. Kept
+ * here rather than in a component because THREE pickers offer a condition — a
+ * watch, a step's "stop when", and a branch's fork — and they must not
+ * disagree about what a fresh one of each shape starts as.
+ */
+export function freshCondition(kind: ConditionKind, previous?: Condition): Condition {
+  if (conditionUsesFraction(kind)) {
+    // Ore hold and cargo hold read naturally as "nearly full" (90%); every
+    // other fraction — shields, armor, hull, health, capacitor — as a lower
+    // safety line (30%).
+    const wantsFull = kind === "ore-hold-at-least" || kind === "cargo-full";
+    const keep = previous !== undefined && "fraction" in previous ? previous.fraction : wantsFull ? 0.9 : 0.3;
+    return { kind, fraction: clampConditionFraction(keep, kind) } as Condition;
+  }
+  if (conditionUsesIsk(kind)) {
+    const keep = previous !== undefined && "isk" in previous ? previous.isk : 10_000_000;
+    return { kind, isk: keep } as Condition;
+  }
+  if (conditionUsesCount(kind)) {
+    // Zero = "anyone else at all", the setting a solo miner wants.
+    const keep = previous !== undefined && "count" in previous ? previous.count : 0;
+    return { kind, count: keep } as Condition;
+  }
+  return { kind } as Condition;
+}
+
+/** The ceiling on a pilot-count condition — a whole system's worth is plenty. */
+export const MAX_CONDITION_PILOT_COUNT = 50;
+
+/** What a pilot-count field's zero means, said in the field rather than left
+ * to be discovered — an empty-looking "0" otherwise reads as "off". */
+export const CONDITION_PILOT_COUNT_HINT = "0 means anyone else at all";
+
+/** A pilot count, clamped. ZERO is legal and means "anyone else at all". */
+export function clampConditionCount(raw: number): number {
+  return Math.min(MAX_CONDITION_PILOT_COUNT, Math.max(0, Math.trunc(raw) || 0));
+}
+
+/** An ISK threshold, clamped to what the format will accept. */
+export function clampConditionIsk(raw: number): number {
+  return Math.min(MAX_ISK_ARG, Math.max(MIN_ISK_ARG, Math.trunc(raw) || MIN_ISK_ARG));
+}
 
 /** True when a condition kind's threshold is a 0..1 fraction (a percent slider). */
 export function conditionUsesFraction(kind: ConditionKind): boolean {

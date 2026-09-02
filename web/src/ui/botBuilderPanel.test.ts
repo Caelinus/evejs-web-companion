@@ -1,7 +1,14 @@
-// The Bot Builder editor as it RENDERS. It pins what a player first sees: the
-// watch buttons (no built-in floor anymore — watches are the player's), the top
-// repeat control, the example program in plain sentences, the palette (including
-// the new rats block), and — R7d — no world id on screen.
+// The Bot Builder as it RENDERS, after the redesign to a numbered plan plus an
+// inspector (docs/bot-builder-interface.md §2).
+//
+// WHAT THIS FILE CAN AND CANNOT SEE. The SSR harness renders once and cannot
+// click, so everything here is FIRST-MOUNT state: the three regions, the plan
+// as sentences, the row menus closed, the pickers closed, and the inspector
+// absent because nothing is selected yet. That is deliberate — the inspector is
+// the part with the most template in it, so it lives in `BotInspector.svelte`
+// and `botInspector.test.ts` renders it DIRECTLY with props, the same split
+// that `BotManagerPilotRow.svelte` needed for the same reason. Nothing here
+// takes a test-only prop to make a hidden state reachable.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -29,140 +36,104 @@ function renderPanel(): string {
   return render(BotBuilder as never, { props: { store, flow: fakeFlow() } } as never).body;
 }
 
-test("renders the sections and the watch buttons (shields/armor/hull/rats)", () => {
+test("the three regions are there, in order: the bot, its watches, its plan", () => {
   const text = visibleText(renderPanel());
-  assert.match(text, /Bot Builder/);
+  assert.match(text, /Bot builder/);
+  const watches = text.indexOf("Always watching");
+  const plan = text.indexOf("The plan");
+  assert.ok(watches > 0, "the watches region is missing");
+  assert.ok(plan > watches, "the plan must come after the watches region");
+});
+
+test("watches are their own region with the cap visible, never step zero of the plan", () => {
+  const text = visibleText(renderPanel());
+  // The design's one structural rule for region 1 (Home Assistant / Kodu):
+  // always-on rules are separate from the sequence, and the cap is shown.
   assert.match(text, /Always watching/);
-  assert.match(text, /Watch Shields/);
-  assert.match(text, /Watch Armor/);
-  assert.match(text, /Watch Hull/);
-  assert.match(text, /Watch for Rats/);
+  assert.match(text, /1 of 8/, "the watch count against the cap is not shown");
+  assert.match(text, /If shields drop below 30%, dock at home and stop/, "the default watch is not a sentence");
 });
 
-test("the steps section has a top-level repeat control", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /Steps/);
-  assert.match(text, /Repeat/);
-});
-
-test("the palette lists every block, including the rats block", () => {
-  const text = visibleText(renderPanel());
+test("the plan is numbered plain-English sentences, not rows of widgets", () => {
+  const body = renderPanel();
+  const text = visibleText(body);
   assert.match(text, /Leave the station/);
-  assert.match(text, /Mine at a belt/);
-  assert.match(text, /Haul the ore home/);
-  assert.match(text, /Fight off rats with drones/);
+  assert.match(text, /Mine at the nearest belt until the ore hold is 90% full/);
+  assert.match(text, /Haul the ore/);
+  // The row IS the summary: no inline argument widget rides along with it.
+  // (The step's own select elements live in the inspector, which is absent
+  // until something is selected.)
+  assert.doesNotMatch(text, /stop when/i, "an inline until-editor is back inside a row");
+  assert.doesNotMatch(body, /<select[^>]*>[\s\S]*?the ore hold is nearly full/, "an inline until dropdown is back");
 });
 
-test("the example program reads as plain sentences", () => {
+test("the top-level repeat sits in the plan's header, because it wraps everything", () => {
   const text = visibleText(renderPanel());
-  assert.match(text, /Mine at the nearest belt/);
-  assert.match(text, /the ore hold is 90% full/);
+  assert.match(text, /The plan/);
+  assert.match(text, /Repeat/);
+  assert.match(text, /a set number of times/);
 });
 
-test("the default shields watch shows, and the example is valid out of the box", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /Shields drop below/);
-  // Starting station (home + haul), nearest belt, auto equipment => nothing to
-  // pick, so the example reads Ready with no picking required.
-  assert.match(text, /Ready/);
-  assert.match(text, /starting station/i, "home + haul default to the starting station");
+test("every row offers an actions menu, and it starts closed", () => {
+  const body = renderPanel();
+  assert.match(body, /aria-label="Actions for Leave the station"/, "a plan row has no actions menu");
+  // Closed on first render: the menu's items must not be in the document yet.
+  assert.doesNotMatch(visibleText(body), /Move to bottom/, "a row menu renders open");
 });
 
-test("no built-in health floor, and no world id on screen (R7d)", () => {
-  const text = visibleText(renderPanel());
-  assert.doesNotMatch(text, /built in/i, "the safety floor is no longer built in");
-  assert.doesNotMatch(text, /\d{5,}/, "no world id renders (example uses unbound slots)");
+test("the step picker is a closed disclosure, not a permanent palette", () => {
+  const body = renderPanel();
+  const text = visibleText(body);
+  assert.match(text, /\+ Step/);
+  assert.match(text, /\+ Branch/);
+  assert.match(text, /\+ Saved bot/);
+  assert.match(body, /aria-expanded="false"/, "the picker is not reported as collapsed");
+  // The 49-macro catalogue used to be a permanent grid below the plan.
+  assert.doesNotMatch(text, /Fight off rats with drones/, "the whole palette still renders unprompted");
 });
 
-test("has a Save button and a saved-bots section", () => {
+test("the inspector region collapses entirely when nothing is selected", () => {
+  const body = renderPanel();
+  assert.doesNotMatch(body, /builder-inspector/, "an empty inspector frame renders anyway");
+  assert.doesNotMatch(visibleText(body), /More options/, "the inspector's disclosure renders with nothing selected");
+});
+
+test("the header carries the aggregate badge and Save, and the example is Ready", () => {
   const text = visibleText(renderPanel());
+  assert.match(text, /Ready/, "the starter plan should need nothing picked");
   assert.match(text, /Save/);
-  assert.match(text, /Saved bots/);
-  // onMount does not run under SSR, so the list starts empty.
-  assert.match(text, /No saved bots yet/);
+  assert.match(text, /starting station/i, "home and the haul default to the starting station");
 });
 
-test("offers to insert steps from a saved bot, and explains it copies rather than links", () => {
+test("the builder says plainly that it does not start bots", () => {
   const text = visibleText(renderPanel());
-  assert.match(text, /Insert steps from a saved bot/);
-  assert.match(text, /end of the blocks you already have/i, "the insert explicitly appends instead of replacing");
-  assert.match(text, /copies them once/i, "the copy says plainly that it copies, not links, the source bot");
-  assert.match(text, /later changes to that saved bot will not change this one/i);
-  // onMount does not run under SSR, so the library starts empty and the panel
-  // says so instead of showing an empty grid.
-  assert.match(text, /No saved bots yet\. Save one below/i);
+  assert.match(text, /never flies anything|Bot Manager/i);
 });
 
-test("offers the new fleet, exploration, and operations examples", () => {
+test("no world id reaches the screen (R7d)", () => {
   const text = visibleText(renderPanel());
-  for (const label of ["Fleet medic", "Fleet anchor", "Anomaly expedition", "Operations closeout"]) {
+  assert.doesNotMatch(text, /\d{5,}/, "a raw world id rendered");
+});
+
+test("still has a name field and a notes field, so documentation is not discarded", () => {
+  const body = renderPanel();
+  assert.ok(body.includes('id="bot-name"'), "no name field rendered");
+  assert.ok(body.includes('id="bot-notes"'), "no notes field rendered");
+});
+
+test("keeps the examples, the shared library, the by-value insert and the import box", () => {
+  const text = visibleText(renderPanel());
+  for (const label of ["Mining day", "Fleet medic", "Anomaly expedition", "Operations closeout"]) {
     assert.ok(text.includes(label), `${label} example is missing`);
   }
+  assert.match(text, /Insert steps from a saved bot/);
+  assert.match(text, /copies them once/i, "the by-value insert no longer says it copies rather than links");
+  assert.match(text, /Saved bots/);
+  assert.match(text, /Import or export/);
+  // onMount does not run under SSR, so both library lists start empty and say so.
+  assert.match(text, /No saved bots yet/);
 });
 
 test("renders against an empty store without throwing (R18)", () => {
   assert.doesNotThrow(() => renderPanel());
-});
-
-// The editor used to hand-write a `{#if step.macro === "..."}` chain per
-// macro, which left `equipment` (mine-at-belt), `corporation`
-// (find-distribution-agent) and `agent` (request-mission) with NO widget at
-// all — `request-mission` had no editor branch whatsoever. These are now
-// GENERATED from `MACRO_ARG_DESCRIPTORS`, behind "More options" since all
-// three are optional args.
-test("an optional arg with no bespoke editor is GENERATED from the macro's spec", () => {
-  // `equipment` on mine-at-belt is one of the three kinds that used to have no
-  // widget at all. It is provable here because mine-at-belt is in the starter
-  // plan a new bot opens with. The other two — `corporation` and `agent` — sit
-  // on macros a player adds later, and the SSR harness cannot add a step, so
-  // they are pinned where they can be: editorOptions.test.ts asserts each maps
-  // to a real widget kind, and this test proves the generic renderer that
-  // consumes that mapping actually works. Putting those macros into the
-  // starter plan to make them renderable here would change what EVERY new bot
-  // begins as, to suit a test — the plan would read "mine, haul, then go find a
-  // courier agent", which is not a bot anyone would want.
-  const text = visibleText(renderPanel());
-  assert.match(text, /Equipment:/, "no equipment editor rendered for mine-at-belt");
-  assert.match(text, /use everything fitted/, "the equipment picker's default option is missing");
-  assert.match(text, /More options/, "the optional-arg disclosure never renders");
-});
-
-// The watch-add row used to be a hardcoded list of 11 of the 14 legal
-// `conditionAllowedAt(kind, "interrupt")` kinds — health-below, ore-hold-at-least
-// and hold-empty had no button. It is now generated from `WATCH_CONDITION_KINDS`.
-test("a watch can be added for health-below, ore-hold-at-least, and hold-empty", () => {
-  const body = renderPanel();
-  for (const label of ["Watch Ship Health", "Watch Ore Hold", "Watch for an Empty Hold"]) {
-    const found = body.match(new RegExp(`<button([^>]*)>${label}</button>`));
-    assert.ok(found, `${label} watch-add button is missing`);
-    assert.doesNotMatch(found![1]!, /disabled/, `${label}'s button is disabled by default`);
-  }
-});
-
-// `untilKinds` used to be a hardcoded array of 7, while `conditionAllowedAt`
-// admits 10 — wallet-below, wallet-above and cargo-full were unreachable as a
-// step's or branch's "stop when". Now derived from `UNTIL_CONDITION_KINDS`.
-test("the until dropdown offers cargo-full, wallet-below, and wallet-above", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /the cargo hold is nearly full/, "cargo-full is missing from the until dropdown");
-  assert.match(text, /the wallet drops below/, "wallet-below is missing from the until dropdown");
-  assert.match(text, /the wallet rises above/, "wallet-above is missing from the until dropdown");
-});
-
-// `notes` used to be hardcoded to "" in buildScript, the only mention of it in
-// the file — so importing a documented bot and saving it silently discarded
-// its documentation. There is now a real field for it.
-test("has a notes field, so a bot's documentation is not silently discarded on save", () => {
-  const body = renderPanel();
-  assert.ok(body.includes('id="bot-notes"'), "no notes field rendered");
-});
-
-// Validation now carries severities; the header badge must count only the
-// blocking ones (an advisory note is worth reading, never worth stopping a
-// save over). The default bot has no advisory issues, so this just pins that
-// the badge still reads "Ready" once blockingCount, not problems.length, is
-// what it counts.
-test("the header badge counts only blocking problems", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /Ready/);
 });
