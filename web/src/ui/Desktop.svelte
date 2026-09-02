@@ -22,6 +22,7 @@
   import { isWindowTab, MIN_W, MIN_H, type WinState } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import type { Session } from "../app/sessions.ts";
 
   let {
     store,
@@ -35,6 +36,7 @@
     onMove,
     onResize,
     onOpen,
+    sessions,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -47,6 +49,10 @@
     onMove: (id: TabID, x: number, y: number) => void;
     onResize: (id: TabID, w: number, h: number) => void;
     onOpen: (id: TabID) => void;
+    // R107 — the full pilot roster, threaded down only so the Bot Manager panel
+    // can show every held pilot, not just this session's active one. Optional:
+    // every other caller/panel is unaffected. See PanelHost.svelte.
+    sessions?: readonly Session[];
   } = $props();
 
   // Only real window tabs valid in the current state get rendered.
@@ -113,7 +119,7 @@
       onMove={(x, y) => onMove(win.id, x, y)}
       onResize={(w, h) => onResize(win.id, w, h)}
     >
-      <PanelHost {store} {flow} tab={win.id} onOpen={onOpen} />
+      <PanelHost {store} {flow} tab={win.id} onOpen={onOpen} {sessions} />
     </DesktopWindow>
   {/each}
 </div>

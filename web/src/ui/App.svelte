@@ -280,7 +280,7 @@
          boundary inside; this one only catches what escapes them all, so one
          pilot's cockpit can never take the character bar down with it. -->
     <ErrorBoundary name="Cockpit">
-      <Workspace store={active.store} flow={active.flow} />
+      <Workspace store={active.store} flow={active.flow} {sessions} />
     </ErrorBoundary>
   {/key}
 {:else if restoring}

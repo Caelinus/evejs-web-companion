@@ -56,6 +56,29 @@ test("first mount reads as loading, never as an empty library", () => {
   assert.doesNotMatch(text, /No bots saved yet/i);
 });
 
+test("region A (pilots) heading is present", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /Pilots/i);
+});
+
+test("region A reads as loading on first mount, never as 'no pilots'", () => {
+  // The SSR harness never runs onMount, so the server roster fetch has not
+  // fired — the panel must not guess "No pilots online" before it knows.
+  const text = visibleText(renderPanel());
+  assert.match(text, /Loading pilots/i);
+  assert.doesNotMatch(text, /No pilots online/i);
+});
+
+test("the panel mounts fine with an explicit empty sessions array too", () => {
+  const store = createClientStore();
+  const output = render(BotManager as never, {
+    props: { store, flow: fakeFlow(), sessions: [] },
+  } as never);
+  const text = visibleText(output.body);
+  assert.match(text, /Bot manager/i);
+  assert.match(text, /Pilots/i);
+});
+
 test("the panel offers a search box", () => {
   assert.match(renderPanel(), /type="search"/);
 });

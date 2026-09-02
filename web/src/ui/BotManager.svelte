@@ -1,41 +1,87 @@
 <script lang="ts">
-  // BOT MANAGER — region B, the platform-wide script library
-  // (docs/bot-manager-brainstorm.md §4 region B).
+  // BOT MANAGER — regions A and B (docs/bot-manager-brainstorm.md §4).
   //
-  // Region A (pilots) and region C (recent runs) are separate slices and are
-  // NOT built here — see the brainstorm doc's M3 slice split. This panel is
-  // the library alone: every saved bot, from every account, in one list
-  // (Decision 1). "Saved by" names who wrote it for display only — it confers
-  // no rights (Decision 5): any account here can load, edit or delete any row.
+  // Region C (recent runs) is a separate slice and is NOT built here — see the
+  // brainstorm doc's M3 slice split.
   //
-  // Follows ServerBots.svelte's shape: poll-free (the library only changes on
-  // an action taken here), onMount load, a per-row busy id, and error/empty/
-  // loading kept as three distinguishable states rather than collapsed into
-  // one "nothing to show".
+  // Region A (pilots, top): one row per held session in THIS browser tab, plus
+  // one row per character with a live server bot and no held session here
+  // (§4's "multibox wrinkle", option (a) — the roster is threaded in from
+  // App.svelte as `sessions`, an optional prop so every existing caller and
+  // the no-props SSR test keep working). All run-state logic — which mode a
+  // pilot is in, its status words, its detail line — lives in
+  // `bots/pilotRoster.ts`; this panel only fetches the server roster and hands
+  // each pilot's inputs to `BotManagerPilotRow.svelte`.
+  //
+  // Region B (library, below): every saved bot, from every account, in one
+  // list (Decision 1). "Saved by" names who wrote it for display only — it
+  // confers no rights (Decision 5): any account here can load, edit or delete
+  // any row.
+  //
+  // Both regions follow ServerBots.svelte's shape: poll-free (each list only
+  // changes on an action taken here or elsewhere in the app), onMount load,
+  // and error/empty/loading kept as three distinguishable states rather than
+  // collapsed into one "nothing to show".
   import { onMount } from "svelte";
   import {
     listBotScripts,
     getBotScript,
     deleteBotScript,
+    listServerBots,
     type BotScriptSummary,
+    type ServerBot,
   } from "../app/api.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
   import { lastSavedPhrase, libraryView, savedByLabel } from "../bots/libraryView.ts";
+  import { serverBotFor, serverOnlyBots } from "../bots/pilotRoster.ts";
+  import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
 
   let {
     store: _store,
     flow,
     onOpen,
+    sessions,
   }: {
     store: ClientStore;
     flow: AppFlow;
     onOpen?: (tab: TabID) => void;
+    sessions?: readonly Session[];
   } = $props();
 
   /** Direct api.ts calls must ride THIS pilot's full flow options. */
   const botOpts = () => flow.requestOptions();
+
+  // --- region A: pilots -------------------------------------------------
+  // Three honest states, same as region B below: loading, empty ("no pilots
+  // online"), and a read error — a failed read of the server roster must
+  // never collapse into "nothing running" (a player could act on that lie).
+  let pilotsLoaded = $state(false);
+  let pilotsError = $state<string | null>(null);
+  let serverBots = $state<ServerBot[]>([]);
+
+  async function refreshPilots(): Promise<void> {
+    try {
+      serverBots = await listServerBots(botOpts());
+      pilotsError = null;
+    } catch {
+      pilotsError = "Could not load the server's bot roster — are you still logged in?";
+    } finally {
+      pilotsLoaded = true;
+    }
+  }
+
+  const heldSessions = $derived(sessions ?? []);
+  // Characters a held session already covers, so a server-only row is never
+  // shown twice for a pilot whose tab happens to be open right here.
+  const heldCharacterIDs = $derived(
+    heldSessions
+      .map((session) => session.store.station.get().online?.characterID ?? null)
+      .filter((id): id is number => id !== null),
+  );
+  const extraServerBots = $derived(serverOnlyBots(serverBots, heldCharacterIDs));
 
   let loaded = $state(false);
   let error = $state<string | null>(null);
@@ -65,6 +111,7 @@
 
   onMount(() => {
     void refresh();
+    void refreshPilots();
   });
 
   // Which of the honest states we are in, decided by the pure module so the
@@ -134,6 +181,53 @@
   }
 
 </script>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Pilots</h2>
+  </header>
+  <p class="note">
+    Every pilot you have open in this browser tab, plus every character with a
+    bot still running on the server even if it has no tab open here. A bot
+    running in a tab stops when that tab closes; a bot running on the server
+    keeps flying.
+  </p>
+
+  {#if pilotsError}
+    <p class="note error">{pilotsError}</p>
+  {:else if !pilotsLoaded}
+    <p class="note">Loading pilots…</p>
+  {:else if heldSessions.length === 0 && extraServerBots.length === 0}
+    <p class="empty">No pilots online.</p>
+  {:else}
+    <div class="table-wrap overflow-x-auto">
+      <table class="guests reflow">
+        <thead>
+          <tr>
+            <th>Pilot</th>
+            <th>Where</th>
+            <th>Running</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each heldSessions as session (session.id)}
+            {@const characterID = session.store.station.get().online?.characterID ?? null}
+            <BotManagerPilotRow
+              {session}
+              serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
+              onStopped={refreshPilots}
+            />
+          {/each}
+          {#each extraServerBots as bot (bot.botID)}
+            <BotManagerPilotRow serverBot={bot} onStopped={refreshPilots} />
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</section>
 
 <section class="panel">
   <header class="panel-head">
