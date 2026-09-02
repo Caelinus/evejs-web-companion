@@ -19,7 +19,7 @@ export interface ExampleBot {
 
 const FORMAT = { format: "evejs-bot-script", version: 1 } as const;
 
-/** Mine → haul home → refine, forever; reps when shot, drones on rats. */
+/** Mine → haul home → refine, forever; reps when shot, guns and drones on rats. */
 const MINING_DAY: BotScript = {
   ...FORMAT,
   name: "Mining day",
@@ -27,7 +27,7 @@ const MINING_DAY: BotScript = {
   home: startingStation(),
   interrupts: [
     { id: "w-shield", when: { kind: "shield-below", fraction: 0.5 }, respond: "repair" },
-    { id: "w-rats", when: { kind: "hostile-on-grid" }, respond: "launch-drones" },
+    { id: "w-rats", when: { kind: "hostile-on-grid" }, respond: "fight-back" },
     { id: "w-hull", when: { kind: "hull-below", fraction: 0.5 }, respond: "dock-and-pause" },
   ],
   program: [

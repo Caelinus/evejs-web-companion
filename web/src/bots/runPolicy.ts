@@ -152,6 +152,10 @@ export const INTERRUPT_RUN_POLICY: Readonly<Record<InterruptResponse, MacroRunPo
   // An always-armed combat response can act before the resumed main program
   // reaches any checkpoint. Require a fresh player start after process restart.
   "launch-drones": policy(["combat"], false),
+  // Fight-back shoots, so it carries the ratting block's own authority — plus
+  // "destructive", because unlike a bare drone launch it is the bot choosing to
+  // open fire without the player in the loop.
+  "fight-back": policy(["combat", "destructive"], false),
   repair: policy(["combat"], false),
   alert: SAFE,
 });

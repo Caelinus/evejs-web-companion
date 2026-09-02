@@ -572,6 +572,42 @@ test("fight: target died -> next rat; grid clear -> recall drones, then done", (
   assert.equal(done.outcome.kind, "done");
 });
 
+test("fight: a rat beyond the hull's targeting range is not a target at all", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const near = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const far = entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 90000, y: 0, z: 0 } });
+
+  // 30 km of lock range: the near rat is fair game, the far one is invisible to
+  // the ladder — so it does not burn ticks locking something it cannot reach.
+  const inRange = fight(
+    s,
+    obs({ snapshot: snapshot([far, near]), dronesOut: true, weaponModuleIDs: [500], maxTargetRangeM: 30_000 }),
+    {},
+    {},
+  );
+  assert.ok(inRange.action.kind === "lock" && inRange.action.targetID === 6661);
+
+  // Only the far one left: nothing is reachable, so the block FINISHES rather
+  // than locking-and-giving-up forever. As a watch response, that hands the ship
+  // back to the step under it.
+  const unreachable = fight(
+    s,
+    obs({ snapshot: snapshot([far]), weaponModuleIDs: [500], maxTargetRangeM: 30_000 }),
+    {},
+    {},
+  );
+  assert.equal(unreachable.outcome.kind, "done");
+});
+
+test("fight: an unreadable targeting range does NOT gate — the bounded lock stays the backstop", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const far = entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 900000, y: 0, z: 0 } });
+  const t = fight(s, obs({ snapshot: snapshot([far]), dronesOut: true, weaponModuleIDs: [500] }), {}, {});
+  assert.ok(t.action.kind === "lock" && t.action.targetID === 6662);
+});
+
 test("fight: no guns and no drones -> blocked with a plain reason", () => {
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
   const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;

@@ -493,6 +493,45 @@ function fireInterrupt(
         memory: mem,
       };
     }
+    case "fight-back": {
+      // ⚠ BORROWED, NOT COPIED. The combat ladder (drones out → lock the nearest
+      // hostile in targeting range → drones onto it → every idle gun onto it)
+      // already exists as the Fight-the-rats block, and it is reached the only
+      // way this file is allowed to reach a macro: through the injected registry.
+      // That keeps the orchestrator's one dependency rule intact (it knows macro
+      // IDs, never macro code) and means the watch and the block can never drift
+      // apart — a fix to one is a fix to both.
+      const fight = registry["fight-the-rats"];
+      if (fight === undefined) {
+        return runProgram(script, obs, mem, registry);
+      }
+      // The ladder's memory (which target is primary, whether the lock was
+      // issued, which target the drones are already on) is keyed by the WATCH
+      // ROW's id in the same per-step memory map the program's steps use. Row ids
+      // and step ids share one namespace, so this needs no new memory slot — and
+      // it keeps the watch's fight separate from any Fight-the-rats STEP the same
+      // script might also run.
+      const step: MacroStep = { id: row.id, kind: "macro", macro: "fight-the-rats", args: {} };
+      const tick = fight(step, obs, mem.macroMem[row.id] ?? {}, mem.board);
+      if (tick.outcome.kind !== "acting") {
+        // Nothing left to fight — the grid is clear, nothing is inside targeting
+        // range, or this hull cannot fight at all. THIS IS THE RELEASE: the watch
+        // drops the ship and the step under it carries on from where it was. An
+        // always-armed response that never released would starve the program.
+        const { [row.id]: _spent, ...rest } = mem.macroMem;
+        return runProgram(script, obs, { ...mem, macroMem: rest }, registry);
+      }
+      return {
+        action: tick.action,
+        why: tick.why,
+        phase: tick.phase,
+        stepPath: row.id,
+        interruptID: row.id,
+        status: "running",
+        pauseReason: null,
+        memory: { ...mem, macroMem: { ...mem.macroMem, [row.id]: tick.nextMem } },
+      };
+    }
     case "repair": {
       // Switch ON one idle repairer for the watched layer — unless the capacitor
       // is too low to feed it, in which case switch one OFF instead (an empty cap

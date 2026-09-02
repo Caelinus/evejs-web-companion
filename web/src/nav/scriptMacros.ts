@@ -19,7 +19,7 @@ import type {
 import type { ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, WorldRef } from "../bots/botScript.ts";
-import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
+import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, holdItemIDs, isMineableRock } from "./miningBotLoop.ts";
 import {
   agentActionID,
@@ -1374,6 +1374,27 @@ const hardenersOn: MacroDecider = (_step, obs, mem) => {
 };
 
 // ── fight-the-rats ───────────────────────────────────────────────────────────
+/**
+ * The hostiles this ship can actually shoot at: nearest first, and — when the
+ * hull's targeting range is readable — nothing beyond it.
+ *
+ * ⚠ THE GATE IS WHAT STOPS THE LADDER SPINNING. Without it, one rat parked 300 km
+ * out is still "the nearest hostile", so the ladder locks it, waits out
+ * `MAX_LOCK_WAIT_TICKS`, gives up, picks the same rat again, and repeats forever
+ * — harmless as a block a player watched start, fatal as an always-watching
+ * response, which would own the ship and starve the step under it. Out of range
+ * reads as an empty grid, which the callers already know how to finish on.
+ *
+ * Range unreadable (the usual case — see `maxTargetRangeM`) means NO gate, and
+ * the bounded lock stays the only backstop. That is a weaker guarantee, not none:
+ * it gives up on each target in turn rather than never.
+ */
+function hostilesInReach(obs: ScriptObservation, snapshot: SpaceSnapshot, origin: SpaceVector): readonly OverviewRow[] {
+  const rows = hostileRows(snapshot, origin);
+  const range = obs.maxTargetRangeM ?? null;
+  return range === null ? rows : rows.filter((row) => row.distance <= range);
+}
+
 // The full combat loop: nearest pirate first — lock it (bounded), set the drones
 // on it, run every idle gun on it; when it dies the list shrinks and the next
 // one is picked. Done when the grid is clear AND the drones are back aboard.
@@ -1388,7 +1409,7 @@ const fightTheRats: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Fighting", ACTING, false, mem);
   }
   const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
-  const hostiles = hostileRows(snapshot, origin);
+  const hostiles = hostilesInReach(obs, snapshot, origin);
   const myDrones = myDroneIDs(snapshot);
 
   if (hostiles.length === 0) {

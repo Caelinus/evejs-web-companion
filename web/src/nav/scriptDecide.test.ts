@@ -370,6 +370,69 @@ test("a launch-drones interrupt launches once, then yields to the step when dron
   assert.equal(working.stepPath, "m");
 });
 
+// ─── fight-back ──────────────────────────────────────────────────────────────
+//
+// The response borrows the Fight-the-rats decider out of the registry, so these
+// stand in a fake one and check the three properties that matter: the ladder's
+// actions reach the world, its memory survives tick to tick (so the primary is
+// not re-picked every time), and it RELEASES the ship the moment it stops acting.
+
+/** A fake ratting ladder: lock, then shoot, then report the grid clear. */
+const ratLadder: MacroDecider = (_s, o, mem) => {
+  if (o.hostileOnGrid !== true) {
+    return tick({ kind: "wait" }, { kind: "done" });
+  }
+  if (mem["locked"] !== true) {
+    return tick({ kind: "lock", targetID: 77 }, { kind: "acting" }, true, { locked: true });
+  }
+  return tick({ kind: "activate", moduleID: 5, targetID: 77 }, { kind: "acting" }, true, mem);
+};
+const fightRegistry = { ...registry, "fight-the-rats": ratLadder };
+
+const fightBack: InterruptRow = { id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" };
+
+test("a fight-back interrupt runs the ratting ladder and keeps its memory across ticks", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const locking = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), fightRegistry, home);
+  assert.equal(locking.action.kind, "lock");
+  assert.equal(locking.interruptID, "fb");
+
+  // The ladder remembered the lock, so the next tick SHOOTS rather than
+  // re-locking — which is the whole point of keying its memory by the row id.
+  const shooting = decideScriptAction(s, obs({ hostileOnGrid: true }), locking.memory, fightRegistry, home);
+  assert.equal(shooting.action.kind, "activate");
+  assert.equal(shooting.interruptID, "fb");
+});
+
+test("fight-back hands the ship back to the step once there is nothing left to fight", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const fighting = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), fightRegistry, home);
+  assert.equal(fighting.interruptID, "fb");
+
+  // Grid clear: the watch no longer fires at all and mining resumes.
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false }), fighting.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+  assert.equal(mining.action.kind, "activate");
+});
+
+test("fight-back releases the step even while the pirate is STILL there, when the ladder stops acting", () => {
+  // The hostile is on grid (so the watch keeps firing) but the ladder reports
+  // itself done — out of targeting range, or no way to fight. The step must not
+  // be starved: an always-armed response that never released would own the ship.
+  const stalled: MacroDecider = () => tick({ kind: "wait" }, { kind: "done" });
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), { ...registry, "fight-the-rats": stalled }, home);
+  assert.equal(r.stepPath, "m");
+  assert.equal(r.action.kind, "activate");
+});
+
+test("a fight-back watch with no ratting macro in the registry leaves the program running", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), registry, home);
+  assert.equal(r.stepPath, "m");
+  assert.equal(r.status, "running");
+});
+
 // ─── Bounds: cannot-tell streak and the step-tick cap ────────────────────────
 
 test("an unreadable until pauses after the cannot-tell streak runs out", () => {

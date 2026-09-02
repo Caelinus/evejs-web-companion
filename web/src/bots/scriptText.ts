@@ -250,6 +250,8 @@ export function responseSentence(response: InterruptResponse): string {
       return "dock at home and stop";
     case "launch-drones":
       return "send out drones and keep going";
+    case "fight-back":
+      return "fight back and keep going";
     case "repair":
       return "run the repairers until it recovers";
     case "alert":
