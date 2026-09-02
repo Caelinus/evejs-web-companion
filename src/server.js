@@ -95,6 +95,10 @@ const botHost =
   });
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
+// startServer() seeds the starter bots once the port is open, and all it
+// holds is the app -- never createApp's locals. Published here so that call
+// reaches THIS app's store, including one injected by a test.
+app.locals.botScripts = botScripts;
 fs.mkdirSync(config.iconCacheDir, { recursive: true });
 
 app.disable("x-powered-by");
@@ -18759,7 +18763,7 @@ function startServer(options = {}) {
     // the next restart. A failure to seed is logged and otherwise ignored; it
     // must never stop the server coming up.
     try {
-      botScripts.seedStarterBots();
+      appToStart.locals.botScripts.seedStarterBots();
     } catch (error) {
       console.error(error);
     }
