@@ -90,7 +90,7 @@
     target: InspectorTarget;
     flow: AppFlow;
     currentStation?: { id: number; name: string } | null;
-    belts?: readonly { itemID: number; name: string }[];
+    belts?: readonly { itemID: number; name: string; systemName?: string | null }[];
     equipment?: readonly { groupID: number; label: string }[];
     items?: readonly { typeID: number; name: string }[];
     pilots?: readonly { characterID: number; characterName: string }[];
@@ -202,11 +202,17 @@
     }
     const match = belts.find((b) => b.itemID === Number(raw));
     if (match === undefined) return;
-    // A belt ref carries no system name here: the picker only ever offers
-    // belts on the CURRENT grid, and the builder stamps the system it knows.
+    // ⚠ THE SYSTEM NAME IS PART OF THE SAVED DOCUMENT, so it has to be carried
+    // here rather than resolved later: belt ids are grid-local, and the library
+    // is platform-wide, so a pinned belt in someone else's copy of this bot is
+    // only identifiable by the system it was in. The caller resolves it (it is
+    // the one with the name store) and hands it over with the belt.
     onArg(key, {
       kind: "belt",
-      belt: { mode: "chosen", ref: { entity: "belt", id: match.itemID, name: match.name, systemName: null } },
+      belt: {
+        mode: "chosen",
+        ref: { entity: "belt", id: match.itemID, name: match.name, systemName: match.systemName ?? null },
+      },
     });
   }
   function setItemType(key: string, raw: string): void {

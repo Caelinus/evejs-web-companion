@@ -32,7 +32,6 @@
     type ConditionKind,
     type InterruptResponse,
     type InterruptRow,
-    type LoopBodyNode,
     type MacroID,
     type MacroStep,
     type ProgramNode,
@@ -40,11 +39,20 @@
     MAX_INTERRUPTS,
     MAX_NAME_LEN,
     MAX_NOTES_LEN,
+    DEFAULT_HUNT_MAX_JUMPS,
+    DEFAULT_HUNT_RANGE_AU,
     MAX_REPEAT_TIMES,
     MIN_REPEAT_TIMES,
     startingStation,
   } from "../bots/botScript.ts";
   import { CATEGORY_LABEL, categoriesInUse, type BlockCategory } from "../bots/macroCatalogView.ts";
+  import {
+    newEditorState,
+    toEditorState,
+    toScript,
+    hasSubBot as planHasSubBot,
+    type RepeatMode,
+  } from "../bots/editorDoc.ts";
   import {
     CONDITION_NOUN_LABEL,
     WATCH_CONDITION_KINDS,
@@ -112,36 +120,29 @@
   // builds either a looping bot or a run-once one, and `repeatMode` decides.
   type EditorNode = FlatProgramNode;
 
-  let name = $state("My mining bot");
-  let notes = $state("");
-  let repeatMode = $state<"forever" | "times" | "once">("times");
-  let repeatCount = $state(20);
-  let home = $state<WorldRef>(startingStation());
-  let watches = $state<InterruptRow[]>([
-    { id: "w-shield", when: { kind: "shield-below", fraction: 0.3 }, respond: "dock-and-pause" },
-  ]);
-  let steps = $state<EditorNode[]>([
-    { id: "s-undock", kind: "macro", macro: "undock", args: {} },
-    {
-      id: "s-mine",
-      kind: "macro",
-      macro: "mine-at-belt",
-      args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
-      until: { kind: "ore-hold-at-least", fraction: 0.9 },
-    },
-    {
-      id: "s-haul",
-      kind: "macro",
-      macro: "deliver-ore",
-      args: { station: { kind: "station", ref: startingStation() } },
-    },
-  ]);
+  // The document itself lives in `editorDoc.ts`, not here: `toScript` and
+  // `toEditorState` are what decide the JSON a bot is saved as, and inside a
+  // component nothing could test them. These fields are that state, spread into
+  // runes so the template can bind to them.
+  const initial = newEditorState();
+  let name = $state(initial.name);
+  let notes = $state(initial.notes);
+  let repeatMode = $state<RepeatMode>(initial.repeatMode);
+  let repeatCount = $state(initial.repeatCount);
+  let home = $state<WorldRef>(initial.home);
+  let watches = $state<InterruptRow[]>([...initial.watches]);
+  let steps = $state<EditorNode[]>([...initial.steps]);
 
   // A program the one-list editor cannot hold — several loops, or a loop beside
   // loose steps — is kept VERBATIM here so it still runs and round-trips
   // unmangled, and the plan renders it read-only rather than silently dropping
   // the parts it cannot edit.
-  let advancedProgram = $state<readonly ProgramNode[] | null>(null);
+  let advancedProgram = $state<readonly ProgramNode[] | null>(initial.advancedProgram);
+  // The outer loop's own id and stop condition, carried so that opening a bot
+  // and saving it does not rename its loop or drop the only thing that could
+  // stop it early. Neither has a control; both are part of the document.
+  let loopID = $state<string | null>(initial.loopID);
+  let loopUntil = $state<Condition | undefined>(initial.loopUntil);
   const readOnlyPlan = $derived(advancedProgram !== null);
 
   // ── What is selected, and what is open ──────────────────────────────────────
@@ -180,7 +181,7 @@
   });
   const currentStation = $derived<{ id: number; name: string } | null>(stations[0] ?? null);
   const someWatchDocks = $derived(watches.some((w) => w.respond === "dock-and-pause"));
-  const hasSubBot = $derived(steps.some((n) => n.kind === "sub-bot"));
+  const hasSubBot = $derived(planHasSubBot(steps));
 
   const builtDoc = $derived<BotScript>(buildScript());
   const problems = $derived(validateScript(builtDoc));
@@ -216,33 +217,21 @@
   const selectedProblems = $derived(selection === null ? [] : problemsForPath(problemIndex, selection.id));
   const pickerResults = $derived(filterMacroPicker(pickerQuery, pickerCategory));
 
+  /** The document as it would be saved right now — one call into the tested
+   * pure builder, so what Save writes is what `editorDoc.test.ts` proves. */
   function buildScript(): BotScript {
-    // ⚠ A sub-bot node is legal only at the TOP level (an included bot may carry
-    // loops of its own), so a list containing one always builds a run-once bot.
-    const program: readonly ProgramNode[] =
-      advancedProgram !== null
-        ? advancedProgram
-        : steps.length === 0
-          ? []
-          : repeatMode === "once" || hasSubBot
-            ? [...steps]
-            : [
-                {
-                  id: "main-loop",
-                  kind: "loop",
-                  repeat: repeatMode === "forever" ? { kind: "forever" } : { kind: "times", count: repeatCount },
-                  body: steps.filter((n): n is LoopBodyNode => n.kind !== "sub-bot"),
-                },
-              ];
-    return {
-      format: "evejs-bot-script",
-      version: 1,
+    return toScript({
       name,
-      notes: notes.slice(0, MAX_NOTES_LEN),
+      notes,
+      repeatMode,
+      repeatCount,
       home,
-      interrupts: [...watches],
-      program,
-    };
+      watches,
+      steps,
+      advancedProgram,
+      loopID,
+      loopUntil,
+    });
   }
 
   // ── Finding a row in the list ───────────────────────────────────────────────
@@ -414,6 +403,19 @@
     }
     if (macro === "invite-to-fleet") {
       return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
+    }
+    if (macro === "hunt-player") {
+      // `only` stays ABSENT (any player); the leash and the scanner reach start
+      // on their shared defaults so the sentence reads honestly from the start.
+      return {
+        id,
+        kind: "macro",
+        macro,
+        args: {
+          maxJumps: { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS },
+          range: { kind: "count", value: DEFAULT_HUNT_RANGE_AU },
+        },
+      };
     }
     if (macro === "send-chat") {
       return {
@@ -647,11 +649,16 @@
   // Belt ids are grid-local, not global (unlike a station), so a galaxy-wide
   // search makes no sense: offer whatever belts are on the CURRENT grid, matched
   // by the same name test the runtime uses to resolve "nearest".
-  const beltsOnGrid = $derived(
-    ($space.snapshot?.entities ?? [])
+  // The system name rides along because it is written into the SAVED document
+  // (see `setBelt` in BotInspector.svelte): a belt id means nothing outside the
+  // grid it was read on, and this library is shared across accounts.
+  const beltsOnGrid = $derived.by<readonly { itemID: number; name: string; systemName: string | null }[]>(() => {
+    const systemID = $space.snapshot?.solarSystemID ?? null;
+    const systemName = systemID !== null ? ($names.resolved[nameKey("system", systemID)] ?? null) : null;
+    return ($space.snapshot?.entities ?? [])
       .filter((e) => /belt/i.test(e.name ?? ""))
-      .map((e) => ({ itemID: e.itemID, name: e.name ?? "Unnamed belt" })),
-  );
+      .map((e) => ({ itemID: e.itemID, name: e.name ?? "Unnamed belt", systemName }));
+  });
   // Which fitted modules are the miners — from the ACTIVE ship's slots,
   // deduplicated by GROUP, because the format's equipment argument is a group
   // and not a single module. Left unset, the step runs every mining module
@@ -712,41 +719,24 @@
     currentRev = 0;
     importNote = `Loaded the "${example.label}" example — look it over, then save it.`;
   }
+  /** Open a decoded document. Which of the three shapes it is — one loop, no
+   * loop, or something the flat list cannot hold — is `toEditorState`'s call,
+   * and it is tested there. */
   function loadFrom(doc: BotScript): void {
-    name = doc.name;
-    notes = doc.notes;
-    home = doc.home;
-    watches = [...doc.interrupts];
+    const state = toEditorState(doc);
+    name = state.name;
+    notes = state.notes;
+    home = state.home;
+    watches = [...state.watches];
+    steps = [...state.steps];
+    repeatMode = state.repeatMode;
+    repeatCount = state.repeatCount;
+    advancedProgram = state.advancedProgram;
+    loopID = state.loopID;
+    loopUntil = state.loopUntil;
     selection = null;
     menuFor = null;
     saveConflict = null;
-    const first = doc.program[0];
-    if (doc.program.length === 1 && first !== undefined && first.kind === "loop") {
-      // One loop = the list IS its body (steps and branches alike).
-      advancedProgram = null;
-      steps = [...first.body];
-      if (first.repeat.kind === "forever") {
-        repeatMode = "forever";
-      } else {
-        repeatMode = "times";
-        repeatCount = first.repeat.count;
-      }
-    } else if (doc.program.every((n) => n.kind !== "loop")) {
-      // No loop at all = a run-once list, which the editor holds directly.
-      advancedProgram = null;
-      steps = doc.program.filter((n): n is EditorNode => n.kind !== "loop");
-      repeatMode = "once";
-    } else {
-      // Several loops, or a loop beside loose steps — not a shape one list can
-      // hold. Keep it VERBATIM so it still runs and round-trips, and render it
-      // read-only rather than silently dropping anything. `steps` carries the
-      // flattened contents, so adding a step turns it into a plain flat bot.
-      advancedProgram = doc.program;
-      steps = doc.program.flatMap((n): EditorNode[] =>
-        n.kind === "macro" || n.kind === "branch" || n.kind === "sub-bot" ? [n] : [...n.body],
-      );
-      repeatMode = "once";
-    }
     idSeed += 1000;
   }
 
