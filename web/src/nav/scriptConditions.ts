@@ -63,10 +63,12 @@ export interface ScriptObservation {
   /** The lowest health, 0..1, among YOUR drones out in space; null with none out. */
   readonly lowestDroneHealth?: number | null;
   /**
-   * True when this ship's own drones are out. Not a player condition — the
-   * orchestrator reads it so a "launch drones on a pirate" interrupt is
-   * idempotent: with drones already out the response is satisfied and the step
-   * keeps working, rather than re-issuing a launch every tick.
+   * True when this ship's own drones are out — ANY drones, whatever they are.
+   * Not a player condition: the blocks that warp away read it to know there is
+   * something to call home first, and the "launch drones on a pirate" interrupt
+   * reads it to know the drone slots are taken (a launch into full slots is
+   * refused every tick and would starve the step under it). Which drones are
+   * out, by role, is the `combatDroneIDs` / `salvageDroneIDs` pair below.
    */
   readonly dronesOut: boolean | null;
   // ── Raw reads the macro adapters need (the conditions above are DERIVED from
@@ -78,6 +80,19 @@ export interface ScriptObservation {
   readonly lockedTargetIDs?: readonly number[] | null;
   readonly holds?: readonly MiningHold[] | null;
   readonly droneBayItemIDs?: readonly number[] | null;
+  /**
+   * The drone bay and the drones out BY ROLE, classified from the game's own
+   * group name (see nav/droneRoles.ts). A block launches and orders drones for
+   * the job they can do — combat drones fight, salvage drones salvage — never
+   * the whole bay. `*DroneBayItemIDs` are bay stacks; `*DroneIDs` are drones in
+   * space under THIS ship's control. null mirrors an unreadable bay / snapshot,
+   * and a drone whose group has not resolved is in NO list: cannot tell, so it
+   * is never launched for a job it may not be able to do.
+   */
+  readonly combatDroneBayItemIDs?: readonly number[] | null;
+  readonly salvageDroneBayItemIDs?: readonly number[] | null;
+  readonly combatDroneIDs?: readonly number[] | null;
+  readonly salvageDroneIDs?: readonly number[] | null;
   /** Fitted mining-module ids, refreshed when the active hull or fit changes. */
   readonly miningModuleIDs?: readonly number[];
   /** Fitted salvager ids, refreshed when the active hull or fit changes. */

@@ -478,13 +478,19 @@ function fireInterrupt(
       return continueHeadingHome(obs, { ...mem, latched }, travelHome);
     }
     case "launch-drones": {
-      if (obs.dronesOut === true) {
-        // Already defended — keep working the program.
-        return runProgram(script, obs, mem, registry);
+      // The COMBAT drones, by role (nav/droneRoles.ts) — never the whole bay.
+      // Satisfied once they are out. Nothing to do either when the bay holds no
+      // combat drones (a bay of salvage drones defends nothing) or when OTHER
+      // drones hold the slots: a launch into full slots is refused every tick
+      // and would starve the step under it, so the program keeps working.
+      const combatOut = obs.combatDroneIDs ?? [];
+      const combatBay = obs.combatDroneBayItemIDs ?? [];
+      if (combatOut.length > 0 || combatBay.length === 0 || obs.dronesOut === true) {
+        return runProgram(script, obs, mem, registry, false);
       }
       return {
-        action: { kind: "launchDrones", droneItemIDs: obs.droneBayItemIDs ?? [] },
-        why: "A pirate showed up, so the drones go out to defend the ship.",
+        action: { kind: "launchDrones", droneItemIDs: combatBay },
+        why: "A pirate showed up, so the combat drones go out to defend the ship.",
         phase: "Defending",
         stepPath: row.id,
         interruptID: row.id,

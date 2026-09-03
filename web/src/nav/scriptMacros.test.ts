@@ -309,9 +309,50 @@ test("deliver: drones never make it home -> leave anyway once the wait is spent"
   assert.ok(t.action.kind === "startRoute" && t.action.stationID === 60000004);
 });
 
-test("defend: drones in the bay, none out -> launch them", () => {
-  const t = defend({ id: "d", kind: "macro", macro: "defend-with-drones", args: {} }, obs({ snapshot: snapshot([]), dronesOut: false, droneBayItemIDs: [111, 112] }), NM, {});
-  assert.ok(t.action.kind === "launchDrones" && t.action.droneItemIDs.length === 2);
+const defendStep = { id: "d", kind: "macro", macro: "defend-with-drones", args: {} } as const;
+const pirate = () => entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+
+test("defend: a pirate and combat drones in the bay, none out -> launch ONLY the combat drones", () => {
+  // A mixed bay: two Hobgoblins and a Salvage Drone. The salvage drone stays in.
+  const t = defend(defendStep, obs({ snapshot: snapshot([pirate()]), dronesOut: false, droneBayItemIDs: [111, 112, 113], combatDroneBayItemIDs: [111, 112], salvageDroneBayItemIDs: [113] }), NM, {});
+  assert.ok(t.action.kind === "launchDrones");
+  assert.deepEqual(t.action.droneItemIDs, [111, 112]);
+});
+
+test("defend: a bay of salvage drones is NOT a defence -> blocked with a plain reason", () => {
+  const t = defend(defendStep, obs({ snapshot: snapshot([pirate()]), dronesOut: false, droneBayItemIDs: [113], combatDroneBayItemIDs: [], salvageDroneBayItemIDs: [113] }), NM, {});
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /no combat drones/i);
+});
+
+test("defend: salvage drones out, combat drones in the bay -> call the salvage drones in first, launch once they are home", () => {
+  const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const world = (out: SpaceEntity[]) =>
+    obs({ snapshot: snapshot([pirate(), ...out]), dronesOut: out.length > 0, droneBayItemIDs: [111], combatDroneBayItemIDs: [111], salvageDroneBayItemIDs: [], combatDroneIDs: [], salvageDroneIDs: out.map((e) => e.itemID) });
+  // Tick 1: the salvage drone holds the slot — recall it, not the bay.
+  const recall = defend(defendStep, world([salvager]), {}, {});
+  assert.ok(recall.action.kind === "recallDrones" && recall.action.droneIDs.includes(113));
+  // Tick 2: still coming home — wait, do not spam the launch.
+  const wait = defend(defendStep, world([salvager]), recall.nextMem, {});
+  assert.equal(wait.action.kind, "wait");
+  assert.equal(wait.outcome.kind, "acting");
+  // Tick 3: home — the combat drones go out.
+  const launch = defend(defendStep, world([]), wait.nextMem, {});
+  assert.ok(launch.action.kind === "launchDrones");
+  assert.deepEqual(launch.action.droneItemIDs, [111]);
+});
+
+test("defend: a mixed flight out -> only the combat drones are sent onto the pirate", () => {
+  const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const t = defend(defendStep, obs({ snapshot: snapshot([pirate(), hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113] }), NM, {});
+  assert.ok(t.action.kind === "engageDrones" && t.action.targetID === 6661);
+  assert.deepEqual(t.action.droneIDs, [111]);
+});
+
+test("defend: the launch is bounded — a bay that will not launch blocks rather than spinning", () => {
+  const t = defend(defendStep, obs({ snapshot: snapshot([pirate()]), dronesOut: false, combatDroneBayItemIDs: [111] }), { launchTries: 3 }, {});
+  assert.equal(t.outcome.kind, "blocked");
 });
 
 test("defend: pirate dead but drones still out -> recall them, not done yet", () => {
@@ -362,14 +403,73 @@ test("salvage: wrecks + drones out -> set them salvaging (auto-pick); grid clean
   const wreck = entity({ itemID: 70001, kind: "wreck", name: "Wreck", position: { x: 3000, y: 0, z: 0 } });
   const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
 
-  const sweep = salvage(s, obs({ snapshot: snapshot([wreck, drone]), dronesOut: true }), {}, {});
+  const sweep = salvage(s, obs({ snapshot: snapshot([wreck, drone]), dronesOut: true, salvageDroneIDs: [111] }), {}, {});
   assert.ok(sweep.action.kind === "salvageDrones" && sweep.action.targetID === 0 && sweep.action.droneIDs.includes(111));
 
-  const recall = salvage(s, obs({ snapshot: snapshot([drone]), dronesOut: true }), {}, {});
+  const recall = salvage(s, obs({ snapshot: snapshot([drone]), dronesOut: true, salvageDroneIDs: [111] }), {}, {});
   assert.ok(recall.action.kind === "recallDrones");
 
   const done = salvage(s, obs({ snapshot: snapshot([]) }), {}, {});
   assert.equal(done.outcome.kind, "done");
+});
+
+test("salvage: a mixed flight out -> only the SALVAGE drones get the order; the combat drones are left alone", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const t = salvage(s, obs({ snapshot: snapshot([wreck, hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113] }), {}, {});
+  assert.ok(t.action.kind === "salvageDrones");
+  assert.deepEqual(t.action.droneIDs, [113]);
+  // Grid swept: EVERY drone comes home, whatever it is.
+  const recall = salvage(s, obs({ snapshot: snapshot([hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113] }), {}, {});
+  assert.ok(recall.action.kind === "recallDrones");
+  assert.deepEqual([...recall.action.droneIDs].sort(), [111, 113]);
+});
+
+test("salvage: combat drones out from the fight, salvage drones in the bay -> call the combat drones in, then launch ONLY the salvage drones", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const world = (out: SpaceEntity[]) =>
+    obs({
+      snapshot: snapshot([wreck, ...out]),
+      dronesOut: out.length > 0,
+      droneBayItemIDs: [112, 113],
+      combatDroneBayItemIDs: [112],
+      salvageDroneBayItemIDs: [113],
+      combatDroneIDs: out.map((e) => e.itemID),
+      salvageDroneIDs: [],
+    });
+  const recall = salvage(s, world([hob]), {}, {});
+  assert.ok(recall.action.kind === "recallDrones" && recall.action.droneIDs.includes(111), "the Hobgoblin goes home first");
+  const wait = salvage(s, world([hob]), recall.nextMem, {});
+  assert.equal(wait.action.kind, "wait");
+  assert.equal(wait.outcome.kind, "acting", "still working — not blocked, not done");
+  const launch = salvage(s, world([]), wait.nextMem, {});
+  assert.ok(launch.action.kind === "launchDrones");
+  assert.deepEqual(launch.action.droneItemIDs, [113], "the Hobgoblin stays in the bay");
+});
+
+test("salvage: a bay of combat drones and no salvager is NO way to salvage -> blocked", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const t = salvage(s, obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [], droneBayItemIDs: [111, 112], combatDroneBayItemIDs: [111, 112], salvageDroneBayItemIDs: [] }), {}, {});
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /no salvage drones/i);
+});
+
+test("salvage: combat drones out, nothing that can salvage -> blocked, and it says why", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const t = salvage(s, obs({ snapshot: snapshot([wreck, hob]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [], salvageDroneBayItemIDs: [] }), {}, {});
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /cannot salvage/i);
 });
 
 test("salvage: no drones, salvager fitted -> approach, lock, run it on the wreck", () => {
@@ -533,13 +633,13 @@ test("fight: locks the NEAREST rat, drones on it, then every idle gun on it", ()
   const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
 
   // First tick: lock the NEAR one (concentrated fire), remember it.
-  const lock = fight(s, obs({ snapshot: snapshot([far, near, drone]), dronesOut: true, weaponModuleIDs: [500] }), {}, {});
+  const lock = fight(s, obs({ snapshot: snapshot([far, near, drone]), dronesOut: true, combatDroneIDs: [111], weaponModuleIDs: [500] }), {}, {});
   assert.ok(lock.action.kind === "lock" && lock.action.targetID === 6661);
 
   // Locked: drones onto it first…
   const engage = fight(
     s,
-    obs({ snapshot: snapshot([near, drone]), dronesOut: true, lockedTargetIDs: [6661], weaponModuleIDs: [500] }),
+    obs({ snapshot: snapshot([near, drone]), dronesOut: true, combatDroneIDs: [111], lockedTargetIDs: [6661], weaponModuleIDs: [500] }),
     { targetID: 6661, lockIssued: true, waited: 0, dronesOn: null },
     {},
   );
@@ -614,6 +714,42 @@ test("fight: no guns and no drones -> blocked with a plain reason", () => {
   const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
   const t = fight(s, obs({ snapshot: snapshot([rat]), weaponModuleIDs: [], droneBayItemIDs: [] }), {}, {});
   assert.equal(t.outcome.kind, "blocked");
+  // A bay of salvage drones is no way to fight either.
+  const salvageOnly = fight(s, obs({ snapshot: snapshot([rat]), weaponModuleIDs: [], droneBayItemIDs: [113], combatDroneBayItemIDs: [], salvageDroneBayItemIDs: [113] }), {}, {});
+  assert.equal(salvageOnly.outcome.kind, "blocked");
+});
+
+test("fight: a mixed bay -> only the COMBAT drones are launched; a mixed flight -> only they are set on the rat", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const launch = fight(s, obs({ snapshot: snapshot([rat]), dronesOut: false, droneBayItemIDs: [111, 113], combatDroneBayItemIDs: [111], salvageDroneBayItemIDs: [113] }), {}, {});
+  assert.ok(launch.action.kind === "launchDrones");
+  assert.deepEqual(launch.action.droneItemIDs, [111]);
+
+  const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const engage = fight(
+    s,
+    obs({ snapshot: snapshot([rat, hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113], lockedTargetIDs: [6661], weaponModuleIDs: [500] }),
+    { targetID: 6661, lockIssued: true, waited: 0, dronesOn: null },
+    {},
+  );
+  assert.ok(engage.action.kind === "engageDrones");
+  assert.deepEqual(engage.action.droneIDs, [111]);
+});
+
+test("fight: salvage drones out, combat drones in the bay -> recall the salvage drones, and keep shooting meanwhile", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([rat, salvager]), dronesOut: true, combatDroneBayItemIDs: [111], salvageDroneBayItemIDs: [], combatDroneIDs: [], salvageDroneIDs: [113], lockedTargetIDs: [6661], weaponModuleIDs: [500] });
+  const recall = fight(s, world, {}, {});
+  assert.ok(recall.action.kind === "recallDrones" && recall.action.droneIDs.includes(113));
+  // Next tick the salvage drone is still coming home: the ladder does NOT wait on it — the guns go on.
+  const guns = fight(s, world, { ...recall.nextMem, targetID: 6661, lockIssued: true, waited: 0, dronesOn: null }, {});
+  assert.ok(guns.action.kind === "activate" && guns.action.moduleID === 500, `expected the gun, got ${guns.action.kind}`);
 });
 
 test("defend: pirate dead and drones home -> done", () => {

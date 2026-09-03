@@ -95,6 +95,95 @@ function myDroneIDs(snapshot: SpaceSnapshot | null): readonly number[] {
   return snapshot.entities.filter((e) => canMyShipOrderDrone(e, shipID) === true).map((e) => e.itemID);
 }
 
+// ── Drones by ROLE ───────────────────────────────────────────────────────────
+// A block launches and orders drones for the job they can do: the combat blocks
+// take the combat drones, the salvage block the salvage drones, and neither
+// touches the rest. The whole bay used to go out for either job — a Hobgoblin
+// ordered to salvage is refused by the server, and the wrong drones then held
+// the slots the right ones needed, so the block waited on them forever. The
+// roles come off the observation (flow.ts classifies bay stacks and drones in
+// space by the game's own group name — see nav/droneRoles.ts). Recalls stay
+// role-blind: every drone this hull can order comes home.
+type DroneRole = "combat" | "salvage";
+
+interface DroneRoster {
+  /** Every drone this ship can order, whatever it is — what a recall takes. */
+  readonly out: readonly number[];
+  /** The role's drones out in space, and its stacks still in the bay. */
+  readonly roleOut: readonly number[];
+  readonly roleBay: readonly number[];
+  /** Drones out that are NOT this role — they hold the slots the role needs. */
+  readonly othersOut: readonly number[];
+}
+
+function droneRoster(obs: ScriptObservation, role: DroneRole): DroneRoster {
+  const out = myDroneIDs(obs.snapshot ?? null);
+  const roleSet = new Set((role === "combat" ? obs.combatDroneIDs : obs.salvageDroneIDs) ?? []);
+  return {
+    out,
+    roleOut: out.filter((id) => roleSet.has(id)),
+    roleBay: (role === "combat" ? obs.combatDroneBayItemIDs : obs.salvageDroneBayItemIDs) ?? [],
+    othersOut: out.filter((id) => !roleSet.has(id)),
+  };
+}
+
+const LAUNCH_MAX_TRIES = 3; // a launch the server keeps refusing is not retried forever
+
+/**
+ * Put THIS role's drones out, or a null tick when there is nothing to do right
+ * now (they are out already, the bay has none, or the launch has been tried
+ * enough). Drones of another role hold the slots, so they are called in ONCE
+ * first and the launch waits for them to be gone — bounded by
+ * RECALL_MAX_WAIT_TICKS, after which it is tried anyway. While waiting the
+ * caller carries on with its own work: a fight keeps shooting while the
+ * salvage drones come home. The returned memory carries the bookkeeping
+ * whichever way it went, so callers must take it.
+ */
+function launchRoleDrones(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  phase: string,
+  role: DroneRole,
+  why: string,
+): { readonly tick: MacroTick | null; readonly mem: MacroMemory } {
+  const roster = droneRoster(obs, role);
+  if (roster.roleOut.length > 0 || roster.roleBay.length === 0) {
+    return { tick: null, mem };
+  }
+  if (roster.othersOut.length > 0) {
+    if (!flag(mem, "othersRecalled")) {
+      return {
+        tick: tick(
+          { kind: "recallDrones", droneIDs: roster.othersOut },
+          `Calling the other drones in to make room for the ${role} drones.`,
+          phase,
+          ACTING,
+          true,
+          { ...mem, othersRecalled: true, recallWaited: 0 },
+        ),
+        mem,
+      };
+    }
+    const waited = (num(mem, "recallWaited") ?? 0) + 1;
+    if (waited <= RECALL_MAX_WAIT_TICKS) {
+      return { tick: null, mem: { ...mem, recallWaited: waited } };
+    }
+  }
+  const tries = num(mem, "launchTries") ?? 0;
+  if (tries >= LAUNCH_MAX_TRIES) {
+    return { tick: null, mem };
+  }
+  return {
+    tick: tick({ kind: "launchDrones", droneItemIDs: roster.roleBay }, why, phase, ACTING, true, { ...mem, launchTries: tries + 1 }),
+    mem,
+  };
+}
+
+/** True once the role's launch has been tried its full budget and still nothing is out. */
+function launchStalled(mem: MacroMemory): boolean {
+  return (num(mem, "launchTries") ?? 0) >= LAUNCH_MAX_TRIES;
+}
+
 /**
  * Before a block warps AWAY from the grid, don't abandon the drones. The standard
  * move: call them home ONCE, align toward the exit so the ship is ready to warp,
@@ -495,42 +584,52 @@ const defendWithDrones: MacroDecider = (_step, obs, mem) => {
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Not in space, so nothing to defend against.", "Defending", { kind: "done" });
   }
-  if (obs.dronesOut !== true) {
-    const bay = obs.droneBayItemIDs ?? [];
-    if (bay.length === 0) {
-      return tick(WAIT, "No combat drones in the bay.", "Defending", {
-        kind: "blocked",
-        reason: "There are no combat drones in the bay to launch.",
-      });
-    }
-    return tick({ kind: "launchDrones", droneItemIDs: bay }, "Launching the combat drones.", "Launching drones", ACTING);
-  }
-  const shipID = snapshot.ship?.itemID ?? null;
-  const myDrones = snapshot.entities.filter((e) => canMyShipOrderDrone(e, shipID) === true).map((e) => e.itemID);
+  const roster = droneRoster(obs, "combat");
   const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
   const target = hostileRows(snapshot, origin)[0]?.itemID ?? null;
   if (target === null) {
-    // The pirates are gone. Bring the drones home BEFORE finishing — the block
-    // is done only once they are actually back, so the loop never warps off to
-    // the next task and abandons them.
-    if (myDrones.length > 0) {
-      return tick({ kind: "recallDrones", droneIDs: myDrones }, "The pirates are gone — calling the drones back in.", "Recalling drones", ACTING);
+    // The pirates are gone. Bring the drones home BEFORE finishing — ALL of
+    // them, whatever they are — the block is done only once they are actually
+    // back, so the loop never warps off to the next task and abandons them.
+    if (roster.out.length > 0) {
+      return tick({ kind: "recallDrones", droneIDs: roster.out }, "The pirates are gone — calling the drones back in.", "Recalling drones", ACTING);
     }
     return tick(WAIT, "The drones are back; nothing left to fight.", "Defending", { kind: "done" });
   }
-  if (myDrones.length === 0) {
-    return tick(WAIT, "No drones we can command out here.", "Defending", { kind: "done" });
+  // The COMBAT drones out — never the whole bay (see launchRoleDrones).
+  const launch = launchRoleDrones(obs, mem, "Launching drones", "combat", "Launching the combat drones.");
+  if (launch.tick !== null) {
+    return launch.tick;
+  }
+  mem = launch.mem;
+  if (roster.roleOut.length === 0) {
+    if (roster.roleBay.length === 0) {
+      return tick(WAIT, "No combat drones in the bay.", "Defending", {
+        kind: "blocked",
+        reason:
+          roster.othersOut.length > 0
+            ? "The drones out cannot fight, and there are no combat drones in the bay to launch."
+            : "There are no combat drones in the bay to launch.",
+      });
+    }
+    if (launchStalled(mem)) {
+      return tick(WAIT, "The combat drones would not launch.", "Defending", {
+        kind: "blocked",
+        reason: "The combat drones could not be launched.",
+      });
+    }
+    return tick(WAIT, "Waiting for the other drones to come home so the combat drones can go out.", "Launching drones", ACTING, true, mem);
   }
   if (num(mem, "engaged") === target) {
-    return tick(WAIT, "The drones are on the pirate.", "Fighting", ACTING);
+    return tick(WAIT, "The drones are on the pirate.", "Fighting", ACTING, true, mem);
   }
   return tick(
-    { kind: "engageDrones", droneIDs: myDrones, targetID: target },
+    { kind: "engageDrones", droneIDs: roster.roleOut, targetID: target },
     "Sending the drones onto the pirate.",
     "Fighting",
     ACTING,
     true,
-    { engaged: target },
+    { ...mem, engaged: target },
   );
 };
 
@@ -1061,23 +1160,25 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Salvaging", ACTING, false, mem);
   }
   const wrecks = wrecksOnGrid(snapshot);
-  const myDrones = myDroneIDs(snapshot);
+  const roster = droneRoster(obs, "salvage");
   if (wrecks.length === 0) {
     // Swept clean — bring the drones home before finishing (never abandon them).
-    if (myDrones.length > 0) {
-      return tick({ kind: "recallDrones", droneIDs: myDrones }, "All salvaged — calling the drones home.", "Salvaging", ACTING);
+    if (roster.out.length > 0) {
+      return tick({ kind: "recallDrones", droneIDs: roster.out }, "All salvaged — calling the drones home.", "Salvaging", ACTING);
     }
     return tick(WAIT, "Nothing left to salvage.", "Salvaging", { kind: "done" });
   }
 
-  // Drones out: point them at wrecks (auto-pick), re-issued on a slow beat so a
-  // drone that finished one wreck moves to the next without micromanagement.
-  if (myDrones.length > 0) {
+  if (roster.roleOut.length > 0) {
+    // SALVAGE drones out: point them at wrecks (auto-pick), re-issued on a slow
+    // beat so a drone that finished one wreck moves to the next without
+    // micromanagement. Only the salvage drones — a combat drone given this
+    // order is refused by the server, every beat, forever.
     const sinceIssue = (num(mem, "sinceIssue") ?? SALVAGE_REISSUE_TICKS) + 1;
     if (sinceIssue > SALVAGE_REISSUE_TICKS) {
       return tick(
-        { kind: "salvageDrones", droneIDs: myDrones, targetID: 0 },
-        "Setting the drones on the wrecks.",
+        { kind: "salvageDrones", droneIDs: roster.roleOut, targetID: 0 },
+        "Setting the salvage drones on the wrecks.",
         "Salvaging",
         ACTING,
         true,
@@ -1087,19 +1188,33 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     // Fall through with the beat advanced: the MODULE ladder below still runs
     // this tick if salvagers are fitted; otherwise we wait while the drones work.
     mem = { ...mem, sinceIssue };
+  } else {
+    // None out: get the salvage drones (and ONLY them) out of the bay. Combat
+    // drones still out from the fight before hold the slots, so they are called
+    // in first — see launchRoleDrones.
+    const launch = launchRoleDrones(obs, mem, "Salvaging", "salvage", "Launching the salvage drones.");
+    if (launch.tick !== null) {
+      return launch.tick;
+    }
+    mem = launch.mem;
   }
 
   const salvagers = obs.salvageModuleIDs ?? [];
   if (salvagers.length === 0) {
-    if (myDrones.length > 0) {
-      return tick(WAIT, "The drones are working the wrecks.", "Salvaging", ACTING, true, mem);
+    if (roster.roleOut.length > 0) {
+      return tick(WAIT, "The salvage drones are working the wrecks.", "Salvaging", ACTING, true, mem);
     }
-    if ((obs.droneBayItemIDs ?? []).length > 0) {
-      return tick({ kind: "launchDrones", droneItemIDs: obs.droneBayItemIDs ?? [] }, "Launching the drones to salvage.", "Salvaging", ACTING, true, mem);
+    if (roster.roleBay.length > 0 && !launchStalled(mem)) {
+      return tick(WAIT, "Waiting for the other drones to come home so the salvage drones can go out.", "Salvaging", ACTING, true, mem);
     }
     return tick(WAIT, "No way to salvage.", "Salvaging", {
       kind: "blocked",
-      reason: "This ship has no salvage drones in the bay and no salvager fitted.",
+      reason:
+        roster.roleBay.length > 0
+          ? "The salvage drones could not be launched."
+          : roster.othersOut.length > 0
+            ? "The drones out cannot salvage, and this ship has no salvage drones in the bay and no salvager fitted."
+            : "This ship has no salvage drones in the bay and no salvager fitted.",
     });
   }
 
@@ -1410,27 +1525,35 @@ const fightTheRats: MacroDecider = (_step, obs, mem) => {
   }
   const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
   const hostiles = hostilesInReach(obs, snapshot, origin);
-  const myDrones = myDroneIDs(snapshot);
+  const roster = droneRoster(obs, "combat");
 
   if (hostiles.length === 0) {
-    if (myDrones.length > 0) {
-      return tick({ kind: "recallDrones", droneIDs: myDrones }, "Grid clear — calling the drones home.", "Fighting", ACTING);
+    if (roster.out.length > 0) {
+      return tick({ kind: "recallDrones", droneIDs: roster.out }, "Grid clear — calling the drones home.", "Fighting", ACTING);
     }
     return tick(WAIT, "The grid is clear.", "Fighting", { kind: "done" });
   }
 
   const weapons = obs.weaponModuleIDs ?? [];
-  const bay = obs.droneBayItemIDs ?? [];
-  if (weapons.length === 0 && myDrones.length === 0 && bay.length === 0) {
+  if (weapons.length === 0 && roster.roleOut.length === 0 && roster.roleBay.length === 0) {
     return tick(WAIT, "No way to fight.", "Fighting", {
       kind: "blocked",
       reason: "This ship has no guns fitted and no combat drones in the bay.",
     });
   }
 
-  // Drones out first — they defend on their own the moment they undock.
-  if (obs.dronesOut !== true && bay.length > 0) {
-    return tick({ kind: "launchDrones", droneItemIDs: bay }, "Launching the drones.", "Fighting", ACTING, true, mem);
+  // The COMBAT drones out first — they defend on their own the moment they
+  // undock. Never the whole bay: the salvage drones stay in it (launchRoleDrones).
+  const launch = launchRoleDrones(obs, mem, "Fighting", "combat", "Launching the combat drones.");
+  if (launch.tick !== null) {
+    return launch.tick;
+  }
+  mem = launch.mem;
+  if (weapons.length === 0 && roster.roleOut.length === 0 && launchStalled(mem)) {
+    return tick(WAIT, "No way to fight.", "Fighting", {
+      kind: "blocked",
+      reason: "The combat drones could not be launched, and there are no guns to fall back on.",
+    });
   }
 
   // The primary: nearest hostile (hostileRows is nearest-first), remembered so
@@ -1447,7 +1570,7 @@ const fightTheRats: MacroDecider = (_step, obs, mem) => {
       "Fighting",
       ACTING,
       true,
-      { targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
+      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
     );
   }
   const locked = (obs.lockedTargetIDs ?? []).includes(targetID);
@@ -1462,10 +1585,10 @@ const fightTheRats: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, { ...mem, waited });
   }
 
-  // Locked: drones onto it once, then every idle gun onto it.
-  if (myDrones.length > 0 && num(mem, "dronesOn") !== targetID) {
+  // Locked: the combat drones onto it once, then every idle gun onto it.
+  if (roster.roleOut.length > 0 && num(mem, "dronesOn") !== targetID) {
     return tick(
-      { kind: "engageDrones", droneIDs: myDrones, targetID },
+      { kind: "engageDrones", droneIDs: roster.roleOut, targetID },
       "Setting the drones on it.",
       "Fighting",
       ACTING,

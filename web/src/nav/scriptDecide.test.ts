@@ -361,11 +361,12 @@ test("a dock-and-pause interrupt flies home and then stops", () => {
 test("a launch-drones interrupt launches once, then yields to the step when drones are out", () => {
   const drones: InterruptRow = { id: "d", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, drones]);
-  const launching = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false }), initialMemory(s), registry, home);
+  const launching = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false, combatDroneBayItemIDs: [1, 2], salvageDroneBayItemIDs: [3] }), initialMemory(s), registry, home);
   assert.equal(launching.action.kind, "launchDrones");
+  assert.deepEqual(launching.action.kind === "launchDrones" ? launching.action.droneItemIDs : [], [1, 2], "the COMBAT drones only — the salvage drone stays in the bay");
   assert.equal(launching.interruptID, "d");
   // Drones now out: the interrupt is satisfied and the step keeps working.
-  const working = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true }), launching.memory, registry, home);
+  const working = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true, combatDroneIDs: [1, 2] }), launching.memory, registry, home);
   assert.equal(working.action.kind, "activate");
   assert.equal(working.stepPath, "m");
 });
@@ -431,6 +432,18 @@ test("a fight-back watch with no ratting macro in the registry leaves the progra
   const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), registry, home);
   assert.equal(r.stepPath, "m");
   assert.equal(r.status, "running");
+});
+
+test("a launch-drones interrupt with no combat drones to launch yields to the step rather than spinning", () => {
+  const drones: InterruptRow = { id: "d", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, drones]);
+  // A bay of salvage drones defends nothing.
+  const salvageOnly = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false, combatDroneBayItemIDs: [], salvageDroneBayItemIDs: [3] }), initialMemory(s), registry, home);
+  assert.equal(salvageOnly.action.kind, "activate");
+  assert.equal(salvageOnly.stepPath, "m");
+  // Other drones hold the slots: a launch would be refused every tick, so the step keeps working.
+  const slotsTaken = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true, combatDroneBayItemIDs: [1], combatDroneIDs: [] }), initialMemory(s), registry, home);
+  assert.equal(slotsTaken.action.kind, "activate");
 });
 
 // ─── Bounds: cannot-tell streak and the step-tick cap ────────────────────────

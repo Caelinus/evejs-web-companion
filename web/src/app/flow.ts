@@ -180,6 +180,7 @@ import {
 } from "../nav/scriptCapabilities.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
 import type { ScriptObservation } from "../nav/scriptConditions.ts";
+import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
 import { decodeFormations } from "../bridge/formations.ts";
 import { scannerStateFromBoundRead } from "../scanner/scannerCenter.ts";
@@ -5670,6 +5671,45 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return { shield, armor, hull, cap };
   }
 
+  /**
+   * The drone bay and the drones this hull controls BY ROLE, from the game's own
+   * group name — the resolve-then-judge pass the module classifiers above make,
+   * applied to drones so a block never launches the whole bay (the salvage
+   * block used to send Hobgoblins to salvage; see nav/droneRoles.ts). Group
+   * names are cached after the first look, so this costs one /api/names round
+   * trip per NEW drone type, not one per tick. A name read that fails leaves
+   * those drones in no role for the tick: cannot tell, so never launched.
+   */
+  async function classifyDroneRoles(
+    bay: ReturnType<typeof decodeDroneBay>,
+    snapshot: ReturnType<typeof decodeSpaceSnapshot>,
+    shipID: number | null,
+  ): Promise<{ readonly bay: DroneRoleIDs | null; readonly out: DroneRoleIDs | null }> {
+    const drones = snapshot === null ? null : snapshot.entities.filter((e) => canMyShipOrderDrone(e, shipID) === true);
+    const typeIDs = new Set<number>();
+    for (const stack of bay ?? []) {
+      typeIDs.add(stack.typeID);
+    }
+    for (const drone of drones ?? []) {
+      if (drone.typeID !== null) {
+        typeIDs.add(drone.typeID);
+      }
+    }
+    if (typeIDs.size > 0) {
+      try {
+        await resolveNamesNow([...typeIDs].map((id) => ({ kind: "typeGroup" as const, id })));
+      } catch {
+        // Unresolved groups land in no role this tick; the next tick asks again.
+      }
+    }
+    const resolved = store.names.get().resolved;
+    const groupOf = (typeID: number): string | null => resolved[nameKey("typeGroup", typeID)] ?? null;
+    return {
+      bay: bay === null ? null : splitDroneRoles(bay, (stack) => stack.typeID, (stack) => stack.itemID, groupOf),
+      out: drones === null ? null : splitDroneRoles(drones, (drone) => drone.typeID, (drone) => drone.itemID, groupOf),
+    };
+  }
+
   function resolveSalvageModuleIDs(): readonly number[] {
     const fit = store.fitting.get();
     if (fit.slotsError !== null) {
@@ -5943,6 +5983,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const droneBayItemIDs = bay === null ? null : bay.map((stack) => stack.itemID);
 
         const ship = snapshot?.ship ?? null;
+        const droneRoles = await classifyDroneRoles(bay, snapshot, ship?.itemID ?? null);
         const hold = destinationHold(holds);
         const capacity = hold?.capacity ?? null;
         const used = capacity?.used ?? null;
@@ -6296,6 +6337,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           lockedTargetIDs,
           holds,
           droneBayItemIDs,
+          combatDroneBayItemIDs: droneRoles.bay?.combat ?? null,
+          salvageDroneBayItemIDs: droneRoles.bay?.salvage ?? null,
+          combatDroneIDs: droneRoles.out?.combat ?? null,
+          salvageDroneIDs: droneRoles.out?.salvage ?? null,
           miningModuleIDs: capabilities.mining,
           salvageModuleIDs: capabilities.salvage,
           shieldRepairerIDs: capabilities.defense.shield,
