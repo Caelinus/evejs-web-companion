@@ -67,6 +67,27 @@
 @import "@fontsource/barlow-condensed/latin-500.css";
 @import "@fontsource/barlow-condensed/latin-600.css";
 
+/* ------------------------------------------- the Pilot Hangar's two faces --
+ * The hangar landing screen (section 5 below) is set in Barlow SEMI Condensed
+ * with JetBrains Mono for every number and status label. That is one width step
+ * wider than the Barlow Condensed above, and it is the right call for that
+ * screen: the hangar sets whole pilot names, ship names and system names at 12-
+ * 15px in a 272px column, where the display face's tighter width starts costing
+ * legibility rather than buying character.
+ *
+ * SELF-HOSTED for the same reason as the display face, and it matters more here:
+ * the hangar is the FIRST screen, so a webfont from fonts.gstatic.com would be
+ * the app's first request — and on the LAN this client normally runs on there is
+ * no outbound path for it to take. Resolved through node_modules at build time;
+ * Vite emits the woff2 into public/dist beside everything else.
+ *
+ * Only the weights the screen sets: 400 (meta lines, dialog copy), 600 (pilot
+ * and account names) and 700 (the wordmark), plus mono 400. */
+@import "@fontsource/barlow-semi-condensed/latin-400.css";
+@import "@fontsource/barlow-semi-condensed/latin-600.css";
+@import "@fontsource/barlow-semi-condensed/latin-700.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+
 /* ------------------------------------------------------------------ tokens */
 @theme {
   /* The display face, with a condensed-first fallback chain so a build that
@@ -4931,4 +4952,1048 @@
       justify-content: flex-start;
     }
   }
+
+  /* ======================================================================
+   * 5. THE PILOT HANGAR — the landing screen
+   * ----------------------------------------------------------------------
+   * The first screen of the app: every pilot the player knows, grouped by the
+   * account it signs in through, with squads laid over the top. It replaced a
+   * flat list of every character plus a login panel, which stopped working
+   * somewhere around fifty pilots.
+   *
+   * WHY THIS SECTION HAS ITS OWN PALETTE AND ITS OWN DENSITY.
+   * The rest of this file dresses PANELS — framed blocks of prose and record
+   * tables, inside a 72rem centred column, with 40px controls (R8). The hangar
+   * is not a panel. It is a full-bleed screen whose whole job is to put ~100
+   * pilots and four facts about each on one page without scrolling sideways,
+   * and it was designed and signed off at its own densities: 30px chips, 21px
+   * launch buttons, 15px checkboxes, 3px gaps. Those numbers are the design,
+   * not an accident of it — see docs/pilot-hangar.md.
+   *
+   * So the divergences are deliberate and BOUNDED:
+   *   • every rule here is under `.hangar`, so nothing leaks into a panel;
+   *   • the palette is declared once as `--hangar-*` custom properties on the
+   *     root element, so the screen has exactly one place to retune;
+   *   • the page/panel/line values are a shade cooler and darker than the app
+   *     tokens (#070a0f vs #05080d) because the screen is edge-to-edge dark
+   *     with no panel frames to separate its surfaces.
+   *
+   * WHAT IT DOES NOT DIVERGE ON. Colour is never the only signal: the ON and
+   * IDLE badges carry their words, every squad dot carries a `title`, the
+   * launch buttons say ALL. Nothing renders a numeric id (R7d) — an unresolved
+   * place or skill prints an em dash. There is no horizontal page scroll at
+   * 360px: the grid collapses to one column and the chip row is the one thing
+   * that scrolls, inside itself, on purpose.
+   *
+   * THE ONE KNOWN TENSION with R8 is target size. A pilot row is a 56px tap
+   * target and the account header is 40px, but the chips, the pin star and the
+   * row checkboxes are smaller than 40px — deliberately, because a grid of
+   * 100 pilots at 40px per control is the unusable screen this replaced. The
+   * mitigation is behavioural and lives in PilotHangar.svelte: below 760px a
+   * tap on a pilot ROW selects rather than launches, so the small controls stop
+   * being on the critical path and the row itself is what you aim at.
+   * ==================================================================== */
+
+  /* The screen itself: a full-viewport surface, whether it is the boot landing
+   * page or an overlay over a live cockpit. Fixed rather than in the document
+   * flow so it escapes #app's centred 72rem column and its gutter — the hangar
+   * is edge-to-edge by design, and its header is sticky against this box. */
+  .hangar {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--hangar-page);
+  }
+
+  /* The palette, the two faces and the control resets. `.hangar-chrome` carries
+   * them onto the dialogs, which are fixed overlays rendered OUTSIDE the screen
+   * — without this they inherited the page's font and none of the --hangar-*
+   * custom properties, so every dialog came out transparent and unstyled. The
+   * add-character overlay deliberately does NOT take this class: it hosts the
+   * app's own create-character panel, which must keep the app's look. */
+  .hangar,
+  .hangar-chrome {
+    --hangar-accent: #2c6f9e;
+    --hangar-accent-fill: #14405e;
+    --hangar-accent-hover: #1b5580;
+    --hangar-page: #070a0f;
+    --hangar-panel: #0b1119;
+    --hangar-row: #0d141c;
+    --hangar-row-hover: #101c27;
+    --hangar-row-selected: #0f1c28;
+    --hangar-field: #0a1119;
+    --hangar-line: #16202c;
+    --hangar-line-2: #17222f;
+    --hangar-line-3: #1a2634;
+    --hangar-line-4: #1d2b3a;
+    --hangar-line-5: #24455c;
+    --hangar-text: #c8d4e0;
+    --hangar-text-bright: #e6eef6;
+    --hangar-text-strong: #dbe6f1;
+    --hangar-text-mid: #9aadc0;
+    --hangar-text-soft: #8aa2b8;
+    --hangar-text-dim: #6b8299;
+    --hangar-text-dimmer: #5b7288;
+    --hangar-text-faint: #46596d;
+    --hangar-text-ghost: #2b3a4b;
+    --hangar-good: #52d9a3;
+    --hangar-good-line: #1e5c45;
+    --hangar-link: #6fb4e8;
+    --hangar-link-bright: #8fd0f5;
+    --hangar-warn: #e0b155;
+    --hangar-warn-line: #4a3a16;
+    --hangar-warn-fill: #3a2a08;
+    --hangar-warn-fill-line: #7a5c1c;
+    --hangar-bad: #d98a8a;
+    --hangar-bad-fill: #1d0d0d;
+    --hangar-bad-line: #55272a;
+    --hangar-bad-hover: #2b1214;
+    --hangar-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+    color: var(--hangar-text);
+    font-family: "Barlow Semi Condensed", "Barlow Condensed", "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.35;
+  }
+  :is(.hangar, .hangar-chrome) *,
+  :is(.hangar, .hangar-chrome) *::before,
+  :is(.hangar, .hangar-chrome) *::after { box-sizing: border-box; }
+
+  /* The base layer dresses every <button> as a 40px raised control. Inside the
+   * hangar a button is a bare surface the classes below paint; this reset is
+   * what lets a 19px "▶ ALL" exist at all. It sits in @layer components, so it
+   * beats @layer base on the strength of the layer alone.
+   *
+   * `:where()` is load-bearing, not decoration. Written as `.hangar button` the
+   * reset is a class PLUS a type, which out-specifies every single-class paint
+   * rule below it — and every filled control on the screen came out transparent.
+   * `:where()` contributes nothing, so the reset weighs one class and loses to
+   * the paint rules that follow it, which is what a reset is for. */
+  :is(.hangar, .hangar-chrome) :where(button) {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    min-height: 0;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background 120ms linear, border-color 120ms linear, color 120ms linear;
+  }
+  :is(.hangar, .hangar-chrome) :where(input) {
+    border-radius: 0;
+    min-height: 0;
+    font: inherit;
+  }
+  .hangar input[type="checkbox"] {
+    accent-color: var(--hangar-accent);
+    margin: 0;
+    flex: none;
+    width: 15px;
+    height: 15px;
+  }
+  .hangar-mono {
+    font-family: var(--hangar-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  @keyframes hangarPulseDot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  @keyframes hangarRiseIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  /* --- header ---------------------------------------------------------- */
+
+  .hangar-head {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 0 20px;
+    min-height: 52px;
+    border-bottom: 1px solid var(--hangar-line);
+    background: linear-gradient(180deg, #0d141d, #0a1017);
+  }
+  .hangar-brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+  }
+  .hangar-wordmark {
+    font-size: 13px;
+    letter-spacing: 3px;
+    font-weight: 700;
+    color: var(--hangar-link);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .hangar-online-count {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--hangar-mono);
+    font-size: 11px;
+    color: var(--hangar-text-dim);
+    white-space: nowrap;
+  }
+  .hangar-online-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--hangar-good);
+    animation: hangarPulseDot 2.4s infinite;
+  }
+  .hangar-search {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 32px;
+    flex: 1;
+    min-width: 180px;
+    max-width: 440px;
+    padding: 0 11px;
+    background: var(--hangar-field);
+    border: 1px solid var(--hangar-line-4);
+  }
+  .hangar-search:focus-within { border-color: var(--hangar-accent); }
+  .hangar-search-slash {
+    font-family: var(--hangar-mono);
+    font-size: 12px;
+    color: var(--hangar-text-faint);
+  }
+  .hangar-search input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    padding: 0;
+    color: var(--hangar-text-strong);
+    font-size: 15px;
+  }
+  .hangar-match {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-faint);
+    border: 1px solid var(--hangar-line-4);
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+  .hangar-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .hangar-manage {
+    height: 30px;
+    padding: 0 13px;
+    flex: none;
+    background: transparent;
+    border: 1px solid var(--hangar-line-4);
+    color: var(--hangar-text-soft);
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  .hangar-manage.is-on {
+    background: var(--hangar-warn-fill);
+    border-color: var(--hangar-warn-fill-line);
+    color: var(--hangar-warn);
+  }
+  .hangar-add {
+    height: 30px;
+    padding: 0 14px;
+    flex: none;
+    background: var(--hangar-accent-fill);
+    border: 1px solid var(--hangar-accent);
+    color: #cfe8fa;
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-add:hover:not(:disabled) { background: var(--hangar-accent-hover); }
+
+  /* --- squad chip row -------------------------------------------------- */
+
+  .hangar-chiprow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding: 20px 20px 0;
+  }
+  .hangar-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 11px;
+    flex: none;
+    font-size: 13px;
+    background: var(--hangar-panel);
+    border: 1px solid var(--hangar-line-3);
+    color: var(--hangar-text-mid);
+  }
+  .hangar-chip.is-on {
+    background: var(--hangar-row-selected);
+    border-color: var(--hangar-accent);
+    color: var(--hangar-text-bright);
+  }
+  .hangar-swatch {
+    width: 7px;
+    height: 7px;
+    flex: none;
+  }
+  /* Same structure as a picker row: the chip is a box, its label is a button,
+   * and "▶ ALL" / "edit" sit beside that button rather than inside it. */
+  .hangar-chip-select {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    color: inherit;
+  }
+  .hangar-chip-name { white-space: nowrap; }
+  .hangar-chip-count {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-dimmer);
+  }
+  .hangar-chip.is-on .hangar-chip-count { color: inherit; opacity: 0.65; }
+  /* "▶ ALL" — the same control in three sizes: on a chip, on an account header
+   * and in the squad picker. Only the height and padding differ. */
+  .hangar-launch {
+    height: 19px;
+    padding: 0 6px;
+    flex: none;
+    background: #10202c;
+    border: 1px solid var(--hangar-line-5);
+    color: #7fc4ee;
+    font-family: var(--hangar-mono);
+    font-size: 9px;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-launch:hover:not(:disabled) { background: #17364b; }
+  .hangar-launch.is-account {
+    height: 21px;
+    padding: 0 8px;
+    color: var(--hangar-link-bright);
+  }
+  .hangar-launch.is-picker { height: 20px; }
+  .hangar-chip-edit {
+    height: 19px;
+    padding: 0 5px;
+    flex: none;
+    background: transparent;
+    border: 1px solid #24354a;
+    color: var(--hangar-text-soft);
+    font-size: 10px;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-chip-edit:hover:not(:disabled) { border-color: var(--hangar-accent); }
+
+  /* --- squad picker popover -------------------------------------------- */
+
+  .hangar-picker { position: relative; flex: none; }
+  .hangar-picker-panel {
+    position: absolute;
+    z-index: 14;
+    top: 36px;
+    left: 0;
+    width: 300px;
+    background: var(--hangar-panel);
+    border: 1px solid var(--hangar-line-5);
+    box-shadow: 0 14px 34px rgb(0 0 0 / 0.65);
+    animation: hangarRiseIn 0.14s ease-out;
+  }
+  .hangar-picker-search { padding: 9px; border-bottom: 1px solid var(--hangar-line-2); }
+  .hangar-picker-list {
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 5px;
+  }
+  .hangar-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 7px;
+  }
+  .hangar-picker-row:hover { background: #101a25; }
+  /* The row's own label is the button; the star and "▶ ALL" are siblings, not
+   * children — a control inside a control is not something a screen reader or a
+   * keyboard can take apart. */
+  .hangar-picker-select {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+  }
+  .hangar-picker-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    color: var(--hangar-text-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hangar-picker-count {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-dimmer);
+    flex: none;
+  }
+  .hangar-picker-empty {
+    padding: 14px 8px;
+    font-size: 13px;
+    color: var(--hangar-text-faint);
+    text-align: center;
+  }
+  .hangar-picker-new {
+    width: 100%;
+    height: 34px;
+    border-top: 1px solid var(--hangar-line-2);
+    color: var(--hangar-text-soft);
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-picker-new:hover:not(:disabled) {
+    background: #101a25;
+    color: #cfe8fa;
+  }
+  /* The pin star, on a picker row and on a pilot row. Off is a dim slate, not
+   * an absence — an invisible control is not a control. */
+  .hangar-star {
+    width: 22px;
+    height: 20px;
+    flex: none;
+    font-size: 11px;
+    color: var(--hangar-text-ghost);
+  }
+  .hangar-star.is-on { color: var(--hangar-warn); }
+
+  /* --- summary line ---------------------------------------------------- */
+
+  .hangar-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 20px 0;
+    font-family: var(--hangar-mono);
+    font-size: 11px;
+    color: var(--hangar-text-dimmer);
+  }
+  .hangar-summary-bar { color: var(--hangar-text-ghost); }
+  .hangar-summary-manage { color: var(--hangar-warn); }
+
+  /* --- account grid ---------------------------------------------------- */
+
+  .hangar-grid {
+    display: grid;
+    gap: 12px;
+    align-items: stretch;
+    padding: 14px 20px 40px;
+    grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  }
+  /* Room for the floating selection bar, so the last row is never under it. */
+  .hangar-grid.has-selection { padding-bottom: 110px; }
+
+  .hangar-account {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--hangar-panel);
+    border: 1px solid var(--hangar-line-2);
+  }
+  .hangar-account-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 10px;
+    border-top: 2px solid var(--hangar-accent);
+    background: linear-gradient(180deg, #10202c, #0c141d);
+  }
+  .hangar-caret {
+    flex: none;
+    font-size: 10px;
+    color: var(--hangar-text-faint);
+  }
+  .hangar-account-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 1.4px;
+    color: var(--hangar-text-strong);
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hangar-account-count {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-dimmer);
+    flex: none;
+  }
+  /* Manage mode's remove: the same red on every surface it appears on. */
+  .hangar-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    height: 21px;
+    width: 21px;
+    background: var(--hangar-bad-fill);
+    border: 1px solid var(--hangar-bad-line);
+    color: var(--hangar-bad);
+    font-size: 11px;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-remove:hover:not(:disabled) { background: var(--hangar-bad-hover); }
+  .hangar-remove.is-pilot {
+    height: 20px;
+    width: 22px;
+    font-size: 10px;
+  }
+
+  .hangar-pilots {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px;
+    /* Every account box in a grid row ends level: the list takes the slack. */
+    flex: 1;
+  }
+
+  /* --- one pilot ------------------------------------------------------- */
+
+  .hangar-row {
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+    width: 100%;
+    padding: 9px 10px;
+    text-align: left;
+    background: var(--hangar-row);
+    border: 1px solid var(--hangar-line-2);
+  }
+  :is(.hangar, .hangar-chrome) .hangar-row.is-clickable:hover {
+    background: var(--hangar-row-hover);
+    border-color: var(--hangar-accent);
+  }
+  :is(.hangar, .hangar-chrome) .hangar-row.is-clickable { cursor: pointer; }
+  .hangar-row.is-selected {
+    background: var(--hangar-row-selected);
+    border-color: var(--hangar-accent);
+  }
+  .hangar-row-main { flex: 1; min-width: 0; }
+  .hangar-row-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .hangar-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--hangar-text-bright);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  /* Badges carry their own word — the colour is reinforcement, never the
+   * message (the accessibility rule at the top of this file). */
+  .hangar-badge {
+    font-family: var(--hangar-mono);
+    font-size: 9px;
+    padding: 0 3px;
+    flex: none;
+  }
+  .hangar-badge.is-online {
+    color: var(--hangar-good);
+    border: 1px solid var(--hangar-good-line);
+  }
+  .hangar-badge.is-idle {
+    color: var(--hangar-warn);
+    border: 1px solid var(--hangar-warn-line);
+  }
+  .hangar-meta {
+    display: flex;
+    gap: 5px;
+    margin-top: 2px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--hangar-text-dim);
+  }
+  .hangar-meta-sep { color: #3a4a5c; }
+  .hangar-meta-loc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hangar-stats {
+    display: flex;
+    gap: 9px;
+    margin-top: 4px;
+    min-width: 0;
+    font-family: var(--hangar-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+  }
+  /* ISK and SP never wrap and never truncate — they are the two figures the
+   * player scans down a column. Only the training string gives way. */
+  .hangar-isk { color: var(--hangar-good); flex: none; white-space: nowrap; }
+  .hangar-sp { color: var(--hangar-text-dimmer); flex: none; white-space: nowrap; }
+  .hangar-train {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--hangar-link);
+  }
+  .hangar-train.is-idle { color: var(--hangar-warn); }
+
+  .hangar-rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+  .hangar-star.is-row { width: 20px; height: 18px; font-size: 12px; }
+  .hangar-tags { display: flex; gap: 2px; }
+  .hangar-tag {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+  }
+
+  /* An account with room in it says so, rather than looking finished. */
+  .hangar-slot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    min-height: 56px;
+    padding: 9px 10px;
+    text-align: left;
+    background: transparent;
+    border: 1px dashed var(--hangar-line);
+    color: #2f3d4d;
+    font-size: 12px;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-slot:hover:not(:disabled) {
+    border-color: var(--hangar-accent);
+    color: #9dc4e2;
+  }
+  .hangar-slot-count {
+    font-family: var(--hangar-mono);
+    font-size: 9px;
+    color: #1d2836;
+  }
+
+  /* --- manage mode: the per-pilot squad checklist ----------------------- */
+
+  .hangar-squadbtn-wrap { position: relative; margin-top: 7px; }
+  .hangar-squadbtn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 24px;
+    padding: 0 9px;
+    font-size: 12px;
+    background: transparent;
+    border: 1px solid #1e2a38;
+    color: var(--hangar-text-mid);
+  }
+  .hangar-squadbtn.is-open {
+    background: var(--hangar-row-selected);
+    border-color: var(--hangar-accent);
+  }
+  .hangar-squadmenu {
+    position: absolute;
+    z-index: 13;
+    top: 26px;
+    left: 0;
+    width: 210px;
+    background: var(--hangar-panel);
+    border: 1px solid var(--hangar-line-5);
+    box-shadow: 0 12px 28px rgb(0 0 0 / 0.65);
+    animation: hangarRiseIn 0.14s ease-out;
+  }
+  .hangar-squadmenu-list { max-height: 210px; overflow-y: auto; padding: 4px; }
+  .hangar-squadmenu-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    height: 26px;
+    padding: 0 7px;
+    font-size: 12px;
+    color: var(--hangar-text-soft);
+  }
+  .hangar-squadmenu-row.is-member {
+    background: var(--hangar-row-selected);
+    color: var(--hangar-text-strong);
+  }
+  .hangar-squadmenu-mark {
+    width: 10px;
+    flex: none;
+    font-size: 10px;
+    color: transparent;
+  }
+  .hangar-squadmenu-row.is-member .hangar-squadmenu-mark { color: var(--hangar-link-bright); }
+  .hangar-squadmenu-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  .hangar-squadmenu-done {
+    width: 100%;
+    height: 26px;
+    border-top: 1px solid var(--hangar-line-2);
+    color: var(--hangar-text-dim);
+    font-size: 11px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-squadmenu-done:hover:not(:disabled) { color: #cfe8fa; }
+
+  /* --- the selection bar ----------------------------------------------- */
+
+  .hangar-selbar {
+    position: fixed;
+    z-index: 31;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    min-width: 600px;
+    max-width: calc(100vw - 24px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 14px;
+    background: #0e1a24;
+    border: 1px solid var(--hangar-accent);
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.6);
+    animation: hangarRiseIn 0.16s ease-out;
+  }
+  .hangar-selbar-text { display: flex; flex-direction: column; min-width: 0; }
+  .hangar-selbar-count {
+    font-family: var(--hangar-mono);
+    font-size: 12px;
+    color: var(--hangar-link-bright);
+  }
+  .hangar-selbar-detail {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-dimmer);
+  }
+  .hangar-selbar-spacer { flex: 1; }
+  .hangar-ghost {
+    height: 32px;
+    padding: 0 12px;
+    flex: none;
+    background: transparent;
+    border: 1px solid var(--hangar-line-5);
+    color: #9dc4e2;
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-ghost:hover:not(:disabled) { color: #cfe8fa; }
+  .hangar-primary {
+    height: 32px;
+    padding: 0 16px;
+    flex: none;
+    background: var(--hangar-accent-fill);
+    border: 1px solid var(--hangar-accent);
+    color: #cfe8fa;
+    font-size: 12px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-primary:hover:not(:disabled) { background: var(--hangar-accent-hover); }
+
+  /* --- dialogs: launch progress, login, squad editor -------------------- */
+
+  .hangar-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 32;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgb(4 7 11 / 0.74);
+  }
+  .hangar-dialog {
+    width: 100%;
+    max-width: 400px;
+    background: var(--hangar-panel);
+    border: 1px solid var(--hangar-line-5);
+    border-top: 2px solid var(--hangar-accent);
+    animation: hangarRiseIn 0.18s ease-out;
+  }
+  .hangar-dialog.is-narrow { max-width: 384px; }
+  .hangar-dialog-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--hangar-line-2);
+  }
+  .hangar-dialog-title {
+    flex: 1;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: var(--hangar-text-strong);
+    text-transform: uppercase;
+  }
+  .hangar-dialog-progress {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    color: var(--hangar-text-dimmer);
+    flex: none;
+  }
+  .hangar-dialog-close {
+    flex: none;
+    color: var(--hangar-text-faint);
+    font-size: 16px;
+    line-height: 1;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-dialog-close:hover:not(:disabled) { color: var(--hangar-text-strong); }
+  .hangar-dialog-body { padding: 14px; }
+  .hangar-dialog-note {
+    font-size: 14px;
+    color: var(--hangar-text-soft);
+    line-height: 1.45;
+    margin: 0 0 14px;
+  }
+  .hangar-dialog-actions {
+    display: flex;
+    gap: 8px;
+    padding: 0 14px 14px;
+  }
+  /* Actions that live INSIDE the dialog body (a form's submit) rather than in
+   * the dialog's own footer, so they do not pay the body padding twice. */
+  .hangar-dialog-actions.is-inline { padding: 16px 0 0; }
+  .hangar-field-label {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 1.6px;
+    color: var(--hangar-text-faint);
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .hangar-input {
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    background: var(--hangar-field);
+    border: 1px solid var(--hangar-line-4);
+    color: var(--hangar-text-strong);
+    outline: 0;
+    font-size: 15px;
+  }
+  .hangar-picker-search .hangar-input { height: 30px; padding: 0 9px; font-size: 14px; }
+  .hangar-input:focus { border-color: var(--hangar-accent); }
+  .hangar-input + .hangar-field-label { margin-top: 12px; }
+  .hangar-dialog-primary {
+    flex: 1;
+    height: 34px;
+    background: var(--hangar-accent-fill);
+    border: 1px solid var(--hangar-accent);
+    color: #cfe8fa;
+    font-size: 12px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-dialog-primary:hover:not(:disabled) { background: var(--hangar-accent-hover); }
+  :is(.hangar, .hangar-chrome) .hangar-dialog-primary:disabled { opacity: 0.5; cursor: default; }
+  .hangar-dialog-primary.is-wide { height: 38px; font-size: 13px; letter-spacing: 1.6px; }
+  .hangar-dialog-ghost {
+    height: 34px;
+    padding: 0 12px;
+    flex: none;
+    background: transparent;
+    border: 1px solid var(--hangar-line-5);
+    color: var(--hangar-text-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-dialog-ghost:hover:not(:disabled) { color: #cfe8fa; }
+  .hangar-dialog-danger {
+    height: 34px;
+    padding: 0 12px;
+    flex: none;
+    background: var(--hangar-bad-fill);
+    border: 1px solid var(--hangar-bad-line);
+    color: var(--hangar-bad);
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-dialog-danger:hover:not(:disabled) { background: var(--hangar-bad-hover); }
+  .hangar-swatches { display: flex; gap: 7px; margin-bottom: 18px; }
+  .hangar-swatch-btn {
+    width: 30px;
+    height: 30px;
+    border: 2px solid transparent;
+  }
+  .hangar-swatch-btn.is-on { border-color: var(--hangar-text-strong); }
+  .hangar-dialog-error {
+    margin: 10px 0 0;
+    font-size: 13px;
+    color: var(--hangar-bad);
+  }
+
+  /* The create-character screen is an existing panel, hosted in the hangar's
+   * overlay rather than restyled into it: it is a different KIND of screen (a
+   * long form with its own icons and validation), and dressing it as a 384px
+   * hangar dialog would only make it cramped. It keeps the app's panel look and
+   * the overlay gives it room to scroll. */
+  .hangar-create {
+    width: 100%;
+    max-width: 46rem;
+    max-height: 100%;
+    overflow-y: auto;
+  }
+
+  .hangar-queue {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    max-height: 46vh;
+    overflow-y: auto;
+  }
+  .hangar-queue-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 14px;
+  }
+  .hangar-queue-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--hangar-text-ghost);
+  }
+  .hangar-queue-row.is-online .hangar-queue-dot { background: var(--hangar-good); }
+  .hangar-queue-row.is-failed .hangar-queue-dot { background: var(--hangar-bad); }
+  .hangar-queue-name {
+    flex: 1;
+    min-width: 0;
+    color: var(--hangar-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hangar-queue-state {
+    font-family: var(--hangar-mono);
+    font-size: 10px;
+    flex: none;
+    color: var(--hangar-text-dimmer);
+  }
+  .hangar-queue-row.is-online .hangar-queue-state { color: var(--hangar-good); }
+  .hangar-queue-row.is-failed .hangar-queue-state { color: var(--hangar-bad); }
+
+  /* --- first run ------------------------------------------------------- */
+
+  .hangar-empty-screen { padding: 90px 24px; text-align: center; }
+  .hangar-empty-title {
+    font-size: 20px;
+    letter-spacing: 2px;
+    color: var(--hangar-text-dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .hangar-empty-copy {
+    font-size: 15px;
+    color: var(--hangar-text-faint);
+    max-width: 380px;
+    margin: 0 auto 20px;
+    line-height: 1.5;
+  }
+  .hangar-empty-action {
+    height: 36px;
+    padding: 0 20px;
+    background: var(--hangar-accent-fill);
+    border: 1px solid var(--hangar-accent);
+    color: #cfe8fa;
+    font-size: 13px;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-empty-action:hover:not(:disabled) { background: var(--hangar-accent-hover); }
+
+  /* --- mobile (< 760px) -------------------------------------------------
+   * One implementation, one breakpoint. The grid collapses to a single column,
+   * the search takes its own line, and the chip row becomes the ONE thing on
+   * the page that scrolls sideways — inside itself, so the page still does not
+   * (R8). Touch targets on the row grow; the row itself is the target, because
+   * below this width a tap SELECTS rather than launching (PilotHangar.svelte),
+   * which is the mis-tap protection the small controls need. */
+  @media (max-width: 759px) {
+    .hangar-head {
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 10px 12px;
+    }
+    .hangar-search {
+      order: 3;
+      min-width: 100%;
+      max-width: none;
+    }
+    .hangar-chiprow {
+      position: sticky;
+      top: 52px;
+      z-index: 9;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      background: var(--hangar-page);
+      padding: 12px 12px 10px;
+    }
+    .hangar-chiprow::-webkit-scrollbar { display: none; }
+    .hangar-summary { padding: 10px 12px 0; }
+    .hangar-grid {
+      grid-template-columns: 1fr;
+      padding: 12px 12px 40px;
+    }
+    .hangar-grid.has-selection { padding-bottom: 110px; }
+    .hangar input[type="checkbox"] { width: 20px; height: 20px; }
+    .hangar-star.is-row { width: 26px; height: 24px; }
+    .hangar-picker-panel { left: auto; right: 0; width: 270px; }
+    .hangar-selbar {
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      transform: none;
+      min-width: 0;
+      max-width: none;
+      flex-wrap: wrap;
+    }
+  }
+
 }

@@ -11,6 +11,7 @@ import {
   loadKnownCharacters,
   rememberCharacters,
   forgetKnownCharacter,
+  forgetKnownAccount,
   setKnownCharacterStorage,
   type KnownCharacterStorage,
 } from "./knownCharacters.ts";
@@ -105,4 +106,98 @@ test("corrupt stored JSON reads back as empty, not a throw", () => {
   // A non-array payload is also ignored.
   storage.map.set("evejs-web-known-characters:v1", JSON.stringify({ nope: true }));
   assert.deepEqual(loadKnownCharacters(), []);
+});
+
+// --- the Pilot Hangar's columns --------------------------------------------
+//
+// The hangar shows where a pilot is and what it is training. The location and
+// skill NAMES can only be resolved by a caller holding a token, so an ordinary
+// character-select sign-in cannot supply them — and must not wipe them either.
+// These pin the carry-over rule that makes that safe.
+
+/** A selection row carrying the fields the hangar reads off it. */
+function hangarChar(
+  characterID: number,
+  extras: Partial<Record<string, unknown>>,
+): CharacterSummary {
+  return {
+    characterID,
+    characterName: `Pilot ${characterID}`,
+    shipName: "Velator",
+    skillPoints: 500,
+    balance: 1000,
+    stationID: null,
+    solarSystemID: null,
+    skillTypeID: null,
+    toLevel: null,
+    trainingEndTime: null,
+    ...extras,
+  } as unknown as CharacterSummary;
+}
+
+test("a sign-in with a token records the resolved place and skill", () => {
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, { stationID: 60000004, skillTypeID: 3300, toLevel: 4 })],
+    new Map([[7001, { locationName: "Jita IV - Moon 4", trainingSkillName: "Mining Barge" }]]),
+  );
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.locationName, "Jita IV - Moon 4");
+  assert.equal(row?.trainingSkillName, "Mining Barge");
+  assert.equal(row?.trainingToLevel, 4);
+});
+
+test("a plain sign-in KEEPS the names it cannot resolve, as long as nothing moved", () => {
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, { stationID: 60000004, skillTypeID: 3300, toLevel: 4 })],
+    new Map([[7001, { locationName: "Jita IV - Moon 4", trainingSkillName: "Mining Barge" }]]),
+  );
+  // The character-select screen re-records the same account with no lookup.
+  rememberCharacters("farmer", [
+    hangarChar(7001, { stationID: 60000004, skillTypeID: 3300, toLevel: 4 }),
+  ]);
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.locationName, "Jita IV - Moon 4");
+  assert.equal(row?.trainingSkillName, "Mining Barge");
+});
+
+test("a name whose id changed is DROPPED rather than carried over as a lie", () => {
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, { stationID: 60000004, skillTypeID: 3300 })],
+    new Map([[7001, { locationName: "Jita IV - Moon 4", trainingSkillName: "Mining Barge" }]]),
+  );
+  // The pilot has moved and started a different skill; without a lookup we do
+  // not know the new names, and the old ones no longer describe anything.
+  rememberCharacters("farmer", [
+    hangarChar(7001, { stationID: 60000010, skillTypeID: 3400 }),
+  ]);
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.locationName, null);
+  assert.equal(row?.trainingSkillName, null);
+});
+
+test("an undocked pilot is placed by its solar system", () => {
+  rememberCharacters("farmer", [hangarChar(7001, { solarSystemID: 30000142 })]);
+  assert.equal(loadKnownCharacters()[0]?.locationRefID, 30000142);
+});
+
+test("the training end time is stored as a Unix instant, not a retail FILETIME", () => {
+  // 2011-11-11T00:00:00Z as a FILETIME.
+  rememberCharacters("farmer", [
+    hangarChar(7001, { trainingEndTime: 129654432000000000n }),
+  ]);
+  assert.equal(loadKnownCharacters()[0]?.trainingEndsAtMs, 1320969600000);
+});
+
+test("forgetting an account drops all of its pilots and names which went", () => {
+  rememberCharacters("farmer", [hangarChar(7001, {}), hangarChar(7002, {})]);
+  rememberCharacters("trader", [hangarChar(8001, {})]);
+  const gone = forgetKnownAccount("farmer");
+  assert.deepEqual(gone.sort(), [7001, 7002]);
+  assert.deepEqual(
+    loadKnownCharacters().map((k) => k.characterID),
+    [8001],
+  );
 });

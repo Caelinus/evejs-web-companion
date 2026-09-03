@@ -12,9 +12,13 @@
   // elsewhere; this file is pure orchestration.
   import CharacterBar from "./CharacterBar.svelte";
   import Onboarding from "./Onboarding.svelte";
+  import PilotHangar from "./PilotHangar.svelte";
   import Workspace from "./Workspace.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import { createSession, type Session } from "../app/sessions.ts";
+  import type { LaunchEntry, LaunchTarget } from "../app/hangarLaunch.ts";
+  import { BridgeCallError } from "../bridge/callMethod.ts";
+  import { panelErrorWords } from "../bridge/refusals.ts";
   import {
     loadPersistedSessions,
     savePersistedSessions,
@@ -32,12 +36,20 @@
   const hasRetained = retained.pilots.length > 0;
 
   // The online roster, the active pilot, and the one being added. On a fresh tab
-  // the first pilot starts onboarding immediately; when there's a retained roster
-  // we restore it instead (createSession warms its health ping either way).
+  // the PILOT HANGAR is the landing screen — every pilot this browser knows,
+  // grouped by account, with the login behind a modal; when there's a retained
+  // roster we restore straight into the cockpit instead.
+  //
+  // The hangar is not only the boot screen: it stays up over a live cockpit
+  // after it launches a batch, so its progress dialog survives the first pilot
+  // coming online and its "in client" markers mean something. `onboarding` is
+  // still the "Add character" overlay reached from the character bar, which is
+  // also where creating a character and stopping a server bot live.
   let sessions = $state<Session[]>([]);
   let activeId = $state<string | null>(null);
   let restoring = $state(hasRetained);
-  let onboarding = $state<Session | null>(hasRetained ? null : createSession());
+  let hangarOpen = $state(!hasRetained);
+  let onboarding = $state<Session | null>(null);
 
   const active = $derived(sessions.find((s) => s.id === activeId) ?? null);
 
@@ -66,9 +78,10 @@
       }
     }
     restoring = false;
-    // Nothing came back (e.g. the server was down) — fall through to a login.
-    if (sessions.length === 0 && onboarding === null) {
-      onboarding = createSession();
+    // Nothing came back (e.g. the server was down) — fall through to the hangar,
+    // which shows the same pilots and can try them again one at a time.
+    if (sessions.length === 0) {
+      hangarOpen = true;
     }
   }
 
@@ -111,6 +124,63 @@
     activeId = id;
   }
 
+  // --- the hangar's "bring online" -------------------------------------------
+  //
+  // The hangar decides WHICH pilots; only this component can create a session,
+  // so the doing lives here. It is the restore loop above generalised: sign in
+  // (any password), select, keep the session — one pilot at a time, and for the
+  // same reason. A browser allows about six connections per origin, and six
+  // simultaneous sign-ins fill that pool with sign-ins, so the seventh request
+  // of any kind waits behind them. Sequentially, each pilot also LANDS
+  // separately, which is what makes the progress dialog honest: a row flips
+  // because that pilot is actually in the client, not because a timer fired.
+  //
+  // A pilot that cannot come online (already flown by a bot, account gone,
+  // server down) is reported and skipped. One refusal must not strand the rest
+  // of a squad.
+  function launchFailureWords(cause: unknown): string {
+    if (cause instanceof BridgeCallError) {
+      if (cause.code === "UNKNOWN_EVEJS_ACCOUNT") return "account is gone";
+      if (cause.code === "CALL_REFUSED") return cause.message;
+      return panelErrorWords(cause);
+    }
+    return "could not connect";
+  }
+
+  async function bringOnline(
+    targets: readonly LaunchTarget[],
+    onProgress: (characterID: number, state: LaunchEntry["state"], note?: string) => void,
+  ): Promise<void> {
+    for (const target of targets) {
+      onProgress(target.characterID, "connecting");
+      const session = createSession();
+      try {
+        await session.flow.login(target.accountName, "");
+        await session.flow.selectCharacter(target.characterID);
+        sessions = [...sessions, session];
+        // The first pilot up becomes the cockpit behind the hangar, so "Go to
+        // first pilot" has somewhere to land and closing the hangar is not a
+        // blank page.
+        if (activeId === null) activeId = session.id;
+        onProgress(target.characterID, "online");
+      } catch (cause) {
+        try {
+          await session.flow.logout();
+        } catch {
+          // best-effort teardown of a half-started session
+        }
+        onProgress(target.characterID, "failed", launchFailureWords(cause));
+      }
+    }
+  }
+
+  /** Show one pilot's cockpit and leave the hangar. */
+  function goToPilot(characterID: number): void {
+    const match = sessions.find((s) => s.store.station.get().online?.characterID === characterID);
+    if (match) activeId = match.id;
+    hangarOpen = false;
+  }
+
   // The characters already live in this tab, so the "Add character" picker can
   // disable a quick-add that would just be refused as "already in use". Kept in
   // sync by the same station subscriptions that drive pruning, below.
@@ -135,7 +205,7 @@
       activeId = remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     }
     if (remaining.length === 0 && onboarding === null) {
-      onboarding = createSession();
+      hangarOpen = true;
     }
   }
 
@@ -289,6 +359,21 @@
   <p class="restoring-note">Restoring your pilots…</p>
 {/if}
 
+{#if hangarOpen}
+  <!-- The Pilot Hangar. It is the landing screen when nothing is online, and it
+       stays over a live cockpit after it launches a batch so its progress
+       dialog is not torn down by the first pilot arriving. Its own boundary:
+       the hangar can fail without taking the cockpit underneath with it. -->
+  <ErrorBoundary name="Pilot hangar">
+    <PilotHangar
+      {onlineIDs}
+      onLaunch={bringOnline}
+      onGoToFirst={goToPilot}
+      onClose={active ? () => (hangarOpen = false) : null}
+    />
+  </ErrorBoundary>
+{/if}
+
 {#if onboarding}
   {#if active}
     <!-- Add character: an overlay over the live workspace, which keeps running. -->
@@ -302,7 +387,8 @@
       </div>
     </div>
   {:else}
-    <!-- First pilot: full-screen login, nothing behind it. -->
+    <!-- No cockpit behind it (the hangar handed us a session that then went
+         away): a full-screen login, nothing behind it. -->
     <h1>EveJS Web</h1>
     <Onboarding store={onboarding.store} flow={onboarding.flow} {onlineIDs} onOnline={completeOnboarding} />
   {/if}
