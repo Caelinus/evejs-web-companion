@@ -6341,6 +6341,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           salvageDroneBayItemIDs: droneRoles.bay?.salvage ?? null,
           combatDroneIDs: droneRoles.out?.combat ?? null,
           salvageDroneIDs: droneRoles.out?.salvage ?? null,
+          unclassifiedDroneBayItemIDs: droneRoles.bay?.unknown ?? null,
           miningModuleIDs: capabilities.mining,
           salvageModuleIDs: capabilities.salvage,
           shieldRepairerIDs: capabilities.defense.shield,

@@ -1207,14 +1207,22 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     if (roster.roleBay.length > 0 && !launchStalled(mem)) {
       return tick(WAIT, "Waiting for the other drones to come home so the salvage drones can go out.", "Salvaging", ACTING, true, mem);
     }
-    return tick(WAIT, "No way to salvage.", "Salvaging", {
-      kind: "blocked",
+    // No way to salvage is not a reason to stop the whole program — a ratting
+    // hull with no salvager still has looting and the next den to get on with.
+    // SKIPPED, not blocked: the orchestrator warns once and moves on. The
+    // reason names an unreadable bay stack rather than calling the bay empty,
+    // so a failed group lookup is visible instead of masquerading as "no drones".
+    const unread = (obs.unclassifiedDroneBayItemIDs ?? []).length;
+    return tick(WAIT, "No way to salvage — moving on.", "Salvaging", {
+      kind: "skipped",
       reason:
         roster.roleBay.length > 0
           ? "The salvage drones could not be launched."
           : roster.othersOut.length > 0
             ? "The drones out cannot salvage, and this ship has no salvage drones in the bay and no salvager fitted."
-            : "This ship has no salvage drones in the bay and no salvager fitted.",
+            : unread > 0
+              ? `This ship has no salvager fitted, and ${unread === 1 ? "a drone" : `${unread} drones`} in the bay could not be identified, so none were launched.`
+              : "This ship has no salvage drones in the bay and no salvager fitted.",
     });
   }
 

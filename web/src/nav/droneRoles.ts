@@ -45,6 +45,12 @@ export function droneRoleForGroup(groupName: string | null | undefined): DroneRo
 export interface DroneRoleIDs {
   readonly combat: readonly number[];
   readonly salvage: readonly number[];
+  /**
+   * Rows whose type or group could NOT be read — in no role, and worth naming
+   * when a block reports "no salvage drones", so a name lookup that failed does
+   * not read as an empty bay.
+   */
+  readonly unknown: readonly number[];
 }
 
 /**
@@ -60,6 +66,7 @@ export function splitDroneRoles<T>(
 ): DroneRoleIDs {
   const combat: number[] = [];
   const salvage: number[] = [];
+  const unknown: number[] = [];
   for (const row of rows) {
     const typeID = typeIDOf(row);
     const role = droneRoleForGroup(typeID === null ? null : groupOf(typeID));
@@ -67,7 +74,9 @@ export function splitDroneRoles<T>(
       combat.push(itemIDOf(row));
     } else if (role === "salvage") {
       salvage.push(itemIDOf(row));
+    } else if (role === null) {
+      unknown.push(itemIDOf(row));
     }
   }
-  return { combat, salvage };
+  return { combat, salvage, unknown };
 }

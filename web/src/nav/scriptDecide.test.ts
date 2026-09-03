@@ -179,6 +179,37 @@ test("until-met with the laser off but the rock still locked releases the lock b
   assert.equal(results[1]?.stepPath, "h", "the rock is unlocked, so it can advance now");
 });
 
+// ─── The "skipped" outcome ───────────────────────────────────────────────────
+
+/** A step that cannot do its job on this ship — the salvage-without-a-salvager case. */
+const skipper: MacroDecider = () => tick({ kind: "wait" }, { kind: "skipped", reason: "no way to do this" });
+const skipRegistry = { ...registry, "salvage-wrecks": skipper };
+
+test("a skipped step warns ONCE through the alert path and the program moves on", () => {
+  const s = script([macroStep("sv", "salvage-wrecks"), macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const first = decideScriptAction(s, obs(), initialMemory(s), skipRegistry, home);
+  assert.equal(first.status, "running", "not paused");
+  assert.equal(first.action.kind, "alert");
+  assert.match(first.action.kind === "alert" ? first.action.message : "", /Skipped "Salvage the wrecks on this grid": no way to do this/);
+  assert.equal(first.stepPath, "sv");
+  // Next tick: the step after it is working, and nothing was said again.
+  const next = decideScriptAction(s, obs(), first.memory, skipRegistry, home);
+  assert.equal(next.stepPath, "m");
+  assert.equal(next.action.kind, "activate");
+});
+
+test("a skipped step inside a loop is silent the second time round, and a loop of nothing but skips trips the livelock guard", () => {
+  const loop: ProgramNode = { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [macroStep("sv", "salvage-wrecks"), macroStep("u", "undock")] };
+  const s = script([loop]);
+  const first = decideScriptAction(s, obs({ inSpace: true }), initialMemory(s), skipRegistry, home);
+  assert.equal(first.action.kind, "alert", "said once");
+  // Round two: the skip is silent and the scan runs on to the livelock guard,
+  // because undock-in-space and skip-salvage between them do nothing.
+  const second = decideScriptAction(s, obs({ inSpace: true }), first.memory, skipRegistry, home);
+  assert.equal(second.status, "paused");
+  assert.match(second.pauseReason ?? "", /nothing it can do/i);
+});
+
 test("a loop whose body can never do anything pauses on the livelock guard", () => {
   // Body is a single undock, but the ship is already in space, so every pass
   // completes instantly issuing no world call.

@@ -453,23 +453,23 @@ test("salvage: combat drones out from the fight, salvage drones in the bay -> ca
   assert.deepEqual(launch.action.droneItemIDs, [113], "the Hobgoblin stays in the bay");
 });
 
-test("salvage: a bay of combat drones and no salvager is NO way to salvage -> blocked", () => {
+test("salvage: a bay of combat drones and no salvager is NO way to salvage -> skipped", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
   const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
   const t = salvage(s, obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [], droneBayItemIDs: [111, 112], combatDroneBayItemIDs: [111, 112], salvageDroneBayItemIDs: [] }), {}, {});
-  assert.equal(t.outcome.kind, "blocked");
-  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /no salvage drones/i);
+  assert.equal(t.outcome.kind, "skipped");
+  assert.match(t.outcome.kind === "skipped" ? t.outcome.reason : "", /no salvage drones/i);
 });
 
-test("salvage: combat drones out, nothing that can salvage -> blocked, and it says why", () => {
+test("salvage: combat drones out, nothing that can salvage -> skipped, and it says why", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
   const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
   const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
   const t = salvage(s, obs({ snapshot: snapshot([wreck, hob]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [], salvageDroneBayItemIDs: [] }), {}, {});
-  assert.equal(t.outcome.kind, "blocked");
-  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /cannot salvage/i);
+  assert.equal(t.outcome.kind, "skipped");
+  assert.match(t.outcome.kind === "skipped" ? t.outcome.reason : "", /cannot salvage/i);
 });
 
 test("salvage: no drones, salvager fitted -> approach, lock, run it on the wreck", () => {
@@ -489,12 +489,17 @@ test("salvage: no drones, salvager fitted -> approach, lock, run it on the wreck
   assert.ok(run.action.kind === "activate" && run.action.moduleID === 800 && run.action.targetID === 70001);
 });
 
-test("salvage: nothing to salvage with -> blocked with a plain reason", () => {
+test("salvage: nothing to salvage with -> SKIPPED with a plain reason, not a stop", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
   const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
   const t = salvage(s, obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [], droneBayItemIDs: [] }), {}, {});
-  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(t.outcome.kind, "skipped");
+  assert.match(t.outcome.kind === "skipped" ? t.outcome.reason : "", /no salvage drones in the bay and no salvager fitted/);
+  // A bay stack whose group could not be read is NAMED, not passed off as an empty bay.
+  const unread = salvage(s, obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [], droneBayItemIDs: [111], salvageDroneBayItemIDs: [], unclassifiedDroneBayItemIDs: [111] }), {}, {});
+  assert.equal(unread.outcome.kind, "skipped");
+  assert.match(unread.outcome.kind === "skipped" ? unread.outcome.reason : "", /could not be identified/);
 });
 
 test("loot: only YOUR wrecks are ever opened — others' and unknown-owner wrecks never", () => {

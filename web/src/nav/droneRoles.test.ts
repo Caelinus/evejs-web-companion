@@ -46,4 +46,5 @@ test("splitDroneRoles keeps order, drops unknown types and unresolved groups", (
   const roles = splitDroneRoles(rows, (r) => r.typeID, (r) => r.itemID, (typeID) => groups[typeID] ?? null);
   assert.deepEqual(roles.combat, [1, 5]);
   assert.deepEqual(roles.salvage, [2]);
+  assert.deepEqual(roles.unknown, [6, 7], "the unreadable ones are named, not silently dropped");
 });

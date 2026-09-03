@@ -93,6 +93,8 @@ export interface ScriptObservation {
   readonly salvageDroneBayItemIDs?: readonly number[] | null;
   readonly combatDroneIDs?: readonly number[] | null;
   readonly salvageDroneIDs?: readonly number[] | null;
+  /** Bay stacks whose type or group could not be read this tick — in no role. */
+  readonly unclassifiedDroneBayItemIDs?: readonly number[] | null;
   /** Fitted mining-module ids, refreshed when the active hull or fit changes. */
   readonly miningModuleIDs?: readonly number[];
   /** Fitted salvager ids, refreshed when the active hull or fit changes. */

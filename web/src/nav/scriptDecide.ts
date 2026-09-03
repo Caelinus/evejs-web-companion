@@ -35,7 +35,7 @@ import type {
   MacroID,
   MacroStep,
 } from "../bots/botScript.ts";
-import { alertSentence, conditionSentence } from "../bots/scriptText.ts";
+import { alertSentence, conditionSentence, stepSentence } from "../bots/scriptText.ts";
 import {
   SENTENCE as COND_SENTENCE,
   bumpCannotTellStreak,
@@ -167,6 +167,9 @@ export type MacroMemory = Readonly<Record<string, unknown>>;
  *   • outcome "done"    — it has finished its own job (docked, hold empty); the
  *                         orchestrator advances to the next step this tick.
  *   • outcome "blocked" — it cannot proceed; the bot pauses with the reason.
+ *   • outcome "skipped" — it cannot do its job on this ship and that is not
+ *                         worth stopping for (no salvager on a ratting hull):
+ *                         the orchestrator says so once and advances.
  *
  * `armed` says whether the player's `until` is meaningful yet — mine-at-belt is
  * unarmed until it has arrived, which is what keeps "ore hold full" from reading
@@ -175,7 +178,8 @@ export type MacroMemory = Readonly<Record<string, unknown>>;
 export type MacroOutcome =
   | { readonly kind: "acting" }
   | { readonly kind: "done" }
-  | { readonly kind: "blocked"; readonly reason: string };
+  | { readonly kind: "blocked"; readonly reason: string }
+  | { readonly kind: "skipped"; readonly reason: string };
 
 /**
  * The run-scoped BOARD: facts one block publishes for the blocks after it (the
@@ -259,6 +263,13 @@ export interface ScriptMemory {
    * "nothing spent yet", which is the safe default: it alerts.
    */
   readonly spentAlerts?: readonly string[];
+  /**
+   * Step ids that have already been SKIPPED (outcome "skipped") this run, so the
+   * warning is said once: a skipped step inside a loop comes round again every
+   * pass, and a program that can do nothing but skip must trip the livelock
+   * guard, not alert forever. Optional like `spentAlerts`, same default.
+   */
+  readonly skippedSteps?: readonly string[];
 }
 
 /** The memory a fresh run starts from — positioned at the first node. */
@@ -272,6 +283,7 @@ export function initialMemory(script: BotScript): ScriptMemory {
     macroMem: {},
     board: {},
     spentAlerts: [],
+    skippedSteps: [],
   };
 }
 
@@ -774,6 +786,49 @@ function runProgram(
 
     if (tick.outcome.kind === "blocked") {
       return paused(tick.outcome.reason, { ...mem, position, loopPass, macroMem, board }, step.id);
+    }
+
+    if (tick.outcome.kind === "skipped") {
+      // The step cannot do its job on this ship, and that is not worth stopping
+      // the whole program for. Say so ONCE — through the alert path, which is
+      // held on the readout and on a server bot's record so a player who was
+      // away still sees it — and move on exactly as a finished step does. The
+      // SECOND time the same step is skipped (a loop brought it round again)
+      // it advances silently, so a program with nothing else to do falls
+      // through to the livelock guard below instead of alerting every tick.
+      macroMem = omit(macroMem, step.id);
+      const next = advance(script, position, loopPass);
+      const skipped = mem.skippedSteps ?? [];
+      if (skipped.includes(step.id)) {
+        position = next.position;
+        loopPass = next.loopPass;
+        if (next.wrapped) {
+          wraps += 1;
+          if (wraps >= 2) {
+            return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+          }
+        }
+        continue;
+      }
+      const message = `Skipped "${stepSentence(step)}": ${tick.outcome.reason}`;
+      return {
+        action: { kind: "alert", message },
+        why: message,
+        phase: "Skipping a step",
+        stepPath: step.id,
+        interruptID: null,
+        status: "running",
+        pauseReason: null,
+        memory: {
+          ...mem,
+          position: next.position,
+          loopPass: next.loopPass,
+          stepTicks: 0,
+          macroMem,
+          board,
+          skippedSteps: [...skipped, step.id],
+        },
+      };
     }
 
     if (tick.outcome.kind === "done") {
