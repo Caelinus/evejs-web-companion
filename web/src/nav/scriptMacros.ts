@@ -16,7 +16,7 @@ import type {
   MacroTick,
   ScriptBoard,
 } from "./scriptDecide.ts";
-import type { ScriptObservation } from "./scriptConditions.ts";
+import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
@@ -403,20 +403,28 @@ const travelToBelt: MacroDecider = (step, obs) => {
 // Two things layer on top of that core loop:
 //   • NEAREST-mode rotation (decision 2, docs/bot-builder-brainstorm.md §op-2):
 //     a belt found dry after arrival is not a stop, it is a cue to rotate to
-//     the nearest belt not yet emptied THIS TOUR (tracked on the board, so it
-//     survives a haul-home lap) — pausing only once every belt has been
-//     visited and found empty. A CHOSEN (pinned) belt never rotates: it keeps
-//     the original "pause when dry" behaviour, pinned to the one belt.
+//     the nearest belt not yet reported dry — pausing only once every belt has
+//     been visited and found empty. That "found dry" memory is SHARED across
+//     every pilot running a mining bot: it lives on the BFF, in-process, keyed
+//     by solar system NAME then belt NAME (never a grid-local id, which means
+//     nothing to a pilot in a different instance of the same system), and it
+//     expires on its own so a later tour finds rock that respawned. This block
+//     only reads it (`obs.dryBelts`) and reports into it (the `rememberBeltDry`
+//     action) — it holds none of that state itself. A CHOSEN (pinned) belt
+//     never rotates: it keeps the original "pause when dry" behaviour, pinned
+//     to the one belt.
 //   • ORE PRIORITY (the step's optional `ores` tier list): only rocks whose
 //     groupID matches the CURRENT tier's family are mineable. A belt with none
-//     of that ore counts as emptied for the tier exactly like an all-out belt
-//     does for the plain case; once every belt is emptied for the tier, the
-//     next tier starts a fresh tour (the emptied set is cleared). Tiers run
-//     out → blocked. Deliberately NOT handled: a higher-priority family
-//     reappearing on a belt already emptied for a lower tier (e.g. Veldspar
-//     respawning while working Kernite) is simply not noticed — the tour
-//     already moved on, and chasing respawns mid-tier is not worth the extra
-//     state for how rarely a rock resource turnover matters here.
+//     of that ore counts as dry for the tier exactly like an all-out belt does
+//     for the plain case; once every belt is dry for the tier, the next tier
+//     starts a fresh tour. The current tier is per-pilot (kept on this pilot's
+//     own run board, `mineOreTier`) — two pilots working the same system can be
+//     on different tiers. Tiers run out → blocked. Deliberately NOT handled: a
+//     higher-priority family reappearing on a belt already dry for a lower
+//     tier (e.g. Veldspar respawning while working Kernite) is simply not
+//     noticed — the tour already moved on, and chasing respawns mid-tier is
+//     not worth the extra state for how rarely a rock resource turnover
+//     matters here.
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
@@ -444,13 +452,13 @@ const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
     const family = ores[tier]!;
     const tierRocks = allRocks.filter((r) => r.groupID === family.groupID);
     if (tierRocks.length === 0) {
-      return mineNoTargetRocks(step, snapshot, measurement, board, pinned, family, ores, tier);
+      return mineNoTargetRocks(step, obs, snapshot, measurement, board, pinned, family, ores, tier);
     }
     return mineWithRocks(step, obs, mem, snapshot, highestGradeRocks(tierRocks), measurement);
   }
 
   if (allRocks.length === 0) {
-    return mineNoTargetRocks(step, snapshot, measurement, board, pinned, null, [], 0);
+    return mineNoTargetRocks(step, obs, snapshot, measurement, board, pinned, null, [], 0);
   }
   return mineWithRocks(step, obs, mem, snapshot, allRocks, measurement);
 };
@@ -466,6 +474,7 @@ const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
  */
 function mineNoTargetRocks(
   step: MacroStep,
+  obs: ScriptObservation,
   snapshot: SpaceSnapshot,
   measurement: SpaceMeasurement | null,
   board: ScriptBoard,
@@ -501,22 +510,24 @@ function mineNoTargetRocks(
     });
   }
 
+  const dryNames = dryBeltNames(obs.dryBelts ?? null, family);
   const options: readonly BeltOption[] = belts.map((b) => ({
     id: b.itemID,
     name: b.name,
     distance: measurement?.distances.get(b.itemID) ?? null,
   }));
-  const emptied = beltEmptiedIDs(board);
+  const emptied = belts.filter((b) => b.name !== null && dryNames.has(b.name)).map((b) => b.itemID);
   const target = nearestUnworkedBelt(options, new Set(emptied));
 
   if (target === null) {
-    // Every belt has been visited and found dry this tour.
+    // Every belt on this grid is reported dry by the shared memory. There is
+    // no "emptied this tour" set of our own to clear here — the BFF's memory
+    // ages entries out on its own, and THAT is what lets a later tour (of this
+    // tier, or any pilot's) find rock that has respawned since.
     if (family !== null && tier + 1 < ores.length) {
-      // A fresh tour for the next tier — the ore that ran out here may still
-      // be sitting on a belt we marked emptied for THIS tier.
       return withBoardPatch(
         tick(WAIT, `No ${family.name} left in this system, moving to the next ore.`, "Switching ore", ACTING, false, {}),
-        { [MINE_ORE_TIER_KEY]: tier + 1, [MINE_EMPTIED_BELTS_KEY]: "" },
+        { [MINE_ORE_TIER_KEY]: tier + 1 },
       );
     }
     const reason = family !== null
@@ -527,15 +538,23 @@ function mineNoTargetRocks(
 
   const targetDist = target.distance ?? Number.POSITIVE_INFINITY;
   if (targetDist <= BELT_ARRIVAL_RADIUS_M) {
-    // On grid with it, and it has none of what we want — mark it emptied and
-    // let the next tick rotate again (armed: we HAVE confirmed arrival here).
-    const nextEmptied = emptied.includes(target.id) ? emptied : [...emptied, target.id];
+    // On grid with it, and it has none of what we want — tell the BFF's
+    // shared memory (name-keyed) instead of writing a board patch of our own,
+    // so every pilot's rotation, not just this one, steers away from it.
+    const systemName = obs.systemName ?? null;
+    const beltName = target.name ?? null;
+    if (systemName === null || beltName === null) {
+      const reason = "The bot cannot tell which solar system this is.";
+      return tick(WAIT, reason, "Belt empty", { kind: "blocked", reason });
+    }
     const why = family !== null
       ? `No ${family.name} left here, moving to the next belt.`
       : "This belt is mined out, moving to the next belt.";
-    return withBoardPatch(
-      tick(WAIT, why, "Belt empty", ACTING),
-      { [MINE_EMPTIED_BELTS_KEY]: encodeBeltIDs(nextEmptied) },
+    return tick(
+      { kind: "rememberBeltDry", systemName, beltName, groupID: family?.groupID ?? null },
+      why,
+      "Belt empty",
+      ACTING,
     );
   }
   return tick(
@@ -546,6 +565,20 @@ function mineNoTargetRocks(
     false,
     {},
   );
+}
+
+/** Belt names the shared memory reports dry — for `family`'s tier, or entirely. */
+function dryBeltNames(dryBelts: readonly DryBelt[] | null, family: OreFamilyArg | null): ReadonlySet<string> {
+  const names = new Set<string>();
+  if (dryBelts === null) {
+    return names;
+  }
+  for (const dry of dryBelts) {
+    if (dry.all || (family !== null && dry.families.includes(family.groupID))) {
+      names.add(dry.beltName);
+    }
+  }
+  return names;
 }
 
 /** We have rocks (of the current tier, when there is one) — the core lock-and-mine loop. */
@@ -795,24 +828,13 @@ function withBoardPatch(t: MacroTick, patch: ScriptBoard): MacroTick {
 }
 
 // ── belt rotation bookkeeping (mine-at-belt, nearest mode) ─────────────────
-// The set of belts already found dry THIS TOUR lives on the run board (key
-// "mineEmptiedBelts") as a comma-joined id string — ScriptBoard has no array
-// slot, and the board (unlike mem) survives a haul-home lap. "" / absent = a
-// fresh tour, nothing emptied yet.
-const MINE_EMPTIED_BELTS_KEY = "mineEmptiedBelts";
+// Which belts have been found dry lives OFF this board entirely now — it is
+// the BFF's shared, name-keyed memory (see the `mineAtBelt` header comment
+// and `dryBeltNames` above), so every pilot's rotation sees the same picture
+// and a later tour finds rock that respawned once the BFF's entry ages out.
+// The current ORE TIER stays per-pilot on this run board: two pilots working
+// the same system can legitimately be working different tiers.
 const MINE_ORE_TIER_KEY = "mineOreTier";
-
-function beltEmptiedIDs(board: ScriptBoard): readonly number[] {
-  const raw = board[MINE_EMPTIED_BELTS_KEY];
-  if (typeof raw !== "string" || raw.length === 0) {
-    return [];
-  }
-  return raw.split(",").map(Number).filter((id) => Number.isFinite(id));
-}
-
-function encodeBeltIDs(ids: readonly number[]): string {
-  return ids.join(",");
-}
 
 /** The agent this mission step works with: its own pick, or the board's. */
 function stepAgentID(step: MacroStep, board: ScriptBoard): number | null {

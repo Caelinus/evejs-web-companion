@@ -326,3 +326,8 @@ The every-minute cron was deleted at the natural finish. 412 tests green at clos
   of the tier ore counts as emptied, a full dry tour advances the tier and clears the set, tiers exhausted pauses.
   Inside a family the richest grade is mined first (`SpaceEntity.oreGrade` = dogma 2699, stamped by the BFF on
   the snapshot). The picker searches `GET /api/ore/families` (static data, 44 groups). Docs: bridge-wire-contract.
+- **2026-09-04** — **Dry-belt memory moved off the run board onto the BFF, shared across pilots.** `src/beltMemory.js`:
+  in-process only (a restart forgets, by design), keyed by solar system NAME then belt NAME (belt ids are grid-local),
+  each mark = dry entirely or dry of one ore family, one-hour expiry so respawned rock gets found again. Routes
+  `GET/POST /api/bots/belt-memory`; the decider reads `obs.dryBelts` (10 s runner cache, cleared on write) and reports
+  with the `rememberBeltDry` action. The ore TIER stays per-pilot on the run board.

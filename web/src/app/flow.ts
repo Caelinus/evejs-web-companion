@@ -179,7 +179,7 @@ import {
   type CapabilityScope,
 } from "../nav/scriptCapabilities.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
-import type { ScriptObservation } from "../nav/scriptConditions.ts";
+import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
 import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
 import { decodeFormations } from "../bridge/formations.ts";
@@ -5951,6 +5951,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const cargoWatched = watchedKinds.has("cargo-full");
     // One finder result per run: the found agent does not change under the bot.
     let foundAgentCache: NonNullable<ScriptObservation["foundAgent"]> | null = null;
+    // The shared belt memory read is gated on the mine-at-belt macro (below),
+    // but the runner ticks every ~2s and a belt does not go dry that often —
+    // so cache the last read per system name for a short while rather than
+    // hitting the BFF on every tick.
+    const BELT_MEMORY_CACHE_MS = 10_000;
+    let beltMemoryCache: { system: string; at: number; rows: readonly DryBelt[] } | null = null;
     const capabilityCache = createCapabilityCache(
       {
         value: initialCapabilities,
@@ -6020,6 +6026,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let colonies: ScriptObservation["colonies"] = null;
         let damagedItemIDs: ScriptObservation["damagedItemIDs"] = null;
         let scannerOperations: ScriptObservation["scannerOperations"] = null;
+        const systemName = store.flight.get().solarSystemName;
+        let dryBelts: ScriptObservation["dryBelts"] = null;
+        if (macro === "mine-at-belt" && systemName !== null) {
+          const cached = beltMemoryCache;
+          if (cached !== null && cached.system === systemName && Date.now() - cached.at < BELT_MEMORY_CACHE_MS) {
+            dryBelts = cached.rows;
+          } else {
+            try {
+              const rows = await api.readBeltMemory(systemName, callOptions);
+              beltMemoryCache = { system: systemName, at: Date.now(), rows };
+              dryBelts = rows;
+            } catch {
+              dryBelts = null;
+            }
+          }
+        }
         if (macro !== null && SCANNER_MACROS.has(macro)) {
           try {
             scannerOperations = await api.loadScannerOperations(callOptions);
@@ -6318,6 +6340,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           jumpsToDropoff,
           anomalies,
           scannerOperations,
+          systemName,
+          dryBelts,
           targetedByPlayer,
           lowestDroneHealth,
           cargoFraction,
@@ -6434,6 +6458,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             if (action.itemIDs.length > 0) {
               await api.unloadMiningHolds(action.itemIDs, callOptions);
             }
+            return;
+          case "rememberBeltDry":
+            await api.rememberBeltDry(action.systemName, action.beltName, action.groupID, callOptions);
+            // The next tick must see this mark, not the cached list from before it.
+            beltMemoryCache = null;
             return;
           case "agentButton": {
             // The same call the mission bot presses buttons with; the fresh

@@ -16,6 +16,7 @@ const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
+const { createBeltMemory } = require("./beltMemory");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -99,6 +100,12 @@ app.locals.bridgeSessions = bridgeSessions;
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
 app.locals.botScripts = botScripts;
+// Shared, in-process (never persisted — see src/beltMemory.js) memory of belts
+// mining bots have found dry, keyed by solar-system NAME then belt NAME. Every
+// account's bots share the one instance; a restart forgets it, which is fine —
+// belts repopulate and entries expire on their own.
+const beltMemory = options.beltMemory || createBeltMemory();
+app.locals.beltMemory = beltMemory;
 fs.mkdirSync(config.iconCacheDir, { recursive: true });
 
 app.disable("x-powered-by");
@@ -18465,6 +18472,56 @@ const BOT_START_STATUS = {
 app.get("/api/bots", requireAuth, (req, res, next) => {
   try {
     res.json({ ok: true, bots: botHost.list(req.account.accountID) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Shared belt memory (goal: mine-ore-priority) ────────────────────────────
+// In-process only, keyed by solar-system NAME then belt NAME (see
+// src/beltMemory.js for why belt entity ids are not usable). No gateway call
+// either way — this is BFF-local bookkeeping every account's bots share.
+app.get("/api/bots/belt-memory", requireAuth, (req, res, next) => {
+  try {
+    const system = typeof req.query.system === "string" ? req.query.system.trim() : "";
+    if (!system) {
+      res.status(400).json({ ok: false, error: "INVALID_SYSTEM", message: "A system name is required." });
+      return;
+    }
+    res.json({ ok: true, system, belts: beltMemory.dryBelts(system) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bots/belt-memory", requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const system = typeof body.system === "string" ? body.system.trim() : "";
+    const beltName = typeof body.beltName === "string" ? body.beltName.trim() : "";
+    if (!system || !beltName) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_BELT",
+        message: "A system name and a belt name are required.",
+      });
+      return;
+    }
+    let groupID = null;
+    if (body.groupID !== null && body.groupID !== undefined) {
+      const numeric = Number(body.groupID);
+      if (!Number.isSafeInteger(numeric) || numeric <= 0) {
+        res.status(400).json({
+          ok: false,
+          error: "INVALID_GROUP",
+          message: "groupID must be null or a positive integer.",
+        });
+        return;
+      }
+      groupID = numeric;
+    }
+    beltMemory.markDry(system, beltName, groupID);
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }

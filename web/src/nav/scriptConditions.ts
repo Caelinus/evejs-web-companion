@@ -37,6 +37,13 @@ import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
  * because `health-below` watches the weakest layer while `shield-below` watches
  * one specific layer.
  */
+/** One belt the shared memory says is dry: entirely (`all`) or of these ore families (type groups). */
+export interface DryBelt {
+  readonly beltName: string;
+  readonly all: boolean;
+  readonly families: readonly number[];
+}
+
 export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
@@ -58,6 +65,15 @@ export interface ScriptObservation {
    * inventory read a hauler needs.
    */
   readonly cargoFraction?: number | null;
+  /** The solar system the ship is in, by NAME — the key of the shared belt memory. */
+  readonly systemName?: string | null;
+  /**
+   * Belts already found dry in THIS system, from the BFF's shared in-process
+   * belt memory (every pilot running a mining bot reports into it, entries
+   * expire on their own). Read only while a mine step is active. null =
+   * unreadable — treated as "nothing known", never as "all dry".
+   */
+  readonly dryBelts?: readonly DryBelt[] | null;
   /** True when a PLAYER's ship on this grid has locked this ship. */
   readonly targetedByPlayer?: boolean | null;
   /** The lowest health, 0..1, among YOUR drones out in space; null with none out. */

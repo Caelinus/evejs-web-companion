@@ -101,6 +101,13 @@ export type ScriptAction =
   | { readonly kind: "restartExtractor"; readonly planetID: number; readonly pinID: number; readonly resourceTypeID: number }
   /** Pay the station repair shop to fix these items. */
   | { readonly kind: "repairItems"; readonly itemIDs: readonly number[] }
+  /**
+   * Tell the BFF's SHARED belt memory that a belt in this system has no rocks
+   * left (`groupID` null) or none of one ore family (`groupID` = the family's
+   * type group). Keyed by NAMES: belt ids are grid-local and the memory is read
+   * by other pilots running the same bot, possibly in other systems.
+   */
+  | { readonly kind: "rememberBeltDry"; readonly systemName: string; readonly beltName: string; readonly groupID: number | null }
   /** Move stacks between docked places (hangar / cargo / ore hold), qty = split. */
   | {
       readonly kind: "moveItems";

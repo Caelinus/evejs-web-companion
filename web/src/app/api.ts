@@ -1603,6 +1603,42 @@ export async function listOreFamilies(options: ApiOptions = {}): Promise<readonl
     : [];
 }
 
+/** One belt the BFF's shared belt memory says is dry, from /api/bots/belt-memory. */
+export interface DryBeltRow {
+  readonly beltName: string;
+  readonly all: boolean;
+  readonly families: readonly number[];
+}
+
+/**
+ * Read the shared belt memory for one solar system, by NAME (belt entity ids
+ * are grid-local — see src/beltMemory.js). In-process on the BFF, never
+ * persisted, and shared by every pilot's mining bot.
+ */
+export async function readBeltMemory(
+  system: string,
+  options: ApiOptions = {},
+): Promise<readonly DryBeltRow[]> {
+  const data = await getJson(`/api/bots/belt-memory?system=${encodeURIComponent(system)}`, options);
+  return Array.isArray((data as { belts?: unknown }).belts)
+    ? ((data as { belts: unknown }).belts as unknown as readonly DryBeltRow[])
+    : [];
+}
+
+/**
+ * Tell the shared belt memory that `beltName` in `system` has no rocks left
+ * (`groupID` null) or none of one ore family (`groupID` = the family's type
+ * group).
+ */
+export async function rememberBeltDry(
+  system: string,
+  beltName: string,
+  groupID: number | null,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
+}
+
 // --- R4 Agents & Missions (agentMgr bridge) --------------------------------
 // The BFF holds the bound agent handle; the browser addresses agents by game ID
 // and decodes the raw retail-shaped conversation/briefing/journal results with

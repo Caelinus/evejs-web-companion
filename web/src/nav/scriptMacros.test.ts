@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 
 import type { FlightStatus, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import type { MacroMemory } from "./scriptDecide.ts";
-import type { ScriptObservation } from "./scriptConditions.ts";
+import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
 
@@ -49,6 +49,7 @@ function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
     oreHoldFraction: 0, holdEmpty: true, hostileOnGrid: false, dronesOut: false,
     flightStatus: flight(), snapshot: null, lockedTargetIDs: [], holds: null, droneBayItemIDs: [],
     miningModuleIDs: [], startingStationID: null,
+    systemName: "Test System",
     ...over,
   };
 }
@@ -252,28 +253,36 @@ test("mine: rock locked, but no mining equipment was detected -> blocked, not a 
   assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /no mining equipment/i);
 });
 
-// ── mine: belt rotation (nearest mode, decision 2) ──────────────────────────
+// ── mine: belt rotation (nearest mode, decision 2, shared BFF memory) ───────
 
-test("mine: a dry belt in nearest mode rotates to the next unworked belt instead of blocking", () => {
+test("mine: a dry belt in nearest mode reports it via the shared memory instead of blocking", () => {
   const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const far = entity({ itemID: 40002, name: "Asteroid Belt 2", position: { x: 500000, y: 0, z: 0 } });
   const t1 = mine(mineStep, obs({ snapshot: snapshot([near, far]) }), NM, {});
-  assert.equal(t1.action.kind, "wait");
-  assert.equal(t1.outcome.kind, "acting");
+  assert.equal(t1.action.kind, "rememberBeltDry");
+  assert.ok(
+    t1.action.kind === "rememberBeltDry" &&
+      t1.action.systemName === "Test System" &&
+      t1.action.beltName === "Asteroid Belt 1" &&
+      t1.action.groupID === null,
+  );
   assert.match(t1.why, /moving to the next belt/i);
-  assert.equal(t1.boardPatch?.["mineEmptiedBelts"], "40001");
 
-  // Next tick, with the emptied set carried on the board: rotate to the far belt.
-  const t2 = mine(mineStep, obs({ snapshot: snapshot([near, far]) }), NM, { ...t1.boardPatch });
+  // Next tick, with the shared memory now reporting belt 1 all-dry: rotate to the far belt.
+  const dryBelts: DryBelt[] = [{ beltName: "Asteroid Belt 1", all: true, families: [] }];
+  const t2 = mine(mineStep, obs({ snapshot: snapshot([near, far]), dryBelts }), NM, {});
   assert.equal(t2.action.kind, "warp");
   assert.ok(t2.action.kind === "warp" && t2.action.targetID === 40002);
 });
 
-test("mine: every belt in the system emptied -> blocked with a plain reason", () => {
+test("mine: every belt in the system reported dry -> blocked with a plain reason", () => {
   const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const far = entity({ itemID: 40002, name: "Asteroid Belt 2", position: { x: 8000, y: 0, z: 0 } });
-  const board = { mineEmptiedBelts: "40001,40002" };
-  const t = mine(mineStep, obs({ snapshot: snapshot([near, far]) }), NM, board);
+  const dryBelts: DryBelt[] = [
+    { beltName: "Asteroid Belt 1", all: true, families: [] },
+    { beltName: "Asteroid Belt 2", all: true, families: [] },
+  ];
+  const t = mine(mineStep, obs({ snapshot: snapshot([near, far]), dryBelts }), NM, {});
   assert.equal(t.outcome.kind, "blocked");
   assert.equal(t.outcome.kind === "blocked" ? t.outcome.reason : "", "Every asteroid belt in this system is mined out.");
 });
@@ -293,15 +302,46 @@ test("mine: a CHOSEN (pinned) belt still just pauses when dry — no rotation", 
   assert.equal(t.boardPatch, undefined);
 });
 
-test("mine: the emptied-belt board patch survives a fresh per-step memory (a haul-home lap)", () => {
+test("mine: the shared belt memory is read from the observation, independent of per-step memory", () => {
   const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const far = entity({ itemID: 40002, name: "Asteroid Belt 2", position: { x: 500000, y: 0, z: 0 } });
+  const dryBelts: DryBelt[] = [{ beltName: "Asteroid Belt 1", all: true, families: [] }];
   // A stale mem (as if this were mid-lock on a rock from before the haul) makes no difference.
-  const t1 = mine(mineStep, obs({ snapshot: snapshot([near, far]) }), { rockID: 999, lockIssued: true }, {});
-  assert.equal(t1.boardPatch?.["mineEmptiedBelts"], "40001");
-  // Re-entering the step resets mem to {}, but the board (carried by the runner) still has it.
-  const t2 = mine(mineStep, obs({ snapshot: snapshot([near, far]) }), {}, { ...t1.boardPatch });
+  const t1 = mine(mineStep, obs({ snapshot: snapshot([near, far]), dryBelts }), { rockID: 999, lockIssued: true }, {});
+  assert.ok(t1.action.kind === "warp" && t1.action.targetID === 40002);
+  // Re-entering the step resets mem to {} and the board carries nothing either —
+  // the shared memory lives on the observation and does not care.
+  const t2 = mine(mineStep, obs({ snapshot: snapshot([near, far]), dryBelts }), {}, {});
   assert.ok(t2.action.kind === "warp" && t2.action.targetID === 40002);
+});
+
+test("mine: dryBelts null (unreadable) is treated as nothing known, never as all dry", () => {
+  const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([near]), dryBelts: null }), NM, {});
+  assert.equal(t.action.kind, "rememberBeltDry");
+});
+
+test("mine: on a dry belt but the system name is unreadable -> blocked, not a bare report", () => {
+  const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([near]), systemName: null }), NM, {});
+  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(t.outcome.kind === "blocked" ? t.outcome.reason : "", "The bot cannot tell which solar system this is.");
+});
+
+test("mine: rotation skips a belt dry for this tier's family but not a belt dry only for a different family", () => {
+  const belt1 = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
+  const belt2 = entity({ itemID: 40002, name: "Asteroid Belt 2", position: { x: 500000, y: 0, z: 0 } });
+  const step = oreListStep([VELDSPAR, KERNITE]);
+  const dryBelts: DryBelt[] = [
+    { beltName: "Asteroid Belt 1", all: false, families: [VELDSPAR.groupID] },
+    { beltName: "Asteroid Belt 2", all: false, families: [KERNITE.groupID] },
+  ];
+  const t = mine(step, obs({ snapshot: snapshot([belt1, belt2]), dryBelts }), NM, {});
+  assert.equal(t.action.kind, "warp");
+  assert.ok(
+    t.action.kind === "warp" && t.action.targetID === 40002,
+    "belt 2 is only dry for Kernite, not the active Veldspar tier, so it is still a target",
+  );
 });
 
 // ── mine: ore priority (tiered oreList) ──────────────────────────────────────
@@ -335,27 +375,38 @@ test("mine: within a family, the highest ore grade wins over distance; an unknow
   assert.ok(t.action.kind === "orbit" && t.action.targetID === 50002, "grade II beats both a closer plain rock and an unknown-grade one");
 });
 
-test("mine: once a tier's ore is gone from every belt, priority advances to the next tier (a fresh tour)", () => {
+test("mine: a belt on grid dry for the tier's family reports that family's groupID, not a plain dry", () => {
   const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const kern = entity({ itemID: 50001, name: "Kernite", groupID: 465, miningYieldTypeID: 1229, position: { x: 9000, y: 0, z: 0 } });
   const step = oreListStep([VELDSPAR, KERNITE]);
-  const world = () => obs({ snapshot: snapshot([belt, kern]) });
-
-  // Tick 1: sitting on the only belt, no Veldspar here -> emptied for this tier.
-  const t1 = mine(step, world(), NM, {});
-  assert.equal(t1.action.kind, "wait");
+  const t1 = mine(step, obs({ snapshot: snapshot([belt, kern]) }), NM, {});
+  assert.equal(t1.action.kind, "rememberBeltDry");
+  assert.ok(
+    t1.action.kind === "rememberBeltDry" &&
+      t1.action.systemName === "Test System" &&
+      t1.action.beltName === "Asteroid Belt 1" &&
+      t1.action.groupID === VELDSPAR.groupID,
+  );
   assert.match(t1.why, /No Veldspar left here/i);
-  assert.equal(t1.boardPatch?.["mineEmptiedBelts"], "40001");
+});
 
-  // Tick 2: every belt is now emptied for Veldspar -> advance to Kernite, fresh tour.
+test("mine: once a tier's ore is reported gone from every belt, priority advances to the next tier (a fresh tour)", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
+  const kern = entity({ itemID: 50001, name: "Kernite", groupID: 465, miningYieldTypeID: 1229, position: { x: 9000, y: 0, z: 0 } });
+  const step = oreListStep([VELDSPAR, KERNITE]);
+  // The shared memory already reports the only belt dry for Veldspar.
+  const dryBelts: DryBelt[] = [{ beltName: "Asteroid Belt 1", all: false, families: [VELDSPAR.groupID] }];
+  const world = () => obs({ snapshot: snapshot([belt, kern]), dryBelts });
+
+  // Tick 1: every belt is dry for Veldspar -> advance to Kernite, fresh tour (per-pilot tier).
+  const t1 = mine(step, world(), NM, {});
+  assert.match(t1.why, /No Veldspar left in this system, moving to the next ore/i);
+  assert.equal(t1.boardPatch?.["mineOreTier"], 1);
+
+  // Tick 2: now on the Kernite tier, the rock right there is mineable — the
+  // shared memory's Veldspar-only entry does not block a different family.
   const t2 = mine(step, world(), NM, { ...t1.boardPatch });
-  assert.match(t2.why, /No Veldspar left in this system, moving to the next ore/i);
-  assert.equal(t2.boardPatch?.["mineOreTier"], 1);
-  assert.equal(t2.boardPatch?.["mineEmptiedBelts"], "");
-
-  // Tick 3: now on the Kernite tier, the rock right there is mineable.
-  const t3 = mine(step, world(), NM, { ...t2.boardPatch });
-  assert.ok(t3.action.kind === "orbit" && t3.action.targetID === 50001);
+  assert.ok(t2.action.kind === "orbit" && t2.action.targetID === 50001);
 });
 
 test("mine: the ore-priority list running out entirely -> blocked, never a silent fallback to any rock", () => {

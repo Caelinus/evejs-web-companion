@@ -1467,6 +1467,19 @@ refused, and proves the wallet was not touched.
   Asteroid category (25): every grade of one ore and its compressed variant sit
   in the same group, so the distinct group set is the family set. Only
   **published** types are considered. Feeds the bot editor's ore picker.
+- `GET /api/bots/belt-memory?system=` → `{ ok, system, belts:[{beltName, all,
+  families:[groupID]}] }`. `system` (a solar-system NAME) is required — a
+  missing/blank one is 400 `INVALID_SYSTEM`. Reads the BFF's SHARED, in-process
+  belt memory (src/beltMemory.js): every mining bot on this BFF reports into it,
+  keyed by solar-system name then belt name (belt entity ids are grid-local, so
+  names are the only stable handle). No gateway call. Not persisted — lost on a
+  BFF restart, and entries expire on their own after an hour. An unknown system
+  answers `belts: []`, never an error.
+- `POST /api/bots/belt-memory` `{system, beltName, groupID}` → `{ ok: true }`.
+  Marks a belt dry: entirely (`groupID: null`) or of one ore family
+  (`groupID` = that family's type group, a positive integer). Missing/blank
+  `system` or `beltName` is 400 `INVALID_BELT`; a `groupID` that is neither
+  `null` nor a positive integer is 400 `INVALID_GROUP`. No gateway call.
 - `POST /api/bridge/market/buy` `{typeID, price, quantity, durationDays, confirm}`
 - `POST /api/bridge/market/sell` `{itemID, typeID, price, quantity, durationDays, confirm}`
 - `POST /api/bridge/market/cancel` `{orderID, confirm}`
