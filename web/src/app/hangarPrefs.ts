@@ -207,6 +207,26 @@ export function toggleSquadMember(
   return { ...prefs, members: { ...prefs.members, [squadID]: next } };
 }
 
+/**
+ * Put several pilots in an existing squad at once, skipping the ones already in
+ * it. This is "add the selection to Mining Op": a union, never a replacement —
+ * adding two pilots to a squad must not drop the four already in it. An unknown
+ * squad id leaves the prefs untouched, so a squad deleted in another tab cannot
+ * resurrect itself as a members entry with no squad.
+ */
+export function addSquadMembers(
+  prefs: HangarPrefs,
+  squadID: string,
+  characterIDs: readonly number[],
+): HangarPrefs {
+  if (!prefs.squads.some((s) => s.id === squadID)) return prefs;
+  const current = prefs.members[squadID] ?? [];
+  const have = new Set(current);
+  const added = characterIDs.filter((id) => !have.has(id));
+  if (added.length === 0) return prefs;
+  return { ...prefs, members: { ...prefs.members, [squadID]: [...current, ...added] } };
+}
+
 function toggleIn<T>(list: readonly T[], value: T): T[] {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }

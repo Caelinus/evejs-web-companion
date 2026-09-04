@@ -51,7 +51,12 @@
 
   function activate(): void {
     if (manage) return;
-    if (tapSelects) onToggleSelect();
+    // A pilot already in the client has nothing to launch, so the mis-tap
+    // protection has nothing to protect against: the tap takes you to its
+    // cockpit on every width. Selecting it instead is what made an online row
+    // feel dead — the checkbox is still right there for the rare case where you
+    // want it in a squad.
+    if (tapSelects && !pilot.online) onToggleSelect();
     else onActivate();
   }
 
@@ -102,7 +107,7 @@
       <span class="hangar-name">{pilot.name}</span>
       {#if pilot.online}
         <!-- Words with the mark, never the mark alone (R9a). -->
-        <span class="hangar-badge is-online" title="Already in the client">ON</span>
+        <span class="hangar-badge is-online" title="Already in the client — click the row to go to it">ON</span>
       {/if}
       {#if pilot.training === null}
         <span class="hangar-badge is-idle" title="No skill in training">IDLE</span>

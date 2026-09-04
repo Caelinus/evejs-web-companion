@@ -22,6 +22,8 @@ const { setKnownCharacterStorage } = await import("../app/knownCharacters.ts");
 const { setHangarPrefsStorage } = await import("../app/hangarPrefs.ts");
 const PilotHangar = (await import("./PilotHangar.svelte")).default;
 const HangarPilotRow = (await import("./HangarPilotRow.svelte")).default;
+const HangarSquadAssign = (await import("./HangarSquadAssign.svelte")).default;
+const HangarSquadPicker = (await import("./HangarSquadPicker.svelte")).default;
 
 const ROSTER_KEY = "evejs-web-known-characters:v1";
 const PREFS_KEY = "evejs-web-hangar-prefs:v1";
@@ -41,7 +43,7 @@ function renderHangar(): string {
     props: {
       onlineIDs: new Set<number>([90000002]),
       onLaunch: async () => {},
-      onGoToFirst: () => {},
+      onShowPilot: () => {},
       onClose: null,
     },
   } as never).body;
@@ -178,6 +180,39 @@ test("a squad puts its colour on the chip row and a dot on its pilots", () => {
   assert.equal(body.split('title="Mining Op"').length - 1, 2);
 });
 
+test("an unpinned squad is still a chip, not only a row in the dropdown", () => {
+  // The regression this pins: squads used to reach the chip row only once
+  // pinned, and nothing pins itself — so on a fresh install every squad the
+  // player made was reachable ONLY through "All squads ▼", which is the one
+  // control on the screen they had no reason to open.
+  setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
+  setHangarPrefsStorage(
+    storage({
+      [PREFS_KEY]: JSON.stringify({
+        squads: [
+          { id: "s1", name: "Mining Op", color: "#52d9a3" },
+          { id: "s2", name: "Scout Net", color: "#6fb4e8" },
+        ],
+        members: { s1: [90000001], s2: [90000003] },
+        pinnedSquads: ["s2"],
+        pinnedPilots: [],
+        collapsedAccounts: [],
+      }),
+    }),
+  );
+  const body = renderHangar();
+  const chiprow = body.slice(
+    body.indexOf('class="hangar-chiprow"'),
+    body.indexOf('class="hangar-summary"'),
+  );
+  assert.match(chiprow, /Mining Op/, "the unpinned squad is on the row too");
+  // Pinned first: a squad kept at the front stays at the front.
+  assert.ok(
+    chiprow.indexOf("Scout Net") < chiprow.indexOf("Mining Op"),
+    "pinning decides the order the chips come in",
+  );
+});
+
 test("a collapsed account shows its header and hides its pilots", () => {
   setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
   setHangarPrefsStorage(
@@ -195,6 +230,53 @@ test("a collapsed account shows its header and hides its pilots", () => {
   assert.match(body, /Other Account/);
   assert.doesNotMatch(body, /Scout/);
   assert.match(body, /Ore Farmer/, "the other account is unaffected");
+});
+
+// --- the squad picker -------------------------------------------------------
+
+function renderPicker(squads: unknown[], open = true): string {
+  return render(HangarSquadPicker as never, {
+    props: {
+      squads,
+      prefs: { squads, members: {}, pinnedSquads: [], pinnedPilots: [], collapsedAccounts: [] },
+      knownIDs: new Set<number>(),
+      open,
+      onToggleOpen: () => {},
+      onSelect: () => {},
+      onTogglePin: () => {},
+      onLaunch: () => {},
+      onEdit: () => {},
+      onNew: () => {},
+    },
+  } as never).body;
+}
+
+test("every squad in the picker offers the editor, which is where Delete lives", () => {
+  // The gap this pins: a squad could be made from three places and unmade from
+  // none of them, unless the player pressed Manage and noticed that the chips'
+  // "▶ ALL" had quietly turned into an "edit". The picker already lists every
+  // squad by name, so the way out of one lives there too.
+  const body = renderPicker([
+    { id: "s1", name: "Mining Op", color: "#52d9a3" },
+    { id: "s2", name: "Scout Net", color: "#6fb4e8" },
+  ]);
+  assert.equal(
+    body.split('class="hangar-chip-edit is-picker"').length - 1,
+    2,
+    "both squads, not just a pinned or selected one",
+  );
+  assert.match(body, /Rename, recolour or delete Mining Op/);
+  assert.match(body, /Rename, recolour or delete Scout Net/);
+});
+
+test("a closed picker is a chip and nothing else", () => {
+  const body = renderPicker([{ id: "s1", name: "Mining Op", color: "#52d9a3" }], false);
+  assert.match(body, /All squads \(1\)/);
+  assert.doesNotMatch(body, /Mining Op/, "the list belongs to the open popover");
+});
+
+test("an empty picker says so rather than showing an empty box", () => {
+  assert.match(renderPicker([]), /No squads yet\./);
 });
 
 // --- the row on its own -----------------------------------------------------
@@ -241,4 +323,35 @@ test("manage mode hides every way to launch or select a pilot by accident", () =
   assert.doesNotMatch(managing, /type="checkbox"/, "no selection while managing");
   assert.doesNotMatch(managing, /role="button"/, "the row itself is inert while managing");
   assert.match(managing, /Squads \(0\)/, "and the squad checklist appears instead");
+});
+
+// --- "Save as squad" --------------------------------------------------------
+
+function renderAssign(squads: unknown[]): string {
+  return render(HangarSquadAssign as never, {
+    props: {
+      pilotCount: 2,
+      squads,
+      prefs: { squads, members: {}, pinnedSquads: [], pinnedPilots: [], collapsedAccounts: [] },
+      knownIDs: new Set<number>(),
+      suggestedName: "New squad 1",
+      suggestedColor: "#52d9a3",
+      onConfirm: () => {},
+      onCancel: () => {},
+    },
+  } as never).body;
+}
+
+test("with squads to choose from, the chooser offers them before a new one", () => {
+  const body = renderAssign([{ id: "s1", name: "Mining Op", color: "#52d9a3" }]);
+  assert.match(body, /Mining Op/, "the existing squad is a choice");
+  assert.match(body, /Create a new squad/);
+  assert.match(body, /Add 2 pilots/, "and the button says what confirming will do");
+});
+
+test("with no squads yet the chooser is straight to naming a new one", () => {
+  const body = renderAssign([]);
+  assert.doesNotMatch(body, /Create a new squad/, "nothing to choose between");
+  assert.match(body, /Squad name/);
+  assert.match(body, /Create squad with 2 pilots/);
 });

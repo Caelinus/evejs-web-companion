@@ -13,6 +13,7 @@ import {
   EMPTY_PREFS,
   SQUAD_PALETTE,
   addSquad,
+  addSquadMembers,
   deleteSquad,
   forgetPilots,
   loadHangarPrefs,
@@ -164,4 +165,22 @@ test("new squads cycle the palette so two made in a row do not look alike", () =
   }
   assert.deepEqual(picked.slice(0, SQUAD_PALETTE.length), [...SQUAD_PALETTE]);
   assert.equal(picked[SQUAD_PALETTE.length], SQUAD_PALETTE[0]);
+});
+
+test("adding a selection to a squad is a union, never a replacement", () => {
+  // "Save as squad → Mining Op" with two pilots selected must not throw away
+  // the four already in it, and must not list a pilot twice when one of the two
+  // was already a member.
+  let prefs = addSquad(EMPTY_PREFS, MINING, [1, 2, 3, 4]);
+  prefs = addSquadMembers(prefs, MINING.id, [3, 5]);
+  assert.deepEqual(prefs.members[MINING.id], [1, 2, 3, 4, 5]);
+});
+
+test("adding pilots to a squad that is not there changes nothing", () => {
+  // A squad deleted in another tab must not come back as a members entry with
+  // no squad on the chip row to match it.
+  const prefs = addSquad(EMPTY_PREFS, MINING, [1]);
+  const after = addSquadMembers(prefs, SCOUTS.id, [2]);
+  assert.equal(after, prefs, "the same value back, so nothing is written");
+  assert.equal(after.members[SCOUTS.id], undefined);
 });

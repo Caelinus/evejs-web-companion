@@ -20,11 +20,13 @@ between them is the character bar, not this screen.
 
 | File | What it owns |
 | --- | --- |
-| `web/src/ui/PilotHangar.svelte` | the screen: header, chips, picker, summary, grid, selection bar |
+| `web/src/ui/PilotHangar.svelte` | the screen: header, chips, summary, grid, selection bar |
 | `web/src/ui/HangarPilotRow.svelte` | one pilot, including the manage-mode squad checklist |
+| `web/src/ui/HangarSquadPicker.svelte` | "All squads ▼" — search, pin, edit, launch |
 | `web/src/ui/HangarLoginDialog.svelte` | "+ Add account" — signs in, records the pilots, signs out |
 | `web/src/ui/HangarAddCharacter.svelte` | an empty slot — hosts `CharacterCreate` on a throwaway session |
 | `web/src/ui/HangarSquadEditor.svelte` | name / colour / delete |
+| `web/src/ui/HangarSquadAssign.svelte` | "Save as squad" — put the selection in an existing squad or a new one |
 | `web/src/ui/HangarLaunchProgress.svelte` | one row per pilot, resolving as each lands |
 | `web/src/app/hangar.ts` | **pure.** filtering, grouping, sorting, and every string the screen prints |
 | `web/src/app/hangarPrefs.ts` | **pure + localStorage.** squads, membership, pins, collapsed accounts |
@@ -88,13 +90,40 @@ the mode where you remove pilots, and a stray click that put six of them in the 
 worst possible surprise there.
 
 **Below 760px a tap SELECTS instead of launching**, and the selection bar's "Bring online ▶" is the
-deliberate action. Mis-tap protection — see the target-size note below.
+deliberate action. Mis-tap protection — see the target-size note below. The exception is a pilot that
+is already in the client: there is nothing to launch, so the tap goes to its cockpit at every width.
 
-**Cancelling "+ New squad" discards it; cancelling "Save as squad" does not.** A squad is created
-before the editor opens (the editor edits a squad; inventing a second "not saved yet" shape for one
-would give every colour and member list two places to read from). So cancel undoes the creation —
-except when the squad already holds the pilots that were selected, where throwing it away would lose
-real work.
+**Clicking a pilot that is already ON goes to its cockpit.** It used to fall through `launch`'s
+"already online" filter and do nothing, which — with the hangar open over a live cockpit — left no way
+back into the client except the header. The header's way back is `◀ To client`, named for where it
+goes rather than what it undoes.
+
+**The hangar is reachable from the cockpit.** `Pilots` on the character bar reopens it. Without that
+button the hangar was a one-way door: the first pilot coming online put the only screen that can
+launch the other twenty, edit squads or forget a pilot out of reach for the life of the tab.
+
+**No squad edit is written until it is confirmed.** Both squad dialogs open on a DRAFT — a `Squad`
+value with an id that is not in prefs — and it becomes real on Save, or not at all. Previously the
+squad was created first and cancelling was supposed to undo it, which left a "New squad 3" behind
+every time the undo did not apply.
+
+**"Save as squad" asks WHICH squad.** From a selection the first question is not what to call a new
+squad, it is whether this is a new one at all; before `HangarSquadAssign` there was no way to add a
+selection to a squad that already existed, so every op made another squad. `addSquadMembers` is a
+union — adding two pilots never drops the four already in it.
+
+**Every squad is a chip; pinning decides ORDER, not existence.** Only pinned squads used to reach the
+chip row, and nothing pins itself, so on a fresh install squads were reachable solely through the
+"All squads ▼" dropdown. The chips now run `All pilots · Not training · In client │ <every squad>`,
+pinned ones first. The picker stays for search, pinning and editing once the row is long.
+
+**Deleting a squad does not go through manage mode.** Delete lives in `HangarSquadEditor`, and the
+only door to that editor was the chips' `edit` — which only appears in manage mode, where it replaces
+`▶ ALL`. So a squad could be made from three places (the picker's `+ New squad`, "Save as squad", the
+per-pilot checklist) and unmade from none, unless the player thought to press Manage and noticed a
+button had changed under them. Every picker row now carries the same `edit`, which is why the picker
+is its own component: the popover is closed in the screen's default render, and an SSR test cannot
+open it.
 
 **The per-pilot squad control is a checklist popover, not a chip grid.** The handoff tried the flat
 grid: at eleven squads it made every row about 230px tall.
@@ -139,11 +168,14 @@ path for it to take.
 
 - `web/src/app/hangar.test.ts` — 18 tests: the stale-training rule, scope × search composition, the
   pinned-then-SP sort, slot padding, and every formatted string.
-- `web/src/app/hangarPrefs.test.ts` — 10 tests: round-trip, junk and half-written storage, and the two
-  cascade deletes (a squad takes its membership and pin; a forgotten pilot leaves every squad).
+- `web/src/app/hangarPrefs.test.ts` — 12 tests: round-trip, junk and half-written storage, the two
+  cascade deletes (a squad takes its membership and pin; a forgotten pilot leaves every squad), and
+  `addSquadMembers` as a union that ignores an unknown squad.
 - `web/src/app/knownCharacters.test.ts` — the carry-over rule and the FILETIME conversion.
 - `web/src/ui/pilotHangar.test.ts` — SSR renders: first run, a populated hangar, a roster row written
-  before the hangar existed, empty slots, squads, a collapsed account, and manage mode.
+  before the hangar existed, empty slots, squads (pinned and not), a collapsed account, manage mode,
+  the squad picker (open, closed and empty — every row offering the editor), and "Save as squad" with
+  and without squads to choose from.
 - `web/src/ui/squareCorners.test.ts` — now pins the circles **by selector** rather than counting to
   one, so a new `border-radius: 50%` has to be named and reviewed.
 

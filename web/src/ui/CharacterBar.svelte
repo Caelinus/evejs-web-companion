@@ -7,12 +7,19 @@
   import CharacterChip from "./CharacterChip.svelte";
   import type { Session } from "../app/sessions.ts";
 
-  let { sessions, activeId, serverStatus, onSwitch, onAdd }: {
+  let { sessions, activeId, serverStatus, onSwitch, onAdd, onHangar }: {
     sessions: Session[];
     activeId: string | null;
     serverStatus: "checking" | "online" | "offline";
     onSwitch: (id: string) => void;
     onAdd: () => void;
+    /**
+     * Reopen the Pilot Hangar over the cockpit. Without this the hangar was a
+     * one-way door: the moment the first pilot came online, the only screen that
+     * can bring the OTHER twenty online, edit squads or forget a pilot became
+     * unreachable for the life of the tab.
+     */
+    onHangar: () => void;
   } = $props();
 
   const statusLabel = $derived(
@@ -39,5 +46,8 @@
     <span class="char-bar-status-dot"></span>
     <span class="char-bar-status-text">{statusLabel}</span>
   </span>
+  <button type="button" class="char-bar-hangar" onclick={onHangar} title="Pilot hangar — every pilot, squads and accounts">
+    Pilots
+  </button>
   <button type="button" class="char-bar-add" onclick={onAdd}>+ Add character</button>
 </div>

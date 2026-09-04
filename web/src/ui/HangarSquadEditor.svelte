@@ -1,10 +1,14 @@
 <script lang="ts">
   // The squad editor: name, colour, save, delete.
   //
-  // Reached three ways — a chip's "edit" in manage mode, the picker's
-  // "+ New squad", and "Save as squad" on the selection bar, which creates the
-  // squad from the selection and opens this on it so the player can name the
-  // thing they just made while they still remember what it was for.
+  // Reached two ways — a chip's "edit" in manage mode, and the picker's
+  // "+ New squad". ("Save as squad" on the selection bar goes to
+  // HangarSquadAssign instead, because from a selection the first question is
+  // WHICH squad, not what to call a new one.)
+  //
+  // When `isNew` the squad handed in is a DRAFT: it has an id and a colour but
+  // nothing in prefs, and it is the parent's Save that makes it real. So Cancel
+  // here writes nothing, and there is no Delete to offer.
   import { SQUAD_PALETTE, type Squad } from "../app/hangarPrefs.ts";
 
   let {
@@ -74,8 +78,13 @@
           type="button"
           class="hangar-dialog-primary"
           onclick={() => onSave({ name: name.trim() || squad.name, color })}
-        >Save squad</button>
-        <button type="button" class="hangar-dialog-danger" onclick={onDelete}>Delete</button>
+        >{isNew ? "Create squad" : "Save squad"}</button>
+        {#if !isNew}
+          <!-- A new squad is a draft that does not exist yet: Cancel already
+               drops it, and "Delete" would claim to remove something the player
+               has not made. -->
+          <button type="button" class="hangar-dialog-danger" onclick={onDelete}>Delete</button>
+        {/if}
         <button type="button" class="hangar-dialog-ghost" onclick={onCancel}>Cancel</button>
       </div>
     </div>

@@ -32,6 +32,8 @@
   import HangarLoginDialog from "./HangarLoginDialog.svelte";
   import HangarAddCharacter from "./HangarAddCharacter.svelte";
   import HangarSquadEditor from "./HangarSquadEditor.svelte";
+  import HangarSquadPicker from "./HangarSquadPicker.svelte";
+  import HangarSquadAssign from "./HangarSquadAssign.svelte";
   import HangarLaunchProgress from "./HangarLaunchProgress.svelte";
   import {
     loadKnownCharacters,
@@ -43,6 +45,7 @@
     loadHangarPrefs,
     saveHangarPrefs,
     addSquad,
+    addSquadMembers,
     deleteSquad,
     forgetPilots,
     nextSquadColor,
@@ -81,7 +84,7 @@
   let {
     onlineIDs = new Set<number>(),
     onLaunch,
-    onGoToFirst,
+    onShowPilot,
     onClose = null,
   }: {
     /** Character IDs already in the client, from App's live session list. */
@@ -94,8 +97,13 @@
       targets: readonly LaunchTarget[],
       onProgress: (characterID: number, state: LaunchEntry["state"], note?: string) => void,
     ) => Promise<void>;
-    /** Show the first pilot that came online. */
-    onGoToFirst: (characterID: number) => void;
+    /**
+     * Leave the hangar showing one pilot's cockpit. Used by the launch dialog's
+     * "go to first pilot", and by clicking a pilot that is ALREADY in the
+     * client — for that pilot there is nothing to launch, so the row's job is to
+     * take you to it instead of doing nothing at all.
+     */
+    onShowPilot: (characterID: number) => void;
     /**
      * Leave the hangar without launching anything. Null when the hangar IS the
      * screen (no pilot is online yet) and there is nowhere to go back to.
@@ -120,18 +128,16 @@
   let selected = $state<Set<number>>(new Set());
   let manage = $state(false);
   let pickerOpen = $state(false);
-  let squadQuery = $state("");
   let squadMenuFor = $state<number | null>(null);
+  /**
+   * The squad the editor is open on. When `editingIsNew` it is a DRAFT that does
+   * not exist in `prefs` yet — cancelling one is genuinely free, because there is
+   * nothing to undo.
+   */
   let editing = $state<Squad | null>(null);
   let editingIsNew = $state(false);
-  /**
-   * Cancelling the editor should undo the squad it was opened on — but ONLY for
-   * "+ New squad", where the squad exists solely because the editor needed
-   * something to edit. A squad made by "Save as squad" already holds the pilots
-   * that were selected, and throwing that away because the player did not want
-   * to rename it would lose the actual work.
-   */
-  let discardOnCancel = $state(false);
+  /** "Save as squad" is open: pick an existing squad, or describe a new one. */
+  let assigning = $state(false);
   let loginOpen = $state(false);
   /** The account whose empty slot was clicked, i.e. "put a pilot in here". */
   let addingTo = $state<string | null>(null);
@@ -173,14 +179,17 @@
   const selectedPilots = $derived(pilots.filter((p) => selected.has(p.characterID)));
   const onlineCount = $derived(pilots.filter((p) => p.online).length);
   const idleCount = $derived(pilots.filter((p) => p.training === null).length);
-  const pinnedSquads = $derived(prefs.squads.filter((s) => prefs.pinnedSquads.includes(s.id)));
-  const pickerSquads = $derived(
-    prefs.squads.filter(
-      (s) =>
-        squadQuery.trim().length === 0 ||
-        s.name.toLowerCase().includes(squadQuery.trim().toLowerCase()),
-    ),
-  );
+  // EVERY squad is on the chip row, beside "All pilots" / "Not training" / "In
+  // client". It used to be only the pinned ones, which meant a fresh install —
+  // where nothing is pinned — could reach its squads solely through the "All
+  // squads ▼" dropdown, i.e. the feature was invisible to anyone who had not
+  // already found the picker. Pinning now decides ORDER, not existence: pinned
+  // squads lead, the rest follow in the order they were made. The picker stays
+  // for searching, pinning and editing once the row is long.
+  const chipSquads = $derived([
+    ...prefs.squads.filter((s) => prefs.pinnedSquads.includes(s.id)),
+    ...prefs.squads.filter((s) => !prefs.pinnedSquads.includes(s.id)),
+  ]);
 
   // --- refresh on mount ------------------------------------------------------
   //
@@ -272,7 +281,19 @@
   function goToFirst(): void {
     const first = queue.find((entry) => entry.state === "online");
     queue = [];
-    if (first) onGoToFirst(first.characterID);
+    if (first) onShowPilot(first.characterID);
+  }
+
+  /**
+   * What clicking a pilot row does. A pilot that is not in the client comes
+   * online; one that already is takes you to its cockpit. Before this the second
+   * case fell through `launch`'s "already online" filter and the row was simply
+   * dead — with a pilot up and the hangar still open there was no way back into
+   * the client except the header.
+   */
+  function activatePilot(pilot: HangarPilot): void {
+    if (pilot.online) onShowPilot(pilot.characterID);
+    else void launch([pilot]);
   }
 
   // --- popovers --------------------------------------------------------------
@@ -289,50 +310,87 @@
   }
 
   // --- squads ----------------------------------------------------------------
+  //
+  // NOTHING HERE WRITES UNTIL THE PLAYER CONFIRMS. Both dialogs used to be opened
+  // on a squad that had already been created, so cancelling either one left a
+  // "New squad 3" on the chip row that the player never asked for. A new squad is
+  // now a DRAFT — a Squad value with an id, held in `editing` and never committed
+  // — and it becomes real in `saveSquadEdit`, on Save, or not at all.
 
-  // A squad is created BEFORE the editor opens, not on save: the editor edits a
-  // squad, and inventing a second "not saved yet" shape for one would mean every
-  // colour swatch and member list had two places to read from.
-  function newSquad(memberIDs: readonly number[] = []): void {
-    const squad: Squad = {
+  function draftSquad(): Squad {
+    return {
       id: nextSquadId(),
       name: `New squad ${prefs.squads.length + 1}`,
       color: nextSquadColor(prefs),
     };
-    commit(addSquad(prefs, squad, memberIDs));
-    editing = squad;
+  }
+
+  /** "+ New squad" in the picker: an empty draft, named and saved or dropped. */
+  function newSquad(): void {
+    editing = draftSquad();
     editingIsNew = true;
-    discardOnCancel = memberIDs.length === 0;
     closePopovers();
   }
 
-  function saveSquadFromSelection(): void {
-    newSquad(selectedPilots.map((p) => p.characterID));
-    selected = new Set();
+  /**
+   * Open the editor on an existing squad — the only route to Delete.
+   *
+   * It hung off the chips' manage mode alone, which meant deleting a squad was
+   * reachable only by pressing Manage and noticing that "▶ ALL" had quietly
+   * become "edit". The picker offers it too now: it already lists every squad by
+   * name and is where you go when the chip row is long.
+   */
+  function editSquad(squad: Squad): void {
+    editing = squad;
+    editingIsNew = false;
+    closePopovers();
   }
 
   function saveSquadEdit(patch: { name: string; color: string }): void {
     if (!editing) return;
-    commit(updateSquad(prefs, editing.id, patch));
-    closeSquadEditor(false);
+    // A draft has no entry in prefs yet, so saving it is an add, not an update.
+    commit(
+      editingIsNew
+        ? addSquad(prefs, { ...editing, ...patch })
+        : updateSquad(prefs, editing.id, patch),
+    );
+    closeSquadEditor();
   }
 
   function removeSquad(): void {
     if (!editing) return;
     const id = editing.id;
     commit(deleteSquad(prefs, id));
-    closeSquadEditor(false);
+    closeSquadEditor();
     if (scope.kind === "squad" && scope.value === id) scope = { kind: "all" };
   }
 
-  function closeSquadEditor(discard: boolean): void {
-    const squad = editing;
+  function closeSquadEditor(): void {
     editing = null;
     editingIsNew = false;
-    if (discard && squad) {
-      commit(deleteSquad(prefs, squad.id));
+  }
+
+  // "Save as squad" on the selection bar. It only OPENS the chooser; the squad
+  // is created, or the selection added to an existing one, in `assignSquad`.
+  function openSquadAssign(): void {
+    if (selectedPilots.length === 0) return;
+    assigning = true;
+    closePopovers();
+  }
+
+  function assignSquad(
+    choice: { kind: "existing"; squadID: string } | { kind: "new"; name: string; color: string },
+  ): void {
+    const memberIDs = selectedPilots.map((p) => p.characterID);
+    if (choice.kind === "existing") {
+      commit(addSquadMembers(prefs, choice.squadID, memberIDs));
+    } else {
+      commit(
+        addSquad(prefs, { ...draftSquad(), name: choice.name, color: choice.color }, memberIDs),
+      );
     }
-    discardOnCancel = false;
+    assigning = false;
+    selected = new Set();
   }
 
   // --- manage-mode removals --------------------------------------------------
@@ -402,7 +460,12 @@
         + Add account
       </button>
       {#if onClose}
-        <button type="button" class="hangar-manage" onclick={onClose}>Back</button>
+        <!-- The way back into the client. Labelled for where it GOES, not for
+             what it undoes: with pilots already up, "Back" gave no hint that
+             the cockpit was still there behind the hangar. -->
+        <button type="button" class="hangar-manage is-exit" onclick={onClose}>
+          ◀ To client
+        </button>
       {/if}
     </div>
   </header>
@@ -419,45 +482,6 @@
         <span class="hangar-chip-count">{pilots.length}</span>
       </button>
     </div>
-
-    {#each pinnedSquads as squad (squad.id)}
-      {@const count = squadMemberCount(prefs, squad.id, knownIDs)}
-      <div
-        class="hangar-chip"
-        class:is-on={scope.kind === "squad" && scope.value === squad.id}
-        style:border-color={scope.kind === "squad" && scope.value === squad.id
-          ? squad.color
-          : undefined}
-      >
-        <button
-          type="button"
-          class="hangar-chip-select"
-          onclick={() => (scope = { kind: "squad", value: squad.id })}
-        >
-          <span class="hangar-swatch" style:background={squad.color}></span>
-          <span class="hangar-chip-name">{squad.name}</span>
-          <span class="hangar-chip-count">{count}</span>
-        </button>
-        {#if manage}
-          <button
-            type="button"
-            class="hangar-chip-edit"
-            title="Rename, recolour or delete"
-            onclick={() => {
-              editing = squad;
-              editingIsNew = false;
-            }}
-          >edit</button>
-        {:else}
-          <button
-            type="button"
-            class="hangar-launch"
-            title={`Bring all of ${squad.name} online`}
-            onclick={() => launch(squadPilots(squad.id))}
-          >▶ ALL</button>
-        {/if}
-      </div>
-    {/each}
 
     <div
       class="hangar-chip"
@@ -483,80 +507,65 @@
       </button>
     </div>
 
-    <!-- The picker is how the chip row scales past about five squads: pin the
-         handful you use, keep the rest one click away. -->
-    <div class="hangar-picker">
-      <div class="hangar-chip" class:is-on={pickerOpen}>
+    {#if chipSquads.length > 0}
+      <span class="hangar-chip-divider" aria-hidden="true"></span>
+    {/if}
+
+    <!-- Every squad, pinned ones first. See `chipSquads`. -->
+    {#each chipSquads as squad (squad.id)}
+      {@const count = squadMemberCount(prefs, squad.id, knownIDs)}
+      <div
+        class="hangar-chip"
+        class:is-on={scope.kind === "squad" && scope.value === squad.id}
+        style:border-color={scope.kind === "squad" && scope.value === squad.id
+          ? squad.color
+          : undefined}
+      >
         <button
           type="button"
           class="hangar-chip-select"
-          aria-expanded={pickerOpen}
-          onclick={() => {
-            pickerOpen = !pickerOpen;
-            squadQuery = "";
-          }}
+          onclick={() => (scope = { kind: "squad", value: squad.id })}
         >
-          <span class="hangar-chip-name">All squads ({prefs.squads.length})</span>
-          <span aria-hidden="true">▼</span>
+          <span class="hangar-swatch" style:background={squad.color}></span>
+          <span class="hangar-chip-name">{squad.name}</span>
+          <span class="hangar-chip-count">{count}</span>
         </button>
+        {#if manage}
+          <button
+            type="button"
+            class="hangar-chip-edit"
+            title="Rename, recolour or delete"
+            onclick={() => editSquad(squad)}
+          >edit</button>
+        {:else}
+          <button
+            type="button"
+            class="hangar-launch"
+            title={`Bring all of ${squad.name} online`}
+            onclick={() => launch(squadPilots(squad.id))}
+          >▶ ALL</button>
+        {/if}
       </div>
-      {#if pickerOpen}
-        <div class="hangar-picker-panel">
-          <div class="hangar-picker-search">
-            <input
-              class="hangar-input"
-              type="search"
-              aria-label="Search squads"
-              placeholder="Search squads"
-              bind:value={squadQuery}
-            />
-          </div>
-          <div class="hangar-picker-list">
-            {#each pickerSquads as squad (squad.id)}
-              {@const isPinned = prefs.pinnedSquads.includes(squad.id)}
-              <div class="hangar-picker-row">
-                <button
-                  type="button"
-                  class="hangar-picker-select"
-                  onclick={() => {
-                    scope = { kind: "squad", value: squad.id };
-                    pickerOpen = false;
-                  }}
-                >
-                  <span class="hangar-swatch" style:background={squad.color}></span>
-                  <span class="hangar-picker-name">{squad.name}</span>
-                  <span class="hangar-picker-count">
-                    {pilotCountLabel(squadMemberCount(prefs, squad.id, knownIDs))}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  class="hangar-star"
-                  class:is-on={isPinned}
-                  aria-pressed={isPinned}
-                  title={isPinned ? "Unpin from the chip row" : "Pin to the chip row"}
-                  onclick={() => commit(togglePinnedSquad(prefs, squad.id))}
-                >★</button>
-                <button
-                  type="button"
-                  class="hangar-launch is-picker"
-                  title={`Bring all of ${squad.name} online`}
-                  onclick={() => launch(squadPilots(squad.id))}
-                >▶ ALL</button>
-              </div>
-            {/each}
-            {#if pickerSquads.length === 0}
-              <div class="hangar-picker-empty">
-                {prefs.squads.length === 0 ? "No squads yet." : "No squad matches that."}
-              </div>
-            {/if}
-          </div>
-          <button type="button" class="hangar-picker-new" onclick={() => newSquad()}>
-            + New squad
-          </button>
-        </div>
-      {/if}
-    </div>
+    {/each}
+
+    <!-- The picker is no longer the only way to a squad — every squad is a chip
+         above. It is what the row needs once there are a dozen: search, the pin
+         that decides which lead, and the "edit" that reaches Delete. -->
+    <HangarSquadPicker
+      squads={prefs.squads}
+      {prefs}
+      {knownIDs}
+      open={pickerOpen}
+      onToggleOpen={() => (pickerOpen = !pickerOpen)}
+      onSelect={(squadID) => {
+        scope = { kind: "squad", value: squadID };
+        pickerOpen = false;
+      }}
+      onTogglePin={(squadID) => commit(togglePinnedSquad(prefs, squadID))}
+      onLaunch={(squadID) => launch(squadPilots(squadID))}
+      onEdit={editSquad}
+      onNew={newSquad}
+    />
   </div>
 
   <div class="hangar-summary">
@@ -620,7 +629,7 @@
                 selected={selected.has(pilot.characterID)}
                 squads={prefs.squads}
                 squadMenuOpen={squadMenuFor === pilot.characterID}
-                onActivate={() => launch([pilot])}
+                onActivate={() => activatePilot(pilot)}
                 onToggleSelect={() => toggleSelected(pilot.characterID)}
                 onTogglePin={() => commit(togglePinnedPilot(prefs, pilot.characterID))}
                 onRemove={() => removePilot(pilot.characterID)}
@@ -667,7 +676,7 @@
         <span class="hangar-selbar-detail">{selectionDetail(selectedPilots)}</span>
       </div>
       <div class="hangar-selbar-spacer"></div>
-      <button type="button" class="hangar-ghost" onclick={saveSquadFromSelection}>
+      <button type="button" class="hangar-ghost" onclick={openSquadAssign}>
         Save as squad
       </button>
       <button type="button" class="hangar-ghost" onclick={() => (selected = new Set())}>
@@ -713,7 +722,20 @@
       isNew={editingIsNew}
       onSave={saveSquadEdit}
       onDelete={removeSquad}
-      onCancel={() => closeSquadEditor(discardOnCancel)}
+      onCancel={closeSquadEditor}
     />
   {/key}
+{/if}
+
+{#if assigning && selectedPilots.length > 0}
+  <HangarSquadAssign
+    pilotCount={selectedPilots.length}
+    squads={prefs.squads}
+    {prefs}
+    {knownIDs}
+    suggestedName={`New squad ${prefs.squads.length + 1}`}
+    suggestedColor={nextSquadColor(prefs)}
+    onConfirm={assignSquad}
+    onCancel={() => (assigning = false)}
+  />
 {/if}

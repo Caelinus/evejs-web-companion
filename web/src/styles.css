@@ -2648,7 +2648,8 @@
     overflow-x: auto;
     overflow-y: hidden;
   }
-  .char-bar-add {
+  .char-bar-add,
+  .char-bar-hangar {
     flex: 0 0 auto;
     align-self: center;
     min-height: 2rem;
@@ -2656,6 +2657,15 @@
     font-size: 0.8rem;
     white-space: nowrap;
   }
+  /* The way back to the Pilot Hangar. Quieter than "+ Add character" beside it:
+   * both leave the cockpit, but this one goes to a screen you were already on,
+   * so it should not compete with the action that creates something. */
+  .char-bar-hangar {
+    background: transparent;
+    border: 1px solid var(--color-line-strong);
+    color: var(--color-muted);
+  }
+  .char-bar-hangar:hover:not(:disabled) { color: var(--color-text); }
 
   /* R107 — server connection indicator, sat just before Add character: a dot
    * plus a short label (Connected / Connecting… / Server offline). */
@@ -5117,8 +5127,9 @@
     z-index: 10;
     display: flex;
     align-items: center;
-    gap: 18px;
-    padding: 0 20px;
+    flex-wrap: wrap;
+    gap: 18px 18px;
+    padding: 6px 20px;
     min-height: 52px;
     border-bottom: 1px solid var(--hangar-line);
     background: linear-gradient(180deg, #0d141d, #0a1017);
@@ -5189,10 +5200,18 @@
     padding: 1px 5px;
     white-space: nowrap;
   }
+  /* Never shrinks, and wraps to its own line rather than sliding off the right
+   * edge: with a pilot online there are THREE controls here (Manage, + Add
+   * account, ◀ To client), which is enough to overflow a half-width window, and
+   * a header button that has left the viewport is a button that does not
+   * exist. `.hangar-head` wraps for the same reason. */
   .hangar-head-actions {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex: 0 0 auto;
+    margin-left: auto;
+    flex-wrap: wrap;
   }
   .hangar-manage {
     height: 30px;
@@ -5209,6 +5228,12 @@
     background: var(--hangar-warn-fill);
     border-color: var(--hangar-warn-fill-line);
     color: var(--hangar-warn);
+  }
+  /* "◀ To client" — only there once a pilot is up, and the one control in the
+   * header that leaves the screen, so it reads as a live destination. */
+  .hangar-manage.is-exit {
+    border-color: var(--hangar-good-line);
+    color: var(--hangar-good);
   }
   .hangar-add {
     height: 30px;
@@ -5270,6 +5295,16 @@
     color: var(--hangar-text-dimmer);
   }
   .hangar-chip.is-on .hangar-chip-count { color: inherit; opacity: 0.65; }
+  /* Splits the three fixed scopes from the player's own squads, which follow
+   * them on the same row. A hairline, because the two groups are peers — you
+   * pick exactly one of them — and a heading would say otherwise. */
+  .hangar-chip-divider {
+    flex: 0 0 auto;
+    align-self: stretch;
+    width: 1px;
+    margin: 2px 4px;
+    background: var(--hangar-line-3);
+  }
   /* "▶ ALL" — the same control in three sizes: on a chip, on an account header
    * and in the squad picker. Only the height and padding differ. */
   .hangar-launch {
@@ -5299,6 +5334,7 @@
     font-size: 10px;
   }
   :is(.hangar, .hangar-chrome) .hangar-chip-edit:hover:not(:disabled) { border-color: var(--hangar-accent); }
+  .hangar-chip-edit.is-picker { height: 20px; }
 
   /* --- squad picker popover -------------------------------------------- */
 
@@ -5853,6 +5889,39 @@
     text-transform: uppercase;
   }
   :is(.hangar, .hangar-chrome) .hangar-dialog-danger:hover:not(:disabled) { background: var(--hangar-bad-hover); }
+  /* --- "Save as squad" chooser ------------------------------------------
+   * A radio group drawn as rows. Real radios were tried and lost: the row also
+   * carries a colour swatch and a member count, so the control the player aims
+   * at is the row either way, and `aria-pressed` on a button says the same
+   * thing to a screen reader without a label wrapping half a layout. */
+  .hangar-picker-list.is-choices {
+    max-height: 216px;
+    border: 1px solid var(--hangar-line-2);
+    margin-bottom: 8px;
+  }
+  .hangar-choice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px;
+    text-align: left;
+    color: var(--hangar-text-strong);
+  }
+  .hangar-choice:hover { background: #101a25; }
+  .hangar-choice.is-on { background: var(--hangar-row-selected); }
+  .hangar-choice.is-new {
+    border: 1px solid var(--hangar-line-2);
+    margin-bottom: 4px;
+  }
+  .hangar-choice-mark {
+    flex: none;
+    width: 12px;
+    font-size: 10px;
+    color: var(--hangar-text-ghost);
+  }
+  .hangar-choice.is-on .hangar-choice-mark { color: var(--hangar-link); }
+
   .hangar-swatches { display: flex; gap: 7px; margin-bottom: 18px; }
   .hangar-swatch-btn {
     width: 30px;

@@ -174,7 +174,11 @@
     }
   }
 
-  /** Show one pilot's cockpit and leave the hangar. */
+  /**
+   * Show one pilot's cockpit and leave the hangar. Reached from the launch
+   * dialog's "go to first pilot" and from clicking a pilot that is already in
+   * the client.
+   */
   function goToPilot(characterID: number): void {
     const match = sessions.find((s) => s.store.station.get().online?.characterID === characterID);
     if (match) activeId = match.id;
@@ -341,7 +345,14 @@
 
 {#if active}
   <ErrorBoundary name="Character bar">
-    <CharacterBar {sessions} {activeId} {serverStatus} onSwitch={switchTo} onAdd={addCharacter} />
+    <CharacterBar
+      {sessions}
+      {activeId}
+      {serverStatus}
+      onSwitch={switchTo}
+      onAdd={addCharacter}
+      onHangar={() => (hangarOpen = true)}
+    />
   </ErrorBoundary>
   <!-- Remount on switch: each Workspace binds one stable store/flow for its
        whole life, and the in-memory store makes the remount instant. -->
@@ -368,7 +379,7 @@
     <PilotHangar
       {onlineIDs}
       onLaunch={bringOnline}
-      onGoToFirst={goToPilot}
+      onShowPilot={goToPilot}
       onClose={active ? () => (hangarOpen = false) : null}
     />
   </ErrorBoundary>
