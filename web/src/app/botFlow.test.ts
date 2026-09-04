@@ -95,6 +95,7 @@ function spaceBody(options: { activeModuleIDs?: number[] } = {}): unknown {
           remainingQuantity: 12_000,
           miningYieldTypeID: 1230,
           beltID: BELT,
+          oreGrade: 1,
         },
         {
           itemID: BELT,

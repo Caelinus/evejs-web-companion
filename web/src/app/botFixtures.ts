@@ -316,6 +316,7 @@ export function spaceBody(options: { readonly activeModuleIDs?: readonly number[
           remainingQuantity: 12000,
           miningYieldTypeID: 1230,
           beltID: 40000123,
+          oreGrade: 1,
         },
         {
           itemID: 40000123,

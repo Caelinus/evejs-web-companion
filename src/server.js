@@ -16686,6 +16686,41 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
   }
 });
 
+// The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level) of the
+// rock's ore type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. Stamped onto
+// each ROCK row of a space snapshot from static data before it reaches the
+// browser, because the gateway's own row carries the ore's typeID but not its
+// grade. Non-rock rows pass through untouched; a non-numeric attribute (or a
+// rock whose ore has none) reads as null, never 0 — see SpaceEntity.oreGrade.
+const ASTEROID_META_LEVEL_ATTRIBUTE = 2699;
+
+function isRockSpaceEntityRow(row) {
+  return Boolean(
+    row &&
+      typeof row === "object" &&
+      (row.beltID || row.miningYieldTypeID || row.kind === "asteroid"),
+  );
+}
+
+function withOreGrades(space) {
+  if (!space || typeof space !== "object" || !Array.isArray(space.entities)) {
+    return space;
+  }
+  return {
+    ...space,
+    entities: space.entities.map((row) => {
+      if (!isRockSpaceEntityRow(row)) {
+        return row;
+      }
+      const grade = staticData.getTypeDogmaAttribute(row.typeID, ASTEROID_META_LEVEL_ATTRIBUTE, null);
+      return {
+        ...row,
+        oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+      };
+    }),
+  };
+}
+
 // R11 space overview + ship HUD. A read-only snapshot of what the ship can see
 // right now — the visible entities around it and the active ship's shield /
 // armor / hull / capacitor. The browser polls this ~1s while in space with the
@@ -16703,7 +16738,11 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
     const outcome = await gateway.readSpaceSnapshot(held.bridgeSessionID, {
       userid: held.accountID,
     });
-    res.json({ ok: true, space: outcome.space, notifications: outcome.notifications });
+    res.json({
+      ok: true,
+      space: withOreGrades(outcome.space),
+      notifications: outcome.notifications,
+    });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
       forgetBridgeSession(req.webSessionID);
@@ -17864,6 +17903,23 @@ app.get("/api/market/find", requireAuth, async (req, res, next) => {
       limit: result.limit,
       count: result.matches.length,
       matches: result.matches,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// The ore families for the bot editor's ore picker: the distinct type GROUPS
+// of published Asteroid-category types (goal: mine-ore-priority). Static
+// reference data, like /api/market/find — no gateway call.
+app.get("/api/ore/families", requireAuth, async (req, res, next) => {
+  try {
+    const families = staticData.listOreFamilies();
+    res.json({
+      ok: true,
+      source: "static-data",
+      count: families.length,
+      families,
     });
   } catch (error) {
     next(error);

@@ -36,7 +36,7 @@ function ent(over: Record<string, unknown>): Record<string, unknown> {
     radius: 10, position: { x: 1000, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, isSelf: false,
     shieldRatio: null, armorRatio: null, hullRatio: null, characterID: null, corporationID: null,
     allianceID: null, securityStatus: null, maxVelocity: null, mode: null, capacitorRatio: null,
-    remainingQuantity: null, miningYieldTypeID: null, beltID: null, isNpc: false, npcEntityType: null,
+    remainingQuantity: null, miningYieldTypeID: null, beltID: null, oreGrade: null, isNpc: false, npcEntityType: null,
     controllerID: null, droneActivity: null, targetEntityID: null,
     ...over,
   };

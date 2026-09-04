@@ -1461,6 +1461,12 @@ refused, and proves the wallet was not touched.
   so it answers even when the market is down. It is the only way the panel ever
   obtains a typeID, because a player must never be asked for one (R7d). Only
   **published** types carrying a `marketGroupID` are offered.
+- `GET /api/ore/families` → `{ ok, source:"static-data", count, families:[{groupID,
+  name}] }`, sorted by `name`. Pure static reference data, like `/api/market/find`
+  — no gateway call, no live session. A "family" is a type GROUP within the
+  Asteroid category (25): every grade of one ore and its compressed variant sit
+  in the same group, so the distinct group set is the family set. Only
+  **published** types are considered. Feeds the bot editor's ore picker.
 - `POST /api/bridge/market/buy` `{typeID, price, quantity, durationDays, confirm}`
 - `POST /api/bridge/market/sell` `{itemID, typeID, price, quantity, durationDays, confirm}`
 - `POST /api/bridge/market/cancel` `{orderID, confirm}`
@@ -2160,6 +2166,14 @@ select).
   interprets nothing; the browser's `web/src/bridge/space.ts` decoder owns that.
   A `SESSION_NOT_FOUND` drops the held bridge session (the page returns to
   character select).
+
+  One exception: the BFF stamps `oreGrade` onto each ROCK row (a row carrying
+  `beltID`/`miningYieldTypeID`, or `kind: "asteroid"`) before relaying — the
+  gateway's own row does not carry it. `oreGrade` is the rock's ore type's
+  dogma attribute 2699 (asteroid meta level): 0-Grade=0, plain=1, II-Grade=2,
+  III=3, IV=4. It is `null` on non-rock rows and when the attribute cannot be
+  read; a `null` is never a `0` — see `SpaceEntity.oreGrade` in
+  `web/src/store/types.ts`.
 
 **Polling cadence:** the Overview panel polls this every **1 s** while the ship
 is in space and the panel is open. It stops when the panel closes, and the very

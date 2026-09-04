@@ -535,6 +535,10 @@
   // ── What the inspector's pickers can offer ──────────────────────────────────
   let savedFittings = $state<readonly { fittingID: number; name: string }[]>([]);
   let savedSpots = $state<readonly { bookmarkID: number; name: string }[]>([]);
+  // The ore-family catalogue for the mine block's priority list — static
+  // reference data, loaded once. An empty result (offline, or not shipped
+  // yet) leaves the picker's own empty-state to say so.
+  let oreFamilies = $state<readonly { groupID: number; name: string }[]>([]);
   // The known-pilots roster (multibox onboarding records it) — names and ids
   // only, from localStorage; no token, no live read.
   let knownPilots = $state<readonly { characterID: number; characterName: string }[]>([]);
@@ -550,6 +554,12 @@
       .listBookmarks()
       .then((rows) => {
         savedSpots = rows;
+      })
+      .catch(() => {});
+    void flow
+      .listOreFamilies()
+      .then((rows) => {
+        oreFamilies = rows;
       })
       .catch(() => {});
     void refreshSaved();
@@ -822,6 +832,7 @@
     agents={$finder.agents}
     fittings={savedFittings}
     spots={savedSpots}
+    oreFamilies={oreFamilies}
     savedBots={savedList}
     problems={selectedProblems}
     onArg={applyArg}

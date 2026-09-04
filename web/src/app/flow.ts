@@ -462,6 +462,11 @@ export interface AppFlow {
    */
   findMarketTypes(q: string): Promise<readonly api.MarketTypeMatch[]>;
   /**
+   * List the ore families the bot editor's ore picker can offer. Static
+   * reference data, so it answers even before a character is selected.
+   */
+  listOreFamilies(): Promise<readonly api.OreFamily[]>;
+  /**
    * R83 — BROWSE the market tree. Static reference data, so both of these work
    * even when the market daemon itself is not answering: a player can find out
    * what EXISTS before asking what it costs.
@@ -7427,6 +7432,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
     loadMarket,
     findMarketTypes: (q: string) => api.findMarketTypes(q, callOptions),
+    listOreFamilies: () => api.listOreFamilies(callOptions),
     loadMarketGroups: (parentGroupID: number) => api.loadMarketGroups(parentGroupID, callOptions),
     loadMarketGroupTypes: (marketGroupID: number) =>
       api.loadMarketGroupTypes(marketGroupID, callOptions),

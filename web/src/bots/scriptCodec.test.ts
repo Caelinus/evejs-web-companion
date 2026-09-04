@@ -11,7 +11,7 @@ import {
   decodeScriptValue,
   encodeScriptDoc,
 } from "./scriptCodec.ts";
-import { MAX_DOC_BYTES, SCRIPT_FORMAT, SCRIPT_VERSION, type BotScript } from "./botScript.ts";
+import { MAX_DOC_BYTES, MAX_ORE_LIST, SCRIPT_FORMAT, SCRIPT_VERSION, type BotScript } from "./botScript.ts";
 
 // A clean, warning-free document — the design's "Belt runner". Each test that
 // needs a malformed one clones this and breaks exactly one thing.
@@ -177,6 +177,7 @@ function everyArgKind(): BotScript {
         args: {
           belt: { kind: "belt", belt: { mode: "nearest" } },
           pick: { kind: "rockPick", pick: "biggest" },
+          ores: { kind: "oreList", ores: [{ groupID: 462, name: "Veldspar" }] },
         },
         until: { kind: "ore-hold-at-least", fraction: 0.9 },
       },
@@ -650,4 +651,116 @@ test("decodeScriptValue and decodeScriptText agree on a clean document", () => {
   const fromValue = mustAccept(decodeScriptValue(golden()));
   const fromText = mustAccept(decodeScriptText(encodeScriptDoc(golden())));
   assert.deepStrictEqual(fromValue.doc, fromText.doc);
+});
+
+// ─── Ore priority list ───────────────────────────────────────────────────────
+
+/** The golden document's mine step, narrowed the way tsc can follow (a throw, not assert.ok). */
+function mineStepOf(doc: BotScript) {
+  const loop = doc.program[0];
+  if (loop === undefined || loop.kind !== "loop") throw new Error("fixture: first node is not a loop");
+  const mine = loop.body[0];
+  if (mine === undefined || mine.kind !== "macro") throw new Error("fixture: first step is not a macro");
+  return { loop, mine };
+}
+
+function withOreList(ores: readonly { groupID: number; name: string }[]): BotScript {
+  const doc = clone() as BotScript;
+  const { loop, mine } = mineStepOf(doc);
+  return {
+    ...doc,
+    program: [
+      {
+        ...loop,
+        body: [
+          {
+            ...mine,
+            args: { ...mine.args, ores: { kind: "oreList", ores } },
+          },
+          ...loop.body.slice(1),
+        ],
+      },
+    ],
+  };
+}
+
+test("an ore priority list round-trips through encode/decode with no warnings", () => {
+  const doc = withOreList([
+    { groupID: 462, name: "Veldspar" },
+    { groupID: 465, name: "Kernite" },
+  ]);
+  const { doc: round, warnings } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+  assert.deepStrictEqual(round, doc);
+  assert.deepStrictEqual([...warnings], []);
+});
+
+test("an empty ore priority list is valid (any rock)", () => {
+  const doc = withOreList([]);
+  const { doc: round, warnings } = mustAccept(decodeScriptValue(doc));
+  const { mine } = mineStepOf(round);
+  const ores = mine.args["ores"];
+  assert.ok(ores !== undefined && ores.kind === "oreList");
+  assert.deepStrictEqual(ores.ores, []);
+  assert.deepStrictEqual([...warnings], []);
+});
+
+test("a duplicate groupID in an ore priority list is dropped, keeping the first, with a warning", () => {
+  const doc = withOreList([
+    { groupID: 462, name: "Veldspar" },
+    { groupID: 465, name: "Kernite" },
+    { groupID: 462, name: "Veldspar (dup)" },
+  ]);
+  const { doc: round, warnings } = mustAccept(decodeScriptValue(doc));
+  const { mine } = mineStepOf(round);
+  const ores = mine.args["ores"];
+  assert.ok(ores !== undefined && ores.kind === "oreList");
+  assert.deepStrictEqual(ores.ores, [
+    { groupID: 462, name: "Veldspar" },
+    { groupID: 465, name: "Kernite" },
+  ]);
+  assert.ok(warnings.some((w) => /repeated entries/i.test(w)));
+});
+
+test("an ore priority list over MAX_ORE_LIST is truncated, not refused, with a warning", () => {
+  const many = Array.from({ length: MAX_ORE_LIST + 5 }, (_, i) => ({ groupID: 1000 + i, name: `Ore ${i}` }));
+  const doc = withOreList(many);
+  const { doc: round, warnings } = mustAccept(decodeScriptValue(doc));
+  const { mine } = mineStepOf(round);
+  const ores = mine.args["ores"];
+  assert.ok(ores !== undefined && ores.kind === "oreList");
+  assert.equal(ores.ores.length, MAX_ORE_LIST);
+  assert.deepStrictEqual(ores.ores, many.slice(0, MAX_ORE_LIST));
+  assert.ok(warnings.some((w) => /cut down/i.test(w)));
+});
+
+test("a malformed ore priority list entry refuses the whole document", () => {
+  // Missing groupID.
+  const badMissingGroup = clone();
+  const loopA = badMissingGroup.program[0];
+  loopA.body[0].args["ores"] = { kind: "oreList", ores: [{ name: "Veldspar" }] };
+  assert.equal(decodeScriptValue(badMissingGroup).ok, false, "an entry with no groupID must refuse");
+
+  // Non-integer groupID.
+  const badGroupType = clone();
+  const loopB = badGroupType.program[0];
+  loopB.body[0].args["ores"] = { kind: "oreList", ores: [{ groupID: "462", name: "Veldspar" }] };
+  assert.equal(decodeScriptValue(badGroupType).ok, false, "a non-numeric groupID must refuse");
+
+  // Negative groupID.
+  const badGroupNeg = clone();
+  const loopC = badGroupNeg.program[0];
+  loopC.body[0].args["ores"] = { kind: "oreList", ores: [{ groupID: -1, name: "Veldspar" }] };
+  assert.equal(decodeScriptValue(badGroupNeg).ok, false, "a non-positive groupID must refuse");
+
+  // `ores` not an array.
+  const badShape = clone();
+  const loopD = badShape.program[0];
+  loopD.body[0].args["ores"] = { kind: "oreList", ores: "not-an-array" };
+  assert.equal(decodeScriptValue(badShape).ok, false, "ores must be an array");
+
+  // Non-string name.
+  const badName = clone();
+  const loopE = badName.program[0];
+  loopE.body[0].args["ores"] = { kind: "oreList", ores: [{ groupID: 462, name: 123 }] };
+  assert.equal(decodeScriptValue(badName).ok, false, "a non-string name must refuse");
 });

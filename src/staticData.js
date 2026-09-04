@@ -1008,6 +1008,40 @@ function findMarketTypes(filters = {}) {
   return { matches, total, capped, q, limit };
 }
 
+// --- Ore families for the bot editor's ore picker ---------------------------
+//
+// Twin of findMarketTypes above: pure static reference data, no gateway call.
+// A "family" is a type GROUP within the Asteroid category (25) — every grade
+// of one ore (0-Grade, plain, II/III/IV-Grade) and its compressed variant sit
+// in the SAME group (verified live: Veldspar's four grades all carry group 462,
+// Scordite's carry 460), so the distinct group set already IS the family set;
+// there is no separate family table to build.
+//
+// ⚠ PUBLISHED ONLY, like findMarketTypes: this feeds a picker, and an
+// unpublished type (a test object, a removed ore) offered there would let a
+// player build a bot around ore the server will never actually hand them.
+const ASTEROID_CATEGORY_ID = 25;
+
+function listOreFamilies() {
+  const namesByGroupID = new Map();
+  for (const entry of buildIndex("itemTypes", "types", "typeID").values()) {
+    if (!entry || entry.published !== true) {
+      continue;
+    }
+    if ((Number(entry.categoryID) || 0) !== ASTEROID_CATEGORY_ID) {
+      continue;
+    }
+    const groupID = Number(entry.groupID) || 0;
+    if (groupID <= 0 || namesByGroupID.has(groupID)) {
+      continue;
+    }
+    namesByGroupID.set(groupID, getTypeGroupName(entry.typeID));
+  }
+  const families = Array.from(namesByGroupID, ([groupID, name]) => ({ groupID, name }));
+  families.sort((a, b) => a.name.localeCompare(b.name) || a.groupID - b.groupID);
+  return families;
+}
+
 // --- Browsing the market by group (goal R83) -------------------------------
 //
 // The market panel could only be reached by TYPING a name. That is fine when you
@@ -1299,6 +1333,7 @@ module.exports = {
   getModuleChargeFitment,
   getChargeSize,
   findMarketTypes,
+  listOreFamilies,
   getMarketGroupChildren,
   getMarketGroupTypes,
   getNpcIndustryFacility,

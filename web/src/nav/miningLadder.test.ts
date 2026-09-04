@@ -116,6 +116,7 @@ function entity(overrides: Partial<SpaceEntity> & { itemID: number }): SpaceEnti
     remainingQuantity: 5_000,
     miningYieldTypeID: 1230,
     beltID: BELT_ID,
+    oreGrade: null,
     // ⚠ A ROW IS ONLY A PIRATE IF THE SERVER SAYS IT IS AN NPC. This defaulted
     // to undefined in the first draft of this file and the danger cases fell
     // straight through to "head for the belt" — the fixture, not the loop, was

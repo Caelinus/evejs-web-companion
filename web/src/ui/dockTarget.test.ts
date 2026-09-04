@@ -31,6 +31,7 @@ function entity(over: Partial<SpaceEntity> & { itemID: number; kind: string | nu
     remainingQuantity: null,
     miningYieldTypeID: null,
     beltID: null,
+    oreGrade: null,
     isNpc: false,
     npcEntityType: null,
     ...over,

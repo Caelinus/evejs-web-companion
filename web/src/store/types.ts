@@ -1500,6 +1500,14 @@ export interface SpaceEntity {
   readonly miningYieldTypeID: number | null;
   readonly beltID: number | null;
   /**
+   * The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level), read by
+   * the BFF from static data: 0-Grade = 0, plain = 1, II-Grade = 2, III = 3,
+   * IV = 4. Higher is richer. null when the row is not a rock or the type has
+   * no such attribute; a null is NOT a zero (an unknown grade sorts last, it is
+   * never treated as the worst).
+   */
+  readonly oreGrade: number | null;
+  /**
    * R25 slice B — SHIP rows only. The only thing that separates a pirate from a
    * person.
    *

@@ -1585,6 +1585,24 @@ export async function findMarketTypes(
     : [];
 }
 
+/** One ore family (a type group in the Asteroid category) from /api/ore/families. */
+export interface OreFamily {
+  readonly groupID: number;
+  readonly name: string;
+}
+
+/**
+ * List the ore families the bot editor's ore picker can offer. Static
+ * reference data, like `findMarketTypes` — no gateway call, so it works even
+ * before a character is selected.
+ */
+export async function listOreFamilies(options: ApiOptions = {}): Promise<readonly OreFamily[]> {
+  const data = await getJson("/api/ore/families", options);
+  return Array.isArray((data as { families?: unknown }).families)
+    ? ((data as { families: unknown }).families as unknown as readonly OreFamily[])
+    : [];
+}
+
 // --- R4 Agents & Missions (agentMgr bridge) --------------------------------
 // The BFF holds the bound agent handle; the browser addresses agents by game ID
 // and decodes the raw retail-shaped conversation/briefing/journal results with

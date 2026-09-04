@@ -30,6 +30,7 @@
     type SubBotNode,
     type WorldRef,
     MAX_ISK_ARG,
+    MAX_ORE_LIST,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
   import {
@@ -75,6 +76,7 @@
     fittings = [],
     spots = [],
     savedBots = [],
+    oreFamilies = [],
     problems = [],
     onArg,
     onCondition,
@@ -94,6 +96,10 @@
     fittings?: readonly { fittingID: number; name: string }[];
     spots?: readonly { bookmarkID: number; name: string }[];
     savedBots?: readonly { scriptID: string; name: string }[];
+    /** Every ore family the mine block can prioritise (Veldspar, Kernite, …).
+     * A grade within a family (0-Grade, II-, III-, …) is the runtime's business
+     * and is never listed here — see `OreFamilyArg` in botScript.ts. */
+    oreFamilies?: readonly { groupID: number; name: string }[];
     problems?: readonly ScriptProblem[];
     /** One argument changed. `undefined` clears it back to the macro's default. */
     onArg: (key: string, value: Arg | undefined) => void;
@@ -170,6 +176,10 @@
   function rockPickValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "rockPick" ? arg.pick : "nearest";
+  }
+  function oreListValue(step: MacroStep, key: string): readonly { groupID: number; name: string }[] {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "oreList" ? arg.ores : [];
   }
 
   // ── Turning what a widget reports back into an argument ─────────────────────
@@ -269,6 +279,49 @@
   }
   function setWorldRef(arg: ArgDescriptor, ref: WorldRef): void {
     onArg(arg.key, arg.kind === "destination" ? { kind: "destination", ref } : { kind: "station", ref });
+  }
+
+  // ── The ore priority list: search, add, reorder, remove ─────────────────────
+  // Text typed into the search box, kept here rather than in `BotBuilder.svelte`
+  // — it is throwaway UI state, gone the moment a family is picked, not part of
+  // the saved document the way `ores` itself is.
+  let oreQuery = $state("");
+  /** Up to 8 families whose name contains the typed text, already-chosen ones
+   * excluded, starts-with matches first. Nothing shown under two characters —
+   * the same threshold `StationPicker.svelte` uses before it searches. */
+  function oreMatches(
+    query: string,
+    chosen: readonly { groupID: number; name: string }[],
+  ): readonly { groupID: number; name: string }[] {
+    const q = query.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const chosenIDs = new Set(chosen.map((o) => o.groupID));
+    return oreFamilies
+      .filter((f) => !chosenIDs.has(f.groupID) && f.name.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        return aStarts !== bStarts ? aStarts - bStarts : a.name.localeCompare(b.name);
+      })
+      .slice(0, 8);
+  }
+  function addOre(key: string, chosen: readonly { groupID: number; name: string }[], family: { groupID: number; name: string }): void {
+    if (chosen.length >= MAX_ORE_LIST || chosen.some((o) => o.groupID === family.groupID)) return;
+    onArg(key, { kind: "oreList", ores: [...chosen, { groupID: family.groupID, name: family.name }] });
+    oreQuery = "";
+  }
+  function removeOre(key: string, chosen: readonly { groupID: number; name: string }[], groupID: number): void {
+    const ores = chosen.filter((o) => o.groupID !== groupID);
+    // Back to the default: an emptied list is dropped rather than saved empty,
+    // so an untouched — or fully cleared — step exports exactly as imported.
+    onArg(key, ores.length === 0 ? undefined : { kind: "oreList", ores });
+  }
+  function moveOre(key: string, chosen: readonly { groupID: number; name: string }[], index: number, delta: -1 | 1): void {
+    const target = index + delta;
+    if (target < 0 || target >= chosen.length) return;
+    const ores = [...chosen];
+    [ores[index], ores[target]] = [ores[target], ores[index]];
+    onArg(key, { kind: "oreList", ores });
   }
 
   // ── Which arguments are visible, and which sit behind "More options" ────────
@@ -396,6 +449,60 @@
         allowSystems={arg.widget === "destination-picker"}
         onPick={(ref) => setWorldRef(arg, ref)}
       />
+    </div>
+  {:else if arg.widget === "ore-list-picker"}
+    {@const chosen = oreListValue(step, arg.key)}
+    {@const matches = oreMatches(oreQuery, chosen)}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> — optional</span>{/if}
+      </span>
+      <input
+        id={fieldId}
+        type="text"
+        placeholder="search ore by name…"
+        value={oreQuery}
+        oninput={(e) => (oreQuery = e.currentTarget.value)}
+      />
+      {#if matches.length > 0}
+        <ul class="market-picker">
+          {#each matches as family (family.groupID)}
+            <li>
+              <button type="button" class="pick-row" onclick={() => addOre(arg.key, chosen, family)}>
+                <span class="pick-main"><span class="pick-name">{family.name}</span></span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if oreFamilies.length === 0}
+        <span class="inspector-suffix">Ore names could not be loaded.</span>
+      {/if}
+      {#if chosen.length > 0}
+        <ol class="ore-priority-list">
+          {#each chosen as ore, index (ore.groupID)}
+            <li>
+              <span class="ore-priority-rank">{index + 1}.</span>
+              <span class="ore-priority-name">{ore.name}</span>
+              <button type="button" class="minor" disabled={index === 0} onclick={() => moveOre(arg.key, chosen, index, -1)}>
+                Move up
+              </button>
+              <button
+                type="button"
+                class="minor"
+                disabled={index === chosen.length - 1}
+                onclick={() => moveOre(arg.key, chosen, index, 1)}
+              >
+                Move down
+              </button>
+              <button type="button" class="danger" onclick={() => removeOre(arg.key, chosen, ore.groupID)}>Remove</button>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+      <span class="inspector-suffix">
+        First is mined first. Every grade of an ore counts; richer grades are mined before poorer ones.
+      </span>
     </div>
   {:else}
     <label class="inspector-field" for={fieldId}>

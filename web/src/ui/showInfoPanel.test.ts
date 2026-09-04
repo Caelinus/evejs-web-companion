@@ -81,6 +81,7 @@ function spaceStore(): unknown {
           remainingQuantity: 4200,
           miningYieldTypeID: ORE_TYPE_ID,
           beltID: 1,
+          oreGrade: null,
           isNpc: false,
           npcEntityType: null,
           controllerID: null,

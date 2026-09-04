@@ -47,6 +47,10 @@ const OPTIONS = {
   fittings: [{ fittingID: 1, name: "Test Fitting" }],
   spots: [{ bookmarkID: 2, name: "Test Spot" }],
   savedBots: [{ scriptID: "script-1", name: "Test Saved Bot" }],
+  oreFamilies: [
+    { groupID: 450001, name: "Test Veldspar" },
+    { groupID: 450002, name: "Test Kernite" },
+  ],
 };
 
 function renderInspector(target: unknown, over: Record<string, unknown> = {}): string {
@@ -82,6 +86,7 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   { macro: "mine-at-belt", key: "belt", expect: /the nearest belt/, why: "belt-picker" },
   { macro: "mine-at-belt", key: "equipment", expect: /use everything fitted/, why: "equipment-picker" },
   { macro: "mine-at-belt", key: "pick", expect: /the biggest rock first/, why: "rock-pick-select" },
+  { macro: "mine-at-belt", key: "ores", expect: /search ore by name/, why: "ore-list-picker" },
   { macro: "request-mission", key: "agent", expect: /use the agent your bot finds/, why: "agent-picker" },
   { macro: "find-distribution-agent", key: "corporation", expect: /placeholder="any corporation"/, why: "corp-picker" },
   { macro: "refit-ship", key: "fitting", expect: /Test Fitting/, why: "fitting-picker" },
@@ -150,6 +155,46 @@ test("an optional argument the player has ALREADY set stays visible", () => {
   const summaryAt = html.indexOf("More options");
   assert.ok(summaryAt > 0, "the disclosure vanished entirely");
   assert.ok(html.indexOf("arg-step-under-test-pick") < summaryAt, "a set optional argument was hidden away");
+});
+
+// ── The ore priority list ────────────────────────────────────────────────────
+
+test("chosen ore families render in priority order", () => {
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        ores: {
+          kind: "oreList",
+          ores: [
+            { groupID: 450002, name: "Test Kernite" },
+            { groupID: 450001, name: "Test Veldspar" },
+          ],
+        },
+      },
+    }),
+  });
+  const text = visibleText(html);
+  assert.match(text, /Test Kernite/);
+  assert.match(text, /Test Veldspar/);
+  assert.ok(
+    text.indexOf("Test Kernite") < text.indexOf("Test Veldspar"),
+    "the first-chosen family should render before the second, priority order preserved",
+  );
+});
+
+test("an empty ore catalogue is said rather than shown as a blank picker", () => {
+  const text = visibleText(renderInspector({ kind: "step", step: step("mine-at-belt") }, { oreFamilies: [] }));
+  assert.match(text, /Ore names could not be loaded/);
+});
+
+test("no ore group id reaches the screen (R7d)", () => {
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", { args: { ores: { kind: "oreList", ores: [{ groupID: 450001, name: "Test Veldspar" }] } } }),
+  });
+  const text = visibleText(html);
+  assert.doesNotMatch(text, /450001/, "an ore group id was rendered as text");
 });
 
 // ── The "stop when" control ─────────────────────────────────────────────────

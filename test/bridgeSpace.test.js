@@ -62,8 +62,22 @@ function fakeStore() {
   };
 }
 
+// typeID -> dogma attribute 2699 (asteroid meta level), for the ore-grade tests.
+const ORE_GRADES = { 1230: 1, 17470: 2 };
+
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return {
+    getStation() { return null; },
+    getTypeName(id) { return `Type ${id}`; },
+    getTypeDogmaAttribute(typeID, attributeID, fallback) {
+      if (attributeID !== 2699) {
+        return fallback;
+      }
+      return Object.prototype.hasOwnProperty.call(ORE_GRADES, typeID)
+        ? ORE_GRADES[typeID]
+        : fallback;
+    },
+  };
 }
 
 // The gateway's snapshot shape: identity + geometry per visible object, plus the
@@ -238,6 +252,65 @@ test("the space snapshot route relays the gateway projection on the held session
   assert.equal(payload.space.ship.hullRatio, 1);
   assert.equal(payload.space.ship.capacitorRatio, 0.25);
   assert.equal(payload.space.ship.hullCapacity, 600);
+});
+
+test("the space snapshot route stamps oreGrade onto rock rows from static data", async () => {
+  const snapshot = {
+    ...SNAPSHOT,
+    entities: [
+      ...SNAPSHOT.entities,
+      {
+        kind: "asteroid",
+        itemID: 40000001,
+        typeID: 1230, // Veldspar -> grade 1
+        beltID: 40000000,
+        miningYieldTypeID: 1230,
+        radius: 100,
+        position: { x: 5000, y: 0, z: 0 },
+        velocity: { x: 0, y: 0, z: 0 },
+        isSelf: false,
+      },
+      {
+        kind: "asteroid",
+        itemID: 40000002,
+        typeID: 17470, // Veldspar II-Grade -> grade 2
+        beltID: 40000000,
+        miningYieldTypeID: 17470,
+        radius: 100,
+        position: { x: 6000, y: 0, z: 0 },
+        velocity: { x: 0, y: 0, z: 0 },
+        isSelf: false,
+      },
+      {
+        kind: "asteroid",
+        itemID: 40000003,
+        typeID: 999999, // no known dogma attribute
+        beltID: 40000000,
+        miningYieldTypeID: 999999,
+        radius: 100,
+        position: { x: 7000, y: 0, z: 0 },
+        velocity: { x: 0, y: 0, z: 0 },
+        isSelf: false,
+      },
+    ],
+  };
+  const gateway = fakeGateway({
+    async readSpaceSnapshot(bridgeSessionID, sessionFields) {
+      this.calls.spaceSnapshot.push({ bridgeSessionID, sessionFields });
+      return { space: snapshot, notifications: [] };
+    },
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/space/snapshot");
+
+  const byId = (id) => payload.space.entities.find((row) => row.itemID === id);
+  assert.equal(byId(40000001).oreGrade, 1);
+  assert.equal(byId(40000002).oreGrade, 2);
+  assert.equal(byId(40000003).oreGrade, null, "an unresolvable attribute reads as null, not 0");
+  // Non-rock rows are untouched — they must not gain the field at all.
+  assert.equal(Object.prototype.hasOwnProperty.call(byId(GATE_ID), "oreGrade"), false);
 });
 
 test("the space snapshot route requires a login and a held session", async () => {

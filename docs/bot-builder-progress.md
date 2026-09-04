@@ -318,3 +318,11 @@ The every-minute cron was deleted at the natural finish. 412 tests green at clos
   C2 (draft validation, 8) + shared `macroSpecs.ts`, C3 (palette metadata, 6), D1 (BFF storage layer, 8).
   **117 tests green, tsc clean, 14 new modules.** Stopped the loop at this clean milestone: everything left is
   live-coupled or UI-taste work better done with the operator (see STATUS at top). Not committed; not pushed.
+- **2026-09-04** — **Mine at a belt: belt rotation wired in, plus an ore priority list.** The A4c `beltRotation.ts`
+  module was tested but never imported; the decider now rotates a nearest-mode belt found dry after arrival to the
+  nearest belt not yet emptied this tour (emptied set on the run board, so it survives a haul-home lap) and pauses
+  only once every belt is dry. A pinned belt still pauses. New optional `ores` arg (`oreList`): an ordered list of
+  ore FAMILIES by type group (every grade of Veldspar is group 462), worked strictly tier by tier — a belt with none
+  of the tier ore counts as emptied, a full dry tour advances the tier and clears the set, tiers exhausted pauses.
+  Inside a family the richest grade is mined first (`SpaceEntity.oreGrade` = dogma 2699, stamped by the BFF on
+  the snapshot). The picker searches `GET /api/ore/families` (static data, 44 groups). Docs: bridge-wire-contract.

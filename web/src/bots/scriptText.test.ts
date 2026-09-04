@@ -109,6 +109,50 @@ test("a mining step reads with its belt and its until", () => {
   assert.match(sentence, /until the ore hold is 90% full/);
 });
 
+test("a mining step with an ore priority list names it, in order", () => {
+  const step: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: {
+      belt: { kind: "belt", belt: { mode: "nearest" } },
+      ores: {
+        kind: "oreList",
+        ores: [
+          { groupID: 462, name: "Veldspar" },
+          { groupID: 465, name: "Kernite" },
+        ],
+      },
+    },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  const sentence = stepSentence(step);
+  assert.match(sentence, /Mine at the nearest belt, Veldspar then Kernite first/);
+});
+
+test("a mining step with no ore priority list (or an empty one) says nothing about ore order", () => {
+  const withoutOres: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  assert.doesNotMatch(stepSentence(withoutOres), /first/);
+
+  const withEmptyOres: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: {
+      belt: { kind: "belt", belt: { mode: "nearest" } },
+      ores: { kind: "oreList", ores: [] },
+    },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  assert.doesNotMatch(stepSentence(withEmptyOres), /first/);
+});
+
 test("a chosen world slot shows its name, never its id (R7d)", () => {
   const named: MacroStep = {
     id: "s1",

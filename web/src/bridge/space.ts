@@ -110,6 +110,10 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     remainingQuantity: countOrNull(raw.remainingQuantity),
     miningYieldTypeID: idOrNull(raw.miningYieldTypeID),
     beltID: idOrNull(raw.beltID),
+    // The rock's ORE GRADE (dogma 2699), stamped by the BFF from static data.
+    // An ABSENT oreGrade decodes to null ("unknown"), never 0: 0-Grade ore is a
+    // real, meaningful grade and must not collide with "we don't know".
+    oreGrade: countOrNull(raw.oreGrade),
     // R25 slice B — ship rows only. An ABSENT isNpc decodes to FALSE, which is
     // the safe direction: a row we cannot classify is treated as a person, so
     // the panel never invents a threat. npcEntityType stays null.

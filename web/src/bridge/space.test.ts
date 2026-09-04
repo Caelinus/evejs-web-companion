@@ -309,6 +309,40 @@ test("a facility with junk in its typelists keeps only the real ids", () => {
   assert.deepEqual(snapshot?.entities[0]?.compressionFacility?.typeListIDs, [1, 3]);
 });
 
+// --- the rock's ore grade -----------------------------------------------------
+
+test("oreGrade decodes present values, including a real zero, and absent stays null", () => {
+  const rowFor = (extra: Record<string, unknown>): JsonValue =>
+    ({
+      kind: "asteroid",
+      itemID: 7001,
+      position: { x: 0, y: 0, z: 0 },
+      velocity: { x: 0, y: 0, z: 0 },
+      ...extra,
+    }) as unknown as JsonValue;
+
+  const graded = decodeSpaceSnapshot({
+    inSpace: true,
+    entities: [rowFor({ oreGrade: 3 })],
+  } as unknown as JsonValue);
+  assert.equal(graded.entities[0]?.oreGrade, 3);
+
+  // 0-Grade is a real, meaningful grade — it must survive as 0, not become null.
+  const zeroGrade = decodeSpaceSnapshot({
+    inSpace: true,
+    entities: [rowFor({ oreGrade: 0 })],
+  } as unknown as JsonValue);
+  assert.equal(zeroGrade.entities[0]?.oreGrade, 0);
+
+  // Absent — a row that is not a rock, or one the BFF had no dogma for — is
+  // "unknown", never 0.
+  const absent = decodeSpaceSnapshot({
+    inSpace: true,
+    entities: [rowFor({})],
+  } as unknown as JsonValue);
+  assert.equal(absent.entities[0]?.oreGrade, null);
+});
+
 // --- the same object twice on the wire ---------------------------------------
 //
 // A repeated id is not a longer list, and a keyed `{#each}` handed the same key
