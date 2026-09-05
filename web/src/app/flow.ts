@@ -6545,7 +6545,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "unloadOre":
             if (action.itemIDs.length > 0) {
-              await api.unloadMiningHolds(action.itemIDs, callOptions);
+              // ⚠ THE RESULT IS READ, NOT DISCARDED. A 200 from this route is
+              // not proof anything moved — invbroker declines silently in
+              // several branches, which is the whole reason the route re-reads
+              // and reports `moved`. The UI path judges that through
+              // runMiningAction; the bot path threw the answer away, so a
+              // delivery that moved nothing looked exactly like one that
+              // worked. Raising here is what puts it in front of the refusal
+              // ledger instead of nowhere.
+              const result = await api.unloadMiningHolds(action.itemIDs, callOptions);
+              const moved = result.moved ?? null;
+              if (moved !== null && moved.length === 0) {
+                throw new Error("Nothing moved to your hangar, and the server gave no reason.");
+              }
             }
             return;
           case "rememberBeltDry":
@@ -6816,6 +6828,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           interruptID: snapshot.interruptID,
           pauseReason: snapshot.pauseReason,
           note: snapshot.note,
+          refusals: snapshot.refusals,
         });
         if (snapshot.status === "error") {
           stopLiveStream();
@@ -6823,6 +6836,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
       },
       isSessionLost,
+      // The RAW wire text, code prefix and all — the ledger words it through
+      // describeRefusal itself and classifies on the code, so it must not be
+      // pre-translated here.
+      refusalReason: readRefusalReason,
       registry: SCRIPT_MACROS,
       travelHome: scriptTravelHome,
     };

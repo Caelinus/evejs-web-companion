@@ -23,7 +23,7 @@ rest of the bot's lap, not a constant.
 
 ---
 
-## 1. Refusals are invisible (was finding 3)
+## 1. Refusals are invisible (was finding 3) ✅ DONE
 
 ### The gap
 
@@ -116,6 +116,32 @@ Pure ledger tests (count, reset-on-success, distinct keys). One flow test that a
 repeatedly refused loot surfaces in the snapshot and eventually pauses the run
 rather than looping — the test that would have caught the original bug in
 minutes rather than twelve hours.
+
+### Shipped
+
+`nav/refusalLedger.ts` plus the runner wiring, the store slice, and the paint in
+`CustomBotReadout.svelte` — a store field nobody renders is not "visible", so
+the line is pinned by an SSR render test as well as the plumbing.
+
+Two things the implementation had to settle beyond the plan:
+
+- **The pause reason has to be put back ON TOP of the decider's snapshot.**
+  `toSnapshot` words a snapshot from the DECIDER's tick, which knows nothing
+  about a refusal the issue then hit — so pausing with `result` alone stopped
+  the run while still displaying the cheerful "Taking what's inside." that
+  caused this whole investigation. Pinned by its own test.
+- **A success must CLEAR the key.** Without it a key that failed twice early and
+  then recovered carries those two forever and stops the run prematurely on an
+  unrelated blip hours later.
+
+Target ids are part of the key only for `lootWreck`/`lootContainer` — the two
+actions that walk a list of interchangeable objects, where one stubborn can must
+neither spend nor hide the next one's budget. Everything else is keyed by step +
+action kind, which is identity enough.
+
+Not done here, and still item 2's job: nothing yet ACTS on `gone` vs
+`unreachable`. The ledger records the distinction and the deciders will use it
+to retire or re-approach.
 
 ---
 

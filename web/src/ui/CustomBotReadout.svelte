@@ -57,6 +57,18 @@
     {#if $customBot.note}<p class="why">{$customBot.note}</p>{/if}
     {#if $customBot.why}<p class="why">Why: {$customBot.why}</p>{/if}
     {#if $customBot.pauseReason}<p class="pause">{$customBot.pauseReason}</p>{/if}
+    {#if $customBot.refusals.length > 0}
+      <!-- What the server keeps turning down. THIS IS THE LINE THAT WAS
+           MISSING: a bot answered 227 refusals over twelve hours while this
+           panel showed nothing but "Taking what's inside." Worst first, and in
+           the server's own words via describeRefusal — never a code. -->
+      {#each $customBot.refusals as refusal (refusal.key)}
+        <p class="refusal">
+          ⚠ {refusal.words}
+          <span class="tally">×{refusal.count}</span>
+        </p>
+      {/each}
+    {/if}
     {#if $customBot.lastAlert}
       <!-- The last "alert me" watch. Stays on screen after the notification has
            gone, so a player who missed the pop-up still sees what happened. -->
@@ -79,6 +91,15 @@
   .custombot .pause {
     color: var(--color-warn);
     margin: 0.3rem 0 0;
+  }
+  .custombot .refusal {
+    color: var(--color-warn);
+    font-size: 0.9rem;
+    margin: 0.2rem 0 0;
+  }
+  .custombot .refusal .tally {
+    color: var(--color-muted);
+    margin-left: 0.3rem;
   }
   .custombot .alert {
     color: var(--color-accent);
