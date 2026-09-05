@@ -93,9 +93,22 @@ of one change:
 does: `moved.length === 0 && requested > 0` should throw, so the ledger sees a
 silent decline and not just a hard refusal.
 
-**Distinguish gone from refused.** A `FakeItemNotFound` on `bindObject` (see
-item 5c) means the object no longer exists; that is `kind: "gone"` and should
-retire the target immediately rather than spend a retry budget on it.
+**Distinguish gone from refused — and see 5b before implementing it.** A
+`FakeItemNotFound` on `bindObject` is NOT simply "the object is gone": the same
+code is thrown for an object that is merely out of range or off-scene. Those
+want opposite handling, so the ledger needs three states rather than two:
+
+| state | cause | handling |
+| --- | --- | --- |
+| `refused` | the transfer was declined | count it, back off, bound it |
+| `unreachable` | out of range / off-grid at bind time | re-approach; NEVER retire |
+| `gone` | the id matches no inventory target at all | retire for the run |
+
+The client cannot tell `unreachable` from `gone` on the error code alone — both
+arrive as `FakeItemNotFound`. It can tell them apart from what it already knows:
+if the entity is still on the grid in this tick's snapshot, treat it as
+`unreachable` and close the distance; if it has left the snapshot too, it is
+`gone`. Retiring on the bare code would strand a bot that merely drifted.
 
 ### Tests
 
@@ -298,17 +311,38 @@ to the ore hold never trips it.
 - Once the condition exists, `loot-containers` can stop scooping when there is no
   room instead of discovering it one refusal at a time.
 
-### 5b. A despawned can burns a full retry budget
+### 5b. A despawned — or merely distant — can burns a full retry budget
 
-`FakeItemNotFound` on `bindObject` is the emulator refusing to bind an item id
-that no longer exists — its definition is not in this checkout, and the emulator
-source is external, so this is inference from the call path plus the comment at
-`scriptMacros.ts:1536`. `openContainer` binds straight from a snapshot that may
-be a tick stale.
+**Confirmed, no longer inference.** `FakeItemNotFound` is thrown by eve.js's
+`Handle_GetInventoryFromId` in `invBrokerService.js`, the handler behind the
+`invbroker.GetInventoryFromId` bind that `containerBindSpec` uses
+(`src/server.js:2111`, and see `docs/loot-can.md`). Read from a copy of the
+emulator source outside this repo, so treat the line numbers as version-specific
+and the handler name as the durable reference.
 
-**Plan.** Covered by item 1's `kind: "gone"`: a bind failure retires the target
-for the run immediately rather than spending five attempts on an object that has
-ceased to exist. Cheap, and it removes the interleaved noise from the log.
+It throws from **two guards that matter here**, and this is the part that
+changes the plan:
+
+1. the itemID matches no known inventory target at all — the container has
+   genuinely stopped existing (**gone**);
+2. `_getSpaceContainerScopeAccessError` is truthy — the same-scene and
+   transfer-range check the loot-can design already described — so a container
+   that fell off-grid or out of range between the snapshot tick and the bind
+   call throws the **identical code** (**unreachable**).
+
+`openContainer` binds straight from a snapshot that may be a tick stale, so both
+are ordinary races rather than faults.
+
+**Plan.** Item 1's ledger, with the three-state table there rather than a flat
+`gone`. A bare `FakeItemNotFound` must NOT retire a target: a can the bot simply
+drifted away from would be abandoned for the rest of the run, and on a jetcan
+hauling loop that is most of the cans. Split on the snapshot — still on grid
+means close the distance, absent from the grid means retire.
+
+Note this is a *different* failure point from `NotEnoughCargoSpace`, which comes
+from the `Add`/`MultiAdd` transfer after a successful bind. Both land on the same
+`lootWreck`/`lootContainer` action and both are swallowed identically at
+`scriptRunner.ts:194-215`.
 
 ### 5c. Every mover needs a refused-transfer test
 
