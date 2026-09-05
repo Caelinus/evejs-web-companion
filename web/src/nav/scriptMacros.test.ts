@@ -426,6 +426,36 @@ test("deliver: docked with ore -> unload; docked empty -> done", () => {
   assert.equal(done.outcome.kind, "done");
 });
 
+test("deliver: the ore hold goes ashore, the CARGO hold stays aboard", () => {
+  // A barge carrying spare mining crystals in cargo. Before this, the delivery
+  // took them too — the mining-holds route reports cargo as a fallback entry on
+  // every hull and the block emptied every hold it was handed.
+  const holds: MiningHold[] = [
+    { key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, quantity: 100 }], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, quantity: 4 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.ok(t.action.kind === "unloadOre");
+  assert.deepEqual(t.action.kind === "unloadOre" ? [...t.action.itemIDs] : [], [8], "the crystals stayed in cargo");
+});
+
+test("deliver: a hull with no ore hold still delivers what it mined into cargo", () => {
+  const holds: MiningHold[] = [
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 42, typeID: 1230, quantity: 50 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.ok(t.action.kind === "unloadOre" && t.action.itemIDs.includes(42));
+});
+
+test("deliver: an empty ore hold is DONE even with cargo aboard", () => {
+  const holds: MiningHold[] = [
+    { key: "ore", label: "Ore Hold", items: [], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, quantity: 4 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.equal(t.outcome.kind, "done", "the trip delivered its ore; the cargo hold is not its business");
+});
+
 test("deliver: in space, away from the station -> ride the autopilot there (multi-system)", () => {
   const t = deliver(haulStep, obs({ snapshot: snapshot([]) }), NM, {});
   assert.ok(t.action.kind === "startRoute" && t.action.stationID === 60000004);

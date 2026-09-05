@@ -32,7 +32,9 @@ import {
   createMiningBot,
   decideMiningAction,
   destinationHold,
+  freightHoldItemIDs,
   HAUL_AT_FRACTION,
+  holdItemIDs,
   holdShouldHaul,
   holdUnits,
   isMineableRock,
@@ -270,6 +272,60 @@ function decide(overrides: Partial<MiningObservation>, mem = EMPTY_MEMORY) {
 }
 
 // --- the readers -------------------------------------------------------------
+
+function cargoHoldWith(items: readonly number[], present = true): MiningHold {
+  return {
+    key: "cargo",
+    label: "Cargo hold",
+    items: items.map((itemID) => ({ itemID, typeID: 3389, quantity: 1 })),
+    capacity: { capacity: 400, used: 0 },
+    present,
+    error: null,
+  };
+}
+
+test("a delivery empties the SPECIALISED holds and leaves the cargo hold alone", () => {
+  // The bug this exists to stop: a barge's spare mining crystals live in cargo,
+  // and every lap put them in the station hangar because the mining-holds route
+  // reports cargo as a fallback entry on every hull.
+  const holds = [oreHold(1_000, 5_000, [500]), cargoHoldWith([70_001, 70_002])];
+  assert.deepEqual([...freightHoldItemIDs(holds)], [90_000], "only the ore hold's stack");
+  // The old reading, kept here so the difference is explicit rather than implied.
+  assert.deepEqual([...holdItemIDs(holds)], [90_000, 70_001, 70_002]);
+});
+
+test("a hull with NO specialised hold still delivers out of cargo", () => {
+  // The case the fallback was written for: a frigate mines straight into cargo,
+  // and refusing to unload it there would strand the ore.
+  const holds = [cargoHoldWith([70_001])];
+  assert.deepEqual([...freightHoldItemIDs(holds)], [70_001]);
+});
+
+test("a specialised hold whose CAPACITY read failed is still the hull's own hold", () => {
+  // The mining-holds route folds "absent" and "capacity unreadable" into the
+  // same present:false. Contents are the second witness — without them one
+  // failed read would demote a barge to "no ore hold" and ship its cargo out.
+  const blindOre: MiningHold = {
+    key: "ore",
+    label: "Ore hold",
+    items: [{ itemID: 90_500, typeID: 1230, quantity: 10 }],
+    capacity: null,
+    present: false,
+    error: "READ_FAILED",
+  };
+  assert.deepEqual([...freightHoldItemIDs([blindOre, cargoHoldWith([70_001])])], [90_500]);
+});
+
+test("an empty ore hold on a hull that has one does NOT fall back to cargo", () => {
+  // "Nothing left to deliver" — not "so take the cargo hold instead".
+  const holds = [oreHold(0, 5_000, []), cargoHoldWith([70_001])];
+  assert.deepEqual([...freightHoldItemIDs(holds)], []);
+});
+
+test("unreadable holds deliver nothing rather than guessing", () => {
+  assert.deepEqual([...freightHoldItemIDs(null)], []);
+  assert.deepEqual([...freightHoldItemIDs([])], []);
+});
 
 test("the destination hold is the hull's specialised one, falling back to cargo", () => {
   const cargo: MiningHold = {

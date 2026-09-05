@@ -1,7 +1,8 @@
 # What stays aboard — a design for unload/jettison policy
 
-Design doc. **Nothing here is implemented.** It exists because the current
-behaviour is only safe by accident, and the accident is about to end.
+Design doc. **Part 1 is implemented** (`fix(bots): deliver ore, not the whole
+ship`); Parts 2 and 3 are not. It exists because the current behaviour is only
+safe by accident, and the accident is about to end.
 
 ## The problem
 
@@ -67,10 +68,25 @@ needed for the narrow case in Part 1 below.
 
 # The proposal, in three parts
 
-## Part 1 — `deliver-ore` should deliver ore
+## Part 1 — `deliver-ore` should deliver ore ✅ DONE
 
 The largest share of the problem needs **no configuration at all**, because it
 is a bug rather than a policy.
+
+> **Shipped as `freightHoldItemIDs` in `nav/miningBotLoop.ts`.** It covers FOUR
+> call sites, not one: `deliver-ore`, the fixed mining ladder's own unload
+> (`miningBotLoop.ts:486`), and the two haul-completion checks that ask whether
+> the hold is empty yet. Those last two had to move together with the unload —
+> they measure "is it empty", so leaving them on `holdItemIDs` would have meant
+> a haul was never counted complete while anything sat in the cargo hold.
+>
+> One thing the implementation found that this design had not: the mining-holds
+> route computes `present` as `reading !== null && capacity > 0`, so a hold
+> whose CAPACITY read failed is reported exactly like a hold the hull does not
+> have — unlike `/bays`, which is strictly three-valued. A hull whose ore-hold
+> capacity read blipped would have been demoted to "no ore hold" and had its
+> cargo shipped out. `isSpecialisedHold` therefore takes contents as a second
+> witness: a hold that listed a stack demonstrably exists.
 
 **Rule: `deliver-ore` unloads the specialised mining holds. It falls back to the
 cargo hold only when the hull has no specialised mining hold present.**
@@ -96,7 +112,7 @@ crystals in that cargo are still exposed. Two ways to close it:
   and filter the cargo fallback to the ore category, so `deliver-ore` delivers
   ore even out of a mixed cargo hold.
 
-**Recommend 1b**, but not urgently — 1a first, 1b when the residual bites.
+**1a shipped.** 1b remains open, for when the residual bites.
 
 > ⚠ **This is a behaviour change and must be announced.** A mining bot that also
 > loots, and relies on `deliver-ore` to empty the loot out of cargo, will now

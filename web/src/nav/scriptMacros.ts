@@ -20,7 +20,7 @@ import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import { BELT_ARRIVAL_RADIUS_M, holdItemIDs, isMineableRock } from "./miningBotLoop.ts";
+import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import {
   agentActionID,
@@ -708,7 +708,10 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
     });
   }
   if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
-    const items = holdItemIDs(obs.holds ?? null);
+    // The FREIGHT holds, not every hold. On a hull with an ore hold the cargo
+    // hold is not where the ore is, and emptying it here put the ship's spare
+    // crystals and ammunition ashore every lap — see freightHoldItemIDs.
+    const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
       return tick({ kind: "unloadOre", itemIDs: items }, "Unloading the ore into the hangar.", "Unloading", ACTING);
     }

@@ -322,7 +322,7 @@ every mover — `deliver-ore`, `unload-cargo`, `move-items`, `jettison-cargo`,
 `load-mission-cargo` — a refused case. The loot path now has two; the pattern is
 in `lootDispatchFlow.test.ts` and is worth copying rather than reinventing.
 
-### 5d. A decision to make, not a bug to fix
+### 5d. RESOLVED — it was a bug after all
 
 `deliver-ore` unloads via `holdItemIDs(obs.holds)`, and the BFF's `MINING_HOLDS`
 table always includes the cargo hold as a fallback entry
@@ -338,8 +338,15 @@ decision before any code changes**, and the options are:
 2. Restrict it to freight, matching `unload-cargo` after the fix.
 3. Add an argument, defaulting to today's behaviour so nothing changes silently.
 
-Flagged rather than chosen, because guessing here changes what existing bots do
-to their cargo holds overnight.
+**Resolved 2026-09-05: option 2, restrict it to freight.** On the evidence it
+was not a policy choice at all — the `MINING_HOLDS` cargo entry is documented as
+a fallback for hulls with no specialised hold, and the filter implementing that
+was simply missing. `deliver-ore` now sweeps cargo only when the hull has no
+specialised mining hold. See `docs/unloading-policy-design.md` Part 1.
+
+The behaviour change is real and narrow: a mining bot that also loots, and
+relied on `deliver-ore` to empty that loot out of cargo, now leaves it aboard.
+The fix for such a script is one extra `unload-cargo` block.
 
 ---
 
