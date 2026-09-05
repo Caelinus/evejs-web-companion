@@ -22,6 +22,7 @@ import type {
   InventoryItemRow,
   JournalState,
   MiningHold,
+  ShipBay,
   SpaceSnapshot,
 } from "../store/types.ts";
 import type { CargoReading, TravelReading } from "./missionBotLoop.ts";
@@ -168,6 +169,14 @@ export interface ScriptObservation {
   readonly journal?: JournalState | null;
   /** The active ship's cargo rows + capacity. */
   readonly cargo?: CargoReading | null;
+  /**
+   * The active hull's SPECIALISED bays, contents included — what `unload-cargo`
+   * needs to empty a hauler whose freight went to the ore hold rather than to
+   * cargo. Read only while a block that empties the ship is active, because the
+   * BFF answers it with one capacity call per candidate flag and that is far too
+   * much to pay on every tick of a mining run.
+   */
+  readonly shipBays?: readonly ShipBay[] | null;
   /** The docked station's hangar rows (the mission package is picked from here). */
   readonly stationHangar?: readonly InventoryItemRow[] | null;
   /** What the shared autopilot is doing (mission travel rides it). */

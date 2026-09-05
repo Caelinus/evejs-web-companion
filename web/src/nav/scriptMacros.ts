@@ -36,6 +36,7 @@ import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotL
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
+import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
 
 const WAIT = { kind: "wait" } as const;
 const ACTING = { kind: "acting" } as const;
@@ -1269,8 +1270,26 @@ const waitBlock: MacroDecider = (step, _obs, mem) => {
 };
 
 // ── unload-cargo ─────────────────────────────────────────────────────────────
-// Docked: move EVERYTHING in the cargo hold into the station hangar. Done only
-// when a fresh cargo read shows the hold empty — a 200 is not an empty hold.
+// Docked: move everything the ship is CARRYING into the station hangar — the
+// cargo hold and every specialised freight bay, each from its own place.
+//
+// ⚠ IT IS NOT ONLY THE CARGO HOLD, AND THAT IS THE WHOLE FIX. This block used
+// to read `obs.cargo` alone, which was fine while loot went nowhere else. Once
+// `transferLootedRows` started routing ore into the ore hold, a hauler's freight
+// stopped being reachable by the one block meant to unload it: the ore hold
+// filled, `cargo-full` (which measures the CARGO hold) never tripped, the loop
+// never ended, and every further scoop was refused for want of room. Whatever
+// `FREIGHT_BAYS` lets a bot fill, this block has to be able to empty, or the
+// same trap just moves one bay over.
+//
+// ⚠ WHAT IT WILL NOT TOUCH: the ship's KIT. Drones, fuel, ammo, fighters,
+// subsystems and the hulls in a maintenance bay are not freight, and a block
+// that stripped them would turn a drop-off into a stranding. `FREIGHT_BAYS`
+// draws that line; this block never widens it.
+//
+// Done only when a fresh read shows nothing left — and a hold that could not be
+// READ never counts as an empty one, so an unreadable ship reports blocked
+// rather than quietly passing for unloaded.
 const unloadCargo: MacroDecider = (_step, obs, mem) => {
   if (obs.flightStatus?.docked !== true) {
     return tick(WAIT, "Not docked, so there is no hangar to unload into.", "Emptying the hold", {
@@ -1279,27 +1298,55 @@ const unloadCargo: MacroDecider = (_step, obs, mem) => {
     });
   }
   const cargo = obs.cargo ?? null;
-  if (cargo === null) {
-    return tick(WAIT, "Reading the cargo hold.", "Emptying the hold", ACTING, false, mem);
+  const bays = obs.shipBays ?? null;
+  const groups: { readonly bay: string | null; readonly itemIDs: readonly number[] }[] = [];
+  if (cargo !== null && cargo.rows.length > 0) {
+    groups.push({ bay: null, itemIDs: cargo.rows.map((row) => row.itemID) });
   }
-  if (cargo.rows.length === 0) {
-    return tick(WAIT, "The cargo hold is empty.", "Emptying the hold", { kind: "done" });
+  for (const bay of bays ?? []) {
+    if (bay.present !== true || !FREIGHT_BAYS.has(bay.key)) {
+      continue;
+    }
+    const items = bay.items ?? [];
+    if (items.length > 0) {
+      groups.push({ bay: bay.key, itemIDs: items.map((row) => row.itemID) });
+    }
   }
-  const attempts = (num(mem, "attempts") ?? 0) + 1;
-  if (attempts > MAX_BLOCK_ATTEMPTS) {
-    return tick(WAIT, "The cargo would not move.", "Emptying the hold", {
-      kind: "blocked",
-      reason: "The station kept refusing the cargo, so the bot stopped.",
+  if (groups.length > 0) {
+    const attempts = (num(mem, "attempts") ?? 0) + 1;
+    if (attempts > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The cargo would not move.", "Emptying the hold", {
+        kind: "blocked",
+        reason: "The station kept refusing the cargo, so the bot stopped.",
+      });
+    }
+    return tick(
+      { kind: "unloadHolds", groups },
+      "Moving what the ship is carrying into the hangar.",
+      "Emptying the hold",
+      ACTING,
+      false,
+      { ...mem, attempts },
+    );
+  }
+  // Nothing to move that we can SEE. Only a ship we actually managed to read
+  // end to end is an empty one — a failed cargo or bay read is "cannot tell",
+  // and passing that off as "done" is the exact conflation that let a full ore
+  // hold sail through this block in the first place.
+  if (cargo === null || bays === null) {
+    const blindChecks = (num(mem, "blindChecks") ?? 0) + 1;
+    if (blindChecks > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The ship's holds could not be read.", "Emptying the hold", {
+        kind: "blocked",
+        reason: "The ship's holds could not be read, so the bot cannot tell whether it is empty.",
+      });
+    }
+    return tick(WAIT, "Checking the ship's holds.", "Emptying the hold", ACTING, false, {
+      ...mem,
+      blindChecks,
     });
   }
-  return tick(
-    { kind: "unloadMissionCargo", itemIDs: cargo.rows.map((row) => row.itemID) },
-    "Moving the cargo into the hangar.",
-    "Emptying the hold",
-    ACTING,
-    false,
-    { attempts },
-  );
+  return tick(WAIT, "The ship is empty.", "Emptying the hold", { kind: "done" });
 };
 
 // ── return-to-agent ──────────────────────────────────────────────────────────

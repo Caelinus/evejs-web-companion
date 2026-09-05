@@ -81,6 +81,17 @@ export type ScriptAction =
   | { readonly kind: "startRoute"; readonly stationID: number }
   | { readonly kind: "loadMissionCargo"; readonly typeID: number; readonly quantity: number }
   | { readonly kind: "unloadMissionCargo"; readonly itemIDs: readonly number[] }
+  /**
+   * Empty the ship's FREIGHT into the station hangar — the cargo hold and every
+   * specialised bay carrying cargo — one group per source place, because a move
+   * must name the place the items are actually in. `bay: null` is the cargo
+   * hold. Distinct from `unloadMissionCargo`, which only ever means "the one
+   * package the mission put in cargo".
+   */
+  | {
+      readonly kind: "unloadHolds";
+      readonly groups: readonly { readonly bay: string | null; readonly itemIDs: readonly number[] }[];
+    }
   /** Order salvage drones onto a wreck; targetID 0 = the runtime auto-picks. */
   | { readonly kind: "salvageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   /** Take everything out of ONE wreck (an owned wreck — the decider guarantees it). */

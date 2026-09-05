@@ -86,6 +86,32 @@ function spaceBodyWith(entity: Record<string, unknown>): unknown {
   };
 }
 
+/**
+ * The BFF's `/bays` answer, shaped exactly as the route builds it: EVERY
+ * candidate bay is reported, absent ones with `present:false` and `items:null`.
+ * Naming a bay here is what makes the router willing to address it — a hull
+ * whose bays were never read routes everything to cargo instead.
+ */
+function baysBody(shipID: number, present: readonly string[]): unknown {
+  const keys = ["cargo", "ore", "gas", "ice", "asteroid", "mineral", "salvage", "planetary", "drone", "ammo", "fuel"];
+  return {
+    ok: true,
+    shipID,
+    activeShipID: shipID,
+    bays: keys.map((key) => {
+      const has = present.includes(key);
+      return {
+        key,
+        label: key,
+        present: has,
+        capacity: has ? { capacity: 16000, used: 0 } : { capacity: 0, used: 0 },
+        items: has ? [] : null,
+        error: null,
+      };
+    }),
+  };
+}
+
 function containerReads(containerID: number, items: unknown[]): unknown {
   return {
     ok: true,
@@ -213,13 +239,19 @@ test("a custom bot's loot-containers step splits ore-category loot into the ore 
     if (path === "/api/names") return { status: 200, body: namesBody(body) };
     if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
     if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
+    // The hull HAS an ore hold. That is now a precondition for addressing it:
+    // the router only names a bay the ship was observed to have.
+    if (path === `/api/bridge/ship/${SHIP_ID}/bays`) return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"]) };
     if (path.startsWith("/api/bridge/inventory/container/")) {
       return {
         status: 200,
         body: containerReads(CONTAINER_ID, [
-          // Veldspar — category 25 (Asteroid) — belongs in the ore hold.
-          packedRow({ itemID: 90010, typeID: 1230, groupID: 18, categoryID: 25, flagID: null, quantity: 500, singleton: 0 }),
-          // A non-ore stack in the same can — still goes to cargo, same as before.
+          // Veldspar — category 25 (Asteroid), group 462 — belongs in the ore
+          // hold. (This row used to claim group 18, which is Tritanium's; the
+          // old router read categoryID only, so the wrong number never showed.)
+          packedRow({ itemID: 90010, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 500, singleton: 0 }),
+          // Tritanium — a refined mineral. This hull has no mineral hold, so it
+          // still goes to cargo, same as before.
           packedRow({ itemID: 90011, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 100, singleton: 0 }),
         ]),
       };
@@ -251,6 +283,181 @@ test("a custom bot's loot-containers step splits ore-category loot into the ore 
       to: { kind: "cargo" },
     })),
     "the non-ore stack still went to cargo",
+  );
+});
+
+// ── The twelve-hour bug, pinned ─────────────────────────────────────────────
+//
+// A live bot answered 227 consecutive NotEnoughCargoSpace refusals on
+// /api/bridge/inventory/transfer over twelve hours. Two defects produced it and
+// both are pinned below, because neither was covered before: the ore hold was
+// addressed on hulls that do not have one, and a refusal on the ore half
+// cancelled the cargo half that would have succeeded.
+
+test("a hull with NO ore hold gets its ore in cargo — the bay is never addressed blind", async () => {
+  const CONTAINER_ID = 80003;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "container",
+          name: "Jetcan",
+          ownerID: 555,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
+    // A combat hull: cargo only. `resolvePlace` would happily resolve
+    // {shipBay:"ore"} here anyway — it reads a static table and never checks the
+    // hull — and the server would answer NotEnoughCargoSpace against a
+    // 0-capacity flag, forever.
+    if (path === `/api/bridge/ship/${SHIP_ID}/bays`) return { status: 200, body: baysBody(SHIP_ID, ["cargo"]) };
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(CONTAINER_ID, [
+          packedRow({ itemID: 90020, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 500, singleton: 0 }),
+        ]),
+      };
+    }
+    if (path === "/api/bridge/inventory/transfer") {
+      return { status: 200, body: { ok: true, applied: true, moved: [90020], declined: [], declinedSilently: false, notFound: [] } };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-containers", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  flow.stopCustomBot();
+
+  const transfers = requests.filter((r) => r.path === "/api/bridge/inventory/transfer");
+  assert.ok(transfers.length > 0, "it tried to move the loot");
+  assert.equal(
+    transfers.some((r) => JSON.stringify(r.body.to) === JSON.stringify({ kind: "shipBay", bay: "ore" })),
+    false,
+    "no transfer addressed an ore hold this hull does not have",
+  );
+  assert.ok(
+    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+      itemIDs: [90020],
+      from: { kind: "container", itemID: CONTAINER_ID },
+      to: { kind: "cargo" },
+    })),
+    "the ore went to cargo instead",
+  );
+});
+
+test("a REFUSED ore-hold transfer still lands the rest of the loot, and spills the ore into cargo", async () => {
+  const CONTAINER_ID = 80004;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "container",
+          name: "Jetcan",
+          ownerID: 555,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
+    if (path === `/api/bridge/ship/${SHIP_ID}/bays`) return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"]) };
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(CONTAINER_ID, [
+          packedRow({ itemID: 90030, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 500, singleton: 0 }),
+          packedRow({ itemID: 90031, typeID: 578, groupID: 60, categoryID: 7, flagID: null, quantity: 1, singleton: 1 }),
+        ]),
+      };
+    }
+    if (path === "/api/bridge/inventory/transfer") {
+      // The ore hold is FULL. Everything aimed at it is refused; cargo accepts.
+      const to = body.to as { kind?: string; bay?: string } | undefined;
+      if (to && to.kind === "shipBay") {
+        return {
+          status: 409,
+          body: { ok: false, error: "NotEnoughCargoSpace", message: "There isn't enough room in that hold." },
+        };
+      }
+      return { status: 200, body: { ok: true, applied: true, moved: [], declined: [], declinedSilently: false, notFound: [] } };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-containers", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  flow.stopCustomBot();
+
+  const transfers = requests.filter((r) => r.path === "/api/bridge/inventory/transfer");
+  assert.ok(
+    transfers.some((r) => JSON.stringify(r.body.to) === JSON.stringify({ kind: "shipBay", bay: "ore" })),
+    "it did try the ore hold first",
+  );
+  // THE REGRESSION. Before the fix the refusal above rejected the whole
+  // function and this module transfer was never issued at all.
+  assert.ok(
+    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+      itemIDs: [90031],
+      from: { kind: "container", itemID: CONTAINER_ID },
+      to: { kind: "cargo" },
+    })),
+    "the non-ore loot still went to cargo despite the ore hold refusing",
+  );
+  assert.ok(
+    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+      itemIDs: [90030],
+      from: { kind: "container", itemID: CONTAINER_ID },
+      to: { kind: "cargo" },
+    })),
+    "the refused ore spilled into cargo rather than being abandoned",
   );
 });
 
