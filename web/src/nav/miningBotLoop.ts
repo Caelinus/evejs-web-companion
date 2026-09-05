@@ -363,6 +363,13 @@ export function holdItemIDs(holds: readonly MiningHold[] | null): readonly numbe
 }
 
 /**
+ * Retail's Asteroid category — every ore, ice and harvestable gas type lives in
+ * it, so it is exactly "what a mining ship could have mined". The same constant
+ * `refine-ore` and the loot router reach for.
+ */
+const CATEGORY_ASTEROID = 25;
+
+/**
  * Is this one of the hull's OWN specialised mining holds, rather than the cargo
  * hold the route appends as a fallback?
  *
@@ -397,18 +404,37 @@ function isSpecialisedHold(hold: MiningHold): boolean {
  * to cargo only when it has none — which is the case the fallback was written
  * for and the only case in which cargo holds the ore.
  *
- * A hull with no specialised hold still carries its kit in the same cargo hold
- * as its ore, and this function cannot tell them apart: the mining-holds route
- * strips `groupID`/`categoryID` from its rows. Closing that needs those two
- * fields on the route — see docs/unloading-policy-design.md, Part 1b.
+ * A hull with NO specialised hold carries its kit in the same cargo hold as its
+ * ore, so that fallback is filtered by category: only what the ship could have
+ * mined is delivered, and the crystals stowed beside it stay put. A row whose
+ * category cannot be read is LEFT ABOARD — unknown is never a verdict, the same
+ * rule `refine-ore` applies when it refuses to refine a row it cannot classify.
+ * Nothing is filtered out of a specialised hold: an ore hold holds ore, and the
+ * player put anything else in there on purpose.
  */
 export function freightHoldItemIDs(holds: readonly MiningHold[] | null): readonly number[] {
   if (!holds) {
     return [];
   }
   const specialised = holds.filter(isSpecialisedHold);
-  const source = specialised.length > 0 ? specialised : holds.filter((hold) => hold.key === "cargo");
-  return source.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
+  if (specialised.length > 0) {
+    return specialised.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
+  }
+  const fallback = holds.filter((hold) => hold.key === "cargo").flatMap((hold) => hold.items ?? []);
+  // ⚠ NO CLASSIFIER, NO FILTER. If not one row in the hold carries a category,
+  // we are not looking at a cargo hold full of unclassifiable things — we are
+  // talking to a bridge that does not publish the field at all. Filtering on it
+  // then would deliver NOTHING, and a miner would sit at the station mining
+  // into a hold that never empties. Falling back to the pre-Part-1b behaviour
+  // is the safe reading; a single classified row is enough to trust the filter.
+  // `typeof … === "number"`, not `!== null`: a row from a source that omits the
+  // field entirely reads as `undefined`, and treating that as "classified"
+  // would filter every stack out and deliver nothing.
+  const canClassify = fallback.some((item) => typeof item.categoryID === "number");
+  if (!canClassify) {
+    return fallback.map((item) => item.itemID);
+  }
+  return fallback.filter((item) => item.categoryID === CATEGORY_ASTEROID).map((item) => item.itemID);
 }
 
 /** Total units across the holds, or null when nothing could be read. */

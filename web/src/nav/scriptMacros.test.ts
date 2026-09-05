@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { FlightStatus, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
+import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import type { MacroMemory } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
@@ -418,7 +418,7 @@ test("mine: the ore-priority list running out entirely -> blocked, never a silen
 });
 
 test("deliver: docked with ore -> unload; docked empty -> done", () => {
-  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, quantity: 100 }], capacity: null, present: true, error: null }];
+  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null }];
   const unload = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre }), NM, {});
   assert.ok(unload.action.kind === "unloadOre" && unload.action.itemIDs.includes(8));
 
@@ -431,8 +431,8 @@ test("deliver: the ore hold goes ashore, the CARGO hold stays aboard", () => {
   // took them too — the mining-holds route reports cargo as a fallback entry on
   // every hull and the block emptied every hold it was handed.
   const holds: MiningHold[] = [
-    { key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, quantity: 100 }], capacity: null, present: true, error: null },
-    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, quantity: 4 }], capacity: null, present: true, error: null },
+    { key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, groupID: 483, categoryID: 8, quantity: 4 }], capacity: null, present: true, error: null },
   ];
   const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
   assert.ok(t.action.kind === "unloadOre");
@@ -441,7 +441,7 @@ test("deliver: the ore hold goes ashore, the CARGO hold stays aboard", () => {
 
 test("deliver: a hull with no ore hold still delivers what it mined into cargo", () => {
   const holds: MiningHold[] = [
-    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 42, typeID: 1230, quantity: 50 }], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 42, typeID: 1230, groupID: 462, categoryID: 25, quantity: 50 }], capacity: null, present: true, error: null },
   ];
   const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
   assert.ok(t.action.kind === "unloadOre" && t.action.itemIDs.includes(42));
@@ -450,7 +450,7 @@ test("deliver: a hull with no ore hold still delivers what it mined into cargo",
 test("deliver: an empty ore hold is DONE even with cargo aboard", () => {
   const holds: MiningHold[] = [
     { key: "ore", label: "Ore Hold", items: [], capacity: null, present: true, error: null },
-    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, quantity: 4 }], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, groupID: 483, categoryID: 8, quantity: 4 }], capacity: null, present: true, error: null },
   ];
   const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
   assert.equal(t.outcome.kind, "done", "the trip delivered its ore; the cargo hold is not its business");
@@ -1630,8 +1630,11 @@ const compress = SCRIPT_MACROS["compress-ore"]!;
 const compressStep: MacroStep = { id: "co", kind: "macro", macro: "compress-ore", args: {} };
 
 /** A hold with these stacks in it. */
-function oreHold(items: { itemID: number; typeID: number; quantity: number }[]): MiningHold[] {
-  return [{ key: "ore", label: "Ore Hold", items, capacity: null, present: true, error: null }];
+function oreHold(items: readonly { itemID: number; typeID: number; quantity: number }[]): MiningHold[] {
+  // Everything in an ore hold is ore, so the helper classifies it as such —
+  // callers say what is there, not what kind of thing it is.
+  const rows: HoldItem[] = items.map((item) => ({ ...item, groupID: 462, categoryID: 25 }));
+  return [{ key: "ore", label: "Ore Hold", items: rows, capacity: null, present: true, error: null }];
 }
 
 /** A support ship that IS running its compression gear. */

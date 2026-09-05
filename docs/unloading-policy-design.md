@@ -1,7 +1,6 @@
 # What stays aboard — a design for unload/jettison policy
 
-Design doc. **Part 1 is implemented** (`fix(bots): deliver ore, not the whole
-ship`); Parts 2 and 3 are not. It exists because the current behaviour is only
+Design doc. **Part 1 and Part 1b are implemented**; Parts 2 and 3 are not. It exists because the current behaviour is only
 safe by accident, and the accident is about to end.
 
 ## The problem
@@ -112,7 +111,21 @@ crystals in that cargo are still exposed. Two ways to close it:
   and filter the cargo fallback to the ore category, so `deliver-ore` delivers
   ore even out of a mixed cargo hold.
 
-**1a shipped.** 1b remains open, for when the residual bites.
+**Both shipped.** ✅ 1b added the two fields to the route — the same pair
+`/bays` already publishes, while `flagID`/`locationID` stay behind — and
+`freightHoldItemIDs` now filters the cargo fallback to the Asteroid category.
+
+Two rules the implementation had to settle that this design had not:
+
+- **An unclassifiable row is LEFT ABOARD.** Unknown is never a verdict, the same
+  rule `refine-ore` applies. It costs a stack of ore staying in the hold; the
+  other way round costs the crystals, silently, every lap.
+- **A hold in which NOT ONE row carries a category is delivered whole.** That is
+  not a cargo bay full of mysteries, it is a bridge that does not publish the
+  field — and filtering on it there would deliver nothing at all and leave a
+  miner mining into a hold that never empties. One classified row is enough to
+  trust the filter. The check is `typeof x === "number"`, not `!== null`,
+  because a row from a source that omits the field reads as `undefined`.
 
 > ⚠ **This is a behaviour change and must be announced.** A mining bot that also
 > loots, and relies on `deliver-ore` to empty the loot out of cargo, will now

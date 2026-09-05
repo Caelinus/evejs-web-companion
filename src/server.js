@@ -16090,6 +16090,15 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
           ? decodeInventoryRows(listed.value.result).map((row) => ({
               itemID: row.itemID,
               typeID: row.typeID,
+              // WHAT KIND OF THING IT IS — the same two fields /bays publishes,
+              // and for the same reason: a stack's category is part of what a
+              // player reads about it, not wire detail like flagID. Without
+              // them a bot delivering out of the CARGO fallback (a hull with no
+              // specialised hold mines straight into cargo) cannot tell the ore
+              // it just mined from the mining crystals stowed beside it, and so
+              // shipped the crystals ashore with the ore every lap.
+              groupID: row.groupID,
+              categoryID: row.categoryID,
               quantity: row.quantity,
             }))
           : null;

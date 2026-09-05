@@ -26,7 +26,7 @@ test("holds decode by NAME, with capacity and contents", () => {
       label: "Ore hold",
       present: true,
       capacity: { capacity: 5000, used: 120 },
-      items: [{ itemID: 8800001, typeID: 1230, quantity: 500 }],
+      items: [{ itemID: 8800001, typeID: 1230, groupID: 462, categoryID: 25, quantity: 500 }],
       error: null,
     },
   ] as unknown as JsonValue);
@@ -34,7 +34,26 @@ test("holds decode by NAME, with capacity and contents", () => {
   assert.equal(holds.length, 1);
   assert.equal(holds[0]?.label, "Ore hold");
   assert.equal(holds[0]?.capacity?.capacity, 5000);
-  assert.deepEqual(holds[0]?.items, [{ itemID: 8800001, typeID: 1230, quantity: 500 }]);
+  assert.deepEqual(holds[0]?.items, [
+    { itemID: 8800001, typeID: 1230, groupID: 462, categoryID: 25, quantity: 500 },
+  ]);
+});
+
+test("a hold row from a bridge that does not publish a category decodes to null, not zero", () => {
+  // "Could not classify" and "classified as category 0" are different, and a
+  // delivery filtering on the category has to be able to tell them apart.
+  const holds = decodeMiningHolds([
+    {
+      key: "cargo",
+      label: "Cargo hold",
+      present: true,
+      items: [{ itemID: 8800002, typeID: 1230, quantity: 5 }],
+      error: null,
+    },
+  ] as unknown as JsonValue);
+
+  assert.equal(holds[0]?.items?.[0]?.groupID, null);
+  assert.equal(holds[0]?.items?.[0]?.categoryID, null);
 });
 
 test("a hold whose read FAILED decodes items to null — not to an empty hold", () => {

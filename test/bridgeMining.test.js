@@ -148,6 +148,8 @@ function fakeGateway(overrides = {}) {
           packedRow({
             itemID,
             typeID: itemID === ICE_STACK_ID ? 16262 : 1230,
+            groupID: itemID === ICE_STACK_ID ? 423 : 462,
+            categoryID: 25,
             locationID: flag === FLAG_HANGAR ? ORIGIN_STATION_ID : SHIP_ID,
             flagID: flag,
             quantity: 500,
@@ -411,6 +413,22 @@ test("R7d/R9a: the response names each hold and never leaks a flag number", asyn
     );
   }
   assert.equal(/\bflag\b/i.test(serialized), false, "the word 'flag' must not reach the browser");
+});
+
+test("a hold row says WHAT it is — group and category ride along, flagID still does not", async () => {
+  // A bot delivering out of the CARGO fallback has to tell the ore it mined
+  // from the mining crystals stowed beside it, and typeID alone cannot. These
+  // are the same two fields /bays already publishes; flagID and locationID
+  // remain wire detail and stay behind (R7d).
+  const { baseUrl } = await docked();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
+
+  const ore = payload.holds.find((hold) => hold.key === "ore");
+  assert.equal(ore.items.length, 1);
+  assert.equal(ore.items[0].groupID, 462);
+  assert.equal(ore.items[0].categoryID, 25);
+  assert.equal("flagID" in ore.items[0], false, "flagID must not ride along with them");
+  assert.equal("locationID" in ore.items[0], false, "nor locationID");
 });
 
 test("a hold the hull does not have is marked absent, not shown as empty", async () => {

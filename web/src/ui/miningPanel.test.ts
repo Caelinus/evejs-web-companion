@@ -79,7 +79,7 @@ function renderLoaded(options: {
         capacity: options.capacityUnknown ? null : { capacity: 5000, used: 1250 },
         items: options.holdItemsNull
           ? null
-          : [{ itemID: ORE_STACK_ID, typeID: ORE_TYPE_ID, quantity: 500 }],
+          : [{ itemID: ORE_STACK_ID, typeID: ORE_TYPE_ID, groupID: 462, categoryID: 25, quantity: 500 }],
         error: options.holdItemsNull ? "READ_FAILED" : null,
       },
       // A hull without a gas bay: absent, so it must not be drawn at all.

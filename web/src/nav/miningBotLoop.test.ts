@@ -230,6 +230,8 @@ function oreHold(used: number, capacity = 5_000, items: readonly number[] = []):
     items: items.map((quantity, index) => ({
       itemID: 90_000 + index,
       typeID: 1230,
+      groupID: 462,
+      categoryID: 25,
       quantity,
     })),
     capacity: { capacity, used },
@@ -273,15 +275,21 @@ function decide(overrides: Partial<MiningObservation>, mem = EMPTY_MEMORY) {
 
 // --- the readers -------------------------------------------------------------
 
-function cargoHoldWith(items: readonly number[], present = true): MiningHold {
+/** Cargo rows default to mining crystals — kit, category 8, never ore. */
+function cargoHoldWith(items: readonly number[], categoryID: number | null = 8): MiningHold {
   return {
     key: "cargo",
     label: "Cargo hold",
-    items: items.map((itemID) => ({ itemID, typeID: 3389, quantity: 1 })),
+    items: items.map((itemID) => ({ itemID, typeID: 3389, groupID: 483, categoryID, quantity: 1 })),
     capacity: { capacity: 400, used: 0 },
-    present,
+    present: true,
     error: null,
   };
+}
+
+/** An ore stack sitting in the CARGO hold — a frigate with no specialised bay. */
+function cargoOre(itemID: number) {
+  return { itemID, typeID: 1230, groupID: 462, categoryID: 25, quantity: 500 };
 }
 
 test("a delivery empties the SPECIALISED holds and leaves the cargo hold alone", () => {
@@ -294,11 +302,42 @@ test("a delivery empties the SPECIALISED holds and leaves the cargo hold alone",
   assert.deepEqual([...holdItemIDs(holds)], [90_000, 70_001, 70_002]);
 });
 
-test("a hull with NO specialised hold still delivers out of cargo", () => {
+test("a hull with NO specialised hold still delivers the ore out of cargo", () => {
   // The case the fallback was written for: a frigate mines straight into cargo,
   // and refusing to unload it there would strand the ore.
-  const holds = [cargoHoldWith([70_001])];
+  const holds: MiningHold[] = [
+    { ...cargoHoldWith([]), items: [cargoOre(70_001)] },
+  ];
   assert.deepEqual([...freightHoldItemIDs(holds)], [70_001]);
+});
+
+test("the cargo fallback delivers the ORE and leaves the kit beside it", () => {
+  // Part 1b. A frigate mines into cargo, and its spare crystals are in the very
+  // same hold — the one case bay-level routing can say nothing about.
+  const holds: MiningHold[] = [
+    { ...cargoHoldWith([70_002]), items: [cargoOre(70_001), ...cargoHoldWith([70_002]).items!] },
+  ];
+  assert.deepEqual([...freightHoldItemIDs(holds)], [70_001], "the crystals stayed aboard");
+});
+
+test("a cargo row whose category cannot be read is LEFT ABOARD, never guessed at", () => {
+  // Unknown is not a verdict. One classified row is enough to trust the filter,
+  // so the unreadable one beside it is a deliberate omission, not an oversight.
+  const holds: MiningHold[] = [
+    {
+      ...cargoHoldWith([]),
+      items: [cargoOre(70_001), { itemID: 70_009, typeID: 999, groupID: null, categoryID: null, quantity: 1 }],
+    },
+  ];
+  assert.deepEqual([...freightHoldItemIDs(holds)], [70_001]);
+});
+
+test("a hold NOTHING in which carries a category delivers everything, rather than nothing", () => {
+  // Talking to a bridge that does not publish the field. Filtering on it then
+  // would deliver nothing at all and leave a miner mining into a hold that
+  // never empties — so the pre-Part-1b behaviour is the safe reading.
+  const holds = [cargoHoldWith([70_001, 70_002], null)];
+  assert.deepEqual([...freightHoldItemIDs(holds)], [70_001, 70_002]);
 });
 
 test("a specialised hold whose CAPACITY read failed is still the hull's own hold", () => {
@@ -308,7 +347,7 @@ test("a specialised hold whose CAPACITY read failed is still the hull's own hold
   const blindOre: MiningHold = {
     key: "ore",
     label: "Ore hold",
-    items: [{ itemID: 90_500, typeID: 1230, quantity: 10 }],
+    items: [{ itemID: 90_500, typeID: 1230, groupID: 462, categoryID: 25, quantity: 10 }],
     capacity: null,
     present: false,
     error: "READ_FAILED",
@@ -1391,7 +1430,7 @@ test("a PARTIAL hold read cannot mint phantom ore, and real growth still counts 
   const cargoHold: MiningHold = {
     key: "cargo",
     label: "Cargo hold",
-    items: [{ itemID: 99_999, typeID: 34, quantity: 20 }],
+    items: [{ itemID: 99_999, typeID: 34, groupID: 18, categoryID: 4, quantity: 20 }],
     capacity: { capacity: 500, used: 20 },
     present: true,
     error: null,

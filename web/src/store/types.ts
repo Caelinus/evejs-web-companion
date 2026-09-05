@@ -1825,6 +1825,13 @@ export interface HoldCapacity {
 export interface HoldItem {
   readonly itemID: number;
   readonly typeID: number;
+  /**
+   * What KIND of thing this is, as the game classifies it. `null` is "the read
+   * did not say" and is never a verdict — a delivery that cannot tell ore from
+   * a mining crystal leaves the stack alone rather than guessing.
+   */
+  readonly groupID: number | null;
+  readonly categoryID: number | null;
   readonly quantity: number;
 }
 

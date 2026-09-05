@@ -67,7 +67,16 @@ function decodeHoldItems(value: JsonValue | undefined): readonly HoldItem[] | nu
     if (itemID === null || typeID === null) {
       continue;
     }
-    items.push({ itemID, typeID, quantity: numberOrNull(raw.quantity) ?? 0 });
+    items.push({
+      itemID,
+      typeID,
+      // Absent decodes to null, not 0: a hold read from an older bridge that
+      // does not publish these simply cannot classify, which is a different
+      // thing from classifying as category zero.
+      groupID: idOrNull(raw.groupID),
+      categoryID: idOrNull(raw.categoryID),
+      quantity: numberOrNull(raw.quantity) ?? 0,
+    });
   }
   return items;
 }
