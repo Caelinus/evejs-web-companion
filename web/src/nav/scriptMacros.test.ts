@@ -780,6 +780,24 @@ test("loot-containers: far from a container -> approach first", () => {
   assert.ok(go.action.kind === "approach" && go.action.targetID === 80001);
 });
 
+/** One entry as the run's refusal ledger would report it. */
+function refusal(
+  stepID: string,
+  actionKind: string,
+  targetID: number,
+  count: number,
+  kind: "refused" | "unreachable" | "gone" = "refused",
+) {
+  return {
+    key: `${stepID}:${actionKind}:${targetID}`,
+    count,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There isn't enough room in that hold.",
+    kind,
+  };
+}
+
 test("loot-containers: still on grid after a loot attempt -> tried again, never silently believed emptied", () => {
   // A jetcan the server has not despawned is a jetcan that is NOT actually
   // empty yet (jettisonRuntime.js's maybeExpireEmptySpaceContainer despawns it
@@ -790,25 +808,97 @@ test("loot-containers: still on grid after a loot attempt -> tried again, never 
   const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
   const can = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
 
-  const retry = loot(s, obs({ snapshot: snapshot([can]) }), { tries: { "80001": 1 } }, {});
+  const retry = loot(s, obs({ snapshot: snapshot([can]), refusals: [refusal("lc", "lootContainer", 80001, 1)] }), {}, {});
   assert.ok(retry.action.kind === "lootContainer" && retry.action.containerID === 80001);
-  assert.equal((retry.nextMem["tries"] as Record<string, number>)["80001"], 2);
 });
 
-test("loot-containers: a can that keeps refusing for MAX_BLOCK_ATTEMPTS is set aside, not looped forever", () => {
+test("loot-containers: a can that keeps refusing is set aside — and the bound SURVIVES the lap", () => {
+  // The bound now lives on the RUN's ledger, not in step memory. That is the
+  // whole change: `scriptDecide` drops step memory every time the block is left,
+  // so the old `tries` counter handed each stubborn can a fresh five attempts on
+  // every lap of a `forever` loop — which is exactly why the original log shows
+  // repeating bursts of five instead of one burst and then silence.
   const loot = SCRIPT_MACROS["loot-containers"]!;
   const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
   const stuck = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
   const other = entity({ itemID: 80002, kind: "container", position: { x: 2000, y: 0, z: 0 } });
+  const ledger = [refusal("lc", "lootContainer", 80001, 5)];
 
-  // MAX_BLOCK_ATTEMPTS is 5 (scriptMacros.ts, not exported) — this is the 6th try.
-  const gaveUp = loot(s, obs({ snapshot: snapshot([stuck]) }), { tries: { "80001": 5 } }, {});
-  assert.equal(gaveUp.action.kind, "wait");
-  assert.deepEqual(gaveUp.nextMem["skipped"], [80001]);
-
-  // Next tick: the stuck can is skipped, so a different one on grid is picked instead.
-  const next = loot(s, obs({ snapshot: snapshot([stuck, other]) }), gaveUp.nextMem, {});
+  // Set aside, so a different can on the grid is picked instead.
+  const next = loot(s, obs({ snapshot: snapshot([stuck, other]), refusals: ledger }), {}, {});
   assert.ok(next.action.kind === "lootContainer" && next.action.containerID === 80002);
+
+  // ⚠ WITH FRESH MEMORY — a new lap. The old counter lived here and was wiped;
+  // the ledger is not, so the can stays set aside.
+  const nextLap = loot(s, obs({ snapshot: snapshot([stuck, other]), refusals: ledger }), {}, {});
+  assert.ok(nextLap.action.kind === "lootContainer" && nextLap.action.containerID === 80002);
+
+  // And with only the stuck can on grid, the block finishes rather than looping.
+  const alone = loot(s, obs({ snapshot: snapshot([stuck]), refusals: ledger }), { emptyChecks: 99 }, {});
+  assert.equal(alone.outcome.kind, "done");
+});
+
+test("loot-containers: a can that CANNOT BE REACHED is closed in on, never set aside", () => {
+  // eve.js answers the same FakeItemNotFound for a despawned can and for one
+  // merely out of range. Retiring on that would abandon every can the ship
+  // drifted away from — most of them, on a hauling loop.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([can]), refusals: [refusal("lc", "lootContainer", 80001, 9, "unreachable")] }),
+    {},
+    {},
+  );
+  // In range by our own arithmetic, and it still closes in: the gateway's range
+  // check beats the snapshot's.
+  assert.ok(t.action.kind === "approach" && t.action.targetID === 80001);
+});
+
+test("loot-containers: a can that is GONE is set aside at once, without spending the budget", () => {
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const ghost = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
+  const real = entity({ itemID: 80002, kind: "container", position: { x: 2000, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([ghost, real]), refusals: [refusal("lc", "lootContainer", 80001, 1, "gone")] }),
+    {},
+    {},
+  );
+  assert.ok(t.action.kind === "lootContainer" && t.action.containerID === 80002);
+});
+
+test("loot-wrecks: a wreck is marked emptied only once the attempt was NOT refused", () => {
+  // It used to be marked the instant the action went out, which believed a
+  // refused transfer exactly as readily as a real one — the behaviour
+  // loot-containers' own comment calls out and this block never fixed.
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const world = { snapshot: snapshot([wreck]), myCharacterID: 90000001 };
+
+  const issued = loot(s, obs(world), {}, {});
+  assert.ok(issued.action.kind === "lootWreck" && issued.action.wreckID === 70001);
+  assert.equal(issued.nextMem["attempted"], 70001, "remembered as ATTEMPTED, not as emptied");
+  assert.deepEqual(issued.nextMem["looted"], [], "nothing is claimed emptied yet");
+
+  // Next tick with NO refusal recorded: the attempt stood, so the wreck is
+  // ticked off — and with nothing else of ours on the grid, the block finishes.
+  const confirmed = loot(s, obs(world), issued.nextMem, {});
+  assert.equal(confirmed.outcome.kind, "done");
+
+  // The other branch: the attempt WAS refused, so the wreck is NOT ticked off
+  // and the block tries it again instead of declaring the grid clear.
+  const refused = loot(
+    s,
+    obs({ ...world, refusals: [refusal("lw", "lootWreck", 70001, 1)] }),
+    issued.nextMem,
+    {},
+  );
+  assert.notEqual(refused.outcome.kind, "done", "a refused wreck is not ticked off");
+  assert.ok(refused.action.kind === "lootWreck", "it tries again");
 });
 
 test("hardeners-on: switches idle hardeners on one per tick; all running -> done; none fitted -> blocked", () => {

@@ -121,6 +121,21 @@ export interface RefusalLedger {
   note(key: string, raw: string, at: number, stillOnGrid: boolean | null): RefusalRecord;
   /** A success on this key: the streak is over. */
   clear(key: string): void;
+  /**
+   * Something moved, so a hold that had no room may have room now. Forgets every
+   * `refused` streak — and ONLY those.
+   *
+   * ⚠ WITHOUT THIS, SETTING A CAN ASIDE IS PERMANENT. A can is set aside because
+   * it kept refusing, and it kept refusing because the hold was full; once the
+   * hold is emptied nothing would ever try that can again, because the only
+   * thing that clears a streak is a success on the same key and the block has
+   * stopped issuing one. A hauler would set aside every can on the belt over a
+   * few laps and then quietly find nothing to do.
+   *
+   * `gone` and `unreachable` survive on purpose: emptying a hold does not bring
+   * back a despawned container, and does not close a distance.
+   */
+  forgetRefused(): void;
   /** Consecutive failures on this key, 0 when it is not failing. */
   consecutive(key: string): number;
   /** Everything currently failing, worst first — what a readout shows. */
@@ -151,6 +166,13 @@ export function createRefusalLedger(): RefusalLedger {
     clear(key) {
       byKey.delete(key);
     },
+    forgetRefused() {
+      for (const [key, record] of byKey) {
+        if (record.kind === "refused") {
+          byKey.delete(key);
+        }
+      }
+    },
     consecutive(key) {
       return byKey.get(key)?.count ?? 0;
     },
@@ -158,4 +180,65 @@ export function createRefusalLedger(): RefusalLedger {
       return [...byKey.values()].sort((left, right) => right.count - left.count);
     },
   };
+}
+
+// ── The read side: what a DECIDER asks ──────────────────────────────────────
+
+/** The record for one target, or null when it is not currently failing. */
+export function refusalFor(
+  records: readonly RefusalRecord[] | null | undefined,
+  stepID: string | null,
+  actionKind: string,
+  targetID: number | null,
+): RefusalRecord | null {
+  if (!records) {
+    return null;
+  }
+  const key = refusalKey(stepID, actionKind, targetID);
+  return records.find((record) => record.key === key) ?? null;
+}
+
+/**
+ * Should a block stop offering this target?
+ *
+ * ⚠ THIS REPLACES A PER-STEP `tries` COUNTER, AND THAT IS THE WHOLE POINT.
+ * A macro's own bookkeeping lives in step memory, which `scriptDecide` drops
+ * every time the step is left — so on a `forever` loop the same stubborn can
+ * got a fresh five-attempt budget every lap, which is exactly why the original
+ * log shows repeating bursts of five rather than one burst and then silence.
+ * The ledger is owned by the RUN, so a bound expressed against it actually
+ * binds.
+ *
+ * `gone` is set aside at once: there is nothing there to try. `unreachable` is
+ * NEVER set aside — the object exists and the answer is to close the distance,
+ * not to give up on it.
+ */
+export function shouldSetAside(
+  records: readonly RefusalRecord[] | null | undefined,
+  stepID: string | null,
+  actionKind: string,
+  targetID: number | null,
+  limit: number,
+): boolean {
+  const record = refusalFor(records, stepID, actionKind, targetID);
+  if (record === null) {
+    return false;
+  }
+  if (record.kind === "gone") {
+    return true;
+  }
+  if (record.kind === "unreachable") {
+    return false;
+  }
+  return record.count >= limit;
+}
+
+/** True when the last attempt on this target failed to reach it. */
+export function isUnreachable(
+  records: readonly RefusalRecord[] | null | undefined,
+  stepID: string | null,
+  actionKind: string,
+  targetID: number | null,
+): boolean {
+  return refusalFor(records, stepID, actionKind, targetID)?.kind === "unreachable";
 }

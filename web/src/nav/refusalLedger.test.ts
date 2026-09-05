@@ -10,9 +10,12 @@ import assert from "node:assert/strict";
 import {
   classifyRefusal,
   createRefusalLedger,
+  isUnreachable,
   MAX_CONSECUTIVE_REFUSALS,
+  refusalFor,
   refusalKey,
   settleTicksForRefusals,
+  shouldSetAside,
 } from "./refusalLedger.ts";
 
 const NO_ROOM = "CALL_REFUSED: NotEnoughCargoSpace";
@@ -112,4 +115,69 @@ test("the bound is looser than a block's own, because it stops the whole run", (
   // MAX_BLOCK_ATTEMPTS is 5 and bounds one visit to a block, where giving up and
   // trying the next can is cheap. This one ends the run.
   assert.ok(MAX_CONSECUTIVE_REFUSALS > 5);
+});
+
+// ── Decay: the thing that stops "set aside" meaning "for ever" ──────────────
+
+test("something moving forgets every refused streak, so a set-aside can is retried", () => {
+  // A can is set aside because it kept refusing, and it kept refusing because
+  // the hold was full. Nothing would ever try it again once the hold is emptied,
+  // because the only thing that clears a streak is a success on the SAME key and
+  // the block has stopped issuing one. A hauler would quietly run out of work.
+  const ledger = createRefusalLedger();
+  const can = refusalKey("s1", "lootContainer", 80001);
+  for (let i = 0; i < 6; i += 1) {
+    ledger.note(can, NO_ROOM, i, true);
+  }
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 80001, 5), true);
+
+  ledger.forgetRefused();
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 80001, 5), false);
+});
+
+test("emptying a hold does NOT bring back a despawned can, or close a distance", () => {
+  const ledger = createRefusalLedger();
+  const ghost = refusalKey("s1", "lootContainer", 1);
+  const far = refusalKey("s1", "lootContainer", 2);
+  ledger.note(ghost, "CALL_REFUSED: FakeItemNotFound", 1, false);
+  ledger.note(far, "CALL_REFUSED: FakeItemNotFound", 1, true);
+  ledger.forgetRefused();
+  assert.equal(ledger.consecutive(ghost), 1, "gone survives");
+  assert.equal(ledger.consecutive(far), 1, "unreachable survives");
+});
+
+// ── The read side a decider uses ────────────────────────────────────────────
+
+test("a target nothing is recorded against is not set aside", () => {
+  assert.equal(shouldSetAside([], "s1", "lootContainer", 80001, 5), false);
+  assert.equal(shouldSetAside(null, "s1", "lootContainer", 80001, 5), false);
+  assert.equal(refusalFor(undefined, "s1", "lootContainer", 1), null);
+});
+
+test("a GONE target is set aside at once, without spending the budget", () => {
+  const ledger = createRefusalLedger();
+  ledger.note(refusalKey("s1", "lootContainer", 1), "CALL_REFUSED: FakeItemNotFound", 0, false);
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), true);
+});
+
+test("an UNREACHABLE target is never set aside, however often it is missed", () => {
+  // It exists. The answer is to close the distance, not to give up on it.
+  const ledger = createRefusalLedger();
+  const key = refusalKey("s1", "lootContainer", 1);
+  for (let i = 0; i < 50; i += 1) {
+    ledger.note(key, "CALL_REFUSED: FakeItemNotFound", i, true);
+  }
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), false);
+  assert.equal(isUnreachable(ledger.records(), "s1", "lootContainer", 1), true);
+});
+
+test("a stubborn but reachable target is set aside once it passes the limit", () => {
+  const ledger = createRefusalLedger();
+  const key = refusalKey("s1", "lootContainer", 1);
+  for (let i = 0; i < 4; i += 1) {
+    ledger.note(key, NO_ROOM, i, true);
+  }
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), false);
+  ledger.note(key, NO_ROOM, 5, true);
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), true);
 });

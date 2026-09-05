@@ -56,6 +56,21 @@ export const SETTLE_TICKS = 2;
 export const MAX_READ_FAILURES = 5;
 
 /**
+ * Actions that put items somewhere else, so a hold which had no room may have
+ * room now. Their success is the signal that expires every `refused` streak —
+ * see `forgetRefused`, without which a can set aside for a full hold would
+ * never be tried again after the hold was emptied.
+ */
+function freesHoldSpace(action: ScriptAction): boolean {
+  return action.kind === "unloadOre"
+    || action.kind === "unloadHolds"
+    || action.kind === "unloadMissionCargo"
+    || action.kind === "moveItems"
+    || action.kind === "jettison"
+    || action.kind === "reprocessOre";
+}
+
+/**
  * The world object an action addresses, when it addresses one.
  *
  * Only the loot pair, deliberately. A per-target streak earns its keep where a
@@ -219,7 +234,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     // pause the player can read and recover from, never a dead loop.
     let result: ReturnType<typeof decideScriptAction>;
     try {
-      result = decideScriptAction(script, obs, memory, deps.registry, deps.travelHome);
+      // ⚠ THE LEDGER RIDES IN ON THE OBSERVATION. A decider's whole interface is
+      // "here are the facts, choose" — and "this can has refused me nine times
+      // running, across four laps" is a fact about the world exactly like a
+      // distance is. Handing it over here rather than as a fifth argument keeps
+      // every macro reading one thing, and keeps `decideScriptAction` pure.
+      result = decideScriptAction(
+        script,
+        { ...obs, refusals: ledger.records() },
+        memory,
+        deps.registry,
+        deps.travelHome,
+      );
     } catch (error) {
       pauseWith(`${DECIDE_FAILED} (${String(error)})`);
       return;
@@ -250,6 +276,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         // and then recovered would carry those two forever and stop the run
         // early on an unrelated blip much later.
         ledger.clear(key);
+        if (freesHoldSpace(result.action)) {
+          ledger.forgetRefused();
+        }
       } catch (error) {
         if (deps.isSessionLost(error)) {
           setError(SESSION_LOST);

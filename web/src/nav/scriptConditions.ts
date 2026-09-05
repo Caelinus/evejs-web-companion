@@ -28,6 +28,7 @@ import type {
 import type { CargoReading, TravelReading } from "./missionBotLoop.ts";
 import type { SavedFitting } from "../bridge/fittings.ts";
 import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
+import type { RefusalRecord } from "./refusalLedger.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -177,6 +178,13 @@ export interface ScriptObservation {
    * much to pay on every tick of a mining run.
    */
   readonly shipBays?: readonly ShipBay[] | null;
+  /**
+   * What the RUN has been refused so far, injected by the runner (the ledger is
+   * its state, not a read). A decider treats this as an ordinary fact: "this can
+   * has turned me down nine times across four laps" is as much a property of the
+   * world as a distance is, and unlike a per-step counter it survives the lap.
+   */
+  readonly refusals?: readonly RefusalRecord[] | null;
   /** The docked station's hangar rows (the mission package is picked from here). */
   readonly stationHangar?: readonly InventoryItemRow[] | null;
   /** What the shared autopilot is doing (mission travel rides it). */

@@ -145,7 +145,7 @@ to retire or re-approach.
 
 ---
 
-## 2. Macro memory resets, so the retry bounds don't hold (was finding 4)
+## 2. Macro memory resets, so the retry bounds don't hold (was finding 4) ✅ DONE
 
 ### The gap
 
@@ -197,10 +197,42 @@ cleanest is *any* successful transfer by this run — rather than to a wall-cloc
 timer alone.
 
 **Also close the wreck/container asymmetry.** `lootWrecks` marks a wreck looted
-the instant it issues (`scriptMacros.ts:1512`), which the comment block at
-`:1532` explicitly describes as the rejected old behaviour that `lootContainers`
-was built to avoid. `lootWrecks` was never brought along. It should ask the
-ledger like its neighbour.
+the instant it issues, which the comment block beside `lootContainers`
+explicitly describes as the rejected old behaviour that block was built to
+avoid. `lootWrecks` was never brought along. It should ask the ledger like its
+neighbour.
+
+### Shipped
+
+`lootContainers` lost `tries` and `skipped` entirely and asks
+`shouldSetAside(obs.refusals, …)` instead; the ledger rides in on the
+observation, because "this can has refused me nine times across four laps" is a
+fact about the world exactly like a distance is.
+
+`lootWrecks` keeps a `looted` set — a wreck does NOT despawn when emptied, so
+the container trick of reading "still on grid" as "still has something in it"
+is unavailable to it — but it now writes that record on the ANSWER rather than
+on the asking: it remembers what it `attempted`, and one tick later the absence
+of a ledger entry is what promotes that to `looted`.
+
+`unloadCargo` and `moveItems` keep their `attempts`, as planned: those bound
+SILENT non-progress, which the ledger cannot see. Item 3 replaces them.
+
+Two things worth knowing:
+
+- **Decay had to be real, not decorative.** A can is set aside because it kept
+  refusing, and it kept refusing because the hold was full — so once the hold is
+  emptied nothing would ever try it again, because the only thing that clears a
+  streak is a success on the same key and the block has stopped issuing one. A
+  hauler would quietly set aside every can on the belt. `forgetRefused()` fires
+  when an action that moves items succeeds, and deliberately spares `gone` and
+  `unreachable`: emptying a hold does not bring back a despawned container, and
+  does not close a distance.
+- **`unreachable` now overrides our own arithmetic.** If the gateway's range
+  check said no, the block closes in even when the snapshot's distance says it
+  is already in range — a stale position or a scene boundary this client cannot
+  see. Retrying the loot from where it stands would just collect the same
+  refusal.
 
 ---
 

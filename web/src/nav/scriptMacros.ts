@@ -37,6 +37,7 @@ import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/ove
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
+import { isUnreachable, refusalFor, shouldSetAside } from "./refusalLedger.ts";
 
 const WAIT = { kind: "wait" } as const;
 const ACTING = { kind: "acting" } as const;
@@ -1519,7 +1520,7 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
 // Loot YOUR OWN wrecks, nearest first: fly inside loot range, empty it, mark it,
 // next. A wreck whose owner cannot be read is NEVER opened — that is the whole
 // "no can flipping" rule, structural rather than polite.
-const lootWrecks: MacroDecider = (_step, obs, mem) => {
+const lootWrecks: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Looting", ACTING, false, mem);
@@ -1528,39 +1529,64 @@ const lootWrecks: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
   }
   const lootedRaw = mem["looted"];
-  const looted = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
-  const mine = wrecksOnGrid(snapshot).filter((w) => isOwnWreck(w, obs) && !looted.has(w.itemID));
+  const lootedBefore = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
+
+  // ⚠ MARK IT ON THE ANSWER, NOT ON THE ASKING. This block used to add a wreck
+  // to `looted` the instant it issued the action, which believed a refused
+  // transfer exactly as readily as a real one and moved on leaving the loot
+  // sitting there. `lootContainers` was deliberately built to avoid that and
+  // said so in its own comment; this block was never brought along.
+  //
+  // A wreck cannot use the container trick of reading "still on grid" as "still
+  // has something in it" — an emptied wreck stays put — so the block does need
+  // its own record. What it can do is write that record one tick LATER, once the
+  // ledger has had a chance to say whether the attempt was refused.
+  const attempted = num(mem, "attempted");
+  const attemptWasRefused =
+    attempted !== null && refusalFor(obs.refusals, step.id, "lootWreck", attempted) !== null;
+  const looted =
+    attempted !== null && !attemptWasRefused ? new Set([...lootedBefore, attempted]) : lootedBefore;
+  const memBase: MacroMemory = { ...mem, looted: [...looted], attempted: null };
+
+  const mine = wrecksOnGrid(snapshot).filter(
+    (w) =>
+      isOwnWreck(w, obs) &&
+      !looted.has(w.itemID) &&
+      !shouldSetAside(obs.refusals, step.id, "lootWreck", w.itemID, MAX_BLOCK_ATTEMPTS),
+  );
   if (mine.length === 0) {
     return tick(WAIT, "Every wreck of yours here is emptied.", "Looting", { kind: "done" });
   }
   const measurement = measureSpace(snapshot);
   const target = nearest(mine, measurement);
   if (target === null) {
-    return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, mem);
+    return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memBase);
   }
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
-  if (dist > LOOT_RANGE_M) {
-    if (num(mem, "approaching") === target.itemID) {
-      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, mem);
+  // The gateway's own range check beats our arithmetic — see lootContainers.
+  const unreachable = isUnreachable(obs.refusals, step.id, "lootWreck", target.itemID);
+  if (dist > LOOT_RANGE_M || unreachable) {
+    if (!unreachable && num(memBase, "approaching") === target.itemID) {
+      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, memBase);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      "Heading for your wreck.",
+      unreachable ? "Too far to reach it — closing in." : "Heading for your wreck.",
       "Looting",
       ACTING,
       true,
-      { ...mem, approaching: target.itemID },
+      { ...memBase, approaching: target.itemID },
     );
   }
-  // In range: empty it and mark it done (the flow's transfer verifies the move;
-  // an empty wreck is a no-op either way).
+  // In range: empty it, and remember only that it was ATTEMPTED. Whether it is
+  // actually emptied is settled on the next tick, above.
   return tick(
     { kind: "lootWreck", wreckID: target.itemID },
     "Taking what's inside.",
     "Looting",
     ACTING,
     true,
-    { ...mem, approaching: null, looted: [...looted, target.itemID] },
+    { ...memBase, approaching: null, attempted: target.itemID },
   );
 };
 
@@ -1591,7 +1617,7 @@ const CONTAINER_SETTLE_TICKS = 30; // ~2s/tick elsewhere in this file -> roughly
 // exactly the retry a decline needs. Only a can that keeps refusing for
 // MAX_BLOCK_ATTEMPTS running gets set aside, so a genuinely stuck one does not
 // loop the block forever.
-const lootContainers: MacroDecider = (_step, obs, mem) => {
+const lootContainers: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Looting", ACTING, false, mem);
@@ -1599,9 +1625,13 @@ const lootContainers: MacroDecider = (_step, obs, mem) => {
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
   }
-  const skippedRaw = mem["skipped"];
-  const skipped = new Set<number>(Array.isArray(skippedRaw) ? (skippedRaw as number[]) : []);
-  const cans = containersOnGrid(snapshot).filter((c) => !skipped.has(c.itemID));
+  // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
+  // list in step memory. The list was dropped every time the block was left, so
+  // on a `forever` loop each stubborn can was reconsidered from scratch on every
+  // lap — five fresh attempts, for ever. See `shouldSetAside`.
+  const cans = containersOnGrid(snapshot).filter(
+    (c) => !shouldSetAside(obs.refusals, step.id, "lootContainer", c.itemID, MAX_BLOCK_ATTEMPTS),
+  );
   if (cans.length === 0) {
     // A can that has not shown up in THIS tick's snapshot is not proof the
     // grid never had one — landing on a belt and checking for containers on
@@ -1626,38 +1656,34 @@ const lootContainers: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memClean);
   }
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
-  if (dist > LOOT_RANGE_M) {
-    if (num(memClean, "approaching") === target.itemID) {
+  // ⚠ THE SERVER'S RANGE CHECK BEATS OUR MEASUREMENT. A bind that came back
+  // "cannot reach" means the gateway's own scene/range test said no, whatever
+  // the snapshot's arithmetic made of the distance — a stale position, or a
+  // scene boundary this client cannot see. Closing in is the answer; retrying
+  // the loot from here would just collect the same refusal.
+  const unreachable = isUnreachable(obs.refusals, step.id, "lootContainer", target.itemID);
+  if (dist > LOOT_RANGE_M || unreachable) {
+    if (!unreachable && num(memClean, "approaching") === target.itemID) {
       return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, memClean);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      "Heading for the container.",
+      unreachable ? "Too far to reach it — closing in." : "Heading for the container.",
       "Looting",
       ACTING,
       true,
       { ...memClean, approaching: target.itemID },
     );
   }
-  const triesRaw = memClean["tries"];
-  const tries: Record<string, number> =
-    triesRaw !== null && typeof triesRaw === "object" ? { ...(triesRaw as Record<string, number>) } : {};
-  const targetTries = (tries[target.itemID] ?? 0) + 1;
-  if (targetTries > MAX_BLOCK_ATTEMPTS) {
-    return tick(WAIT, "That container would not give up its contents.", "Looting", ACTING, true, {
-      ...memClean,
-      approaching: null,
-      skipped: [...skipped, target.itemID],
-    });
-  }
-  tries[target.itemID] = targetTries;
+  // No `tries` counter here any more: the ledger counts, across laps, and
+  // `shouldSetAside` above is what takes a hopeless can out of the list.
   return tick(
     { kind: "lootContainer", containerID: target.itemID },
     "Taking what's inside.",
     "Looting",
     ACTING,
     true,
-    { ...memClean, approaching: null, tries },
+    { ...memClean, approaching: null },
   );
 };
 
