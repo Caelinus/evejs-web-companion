@@ -46,10 +46,10 @@ const PANELS = [
   "Workspace",
   "LoginForm",
   "CharacterSelect",
-  // No StationPanel here: R60 folded the station's services and guests into a
-  // TAB of Inventory & Ship, and the old panel sat unimported from then on —
-  // only this list kept it alive. Deleted with the station-panel redesign,
-  // which takes the name for the docked dock panel.
+  // The docked right-hand dock panel. It renders with nothing but a store and a
+  // flow, exactly as it does on a cold mount before the first read answers.
+  "StationPanel",
+  // Still mounted IN SPACE, as the Neocom's floating Inventory & Ship window.
   "InventoryShip",
   "Fitting",
   "Industry",

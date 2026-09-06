@@ -39,6 +39,7 @@ import {
   rowsIn,
   samePlace,
   shipRows,
+  shortLabel,
   uncheckedShipBays,
 } from "./inventoryModel.ts";
 
@@ -560,4 +561,19 @@ test("a division that reads back empty only LOOKS inaccessible — it never gate
   // nothing, so an empty read and an empty division are indistinguishable.
   assert.equal(divisionLooksAccessible({ rows: [stack()] }), true);
   assert.equal(divisionLooksAccessible({ rows: [] }), false);
+});
+
+// --- the narrow panel's one-word destination ---------------------------------
+
+test("a destination abbreviates to its DISTINGUISHING word, not just its first", () => {
+  assert.equal(shortLabel("Ship cargo"), "Cargo");
+  assert.equal(shortLabel("Station hangar"), "Hangar");
+  // "hold" and "bay" are what every hull has, so they are never the half that
+  // tells two places apart.
+  assert.equal(shortLabel("Ore hold"), "Ore");
+  assert.equal(shortLabel("Drone bay"), "Drone");
+  assert.equal(shortLabel("Ship maintenance bay"), "Ship");
+  // A one-word name is already as short as it goes.
+  assert.equal(shortLabel("Industry"), "Industry");
+  assert.equal(shortLabel(""), "");
 });

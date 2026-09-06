@@ -1,16 +1,25 @@
 <script lang="ts">
   // The fixed top-right dock panel — your always-on situational awareness.
-  // Docked (R60): the tabbed Inventory & Ship — Ship Inventory / Ship Hangar /
-  // Item Hangar / Corporate Hangar — headed by the station's NAME (the station
-  // services/guests moved to their own Neocom "Station" window). In space: the
-  // (compact) Overview — what's around your ship. Ship
-  // condition, the module rack and the locked-target brackets are deliberately
-  // NOT here — they live in the persistent bottom HUD and the floating
-  // TargetsPanel respectively. Collapsible to a thin strip, and expandable by
-  // dragging its left edge; both the collapse state and the width are remembered
-  // per character.
+  //
+  //   DOCKED   the Station panel: the open hull's bays, the ship hangar, the
+  //            item hangar, the corporation's divisions, any open container and
+  //            the station's own services and guests.
+  //   IN SPACE the compact Overview — what is around your ship.
+  //
+  // Ship condition, the module rack and the locked-target brackets are
+  // deliberately NOT here: they live in the persistent bottom HUD and the
+  // floating TargetsPanel. Collapsible to a thin strip, and expandable by
+  // dragging its left edge; both the collapse state and the width are
+  // remembered per character.
+  //
+  // ⚠ THE TWO ARMS BELOW ARE NOT SYMMETRICAL, ON PURPOSE. The Station panel
+  // brings its own header (title, station hint, refresh, collapse) and its own
+  // pinned action bar, so it takes the whole frame: no `.dock-panel-head` above
+  // it and no `.dock-panel-body` padding or scrolling around it. Both of those
+  // belong to the Overview now, and a change made for the docked panel must
+  // never be made by editing them — see dockPanelStates.test.ts.
   import Overview from "./Overview.svelte";
-  import InventoryShip from "./InventoryShip.svelte";
+  import StationPanel from "./StationPanel.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -78,24 +87,24 @@
   {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <span class="dock-resize" title="Drag to resize" onpointerdown={startResize}></span>
-    <header class="dock-panel-head">
-      <h2>{title}</h2>
-      <button type="button" class="dock-collapse" title="Collapse" aria-label="Collapse" onclick={onToggle}>›</button>
-    </header>
-    <div class="dock-panel-body">
-      {#if isDocked}
-        <div class="dock-inventory">
-          <ErrorBoundary name="Inventory &amp; Ship">
-            <InventoryShip {store} {flow} dock ping={inventoryPing} />
-          </ErrorBoundary>
-        </div>
-      {:else}
+    {#if isDocked}
+      <div class="stn-host">
+        <ErrorBoundary name="Station">
+          <StationPanel {store} {flow} ping={inventoryPing} onCollapse={onToggle} />
+        </ErrorBoundary>
+      </div>
+    {:else}
+      <header class="dock-panel-head">
+        <h2>{title}</h2>
+        <button type="button" class="dock-collapse" title="Collapse" aria-label="Collapse" onclick={onToggle}>›</button>
+      </header>
+      <div class="dock-panel-body">
         <div class="dock-overview">
           <ErrorBoundary name="Overview">
             <Overview {store} {flow} compact />
           </ErrorBoundary>
         </div>
-      {/if}
-    </div>
+      </div>
+    {/if}
   {/if}
 </aside>

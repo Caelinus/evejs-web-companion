@@ -6065,4 +6065,836 @@
     }
   }
 
+
+  /* ======================================================================
+   * 6. THE STATION PANEL — the right-hand dock panel while DOCKED
+   * ----------------------------------------------------------------------
+   * The hangars, the ship bays, the corporation's divisions and the station's
+   * services, as table ROWS. It replaced a grid of large tiles that used a
+   * 1200px-wide dock column to show about eight things.
+   *
+   * ⚠ DOCKED ONLY. In space the same frame holds the compact Overview, which
+   * is styled by `.dock-overview` and the `.dock-panel*` rules far above. NONE
+   * of the rules here may be written so that they can reach it: everything is
+   * under `.stn-panel`, and the palette below is scoped to that root rather
+   * than added to the global `@theme` tokens. `dockPanelStates.test.ts` fails
+   * if the frame's shared rules or the global tokens move.
+   *
+   * WHY IT HAS ITS OWN PALETTE AND ITS OWN DENSITY.
+   * Same reason as the Pilot Hangar in section 5: the rest of this file dresses
+   * PANELS — framed blocks of prose and record tables with 40px controls. This
+   * is a dense, cold, square inventory table that has to stay readable in a
+   * 260px column and use the room in a 1200px one. The `--stn-*` custom
+   * properties are the handoff's palette, verbatim, and they stop at this root.
+   *
+   * ⚠ THE WIDTH QUESTION IS `@container`, NOT `@media` (R85). The panel lives
+   * in a column the player drags, so "is there room for the m³ columns" is a
+   * question about THIS panel and never about the browser window. Asking the
+   * viewport is exactly the bug R85 fixed. `station` is the container.
+   *
+   * ⚠ AND `container-type` MAKES THIS A CONTAINING BLOCK FOR `position: fixed`
+   * DESCENDANTS. The row menu is therefore `position: absolute` against this
+   * root, on purpose — see `openMenu` in StationPanel.svelte. A menu written
+   * as `fixed` with viewport coordinates would land in the wrong place.
+   *
+   * THE KNOWN TENSION WITH R8 is target size, and it is resolved the way the
+   * Pilot Hangar resolves it — behaviourally, not by shrinking the promise.
+   * The per-row move buttons are 26px, below R8's 2.5rem minimum, so below
+   * 560px the whole Move column is REMOVED: the row itself becomes a 46px tap
+   * target that toggles selection, and moving is done from the action bar,
+   * whose controls are 32px and full-width-reachable. The small controls are
+   * never on the critical path on a touch-sized panel.
+   * ==================================================================== */
+
+  /* The two places the panel is mounted have to give it the whole box: it sizes
+   * itself and pins its own action bar, so a host that scrolls or pads would
+   * put the action bar below the fold. Both hosts are docked-only branches. */
+  .stn-host {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .mobile-main.mobile-main-station {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+  }
+
+  .stn-panel {
+    /* --- the handoff's palette, scoped to this root and nowhere else --- */
+    --stn-page: #0a1119;
+    --stn-raised: #0e1826;
+    --stn-surface: #0c131d;
+    --stn-hover: #0f1824;
+    --stn-picked: #132538;
+    --stn-tint: #1f3a55;
+    --stn-flying: #0f1c2b;
+    --stn-line: #1c2939;
+    --stn-line-strong: #2a4360;
+    --stn-hair: #111a26;
+    --stn-track: #131d2a;
+    --stn-text: #d6e1ec;
+    --stn-bright: #e8f3fb;
+    --stn-secondary: #a9b8c8;
+    --stn-muted: #7f93a8;
+    --stn-disabled: #5f7188;
+    --stn-accent: #8ec5ee;
+    --stn-accent-strong: #5aa9e6;
+    --stn-btn-text: #a9c8e2;
+    --stn-danger-text: #e0a39a;
+    --stn-danger-line: #4a2c2c;
+    --stn-danger-bg: #1b1113;
+    --stn-danger-strong: #d97a6a;
+
+    container-type: inline-size;
+    container-name: station;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    /* ⚠ `width: 100%` IS LOAD-BEARING, not tidiness. `inline-size` containment
+     * stops the CONTENT contributing to the element's own width, so a host that
+     * makes this a flex ITEM (rather than a block child of a column) sizes it
+     * from its content — which containment has just removed — and it collapses
+     * to zero. Measured: 0px wide inside a `display: flex` row. Taking the
+     * width from the parent is the same rule `.table-wrap` carries, and for the
+     * same reason. */
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--stn-page);
+    color: var(--stn-text);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* ⚠ THE PANEL CANCELS THE APP'S ELEMENT DRESSING, ONCE, HERE.
+   *
+   * The base and component layers style BARE ELEMENTS for a page of panels: a
+   * `section` is a bordered card with a gradient and an accent hairline, a
+   * `button` is a 40px gradient control, an `input` is a 40px field, and `p` /
+   * `h3` / `dl` carry their own vertical rhythm. Every one of those is right
+   * there and wrong inside a dense inventory table, which is why the first pass
+   * of this panel came out as a stack of nested cards.
+   *
+   * `:where()` is what makes this safe: it contributes NO specificity, so each
+   * rule below weighs exactly `.stn-panel` (0,1,0) and every `.stn-*` component
+   * class further down wins on source order rather than needing to be written
+   * defensively. Reset first, dress after — never the other way round. */
+  .stn-panel :where(section, .panel) {
+    position: static;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+  }
+  .stn-panel :where(section, .panel)::before { content: none; }
+  .stn-panel :where(ul, ol) { list-style: none; margin: 0; padding: 0; }
+  .stn-panel :where(li, p, h3, dl, dt, dd) { margin: 0; }
+  .stn-panel :where(button) {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: normal;
+    line-height: 1.2;
+    transition: none;
+  }
+  .stn-panel :where(input, select, textarea) {
+    min-height: 0;
+    padding: 0;
+    max-width: none;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+  }
+  /* The base's hover gradient is (0,2,1) and would outrank a plain component
+   * class, so it is cancelled at matching weight and re-offered per control. */
+  .stn-panel button:hover:not(:disabled) {
+    background: none;
+    border-color: inherit;
+  }
+  .stn-panel button:disabled { opacity: 1; }
+
+  .stn-panel button,
+  .stn-panel input,
+  .stn-panel select {
+    font-family: inherit;
+    font-size: 13px;
+    border-radius: 0;
+  }
+  .stn-panel button:focus-visible,
+  .stn-panel input:focus-visible,
+  .stn-panel select:focus-visible {
+    outline: 2px solid var(--stn-accent);
+    outline-offset: -2px;
+  }
+  .stn-panel button:disabled {
+    color: var(--stn-disabled);
+    cursor: default;
+  }
+
+  /* The scrollbar, dark and thin so a scrolling list does not put a bright
+   * chrome-coloured bar down the middle of the workspace. */
+  .stn-content {
+    scrollbar-width: thin;
+    scrollbar-color: var(--stn-line-strong) var(--stn-page);
+  }
+  .stn-content::-webkit-scrollbar { width: 8px; height: 8px; }
+  .stn-content::-webkit-scrollbar-track {
+    background: var(--stn-page);
+    border-left: 1px solid var(--stn-hair);
+  }
+  .stn-content::-webkit-scrollbar-thumb {
+    background: var(--stn-line-strong);
+    border: 2px solid var(--stn-page);
+  }
+  .stn-content::-webkit-scrollbar-thumb:hover { background: var(--stn-accent-strong); }
+
+  /* --- 6.1 the header ------------------------------------------------- */
+
+  .stn-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--stn-raised);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-head-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  /* The station's name, secondary to the workspace header above it. It is the
+   * first thing allowed to shrink, and it never wraps the header to two rows. */
+  .stn-head-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-icon-btn {
+    flex: none;
+    min-height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-icon-btn:hover:not(:disabled) {
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+  /* The word beside the glyph comes back wherever there is room for it, and on
+   * a touch-sized panel — where `title` produces no tooltip at all. */
+  .stn-icon-word { display: none; margin-left: 4px; }
+
+  /* --- 6.2 the location row -------------------------------------------- */
+
+  .stn-locations {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-tabs { display: none; flex-wrap: wrap; }
+  .stn-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 38px;
+    padding: 0 12px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--stn-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-tab:hover:not(.on) { color: var(--stn-bright); }
+  .stn-tab.on {
+    color: var(--stn-bright);
+    border-bottom-color: var(--stn-accent);
+  }
+  .stn-badge { font-size: 11px; color: var(--stn-muted); }
+  .stn-tab.on .stn-badge { color: var(--stn-accent); }
+
+  /* The dropdown needs room for the longest location name; when the panel
+   * cannot give both it and the filter that room, the filter takes the next
+   * line rather than clipping "Procurer bays" to "Procurer bays (". */
+  .stn-picker {
+    flex: 1 1 150px;
+    min-width: 0;
+    height: 36px;
+    padding: 0 8px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-bright);
+    font-weight: 600;
+  }
+
+  .stn-filter {
+    flex: 1 1 100px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 8px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+  }
+  .stn-filter-glyph { color: var(--stn-muted); }
+  .stn-filter input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    color: var(--stn-text);
+    outline: none;
+  }
+
+  /* --- 6.3 what the panel has to say ----------------------------------- */
+
+  .stn-notes {
+    flex: none;
+    padding: 6px 12px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-note {
+    margin: 0;
+    color: var(--stn-muted);
+    text-wrap: pretty;
+  }
+  .stn-note + .stn-note { margin-top: 4px; }
+  .stn-note.bad { color: var(--stn-danger-text); }
+
+  /* --- 6.4 the scrolling content --------------------------------------- */
+
+  .stn-content {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .stn-view {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .stn-view[hidden] { display: none; }
+  .stn-group { display: flex; flex-direction: column; min-width: 0; }
+
+  .stn-group-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 12px 12px 8px;
+    background: transparent;
+    border: 0;
+    color: var(--stn-muted);
+    font-size: 11px;
+    text-align: left;
+  }
+  /* Only the chevron and the title fold the bay away; Stack all is a sibling,
+   * because a button inside a button is not markup a browser will honour. */
+  .stn-group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .stn-group-toggle:hover { background: var(--stn-surface); }
+  .stn-chevron { width: 10px; font-size: 10px; color: var(--stn-muted); }
+  .stn-group-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--stn-secondary);
+    white-space: nowrap;
+  }
+  .stn-group-count { display: none; white-space: nowrap; }
+  .stn-group-gap { flex: 1; }
+
+  /* The fill is a SUMMARY. The reading beside it is the real answer, so a place
+   * whose capacity was never reported gets a flat, unfilled track and the words
+   * "not known" — never a confident empty bar, which reads as "there is room". */
+  .stn-bar {
+    flex: 1;
+    min-width: 40px;
+    height: 3px;
+    background: var(--stn-track);
+  }
+  .stn-bar.nolimit { background: var(--stn-line-strong); }
+  .stn-bar-fill { display: block; height: 100%; background: var(--stn-accent-strong); }
+  .stn-bar-fill.full { background: var(--stn-danger-strong); }
+  .stn-group-cap {
+    font-variant-numeric: tabular-nums;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  .stn-group-cap.unknown { color: var(--stn-muted); }
+
+  /* --- 6.5 the rows ----------------------------------------------------- */
+
+  .stn-colhead,
+  .stn-row {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) 64px;
+    column-gap: 8px;
+    align-items: center;
+    min-width: 0;
+  }
+  .stn-colhead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 28px;
+    padding: 0 12px;
+    background: var(--stn-surface);
+    border-top: 1px solid var(--stn-line);
+    border-bottom: 1px solid var(--stn-line);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  /* A sortable column header. It deliberately does NOT set `text-align`: the
+   * cell class it also carries does, and a button that reset it to `inherit`
+   * put "QTY" on the left of a right-aligned column. */
+  .stn-sort {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+  .stn-sort.on { color: var(--stn-accent); }
+
+  .stn-rows { list-style: none; margin: 0; padding: 0; min-width: 0; }
+  .stn-rows.drop-target { outline: 1px dashed var(--stn-accent); outline-offset: -1px; }
+
+  .stn-row {
+    min-height: 46px;
+    padding: 2px 12px 2px 10px;
+    border-bottom: 1px solid var(--stn-hair);
+    border-left: 2px solid transparent;
+    cursor: pointer;
+  }
+  .stn-row:hover { background: var(--stn-hover); }
+  .stn-row.picked {
+    background: var(--stn-picked);
+    border-left-color: var(--stn-accent-strong);
+  }
+  .stn-row.readonly { cursor: default; }
+  .stn-row input[type="checkbox"] { accent-color: var(--stn-accent-strong); margin: 0; }
+
+  .stn-cell-pick { display: none; }
+  .stn-cell-icon { display: flex; }
+  .stn-cell-icon .type-icon { width: 28px; height: 28px; }
+  .stn-cell-name { display: flex; flex-direction: column; min-width: 0; }
+  .stn-name {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* One line carrying the two readings the narrow tier has no columns for. It
+   * never wraps — a row that grows a second line breaks the rhythm of the list. */
+  .stn-meta {
+    font-size: 11px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-cell-qty {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .stn-cell-unit,
+  .stn-cell-vol,
+  .stn-cell-state,
+  .stn-cell-move { display: none; }
+  .stn-cell-unit,
+  .stn-cell-vol {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .stn-cell-unit { color: var(--stn-muted); }
+  .stn-cell-state { color: var(--stn-muted); }
+  .stn-cell-move { justify-content: flex-end; gap: 3px; min-width: 0; }
+  .stn-muted { color: var(--stn-muted); font-size: 11px; }
+
+  .stn-empty {
+    padding: 18px 12px;
+    color: var(--stn-muted);
+    border-bottom: 1px solid var(--stn-hair);
+    text-wrap: pretty;
+  }
+  .stn-empty.bad { color: var(--stn-danger-text); }
+
+  /* --- 6.6 buttons ------------------------------------------------------ */
+
+  .stn-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 10px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-weight: 500;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-btn:hover:not(:disabled) { border-color: var(--stn-accent); }
+  .stn-btn-quick {
+    background: #0f1a28;
+    color: var(--stn-btn-text);
+    font-size: 11px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* A narrow panel gets the destination's first word — "Ore", "Station" — with
+   * the full name on the button's title and in the move bar. The alternative
+   * was "to Station hangar" pushing the quantity column into an ellipsis. */
+  .stn-quick-long { display: none; }
+  .stn-quick-short { display: inline; }
+  .stn-btn-more { min-height: 26px; padding: 0 6px; background: #0f1a28; color: var(--stn-btn-text); }
+  .stn-btn-ghost { background: transparent; border-color: var(--stn-line); color: var(--stn-secondary); }
+  .stn-btn-go {
+    min-height: 30px;
+    padding: 0 14px;
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .stn-btn-danger {
+    background: var(--stn-danger-bg);
+    border-color: var(--stn-danger-line);
+    color: var(--stn-danger-text);
+  }
+  .stn-btn-danger-go {
+    min-height: 30px;
+    padding: 0 14px;
+    background: var(--stn-danger-line);
+    border-color: var(--stn-danger-strong);
+    color: var(--stn-bright);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  /* Re-stacking is offered where it can act — the item hangar and the cargo
+   * hold, which are the only two places the bridge can re-stack. */
+  .stn-stack { min-height: 24px; padding: 0 8px; font-size: 11px; }
+  .stn-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 12px;
+  }
+  .stn-btn-wide { min-height: 32px; padding: 0 12px; }
+
+  /* --- 6.7 the corporation's divisions ---------------------------------- */
+
+  .stn-divisions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px 0;
+  }
+  .stn-chip {
+    min-height: 28px;
+    padding: 0 10px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    font-weight: 500;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .stn-chip.on {
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+
+  /* --- 6.8 the ship hangar ---------------------------------------------- */
+
+  .stn-ship-colhead,
+  .stn-ship-row {
+    grid-template-columns: 44px minmax(0, 1fr) 108px;
+  }
+  .stn-ship-row { min-height: 60px; padding: 6px 12px 6px 10px; }
+  .stn-ship-row.flying {
+    background: var(--stn-flying);
+    border-left-color: var(--stn-accent-strong);
+  }
+  .stn-cell-render { display: flex; }
+  .stn-cell-render .type-icon { width: 40px; height: 40px; }
+  .stn-ship-name { font-weight: 600; font-size: 14px; }
+  .stn-cell-bays,
+  .stn-cell-status { display: none; color: var(--stn-secondary); min-width: 0; }
+  .stn-cell-bays {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-cell-status.accent { color: var(--stn-accent); }
+  .stn-ship-row .stn-cell-move { display: flex; }
+
+  /* --- 6.9 the station's services --------------------------------------- */
+
+  .stn-services {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+    padding: 14px 12px;
+  }
+  .stn-services[hidden] { display: none; }
+  .stn-services-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .stn-section {
+    margin: 4px 0 0;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--stn-secondary);
+  }
+  .stn-facts {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 14px;
+    margin: 0;
+  }
+  .stn-facts dt {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .stn-facts dd { margin: 0; text-wrap: pretty; }
+  .stn-services .stn-controls { padding: 0; }
+  /* The guests table keeps the app's own table styling and its R8 reflow
+   * contract — it is a genuine record table and that machinery is already
+   * built and tested. Only the pilot's own row is tinted, to match the panel. */
+  .stn-services tr.self { background: var(--stn-flying); }
+  .stn-services tr.self td:first-child { font-weight: 600; }
+
+  /* --- 6.10 the action bar ---------------------------------------------- */
+
+  .stn-actions {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 6px 12px;
+    background: var(--stn-raised);
+    border-top: 1px solid var(--stn-line);
+  }
+  .stn-actions.armed { border-top-color: var(--stn-line-strong); }
+  .stn-sel-mark {
+    width: 3px;
+    height: 20px;
+    background: #3a4a5c;
+  }
+  .stn-actions.armed .stn-sel-mark { background: var(--stn-accent); }
+  .stn-sel-count {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #3a4a5c;
+    white-space: nowrap;
+  }
+  .stn-actions.armed .stn-sel-count { color: var(--stn-accent); }
+  .stn-sel-vol {
+    color: var(--stn-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .stn-qty { display: flex; align-items: center; gap: 5px; color: var(--stn-muted); font-size: 12px; }
+  .stn-qty input {
+    width: 56px;
+    min-height: 26px;
+    padding: 0 6px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-size: 12px;
+  }
+  .stn-actions-gap { flex: 1; }
+  .stn-targets { display: none; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .stn-targets-label { color: var(--stn-muted); font-size: 12px; }
+  .stn-ask { min-width: 0; text-wrap: pretty; }
+  .stn-accent { color: var(--stn-accent); }
+  .stn-actions .stn-muted { font-size: 12px; }
+
+  /* --- 6.11 the row menu ------------------------------------------------ */
+
+  .stn-target-toggle { min-height: 32px; }
+  .stn-target-menu {
+    right: 12px;
+    bottom: 52px;
+    left: auto;
+    max-height: 60%;
+    overflow: auto;
+  }
+
+  .stn-menu-shade { position: absolute; inset: 0; z-index: 40; }
+  .stn-menu {
+    position: absolute;
+    z-index: 41;
+    min-width: 180px;
+    max-width: calc(100% - 8px);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+  }
+  .stn-menu-head {
+    margin: 0;
+    padding: 6px 10px 4px;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-menu-item {
+    min-height: 30px;
+    padding: 0 10px;
+    background: transparent;
+    border: 0;
+    color: var(--stn-text);
+    font-weight: 500;
+    font-size: 12px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-menu-item:hover:not(:disabled) { background: var(--stn-tint); }
+
+  /* --- 6.12 the width tiers --------------------------------------------- */
+  /*
+   * Mobile-first: the rules above are the NARROWEST panel, and each tier adds
+   * columns as the panel earns the room. A server render therefore emits every
+   * cell and the stylesheet decides which are shown — which is also why the
+   * tests assert the tiers here rather than in the rendered body.
+   */
+
+  /* ~330px: the checkbox column and the per-row move controls arrive. Below
+   * this the row itself is the tap target and the action bar does the moving. */
+  @container station (min-width: 330px) {
+    .stn-colhead,
+    .stn-row { grid-template-columns: 20px 28px minmax(0, 1fr) 64px 112px; }
+    .stn-cell-pick { display: flex; }
+    .stn-cell-move { display: flex; }
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 110px; }
+  }
+
+  /* 560px: a tab row instead of a dropdown, and the total-m³ and state columns.
+   * The per-row meta line goes away — its two readings now have columns. */
+  @container station (min-width: 560px) {
+    .stn-locations { gap: 8px; padding: 0 8px; }
+    .stn-tabs { display: flex; flex: 1; min-width: 0; }
+    .stn-picker { display: none; }
+    .stn-filter { flex: none; height: 28px; width: 150px; }
+    .stn-icon-word { display: inline; }
+
+    .stn-colhead,
+    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 90px 100px 90px 130px; }
+    .stn-cell-vol,
+    .stn-cell-state { display: block; }
+    .stn-meta { display: none; }
+    .stn-row { min-height: 38px; }
+    .stn-group-count { display: inline; }
+    .stn-cell-icon .type-icon { width: 32px; height: 32px; }
+
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 150px 130px 140px; }
+    .stn-cell-bays,
+    .stn-cell-status { display: block; }
+    .stn-ship-row .stn-meta { display: none; }
+
+    .stn-services { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
+  }
+
+  /* 900px: the per-unit m³ column, a wider filter, and Stack all on the item
+   * hangar — the things that are useful but not worth a column of their own
+   * until the panel is genuinely wide. */
+  @container station (min-width: 900px) {
+    .stn-colhead,
+    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 110px 90px 110px 110px 150px; }
+    .stn-cell-unit { display: block; }
+    .stn-filter { width: 220px; }
+    .stn-quick-long { display: inline; }
+    .stn-quick-short { display: none; }
+    .stn-targets { display: flex; }
+    .stn-target-toggle { display: none; }
+
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 190px 160px 150px; }
+  }
+
 }

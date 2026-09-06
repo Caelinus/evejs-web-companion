@@ -371,6 +371,153 @@ export function amountText(row: InventoryItemRow): string {
   return row.singleton ? "assembled" : amount(row.quantity);
 }
 
+/**
+ * A stack's state, for the column of that name: one assembled object, or a
+ * quantity of loose units. There is no third answer — `singleton` is always
+ * known, because it comes off the row the server sent.
+ */
+export function stateText(row: InventoryItemRow): string {
+  return row.singleton ? "assembled" : "stack";
+}
+
+// --- volume, which is very often NOT KNOWN ----------------------------------
+//
+// ⚠ READ THIS BEFORE ADDING A VOLUME COLUMN. `InventoryItemRow.volume` is m³
+// PER UNIT from the static tables, attached to the hangar and cargo reads —
+// and it is ABSENT on ship-bay contents, because that read does not carry it.
+// So the panel's m³ columns are empty for every row in every bay, and that is
+// the normal case, not an error. Unknown must render as unknown; a 0 there
+// would be a number the panel made up.
+
+/** A stack's total m³, or null when the per-unit volume is not known. */
+export function totalVolume(row: InventoryItemRow): number | null {
+  const unit = row.volume;
+  if (unit === null || unit === undefined || !Number.isFinite(unit)) {
+    return null;
+  }
+  return unit * row.quantity;
+}
+
+/**
+ * The m³ of a whole selection — or null if ANY row's volume is unknown.
+ *
+ * ⚠ Deliberately all-or-nothing. Summing only the rows we happen to know would
+ * put a confident, too-small number in front of a player about to fill a hold.
+ */
+export function sumVolume(rows: readonly InventoryItemRow[]): number | null {
+  let total = 0;
+  for (const row of rows) {
+    const volume = totalVolume(row);
+    if (volume === null) {
+      return null;
+    }
+    total += volume;
+  }
+  return total;
+}
+
+/** An m³ reading in words; "not known" rather than a made-up 0. */
+export function volumeText(m3: number | null): string {
+  return m3 === null ? "not known" : `${amount(m3)} m³`;
+}
+
+/**
+ * The words a place's name is generic in: every hull has a "hold" and a "bay",
+ * so those are never the distinguishing half of a two-word label.
+ */
+const GENERIC_PLACE_WORDS = new Set(["hold", "bay"]);
+
+/**
+ * A destination's name shortened to ONE word, for the per-row move button on a
+ * narrow panel: the distinguishing word, which is the last one unless the last
+ * one is generic.
+ *
+ *   "Ship cargo"    -> "Cargo"      "Ore hold"   -> "Ore"
+ *   "Station hangar"-> "Hangar"     "Drone bay"  -> "Drone"
+ *
+ * ⚠ It is only ever an ABBREVIATION of a name shown in full elsewhere — the
+ * button's own `title`, the "▾" menu and the move bar all spell it out. Two
+ * places can abbreviate alike; the alternative was "to Station hangar" pushing
+ * the quantity column into "123 75", which is a WRONG number rather than a
+ * short name.
+ */
+export function shortLabel(label: string): string {
+  const words = label.trim().split(/\s+/).filter((word) => word !== "");
+  if (words.length < 2) {
+    return label.trim();
+  }
+  const last = words[words.length - 1]!;
+  const pick = GENERIC_PLACE_WORDS.has(last.toLowerCase()) ? words[0]! : last;
+  return pick.charAt(0).toUpperCase() + pick.slice(1);
+}
+
+/** The same, for a table cell where "not known" is too long: an em dash. */
+export function volumeCell(m3: number | null): string {
+  return m3 === null ? "—" : amount(m3);
+}
+
+/** How much room is left in a hold, in words. "" when there is no known limit. */
+export function roomFreeText(capacity: CapacityInfo | null): string {
+  const free = holdFreeM3(capacity);
+  if (free === null || !capacity || !(capacity.capacity > 0)) {
+    return "";
+  }
+  return `${amount(free)} m³ free of ${amount(capacity.capacity)}`;
+}
+
+// --- filtering and sorting --------------------------------------------------
+
+/** Case-insensitive substring on the NAME. A blank filter matches everything. */
+export function matchesFilter(name: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return q === "" || name.toLowerCase().includes(q);
+}
+
+export type SortKey = "name" | "qty" | "vol";
+
+export interface SortOrder {
+  readonly key: SortKey;
+  /** 1 ascending, -1 descending. */
+  readonly dir: 1 | -1;
+}
+
+/** Clicking a column: pick it ascending, or flip it if it is already the one. */
+export function nextSort(current: SortOrder, key: SortKey): SortOrder {
+  return current.key === key ? { key, dir: (current.dir === 1 ? -1 : 1) } : { key, dir: 1 };
+}
+
+/**
+ * Rows in the order the header asks for. `nameOf` resolves a row's displayed
+ * name, which is the store's job, not this module's.
+ *
+ * ⚠ A row whose volume is UNKNOWN always sorts last, in both directions. It has
+ * no place on a scale it is not on, and floating it to the top under "smallest
+ * first" would read as "this is the smallest", which is a claim we cannot make.
+ */
+export function sortInventoryRows(
+  rows: readonly InventoryItemRow[],
+  order: SortOrder,
+  nameOf: (row: InventoryItemRow) => string,
+): readonly InventoryItemRow[] {
+  const sorted = [...rows];
+  sorted.sort((a, b) => {
+    if (order.key === "name") {
+      return nameOf(a).localeCompare(nameOf(b)) * order.dir;
+    }
+    if (order.key === "qty") {
+      return (a.quantity - b.quantity) * order.dir;
+    }
+    const left = totalVolume(a);
+    const right = totalVolume(b);
+    if (left === null || right === null) {
+      if (left === right) return 0;
+      return left === null ? 1 : -1;
+    }
+    return (left - right) * order.dir;
+  });
+  return sorted;
+}
+
 // --- moving -----------------------------------------------------------------
 
 /**

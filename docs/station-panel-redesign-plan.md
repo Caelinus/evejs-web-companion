@@ -217,25 +217,50 @@ branch off the integration branch, merged back with `--no-ff`.
 `dockPanelStates.test.ts` capturing the **current** in-space render as the baseline. No visual
 change anywhere. This phase is the safety net for every phase after it.
 
-**Phase 1 - the frame and the inventory views.** New `StationPanel.svelte`: panel grid, header
-(STATION + hint + refresh), location row (tabs at mid/wide, `<select>` at narrow), filter, group
-headers with capacity bars, the row table with sort and selection, the message strip, and the action
-bar with targets and the inline confirm. Ship bays / item hangar / corp hangar. **All four bay
-states and the unknown-volume rendering land here** — they are not a later polish item. Mounted in
-`DockPanel`'s docked arm and `MobileWorkspace`'s docked home.
+**Phase 1 - the whole panel. DONE.** New `StationPanel.svelte`, mounted in `DockPanel`'s docked arm
+and `MobileWorkspace`'s docked home.
 
-**Phase 2 - ship hangar and station services.** Ship rows with Open / Board; the services two-column
-layout, the repair two-step, the session controls, the guests table.
+⚠ Phase 1 was widened during the work, deliberately. The original split (frame + inventory views
+now, ship hangar and services next, the handoff's omissions after that) would have left the docked
+panel with **no way to board a ship or go offline** between phases. A phase that is green and
+unusable is not a phase. So Phase 1 carries every location and every capability the panel it
+replaces had: the five locations, all four bay states, unknown-volume rendering, sort, filter,
+selection, the action bar with its inline confirm, drag and drop, the container location, merge,
+stack-all, the repair two-step and the session controls.
 
-**Phase 3 - the capabilities the handoff omits.** Drag and drop, the container location, merge,
-stack-all for cargo, the read-only-hull path.
-
-**Phase 4 - expand/dock toggle.** Shell change. See 5.4 - it is the only piece that can reach space
+**Phase 2 - expand/dock toggle.** Shell change. See 5.4 - it is the only piece that can reach space
 and it does not ship until its guard test does.
 
-**Phase 5 - optional, a separate decision.** Adopt the same panel for the in-space floating
+**Phase 3 - optional, a separate decision.** Adopt the same panel for the in-space floating
 "Inventory & Ship" window and retire `InventoryShip.svelte`. Deliberately last: it is the change the
 user asked to be careful about, and by then the panel has been exercised while docked for a while.
+
+### What the build changed from the plan
+
+Six things the drawing could not have shown, each found by looking at the rendered panel:
+
+1. **`.stn-panel` must take `width: 100%` from its parent.** `container-type: inline-size` stops the
+   CONTENT contributing to the element's own width, so a host that makes it a flex ITEM sizes it
+   from content that containment has removed — measured at 0px wide. It is the same rule
+   `.table-wrap` already carries.
+2. **The panel cancels the app's element dressing, once, with `:where()`.** A `section` is a
+   bordered card here, a `button` a 40px gradient control; the first build was a stack of nested
+   cards. `:where()` contributes no specificity, so the reset weighs `.stn-panel` alone and every
+   component class beats it on source order.
+3. **No `class:active`.** `button.active` is a filled accent control in the components layer and
+   outranks a plain `.stn-tab` — the tab came out solid blue. The panel's state classes now avoid
+   every bare name the stylesheet claims, and a test pins that.
+4. **Move targets are per PLACE, not per location.** The bays view is several places at once; one
+   shared target list offered a row in the ore hold a move to the ore hold, and offered the item
+   hangar a move to itself.
+5. **A narrow panel gets a one-word destination** on the per-row move button ("to Hangar", "to
+   Ore"). "to Station hangar" pushed the quantity column into "123 75" — a wrong number is worse
+   than a short name, and the full name is on the button's title, the ▾ menu and the move bar.
+6. **The ship hangar's third column is the cargo hold, not "Bays used".** The handoff's "Hull"
+   column would repeat the ship's own name (hulls have no custom names here), and a full bay
+   summary does not fit a column. One reading that fits, or a dash - never a number worked out
+   locally. Stack-all likewise moved from the location row into the group header, beside the thing
+   it acts on, which also restores it for the ship's cargo hold.
 
 ---
 

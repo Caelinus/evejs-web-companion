@@ -109,28 +109,47 @@ test("collapsed in space, the strip still names the Overview", () => {
   assert.doesNotMatch(body, /\bstn-/);
 });
 
-test("docked, the same frame shows the docked body instead", () => {
+test("docked, the same frame shows the station panel instead", () => {
   // The other half of the branch — without this the tests above could pass on a
   // panel that renders nothing at all.
   const body = dockPanel({ isDocked: true });
-  assert.match(body, /class="dock-inventory"/);
+  assert.match(body, /class="stn-host"/);
+  assert.match(body, /class="stn-panel"/);
   assert.doesNotMatch(body, /class="dock-overview"/);
 });
 
-test("the frame keeps its own head, body and resize handle in both states", () => {
+test("⚠ the two arms are deliberately not symmetrical", () => {
+  // The station panel carries its OWN header (title, station hint, refresh,
+  // collapse) and its own pinned action bar, so it takes the whole frame. The
+  // Overview keeps `.dock-panel-head` and the padded, scrolling
+  // `.dock-panel-body` it has always had. This asymmetry is the thing that
+  // stops a change made for the docked panel from being made by editing them.
+  const docked = dockPanel({ isDocked: true });
+  assert.doesNotMatch(docked, /class="dock-panel-head"/, "the docked arm must not repeat a header");
+  assert.doesNotMatch(docked, /class="dock-panel-body"/, "the docked arm must not be padded/scrolled");
+  assert.match(docked, /aria-label="Collapse"/, "the collapse control must survive the swap");
+
+  const inSpace = dockPanel({ isDocked: false });
+  assert.match(inSpace, /class="dock-panel-head"/);
+  assert.match(inSpace, /class="dock-panel-body"/);
+});
+
+test("the resize handle is on the frame, so it survives in both states", () => {
   for (const isDocked of [true, false]) {
-    const body = dockPanel({ isDocked });
-    assert.match(body, /class="dock-resize"/, `no resize handle (isDocked=${isDocked})`);
-    assert.match(body, /class="dock-panel-head"/, `no head (isDocked=${isDocked})`);
+    assert.match(dockPanel({ isDocked }), /class="dock-resize"/, `no handle (isDocked=${isDocked})`);
   }
 });
 
 test("the in-space branch of DockPanel.svelte does not mention the station panel", () => {
-  // A source guard, because a render only proves what the initial store reaches.
-  const elseArm = DOCK_PANEL_SOURCE.slice(DOCK_PANEL_SOURCE.indexOf("{:else}"));
-  assert.ok(elseArm.length > 0, "expected an in-space branch");
-  assert.doesNotMatch(elseArm, /StationPanel/, "the station panel is mounted in space");
-  assert.match(elseArm, /Overview/, "the in-space branch must still be the Overview");
+  // A source guard, because a render only proves what the INITIAL store
+  // reaches. Slice from the `{:else}` that closes the `{#if isDocked}` arm.
+  const dockedArm = DOCK_PANEL_SOURCE.indexOf("{#if isDocked}");
+  assert.notEqual(dockedArm, -1, "expected an isDocked branch");
+  const elseAt = DOCK_PANEL_SOURCE.indexOf("{:else}", dockedArm);
+  assert.notEqual(elseAt, -1, "expected an in-space branch");
+  const inSpaceArm = DOCK_PANEL_SOURCE.slice(elseAt);
+  assert.doesNotMatch(inSpaceArm, /StationPanel/, "the station panel is mounted in space");
+  assert.match(inSpaceArm, /Overview/, "the in-space branch must still be the Overview");
 });
 
 // --- 2. the shared frame CSS ------------------------------------------------

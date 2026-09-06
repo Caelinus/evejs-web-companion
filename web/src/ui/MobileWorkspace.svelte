@@ -8,7 +8,7 @@
   import WorkspaceHeader from "./WorkspaceHeader.svelte";
   import PanelHost from "./PanelHost.svelte";
   import Overview from "./Overview.svelte";
-  import InventoryShip from "./InventoryShip.svelte";
+  import StationPanel from "./StationPanel.svelte";
   import ShipHud from "./ShipHud.svelte";
   import ModuleRack from "./ModuleRack.svelte";
   import TargetBracket from "./TargetBracket.svelte";
@@ -59,15 +59,19 @@
     <WorkspaceHeader {store} {flow} {isDocked} />
   </ErrorBoundary>
 
-  <main class="mobile-main">
+  <!-- The docked home is the Station panel, which sizes itself and pins its own
+       action bar — so for that ONE case the host stops padding and scrolling and
+       hands it the whole box. Every other panel, in space included, keeps the
+       scrolling padded column it has always had. -->
+  <main class="mobile-main" class:mobile-main-station={effective === null && isDocked}>
     {#if effective !== null}
       <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} />
     {:else if isDocked}
-      <!-- Docked home = the same tabbed dock content as the desktop's right
-           panel (hangars + Station Services); the header above already names
-           the station, so the dock variant's compact layout fits here too. -->
-      <ErrorBoundary name="Inventory &amp; Ship">
-        <InventoryShip {store} {flow} dock />
+      <!-- Docked home = the same Station panel as the desktop's right-hand dock,
+           at its narrowest tier. There is no strip to fold into on a phone, so
+           it is given no collapse control. -->
+      <ErrorBoundary name="Station">
+        <StationPanel {store} {flow} />
       </ErrorBoundary>
     {:else}
       <ErrorBoundary name="Ship HUD">
