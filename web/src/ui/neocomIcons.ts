@@ -46,6 +46,9 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   // Shots fired: a burst leaving a muzzle. Not a target and not a weapon — the
   // combat LOG is about hits landing, which is what the impact marks are.
   shots: ["M3 12h7", "M13 7l3 5-3 5", "M18 5l2 2", "M18 19l2-2", "M20 12h1"],
+  // Equipment: three fitted slots with a power line running through them. Not
+  // the Fitting glyph — this window reads and powers gear, it never refits.
+  equipment: ["M4 7h16", "M4 12h16", "M4 17h16", "M8 4v16", "M16 4v16"],
   scanner: ["M21 12a9 9 0 1 1-9-9", "M12 12l7-3", "M12 12h.01"],
 
   // --- docked ---

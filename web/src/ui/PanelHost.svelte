@@ -21,6 +21,7 @@
   import Mining from "./Mining.svelte";
   import DronesPanel from "./DronesPanel.svelte";
   import ShotsPanel from "./ShotsPanel.svelte";
+  import EquipmentPanel from "./EquipmentPanel.svelte";
   import Skills from "./Skills.svelte";
   import Planets from "./Planets.svelte";
   import Travel from "./Travel.svelte";
@@ -98,6 +99,8 @@ import NoticeLog from "./NoticeLog.svelte";
   <DronesPanel {store} {flow} />
 {:else if tab === "shots"}
   <ShotsPanel {store} {flow} />
+{:else if tab === "equipment"}
+  <EquipmentPanel {store} {flow} />
 {:else if tab === "skills"}
   <Skills {store} {flow} />
 {:else if tab === "planets"}

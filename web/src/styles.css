@@ -4607,6 +4607,22 @@
    * Styling that let the two numbers read as a scoreboard while the caption
    * faded away would be the lie the caption exists to prevent, which is why it
    * keeps body-text size and sits directly under them. */
+  /* ⚠ A PANEL INSIDE A WINDOW HAS NO PADDING TO BLEED PAST.
+   *
+   * `.panel-head`'s negative inline margin exists to reach the edges of a
+   * PADDED panel. A windowed panel's own padding is stripped, so the head hung
+   * 16px outside it on each side and the window body scrolled sideways by the
+   * difference (R8). Measured live at 5px in the equipment window — small, and
+   * still sideways scroll.
+   *
+   * Zeroing the bleed rather than matching it to `.win-body`'s padding keeps
+   * the number out of two places; the head simply starts where its panel does.
+   */
+  .win-body > .panel > .panel-head {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+
   /* "Send drones" on a hostile row — the cockpit's fastest path, carried back
    * into the threat strip. Small and inline, because it sits inside a row that
    * is already an alert and must not become the loudest thing in it. */

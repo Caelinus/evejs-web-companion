@@ -18,6 +18,7 @@ export type TabID =
   | "mining"
   | "drones"
   | "shots"
+  | "equipment"
   | "travel"
   | "bots"
   | "botBuilder"
@@ -90,6 +91,11 @@ export const TABS: readonly TabDef[] = [
   // questions a pilot asks without anything having been clicked first.
   { id: "drones", label: "Drones", where: "in-space" },
   { id: "shots", label: "Shots Fired", where: "in-space" },
+  // ⚠ IN-SPACE ONLY, AND NOT A DUPLICATE OF FITTING. Docked, Fitting is the
+  // place you change what your hull carries. In space nothing may be refitted —
+  // but a module still has to be able to be POWERED UP, and Fitting is not
+  // reachable out here. See the header of `EquipmentPanel.svelte`.
+  { id: "equipment", label: "Equipment", where: "in-space" },
   { id: "scanner", label: "Scanner", where: "in-space" },
   // Both — reachable docked or undocked.
   { id: "inventory", label: "Inventory & Ship", where: "both" },

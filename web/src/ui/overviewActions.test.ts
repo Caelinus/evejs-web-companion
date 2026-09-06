@@ -22,6 +22,7 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const Overview = (await import("./Overview.svelte")).default;
+const EquipmentPanel = (await import("./EquipmentPanel.svelte")).default;
 const { deriveShipStats } = await import("../bridge/shipStats.ts");
 // R30 slice D — where the panel's verb set now actually lives. The assertions
 // below that used to grep this file's markup read it here instead.
@@ -33,6 +34,7 @@ const { SOMEWHERE_ELSE, selectionHasVanished } = await import("../space/selectio
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const EQUIP_SOURCE = readFileSync(path.join(UI_DIR, "EquipmentPanel.svelte"), "utf8");
 
 const ROCK_ID = 50001248;
 const SHIP_ID = 9001;
@@ -177,6 +179,23 @@ function renderLoaded(options: Parameters<typeof loadedStore>[0] = {}): string {
   return render(Overview, { props: { store: loadedStore(options), flow: fakeFlow() } }).body;
 }
 
+/**
+ * The same scene, rendered through the EQUIPMENT WINDOW.
+ *
+ * ⚠ THE EQUIPMENT CLAIMS BELOW MOVED HERE ONE FOR ONE. Each is the assertion
+ * that was made against the cockpit's "Your equipment" table, made against the
+ * new component unchanged — which is what proves the lift, rather than a new
+ * suite written to fit whatever was built.
+ *
+ * ⚠ AND ONE OF THEM IS THE REASON THE WINDOW EXISTS. Fitting is a DOCKED-ONLY
+ * tab, so the row that powers an OFFLINE module up is the only way to do it in
+ * space. Deleting the cockpit without this window would have taken that away
+ * with every test still green.
+ */
+function renderEquipment(options: Parameters<typeof loadedStore>[0] = {}): string {
+  return render(EquipmentPanel, { props: { store: loadedStore(options), flow: fakeFlow() } }).body;
+}
+
 // --- The sections exist and read as a player would expect --------------------
 
 test("the panel shows a locked-target list and an equipment list", () => {
@@ -208,7 +227,7 @@ test("with nothing locked the list says so, in plain words", () => {
 // Locking a thing MAKES it the thing your equipment acts on; the default must
 // follow the lock, and the opt-out has to be the deliberate choice.
 test("the equipment target defaults to what is LOCKED, not to nothing", () => {
-  const body = renderLoaded({ locked: [ROCK_ID] });
+  const body = renderEquipment({ locked: [ROCK_ID] });
 
   const auto = body.indexOf("What I have locked");
   const optOut = body.indexOf("Nothing — just switch it on");
@@ -223,25 +242,25 @@ test("the equipment target defaults to what is LOCKED, not to nothing", () => {
 });
 
 test("with nothing locked, the target picker says so rather than implying a target", () => {
-  const body = renderLoaded({ locked: [] });
+  const body = renderEquipment({ locked: [] });
   assert.match(body, /Nothing locked yet/);
 });
 
 test("a target still being acquired is never the default — it cannot be shot at yet", () => {
-  const body = renderLoaded({ locked: [], acquiring: ROCK_ID });
+  const body = renderEquipment({ locked: [], acquiring: ROCK_ID });
   // Auto resolves over LOCKED targets only; an acquiring one leaves us with none.
   assert.match(body, /Nothing locked yet/);
   assert.doesNotMatch(body, /What I have locked/);
 });
 
 test("a module the server says is cycling reads Running; otherwise Idle", () => {
-  assert.match(visibleText(renderLoaded({ activeModuleIDs: [MODULE_ID] })), /Running/);
-  assert.match(visibleText(renderLoaded({ activeModuleIDs: [] })), /Idle/);
+  assert.match(visibleText(renderEquipment({ activeModuleIDs: [MODULE_ID] })), /Running/);
+  assert.match(visibleText(renderEquipment({ activeModuleIDs: [] })), /Idle/);
 });
 
 test("when the server cannot say what is running, the panel says NOT KNOWN — never Idle", () => {
   // This is the honesty rule: a wrong "Idle" invites a double activation.
-  const body = renderLoaded({ activeModuleIDs: null });
+  const body = renderEquipment({ activeModuleIDs: null });
   const text = visibleText(body);
   assert.match(text, /Not known/);
   assert.doesNotMatch(text, /\bIdle\b/);
@@ -575,6 +594,14 @@ test("R30 slice D: the verb set is DATA from one module, not {#if} blocks in mar
 // --- R30 slice E: the contextual verbs, and the tab switches they killed -----
 
 test("R30 slice E: the app no longer sends the player to another tab to power equipment up", () => {
+  // ⚠ AND IT MUST NOT COME BACK IN THE NEW WINDOW EITHER. That window is
+  // in-space only, where the Fitting tab does not exist at all, so the sentence
+  // would be worse than stale — it would name a place a flying pilot cannot go.
+  assert.equal(
+    EQUIP_SOURCE.includes("Turn equipment on in the Fitting tab first"),
+    false,
+    "the equipment window told the player to visit a docked-only tab",
+  );
   // Deleting these sentences IS the acceptance test for the slice. Offline
   // equipment is listed right here with Power up on the row, so every one of
   // them is now false — and they must be gone, not reworded.
@@ -623,7 +650,7 @@ test("R30 slice E: offline equipment is LISTED, with the one click that used to 
     slotsError: null,
     resourcesError: null,
   });
-  const body = render(Overview, { props: { store, flow: fakeFlow() } }).body;
+  const body = render(EquipmentPanel, { props: { store, flow: fakeFlow() } }).body;
   const text = visibleText(body);
 
   assert.match(text, /Miner I/, "an offline module is listed, not hidden");
@@ -668,7 +695,7 @@ test("R30 slice E: powering a module is verified against a RE-READ, not the call
   // A 200 is not proof. setModuleOnline re-reads the fitting itself, so the
   // check is against freshly-read authoritative state: if the module's own
   // online flag did not move, that is reported as exactly that.
-  const power = section(SOURCE, "async function setModulePower", "</script>");
+  const power = section(EQUIP_SOURCE, "async function setModulePower", "</script>");
   assert.ok(power.length > 200, "the power dispatch must be found");
   assert.match(power, /await flow\.setModuleOnline\(module\.itemID, online\)/);
   assert.match(power, /\$fitting\.slots\.find/, "the fitting is re-read afterwards");
@@ -973,7 +1000,7 @@ const HOLD_STORE_EVENT = {
 };
 
 test("R24 slice C: an unknown cycle reads NOT KNOWN, never an instant one", () => {
-  const text = visibleText(renderLoaded());
+  const text = visibleText(renderEquipment());
   assert.match(text, /Cycle/, "the equipment table has a cycle column");
   // Nothing has told us this module's cycle length yet.
   assert.match(text, /Not known/);
@@ -982,7 +1009,7 @@ test("R24 slice C: an unknown cycle reads NOT KNOWN, never an instant one", () =
 test("R24 slice C: a BASE cycle length says so; a server one does not", () => {
   const baseStore = loadedStore();
   baseStore.apply({ type: "targeting/base-cycles", cycles: { [MODULE_ID]: 15000 } });
-  const base = visibleText(render(Overview, { props: { store: baseStore, flow: fakeFlow() } }).body);
+  const base = visibleText(render(EquipmentPanel, { props: { store: baseStore, flow: fakeFlow() } }).body);
   assert.match(base, /15s/, "the length is shown");
   assert.match(base, /before skills/, "and it is named as the equipment's own figure");
 
@@ -996,7 +1023,7 @@ test("R24 slice C: a BASE cycle length says so; a server one does not", () => {
     observedAtMs: Date.now(),
   });
   const server = visibleText(
-    render(Overview, { props: { store: serverStore, flow: fakeFlow() } }).body,
+    render(EquipmentPanel, { props: { store: serverStore, flow: fakeFlow() } }).body,
   );
   assert.match(server, /12\.8s|13s/, "the pilot's real cycle length");
   assert.doesNotMatch(

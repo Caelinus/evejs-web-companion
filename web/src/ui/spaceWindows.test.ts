@@ -33,6 +33,7 @@ const { createClientStore } = await import("../store/clientStore.ts");
 const { TABS, launchableTabsFor } = await import("./tabs.ts");
 const { NEOCOM_GLYPHS } = await import("./neocomIcons.ts");
 const ShotsPanel = (await import("./ShotsPanel.svelte")).default;
+const EquipmentPanel = (await import("./EquipmentPanel.svelte")).default;
 const SpaceOverview = (await import("./SpaceOverview.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -58,8 +59,8 @@ function visibleText(body: string): string {
 
 // --- reachable ---------------------------------------------------------------
 
-test("the drones and shots windows are reachable in space, and only in space", () => {
-  for (const id of ["drones", "shots"] as const) {
+test("the drones, shots and equipment windows are reachable in space, and only there", () => {
+  for (const id of ["drones", "shots", "equipment"] as const) {
     const tab = TABS.find((entry) => entry.id === id);
     assert.ok(tab, `there is no '${id}' tab at all`);
     assert.equal(tab.where, "in-space", `'${id}' must not appear docked`);
@@ -262,4 +263,62 @@ test("R7d: no bare numeric ID reaches the shots window", () => {
   for (const id of [SHIP_ID, SHIP_TYPE_ID, SYSTEM_ID]) {
     assert.equal(new RegExp(`\\b${id}\\b`).test(text), false, `${id} is visible`);
   }
+});
+
+// --- the one capability that had no home ------------------------------------
+
+test("⚠ A MODULE CAN STILL BE POWERED UP IN SPACE — Fitting is docked-only", () => {
+  // This is the whole reason the equipment window exists, and the failure it
+  // guards against leaves no red test behind: `ModuleRack` on the HUD is a
+  // different instrument (it fires modules, it cannot online them), and the
+  // Fitting window is not reachable out here at all. Delete the cockpit with
+  // nothing carrying this, and the capability is simply gone.
+  const fitting = TABS.find((tab) => tab.id === "fitting");
+  assert.ok(fitting, "there is no fitting tab");
+  assert.equal(fitting.where, "docked", "this test's premise no longer holds — re-read it");
+
+  const store = createClientStore();
+  store.apply({
+    type: "fitting/loaded",
+    activeShipID: SHIP_ID,
+    slots: [
+      {
+        family: "high",
+        index: 0,
+        // Fitted, and NOT powered up.
+        module: { itemID: 7100001, typeID: 483, groupID: 54, online: false, charge: null },
+      },
+    ],
+    resources: {
+      cpu: { used: 0, total: 0, known: false },
+      powergrid: { used: 0, total: 0, known: false },
+      capacitor: { used: 0, total: 0, known: false },
+      calibration: { used: 0, total: 0, known: false },
+    },
+    stats: null,
+    slotsError: null,
+    resourcesError: null,
+  } as never);
+  const body = render(EquipmentPanel as never, { props: { store, flow: fakeFlow() } } as never).body;
+  assert.match(body, /<button[^>]*>[\s\S]{0,80}Power up/, "no way to online a module in space");
+  // And it says what it is, rather than reading as "off" — powered up and
+  // running are different questions.
+  assert.match(visibleText(body), /Not powered up/);
+});
+
+test("the equipment window never sends a flying pilot to a docked-only tab", () => {
+  // ⚠ THE RENDERED TEXT, NOT THE SOURCE. The file's own comments discuss the
+  // Fitting tab at length — that is the record of WHY the sentence was deleted,
+  // and a grep over the source would forbid keeping it. What must not exist is
+  // an instruction a player can read.
+  const store = createClientStore();
+  const text = visibleText(
+    render(EquipmentPanel as never, { props: { store, flow: fakeFlow() } } as never).body,
+  );
+  assert.equal(
+    /Fitting tab/.test(text),
+    false,
+    "the window told a flying pilot to visit a tab that only exists docked",
+  );
+  assert.equal(/Fitting window/.test(text), false, "same instruction, reworded");
 });
