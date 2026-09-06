@@ -121,11 +121,15 @@ the BFF. Greps for `heatState|heatLevel|rackHeat|heatCapacity|heatAttenuation` a
 
 So:
 
-* The **per-module wedge can be built**, off `damage`. It is honest: it is what heat did.
-* The **per-rack heat bar cannot**, and inventing one by averaging module damage would be a
-  fabricated reading of a quantity the server never sent. Either drop it, or relabel it as what it
-  is (worst damage in the rack), or add a bridge read — and nothing suggests the emulator exposes
-  one. **Recommendation: drop the bar, keep the damage wedge, and say why in the doc.**
+* The **per-module wedge is built** off `damage`. It is honest: it is what heat did.
+* The **per-rack heat bar is STUBBED.** ✅ **Decided:** build the bar, its label and its colour
+  bands, wired to a rack-heat reading that does not exist yet — and until it does, render it exactly
+  the way an unread bay capacity renders: **"not known", with a flat unfilled track**, never a 0 and
+  never an average of module damage standing in for it. Heat mechanics are a separate piece of work
+  in another session; the day the reading arrives the bar lights up with no UI change.
+
+  ⚠ The flat track matters as much as the words. An empty bar reads as "cold", which is a claim
+  about a ship that could be about to burn a module out.
 
 ⚠ `types.ts:1611`: "`{}` AND `null` ARE DIFFERENT. `{}` is 'every module is intact'; `null` is 'we
 could not read the fit'. Overloading is what causes this damage, so a page that treated the second as
@@ -159,10 +163,12 @@ that is a documented decision:
 > have to convert. — `shipHudArcs.ts:123`
 
 A dash pattern is a texture, not a count: `6 3` does not divide into a fixed number of segments as
-the ratio changes, so you cannot count what is left. **Recommendation: keep discrete segments, drawn
-at the handoff's radius and stroke.** It looks nearly identical and keeps the property the note is
-about. Flag it; it is a deliberate divergence from a "high fidelity, colours and behaviour final"
-package.
+the ratio changes, so you cannot count what is left.
+
+✅ **Decided: keep the twelve counted segments, drawn at the handoff's radius, stroke and 240°
+sweep.** It looks nearly identical to the drawing and keeps the property the note is about. This is a
+deliberate divergence from a package whose colours and behaviour are called final, and its author
+should be told.
 
 ### 2.5 The gauge's angles move, and they are pinned by test
 
@@ -185,15 +191,15 @@ explicitly allowed to drop and resynchronise. The current panel says so out loud
 > so shots can be missing from this list.
 
 The handoff's header wants **Dealt · Received · Shots · Hit rate**. Summed over that tail those are
-not the fight's totals and must not be presented as if they were. **Recommendation: keep the header,
-label it for what it is** ("in the last 40 shots"), or drop Dealt/Received and keep Shots + Hit rate
-over the visible window. Either way the sentence above stays.
+not the fight's totals and must not be presented as if they were.
 
-**And "crit" is not available.** The handoff colours a critical hit. `DamageEvent.quality` exists,
-but: "NOT translated to retail's 'Grazes'/'Wrecks' wording here: the mapping is not sourced from this
-server, and inventing it would be fabricated detail." Colouring a band we cannot name is the same
-invention with the label removed. **Recommendation: drop the crit colour; keep `miss` for a real 0,
-which is a value the server does send.**
+✅ **Decided: keep all four figures and say in the header what window they cover** — the last 40
+shots. The sentence about the channel dropping stays.
+
+✅ **Decided: no "crit" colour.** `DamageEvent.quality` exists, but: "NOT translated to retail's
+'Grazes'/'Wrecks' wording here: the mapping is not sourced from this server, and inventing it would
+be fabricated detail." Colouring a band we cannot name is the same invention with the label removed.
+`miss` stays — a real 0 is a value the server does send.
 
 ### 2.7 ⚠ The threat block is not in the handoff, and must not be lost
 
@@ -206,9 +212,10 @@ The handoff's overview has hostile *names* in `#e0a39a` and nothing else. Droppi
 remove the only place the client tells a pilot they are under attack, and the only per-threat lock
 that bypasses the row cap.
 
-**Recommendation: it survives as its own strip above the overview list**, styled to the new
-language, still uncapped and still unfiltered. This is a deliberate addition to the handoff and
-should be called out to its author.
+✅ **Decided: it survives as its own strip above the overview list**, restyled to the new language,
+still uncapped and still unfiltered, keeping the damage banner, the arrival banner and per-threat
+Lock / Release lock / Send drones. This is a deliberate addition to the handoff — it changes the
+panel's top — and its author should be told.
 
 ### 2.8 The locked-targets table and TargetsPanel overlap
 
@@ -216,8 +223,9 @@ Today `locked` is shown twice: as a six-column reflow table inside Overview, and
 `TargetsPanel` of round bracket cards. The handoff drops the table (a `⌖` on the row instead) and
 never mentions the panel. Keeping all three would be three places for one fact.
 
-**Recommendation: the table goes** (the handoff is right), `TargetsPanel` stays as the at-a-glance
-condition read it was built for (R71), and the row gets its `⌖`. Note `TargetsPanel` currently
+✅ **Decided: the table goes** (the handoff is right), `TargetsPanel` stays as the at-a-glance
+condition read it was built for (R71), and the row gets its `⌖`. A judgement call rather than one put
+to the operator: the panel shows the same facts in a better form, so nothing is lost. Note `TargetsPanel` currently
 clamps to `.work-main`; under the new grid it should clamp to the radar like every other floater.
 
 ### 2.9 Orbit and keep-at-range distances: one source of truth, not two
@@ -230,10 +238,11 @@ The handoff wants a `▾` on each of Orbit and Keep, presets 1/5/10/20 km plus a
 remembered **per action, for the session**, defaults orbit 5 km and keep 10 km.
 
 Three conflicts: the storage (localStorage vs session), the presets (different ladders), and where
-they are chosen (Settings vs the action). **Recommendation: the action's `▾` becomes the one place
-they are chosen and it writes through to `flyingDistances`** — so Settings, the radial menu and the
-radar keep agreeing with the overview. Keep localStorage: a distance that forgets itself every
-session is worse, not better. Merge the ladders rather than replacing one with the other.
+they are chosen (Settings vs the action). ✅ **Decided: the action's `▾` becomes the one place they are chosen, and it writes through to
+`flyingDistances`** — so Settings, the radial menu and the radar keep agreeing with the overview.
+localStorage stays: a distance that forgets itself every session is worse, not better, and two
+sources of truth for "how far do I orbit" is a bug waiting to be filed. The ladders are merged rather
+than one replacing the other.
 
 ### 2.10 Minimize and the window strip do not exist
 
@@ -242,8 +251,9 @@ Neocom rail is the only open-window indicator today (`class:open` / `class:activ
 
 The handoff wants **minimize** (hidden entirely) plus a **strip** of chips at the radar's bottom-left.
 That is a second, different hide beside `collapsed`, and two shade-like states on one window will
-confuse. **Recommendation: add `minimized` to `WinState` and keep `collapsed`; the strip lists every
-open window and a chip's dot distinguishes visible from minimized.** The rail keeps meaning "open".
+confuse. ✅ **Decided: add `minimized` to `WinState` and keep `collapsed`**; the strip lists every open
+window and a chip's dot distinguishes visible from minimized. Collapse shades a window you are still
+looking at; minimize puts it away. They are different acts and the handoff wants both. The rail keeps meaning "open".
 Both must be persisted through `DesktopLayout`, whose validator has to learn the field the way it
 just learned `stationExpanded` — an absent field reads `false`.
 
@@ -254,14 +264,40 @@ They are sections of `Overview.svelte` today, not tabs. `tabs.ts` has no `drones
 two Neocom entries (in-space only), and two new panels. Flight and Mining are already in-space window
 tabs, so those two only change their default position and their content.
 
-### 2.12 Compress and jettison are not on the flow, and compress cannot be aimed
+### 2.12 Compress and jettison need flow methods — but compress CAN be aimed
 
 The Mining window wants **Compress** and **Jettison…**. `api.jettisonItems` and
 `api.compressOreInSpace` exist and are used by the bot action switch, but neither is an `AppFlow`
-method — so no panel can call them. Worse, `compressOreInSpace(itemID, facilityID)` needs a
-**facility**, and the UI has no way for a player to pick one. Either the picker is designed (out of
-scope for this handoff) or Compress does not ship in Phase 4. **Recommendation: ship Jettison, defer
-Compress, and say so.**
+method, so no panel can call them. Both need wiring up.
+
+The facility looked at first like a blocker. It is not: **a compression facility is a SHIP on grid**,
+not only a structure — "a mining support ship on grid, your own hull or a fleet-mate's, running an
+Industrial Core plus a compression module" (`api.ts:3566`). And the snapshot already carries the
+reading:
+
+```
+SpaceEntity.compressionFacility?: { rangeMeters, typeListIDs } | null
+```
+
+> ⚠ OPTIONAL so a server that does not project it yet still decodes, and ABSENT MUST READ AS "NOT A
+> FACILITY" — never as an unknown worth trying. Read it as `entity.compressionFacility ?? null`.
+> — `types.ts:1548`
+
+✅ **Decided: Compress ships in Phase 4 with a real picker**, built on the rule the `compress-ore`
+bot macro already uses (`nav/scriptMacros.ts:3643`) — an in-range, non-NPC hull whose
+`compressionFacility` is present and non-null. Lift that rule into a pure module rather than writing
+a second copy of it; two copies "would not diverge loudly — they would diverge in ONE branch".
+
+Three things the panel must keep straight, all of them already documented:
+
+* **absent ≠ null ≠ present.** An unread facility reading is not a candidate, and is not the same as
+  a support ship with its gear switched off.
+* **The server refuses with one silence.** "It refuses a missing facility, an out-of-range one, a
+  foreign item and an ore that has no compressed form all with the same silence, so the caller
+  re-reads its hold rather than guessing which" (`api.ts:3554`). So a refused compress re-reads the
+  hold and says it was refused — it never names a cause it does not have.
+* **Nothing on grid to compress against is a sentence, not a hidden button.** The same rule
+  `rowActions` follows: the control is always drawn, wearing its reason.
 
 ### 2.13 Raw ID inputs go, and that is a real fix
 
@@ -317,8 +353,9 @@ everything not yet moved, hidden by the wrapper as it is today.
 damage wedge. `chromeRender.test.ts`'s `hud-readout` / `hud-modules-h` anchors move deliberately.
 
 **Phase 4 — the windows.** `DronesPanel` and `ShotsPanel` lifted out of `Overview.svelte`; `Flight`
-gets its pickers; `Mining` gets its in-space half. `Overview.svelte` is deleted at the end of this
-phase, and that deletion is the phase's real deliverable.
+gets its three pickers in place of the raw id inputs; `Mining` gets its in-space half — holds,
+Jettison, and Compress over a facility picker built on `compressionFacility`. `Overview.svelte` is
+deleted at the end of this phase, and that deletion is the phase's real deliverable.
 
 **Phase 5 — mobile.** The 1D stacked collapsible cards in `MobileWorkspace`.
 
@@ -356,15 +393,18 @@ the host's locale formatting. Run it in the main checkout, not a fresh worktree.
 
 ---
 
-## 6. Open questions
+## 6. Decisions taken
 
-1. **The threat block** (2.7). It is not in the handoff and it is the only "you are under attack"
-   surface in the client. My recommendation is a strip above the list; the handoff's author should
-   confirm, because it changes the panel's top.
-2. **Rack heat** (2.2). There is no data. Drop the bar, or relabel it as worst module damage?
-3. **The capacitor** (2.4). Keep counted segments against the handoff's dashed arc?
-4. **Shots totals** (2.6). Scope the header to the visible window, or drop Dealt/Received?
-5. **Compress** (2.12). Needs a facility picker that no handoff covers — defer?
-6. **`Overview.svelte`'s deletion.** It is the honest end state, and it is also a 2788-line component
-   that six suites render. Phase 4 is where it dies; if that is too much in one step, it can linger
-   as an unmounted file for a release, but then nothing proves the new panels cover it.
+All six were settled before any code was written.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 1 | The threat block (2.7) | **Its own strip above the overview list.** Uncapped, unfilterable, keeping the damage and arrival banners and per-threat Lock / Send drones. A deliberate addition to the handoff. |
+| 2 | Rack heat (2.2) | **Stub it, reading "not known".** The bar, its label and its bands are built and wired to a reading that does not exist yet; heat mechanics land in a separate session. Never a 0, never an average of module damage. |
+| 3 | The capacitor (2.4) | **Twelve counted segments**, at the handoff's radius, stroke and 240° sweep. A count you can read beats a texture you cannot. |
+| 4 | Shots totals (2.6) | **All four figures, with the header naming its window** — the last 40 shots. No "crit" colour: the band is not sourced from this server. |
+| 5 | Compress (2.12) | **Ships in Phase 4**, with a picker over `compressionFacility` on the snapshot, reusing the `compress-ore` macro's rule. Jettison ships alongside it. |
+| 6 | `Overview.svelte` (§4) | **Deleted in Phase 4.** The deletion is the phase's deliverable — it is the only thing that proves the new panels cover what it did. Its six suites are re-anchored, never deleted. |
+
+Two of these diverge from a package whose colours and behaviour are called final — the threat strip
+(1) and the capacitor (3) — and its author should be told which and why.
