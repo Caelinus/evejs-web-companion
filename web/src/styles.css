@@ -4598,6 +4598,58 @@
   }
   .rack-heat.unknown .rack-heat-value { font-style: italic; }
 
+  /* ------------------------------------------------- the Shots window (§7) --
+   * The combat log as its own window. The totals sit above the table with the
+   * number of shots they were taken over printed underneath them.
+   *
+   * ⚠ THE CAPTION IS NOT DECORATION. These are a sum over a bounded tail of the
+   * push channel, so they are never "damage this fight" — see `shotsLog.ts`.
+   * Styling that let the two numbers read as a scoreboard while the caption
+   * faded away would be the lie the caption exists to prevent, which is why it
+   * keeps body-text size and sits directly under them. */
+  /* "Send drones" on a hostile row — the cockpit's fastest path, carried back
+   * into the threat strip. Small and inline, because it sits inside a row that
+   * is already an alert and must not become the loudest thing in it. */
+  .spc-threat-send {
+    flex: 0 0 auto;
+    min-height: 28px;
+    padding: 0.1rem 0.45rem;
+    font-size: 11px;
+    background: var(--color-panel-2);
+    border: 1px solid var(--color-line);
+    color: var(--color-text);
+  }
+  .spc-threat-send:hover:not(:disabled) { border-color: var(--color-danger); }
+
+  .shot-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    margin: 0.5rem 0 0.2rem;
+  }
+  .shot-total {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+  .shot-total dt {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--color-muted);
+  }
+  .shot-total dd {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-bright);
+  }
+  .shot-total.dealt dd { color: var(--color-accent); }
+  .shot-total.taken dd { color: var(--color-danger); }
+  .shot-totals-caption { margin-top: 0; }
+
   /* The repair list under the rack. Repairing consumes nanite paste, so it is a
    * deliberate control rather than another modifier on a tile. */
   .rack-damage { margin-top: 0.5rem; border-top: 1px solid var(--color-line); padding-top: 0.4rem; }

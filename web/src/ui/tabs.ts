@@ -16,6 +16,8 @@ export type TabID =
   | "flight"
   | "overview"
   | "mining"
+  | "drones"
+  | "shots"
   | "travel"
   | "bots"
   | "botBuilder"
@@ -83,6 +85,11 @@ export const TABS: readonly TabDef[] = [
   { id: "flight", label: "Flight", where: "in-space" },
   { id: "overview", label: "Around Your Ship", where: "in-space" },
   { id: "mining", label: "Mining", where: "in-space" },
+  // Two sections of the old overview cockpit, now windows of their own. Both
+  // are LAUNCHABLE on purpose: "where are my drones" and "what just hit me" are
+  // questions a pilot asks without anything having been clicked first.
+  { id: "drones", label: "Drones", where: "in-space" },
+  { id: "shots", label: "Shots Fired", where: "in-space" },
   { id: "scanner", label: "Scanner", where: "in-space" },
   // Both — reachable docked or undocked.
   { id: "inventory", label: "Inventory & Ship", where: "both" },

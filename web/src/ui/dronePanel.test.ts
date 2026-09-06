@@ -29,9 +29,11 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const Overview = (await import("./Overview.svelte")).default;
+const DronesPanel = (await import("./DronesPanel.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const DRONES_SOURCE = readFileSync(path.join(UI_DIR, "DronesPanel.svelte"), "utf8");
 
 const SHIP_ID = 9001;
 const CHARACTER_ID = 7;
@@ -134,7 +136,8 @@ function spaceRow(over: Record<string, unknown> & { itemID: number }): unknown {
 }
 
 /** The panel in space, with whatever drones and hostiles the case needs. */
-function scene(options: SceneOptions = {}): string {
+/** The store the scene describes — shared by both renderers below. */
+function sceneStore(options: SceneOptions = {}) {
   const store = createClientStore();
   const entities: unknown[] = [];
   for (const hostile of options.hostiles ?? []) {
@@ -217,7 +220,32 @@ function scene(options: SceneOptions = {}): string {
     type: "names/resolved",
     resolved: { [`type:${DRONE_TYPE_ID}`]: "Hobgoblin I" },
   } as never);
+  return store;
+}
+
+/** The scene as the old cockpit renders it. */
+function scene(options: SceneOptions = {}): string {
   return render(Overview, {
+    props: { store: sceneStore(options), flow: fakeFlow() },
+  }).body;
+}
+
+/**
+ * The same scene, rendered through the DRONES WINDOW.
+ *
+ * ⚠ THE DRONE CLAIMS BELOW MOVED HERE, ONE FOR ONE, WHEN THE SECTION BECAME A
+ * WINDOW — every assertion is the one that was made against the cockpit, and it
+ * is made against the new component unchanged. That is the whole point: a lift
+ * proves itself by the old suite passing against the new home, not by a new
+ * suite written to fit whatever was built.
+ *
+ * The threat-block tests still render `Overview` (`scene` above), because the
+ * threat strip's new home is `SpaceOverview` and it is re-anchored there when
+ * the cockpit is deleted.
+ */
+function droneScene(options: SceneOptions = {}): string {
+  const store = sceneStore(options);
+  return render(DronesPanel, {
     props: { store, flow: fakeFlow() },
   }).body;
 }
@@ -240,7 +268,7 @@ const AN_ORPHANED_DRONE = { ...A_SPACE_DRONE, controlled: false };
 // --- The Drones section ------------------------------------------------------
 
 test("the panel says LAUNCHING is the defence, in a player's words", () => {
-  const text = visibleText(scene());
+  const text = visibleText(droneScene());
   // ⚠ The single most important sentence in this feature. The server
   // auto-engages idle combat drones against whatever shoots the ship, so a
   // miner who launches is defended without another click — and a player who is
@@ -251,7 +279,7 @@ test("the panel says LAUNCHING is the defence, in a player's words", () => {
 
 test("the bay and what is in space are shown SEPARATELY, both by name", () => {
   const text = visibleText(
-    scene({
+    droneScene({
       bay: [{ itemID: BAY_DRONE_ID, typeID: DRONE_TYPE_ID, quantity: 1 }],
       inSpace: [A_SPACE_DRONE],
     }),
@@ -268,7 +296,7 @@ test("the bay and what is in space are shown SEPARATELY, both by name", () => {
 
 test("a drone in space says WHAT IT IS DOING, and names what it is doing it to", () => {
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [{ ...A_SPACE_DRONE, activity: "fighting", targetID: RAT_ID }],
       hostiles: [{ itemID: RAT_ID, name: "Serpentis Scout", npcEntityType: "npc" }],
     }),
@@ -282,12 +310,12 @@ test("a drone in space says WHAT IT IS DOING, and names what it is doing it to",
 test("an activity the gateway could not read says Unknown — never Waiting", () => {
   // A player told their drones are idle when nobody looked will not launch the
   // ones that would have saved them.
-  const text = visibleText(scene({ inSpace: [{ ...A_SPACE_DRONE, activity: null }] }));
+  const text = visibleText(droneScene({ inSpace: [{ ...A_SPACE_DRONE, activity: null }] }));
   assert.match(text, /Unknown/);
 });
 
 test("⚠ a FAILED read renders as 'could not be read', never as 'none out'", () => {
-  const text = visibleText(scene({ bay: null, inSpace: null }));
+  const text = visibleText(droneScene({ bay: null, inSpace: null }));
   assert.match(text, /drones in space could not be read/i);
   assert.match(text, /drone bay could not be read/i);
   // The empty-state wording must NOT appear: it would invite a second launch.
@@ -296,19 +324,19 @@ test("⚠ a FAILED read renders as 'could not be read', never as 'none out'", ()
 });
 
 test("a genuinely empty bay and sky say so plainly", () => {
-  const text = visibleText(scene({ bay: [], inSpace: [] }));
+  const text = visibleText(droneScene({ bay: [], inSpace: [] }));
   assert.match(text, /No drones out\./);
   assert.match(text, /Nothing in the drone bay\./);
 });
 
 test("the server's limits are SHOWN, and unknown reads as unknown", () => {
-  const shown = visibleText(scene({ inSpace: [A_SPACE_DRONE], maxActiveDrones: 5, droneBandwidth: 50 }));
+  const shown = visibleText(droneScene({ inSpace: [A_SPACE_DRONE], maxActiveDrones: 5, droneBandwidth: 50 }));
   assert.match(shown, /Drones at once:\s*1 of 5/);
   assert.match(shown, /Bandwidth:\s*50 Mbit\/sec/);
 
   // ⚠ null is "not known" — a hull with no drone bay and a read that failed
   // look identical from here, and neither may be shown as a hard zero.
-  const unknown = visibleText(scene({ maxActiveDrones: null, droneBandwidth: null }));
+  const unknown = visibleText(droneScene({ maxActiveDrones: null, droneBandwidth: null }));
   assert.match(unknown, /Drones at once: not known/);
   assert.match(unknown, /Bandwidth: not known/);
   assert.doesNotMatch(unknown, /Drones at once:\s*\d+ of 0/);
@@ -390,18 +418,28 @@ test("threats are read from the SNAPSHOT, not from the filtered overview rows", 
 });
 
 test("the panel calls one flow method per drone verb, and no others", () => {
+  // ⚠ THE COUNTS MOVED WITH THE MARKUP, and one of them CHANGED — deliberately.
+  //
+  // In the cockpit, Engage had two call sites: one on a threat row ("send drones
+  // at this pirate") and one on the locked target. The threat rows went to
+  // `SpaceOverview`, which does not command drones, so the window has one. That
+  // is a capability question, not a bookkeeping one, and it is written down
+  // here rather than absorbed into a smaller number: sending drones straight
+  // from a threat row is a thing the cockpit could do and the window cannot.
   const callSites: Readonly<Record<string, number>> = {
     // Launch appears twice on purpose: per-stack, and for the picked set.
     "flow.launchDrones(": 2,
-    // Engage appears twice: on a threat row, and against the locked target.
-    "flow.engageDrones(": 2,
+    "flow.engageDrones(": 1,
     "flow.mineWithDrones(": 1,
     // Recall appears twice: one drone, and all of them.
     "flow.recallDrones(": 2,
+    // Recovery for a drone this hull does not fly — one each.
+    "flow.reconnectDrones(": 1,
+    "flow.scoopDrones(": 1,
   };
   for (const [call, expected] of Object.entries(callSites)) {
     assert.equal(
-      SOURCE.split(call).length - 1,
+      DRONES_SOURCE.split(call).length - 1,
       expected,
       `${call} must have exactly ${expected} call site(s)`,
     );
@@ -410,7 +448,7 @@ test("the panel calls one flow method per drone verb, and no others", () => {
   // the one that permanently disowns drones (CmdAbandonDrone) must not appear
   // anywhere in this panel.
   for (const forbidden of ["assistDrones", "guardDrones", "abandonDrone", "unanchor"]) {
-    assert.doesNotMatch(SOURCE, new RegExp(forbidden, "i"), `${forbidden} must not exist`);
+    assert.doesNotMatch(DRONES_SOURCE, new RegExp(forbidden, "i"), `${forbidden} must not exist`);
   }
 });
 
@@ -479,7 +517,7 @@ const AN_ABANDONED_DRONE = {
 };
 
 test("R33: a drone this ship does not fly renders DISABLED, wearing the reason", () => {
-  const body = scene({
+  const body = droneScene({
     inSpace: [AN_ABANDONED_DRONE],
     droneEntities: [
       { itemID: ABANDONED_DRONE_ID, name: "Ice Harvesting Drone II", controllerID: null },
@@ -510,7 +548,7 @@ test("R33: the drone is still LISTED, by name — honest is not hidden", () => {
   // it is really yours, and a panel that hides it invites a player to wonder
   // where it went.
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [AN_ABANDONED_DRONE],
       droneEntities: [
         { itemID: ABANDONED_DRONE_ID, name: "Ice Harvesting Drone II", controllerID: null },
@@ -524,7 +562,7 @@ test("R33: the drone is still LISTED, by name — honest is not hidden", () => {
 test("R33: the gate is THIS HULL, not merely 'has a controller'", () => {
   // A drone under ANOTHER ship's control fails eve.js's check exactly as an
   // abandoned one does. A `controllerID !== null` test would wave it through.
-  const body = scene({
+  const body = droneScene({
     inSpace: [{ ...AN_ABANDONED_DRONE, itemID: OTHER_SHIPS_DRONE_ID, name: "Someone's Warrior" }],
     droneEntities: [
       { itemID: OTHER_SHIPS_DRONE_ID, name: "Someone's Warrior", controllerID: SHIP_ID + 1 },
@@ -534,7 +572,7 @@ test("R33: the gate is THIS HULL, not merely 'has a controller'", () => {
 });
 
 test("R33: a drone this ship DOES fly is untouched", () => {
-  const body = scene({
+  const body = droneScene({
     inSpace: [A_SPACE_DRONE],
     droneEntities: [{ itemID: SPACE_DRONE_ID, name: "Hobgoblin I", controllerID: SHIP_ID }],
   });
@@ -551,7 +589,7 @@ test("R33: capability is NOT removed — one dead drone does not disable the fli
   // The rule that matters most. A mixed flight must still recall everything it
   // legitimately can; disabling the group because one drone is unreachable
   // would cost a player the drones they still own.
-  const body = scene({
+  const body = droneScene({
     inSpace: [A_SPACE_DRONE, AN_ABANDONED_DRONE],
     droneEntities: [
       { itemID: SPACE_DRONE_ID, name: "Hobgoblin I", controllerID: SHIP_ID },
@@ -572,7 +610,7 @@ test("R33: capability is NOT removed — one dead drone does not disable the fli
 });
 
 test("R33: when NOT ONE drone is ours to fly, the group order says so too", () => {
-  const body = scene({
+  const body = droneScene({
     inSpace: [AN_ABANDONED_DRONE],
     droneEntities: [
       { itemID: ABANDONED_DRONE_ID, name: "Ice Harvesting Drone II", controllerID: null },
@@ -589,7 +627,7 @@ test("R33: a drone the snapshot does not carry keeps its LIVE button", () => {
   // snapshot has no row for it, so `controllerID` is not merely null — it is
   // UNKNOWN. A disabled button here would assert a reason we cannot source,
   // which is a worse failure than an enabled one that gets a real answer.
-  const body = scene({ inSpace: [A_SPACE_DRONE] });
+  const body = droneScene({ inSpace: [A_SPACE_DRONE] });
   assert.match(visibleText(body), /Bring home/);
   assert.doesNotMatch(visibleText(body), /Your ship is not flying/);
   assert.match(
@@ -602,7 +640,7 @@ test("R33: a drone the snapshot does not carry keeps its LIVE button", () => {
 test("R33: an unknown drone is still included in the GROUP order", () => {
   // The same rule, applied to the list the group buttons send: "we could not
   // check" must not quietly shrink what a group order acts on.
-  const body = scene({
+  const body = droneScene({
     inSpace: [A_SPACE_DRONE, AN_ABANDONED_DRONE],
     droneEntities: [
       // Only the abandoned one has a snapshot row; A_SPACE_DRONE is unknown.
@@ -618,7 +656,7 @@ test("R33: an unknown drone is still included in the GROUP order", () => {
 
 test("R33: R9a — the reason is a sentence, and names no id and no remedy we lack", () => {
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [AN_ABANDONED_DRONE],
       droneEntities: [
         { itemID: ABANDONED_DRONE_ID, name: "Ice Harvesting Drone II", controllerID: null },
@@ -666,7 +704,7 @@ const R33_PREDICTION = "Your ship is not flying this drone";
 
 test("R34: the server's sentence reaches the player VERBATIM, next to the drone's name", () => {
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [A_SPACE_DRONE],
       orderReports: [{ label: "Hobgoblin I", text: SERVERS_OWN_SENTENCE }],
     }),
@@ -682,7 +720,7 @@ test("R34: the server's sentence is what is quoted — NOT R33's prediction", ()
   // same fact, the authority wins: the server's wording is the server's rule,
   // and ours can drift from it. R33's phrasing must not appear in a report.
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [AN_ABANDONED_DRONE],
       orderReports: [{ label: "Ice Harvesting Drone II", text: SERVERS_OWN_SENTENCE }],
     }),
@@ -700,7 +738,7 @@ test("R34: R33's prediction still does its own job — disabling a control up fr
   // The two mechanisms coexist. With NO server report at all, the abandoned
   // drone's button is still disabled wearing the predicted reason, because
   // nothing has been pressed and there is nothing for the server to have said.
-  const body = scene({
+  const body = droneScene({
     inSpace: [AN_ABANDONED_DRONE],
     droneEntities: [
       { itemID: ABANDONED_DRONE_ID, name: "Ice Harvesting Drone II", controllerID: null },
@@ -721,7 +759,7 @@ test("R34: EVERY refused drone gets its own line — R30's collapse cannot happe
   // that merged them would report one refusal where there were two, and a panel
   // that used one slot would report the last and lose the first.
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [A_SPACE_DRONE],
       orderReports: [
         { label: "Hobgoblin I", text: SERVERS_OWN_SENTENCE },
@@ -735,7 +773,7 @@ test("R34: EVERY refused drone gets its own line — R30's collapse cannot happe
 
 test("R34: drones refused for DIFFERENT reasons each keep their own reason", () => {
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [A_SPACE_DRONE],
       orderReports: [
         { label: "Hobgoblin I", text: SERVERS_OWN_SENTENCE },
@@ -752,14 +790,14 @@ test("R34: an UNKNOWN sentence is shown, not swallowed and not genericised", () 
   // lookup table would have blanked it; the pass-through shows it.
   const novel = "That drone has run out of something this client has never heard of.";
   const text = visibleText(
-    scene({ inSpace: [A_SPACE_DRONE], orderReports: [{ label: "Hobgoblin I", text: novel }] }),
+    droneScene({ inSpace: [A_SPACE_DRONE], orderReports: [{ label: "Hobgoblin I", text: novel }] }),
   );
   assert.match(text, new RegExp(novel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("R34: a drone we cannot name reads as words — NEVER as its id (R7d)", () => {
   const text = visibleText(
-    scene({ inSpace: [A_SPACE_DRONE], orderReports: [{ label: null, text: SERVERS_OWN_SENTENCE }] }),
+    droneScene({ inSpace: [A_SPACE_DRONE], orderReports: [{ label: null, text: SERVERS_OWN_SENTENCE }] }),
   );
   assert.match(text, /One of your drones/);
   assert.match(text, new RegExp(SERVERS_OWN_SENTENCE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -775,7 +813,7 @@ test("R34: R7d — the droneID that KEYS the server's dict never reaches the scr
   // The id used here is the REAL one from the live capture, not a placeholder.
   const LIVE_DRONE_ID = 9988400023314;
   const text = visibleText(
-    scene({
+    droneScene({
       inSpace: [AN_ABANDONED_DRONE],
       orderReports: [{ label: "Ice Harvesting Drone II", text: SERVERS_OWN_SENTENCE }],
     }),
@@ -793,9 +831,9 @@ test("R34: the report markup can only render a label and a sentence", () => {
   // A structural guarantee rather than a sampled one: the block renders exactly
   // `report.label` and `report.text`, and the type carries nothing else. There
   // is no field an id could hide in.
-  const block = SOURCE.slice(
-    SOURCE.indexOf(`{#each $drones.orderReports`),
-    SOURCE.indexOf("<h3>In space</h3>"),
+  const block = DRONES_SOURCE.slice(
+    DRONES_SOURCE.indexOf(`{#each $drones.orderReports`),
+    DRONES_SOURCE.indexOf("<h3>In space</h3>"),
   );
   assert.notEqual(block, "");
   const referenced = [...block.matchAll(/report\.(\w+)/g)].map((match) => match[1]);
@@ -819,17 +857,17 @@ test("R34: the report type itself carries no id (R7d, at the source)", () => {
 // space with no way to reach it.
 
 test("an orphaned drone offers Reconnect and Scoop; a flown one does not", () => {
-  const orphaned = visibleText(scene({ inSpace: [AN_ORPHANED_DRONE] }));
+  const orphaned = visibleText(droneScene({ inSpace: [AN_ORPHANED_DRONE] }));
   assert.match(orphaned, /Reconnect/);
   assert.match(orphaned, /Scoop/);
 
-  const flown = visibleText(scene({ inSpace: [A_SPACE_DRONE] }));
+  const flown = visibleText(droneScene({ inSpace: [A_SPACE_DRONE] }));
   assert.doesNotMatch(flown, /Reconnect/, "a drone you already fly needs no recovery");
   assert.doesNotMatch(flown, /Scoop/);
 });
 
 test("⚠ the orphaned drone still refuses Bring home, and now says why AND what to do", () => {
-  const body = scene({ inSpace: [AN_ORPHANED_DRONE] });
+  const body = droneScene({ inSpace: [AN_ORPHANED_DRONE] });
   const text = visibleText(body);
   // The existing R33 guarantee: the reason IS the label, never a tooltip. The
   // BFF's `controlled:false` is now enough on its own to earn it — before, this
@@ -848,7 +886,7 @@ test("⚠ the orphaned drone still refuses Bring home, and now says why AND what
 });
 
 test("recovery controls are real buttons (R8), and carry no ids (R7d)", () => {
-  const body = scene({ inSpace: [AN_ORPHANED_DRONE] });
+  const body = droneScene({ inSpace: [AN_ORPHANED_DRONE] });
   assert.match(body, /<button[^>]*>\s*Reconnect\s*<\/button>/);
   assert.match(body, /<button[^>]*>\s*Scoop\s*<\/button>/);
   const text = visibleText(body);

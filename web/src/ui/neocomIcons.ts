@@ -41,6 +41,11 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   flight: ["M12 3l7 17-7-4-7 4z"],
   overview: ["M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4", "M12 12h.01"],
   mining: ["M3 3l7 7", "M11 12l4-3 6 2-1 7-7 1z"],
+  // Drones: three small craft flying out from a hull, in a wedge.
+  drones: ["M12 4l3 4-3 2-3-2z", "M5 13l2.5 3.5L5 19", "M19 13l-2.5 3.5L19 19"],
+  // Shots fired: a burst leaving a muzzle. Not a target and not a weapon — the
+  // combat LOG is about hits landing, which is what the impact marks are.
+  shots: ["M3 12h7", "M13 7l3 5-3 5", "M18 5l2 2", "M18 19l2-2", "M20 12h1"],
   scanner: ["M21 12a9 9 0 1 1-9-9", "M12 12l7-3", "M12 12h.01"],
 
   // --- docked ---

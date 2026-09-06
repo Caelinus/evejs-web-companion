@@ -41,6 +41,7 @@
   import { actionsForRow, type ActionConcern, type RowAction, type RowActionID } from "../space/rowActions.ts";
   import { dispatchRowAction, isSingleCallAction } from "../space/rowActionRunner.ts";
   import { gateLinkFor, type GateLink } from "../space/gateLinks.ts";
+  import { orderableDroneIDs } from "./droneFlight.ts";
   import { SPACE_ACTION_GLYPHS, RANGED_ACTIONS, SHORT_ACTION_CAPTION } from "./spaceActionIcons.ts";
   import { flyingDistances, setDistance } from "./flyingDistances.ts";
   import {
@@ -78,6 +79,8 @@
   const targeting = store.targeting;
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
+  // svelte-ignore state_referenced_locally
+  const drones = store.drones;
 
   /**
    * The nearest N rows the list keeps.
@@ -310,6 +313,23 @@
   // hide something that is shooting at you, and neither may the row cap or the
   // search box. This is the only place the client says you are under attack.
   const threats = $derived(hostileRows(snapshot, origin));
+
+  /**
+   * The drones a "Send drones" on a threat row may be issued with.
+   *
+   * ⚠ THIS CONTROL CAME BACK FROM THE COCKPIT, AND IT HAD TO. `Overview.svelte`
+   * put it on every hostile row — the fastest path in the whole client from
+   * "something is shooting me" to "my drones are on it", with no locking and no
+   * window to open first. Deleting the cockpit without it would have taken that
+   * path away and left only the drones window, which is two clicks and a lock.
+   *
+   * The gate itself is `droneFlight.ts`, shared with that window rather than
+   * copied: the branch a second copy gets wrong is the `null` one, where the
+   * snapshot did not carry a drone and neither panel can tell.
+   */
+  const orderableDrones = $derived(
+    orderableDroneIDs($drones.inSpace, snapshot?.entities ?? null, snapshot?.ship?.itemID ?? null),
+  );
   const takingDamage = $derived(
     ($targeting.damageLog ?? []).some((event) => event.direction === "taken"),
   );
@@ -433,6 +453,21 @@
             </button>
             <span class="spc-threat-kind">{hostileLabel(threat) ?? "hostile"}</span>
             <span class="spc-threat-range">{formatDistance(threat.distance)}</span>
+            {#if orderableDrones.length > 0}
+              <!--
+                Only drawn when there is a flight to send. A hull with no drones
+                out has nothing to offer here, and a button that could only ever
+                refuse is the silent decline wearing a live face.
+              -->
+              <button
+                type="button"
+                class="spc-threat-send"
+                disabled={busy.has("drone")}
+                onclick={() => runFor("drone", () => flow.engageDrones(orderableDrones, threat.itemID))}
+              >
+                Send drones
+              </button>
+            {/if}
           </li>
         {/each}
       </ul>
