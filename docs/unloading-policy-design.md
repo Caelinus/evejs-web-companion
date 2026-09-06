@@ -350,3 +350,39 @@ real money here.
   of scope; matching is whole-stack.
 - **`jettison-ore`** is left alone — an ore hold holds ore. Revisit only if a
   hull turns up whose mining hold carries kit.
+
+---
+
+# Addendum — taking what fits (2026-09-06)
+
+A live run stopped with *"Looting — Stopped after 10 refusals in a row. There
+isn't enough room in that hold."* The refusal ledger worked exactly as intended;
+what it exposed was that the loot path had no way to take a PART of a can.
+
+**The operator's question that reframed it:** a can holding more than the ship
+can carry will be refused no matter how empty the hold is, because a transfer is
+all-or-nothing per stack. So "the hold is full, treat the block as done" — the
+fix first proposed — was wrong: the bot would skip that can for ever and loop
+doing nothing.
+
+**What shipped instead.** The loot path now sizes the transfer to the room
+available:
+
+- The container route publishes per-type `volumes`, the same static lookup
+  `/api/bridge/assets/station` and the inventory panel already use. No bridge
+  call, no allowlist change.
+- `fitWithin` (`bridge/holdFit.ts`) sorts a can's rows into whole stacks that
+  fit, ONE split for the stack that straddles the boundary, rows whose volume is
+  unknown (kept apart so their refusal cannot sink the measured ones), and rows
+  deferred to the next trip.
+- The loot dispatch reads live free space from the mining-holds route — one call,
+  and it already covers every bay this path routes into.
+- `loot-containers` / `loot-wrecks` report **done** when the holds have no room
+  at all: a full ship is a finished trip, not a failure.
+
+An unreadable capacity or an unknown volume still hands the whole stack to the
+server, exactly as before, so this can only ever do better than the old path.
+
+**Also hardened:** `readTypeVolumes` now returns an empty map when the static
+tables cannot answer, instead of throwing. A reference lookup must not be able
+to 500 a read the player asked for — it did, on a fake without `getType`.

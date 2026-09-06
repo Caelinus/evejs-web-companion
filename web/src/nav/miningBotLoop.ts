@@ -437,6 +437,31 @@ export function freightHoldItemIDs(holds: readonly MiningHold[] | null): readonl
   return fallback.filter((item) => item.categoryID === CATEGORY_ASTEROID).map((item) => item.itemID);
 }
 
+/**
+ * Total free m³ across every hold that can be READ, or null when none could be.
+ *
+ * What a loot block asks before reaching into a can: with nowhere to put
+ * anything, the answer is not to try and be refused — it is that this ship is
+ * full and the trip is over. Absent/unreadable holds contribute nothing rather
+ * than a zero, so "we could not look" never masquerades as "there is no room".
+ */
+export function holdsFreeM3(holds: readonly MiningHold[] | null): number | null {
+  if (!holds) {
+    return null;
+  }
+  let total = 0;
+  let sawOne = false;
+  for (const hold of holds) {
+    const capacity = hold.capacity;
+    if (!hold.present || capacity === null || capacity.capacity === null || capacity.used === null) {
+      continue;
+    }
+    sawOne = true;
+    total += Math.max(0, capacity.capacity - capacity.used);
+  }
+  return sawOne ? total : null;
+}
+
 /** Total units across the holds, or null when nothing could be read. */
 export function holdUnits(holds: readonly MiningHold[] | null): number | null {
   if (!holds) {

@@ -20,7 +20,7 @@ import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, isMineableRock } from "./miningBotLoop.ts";
+import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import {
   agentActionID,
@@ -1528,6 +1528,16 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
   }
+  // ⚠ A FULL SHIP IS A FINISHED TRIP, NOT A FAILURE. With no room anywhere there
+  // is nothing to attempt: reaching into a can regardless is the refusal loop
+  // this block used to run, and stopping the whole bot over it (which the
+  // refusal ledger rightly did) is not much better. `null` is "we could not
+  // read the holds", which is never a verdict — the block carries on and lets
+  // the transfer decide, as it always did.
+  const freeM3 = holdsFreeM3(obs.holds ?? null);
+  if (freeM3 !== null && freeM3 <= 0) {
+    return tick(WAIT, "The ship is full — time to unload.", "Looting", { kind: "done" });
+  }
   const lootedRaw = mem["looted"];
   const lootedBefore = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
 
@@ -1624,6 +1634,16 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   }
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
+  }
+  // ⚠ A FULL SHIP IS A FINISHED TRIP, NOT A FAILURE. With no room anywhere there
+  // is nothing to attempt: reaching into a can regardless is the refusal loop
+  // this block used to run, and stopping the whole bot over it (which the
+  // refusal ledger rightly did) is not much better. `null` is "we could not
+  // read the holds", which is never a verdict — the block carries on and lets
+  // the transfer decide, as it always did.
+  const freeM3 = holdsFreeM3(obs.holds ?? null);
+  if (freeM3 !== null && freeM3 <= 0) {
+    return tick(WAIT, "The ship is full — time to unload.", "Looting", { kind: "done" });
   }
   // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
   // list in step memory. The list was dropped every time the block was left, so

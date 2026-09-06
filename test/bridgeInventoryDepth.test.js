@@ -80,7 +80,13 @@ function fakeStore() {
 }
 
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return {
+    getStation() { return null; },
+    getTypeName(id) { return `Type ${id}`; },
+    // Per-type m³, so the container read can publish volumes the way the
+    // inventory and asset reads do.
+    getType(id) { return { volume: id === 34 ? 0.01 : 1 }; },
+  };
 }
 
 function packedRow(fields) {

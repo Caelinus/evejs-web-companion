@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { holdFreeM3, unitsThatFit } from "./holdFit.ts";
+import { fitWithin, holdFreeM3, unitsThatFit } from "./holdFit.ts";
 
 test("holdFreeM3 is capacity minus used, floored at zero, null when unread", () => {
   assert.equal(holdFreeM3({ capacity: 5000, used: 2000 }), 3000);
@@ -44,4 +44,68 @@ test("unitsThatFit hands the whole stack to the server when free space is unknow
 
 test("unitsThatFit is 0 for an empty stack", () => {
   assert.equal(unitsThatFit(0, 0.1, 3000), 0);
+});
+
+// ── fitWithin: taking what fits, and leaving the rest where it is ───────────
+
+function stack(itemID: number, quantity: number, volume: number | null) {
+  return { itemID, quantity, volume };
+}
+
+test("a can bigger than the hold is DRAINED, not refused", () => {
+  // The scenario the whole change exists for: 10,000 m³ in the can, 1,000 free.
+  // Asking for the stack whole is refused outright and nothing moves, for ever.
+  const sel = fitWithin([stack(1, 10_000, 1)], 1_000);
+  assert.deepEqual(sel.whole, []);
+  assert.equal(sel.split?.row.itemID, 1);
+  assert.equal(sel.split?.quantity, 1_000, "take exactly what fits");
+  assert.deepEqual(sel.deferred, [], "the rest of that stack rides in the split");
+});
+
+test("whole stacks are taken while they fit, in order", () => {
+  const sel = fitWithin([stack(1, 100, 1), stack(2, 100, 1), stack(3, 100, 1)], 250);
+  assert.deepEqual(sel.whole.map((r) => r.itemID), [1, 2]);
+  assert.equal(sel.split?.row.itemID, 3);
+  assert.equal(sel.split?.quantity, 50);
+});
+
+test("only ONE stack is split — past it the hold is full", () => {
+  // The bridge refuses a quantity when more than one stack is named, and after
+  // the first split there is nothing left worth measuring anyway.
+  const sel = fitWithin([stack(1, 100, 1), stack(2, 100, 1)], 50);
+  assert.equal(sel.split?.row.itemID, 1);
+  assert.deepEqual(sel.deferred.map((r) => r.itemID), [2]);
+});
+
+test("a full hold takes nothing and defers everything", () => {
+  const sel = fitWithin([stack(1, 100, 1)], 0);
+  assert.deepEqual(sel.whole, []);
+  assert.equal(sel.split, null);
+  assert.deepEqual(sel.deferred.map((r) => r.itemID), [1]);
+});
+
+test("an unreadable capacity hands EVERYTHING to the server, as it always did", () => {
+  const sel = fitWithin([stack(1, 100, 1), stack(2, 5, 2)], null);
+  assert.deepEqual(sel.unknown.map((r) => r.itemID), [1, 2]);
+  assert.deepEqual(sel.whole, []);
+  assert.equal(sel.split, null);
+});
+
+test("a row of unknown volume is kept APART, so its refusal cannot sink the rest", () => {
+  const sel = fitWithin([stack(1, 10, 1), stack(2, 1, null)], 100);
+  assert.deepEqual(sel.whole.map((r) => r.itemID), [1]);
+  assert.deepEqual(sel.unknown.map((r) => r.itemID), [2]);
+});
+
+test("nothing is lost: every row lands in exactly one bucket", () => {
+  const rows = [stack(1, 10, 1), stack(2, 1, null), stack(3, 500, 1), stack(4, 500, 1)];
+  const sel = fitWithin(rows, 100);
+  const seen = [
+    ...sel.whole.map((r) => r.itemID),
+    ...(sel.split ? [sel.split.row.itemID] : []),
+    ...sel.unknown.map((r) => r.itemID),
+    ...sel.deferred.map((r) => r.itemID),
+  ];
+  assert.equal(seen.length, new Set(seen).size, "no row is in two buckets");
+  assert.deepEqual([...seen].sort((a, b) => a - b), [1, 2, 3, 4]);
 });

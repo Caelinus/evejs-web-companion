@@ -641,6 +641,8 @@ export interface RawContainerReads {
   readonly containerID: number;
   readonly list: JsonValue;
   readonly capacity: JsonValue;
+  /** Per-type m³ for the rows above, so a caller can work out what FITS. */
+  readonly volumes: Readonly<Record<string, number>>;
 }
 
 /** Open a container and read its contents. */
@@ -653,6 +655,13 @@ export async function openContainer(
     containerID: asNumberOrNull(data.containerID) ?? containerID,
     list: data.list ?? null,
     capacity: data.capacity ?? null,
+    // Normalised here, exactly as the inventory panel's read does it: a bridge
+    // that does not send the field yields an empty map, which reads downstream
+    // as "no volume known for this type" rather than as zero.
+    volumes:
+      data.volumes && typeof data.volumes === "object" && !Array.isArray(data.volumes)
+        ? (data.volumes as Record<string, number>)
+        : {},
   };
 }
 

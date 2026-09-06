@@ -112,12 +112,13 @@ function baysBody(shipID: number, present: readonly string[]): unknown {
   };
 }
 
-function containerReads(containerID: number, items: unknown[]): unknown {
+function containerReads(containerID: number, items: unknown[], volumes: Record<string, number> = {}): unknown {
   return {
     ok: true,
     containerID,
     list: { type: "list", items },
     capacity: keyVal([["capacity", 120], ["used", 4]]),
+    volumes,
   };
 }
 
@@ -458,6 +459,141 @@ test("a REFUSED ore-hold transfer still lands the rest of the loot, and spills t
       to: { kind: "cargo" },
     })),
     "the refused ore spilled into cargo rather than being abandoned",
+  );
+});
+
+test("a can holding MORE than the hold can take is drained, not refused", async () => {
+  // THE SCENARIO THIS EXISTS FOR. 10,000 units of ore at 1 m³ each sitting in a
+  // can, and an ore hold with 1,000 m³ free. A transfer is all-or-nothing per
+  // stack, so asking for the stack whole is refused outright and NOTHING moves
+  // — every tick, for ever. Taking what fits and coming back is the answer.
+  const CONTAINER_ID = 80005;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "container",
+          name: "Jetcan",
+          ownerID: 555,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    // Ore hold: 16,000 capacity, 15,000 used -> 1,000 m³ free.
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(15_000, []) };
+    if (path === `/api/bridge/ship/${SHIP_ID}/bays`) return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"]) };
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(
+          CONTAINER_ID,
+          [packedRow({ itemID: 90040, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 10_000, singleton: 0 })],
+          { "1230": 1 },
+        ),
+      };
+    }
+    if (path === "/api/bridge/inventory/transfer") {
+      return { status: 200, body: { ok: true, applied: true, moved: [90040], declined: [], declinedSilently: false, notFound: [] } };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-containers", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  flow.stopCustomBot();
+
+  const transfers = requests.filter((r) => r.path === "/api/bridge/inventory/transfer");
+  assert.ok(transfers.length > 0, "it moved something rather than being refused");
+  const split = transfers.find((r) => typeof r.body.qty === "number");
+  assert.ok(split, "the oversized stack was SPLIT rather than offered whole");
+  assert.deepEqual(split.body.itemIDs, [90040]);
+  assert.equal(split.body.qty, 1_000, "exactly what the 1,000 m³ of free space holds");
+  assert.deepEqual(split.body.to, { kind: "shipBay", bay: "ore" });
+});
+
+test("a hold with no room at all provokes no transfer whatsoever", async () => {
+  // Nothing fits, so nothing is asked for — the refusal never happens.
+  const CONTAINER_ID = 80006;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "container",
+          name: "Jetcan",
+          ownerID: 555,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(16_000, []) };
+    if (path === `/api/bridge/ship/${SHIP_ID}/bays`) return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"]) };
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(
+          CONTAINER_ID,
+          [packedRow({ itemID: 90050, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 10_000, singleton: 0 })],
+          { "1230": 1 },
+        ),
+      };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-containers", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  flow.stopCustomBot();
+
+  assert.equal(
+    requests.some((r) => r.path === "/api/bridge/inventory/transfer"),
+    false,
+    "a full ship asks for nothing, so there is no refusal to loop on",
   );
 });
 

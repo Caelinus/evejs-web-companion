@@ -2408,6 +2408,16 @@ app.get("/api/bridge/inventory/container/:itemID", requireAuth, async (req, res,
       // A container that reports no capacity is still browsable; the panel
       // simply omits the gauge.
       capacity: capacity.status === "fulfilled" ? capacity.value.result : null,
+      // Per-type VOLUME, from static reference data — the same lookup the
+      // inventory and asset routes already use, so no bridge call and no new
+      // allowlist pair. Volume is a property of the TYPE, never of the stack.
+      //
+      // ⚠ THIS IS WHAT LETS A BOT TAKE WHAT FITS. Without it the browser cannot
+      // work out how much of a stack a hold has room for, so the loot path had
+      // to hand the WHOLE stack over and let the server judge — and a can
+      // holding more than the free space was refused outright, over and over,
+      // rather than being drained a load at a time.
+      volumes: readTypeVolumes(list.value.result),
     });
   } catch (error) {
     next(error);
@@ -10726,6 +10736,14 @@ function readModuleChargeFits(result) {
 function readTypeVolumes(result) {
   const rows = result && Array.isArray(result.items) ? result.items : [];
   const volumes = {};
+  // A REFERENCE LOOKUP MUST NOT BE ABLE TO BREAK A ROUTE. Volume is an
+  // enrichment: without it a panel shows "—" and a bot hands the server the
+  // whole stack to judge, both of which are defined behaviours. A static table
+  // that cannot answer therefore yields an empty map, never a 500 on a read the
+  // player asked for.
+  if (typeof staticData.getType !== "function") {
+    return volumes;
+  }
   for (const row of rows) {
     const fields = row && row.type === "packedrow" && row.fields ? row.fields : null;
     const typeID = Number(fields && fields.typeID) || 0;

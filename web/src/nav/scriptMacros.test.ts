@@ -838,6 +838,56 @@ test("loot-containers: a can that keeps refusing is set aside — and the bound 
   assert.equal(alone.outcome.kind, "done");
 });
 
+/** Holds with a given amount of free room, as the mining-holds read reports it. */
+function holdsWithFree(freeM3: number) {
+  return [
+    { key: "ore", label: "Ore hold", items: [], capacity: { capacity: 16000, used: 16000 - freeM3 }, present: true, error: null },
+    { key: "cargo", label: "Cargo hold", items: [], capacity: { capacity: 0, used: 0 }, present: false, error: null },
+  ];
+}
+
+test("loot-containers: a FULL ship finishes the block instead of reaching into the can", () => {
+  // With nowhere to put anything there is nothing to attempt. Asking anyway is
+  // the refusal loop; stopping the whole bot over it is not much better.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: holdsWithFree(0) as never }), {}, {});
+  assert.equal(t.outcome.kind, "done");
+  assert.match(t.why, /full/i);
+});
+
+test("loot-containers: room left -> it still loots", () => {
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: holdsWithFree(500) as never }), {}, {});
+  assert.ok(t.action.kind === "lootContainer");
+});
+
+test("loot-containers: holds that could not be READ are never taken for full", () => {
+  // "We could not look" is not "there is no room" — the block carries on and
+  // lets the transfer decide, exactly as it did before.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: null }), {}, {});
+  assert.ok(t.action.kind === "lootContainer");
+});
+
+test("loot-wrecks: a FULL ship finishes the block too", () => {
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([wreck]), myCharacterID: 90000001, holds: holdsWithFree(0) as never }),
+    {},
+    {},
+  );
+  assert.equal(t.outcome.kind, "done");
+});
+
 test("loot-containers: a can that CANNOT BE REACHED is closed in on, never set aside", () => {
   // eve.js answers the same FakeItemNotFound for a despawned can and for one
   // merely out of range. Retiring on that would abandon every can the ship
