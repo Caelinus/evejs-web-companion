@@ -334,10 +334,25 @@ calling out as a correctness win, not just a visual one.
 Each leaves the app working and the suite green. A patch branch off the integration branch per
 phase, merged with `--no-ff`.
 
-**Phase 0 — the mirror net, and the model.** Pin the *docked* workspace against everything that
-follows: the station panel still renders, the dock frame CSS and global tokens are unchanged, the
-docked desktop still opens/drags/persists windows. Add `spaceRanges.ts` with its tests. No visual
-change.
+**Phase 0 — the mirror net, and the model. DONE.** `spaceWorkspaceStates.test.ts` pins the *docked*
+workspace against everything that follows — what it renders, that no in-space chrome reaches it,
+that every in-space piece is still behind an `isDocked` guard, and the shared window model's
+contract. It deliberately does not re-hash the dock frame CSS or the design tokens, because
+`dockPanelStates.test.ts` already does and one hash with two homes is a hash nobody updates
+correctly. `spaceRanges.ts` is the ranged-verb model. No visual change.
+
+⚠ **One thing the survey missed, found while building it.** `flyingDistances`' loader validated the
+stored orbit and keep values **against the fixed ladder** — so the handoff's custom distance field
+would have been accepted for the session and then silently reverted to 1 km on the next reload. A
+setting that works until you stop watching it is worse than one that refuses outright. The validator
+now accepts any sane metre count for those two fields (warp keeps its menu; nothing offers a custom
+warp range), and `rangeLabel` takes a namer so a value off the ladder reads as itself rather than as
+a dash.
+
+**Deferred to Phase 2, deliberately:** the handoff's new defaults (orbit 5 km, keep 10 km, against
+today's retail-cited 1 km each). Changing them changes the "Flying distances" summary text that
+`overviewActions.test.ts` pins, and that summary is being replaced by the picker in Phase 2 — so
+both move together rather than breaking the suite twice.
 
 **Phase 1 — the shell.** `.work-main` becomes the handoff's grid; `HudBar` moves into the `hud`
 cell; the radar becomes a sized area rather than the whole left side; windows clamp to the radar;

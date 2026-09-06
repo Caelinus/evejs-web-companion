@@ -43,13 +43,41 @@ const STORAGE_KEY = "evejs-web-flying-distances";
 /**
  * A range's label, read BACK OUT of the fixed menu — never formatted from the
  * raw metre count, which is how "10 km" turns into "10.0 km" or "10000".
+ *
+ * A value that is not on the menu is a CUSTOM one (see `isRangeMetres`), and it
+ * is named rather than dashed: `ui/spaceRanges.ts` owns that formatting, and
+ * this file does not import it because the dependency runs the other way.
+ * Callers that can show a custom range pass their own `fallback`.
  */
-export function rangeLabel(choices: readonly RangeChoice[], metres: string): string {
-  return choices.find((choice) => String(choice.metres) === metres)?.label ?? "—";
+export function rangeLabel(
+  choices: readonly RangeChoice[],
+  metres: string,
+  fallback: (metres: string) => string = () => "—",
+): string {
+  return choices.find((choice) => String(choice.metres) === metres)?.label ?? fallback(metres);
 }
 
 function isChoice(choices: readonly RangeChoice[], value: unknown): value is string {
   return typeof value === "string" && choices.some((choice) => String(choice.metres) === value);
+}
+
+/**
+ * A stored orbit / keep-at-range distance that is not on the ladder.
+ *
+ * ⚠ WHY THE LADDER IS NO LONGER THE VALIDATOR for these two. The in-space
+ * redesign lets a player type a custom distance on the action itself. Validating
+ * the stored value against the fixed menu would accept that number until the
+ * next reload and then silently drop it back to 1 km — the worst kind of
+ * setting, one that works until you stop watching it.
+ *
+ * Warp is deliberately left on its menu: nothing offers a custom warp range.
+ */
+function isRangeMetres(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() === "") {
+    return false;
+  }
+  const metres = Number(value);
+  return Number.isFinite(metres) && metres > 0 && metres <= 500_000;
 }
 
 function load(): FlyingDistances {
@@ -60,8 +88,8 @@ function load(): FlyingDistances {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return {
       warp: isChoice(WARP_RANGES, parsed.warp) ? parsed.warp : DEFAULTS.warp,
-      orbit: isChoice(HOLD_RANGES, parsed.orbit) ? parsed.orbit : DEFAULTS.orbit,
-      hold: isChoice(HOLD_RANGES, parsed.hold) ? parsed.hold : DEFAULTS.hold,
+      orbit: isRangeMetres(parsed.orbit) ? parsed.orbit : DEFAULTS.orbit,
+      hold: isRangeMetres(parsed.hold) ? parsed.hold : DEFAULTS.hold,
     };
   } catch {
     return DEFAULTS;
