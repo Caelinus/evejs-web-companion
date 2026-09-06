@@ -77,6 +77,17 @@ export const FREIGHT_BAYS: ReadonlySet<string> = new Set([
   "planetary",
   "commandCenter",
   "expedition",
+  // Kit on a combat hull, freight on a Hoarder, and there is no way to tell the
+  // two apart from the bay alone. They are here because the operator asked for
+  // them to be supported, and because a bay a bot may FILL must be one it can
+  // also EMPTY — the alternative is a hold that fills once and then turns down
+  // every later pickup for the rest of the run.
+  //
+  // A ship that must keep its own charges or jump fuel says so with the
+  // `exceptBays` argument on the unload block, which keeps a named bay out of
+  // BOTH directions.
+  "ammo",
+  "fuel",
 ]);
 
 /**
@@ -95,7 +106,16 @@ export interface BayPreference {
 // nothing here re-derives them.
 const CATEGORY_ASTEROID = 25; // every mineable ore, ice and harvestable gas
 const CATEGORY_MATERIAL = 4; // refined minerals, salvage, components
-const GROUP_ICE = 423;
+// ⚠ 465 IS RAW ICE; 423 IS "ICE PRODUCT". Checked against the live static data,
+// because this file had them the wrong way round: Clear Icicle and Blue Ice are
+// group 465 in category 25 (Asteroid), while group 423 in category 4 (Material)
+// is the REFINED output — isotopes, Heavy Water, Liquid Ozone, Strontium. Ice
+// was therefore falling through to the ore hold and isotopes were being sent to
+// the ice hold, which is the opposite of both.
+const GROUP_ICE = 465;
+const GROUP_ICE_PRODUCT = 423;
+const GROUP_FUEL_BLOCK = 1136;
+const CATEGORY_CHARGE = 8;
 const GROUP_HARVESTABLE_CLOUD = 711;
 const GROUP_MINERAL = 18;
 const GROUP_SALVAGED_MATERIAL = 754;
@@ -121,8 +141,15 @@ const CATEGORY_PLANETARY = 43;
  * route exactly as their uncompressed form does.
  */
 export const BAY_PREFERENCES: readonly BayPreference[] = Object.freeze([
-  // Ice → the ice hold (Kryos), else the mining hold.
+  // Raw ice → the ice hold (Kryos), else the mining hold that also takes it.
   { bays: ["ice", "ore"], groupIDs: [GROUP_ICE] },
+  // Jump fuel and the rest of the ice products. Isotopes are the load-bearing
+  // case; Heavy Water, Liquid Ozone and Strontium share their group and are
+  // fuel-class consumables too, so they ride along rather than being split out
+  // on a guess. Fuel blocks are their own group and go the same way.
+  { bays: ["fuel"], groupIDs: [GROUP_ICE_PRODUCT, GROUP_FUEL_BLOCK] },
+  // Every charge: ammunition, missiles, capacitor boosters, scripts, crystals.
+  { bays: ["ammo"], categoryIDs: [CATEGORY_CHARGE] },
   // Harvested gas → the gas hold (Hoarder), else the mining hold.
   { bays: ["gas", "ore"], groupIDs: [GROUP_HARVESTABLE_CLOUD] },
   // Refined minerals → the mineral hold (Kryos). NOT the mining hold: 134 takes
@@ -142,11 +169,6 @@ export const BAY_PREFERENCES: readonly BayPreference[] = Object.freeze([
 
 // Deliberately unmapped, and each for a reason:
 //
-//   fuel (133)  — jump-drive isotopes are the ship's own reserve, and sources
-//                 disagree on whether the bay takes fuel blocks as well. Kit.
-//   ammo (143)  — the whole Charge category would fit, but see FREIGHT_BAYS:
-//                 filling a combat ship's ammo hold with loot it will not
-//                 unload is worse than the tiny win of using the space.
 //   drone, fighter, subsystem, shipMaintenance, ship*, booster, corpse,
 //   quafe, fleet, mobileDepot — not cargo in any hull's case.
 //

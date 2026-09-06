@@ -182,6 +182,37 @@
     return arg !== undefined && arg.kind === "oreList" ? arg.ores : [];
   }
 
+  /** The bays a step has been told to leave alone. */
+  function bayListValue(step: MacroStep, key: string): readonly string[] {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "bayList" ? arg.bays : [];
+  }
+
+  /**
+   * The bays worth offering: the ones whose contents are arguable. A player does
+   * not need to be told the drone bay is left alone — no block ever empties it.
+   */
+  const PROTECTABLE_BAYS: readonly { key: string; label: string }[] = [
+    { key: "ammo", label: "Ammo hold" },
+    { key: "fuel", label: "Fuel bay" },
+    { key: "ore", label: "Ore hold" },
+    { key: "gas", label: "Gas hold" },
+    { key: "ice", label: "Ice hold" },
+    { key: "mineral", label: "Mineral hold" },
+    { key: "salvage", label: "Salvage hold" },
+    { key: "planetary", label: "Planetary hold" },
+    { key: "commandCenter", label: "Command centre hold" },
+  ];
+
+  function toggleBay(key: string, chosen: readonly string[], bayKey: string): void {
+    const next = chosen.includes(bayKey)
+      ? chosen.filter((entry) => entry !== bayKey)
+      : [...chosen, bayKey];
+    // An emptied list is DROPPED rather than saved empty, so a step nobody
+    // touched exports exactly as it was imported.
+    onArg(key, next.length === 0 ? undefined : { kind: "bayList", bays: next });
+  }
+
   // ── Turning what a widget reports back into an argument ─────────────────────
   /** Set (or clear, on an empty or unparseable input) a bounded number. */
   function setNumber(step: MacroStep, arg: ArgDescriptor, raw: string): void {
@@ -449,6 +480,30 @@
         allowSystems={arg.widget === "destination-picker"}
         onPick={(ref) => setWorldRef(arg, ref)}
       />
+    </div>
+  {:else if arg.widget === "bay-list-picker"}
+    {@const chosenBays = bayListValue(step, arg.key)}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> - optional</span>{/if}
+      </span>
+      <span class="inspector-suffix">
+        A bay left alone is neither emptied here nor filled with loot.
+      </span>
+      <ul class="bay-list">
+        {#each PROTECTABLE_BAYS as candidate (candidate.key)}
+          <li>
+            <label>
+              <input
+                type="checkbox"
+                checked={chosenBays.includes(candidate.key)}
+                onchange={() => toggleBay(arg.key, chosenBays, candidate.key)}
+              />
+              {candidate.label}
+            </label>
+          </li>
+        {/each}
+      </ul>
     </div>
   {:else if arg.widget === "ore-list-picker"}
     {@const chosen = oreListValue(step, arg.key)}

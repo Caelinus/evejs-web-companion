@@ -376,8 +376,11 @@ test("unload-cargo: FREIGHT in a specialised bay is unloaded too — the hauler 
       shipBays: [
         { key: "cargo", label: "Cargo hold", present: true, capacity: null, items: [], error: null },
         { key: "ore", label: "Ore hold", present: true, capacity: null, items: [row({ itemID: 71, typeID: 1230 })], error: null },
-        // Kit, not freight: it must NOT be emptied at the drop-off.
+        // The drone bay is kit and must NOT be emptied at the drop-off.
         { key: "drone", label: "Drone bay", present: true, capacity: null, items: [row({ itemID: 81, typeID: 2486 })], error: null },
+        // The ammo hold IS emptied now: the operator asked for it to be
+        // supported, and a bay a bot may fill has to be one it can empty. A
+        // ship that must keep its charges names it in `exceptBays`.
         { key: "ammo", label: "Ammo hold", present: true, capacity: null, items: [row({ itemID: 82, typeID: 220 })], error: null },
       ],
     }),
@@ -391,8 +394,42 @@ test("unload-cargo: FREIGHT in a specialised bay is unloaded too — the hauler 
     [
       { bay: null, itemIDs: [51] },
       { bay: "ore", itemIDs: [71] },
+      { bay: "ammo", itemIDs: [82] },
     ],
-    "cargo and the ore hold — never the drone bay or the ammo hold",
+    "cargo, the ore hold and the ammo hold: never the drone bay",
+  );
+});
+
+test("unload-cargo: a bay named in exceptBays is left alone", () => {
+  // The ship keeps its own charges. Without this the ammo hold is freight like
+  // any other and would be emptied at the drop-off, which on a combat hull means
+  // undocking with no ammunition.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withExcept = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { exceptBays: { kind: "bayList", bays: ["ammo"] } },
+  } as never;
+  const tick = unload(
+    withExcept,
+    obs({
+      cargo: { rows: [], capacity: null },
+      shipBays: [
+        { key: "cargo", label: "Cargo hold", present: true, capacity: null, items: [], error: null },
+        { key: "ore", label: "Ore hold", present: true, capacity: null, items: [row({ itemID: 71, typeID: 1230 })], error: null },
+        { key: "ammo", label: "Ammo hold", present: true, capacity: null, items: [row({ itemID: 82, typeID: 220 })], error: null },
+      ],
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds");
+  const groups = tick.action.kind === "unloadHolds" ? tick.action.groups : [];
+  assert.deepEqual(
+    groups.map((g) => g.bay),
+    ["ore"],
+    "the ore hold went ashore; the ammo hold stayed aboard",
   );
 });
 

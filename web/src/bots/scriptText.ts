@@ -91,7 +91,7 @@ export function macroName(macro: MacroID): string {
     case "wait":
       return "Wait a while";
     case "unload-cargo":
-      return "Empty the cargo hold";
+      return "Empty the ship";
     case "salvage-wrecks":
       return "Salvage the wrecks";
     case "loot-wrecks":
@@ -170,6 +170,27 @@ export function boardSlotPhrase(slot: BoardSlot): string {
 }
 
 /** A place, as a player reads it. */
+/**
+ * What a player reads for a bay key. The keys are the bridge's vocabulary, not
+ * words anybody chose to show — R9a says the screen gets language, so a key with
+ * no entry here falls back to itself rather than having a name invented for it.
+ */
+const BAY_LABELS: Readonly<Record<string, string>> = {
+  cargo: "cargo hold",
+  ore: "ore hold",
+  gas: "gas hold",
+  ice: "ice hold",
+  asteroid: "asteroid hold",
+  mineral: "mineral hold",
+  salvage: "salvage hold",
+  ammo: "ammo hold",
+  fuel: "fuel bay",
+  planetary: "planetary hold",
+  commandCenter: "command centre hold",
+  fleet: "fleet hangar",
+  drone: "drone bay",
+};
+
 export function placePhrase(place: string): string {
   switch (place) {
     case "hangar":
@@ -355,8 +376,16 @@ function macroPhrase(step: MacroStep): string {
       const n = seconds !== undefined && seconds.kind === "count" ? seconds.value : 10;
       return `Wait ${n} ${n === 1 ? "second" : "seconds"}`;
     }
-    case "unload-cargo":
-      return "Empty the cargo hold into the hangar";
+    case "unload-cargo": {
+      const except = step.args["exceptBays"];
+      const names =
+        except !== undefined && except.kind === "bayList"
+          ? except.bays.map((key) => BAY_LABELS[key] ?? key)
+          : [];
+      return names.length === 0
+        ? "Empty the ship into the hangar"
+        : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone`;
+    }
     case "hardeners-on":
       return "Switch every hardener and damage control on";
     case "fight-the-rats":

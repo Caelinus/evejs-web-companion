@@ -79,7 +79,10 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   wait: { args: [{ key: "seconds", kind: "count", required: false }], untilRequired: false },
   // Docked: move EVERYTHING in the ship's cargo hold into the station hangar —
   // clears room before an accept-mission, tidies up after a lap.
-  "unload-cargo": { args: [], untilRequired: false },
+  // `exceptBays` keeps named bays out of the unload — the ammo hold on a combat
+  // hull, the fuel bay on a jump-capable one. Optional: absent means empty
+  // everything, which is what the block says on the tin.
+  "unload-cargo": { args: [{ key: "exceptBays", kind: "bayList", required: false }], untilRequired: false },
   // Sweep the grid's wrecks with salvage drones and/or fitted salvagers; done
   // when nothing salvageable is left. Loot only touches YOUR OWN wrecks.
   "salvage-wrecks": { args: [], untilRequired: false },

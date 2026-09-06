@@ -240,7 +240,18 @@ export type Arg =
   | { readonly kind: "rockPick"; readonly pick: RockPick }
   /** An ORDERED ore priority list for the mine block (first = most wanted).
    * Empty or absent = any rock, the shipped behaviour. */
-  | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] };
+  | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] }
+  /**
+   * Bays the block must LEAVE ALONE. Empty or absent = leave nothing alone,
+   * which is the shipped behaviour.
+   *
+   * The case it exists for: a combat ship's ammo hold and a jump-capable hull's
+   * fuel bay are freight on a hauler and the ship's own kit on everything else,
+   * and nothing about the bay says which. Naming one here keeps it out of BOTH
+   * directions — neither filled with loot nor emptied at the station — because
+   * a bay a bot fills but will not empty jams after one load.
+   */
+  | { readonly kind: "bayList"; readonly bays: readonly string[] };
 
 /**
  * One ORE FAMILY the mine block prefers — Veldspar, Kernite, … — identified by
@@ -257,6 +268,9 @@ export interface OreFamilyArg {
 
 /** How long an ore priority list may be. Past ten a player is not prioritising. */
 export const MAX_ORE_LIST = 10;
+
+/** A hull has a couple of dozen bays; a list longer than this is not a choice. */
+export const MAX_BAY_LIST = 12;
 
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";

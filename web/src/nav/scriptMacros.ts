@@ -1294,7 +1294,7 @@ const waitBlock: MacroDecider = (step, _obs, mem) => {
 // Done only when a fresh read shows nothing left — and a hold that could not be
 // READ never counts as an empty one, so an unreadable ship reports blocked
 // rather than quietly passing for unloaded.
-const unloadCargo: MacroDecider = (_step, obs, mem) => {
+const unloadCargo: MacroDecider = (step, obs, mem) => {
   if (obs.flightStatus?.docked !== true) {
     return tick(WAIT, "Not docked, so there is no hangar to unload into.", "Emptying the hold", {
       kind: "blocked",
@@ -1303,12 +1303,19 @@ const unloadCargo: MacroDecider = (_step, obs, mem) => {
   }
   const cargo = obs.cargo ?? null;
   const bays = obs.shipBays ?? null;
+  // Bays this step must leave alone. The ammo hold on a combat hull and the fuel
+  // bay on a jump-capable one are freight to a hauler and the ship's own kit to
+  // everything else, and nothing about the bay itself says which.
+  const exceptArg = step.args["exceptBays"];
+  const except = new Set<string>(
+    exceptArg !== undefined && exceptArg.kind === "bayList" ? exceptArg.bays : [],
+  );
   const groups: { readonly bay: string | null; readonly itemIDs: readonly number[] }[] = [];
   if (cargo !== null && cargo.rows.length > 0) {
     groups.push({ bay: null, itemIDs: cargo.rows.map((row) => row.itemID) });
   }
   for (const bay of bays ?? []) {
-    if (bay.present !== true || !FREIGHT_BAYS.has(bay.key)) {
+    if (bay.present !== true || !FREIGHT_BAYS.has(bay.key) || except.has(bay.key)) {
       continue;
     }
     const items = bay.items ?? [];

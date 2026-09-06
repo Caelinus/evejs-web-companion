@@ -20,7 +20,7 @@ import {
 import type { InventoryItemRow, ShipBay } from "../store/types.ts";
 
 const PREFS: readonly BayPreference[] = [
-  { bays: ["ice", "ore"], groupIDs: [423] },
+  { bays: ["ice", "ore"], groupIDs: [465] },
   { bays: ["mineral"], groupIDs: [18] },
   { bays: ["ore", "asteroid"], categoryIDs: [25] },
 ];
@@ -37,19 +37,19 @@ test("a group rule beats the category rule it refines", () => {
   // Ice is category 25 (Asteroid) AND group 423. The mining hold would claim it
   // on category alone, so group rules have to be asked first or a hull with a
   // dedicated ice hold would never use it.
-  assert.deepEqual(preferredBays(row(1, 25, 423), PREFS), ["ice", "ore"]);
+  assert.deepEqual(preferredBays(row(1, 25, 465), PREFS), ["ice", "ore"]);
   assert.deepEqual(preferredBays(row(2, 25, 462), PREFS), ["ore", "asteroid"]);
 });
 
 test("a second choice is taken when the hull lacks the first", () => {
   // The 19.11 mining-hold rule in practice: a Retriever has no ice hold, and
   // ice belongs in its ore hold rather than trickling into a tiny cargo bay.
-  const groups = planBayTransfers([row(1, 25, 423)], [bay("ore", true), bay("ice", false)], PREFS);
+  const groups = planBayTransfers([row(1, 25, 465)], [bay("ore", true), bay("ice", false)], PREFS);
   assert.deepEqual(groups, [{ bay: "ore", itemIDs: [1] }]);
 });
 
 test("the first choice wins when the hull has both", () => {
-  const groups = planBayTransfers([row(1, 25, 423)], [bay("ore", true), bay("ice", true)], PREFS);
+  const groups = planBayTransfers([row(1, 25, 465)], [bay("ore", true), bay("ice", true)], PREFS);
   assert.deepEqual(groups, [{ bay: "ice", itemIDs: [1] }]);
 });
 
@@ -130,10 +130,11 @@ test("every bay the router can FILL is a bay the unload block can EMPTY", () => 
 });
 
 test("FREIGHT_BAYS never includes a bay that holds the ship's own kit", () => {
+  // fuel and ammo are deliberately NOT here: the operator asked for them to be
+  // supported, and a bay a bot may fill has to be one it can also empty. A ship
+  // that must keep its own charges says so with `exceptBays`.
   for (const kit of [
     "drone",
-    "fuel",
-    "ammo",
     "fighter",
     "subsystem",
     "shipMaintenance",
@@ -159,7 +160,7 @@ test("FREIGHT_BAYS does not list the cargo hold, which is swept as a place not a
 test("the shipped table routes the cargo the bug was about", () => {
   const bays = [bay("ore", true), bay("mineral", true), bay("ice", true)];
   const veldspar = row(1, 25, 462);
-  const ice = row(2, 25, 423);
+  const ice = row(2, 25, 465);
   const tritanium = row(3, 4, 18);
   const module = row(4, 7, 60);
   const groups = planBayTransfers([veldspar, ice, tritanium, module], bays);
@@ -175,10 +176,20 @@ test("the shipped table routes the cargo the bug was about", () => {
   ]);
 });
 
-test("ammunition is left in cargo rather than filling a hold the bot will not empty", () => {
-  // Charge category 8. Deliberate: see FREIGHT_BAYS on why the ammo hold is
-  // treated as kit even though a Hoarder hauls charges for a living.
-  assert.deepEqual(preferredBays(row(1, 8, 83)), []);
+test("ammunition goes to the ammo hold, and jump fuel to the fuel bay", () => {
+  // Category 8 is every charge: ammunition, missiles, cap boosters, scripts.
+  assert.deepEqual(preferredBays(row(1, 8, 85)), ["ammo"]);
+  assert.deepEqual(preferredBays(row(2, 8, 654)), ["ammo"]);
+  // Group 423 is "Ice Product" — the isotopes and their fuel-class siblings.
+  assert.deepEqual(preferredBays(row(3, 4, 423)), ["fuel"]);
+  assert.deepEqual(preferredBays(row(4, 4, 1136)), ["fuel"], "fuel blocks too");
+});
+
+test("raw ice and its refined product are told apart", () => {
+  // Checked against live static data: Clear Icicle is group 465 in category 25;
+  // group 423 in category 4 is the refined output. This file had them swapped.
+  assert.deepEqual(preferredBays(row(1, 25, 465)), ["ice", "ore"], "raw ice");
+  assert.deepEqual(preferredBays(row(2, 4, 423)), ["fuel"], "ice PRODUCT");
 });
 
 // ── The chain: specialised bays only, cargo is not a backstop ──────────────
@@ -224,7 +235,7 @@ test("ice cascades to the MINING hold when the ice hold is full — both are spe
   // Chaining between specialised bays is still right: flag 134 takes ice since
   // patch 19.11. What is forbidden is falling through to the cargo hold.
   const out = planLootTransfers(
-    [vrow(1, 25, 423, 1000, 1)],
+    [vrow(1, 25, 465, 1000, 1)],
     [bay("ice", true), bay("ore", true)],
     FREE({ ice: 400, ore: 600, cargo: 5000 }),
   );
