@@ -43,6 +43,21 @@
 
   const ship = $derived($space.snapshot?.ship ?? null);
 
+  /**
+   * And the hull's own name — see the note in `ModuleRack.svelte`. The header
+   * fell back to "Your ship" for the same reason the rack's tooltips fell back
+   * to a dash: nothing on screen was asking for the name any more.
+   */
+  $effect(() => {
+    const typeID = ship?.typeID ?? null;
+    if (typeID === null || typeID <= 0) {
+      return;
+    }
+    if (resolvedName($names.resolved, "type", typeID, "") === "") {
+      flow.requestNames([{ kind: "type", id: typeID }]);
+    }
+  });
+
   /** The hull's TYPE name — what kind of ship this is. Never an id (R7d). */
   const hullText = $derived(
     ship ? resolvedName($names.resolved, "type", ship.typeID, "Your ship") : "Your ship",
@@ -56,6 +71,18 @@
    */
   const shipNameText = $derived(
     ship?.name && ship.name.trim().length > 0 ? ship.name.trim() : null,
+  );
+  /**
+   * Whether the hull is worth printing NEXT TO the name.
+   *
+   * ⚠ FOUND LIVE, NOT REASONED ABOUT. A ship whose pilot never renamed it is
+   * called after its hull, so the header read "Ship Sunchaser Sunchaser" — the same
+   * word twice, in two weights, which reads as a rendering fault rather than as
+   * two facts. When they are the same word there is only one fact, so only one
+   * is shown.
+   */
+  const showHull = $derived(
+    shipNameText === null || shipNameText.toLowerCase() !== hullText.toLowerCase(),
   );
   const stateText = $derived(shipStateSentence(ship));
 
@@ -97,7 +124,9 @@
     {#if shipNameText}
       <span class="hud-head-name">{shipNameText}</span>
     {/if}
-    <span class="hud-head-hull">{hullText}</span>
+    {#if showHull}
+      <span class="hud-head-hull">{hullText}</span>
+    {/if}
   </header>
 
   <div class="hud-body">

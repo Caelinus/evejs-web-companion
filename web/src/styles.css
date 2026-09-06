@@ -2583,7 +2583,12 @@
     grid-template-areas: "surface panel";
   }
   .workspace.in-space .work-main {
-    grid-template-rows: minmax(0, 1fr) 17rem;
+    /* ⚠ 21rem, MEASURED, not chosen. At the old 17rem the low rack was cut four
+     * pixels short of its own row, and at 19rem the weapon-banking strip under
+     * it was. A rack you cannot see the bottom of is the one thing this cell
+     * exists to prevent. The radar is `minmax(0, 1fr)` and just gives the rem
+     * up; it is the surface with room to spare. */
+    grid-template-rows: minmax(0, 1fr) 21rem;
     grid-template-areas:
       "surface panel"
       "hud     panel";
@@ -3427,6 +3432,10 @@
   .hud-head {
     display: flex;
     align-items: center;
+    /* ⚠ NOT the global `header`'s space-between: the tag and the ship's name are
+     * one phrase read left to right, and pushing them to opposite ends of a
+     * 900px cell puts a hand-span between "Ship" and what it is naming. */
+    justify-content: flex-start;
     gap: 0.5rem;
     min-height: 32px;
     padding: 0 0.6rem;
@@ -3487,7 +3496,45 @@
 
   /* The HUD cell owns its own frame, so its clusters must not draw a second
    * one inside it — two nested boxes around one instrument reads as a bug. */
-  .hud-bar .hud-cluster { background: none; border: 0; padding: 0; }
+  .hud-bar .hud-cluster { background: none; border: 0; padding: 0; min-width: 0; }
+  /* ⚠ AND THE HEAD MUST NOT BLEED HERE. `.panel-head`'s negative inline margin
+   * exists to reach the edges of a PADDED panel; the cell's clusters have no
+   * padding to reach past, so it bled 32px outside its own box and that was the
+   * whole of the HUD's sideways scroll (R8). */
+  .hud-bar .panel-head {
+    margin: 0 0 0.45rem;
+    padding: 0 0 0.3rem;
+    background: none;
+  }
+
+  /* ⚠ IN THE CELL, THE WHEEL AND ITS NUMBERS SIT SIDE BY SIDE.
+   *
+   * Stacked (which is what the mobile workspace still wants, and what the
+   * default rule above stays) the instrument is ~230px tall, and the cell's row
+   * is 17rem. That overflowed by enough to cut the LOW rack off the bottom —
+   * the rack being readable at a glance is the entire point of the cell, so the
+   * gauge is what gives way, not the racks. Side by side it is ~136px, which is
+   * the wheel's own height and nothing more. */
+  .hud-bar .ship-hud {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.8rem;
+  }
+  .hud-bar .hud-wheel { flex: 0 1 8.5rem; }
+  .hud-bar .hud-readout {
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .hud-bar .hud-readout-row {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
 
   /* Narrow screens: stack the rail on top and drop the dock panel below the
    * desktop. The desktop windowing is a large-screen feature; this only keeps
@@ -4347,7 +4394,12 @@
   .rack-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    /* Wrapping, so the heat bar drops below the slots in a narrow cell instead
+     * of pushing the row past its box — 7px of sideways scroll in the HUD is
+     * still sideways scroll (R8). */
+    flex-wrap: wrap;
+    gap: 0.5rem 0.5rem;
+    min-width: 0;
   }
   .rack-row-label {
     flex: 0 0 2.4rem;
@@ -4360,6 +4412,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.3rem;
+    flex: 1 1 auto;
     min-width: 0;
   }
   .module-slot {

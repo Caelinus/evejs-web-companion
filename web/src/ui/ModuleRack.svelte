@@ -151,6 +151,46 @@
     return cycleProgressPercent($targeting.moduleCycles[itemID] ?? null, nowMs);
   }
 
+  /**
+   * ASK FOR THE NAMES THIS RACK NEEDS.
+   *
+   * ⚠ FOUND LIVE, AND IT IS A REAL CAPABILITY GAP, NOT A COSMETIC ONE. Every
+   * tooltip in the rack read "— — click to switch on": the tile is a PICTURE, so
+   * its title is the only place a module says what it is, and the whole rack had
+   * stopped saying.
+   *
+   * The rack used to free-ride on the name cache `Overview.svelte` primed, which
+   * worked while the overview was fixed chrome mounted beside it. The overview
+   * is a WINDOW now, so on any session where nobody opened it, nothing ever
+   * asked for these names. A component that needs a name asks for it itself;
+   * anything else is a dependency on another component's mount order.
+   *
+   * Idempotent by construction: only ids the cache has no entry for are asked
+   * for, so this settles after one round rather than re-asking every poll.
+   */
+  $effect(() => {
+    if (!flow) {
+      return;
+    }
+    const refs: { kind: "type"; id: number }[] = [];
+    const seen = new Set<number>();
+    for (const row of rows) {
+      for (const slot of row.slots) {
+        for (const id of [slot.module?.typeID, slot.module?.charge?.typeID]) {
+          if (typeof id === "number" && id > 0 && !seen.has(id)) {
+            seen.add(id);
+            if (resolvedName($names.resolved, "type", id, "") === "") {
+              refs.push({ kind: "type", id });
+            }
+          }
+        }
+      }
+    }
+    if (refs.length > 0) {
+      flow.requestNames(refs);
+    }
+  });
+
   function moduleName(typeID: number): string {
     return resolvedName($names.resolved, "type", typeID);
   }

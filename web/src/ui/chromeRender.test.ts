@@ -88,6 +88,36 @@ function dockedStore(): unknown {
   return store;
 }
 
+/** The in-space snapshot, hoisted so a test can clone and vary one field. */
+const SHIP_SNAPSHOT = {
+  inSpace: true,
+  solarSystemID: SYSTEM_ID,
+  shipID: SHIP_ID,
+  sampledAtMs: 1_700_000_000_000,
+  entities: [],
+  ship: {
+    itemID: SHIP_ID,
+    typeID: SHIP_TYPE_ID,
+    name: null as string | null,
+    mode: "STOP",
+    shieldRatio: 1,
+    armorRatio: 0.5,
+    hullRatio: 1,
+    capacitorRatio: 0.75,
+    shieldCapacity: 400,
+    armorCapacity: 300,
+    hullCapacity: 600,
+    radius: 100,
+    maxVelocity: 300,
+    activeModuleIDs: [] as number[],
+    overloadedModuleIDs: [] as number[],
+    moduleDamage: {},
+    weaponBanks: {},
+    position: { x: 0, y: 0, z: 0 },
+    velocity: { x: 0, y: 0, z: 0 },
+  },
+};
+
 function inSpaceStore(): unknown {
   const store = createClientStore();
   store.apply({
@@ -112,37 +142,7 @@ function inSpaceStore(): unknown {
     stationName: null,
     structureName: null,
   });
-  store.apply({
-    type: "space/snapshot",
-    snapshot: {
-      inSpace: true,
-      solarSystemID: SYSTEM_ID,
-      shipID: SHIP_ID,
-      sampledAtMs: 1_700_000_000_000,
-      entities: [],
-      ship: {
-        itemID: SHIP_ID,
-        typeID: SHIP_TYPE_ID,
-        name: null,
-        mode: "STOP",
-        shieldRatio: 1,
-        armorRatio: 0.5,
-        hullRatio: 1,
-        capacitorRatio: 0.75,
-        shieldCapacity: 400,
-        armorCapacity: 300,
-        hullCapacity: 600,
-        radius: 100,
-        maxVelocity: 300,
-        activeModuleIDs: [],
-        overloadedModuleIDs: [],
-        moduleDamage: {},
-        weaponBanks: {},
-        position: { x: 0, y: 0, z: 0 },
-        velocity: { x: 0, y: 0, z: 0 },
-      },
-    },
-  });
+  store.apply({ type: "space/snapshot", snapshot: SHIP_SNAPSHOT });
   return store;
 }
 
@@ -207,6 +207,30 @@ test("the HUD no longer duplicates the rail's own launchers", () => {
   for (const gone of ["Mining", "Flight"]) {
     assert.equal(new RegExp(gone).test(text), false, `${gone} is a rail entry, not a HUD button`);
   }
+});
+
+test("the HUD header names the ship once, not the same word twice", () => {
+  // ⚠ FOUND LIVE. A ship nobody renamed carries its hull's own name, so a header
+  // that prints name AND hull unconditionally says "Sunchaser Sunchaser" — one fact
+  // rendered as two, which reads as a bug rather than as detail.
+  const store = inSpaceStore() as { apply: (event: unknown) => void; space: { get: () => never } };
+  store.apply({
+    type: "names/resolved",
+    entries: { [`type:${SHIP_TYPE_ID}`]: "Sunchaser" },
+  });
+  // The ship carries the hull's own name — the live case this was found in.
+  const snapshot = JSON.parse(JSON.stringify(SHIP_SNAPSHOT));
+  snapshot.ship.name = "Sunchaser";
+  store.apply({ type: "space/snapshot", snapshot });
+  const head = renderHud(store);
+  const from = head.indexOf("hud-head");
+  const header = visibleText(head.slice(from, head.indexOf("</header>", from)));
+  assert.match(header, /Sunchaser/, "the hull is not named at all");
+  assert.equal(
+    (header.match(/Sunchaser/g) ?? []).length,
+    1,
+    "the hull was printed twice — the ship carries its hull's name",
+  );
 });
 
 // --- Stop, and the rule that travels with it ---------------------------------
