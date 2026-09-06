@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 
 import {
   classifyRefusal,
+  NO_ROOM_CODE,
+  shipHasNoRoom,
   createRefusalLedger,
   isUnreachable,
   MAX_CONSECUTIVE_REFUSALS,
@@ -160,11 +162,13 @@ test("a GONE target is set aside at once, without spending the budget", () => {
   assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), true);
 });
 
-test("an UNREACHABLE target is never set aside, however often it is missed", () => {
-  // It exists. The answer is to close the distance, not to give up on it.
+test("an UNREACHABLE target is not set aside on the ordinary bound", () => {
+  // It exists. The answer is to close the distance, not to give up on it — so
+  // it survives the limit an outright refusal would be retired at. (It is not
+  // patient for ever; see the test further down.)
   const ledger = createRefusalLedger();
   const key = refusalKey("s1", "lootContainer", 1);
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     ledger.note(key, "CALL_REFUSED: FakeItemNotFound", i, true);
   }
   assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), false);
@@ -180,4 +184,49 @@ test("a stubborn but reachable target is set aside once it passes the limit", ()
   assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), false);
   ledger.note(key, NO_ROOM, 5, true);
   assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), true);
+});
+
+// ── "No room" is about the SHIP, not the target ────────────────────────────
+
+test("a no-room failure is its own kind, and is worded without the marker", () => {
+  const ledger = createRefusalLedger();
+  const record = ledger.note(
+    refusalKey("s1", "lootContainer", 1),
+    `${NO_ROOM_CODE}: There is no room aboard for what is in that container.`,
+    0,
+    true,
+  );
+  assert.equal(record.kind, "no-room");
+  assert.match(record.words, /no room aboard/i);
+  assert.equal(record.words.includes(NO_ROOM_CODE), false, "the sentinel never reaches a player");
+});
+
+test("no room on ONE target answers for the whole step", () => {
+  // The hold that had no room for this container has none for the next either,
+  // so a block must be able to stop asking rather than prove it once per can —
+  // five attempts and a growing backoff each, which reads as a hung bot.
+  const ledger = createRefusalLedger();
+  ledger.note(refusalKey("lc", "lootContainer", 80001), `${NO_ROOM_CODE}: full`, 0, true);
+  assert.equal(shipHasNoRoom(ledger.records(), "lc", "lootContainer"), true);
+  assert.equal(shipHasNoRoom(ledger.records(), "lc", "lootWreck"), false, "a different action");
+  assert.equal(shipHasNoRoom(ledger.records(), "other", "lootContainer"), false, "a different step");
+});
+
+test("an ordinary refusal does not read as no-room", () => {
+  const ledger = createRefusalLedger();
+  ledger.note(refusalKey("lc", "lootContainer", 1), NO_ROOM, 0, true);
+  assert.equal(shipHasNoRoom(ledger.records(), "lc", "lootContainer"), false);
+});
+
+test("an UNREACHABLE target is eventually set aside, rather than approached for ever", () => {
+  // It is never retired on the ordinary bound, but a can this ship will never
+  // reach must not own the block for the rest of the run.
+  const ledger = createRefusalLedger();
+  const key = refusalKey("s1", "lootContainer", 1);
+  for (let i = 0; i < 19; i += 1) {
+    ledger.note(key, "CALL_REFUSED: FakeItemNotFound", i, true);
+  }
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), false, "still closing in");
+  ledger.note(key, "CALL_REFUSED: FakeItemNotFound", 20, true);
+  assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 1, 5), true, "and eventually gives up");
 });

@@ -888,6 +888,47 @@ test("loot-wrecks: a FULL ship finishes the block too", () => {
   assert.equal(t.outcome.kind, "done");
 });
 
+test("loot-containers: the FIRST no-room ends the block — it is not proved once per can", () => {
+  // The failure this closes: the ore hold is full after mining, the cans hold
+  // ore, and ore does not fall through to cargo. Every can then answers "no
+  // room", and the block spent five attempts with a growing backoff on EACH
+  // before setting it aside. With a belt full of cans that is minutes of a bot
+  // doing nothing, which is indistinguishable from a hang.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const a = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const b = entity({ itemID: 80002, kind: "container", position: { x: 20, y: 0, z: 0 } });
+  const noRoom = {
+    key: "lc:lootContainer:80001",
+    count: 1,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There is no room aboard for what is in that container.",
+    kind: "no-room" as const,
+  };
+  // The ship is NOT full by the block's own measure — the cargo hold has room,
+  // it is the ore hold that does not — so only the no-room record can end this.
+  const t = loot(s, obs({ snapshot: snapshot([a, b]), refusals: [noRoom] }), {}, {});
+  assert.equal(t.outcome.kind, "done", "one refusal answers for the whole belt");
+  assert.match(t.why, /unload/i);
+});
+
+test("loot-wrecks: the same, so a full ship stops looting wrecks too", () => {
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const noRoom = {
+    key: "lw:lootWreck:70001",
+    count: 1,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There is no room aboard for what is in that container.",
+    kind: "no-room" as const,
+  };
+  const t = loot(s, obs({ snapshot: snapshot([wreck]), myCharacterID: 90000001, refusals: [noRoom] }), {}, {});
+  assert.equal(t.outcome.kind, "done");
+});
+
 test("loot-containers: a can that CANNOT BE REACHED is closed in on, never set aside", () => {
   // eve.js answers the same FakeItemNotFound for a despawned can and for one
   // merely out of range. Retiring on that would abandon every can the ship

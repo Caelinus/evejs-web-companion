@@ -44,7 +44,14 @@ import { describeRefusal } from "../bridge/refusals.ts";
  * still in this tick's snapshot it is `unreachable` (close the distance); if it
  * has left the snapshot too, it is `gone`.
  */
-export type RefusalKind = "refused" | "unreachable" | "gone";
+export type RefusalKind = "refused" | "unreachable" | "gone" | "no-room";
+
+/**
+ * The marker a caller puts in front of a "nothing I am carrying will fit"
+ * failure. A sentinel rather than a phrase match, so the wording stays free to
+ * change; `describeRefusal` looks past the prefix and shows the sentence.
+ */
+export const NO_ROOM_CODE = "NO_ROOM_ABOARD";
 
 export interface RefusalRecord {
   /** stepPath + action kind + target, so one failing can does not mask another. */
@@ -69,6 +76,14 @@ export interface RefusalRecord {
  * hours, which was the entire problem.
  */
 export const MAX_CONSECUTIVE_REFUSALS = 10;
+
+/**
+ * How much more patience an unreachable target gets than a refusing one, before
+ * even it is set aside. Generous, because closing distance genuinely takes ticks
+ * and giving up early on a can the ship is simply flying towards would be worse
+ * than waiting.
+ */
+const UNREACHABLE_PATIENCE = 4;
 
 /** Base settle, matching the runner's own SETTLE_TICKS. */
 const BASE_SETTLE_TICKS = 2;
@@ -105,7 +120,17 @@ export function refusalKey(
 
 /** Classify a raw wire refusal. `stillOnGrid` is only consulted for a bind miss. */
 export function classifyRefusal(raw: string, stillOnGrid: boolean | null): RefusalKind {
-  if (!/FakeItemNotFound/i.test(String(raw ?? ""))) {
+  const text = String(raw ?? "");
+  // ⚠ A PROPERTY OF THE SHIP, NOT OF THE THING BEING ADDRESSED. Nothing about
+  // the next container will be different: the hold that had no room for this one
+  // has no room for that one either. Kept apart from an ordinary refusal so a
+  // block can stop asking rather than prove it once per target — which is
+  // exactly what it did, at five attempts and a growing backoff EACH, and which
+  // reads as a bot that has hung.
+  if (text.includes(NO_ROOM_CODE)) {
+    return "no-room";
+  }
+  if (!/FakeItemNotFound/i.test(text)) {
     return "refused";
   }
   // The object could not be bound. Still on the grid this tick means it exists
@@ -228,7 +253,11 @@ export function shouldSetAside(
     return true;
   }
   if (record.kind === "unreachable") {
-    return false;
+    // Never retired on the ordinary bound: the object exists and the answer is
+    // to close the distance. But not forever either — a target that cannot be
+    // reached after many tries is one this ship is never going to reach, and
+    // approaching it for the rest of the run is its own kind of stuck.
+    return record.count >= limit * UNREACHABLE_PATIENCE;
   }
   return record.count >= limit;
 }
@@ -241,4 +270,21 @@ export function isUnreachable(
   targetID: number | null,
 ): boolean {
   return refusalFor(records, stepID, actionKind, targetID)?.kind === "unreachable";
+}
+
+/**
+ * Has this step been told there is nowhere aboard to put what it is finding?
+ *
+ * Asked per STEP rather than per target, because that is the scope of the fact.
+ */
+export function shipHasNoRoom(
+  records: readonly RefusalRecord[] | null | undefined,
+  stepID: string | null,
+  actionKind: string,
+): boolean {
+  if (!records) {
+    return false;
+  }
+  const prefix = `${stepID ?? "-"}:${actionKind}:`;
+  return records.some((record) => record.kind === "no-room" && record.key.startsWith(prefix));
 }

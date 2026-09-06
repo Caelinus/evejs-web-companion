@@ -14,6 +14,7 @@ import { decodeCapacity, decodeContainer, decodeInventoryRows } from "../bridge/
 import { decodeShipBays } from "../bridge/shipBays.ts";
 import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
+import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
 import { buildSlots, decodeChargeFits, decodeResources, decodeShipAttributes } from "../bridge/fitting.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import {
@@ -5972,7 +5973,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // ledger, which backs off and sets that can aside after a few tries, so the
     // block finishes and the script goes on to unload.
     if (moved === 0 && planned === 0) {
-      throw new Error("There is no room aboard for what is in that container.");
+      throw new Error(`${NO_ROOM_CODE}: There is no room aboard for what is in that container.`);
     }
   }
 

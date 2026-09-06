@@ -37,7 +37,7 @@ import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/ove
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
-import { isUnreachable, refusalFor, shouldSetAside } from "./refusalLedger.ts";
+import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
 
 const WAIT = { kind: "wait" } as const;
@@ -1564,6 +1564,14 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
   if (freeM3 !== null && freeM3 <= 0) {
     return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
   }
+  // ⚠ ONCE IS ENOUGH. "Nothing aboard will take this" is a fact about the SHIP,
+  // not about the wreck in front of it: the hold with no room for this one has
+  // no room for the next either. Proving it again on every target costs five
+  // attempts and a growing backoff EACH, which is minutes of a bot doing
+  // nothing and looking hung. The trip is over; go and unload.
+  if (shipHasNoRoom(obs.refusals, step.id, "lootWreck")) {
+    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" });
+  }
   const lootedRaw = mem["looted"];
   const lootedBefore = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
 
@@ -1670,6 +1678,11 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   const freeM3 = holdsFreeM3(obs.holds ?? null);
   if (freeM3 !== null && freeM3 <= 0) {
     return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
+  }
+  // Once is enough: see the note in loot-wrecks. Nothing about the next can will
+  // be different while the hold that turned this one down is still full.
+  if (shipHasNoRoom(obs.refusals, step.id, "lootContainer")) {
+    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" });
   }
   // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
   // list in step memory. The list was dropped every time the block was left, so
