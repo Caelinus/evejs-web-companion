@@ -1067,6 +1067,15 @@ async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
         if (held.boundHandles.get(bindSpec.key) === bindPromise) {
           held.boundHandles.delete(bindSpec.key);
         }
+        // Name the target on the way past. A bind refusal says only WHAT the
+        // gateway thought (`FakeItemNotFound`), never WHICH bind asked — and
+        // one panel load fires four of them, so the log cannot otherwise tell
+        // a despawned can from a stale active ship. `errorLogger` prints an
+        // Error's own properties, so this rides out beside code/statusCode.
+        // Set once: the first (innermost) bind to fail owns the name.
+        if (error && typeof error === "object" && error.bindKey === undefined) {
+          error.bindKey = bindSpec.key;
+        }
         throw error;
       });
     held.boundHandles.set(bindSpec.key, bindPromise);

@@ -375,7 +375,7 @@ async function startTestServer(options = {}) {
     eveGatewayClient: options.gateway,
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
-    errorLogger() {},
+    errorLogger: options.errorLogger || function () {},
   });
   const server = app.listen(0, "127.0.0.1");
   activeServers.add(server);
@@ -467,6 +467,46 @@ test("GET container binds with GetInventoryFromId and lists with NO FLAG", async
 
   // No bound handle ever crosses to the browser.
   assert.equal(JSON.stringify(payload).includes("handle:"), false);
+});
+
+test("a failed bind names the target it was binding, so the log can say WHICH", async () => {
+  // The real shape: eve.js's Handle_GetInventoryFromId refuses a can that has
+  // despawned or drifted off the scene, and the refusal carries no target of
+  // its own. Without the key, `FakeItemNotFound` in the log is indistinguishable
+  // from the same refusal on a stale active ship.
+  const logged = [];
+  const gateway = fakeGateway({ items: fixtureItems() });
+  const refusing = {
+    ...gateway,
+    async bindObject(service, method, args, kwargs, sessionFields, bridgeSessionID) {
+      if (method === "GetInventoryFromId" && args[0] === CONTAINER_ID) {
+        throw Object.assign(new Error("FakeItemNotFound"), {
+          code: "CALL_REFUSED",
+          statusCode: 409,
+        });
+      }
+      return gateway.bindObject(service, method, args, kwargs, sessionFields, bridgeSessionID);
+    },
+  };
+  const { baseUrl } = await startTestServer({
+    gateway: refusing,
+    errorLogger: (error) => logged.push(error),
+  });
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(
+    baseUrl,
+    `/api/bridge/inventory/container/${CONTAINER_ID}`,
+  );
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "CALL_REFUSED");
+
+  const refusal = logged.find((error) => error && error.message === "FakeItemNotFound");
+  assert.ok(refusal, "the refusal reached the logger");
+  assert.equal(refusal.bindKey, `container:${CONTAINER_ID}`);
+  // The key is a diagnostic rider, not a new wire field — the browser is told
+  // the code and the message, exactly as before.
+  assert.equal(JSON.stringify(payload).includes("bindKey"), false);
 });
 
 test("transfer moves an item OUT of a container using the container as the source", async () => {
