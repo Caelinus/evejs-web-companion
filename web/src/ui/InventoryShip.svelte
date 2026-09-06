@@ -46,8 +46,32 @@
     isBoardableShip,
     isOpenableContainer,
   } from "../bridge/inventoryShip.ts";
-  import { presentBays, unreadableBays } from "../bridge/shipBays.ts";
-  import { holdFreeM3, unitsThatFit } from "../bridge/holdFit.ts";
+  // The panel's MODEL: where a thing may be moved, what a bay is called, how
+  // full it is IN WORDS, and how much of a stack may actually be sent. It lives
+  // in its own pure module because the docked station panel shares it — two
+  // panels that disagreed about any of it would move a stack two different
+  // ways. See inventoryModel.ts for the invariants it carries.
+  import {
+    amountText,
+    bayIsActionable,
+    bayPlace,
+    capacityText,
+    divisionLooksAccessible,
+    fillPercent,
+    hangarThings as hangarThingsIn,
+    mergeOrder,
+    moveDestinations,
+    moveQuantityFor,
+    orderedPresentBays,
+    parseMoveQuantity,
+    placeKey,
+    placeName as placeNameOf,
+    roomUsedText,
+    rowsIn,
+    samePlace,
+    shipRows,
+    uncheckedShipBays,
+  } from "./inventoryModel.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
   import { isSessionLost } from "../app/flow.ts";
   // R27 — the shared item icon: one cached picture per thing, falling back
@@ -55,12 +79,7 @@
   import TypeIcon from "./TypeIcon.svelte";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
-  import type {
-    CapacityInfo,
-    InventoryItemRow,
-    InventoryPlace,
-    ShipBay,
-  } from "../store/types.ts";
+  import type { InventoryItemRow, InventoryPlace } from "../store/types.ts";
   // R78 — drag and drop between containers. The RULES live in a pure module: a
   // target that decides what it accepts inside `dragover` can only be checked by
   // dragging onto it, and `dragover` is also what tells the cursor whether a drop
@@ -158,39 +177,6 @@
     }
   });
 
-  /**
-   * The order the Ship Inventory tab lists a hull's bays in — the ones a player
-   * reaches for most (cargo, then the specialised holds the user asked to see
-   * first), then the rest. A bay not in this list simply sorts to the end; the
-   * list decides ORDER, never which bays exist (that is the hull's own truth).
-   */
-  const BAY_ORDER: readonly string[] = [
-    "cargo",
-    "shipMaintenance",
-    "fuel",
-    "fleet",
-    "ore",
-    "gas",
-    "ice",
-    "mineral",
-    "asteroid",
-    "drone",
-    "fighter",
-    "ammo",
-    "salvage",
-  ];
-
-  function bayRank(key: string): number {
-    const index = BAY_ORDER.indexOf(key);
-    return index === -1 ? BAY_ORDER.length : index;
-  }
-
-  const CATEGORY_SHIP = 6;
-
-  function isShip(row: InventoryItemRow): boolean {
-    return row.categoryID === CATEGORY_SHIP;
-  }
-
   // R7c — resolve every row's typeID -> type name and categoryID -> category
   // name (batched + cached by the flow's name cache). Fire-and-forget in an
   // effect so rows render immediately and swap to names as they arrive.
@@ -259,19 +245,6 @@
   function nameOnly(id: number | null, kind: NameKind): string {
     return resolvedName($names.resolved, kind, id, "—");
   }
-
-  // The active ship's typeID (it sits in the hangar/cargo rows as the row whose
-  // itemID is the active ship), so its header can show the SHIP TYPE name.
-  const activeShipTypeID = $derived.by<number | null>(() => {
-    const id = $inventory.activeShipID;
-    if (id === null) {
-      return null;
-    }
-    const row =
-      $inventory.hangar.rows.find((r) => r.itemID === id) ??
-      $inventory.cargo.rows.find((r) => r.itemID === id);
-    return row ? row.typeID : null;
-  });
 
   function typeName(typeID: number | null): string {
     if (typeID === null || typeID <= 0) {
@@ -378,11 +351,6 @@
     await askRepairQuote();
   }
 
-  function qtyArg(): number | null {
-    const parsed = Number(moveQty);
-    return moveQty.trim() !== "" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-  }
-
   onMount(() => {
     void run(async () => {
       await flow.loadInventory();
@@ -396,70 +364,7 @@
     });
   });
 
-  function amount(value: number): string {
-    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  }
-
-  /**
-   * How full a bay is, in words. A capacity the ship did not report reads "not
-   * known" and NEVER 0 — a confident "0 of 0 m³" would tell the player the bay
-   * is unusable when in truth we simply failed to ask.
-   */
-  function capacityText(capacity: CapacityInfo | null): string {
-    if (!capacity) {
-      return "not known";
-    }
-    return `${amount(capacity.used)} of ${amount(capacity.capacity)} m³`;
-  }
-
-  /**
-   * Room used in the STATION HANGAR, which has no meaningful limit. eve.js
-   * returns a 1,000,000 m³ default for the unmapped hangar flag (R40) — a
-   * phantom ceiling, not a real one — so the hangar shows only how much room is
-   * used, with no "of {capacity}" and no gauge to fill toward. This is chosen by
-   * WHERE it is rendered (the station-hangar card), never by sniffing the
-   * 1,000,000 value, which is fragile and could legitimately appear elsewhere.
-   * Ship bays with a real finite capacity keep `capacityText` and their gauge.
-   */
-  function roomUsedText(capacity: CapacityInfo | null): string {
-    if (!capacity) {
-      return "not known";
-    }
-    return `${amount(capacity.used)} m³`;
-  }
-
-  /** The gauge's fill, clamped. Zero capacity means no meaningful bar. */
-  function fillPercent(capacity: CapacityInfo | null): number {
-    if (!capacity || !(capacity.capacity > 0)) {
-      return 0;
-    }
-    return Math.max(0, Math.min(100, (capacity.used / capacity.capacity) * 100));
-  }
-
-  /** What a tile says under the name: an amount, or that the thing is one object. */
-  function amountText(row: InventoryItemRow): string {
-    return row.singleton ? "assembled" : amount(row.quantity);
-  }
-
   // --- selection ------------------------------------------------------------
-
-  function samePlace(left: InventoryPlace | null, right: InventoryPlace): boolean {
-    if (!left || left.kind !== right.kind) {
-      return false;
-    }
-    if (left.kind === "container" && right.kind === "container") {
-      return left.itemID === right.itemID;
-    }
-    if (left.kind === "corp" && right.kind === "corp") {
-      return left.division === right.division;
-    }
-    if (left.kind === "shipBay" && right.kind === "shipBay") {
-      // A tick made in the ore hold must not be treated as a tick in the drone
-      // bay: each bay is its own place.
-      return left.bay === right.bay;
-    }
-    return true;
-  }
 
   function toggle(row: InventoryItemRow, place: InventoryPlace): void {
     if (!samePlace(selectionPlace, place)) {
@@ -489,28 +394,8 @@
     if (!place) {
       return [];
     }
-    return rowsOf(place).filter((row) => selection.includes(row.itemID));
+    return rowsIn($inventory, place).filter((row) => selection.includes(row.itemID));
   });
-
-  function rowsOf(place: InventoryPlace): readonly InventoryItemRow[] {
-    if (place.kind === "hangar") {
-      return $inventory.hangar.rows;
-    }
-    if (place.kind === "cargo") {
-      return $inventory.cargo.rows;
-    }
-    if (place.kind === "shipBay") {
-      const bay = $inventory.openShip?.bays.find((entry) => entry.key === place.bay);
-      return bay?.items ?? [];
-    }
-    if (place.kind === "container") {
-      return $inventory.container && $inventory.container.itemID === place.itemID
-        ? $inventory.container.rows
-        : [];
-    }
-    const division = $inventory.corp.divisions.find((entry) => entry.division === place.division);
-    return division ? division.rows : [];
-  }
 
   // Exactly two same-type loose stacks in one place can be re-merged.
   const mergeable = $derived.by<boolean>(
@@ -519,24 +404,7 @@
   );
 
   function placeName(place: InventoryPlace | null): string {
-    if (!place) {
-      return "";
-    }
-    if (place.kind === "hangar") {
-      return "Station hangar";
-    }
-    if (place.kind === "cargo") {
-      return "Ship cargo";
-    }
-    if (place.kind === "shipBay") {
-      const bay = $inventory.openShip?.bays.find((entry) => entry.key === place.bay);
-      return bay ? bay.label : "Ship bay";
-    }
-    if (place.kind === "container") {
-      return containerName();
-    }
-    const division = $inventory.corp.divisions.find((entry) => entry.division === place.division);
-    return `Corporation hangar — ${divisionLabel(place.division, division ? division.name : null)}`;
+    return placeNameOf($inventory, place, containerName());
   }
 
   function containerName(): string {
@@ -549,64 +417,10 @@
 
   // --- bulk destinations ----------------------------------------------------
 
-  // Where a selection may be sent. The current place is excluded (moving items
-  // to where they already are is a no-op), and the corporation divisions only
-  // appear when the corporation actually has an office here.
-  const destinations = $derived.by<{ label: string; place: InventoryPlace }[]>(() => {
-    const options: { label: string; place: InventoryPlace }[] = [];
-    const current = selectionPlace;
-    if (!samePlace(current, { kind: "hangar" })) {
-      options.push({ label: "Station hangar", place: { kind: "hangar" } });
-    }
-    if ($inventory.activeShipID && !samePlace(current, { kind: "cargo" })) {
-      options.push({ label: "Ship cargo", place: { kind: "cargo" } });
-    }
-    // The ACTIVE ship's specialty holds (Ore hold, etc.) — a valid move target
-    // only for the ship you are flying, and only once its bays have been read.
-    // Cargo is already offered above, so it is skipped here. The server still
-    // judges whether a given type belongs in a given hold; this only offers the
-    // destination and (below) sends the amount that fits.
-    const active = $inventory.openShip;
-    if (active && active.itemID === $inventory.activeShipID) {
-      for (const bay of active.bays) {
-        if (bay.present !== true || bay.key === "cargo") {
-          continue;
-        }
-        const place: InventoryPlace = { kind: "shipBay", bay: bay.key };
-        if (!samePlace(current, place)) {
-          options.push({ label: bay.label, place });
-        }
-      }
-    }
-    const container = $inventory.container;
-    if (container && !samePlace(current, { kind: "container", itemID: container.itemID })) {
-      options.push({
-        label: containerName(),
-        place: { kind: "container", itemID: container.itemID },
-      });
-    }
-    if ($inventory.corp.available) {
-      for (const division of $inventory.corp.divisions) {
-        if (samePlace(current, { kind: "corp", division: division.division })) {
-          continue;
-        }
-        options.push({
-          label: divisionLabel(division.division, division.name),
-          place: { kind: "corp", division: division.division },
-        });
-      }
-    }
-    return options;
-  });
-
-  /** The active ship's bay by key, or null (only the ship you're flying counts). */
-  function activeBayByKey(key: string): ShipBay | null {
-    const active = $inventory.openShip;
-    if (!active || active.itemID !== $inventory.activeShipID) {
-      return null;
-    }
-    return active.bays.find((bay) => bay.key === key) ?? null;
-  }
+  // Where a selection may be sent — the model's rule: the current place is
+  // excluded, the ACTIVE hull's specialty holds appear once its bays have been
+  // read, and the corporation's divisions only when it has an office here.
+  const destinations = $derived(moveDestinations($inventory, selectionPlace, containerName()));
 
   // --- R78: dragging items between containers -------------------------------
   //
@@ -621,18 +435,6 @@
 
   /** The container the pointer is over, so it can light up mid-drag. */
   let dropPlaceKey = $state<string | null>(null);
-  function placeKey(place: InventoryPlace): string {
-    switch (place.kind) {
-      case "shipBay":
-        return `shipBay:${place.bay}`;
-      case "container":
-        return `container:${place.itemID}`;
-      case "corp":
-        return `corp:${place.division}`;
-      default:
-        return place.kind;
-    }
-  }
 
   function startTileDrag(event: DragEvent, row: InventoryItemRow, place: InventoryPlace): void {
     // Dragging something that is not ticked makes it the selection, so what you
@@ -689,28 +491,23 @@
     if (!from || selection.length === 0) {
       return;
     }
-    let qty = selection.length === 1 ? qtyArg() : null;
-    // Moving a SINGLE stack into a ship hold: send only what fits, so the server
-    // is never asked to overflow the hold (which it refuses outright rather than
-    // partially filling). A quantity the player TYPED still wins — they asked for
-    // a specific amount; otherwise we compute the fit from the hold's free space
-    // and the item's per-unit volume. Unknown volume/capacity → whole stack, and
-    // the server draws the line.
-    if (destination.kind === "shipBay" && selection.length === 1 && qty === null) {
-      const row = selectedRows[0];
-      const bay = activeBayByKey(destination.bay);
-      if (row) {
-        const fit = unitsThatFit(row.quantity, row.volume, holdFreeM3(bay?.capacity));
-        if (fit <= 0) {
-          error = `The ${bay?.label ?? "hold"} has no room for that.`;
-          return;
-        }
-        // Only send a quantity for a PARTIAL move; the whole stack keeps qty null.
-        qty = fit < row.quantity ? fit : null;
-      }
+    // HOW MUCH to send is the model's decision: a typed quantity wins, and
+    // otherwise a single stack into a ship hold is clamped to what fits — the
+    // server refuses an overflowing move outright rather than partially
+    // filling it. A hold with no room refuses here, in the hold's own name.
+    const verdict = moveQuantityFor({
+      inventory: $inventory,
+      destination,
+      selection,
+      selectedRows,
+      typedQuantity: moveQty,
+    });
+    if (verdict.kind === "refused") {
+      error = verdict.message;
+      return;
     }
     await run(async () => {
-      await flow.transferItems([...selection], from, destination, qty);
+      await flow.transferItems([...selection], from, destination, verdict.quantity);
       selectionPlace = null;
     });
   }
@@ -722,11 +519,12 @@
     }
     // Merge the SMALLER stack into the larger one, which is what dragging one
     // onto the other does in practice.
-    const [first, second] = selectedRows;
-    const source = first!.quantity <= second!.quantity ? first! : second!;
-    const destination = source === first! ? second! : first!;
+    const order = mergeOrder(selectedRows);
+    if (!order) {
+      return;
+    }
     await run(async () => {
-      await flow.mergeStacks(source.itemID, destination.itemID, place);
+      await flow.mergeStacks(order.source.itemID, order.destination.itemID, place);
       selectionPlace = null;
     });
   }
@@ -746,51 +544,27 @@
   // --- R40 the ships --------------------------------------------------------
 
   /**
-   * Every hull the player owns HERE, plus the one they are flying.
-   *
-   * The active ship is normally a hangar row while docked, but a player in
-   * space has no station hangar to read — so when the active ship is not among
-   * the hangar rows it is added from what the slice does know. Otherwise the
-   * one ship they are definitely in would be the one ship they could not open.
+   * Every hull the player owns HERE, plus the one they are flying — including
+   * IN SPACE, where there is no station hangar to read and the active hull
+   * would otherwise be the one ship that could not be opened. See the model.
    */
-  const ships = $derived.by<InventoryItemRow[]>(() => {
-    const rows = $inventory.hangar.rows.filter(isShip);
-    const activeID = $inventory.activeShipID;
-    if (activeID !== null && !rows.some((row) => row.itemID === activeID)) {
-      rows.unshift({
-        itemID: activeID,
-        typeID: activeShipTypeID ?? 0,
-        groupID: null,
-        categoryID: CATEGORY_SHIP,
-        flagID: null,
-        quantity: 1,
-        singleton: true,
-      });
-    }
-    return rows;
-  });
+  const ships = $derived(shipRows($inventory));
 
   /** Everything in the hangar that is NOT a ship — the Item Hangar tab. */
-  const hangarThings = $derived($inventory.hangar.rows.filter((row) => !isShip(row)));
+  const hangarThings = $derived(hangarThingsIn($inventory));
 
   const openShip = $derived($inventory.openShip);
 
   /** The bays this hull actually has, in the tab's reading order. Only these are drawn. */
-  const shownBays = $derived.by<readonly ShipBay[]>(() =>
-    openShip
-      ? [...presentBays(openShip.bays)].sort((a, b) => bayRank(a.key) - bayRank(b.key))
-      : [],
-  );
+  const shownBays = $derived(orderedPresentBays(openShip));
 
   /**
-   * Bays we could not READ. These are named out loud: without them, a hull
-   * whose ore hold failed to read would look exactly like a hull that has no
-   * ore hold, and the player would believe a bay does not exist when in fact
-   * nobody managed to look.
+   * ⚠ Bays we could not READ. Named out loud below: without them, a hull whose
+   * ore hold failed to read would look exactly like a hull that HAS no ore
+   * hold, and the player would believe a bay does not exist when in fact nobody
+   * managed to look.
    */
-  const uncheckedBays = $derived.by<readonly ShipBay[]>(() =>
-    openShip ? unreadableBays(openShip.bays) : [],
-  );
+  const uncheckedBays = $derived(uncheckedShipBays(openShip));
 
   /**
    * Open a hull's bays and jump to the Ship Inventory tab. This is how the Ship
@@ -803,29 +577,6 @@
     void run(() => flow.openShipBays(row.itemID));
   }
 
-  /**
-   * Can the player act on what is in this bay from here?
-   *
-   * ANY bay of the ACTIVE ship (R51). The BFF can now address a bay by its key
-   * as a transfer source — the ore hold, the drone bay and the cargo hold are
-   * all valid sources — so a stack in any of them can be moved into the station
-   * hangar. There is still no addressing for "the ore hold of the ship I am not
-   * flying" (it has no source location), so a bay on an inactive hull stays
-   * read-only and the card says to board instead.
-   */
-  function bayIsActionable(shipItemID: number, bay: ShipBay): boolean {
-    return shipItemID === $inventory.activeShipID && bay.present === true;
-  }
-
-  /**
-   * The place descriptor that addresses this bay as a transfer source. The
-   * cargo hold keeps its own long-standing "cargo" place; every other bay is a
-   * "shipBay" named by its key. The flag behind the key never leaves the BFF.
-   */
-  function bayPlace(bay: ShipBay): InventoryPlace {
-    return bay.key === "cargo" ? { kind: "cargo" } : { kind: "shipBay", bay: bay.key };
-  }
-
   // --- corporation hangar ---------------------------------------------------
 
   const selectedDivision = $derived(
@@ -834,16 +585,6 @@
     ) ?? null,
   );
 
-  /**
-   * Whether the character can see anything in a division. The server filters a
-   * division the character lacks the role for down to nothing, so an empty
-   * read is indistinguishable here from a genuinely empty division — which is
-   * why this only ever DIMS the label and never gates the action. If the player
-   * tries anyway, the server's own refusal is what they are shown.
-   */
-  function divisionLooksAccessible(division: { rows: readonly InventoryItemRow[] }): boolean {
-    return division.rows.length > 0;
-  }
 </script>
 
 <!--
@@ -913,7 +654,7 @@
                 disabled={busy}
                 onclick={() =>
                   run(() =>
-                    flow.transferItems([row.itemID], place, { kind: "cargo" }, qtyArg()),
+                    flow.transferItems([row.itemID], place, { kind: "cargo" }, parseMoveQuantity(moveQty)),
                   )}
               >
                 → Cargo
@@ -924,7 +665,7 @@
                 disabled={busy}
                 onclick={() =>
                   run(() =>
-                    flow.transferItems([row.itemID], place, { kind: "hangar" }, qtyArg()),
+                    flow.transferItems([row.itemID], place, { kind: "hangar" }, parseMoveQuantity(moveQty)),
                   )}
               >
                 → Hangar
@@ -984,12 +725,12 @@
             <p class="error">What is in here could not be read.</p>
           {:else if bay.items.length === 0}
             <p class="empty">Nothing in here yet.</p>
-          {:else if bayIsActionable(openShip.itemID, bay)}
+          {:else if bayIsActionable(openShip.itemID, bay, $inventory.activeShipID)}
             {@render itemGrid(bay.items, bayPlace(bay), "toHangar")}
           {:else}
             {@render itemGrid(bay.items, bayPlace(bay), "none", true)}
           {/if}
-          {#if bay.key === "cargo" && bayIsActionable(openShip.itemID, bay) && bay.items && bay.items.length > 0}
+          {#if bay.key === "cargo" && bayIsActionable(openShip.itemID, bay, $inventory.activeShipID) && bay.items && bay.items.length > 0}
             <!-- Stack-all is a cargo-hold convenience (`stackContainer` only
                  knows "cargo" and "hangar"); it is not offered for other bays. -->
             <p>

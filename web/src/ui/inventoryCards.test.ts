@@ -708,8 +708,15 @@ test("R8: the remaining tables still reflow inside their own scroll wrapper", ()
 // --- the panel computes nothing --------------------------------------------
 
 test("the panel invents no capacity: every number on screen came from the server", () => {
+  // The arithmetic moved to `inventoryModel.ts` when the docked station panel
+  // started sharing it, so the sweep follows it: BOTH the panel's own script
+  // and the model it calls have to be free of invention, or the rule could be
+  // satisfied by pushing a prediction one file across.
   const script = SOURCE.split("</script>")[0] ?? "";
-  const code = script.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  const model = readFileSync(path.join(UI_DIR, "inventoryModel.ts"), "utf8");
+  const strip = (text: string): string =>
+    text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  const code = `${strip(script)}\n${strip(model)}`;
   // The one derived number is the gauge's fill PERCENTAGE, which is a unit
   // conversion of two numbers the server gave, not a prediction.
   assert.match(code, /capacity\.used \/ capacity\.capacity/);
