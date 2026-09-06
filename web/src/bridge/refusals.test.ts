@@ -67,6 +67,8 @@ const EVEJS_REFUSAL_VOCABULARY: readonly string[] = [
   "DockingRequestDenied",
   "EffectAlreadyActive2",
   "EffectCrowdedOut",
+  // invbroker Handle_GetInventoryFromId — reachable on every cargo/bay bind.
+  "FakeItemNotFound",
   "ModuleReactivationDelayed2",
   "NoCharges",
   "NotEnoughCapacitorForOnline",
