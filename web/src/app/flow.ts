@@ -5933,8 +5933,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     freeFor: (bay: string | null) => number | null,
   ): Promise<void> {
     let moved = 0;
+    let planned = 0;
     let lastError: unknown = null;
     for (const transfer of planLootTransfers(rows, bays, freeFor)) {
+      planned += 1;
       try {
         await api.transferItems(
           transfer.itemIDs,
@@ -5955,11 +5957,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         lastError = error;
       }
     }
-    // Nothing asked for at all — every row fits nowhere — is not a failure. It
-    // is the block's cue to go and unload, which the loot deciders read from
-    // the holds. Only an attempt that was made AND refused counts.
     if (moved === 0 && lastError !== null) {
       throw lastError;
+    }
+    // ⚠ NOTHING PLANNED IS NOT NOTHING TO SAY. If the can had rows and not one
+    // of them could go anywhere, the ship has no room for THIS can — which is a
+    // different thing from the ship being full, and the deciders cannot tell it
+    // apart on their own: their "am I full?" check sums every hold, so a barge
+    // with a full ore hold and a half-empty cargo bay reads as having room while
+    // a can of pure ore still fits nowhere.
+    //
+    // Left silent, that is a spin: no call, no refusal, no progress, and the
+    // block re-targets the same can for ever. Saying so puts it in the refusal
+    // ledger, which backs off and sets that can aside after a few tries, so the
+    // block finishes and the script goes on to unload.
+    if (moved === 0 && planned === 0) {
+      throw new Error("There is no room aboard for what is in that container.");
     }
   }
 

@@ -550,6 +550,79 @@ test("a hold with no room at all provokes no transfer whatsoever", async () => {
   );
 });
 
+test("a can that fits nowhere is SAID so, rather than retried in silence", async () => {
+  // The spin this closes: a barge with a full ore hold and a half-empty cargo
+  // bay reads as "has room" to the block's own check, while a can of pure ore
+  // still fits nowhere. Planning nothing and staying quiet would re-target that
+  // can for ever with no call, no refusal and no progress.
+  const CONTAINER_ID = 80007;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "container",
+          name: "Jetcan",
+          ownerID: 555,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    // The ore hold is FULL; the block's own "am I full?" check still sees the
+    // cargo hold's room and carries on, which is exactly the trap.
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(16_000, []) };
+    if (path.startsWith(`/api/bridge/ship/${SHIP_ID}/bays`)) {
+      return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"], { ore: 16_000 }) };
+    }
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(
+          CONTAINER_ID,
+          [packedRow({ itemID: 90060, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 5_000, singleton: 0 })],
+          { "1230": 1 },
+        ),
+      };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-containers", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  flow.stopCustomBot();
+
+  assert.equal(
+    requests.some((r) => r.path === "/api/bridge/inventory/transfer"),
+    false,
+    "nothing was asked for, because nothing fits",
+  );
+  const refusals = store.customBot.get().refusals;
+  assert.ok(refusals.length > 0, "but the run SAYS it could not place the loot");
+  assert.match(refusals[0]!.words, /no room aboard/i);
+});
+
 test("a custom bot's loot-wrecks step dispatches openContainer + transferItems for an owned wreck (closes the pre-existing dispatch-test gap)", async () => {
   const WRECK_ID = 70001;
   const store = createClientStore();
