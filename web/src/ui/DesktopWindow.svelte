@@ -15,6 +15,7 @@
     onFocus,
     onClose,
     onToggleCollapse,
+    onToggleMinimize,
     onMove,
     onResize,
     children,
@@ -25,6 +26,8 @@
     onFocus: () => void;
     onClose: () => void;
     onToggleCollapse: () => void;
+    /** Put the window away. It stays open, and the strip is how it comes back. */
+    onToggleMinimize: () => void;
     onMove: (x: number, y: number) => void;
     onResize: (w: number, h: number) => void;
     children: Snippet;
@@ -104,6 +107,15 @@
   <header class="win-bar" onpointerdown={startDrag} ondblclick={onToggleCollapse}>
     <span class="win-title">{title}</span>
     <span class="win-actions">
+      <!-- Put away, shade, close — in order of how much they take away. -->
+      <button
+        type="button"
+        class="win-btn"
+        title="Put away"
+        aria-label="Put away"
+        onpointerdown={(e) => e.stopPropagation()}
+        onclick={onToggleMinimize}
+      >⌄</button>
       <button
         type="button"
         class="win-btn"

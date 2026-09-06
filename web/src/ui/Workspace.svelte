@@ -32,6 +32,7 @@
     moveWindow,
     resizeWindow,
     toggleCollapse,
+    toggleMinimize,
     focusedId as computeFocusedId,
     loadLayout,
     saveLayout,
@@ -149,6 +150,7 @@
   const move = (id: TabID, x: number, y: number): void => { wins = moveWindow(wins, id, x, y); };
   const resize = (id: TabID, w: number, h: number): void => { wins = resizeWindow(wins, id, w, h); };
   const collapse = (id: TabID): void => { wins = toggleCollapse(wins, id); };
+  const minimize = (id: TabID): void => { wins = toggleMinimize(wins, id); };
   const toggleDock = (): void => { dockCollapsed = !dockCollapsed; };
 
   // Restore the saved layout when a character comes online (keyed by characterID)
@@ -271,6 +273,7 @@
             onFocus={focus}
             onClose={close}
             onToggleCollapse={collapse}
+            onToggleMinimize={minimize}
             onMove={move}
             onResize={resize}
             onOpen={open}
@@ -289,16 +292,19 @@
           onResize={(w) => (dockWidth = w)}
         />
         {#if !isDocked}
+          <!-- The ship HUD is a CELL of the work area now, not a strip under it:
+               the radar takes the top-left, the HUD the bottom-left, and the
+               dock column spans both. Docked there is neither a radar nor a
+               HUD, so the same grid collapses to one row and the desktop keeps
+               the whole left side. -->
+          <ErrorBoundary name="HUD bar">
+            <HudBar {store} {flow} onOpen={open} />
+          </ErrorBoundary>
           <ErrorBoundary name="Locked targets">
             <TargetsPanel {store} x={targetsX} y={targetsY} onMove={(nx, ny) => { targetsX = nx; targetsY = ny; }} />
           </ErrorBoundary>
         {/if}
       </div>
-      {#if !isDocked}
-        <ErrorBoundary name="HUD bar">
-          <HudBar {store} {flow} onOpen={open} />
-        </ErrorBoundary>
-      {/if}
     </div>
   </div>
 {/if}

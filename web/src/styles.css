@@ -2555,13 +2555,42 @@
     gap: 0.6rem;
     padding: 0.6rem;
   }
+  /* THE WORK AREA IS A GRID, and it is the same grid in both states.
+   *
+   * Docked there is one row: the window surface on the left, the Station panel
+   * on the right. In space the left side splits — the radar keeps the top and
+   * the ship HUD takes a fixed strip beneath it — while the dock column spans
+   * both rows, so the overview stays full height.
+   *
+   * ⚠ THE HUD IS A CELL, NOT A FOOTER. It used to sit under the whole work area,
+   * which meant the dock column stopped short of the bottom of the screen for
+   * no reason. Moving it inside costs nothing docked, where the row does not
+   * exist at all.
+   *
+   * ⚠ AND THE WINDOW SURFACE IS THE RADAR'S CELL. That is what gives the
+   * handoff's "floating windows live only inside the radar rect" for free: the
+   * windows are children of `.desktop`, and every clamp in DesktopWindow and
+   * Desktop already measures `.desktop`. Nothing about the clamping changed. */
   .work-main {
     position: relative;
     flex: 1;
     min-height: 0;
-    display: flex;
+    min-width: 0;
+    display: grid;
     gap: 0.6rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "surface panel";
   }
+  .workspace.in-space .work-main {
+    grid-template-rows: minmax(0, 1fr) 17rem;
+    grid-template-areas:
+      "surface panel"
+      "hud     panel";
+  }
+  .work-main > .desktop { grid-area: surface; }
+  .work-main > .dock-panel { grid-area: panel; }
+  .work-main > .hud-bar { grid-area: hud; }
 
   /* The Neocom inside the workspace: full-height, its own scroll, no sticky. */
   .workspace .neocom {
@@ -3005,8 +3034,8 @@
    * faint grid gives it "desktop" depth without competing with panel content. */
   .desktop {
     position: relative;
-    flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
     border: 1px solid var(--color-line);
     background-color: var(--color-bg);
@@ -3250,7 +3279,7 @@
   /* The fixed top-right dock panel (overview / station services), collapsible. */
   .dock-panel {
     position: relative;
-    flex: 0 0 auto;
+    min-height: 0;
     width: 22rem;
     max-width: 60vw;
     display: flex;
@@ -3305,6 +3334,53 @@
     color: var(--color-muted);
   }
   .dock-expand:hover .dock-expand-label { color: var(--color-text-bright); }
+
+  /* THE WINDOW STRIP — one chip per open window, at the surface's bottom-left.
+   *
+   * ⚠ IT IS THE ONLY WAY BACK TO A MINIMIZED WINDOW that does not require the
+   * player to remember which launcher entry it was. A hide with no visible
+   * handle is a window they have lost, so the strip lists windows that are on
+   * the surface too and the DOT says which are which — the chip is never the
+   * only thing that carries the state, and neither is its colour. */
+  .win-strip {
+    position: absolute;
+    left: 0.6rem;
+    bottom: 0.6rem;
+    z-index: 500;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    max-width: calc(100% - 1.2rem);
+  }
+  .win-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 26px;
+    padding: 0 0.55rem;
+    background: #1f3a55;
+    border: 1px solid var(--color-accent);
+    color: var(--color-text-bright);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .win-chip-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--color-accent);
+  }
+  .win-chip.away {
+    background: var(--color-panel-2);
+    border-color: var(--color-line-strong);
+    color: var(--color-cell);
+  }
+  .win-chip.away .win-chip-dot { background: #3a4a5c; }
+  .win-chip:hover { border-color: var(--color-accent-bright); }
 
   /* Drag-to-resize the dock panel from its left edge (the "expandable" panel). */
   .dock-resize {

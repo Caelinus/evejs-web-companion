@@ -187,7 +187,7 @@ function sha256(text: string): string {
 
 test("the extractor is not vacuous: it finds the frame's rules", () => {
   const rules = dockFrameRules();
-  assert.equal(rules.split("\n").length, 16, "the dock frame's rule count changed");
+  assert.equal(rules.split("\n").length, 17, "the dock frame's rule count changed");
   assert.match(rules, /\.dock-panel-body\{[^}]*overflow: auto/);
   assert.match(rules, /\.dock-overview\{/);
 });
@@ -197,9 +197,17 @@ test("⚠ the dock frame's CSS is shared with the in-space Overview and is uncha
   // DON'T re-bless it. Scope the change — put it on the station panel's own
   // root (`.stn-panel`), the way `.hangar` carries the Pilot Hangar's palette.
   // Re-bless it only for a change that is genuinely meant for BOTH states.
+  //
+  // ⚠ RE-BLESSED ONCE, for the in-space redesign's Phase 1. The work area became
+  // a GRID — the window surface is the radar's cell, the ship HUD is a cell
+  // beneath it, and the dock column spans both rows — so the frame lost
+  // `flex: 0 0 auto`, which means nothing to a grid item, and gained
+  // `min-height: 0`, which is what lets its own scroller work inside a grid row.
+  // Both apply identically to the Station panel and to the Overview, which is
+  // exactly the test the paragraph above sets.
   assert.equal(
     sha256(dockFrameRules()),
-    "37687642292c11e023978bfe4e9f69b445aea07cac635a5894954e785b558314",
+    "173d818cabec27d48b7cc88b028d699545623719236a04a10d238e969ce0bf57",
   );
 });
 

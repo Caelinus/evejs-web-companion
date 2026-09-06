@@ -106,26 +106,43 @@ test("in space the same workspace is the radar, the HUD and the overview", () =>
   assert.doesNotMatch(body, /class="stn-host"/, "the station panel leaked into space");
 });
 
+/**
+ * The condition of the `{#if}` a component is drawn inside, or null.
+ *
+ * ⚠ The nearest ENCLOSING conditional, not "a mention within N characters".
+ * The first version of this looked back a fixed 400 chars and reported a false
+ * failure the moment a comment was written between the guard and the component
+ * — which is exactly the kind of test that gets weakened until it proves
+ * nothing.
+ */
+function enclosingCondition(markup: string, tag: string): string | null {
+  const at = markup.indexOf(`<${tag}`);
+  if (at === -1) return null;
+  const opened = markup.lastIndexOf("{#if ", at);
+  if (opened === -1) return null;
+  return markup.slice(opened, markup.indexOf("}", opened) + 1);
+}
+
 test("⚠ every in-space-only piece is mounted behind an isDocked guard", () => {
   // A grep rather than an argument, the same way the station panel's own suite
   // proves it cannot be reached from space. A render only proves what the
   // initial store reaches; this covers the branches it does not.
   const ws = source("Workspace.svelte");
-  for (const piece of ["Tactical", "HudBar", "TargetsPanel"]) {
-    const at = ws.indexOf(`<${piece}`);
-    if (at === -1) continue; // it may live in Desktop rather than Workspace
-    const before = ws.slice(Math.max(0, at - 400), at);
-    assert.match(before, /!isDocked/, `${piece} is mounted without an isDocked guard`);
+  for (const piece of ["HudBar", "TargetsPanel"]) {
+    const condition = enclosingCondition(ws, piece);
+    assert.notEqual(condition, null, `${piece} is no longer mounted by Workspace`);
+    assert.match(condition ?? "", /!isDocked/, `${piece} is mounted without an isDocked guard`);
   }
-  // Tactical is mounted by Desktop, which takes isDocked as a prop.
-  const desktop = source("Desktop.svelte");
-  const tacticalAt = desktop.indexOf("<Tactical");
-  assert.notEqual(tacticalAt, -1, "Desktop no longer mounts the radar");
-  assert.match(
-    desktop.slice(Math.max(0, tacticalAt - 300), tacticalAt),
-    /!isDocked/,
-    "the radar is drawn without an isDocked guard",
-  );
+  // The radar is mounted by Desktop, which takes isDocked as a prop.
+  const radar = enclosingCondition(source("Desktop.svelte"), "Tactical");
+  assert.notEqual(radar, null, "Desktop no longer mounts the radar");
+  assert.match(radar ?? "", /!isDocked/, "the radar is drawn without an isDocked guard");
+});
+
+test("the guard check above is not vacuous — it catches an unguarded mount", () => {
+  assert.equal(enclosingCondition("{#if !isDocked}<HudBar />", "HudBar"), "{#if !isDocked}");
+  assert.equal(enclosingCondition("{#if anything}<HudBar />", "HudBar"), "{#if anything}");
+  assert.equal(enclosingCondition("<HudBar />", "HudBar"), null, "no guard at all is null");
 });
 
 // --- 2. the window model is shared, so its contract is pinned here -----------

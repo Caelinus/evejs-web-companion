@@ -33,6 +33,7 @@
     onFocus,
     onClose,
     onToggleCollapse,
+    onToggleMinimize,
     onMove,
     onResize,
     onOpen,
@@ -46,6 +47,7 @@
     onFocus: (id: TabID) => void;
     onClose: (id: TabID) => void;
     onToggleCollapse: (id: TabID) => void;
+    onToggleMinimize: (id: TabID) => void;
     onMove: (id: TabID, x: number, y: number) => void;
     onResize: (id: TabID, w: number, h: number) => void;
     onOpen: (id: TabID) => void;
@@ -55,8 +57,11 @@
     sessions?: readonly Session[];
   } = $props();
 
-  // Only real window tabs valid in the current state get rendered.
-  const shown = $derived(wins.filter((w) => isWindowTab(w.id) && isTabVisible(w.id, isDocked)));
+  // Every window this state can show, minimized or not — the strip lists them
+  // all, because a window with no visible handle is a window the player has lost.
+  const openHere = $derived(wins.filter((w) => isWindowTab(w.id) && isTabVisible(w.id, isDocked)));
+  // Only the ones actually on the surface get drawn.
+  const shown = $derived(openHere.filter((w) => !w.minimized));
 
   let deskEl = $state<HTMLElement | null>(null);
 
@@ -75,6 +80,9 @@
       const areaW = el.clientWidth;
       const areaH = el.clientHeight;
       if (areaW <= 0 || areaH <= 0) return;
+      // ⚠ Over `wins`, not `shown`: a window put away while the surface was
+      // roomy has to be pulled back inside it BEFORE it is restored, or it
+      // comes back with its title bar past the edge and no handle to drag.
       for (const win of wins) {
         const w = Math.min(win.w, Math.max(MIN_W, areaW));
         const h = win.collapsed ? win.h : Math.min(win.h, Math.max(MIN_H, areaH));
@@ -116,10 +124,32 @@
       onFocus={() => onFocus(win.id)}
       onClose={() => onClose(win.id)}
       onToggleCollapse={() => onToggleCollapse(win.id)}
+      onToggleMinimize={() => onToggleMinimize(win.id)}
       onMove={(x, y) => onMove(win.id, x, y)}
       onResize={(w, h) => onResize(win.id, w, h)}
     >
       <PanelHost {store} {flow} tab={win.id} onOpen={onOpen} {sessions} />
     </DesktopWindow>
   {/each}
+  {#if openHere.length > 0}
+    <!-- THE WINDOW STRIP. One chip per open window, whether it is on the
+         surface or put away — the dot says which. It is the only way back to a
+         minimized window that does not require remembering which launcher entry
+         it was, and it doubles as "what have I got open" without counting
+         overlapping title bars. -->
+    <div class="win-strip" role="group" aria-label="Open windows">
+      {#each openHere as win (win.id)}
+        <button
+          type="button"
+          class="win-chip"
+          class:away={win.minimized}
+          aria-pressed={!win.minimized}
+          title={win.minimized ? `Bring back ${tabLabel(win.id)}` : `Put away ${tabLabel(win.id)}`}
+          onclick={() => onToggleMinimize(win.id)}
+        >
+          <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(win.id)}
+        </button>
+      {/each}
+    </div>
+  {/if}
 </div>
