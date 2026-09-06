@@ -197,3 +197,79 @@ test("R7d — no raw ids reach the player's eyes", () => {
     );
   }
 });
+
+// --- press-and-hold to overload ----------------------------------------------
+//
+// The gesture that guards overloading changed from shift-click to a hold. These
+// are source claims rather than render claims because SSR runs no handlers at
+// all: what can be proven here is that the wiring exists and that the OLD
+// wiring is gone, which is exactly the pair that rots when someone "restores"
+// the familiar modifier.
+
+const RACK_SOURCE = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
+const CSS_SOURCE = readFileSync(path.join(UI_DIR, "..", "styles.css"), "utf8");
+
+test("⚠ SHIFT-CLICK IS GONE — it does not exist on a touch screen", () => {
+  assert.equal(
+    /shiftKey/.test(RACK_SOURCE),
+    false,
+    "shift-click came back; on the touch tier this panel now has, it is unreachable",
+  );
+  assert.equal(
+    /Shift-click/.test(RACK_SOURCE),
+    false,
+    "the tooltip still names a modifier the player may not be able to press",
+  );
+});
+
+test("the hold is wired for a pointer AND for a keyboard", () => {
+  for (const handler of ["onpointerdown", "onpointerup", "onpointerleave", "onkeydown", "onkeyup"]) {
+    assert.match(RACK_SOURCE, new RegExp(handler), `no ${handler} — the press is incomplete`);
+  }
+  // ⚠ The keyboard path must suppress the browser's own click for the key, or a
+  // tap fires the module twice. Trading one inaccessible gesture for another is
+  // not a fix.
+  assert.match(RACK_SOURCE, /event\.preventDefault\(\)/);
+});
+
+test("a press that slides off the button does nothing at all", () => {
+  // Not the overload, and not the activation either: dragging off a control is
+  // how a player takes a press back.
+  assert.match(RACK_SOURCE, /function pressCancel\(\)/);
+  assert.match(RACK_SOURCE, /onpointerleave=\{pressCancel\}/);
+});
+
+test("the slot ring is a drawn CIRCLE, not a rounded corner (R53)", () => {
+  // R53 squared this app's corners and squareCorners.test.ts holds them squared.
+  // The round slot face is an SVG circle INSIDE the square tile — the same
+  // exception `.fit-ring-guide` already is.
+  assert.match(RACK_SOURCE, /<circle class="slot-ring-track"/);
+  const slotRule = CSS_SOURCE.slice(
+    CSS_SOURCE.indexOf("  .module-slot {"),
+    CSS_SOURCE.indexOf("button.module-slot:hover"),
+  );
+  assert.ok(slotRule.length > 0, "the .module-slot rule is not where this test looks");
+  assert.equal(
+    /border-radius/.test(slotRule),
+    false,
+    "the tile was rounded — draw the circle, do not round the box",
+  );
+});
+
+// --- rack heat: a stub that admits it ----------------------------------------
+
+test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
+  const body = renderRack();
+  assert.match(body, /class="rack-heat/, "the heat bar is missing entirely");
+  assert.match(visibleText(body), /not known/, "the heat bar invented a reading");
+  // The trap — damage is the SCAR heat leaves behind, not the heat in the rack
+  // now — is proven on damaged modules in `moduleRack.test.ts`. What is proven
+  // HERE is the rendering half: no fill element is drawn at all, so there is
+  // nothing for a later "just show something" change to quietly start filling.
+  assert.equal(
+    /rack-heat-fill/.test(body),
+    false,
+    "a heat fill was drawn from a reading this client does not have",
+  );
+  assert.equal(/Heat 0/.test(visibleText(body)), false, "not known must never render as 0");
+});

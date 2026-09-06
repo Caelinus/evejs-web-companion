@@ -64,6 +64,23 @@ export interface RackRow {
   readonly family: RackFamily;
   readonly label: string;
   readonly slots: readonly RackSlotVM[];
+  /**
+   * ⚠ HOW HOT THIS RACK IS RUNNING, 0..1 — AND IT IS ALWAYS `null` TODAY.
+   *
+   * There is no heat model anywhere in this client: not in the store, not in
+   * the bridge, not on the BFF. Greps for heatState / heatLevel / rackHeat /
+   * heatCapacity / heatAttenuation across web/src and src/server.js find
+   * nothing. The in-space handoff draws a per-rack heat bar, so the bar is
+   * built and wired — to this, which reads UNKNOWN until a real reading
+   * arrives (a separate piece of work).
+   *
+   * ⚠ IT MUST NEVER BE FILLED IN FROM MODULE DAMAGE. Damage is what heat DID;
+   * it is not how hot the rack is now, and averaging it into this field would
+   * put a fabricated reading on a gauge a pilot uses to decide whether to keep
+   * overloading. Unknown renders as "not known" over a flat track — never 0,
+   * because an empty bar reads as "cold".
+   */
+  readonly heat: number | null;
 }
 
 /**
@@ -77,6 +94,12 @@ export function buildModuleRack(
   overloadedModuleIDs: readonly number[] | null | undefined = null,
   moduleDamage: Readonly<Record<number, number>> | null | undefined = null,
   weaponBanks: Readonly<Record<number, readonly number[]>> | null | undefined = null,
+  /**
+   * ⚠ HOW HOT EACH RACK IS RUNNING, and nothing passes it yet — see RackRow.heat.
+   * It is a parameter rather than a hardcoded null so the day a heat reading
+   * exists, wiring it up is one call site and no UI change at all.
+   */
+  rackHeat: Readonly<Partial<Record<RackFamily, number>>> | null | undefined = null,
 ): readonly RackRow[] {
   const active = new Set(activeModuleIDs ?? []);
   // null/absent stays UNKNOWN rather than collapsing to "nothing is hot".
@@ -100,6 +123,7 @@ export function buildModuleRack(
   return RACK_FAMILIES.map((family) => ({
     family,
     label: RACK_LABELS[family],
+    heat: rackHeat?.[family] ?? null,
     slots: slotsOfFamily(slots, family).map((slot) => ({
       module: slot.module
         ? {
@@ -135,6 +159,59 @@ export function buildModuleRack(
 
 /** What one click on a rack module means right now. */
 export type RackClickAction = "activate" | "deactivate" | null;
+
+/**
+ * How long a press has to be held before it overloads, in milliseconds.
+ *
+ * ⚠ OVERLOADING IS BEHIND A DELIBERATE SECOND GESTURE, and always has been —
+ * it was shift-click before this. Overloading damages the module, so it must
+ * not share the plain click that fires it. A hold is the better guard of the
+ * two because it works on a touch screen, which shift-click never did, and
+ * because the ring that fills during it says what is about to happen.
+ */
+export const OVERLOAD_HOLD_MS = 600;
+
+export type RackHoldAction = "overload" | "stopOverload" | null;
+
+/**
+ * What holding a slot down would do, or null when it would do nothing.
+ *
+ * ⚠ AN UNKNOWN OVERLOAD STATE IS NOT "COOL". `overloaded: null` means the
+ * server did not tell us, so there is no honest toggle to offer: the hold does
+ * nothing rather than guessing which way to flip it. An OFFLINE module is inert
+ * here for the same reason it is inert to a click.
+ */
+export function rackHoldAction(module: RackModule | null): RackHoldAction {
+  if (!module || !module.online || module.overloaded === null) {
+    return null;
+  }
+  return module.overloaded ? "stopOverload" : "overload";
+}
+
+/**
+ * The size of a slot's heat-damage wedge, in the 42-unit slot box — or 0 when
+ * there is no damage to draw.
+ *
+ * ⚠ `null` DAMAGE DRAWS NOTHING, and that is not the same as 0. "We could not
+ * read the fit" and "this module is intact" must not look alike, so an unread
+ * fit gets no wedge rather than an empty one.
+ */
+export function rackDamageWedge(module: RackModule | null): number {
+  if (!module || module.damage === null || module.damage <= 0) {
+    return 0;
+  }
+  return 6 + Math.min(1, module.damage) * 10;
+}
+
+/** Which of the three damage bands a wedge is in. Null when there is no wedge. */
+export function rackDamageBand(module: RackModule | null): "warm" | "hot" | "burning" | null {
+  if (!module || module.damage === null || module.damage <= 0) {
+    return null;
+  }
+  if (module.damage < 0.3) return "warm";
+  if (module.damage < 0.6) return "hot";
+  return "burning";
+}
 
 /**
  * The click decision, kept out of the component so it is testable: an ACTIVE
@@ -206,12 +283,17 @@ export function rackSlotTitle(
     return `${name} — offline (bring it online from the Fitting window)${loaded}${wear}`;
   }
   // Overloading is destructive, so the tile SAYS it is running hot rather than
-  // relying on a colour, and names the modifier that toggles it.
+  // relying on a colour, and names the gesture that toggles it.
+  //
+  // ⚠ "HOLD", NOT "SHIFT-CLICK". The gesture changed with the in-space
+  // redesign because shift-click does not exist on a touch screen, and this
+  // panel has a touch tier — see OVERLOAD_HOLD_MS. The words have to move with
+  // it: a tooltip naming a modifier the player cannot press is worse than none.
   const heat =
     module.overloaded === true
-      ? " Overloaded — running hot and taking damage. Shift-click to stop."
+      ? " Overloaded — running hot and taking damage. Hold to stop."
       : module.overloaded === false
-        ? " Shift-click to overload."
+        ? " Hold to overload."
         : "";
   return module.active
     ? `${name} — active. Click to switch off.${loaded}${banked}${wear}${heat}`

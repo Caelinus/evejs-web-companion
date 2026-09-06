@@ -3404,37 +3404,90 @@
    * a second row (the body scrolls sideways when there are many locks). */
   .targets-panel .target-bracket { flex-wrap: nowrap; margin: 0; }
 
-  /* The bottom HUD bar (in space only). Clusters reuse .hud-cluster / .hud-nav. */
+  /* ------------------------------------------- the HUD cell (in space only) --
+   * Direction 1C's bottom-left cell: a named header, the two instruments, and a
+   * footer carrying what the ship is doing plus Stop.
+   *
+   * ⚠ THE FOOTER IS A GRID ROW, NOT SOMETHING PINNED. `auto 1fr auto` means the
+   * body absorbs every spare pixel and the footer sits at the bottom without
+   * being taken out of flow — so Stop cannot end up underneath the rack when
+   * the fit is long, which is precisely when it is needed.
+   *
+   * It used to be a four-column bar (gauges | rack | shots | nav). The shots
+   * log moved to a window and the nav buttons went entirely — see HudBar.svelte
+   * for where and why. */
   .hud-bar {
     flex: 0 0 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 2fr 3fr 2.4fr 1.3fr;
-    gap: 0.6rem;
+    grid-template-rows: auto 1fr auto;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
   }
+  .hud-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 32px;
+    padding: 0 0.6rem;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-panel-2);
+    min-width: 0;
+  }
+  .hud-head-tag {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted);
+  }
+  .hud-head-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-bright);
+    font-weight: 600;
+  }
+  .hud-head-hull {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  .hud-body {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    gap: 0.6rem;
+    padding: 0.6rem;
+    min-height: 0;
+    overflow: auto;
+  }
+  .hud-foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.45rem 0.6rem;
+    border-top: 1px solid var(--color-line);
+    background: var(--color-panel-2);
+  }
+  .hud-foot-state {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  /* Stop keeps a full touch target (R8) and never shrinks below its words —
+   * it is the one control here a pilot presses without looking. */
+  .hud-stop { flex: 0 0 auto; min-height: 40px; white-space: nowrap; }
+  .hud-foot-error { flex: 1 0 100%; font-size: 0.85rem; }
 
-  /* Shots-fired cluster in the HUD (moved out of the Overview cockpit). A short
-   * scrolling combat log so the bar height stays in line with the gauges. */
-  .hud-shots { min-width: 0; }
-  .hud-shots-empty { margin: 0.3rem 0 0; color: var(--color-muted); font-size: 0.85rem; }
-  .hud-shots-list {
-    list-style: none;
-    margin: 0.3rem 0 0;
-    padding: 0;
-    max-height: 7.5rem;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-  .hud-shots-list li {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.15rem 0;
-    border-bottom: 1px solid var(--color-row-line);
-  }
-  .hud-shot-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hud-shot-meta { flex: 0 0 auto; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+  /* The HUD cell owns its own frame, so its clusters must not draw a second
+   * one inside it — two nested boxes around one instrument reads as a bug. */
+  .hud-bar .hud-cluster { background: none; border: 0; padding: 0; }
 
   /* Narrow screens: stack the rail on top and drop the dock panel below the
    * desktop. The desktop windowing is a large-screen feature; this only keeps
@@ -3453,7 +3506,7 @@
     .desktop { min-height: 60vh; }
     .dock-panel { width: auto; max-width: none; }
     .dock-panel.collapsed { width: auto; }
-    .hud-bar { grid-template-columns: 1fr; }
+    .hud-body { grid-template-columns: 1fr; }
   }
 
   /* ============================================== notices: toasts + log (R80) --
@@ -4144,23 +4197,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .hud-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-  .hud-nav-item {
-    min-height: 40px;
-    text-align: left;
-    background: var(--color-panel-2);
-    border: 1px solid var(--color-line);
-    color: var(--color-text);
-  }
-  .hud-nav-item:hover {
-    border-color: var(--color-accent);
-    color: var(--color-text-bright);
-  }
-
   /* ============================================ the circular ship HUD (R71) --
    * EVE's own instrument: shield / armor / hull as three concentric arcs around
    * a discrete capacitor ring, with the charge in the middle. The geometry is
@@ -4221,6 +4257,24 @@
   .wheel-cap.filled { stroke: var(--color-capacitor); }
   /* The charge sits in the gap the arcs deliberately leave at the bottom... but
    * centred in the wheel, which is where the eye goes. */
+  /* THE SPEED, IN THE GAP THE GAUGES LEAVE. The arcs sweep 240 degrees from
+   * 150, which puts a 120-degree notch at the bottom — see shipHudArcs.ts. That
+   * notch is not spare room, it is where this reading goes: speed and condition
+   * belong to the same glance, and putting speed outside the wheel would make a
+   * pilot look in two places. */
+  .wheel-speed {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    transform: translateX(-50%);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    color: var(--color-muted);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
   .wheel-centre {
     position: absolute;
     inset: 0;
@@ -4309,12 +4363,16 @@
     min-width: 0;
   }
   .module-slot {
-    width: 2.2rem;
-    height: 2.2rem;
+    position: relative;
+    /* 42px, the handoff's slot box — and, not by accident, a real touch target
+     * where the old 2.2rem (35px) was not. */
+    width: 42px;
+    height: 42px;
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
+    /* NOT `overflow: hidden` any more — it clipped the slot ring's stroke. The
+     * icon is sized to the tile, so there is nothing left to clip. */
     border: 1px solid var(--color-line);
     background: var(--color-panel-3);
     color: var(--color-muted);
@@ -4382,25 +4440,110 @@
       transparent 0
     );
   }
+  /* Overloaded: a pulsing dot in the corner of the tile.
+   *
+   * It replaced a 9px flame emoji. An emoji renders at the mercy of whatever
+   * font the platform picked and at that size several of them are unreadable
+   * smudges; a dot is drawn by the same renderer as everything else here. The
+   * state is still carried in WORDS by the button's own title — this is the
+   * glance, never the only telling. */
   .module-heat {
     position: absolute;
-    right: -1px;
-    bottom: -2px;
-    font-size: 9px;
-    line-height: 1;
+    right: 2px;
+    bottom: 2px;
+    width: 5px;
+    height: 5px;
+    background: var(--color-danger);
+    animation: module-heat-pulse 1.1s ease-in-out infinite alternate;
     pointer-events: none;
   }
-  /* Burnt out: the server will not run it at all until it is repaired. */
+  @keyframes module-heat-pulse {
+    from { opacity: 0.35; }
+    to { opacity: 1; }
+  }
+  /* Burnt out: the server will not run it at all until it is repaired. A cross
+   * drawn from two gradients — no glyph, for the reason above. */
   .module-slot:has(.module-burnt) { position: relative; opacity: 0.55; }
   .module-burnt {
     position: absolute;
-    left: -1px;
-    bottom: -2px;
-    font-size: 9px;
-    line-height: 1;
-    color: var(--color-danger);
+    inset: 0;
     pointer-events: none;
+    background:
+      linear-gradient(to bottom right, transparent calc(50% - 1px), var(--color-danger) calc(50% - 1px), var(--color-danger) calc(50% + 1px), transparent calc(50% + 1px)),
+      linear-gradient(to bottom left, transparent calc(50% - 1px), var(--color-danger) calc(50% - 1px), var(--color-danger) calc(50% + 1px), transparent calc(50% + 1px));
   }
+
+  /* ------------------------------------------------------ the slot ring ----
+   * The round face the retail rack has, drawn as an SVG circle INSIDE a square
+   * tile.
+   *
+   * ⚠ IT IS NOT `border-radius`, AND THAT IS DELIBERATE. R53 squared this app's
+   * corners and `squareCorners.test.ts` holds them squared. This is the same
+   * exception `.fit-ring-guide` already is: a geometric instrument drawn inside
+   * the box, not a rounded frame around it. */
+  .slot-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .slot-ring circle {
+    fill: none;
+    stroke-width: 2.5;
+  }
+  .slot-ring-track { stroke: var(--color-line); }
+  /* THE HEAT-DAMAGE WEDGE — how burnt this module already is. Three bands, and
+   * each is also a different arc LENGTH (see rackDamageWedge), so the reading
+   * never depends on telling two colours apart. */
+  .slot-ring-wear { stroke-width: 3.5; stroke-linecap: butt; }
+  .slot-ring-wear.warm { stroke: var(--color-warn); }
+  .slot-ring-wear.hot { stroke: color-mix(in srgb, var(--color-danger) 65%, var(--color-warn)); }
+  .slot-ring-wear.burning { stroke: var(--color-danger); }
+  /* The hold, filling towards an overload. The only warning a player gets
+   * before a module starts damaging itself, so it is drawn bright and on the
+   * tile being held. */
+  .slot-ring-hold {
+    stroke: var(--color-danger);
+    stroke-width: 3.5;
+    stroke-linecap: butt;
+  }
+  .module-slot.holding { border-color: var(--color-danger); }
+
+  /* ------------------------------------------------ rack heat (A STUB) -----
+   * ⚠ THE TRACK IS EMPTY BECAUSE THE READING DOES NOT EXIST, and the row says
+   * so in words. Do NOT give `.rack-heat.unknown` a fill, a shimmer, or a
+   * "probably fine" tint: an empty heat bar reads as COLD, and a pilot who
+   * believes a fabricated cold rack overloads into a burnout. */
+  .rack-heat {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+  }
+  .rack-heat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-muted);
+  }
+  .rack-heat-track {
+    display: block;
+    width: 2.5rem;
+    height: 4px;
+    background: var(--color-field);
+    border: 1px solid var(--color-line);
+  }
+  .rack-heat-fill { display: block; height: 100%; background: var(--color-danger); }
+  .rack-heat-value {
+    font-size: 10px;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .rack-heat.unknown .rack-heat-value { font-style: italic; }
 
   /* The repair list under the rack. Repairing consumes nanite paste, so it is a
    * deliberate control rather than another modifier on a tile. */

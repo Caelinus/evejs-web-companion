@@ -285,33 +285,35 @@ test("docked, the primary control is Undock — and it is HERE, not on another t
   assert.equal(/Stop the ship/.test(text), false, "a docked ship has no engines to cut");
 });
 
-test("in space, the primary control is Stop", () => {
-  assert.match(visibleText(renderWith(inSpaceStore())), /Stop the ship/);
-});
-
-test("STOP IS NEVER DISABLED — not by a shared flag, not by its own", () => {
+test("in space, the strip no longer carries Stop — the HUD does", () => {
+  // ⚠ THIS ASSERTION IS THE INVERSE OF THE ONE IT REPLACED, AND DELIBERATELY.
+  //
+  // Stop used to be the strip's in-space control. It moved to the HUD footer,
+  // which is always on screen in space, because this window is one a player has
+  // to OPEN — and the control you reach for when things are going wrong must
+  // not be behind that. The rule that travels with it ("never disabled, never
+  // guarded") is now asserted in `chromeRender.test.ts` against `HudBar`; both
+  // halves of it, so nothing was dropped in the move.
+  //
+  // What is checked here is only that it did not end up in BOTH places: two
+  // Stops on screen means two places a refusal could be reported and one of
+  // them will be the one the player is not looking at.
   const body = renderWith(inSpaceStore());
-  // Find the Stop button's own markup and assert it carries no disabled state.
-  const index = body.indexOf("Stop the ship");
-  assert.ok(index > 0, "the Stop control is rendered");
-  const openTag = body.lastIndexOf("<button", index);
-  const buttonTag = body.slice(openTag, index);
+  const from = body.indexOf("flight-strip");
+  assert.ok(from > 0, "the flight strip is rendered at all");
+  // The strip's OWN markup, bounded at its closing tag — not a fixed window,
+  // which would quietly stop covering the strip the moment it grew.
+  const strip = body.slice(from, body.indexOf("</section>", from));
+  assert.ok(strip.length > 0, "the strip section is not closed");
   assert.equal(
-    /disabled/.test(buttonTag),
+    strip.includes("Stop the ship"),
     false,
-    "Stop must never render a disabled attribute — see the comment in Overview.svelte",
+    "the strip drew Stop again — it belongs to the HUD footer now",
   );
-});
-
-test("Stop is not silently swallowed by a busy guard either", () => {
-  // The other half of the same rule: an enabled button that drops the click
-  // because something else is in flight is the same failure, wearing a
-  // friendlier face. Stop routes through the UNGUARDED path.
-  assert.match(
-    SOURCE,
-    /runUnguarded\(\(\) => flow\.stopShip\(\)\)/,
-    "Stop must call flow.stopShip through the unguarded runner",
-  );
+  // Non-vacuous: the slice really is the strip, and really does still hold the
+  // strip's own content. Without this the assertion above passes on an empty
+  // string.
+  assert.match(strip, /strip-where/, "the slice is not the flight strip");
 });
 
 // --- the structural claims --------------------------------------------------

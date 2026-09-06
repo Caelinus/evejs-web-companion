@@ -298,7 +298,9 @@
                HUD, so the same grid collapses to one row and the desktop keeps
                the whole left side. -->
           <ErrorBoundary name="HUD bar">
-            <HudBar {store} {flow} onOpen={open} />
+            <!-- No `onOpen`: the HUD's nav buttons went, because every one
+                 of them is a Neocom rail entry that is on screen anyway. -->
+            <HudBar {store} {flow} />
           </ErrorBoundary>
           <ErrorBoundary name="Locked targets">
             <TargetsPanel {store} x={targetsX} y={targetsY} onMove={(nx, ny) => { targetsX = nx; targetsY = ny; }} />

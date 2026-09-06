@@ -1,24 +1,35 @@
 <script lang="ts">
-  // The persistent flying HUD — a bottom bar shown only in space (the retail
-  // client's spatial arrangement): the ship's resource gauges, the module rack,
-  // the live "Shots fired" combat log, and quick-nav buttons for the flight
-  // panels. Reads the last space snapshot; opening Flight/Mining raises those
-  // windows on the desktop via onOpen.
+  // The persistent flying HUD — the bottom-left cell of the in-space workspace
+  // (direction 1C): the ship's gauges and its module rack, under a header that
+  // names the hull and over a footer that says what the ship is doing and offers
+  // the one control a pilot reaches for when it is going wrong.
+  //
+  // ⚠ WHAT LEFT THIS COMPONENT, AND WHERE IT WENT. Two things used to be here
+  // and are not any more. Neither was DELETED — a HUD that quietly drops
+  // capability is a worse HUD:
+  //
+  //   • "Shots fired" — the combat log. It is a scrolling list of text, which is
+  //     the one shape that cannot share a cell with two instruments; it now
+  //     lives in the transitional `Overview` window (and gets its own panel in
+  //     Phase 4). The HUD kept the things you read at a glance.
+  //   • The Flight / Mining nav buttons — every one of them is a rail entry in
+  //     the Neocom, which is on screen at the same time. Two ways to open the
+  //     same window, one of them costing a row of the HUD, is not a feature.
+  //
+  // ⚠ AND WHAT ARRIVED. Stop moved IN, out of the transitional window's flight
+  // strip. It is the control a pilot needs without hunting, so it belongs on the
+  // surface that is always on screen — and it must never be disabled; see below.
   import ModuleRack from "./ModuleRack.svelte";
   import ShipHud from "./ShipHud.svelte";
-  import { SPACE_PANELS } from "./shell.ts";
+  import { shipStateSentence } from "./shipHud.ts";
   import { resolvedName } from "../store/names.ts";
-  import type { TabID } from "./tabs.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
-  import type { DamageEvent, SpaceEntity } from "../store/types.ts";
 
-  let { store, flow, onOpen }: { store: ClientStore; flow: AppFlow; onOpen: (tab: TabID) => void } = $props();
+  let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
 
   // svelte-ignore state_referenced_locally
   const fitting = store.fitting;
-  // svelte-ignore state_referenced_locally
-  const targeting = store.targeting;
   // svelte-ignore state_referenced_locally
   const space = store.space;
   // svelte-ignore state_referenced_locally
@@ -30,82 +41,82 @@
     if (!$fitting.loaded) void flow.loadFitting().catch(() => {});
   });
 
-  // Nav buttons: the flight panels that open a window (the overview is the fixed
-  // top-right dock, not a window, so it is excluded).
-  const navSlots = $derived(SPACE_PANELS.filter((s) => s.wires !== null && s.wires !== "overview"));
+  const ship = $derived($space.snapshot?.ship ?? null);
 
-  // --- Shots fired (moved out of the Overview cockpit into the HUD) -----------
-  // Newest first. Names resolve through the shared cache the dock Overview keeps
-  // primed (both are mounted in space); an id is never shown (R7d).
-  interface ShotRow {
-    readonly id: number;
-    readonly summary: string;
-    readonly weaponLabel: string;
-    readonly amountLabel: string;
-  }
-  function entityLabel(entity: SpaceEntity | null): string {
-    if (!entity) return "something no longer in view";
-    if (entity.name && entity.name.length > 0) return entity.name;
-    const type = resolvedName($names.resolved, "type", entity.typeID, "");
-    return type.length > 0 ? type : "Unknown object";
-  }
-  const shotRows = $derived.by<ShotRow[]>(() => {
-    const byID = new Map<number, SpaceEntity>();
-    for (const entity of $space.snapshot?.entities ?? []) {
-      byID.set(entity.itemID, entity);
+  /** The hull's TYPE name — what kind of ship this is. Never an id (R7d). */
+  const hullText = $derived(
+    ship ? resolvedName($names.resolved, "type", ship.typeID, "Your ship") : "Your ship",
+  );
+  /**
+   * What the pilot called this particular ship, when they called it anything.
+   *
+   * ⚠ NULL IS NOT "UNNAMED". A ship with no name in the snapshot is a ship the
+   * server did not name for us, so the header simply shows the hull — it does
+   * not print a placeholder where a name would be.
+   */
+  const shipNameText = $derived(
+    ship?.name && ship.name.trim().length > 0 ? ship.name.trim() : null,
+  );
+  const stateText = $derived(shipStateSentence(ship));
+
+  /**
+   * The refusal from the LAST press of Stop — "" when nothing went wrong.
+   *
+   * It renders next to Stop rather than anywhere else, for the same reason the
+   * overview keeps its errors per control: a failure a screen away from the
+   * button that caused it is a failure the player will not connect to it.
+   */
+  let stopError = $state("");
+
+  /**
+   * ⚠ STOP HAS NO BUSY GUARD, AND MUST NEVER GET ONE. DO NOT CLEAN THIS UP.
+   *
+   * It is the control a player reaches for when something is going wrong, which
+   * is exactly the moment other requests are in flight — so any busy flag, even
+   * its own, would grey it out at the only time it matters. Dropping the click
+   * because a previous one had not answered yet would be the same failure
+   * wearing a friendlier face: the ship keeps going and nothing says why.
+   * Issuing Stop twice is harmless; it means the same thing every time.
+   */
+  async function stopShip(): Promise<void> {
+    stopError = "";
+    try {
+      await flow.stopShip();
+    } catch (cause) {
+      stopError = String(cause);
     }
-    return [...$targeting.damageLog].reverse().map((shot: DamageEvent) => {
-      const other = shot.otherPartyID === null ? null : (byID.get(shot.otherPartyID) ?? null);
-      const otherLabel = entityLabel(other);
-      const missed = shot.amount <= 0;
-      return {
-        id: shot.id,
-        summary:
-          shot.direction === "dealt"
-            ? missed
-              ? `You shot at ${otherLabel} and missed`
-              : `You hit ${otherLabel}`
-            : missed
-              ? `${otherLabel} shot at you and missed`
-              : `${otherLabel} hit you`,
-        weaponLabel: shot.weaponTypeID === null ? "—" : resolvedName($names.resolved, "type", shot.weaponTypeID, "—"),
-        amountLabel: missed ? "—" : shot.amount.toFixed(1),
-      };
-    });
-  });
+  }
 </script>
 
 <div class="hud-bar">
-  <section class="hud-cluster ship-gauges" aria-label="Ship status">
-    <ShipHud {store} />
-  </section>
-
-  <section class="hud-cluster module-rack" aria-labelledby="hud-modules-h">
-    <div class="panel-head"><h3 id="hud-modules-h">Modules</h3></div>
-    <ModuleRack {store} {flow} />
-  </section>
-
-  <section class="hud-cluster hud-shots" aria-labelledby="hud-shots-h">
-    <div class="panel-head"><h3 id="hud-shots-h">Shots fired</h3></div>
-    {#if shotRows.length === 0}
-      <p class="hud-shots-empty">No shots yet.</p>
-    {:else}
-      <ul class="hud-shots-list">
-        {#each shotRows.slice(0, 30) as shot (shot.id)}
-          <li>
-            <span class="hud-shot-summary">{shot.summary}</span>
-            <span class="hud-shot-meta">{shot.weaponLabel} · {shot.amountLabel}</span>
-          </li>
-        {/each}
-      </ul>
+  <!-- The header: which ship this instrument is about. 32px, so it costs the
+       gauges almost nothing, and it is what makes the cell self-describing when
+       three windows are floating over the radar. -->
+  <header class="hud-head">
+    <span class="hud-head-tag">Ship</span>
+    {#if shipNameText}
+      <span class="hud-head-name">{shipNameText}</span>
     {/if}
-  </section>
+    <span class="hud-head-hull">{hullText}</span>
+  </header>
 
-  <nav class="hud-cluster hud-nav" aria-label="Flight panels">
-    {#each navSlots as slot (slot.id)}
-      <button type="button" class="hud-nav-item" title={slot.hint} onclick={() => onOpen(slot.wires as TabID)}>
-        {slot.label}
-      </button>
-    {/each}
-  </nav>
+  <div class="hud-body">
+    <section class="hud-cluster ship-gauges" aria-label="Ship status">
+      <ShipHud {store} />
+    </section>
+
+    <section class="hud-cluster module-rack" aria-labelledby="hud-modules-h">
+      <div class="panel-head"><h3 id="hud-modules-h">Modules</h3></div>
+      <ModuleRack {store} {flow} />
+    </section>
+  </div>
+
+  <footer class="hud-foot">
+    <span class="hud-foot-state">{stateText}</span>
+    <!-- No `disabled`, ever. See stopShip above. -->
+    <button type="button" class="primary hud-stop" onclick={() => stopShip()}>Stop the ship</button>
+    {#if stopError}
+      <span class="hud-foot-error error" role="alert">{stopError}</span>
+    {/if}
+  </footer>
 </div>

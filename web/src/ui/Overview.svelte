@@ -273,20 +273,6 @@
     busyConcerns = busyConcerns.filter((entry) => entry !== concern);
   }
 
-  /**
-   * Run something with NO busy guard at all.
-   *
-   * ⚠ This exists for Stop and nothing else, and it is the other half of the
-   * "Stop is never disabled" rule. Leaving the button enabled but dropping the
-   * click because a concern was already in flight would be the same failure
-   * wearing a friendlier face: the player presses Stop, the ship keeps going,
-   * and nothing says why. Re-issuing Stop is harmless — it means the same thing
-   * every time.
-   */
-  async function runUnguarded(action: () => Promise<void>): Promise<void> {
-    error = await carry(action);
-  }
-
   /** Runs it, and hands back the words to show — "" when nothing went wrong. */
   async function carry(action: () => Promise<void>): Promise<string> {
     error = "";
@@ -1646,8 +1632,18 @@
   {#if wrongText}
     <p class="strip-wrong error">{wrongText}</p>
   {/if}
-  <p class="controls">
-    {#if docked}
+  <!--
+    ⚠ STOP IS NOT HERE ANY MORE, AND IT WAS NOT DELETED. It moved to the HUD's
+    own footer (`HudBar.svelte`), which is always on screen in space — this
+    window is one a player has to open, and the control you reach for when
+    things are going wrong must not be behind that. The rule it carries went
+    with it, comment and tests both: Stop is never disabled and never guarded.
+
+    Undock stays, because this window is only reachable in space today and the
+    docked arm is the strip's oldest promise — see the "Flight tab" test.
+  -->
+  {#if docked}
+    <p class="controls">
       <button
         type="button"
         class="primary"
@@ -1664,20 +1660,8 @@
       {#if concernErrors.move}
         <span class="error">{concernErrors.move}</span>
       {/if}
-    {:else}
-      <!--
-        ⚠ STOP HAS NO `disabled` AND MUST NEVER GET ONE. DO NOT CLEAN THIS UP.
-        It is the control a player reaches for when something is going wrong,
-        which is exactly when other requests are in flight — so any busy state,
-        even its own, would grey it out at the only moment it matters. Issuing
-        it twice is harmless: it cuts the engines and switches the autopilot
-        off, and doing that again is the same instruction, not a conflicting one.
-      -->
-      <button type="button" class="primary" onclick={() => runUnguarded(() => flow.stopShip())}>
-        Stop the ship
-      </button>
-    {/if}
-  </p>
+    </p>
+  {/if}
 </section>
 
 {#if !inSpace}

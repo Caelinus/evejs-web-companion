@@ -364,8 +364,40 @@ row (over the existing `rowActions` data), the range `▾` popovers, filter tabs
 rows, and the threat strip. Mounted in the dock frame's in-space arm. `Overview.svelte` keeps
 everything not yet moved, hidden by the wrapper as it is today.
 
-**Phase 3 — the HUD.** New gauge geometry, the module slot redraw, press-and-hold overload, the
-damage wedge. `chromeRender.test.ts`'s `hud-readout` / `hud-modules-h` anchors move deliberately.
+**Phase 3 — the HUD. DONE.** New gauge geometry (`GAUGE_START_DEG` 135 → 150, `GAUGE_SWEEP_DEG`
+270 → 240, so the gap is a 120° notch centred on the bottom — and the speed reading now lives in
+it); the module slot redraw as a 42px tile with an SVG ring, the heat-damage wedge, and
+press-and-hold overload; the rack heat bar, stubbed and saying so; and `HudBar` rebuilt as a cell
+with a header, the two instruments, and a footer.
+
+⚠ **The handoff's literal "start 210°" was NOT copied.** It is written in a different angular
+convention; putting 210 into `shipHudArcs.ts` would have swung the gap to the LEFT. What is honoured
+is the shape. The comment in that file says so, because the number is the kind of thing a later
+reader "fixes".
+
+⚠ **The slot ring is a drawn `<circle>`, never `border-radius`.** R53 squared this app's corners and
+`squareCorners.test.ts` holds them squared; the round face is a geometric instrument drawn *inside*
+a square tile, the same exception `.fit-ring-guide` already is. The tile also grew from 2.2rem
+(35px) to the handoff's 42px, which incidentally makes it a real touch target for the first time.
+
+**Capability moved, not dropped.** Two things left `HudBar` and one arrived:
+
+| What | Where it went | Why |
+| --- | --- | --- |
+| "Shots fired" | Stays in the transitional `Overview` window; gets its own panel in Phase 4 | A scrolling text log is the one shape that cannot share a cell with two instruments |
+| The Flight / Mining nav buttons | Deleted — every one was already a Neocom rail entry on screen at the same time | Two ways to open one window, one costing a row of a fixed-height HUD, is not a feature |
+| **Stop** | **Arrived**, from the overview window's flight strip into the HUD footer | It is the control a pilot reaches for when things go wrong; it must not be behind a window they have to open first |
+
+Stop's rule travelled with it intact — never disabled, never behind a busy guard — and so did both
+halves of its test. They now render `HudBar` in `chromeRender.test.ts`; `flightStrip.test.ts` keeps
+the inverse assertion, that the strip did not quietly draw a second one.
+
+**Anchors that moved deliberately:** `chromeRender.test.ts`'s "the HUD offers the module rack and
+the flight panels" split into a rack test and an explicit "no longer duplicates the rail's own
+launchers" test; `flightStrip.test.ts`'s three Stop tests moved to `chromeRender.test.ts`;
+`moduleRack.test.ts`'s tooltip fixtures say "Hold to overload" where they said "Shift-click".
+
+**Still to come:** the mobile tier is Phase 5, so the cell is desktop-shaped today.
 
 **Phase 4 — the windows.** `DronesPanel` and `ShotsPanel` lifted out of `Overview.svelte`; `Flight`
 gets its three pickers in place of the raw id inputs; `Mining` gets its in-space half — holds,
