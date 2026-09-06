@@ -64,8 +64,8 @@
            the server's own words via describeRefusal — never a code. -->
       {#each $customBot.refusals as refusal (refusal.key)}
         <p class="refusal">
-          ⚠ {refusal.words}
-          <span class="tally">×{refusal.count}</span>
+          {refusal.words}
+          <span class="tally">({refusal.count} times)</span>
         </p>
       {/each}
     {/if}

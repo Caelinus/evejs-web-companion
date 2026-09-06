@@ -1536,7 +1536,7 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
   // the transfer decide, as it always did.
   const freeM3 = holdsFreeM3(obs.holds ?? null);
   if (freeM3 !== null && freeM3 <= 0) {
-    return tick(WAIT, "The ship is full — time to unload.", "Looting", { kind: "done" });
+    return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
   }
   const lootedRaw = mem["looted"];
   const lootedBefore = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
@@ -1581,7 +1581,7 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      unreachable ? "Too far to reach it — closing in." : "Heading for your wreck.",
+      unreachable ? "Too far to reach it, closing in." : "Heading for your wreck.",
       "Looting",
       ACTING,
       true,
@@ -1643,7 +1643,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   // the transfer decide, as it always did.
   const freeM3 = holdsFreeM3(obs.holds ?? null);
   if (freeM3 !== null && freeM3 <= 0) {
-    return tick(WAIT, "The ship is full — time to unload.", "Looting", { kind: "done" });
+    return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
   }
   // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
   // list in step memory. The list was dropped every time the block was left, so
@@ -1688,7 +1688,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      unreachable ? "Too far to reach it — closing in." : "Heading for the container.",
+      unreachable ? "Too far to reach it, closing in." : "Heading for the container.",
       "Looting",
       ACTING,
       true,

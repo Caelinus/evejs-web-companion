@@ -49,7 +49,7 @@ test("a refused run SHOWS what is being refused, and how often", async () => {
   const body = render(Readout as never, { props: { store, flow: fakeFlow() } } as never).body;
 
   assert.match(body, /enough room in that hold/, "the server's own words reach the screen");
-  assert.match(body, /×7/, "and the tally, so a streak is visible as a streak");
+  assert.match(body, /\(7 times\)/, "and the tally, so a streak is visible as a streak");
   // The cheerful line the bot was showing INSTEAD of this, for twelve hours.
   assert.match(body, /Taking what's inside/, "the phase still shows — the warning is added, not swapped");
 });
@@ -65,7 +65,7 @@ test("a healthy run paints no refusal line at all", async () => {
   const store = runningBot([]);
   const Readout = (await import("./CustomBotReadout.svelte")).default;
   const body = render(Readout as never, { props: { store, flow: fakeFlow() } } as never).body;
-  assert.equal(/⚠/.test(body), false, "nothing to warn about, so nothing shown");
+  assert.equal(/times\)/.test(body), false, "nothing to warn about, so nothing shown");
 });
 
 test("several things being refused at once are all listed", async () => {
