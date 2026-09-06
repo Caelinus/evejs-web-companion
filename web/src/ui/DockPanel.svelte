@@ -12,13 +12,14 @@
   // dragging its left edge; both the collapse state and the width are
   // remembered per character.
   //
-  // ⚠ THE TWO ARMS BELOW ARE NOT SYMMETRICAL, ON PURPOSE. The Station panel
-  // brings its own header (title, station hint, refresh, collapse) and its own
-  // pinned action bar, so it takes the whole frame: no `.dock-panel-head` above
-  // it and no `.dock-panel-body` padding or scrolling around it. Both of those
-  // belong to the Overview now, and a change made for the docked panel must
-  // never be made by editing them — see dockPanelStates.test.ts.
-  import Overview from "./Overview.svelte";
+  // ⚠ BOTH ARMS NOW BRING THEIR OWN CHROME. Each panel carries its own header
+  // and its own pinned strips, so each takes the whole frame: no
+  // `.dock-panel-head` above it and no `.dock-panel-body` padding or scrolling
+  // around it. `.dock-host` is the shared mount — it gives a panel the whole box
+  // and nothing else, which is the only thing either of them wants from the
+  // frame. What the frame still owns is the border, the width, the collapse
+  // strip and the resize handle.
+  import SpaceOverview from "./SpaceOverview.svelte";
   import StationPanel from "./StationPanel.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import type { ClientStore } from "../store/clientStore.ts";
@@ -110,7 +111,7 @@
       <span class="dock-resize" title="Drag to resize" onpointerdown={startResize}></span>
     {/if}
     {#if isDocked}
-      <div class="stn-host">
+      <div class="dock-host">
         <ErrorBoundary name="Station">
           <StationPanel
             {store}
@@ -123,16 +124,10 @@
         </ErrorBoundary>
       </div>
     {:else}
-      <header class="dock-panel-head">
-        <h2>{title}</h2>
-        <button type="button" class="dock-collapse" title="Collapse" aria-label="Collapse" onclick={onToggle}>›</button>
-      </header>
-      <div class="dock-panel-body">
-        <div class="dock-overview">
-          <ErrorBoundary name="Overview">
-            <Overview {store} {flow} compact />
-          </ErrorBoundary>
-        </div>
+      <div class="dock-host">
+        <ErrorBoundary name="Overview">
+          <SpaceOverview {store} {flow} onCollapse={onToggle} />
+        </ErrorBoundary>
       </div>
     {/if}
   {/if}

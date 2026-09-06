@@ -44,10 +44,19 @@ const CASCADE_STEP = 28;
 const CASCADE_ORIGIN = 16;
 
 // Panels that are fixed chrome (the top-right dock), never floating windows.
-// Only the in-space Overview remains: while docked the dock panel hosts the
-// Inventory & Ship tabs, and the station services/guests are a TAB inside it
-// (there is no separate station window to float).
-const CHROME_TABS = new Set<TabID>(["overview"]);
+//
+// ⚠ EMPTY, AND THAT IS THE POINT NOW. Both halves of the dock frame are their
+// own components with no TabID at all — `StationPanel` docked, `SpaceOverview`
+// in space — so neither can be opened as a window by construction rather than
+// by being listed here.
+//
+// `overview` used to be listed: it WAS the in-space dock panel. It is a window
+// again during the in-space redesign, because `Overview.svelte` still holds the
+// sections that have not moved yet — the flight strip with Stop, the drone
+// controls, the equipment list — and a pilot in space needs a way to reach them
+// while they are between homes. It goes when that file does (Phase 4), and the
+// rail entry goes with it.
+const CHROME_TABS = new Set<TabID>([]);
 
 /** True when this tab opens as a floating window (i.e. is not fixed chrome). */
 export function isWindowTab(id: TabID): boolean {

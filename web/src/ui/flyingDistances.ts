@@ -37,7 +37,18 @@ export interface FlyingDistances {
   readonly hold: string;
 }
 
-const DEFAULTS: FlyingDistances = { warp: "0", orbit: "1000", hold: "1000" };
+/**
+ * ⚠ ORBIT 5 KM AND KEEP 10 KM, not retail's 1 km each.
+ *
+ * The in-space handoff states both, and a 1 km orbit is the wrong first answer
+ * for almost every hull the client flies: a Venture on a rock and a cruiser on
+ * a sentry both want more room than that, and a player who has never opened
+ * Settings should not have to find out by scraping an asteroid. Warp keeps
+ * retail's "as close as it can".
+ *
+ * It only affects somebody who has never chosen — a stored value always wins.
+ */
+const DEFAULTS: FlyingDistances = { warp: "0", orbit: "5000", hold: "10000" };
 const STORAGE_KEY = "evejs-web-flying-distances";
 
 /**

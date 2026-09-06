@@ -195,7 +195,8 @@ test("⚠ but rubbish in storage still falls back to the default", async () => {
     clear: (): void => map.clear(),
   };
   const seen = await readFresh(`junk-${Date.now()}`);
-  assert.deepEqual(seen, { warp: "0", orbit: "1000", hold: "1000" });
+  // The handoff's defaults, not retail's 1 km each — see flyingDistances.ts.
+  assert.deepEqual(seen, { warp: "0", orbit: "5000", hold: "10000" });
 });
 
 test("warp keeps its fixed menu, because nothing offers a custom warp range", () => {

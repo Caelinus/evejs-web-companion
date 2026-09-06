@@ -91,17 +91,18 @@ function dockPanel(options: {
 
 test("in space the dock panel is the Overview, and says so", () => {
   const body = dockPanel({ isDocked: false });
-  assert.match(body, /class="dock-overview"/, "the in-space body must be the Overview");
-  assert.match(body, /Around Your Ship/, "the in-space panel keeps its descriptive name");
-  assert.doesNotMatch(body, /class="dock-inventory"/, "the docked body leaked into space");
+  assert.match(body, /class="spc-panel"/, "the in-space body must be the Overview");
+  assert.match(body, /Around Your Ship/, "the frame keeps its descriptive name");
+  assert.doesNotMatch(body, /class="stn-panel"/, "the docked body leaked into space");
 });
 
 test("⚠ no part of the docked station panel reaches the in-space render", () => {
   const body = dockPanel({ isDocked: false });
-  // The redesign's markup and its scoped palette. Neither may appear out here,
-  // however the docked half is built.
-  assert.doesNotMatch(body, /\bstn-/, "station-panel markup leaked into space");
-  assert.doesNotMatch(body, /--stn-/, "the station panel's scoped tokens leaked into space");
+  // ⚠ `.dock-host` is deliberately NOT in this list: it is the SHARED mount both
+  // arms sit in, not station markup. Everything the Station panel actually
+  // draws is under `.stn-panel`, and that is what must not appear out here.
+  assert.doesNotMatch(body, /class="stn-/, "station-panel markup leaked into space");
+  assert.doesNotMatch(body, /--stn-/, "a scoped token was written into the markup");
   assert.doesNotMatch(body, /Station Services/, "the docked services tab leaked into space");
   assert.doesNotMatch(body, /Board your corvette/, "a docked-only action leaked into space");
 });
@@ -116,25 +117,24 @@ test("docked, the same frame shows the station panel instead", () => {
   // The other half of the branch — without this the tests above could pass on a
   // panel that renders nothing at all.
   const body = dockPanel({ isDocked: true });
-  assert.match(body, /class="stn-host"/);
+  assert.match(body, /class="dock-host"/);
   assert.match(body, /class="stn-panel"/);
-  assert.doesNotMatch(body, /class="dock-overview"/);
+  assert.doesNotMatch(body, /class="spc-panel"/);
 });
 
-test("⚠ the two arms are deliberately not symmetrical", () => {
-  // The station panel carries its OWN header (title, station hint, refresh,
-  // collapse) and its own pinned action bar, so it takes the whole frame. The
-  // Overview keeps `.dock-panel-head` and the padded, scrolling
-  // `.dock-panel-body` it has always had. This asymmetry is the thing that
-  // stops a change made for the docked panel from being made by editing them.
-  const docked = dockPanel({ isDocked: true });
-  assert.doesNotMatch(docked, /class="dock-panel-head"/, "the docked arm must not repeat a header");
-  assert.doesNotMatch(docked, /class="dock-panel-body"/, "the docked arm must not be padded/scrolled");
-  assert.match(docked, /aria-label="Collapse"/, "the collapse control must survive the swap");
-
-  const inSpace = dockPanel({ isDocked: false });
-  assert.match(inSpace, /class="dock-panel-head"/);
-  assert.match(inSpace, /class="dock-panel-body"/);
+test("⚠ both arms bring their own chrome, and the frame dresses neither", () => {
+  // Each panel carries its own header and its own pinned strips, so each takes
+  // the whole frame through the shared `.dock-host` mount. The frame's old
+  // head, body and collapse button are gone from BOTH — which is the point: a
+  // change made for one panel can no longer be made by editing something the
+  // other one is also wearing.
+  for (const isDocked of [true, false]) {
+    const body = dockPanel({ isDocked });
+    assert.match(body, /class="dock-host"/, `no shared mount (isDocked=${isDocked})`);
+    assert.doesNotMatch(body, /class="dock-panel-head"/, `frame header came back (${isDocked})`);
+    assert.doesNotMatch(body, /class="dock-panel-body"/, `frame body came back (${isDocked})`);
+    assert.match(body, /aria-label="Collapse"/, `collapse lost (isDocked=${isDocked})`);
+  }
 });
 
 test("the resize handle is on the frame, so it survives in both states", () => {
@@ -187,9 +187,9 @@ function sha256(text: string): string {
 
 test("the extractor is not vacuous: it finds the frame's rules", () => {
   const rules = dockFrameRules();
-  assert.equal(rules.split("\n").length, 17, "the dock frame's rule count changed");
-  assert.match(rules, /\.dock-panel-body\{[^}]*overflow: auto/);
-  assert.match(rules, /\.dock-overview\{/);
+  assert.equal(rules.split("\n").length, 9, "the dock frame's rule count changed");
+  assert.match(rules, /\.dock-panel\{[^}]*width: 22rem/);
+  assert.match(rules, /\.dock-resize\{/);
 });
 
 test("⚠ the dock frame's CSS is shared with the in-space Overview and is unchanged", () => {
@@ -205,9 +205,17 @@ test("⚠ the dock frame's CSS is shared with the in-space Overview and is uncha
   // `min-height: 0`, which is what lets its own scroller work inside a grid row.
   // Both apply identically to the Station panel and to the Overview, which is
   // exactly the test the paragraph above sets.
+  //
+  // ⚠ RE-BLESSED AGAIN, for Phase 2. Both arms now bring their own header and
+  // their own pinned strips, so the frame stopped dressing either of them:
+  // `.dock-panel-head`, `.dock-panel-body`, `.dock-collapse` and
+  // `.dock-overview` were DELETED as dead, and `.dock-host` — the shared mount
+  // that hands a panel the whole box — is what is left. That is the strongest
+  // possible version of what this test is for: there is no longer a shared
+  // surface to change for one panel and accidentally restyle the other.
   assert.equal(
     sha256(dockFrameRules()),
-    "173d818cabec27d48b7cc88b028d699545623719236a04a10d238e969ce0bf57",
+    "1539409068587e6652014794a62ccf5b3a8e992b2bb12a3eb06977a98b5e9853",
   );
 });
 
@@ -270,7 +278,7 @@ test("expanded, the frame drops its pixel width so the column can stretch it", (
   // Non-vacuous: an ordinary docked panel DOES carry one.
   const ordinary = /<aside[^>]*>/.exec(dockPanel({ isDocked: true }))?.[0] ?? "";
   assert.match(ordinary, /style="width:340px"/);
-  assert.match(body, /class="stn-host"/, "and it is still the station panel inside");
+  assert.match(body, /class="stn-panel"/, "and it is still the station panel inside");
   assert.doesNotMatch(body, /class="dock-resize"/, "there is nothing to drag against");
 });
 
@@ -279,7 +287,7 @@ test("in space the frame is never expanded, whatever it is handed", () => {
   // value. This pins the other half: handed `true`, the in-space arm is still
   // the Overview and the control is nowhere on screen.
   const body = dockPanel({ isDocked: false, expanded: true });
-  assert.match(body, /class="dock-overview"/);
+  assert.match(body, /class="spc-panel"/);
   assert.doesNotMatch(body, /Take the whole work area/, "the control leaked into space");
 });
 

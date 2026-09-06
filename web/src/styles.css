@@ -3290,34 +3290,12 @@
     overflow: hidden;
   }
   .dock-panel.collapsed { width: 2rem; }
-  .dock-panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-    padding: 0.35rem 0.5rem;
-    background: var(--color-panel-2);
-    border-bottom: 1px solid var(--color-line);
-  }
-  .dock-panel-head h2 {
-    margin: 0;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.09em;
-    color: var(--color-text-bright);
-  }
-  .dock-collapse,
   .dock-expand {
     min-height: 26px;
     min-width: 26px;
     padding: 0 0.3rem;
-    background: transparent;
     border: 1px solid transparent;
     color: var(--color-muted);
-  }
-  .dock-collapse:hover { color: var(--color-text-bright); border-color: var(--color-line); }
-  .dock-panel-body { flex: 1; min-height: 0; overflow: auto; padding: 0.6rem 0.7rem; }
-  .dock-expand {
     width: 100%;
     height: 100%;
     display: flex;
@@ -3394,10 +3372,6 @@
     touch-action: none;
   }
 
-  /* In space the dock panel is just the compact overview (locked targets are a
-   * separate floating panel now, ship condition / modules are in the HUD). */
-  .dock-overview { flex: 1; min-width: 0; overflow: auto; }
-
   /* The floating "Locked targets" panel — a free strip over the work area,
    * draggable by its bar, HORIZONTAL by default (the brackets lay left-to-right).
    * Sits above the desktop windows so it stays legible while you fight. */
@@ -3429,21 +3403,6 @@
   /* Horizontal by default: the bracket cards flow left-to-right and never wrap to
    * a second row (the body scrolls sideways when there are many locks). */
   .targets-panel .target-bracket { flex-wrap: nowrap; margin: 0; }
-
-  /* The compact overview (dock panel): hide what the bottom HUD already shows and
-   * the relocated targets table.
-   *
-   * ⚠ R82 REMOVED THE `white-space: nowrap` THAT USED TO LIVE HERE. It was the
-   * dock panel's own workaround for the grid being a six-column table — it kept
-   * each row on one line by letting the box scroll SIDEWAYS instead, which is
-   * exactly the thing that made this panel awkward to read. The list truncates
-   * now, so there is nothing to force and nothing to scroll. */
-  .dock-overview .ov-ship-condition,
-  .dock-overview .ov-locked-targets,
-  .dock-overview .ov-equipment,
-  .dock-overview .ov-shots { display: none; }
-  /* The dock column is short as well as narrow, so its list gets less of it. */
-  .dock-overview .overview-list { max-height: 42vh; }
 
   /* The bottom HUD bar (in space only). Clusters reuse .hud-cluster / .hud-nav. */
   .hud-bar {
@@ -6140,72 +6099,28 @@
       flex-wrap: wrap;
     }
   }
-
-
-  /* ======================================================================
-   * 6. THE STATION PANEL — the right-hand dock panel while DOCKED
-   * ----------------------------------------------------------------------
-   * The hangars, the ship bays, the corporation's divisions and the station's
-   * services, as table ROWS. It replaced a grid of large tiles that used a
-   * 1200px-wide dock column to show about eight things.
-   *
-   * ⚠ DOCKED ONLY. In space the same frame holds the compact Overview, which
-   * is styled by `.dock-overview` and the `.dock-panel*` rules far above. NONE
-   * of the rules here may be written so that they can reach it: everything is
-   * under `.stn-panel`, and the palette below is scoped to that root rather
-   * than added to the global `@theme` tokens. `dockPanelStates.test.ts` fails
-   * if the frame's shared rules or the global tokens move.
-   *
-   * WHY IT HAS ITS OWN PALETTE AND ITS OWN DENSITY.
-   * Same reason as the Pilot Hangar in section 5: the rest of this file dresses
-   * PANELS — framed blocks of prose and record tables with 40px controls. This
-   * is a dense, cold, square inventory table that has to stay readable in a
-   * 260px column and use the room in a 1200px one. The `--stn-*` custom
-   * properties are the handoff's palette, verbatim, and they stop at this root.
-   *
-   * ⚠ THE WIDTH QUESTION IS `@container`, NOT `@media` (R85). The panel lives
-   * in a column the player drags, so "is there room for the m³ columns" is a
-   * question about THIS panel and never about the browser window. Asking the
-   * viewport is exactly the bug R85 fixed. `station` is the container.
-   *
-   * ⚠ AND `container-type` MAKES THIS A CONTAINING BLOCK FOR `position: fixed`
-   * DESCENDANTS. The row menu is therefore `position: absolute` against this
-   * root, on purpose — see `openMenu` in StationPanel.svelte. A menu written
-   * as `fixed` with viewport coordinates would land in the wrong place.
-   *
-   * THE KNOWN TENSION WITH R8 is target size, and it is resolved the way the
-   * Pilot Hangar resolves it — behaviourally, not by shrinking the promise.
-   * The per-row move buttons are 26px, below R8's 2.5rem minimum, so below
-   * 560px the whole Move column is REMOVED: the row itself becomes a 46px tap
-   * target that toggles selection, and moving is done from the action bar,
-   * whose controls are 32px and full-width-reachable. The small controls are
-   * never on the critical path on a touch-sized panel.
-   * ==================================================================== */
-
-  /* ── the docked panel taking the whole work area ──────────────────────
-   *
-   * The player can hand the Station panel the entire column. The desktop is
-   * HIDDEN rather than unmounted: every floating window keeps its own state
-   * (a half-written bot script, a market search, a scroll position), which
-   * remounting would throw away for what is only a change of view.
-   *
-   * ⚠ BOTH SELECTORS REQUIRE A CLASS THAT ONLY EXISTS WHILE DOCKED.
-   * `station-expanded` is bound to Workspace's DERIVED flag (`isDocked &&
-   * preference`), never to the stored preference, so a pilot in space cannot
-   * reach either rule however they left the panel. Undocking into a hidden
-   * desktop with no HUD and no target panel would leave no way back to any of
-   * them. */
+  /* ⚠ THE ONE RULE THAT HIDES THE DESKTOP, and it requires a class that only
+   * exists while docked. `station-expanded` is bound to Workspace's DERIVED
+   * flag (`isDocked && preference`), never to the stored preference, so a pilot
+   * in space cannot reach it however they left the panel — undocking into a
+   * hidden desktop with no HUD and no target panel would leave no way back to
+   * any of them. `dockPanelStates.test.ts` fails if a second rule learns to
+   * hide it, or if this one stops asking for the class. */
   .work-main.station-expanded > .desktop { display: none; }
+
   .dock-panel.expanded {
     flex: 1;
     width: auto;
     max-width: none;
   }
 
-  /* The two places the panel is mounted have to give it the whole box: it sizes
-   * itself and pins its own action bar, so a host that scrolls or pads would
-   * put the action bar below the fold. Both hosts are docked-only branches. */
-  .stn-host {
+  /* THE SHARED MOUNT. Both arms of the dock frame — the Station panel docked,
+   * the Overview in space — bring their own header and their own pinned strips,
+   * so each wants the same thing from the frame: the whole box, and nothing
+   * else. A host that scrolled or padded would put a pinned strip below the
+   * fold. What the frame still owns is the border, the width, the collapse
+   * strip and the resize handle. */
+  .dock-host {
     flex: 1;
     min-width: 0;
     min-height: 0;
@@ -6217,8 +6132,51 @@
     overflow: hidden;
   }
 
-  .stn-panel {
-    /* --- the handoff's palette, scoped to this root and nowhere else --- */
+  /* The palette, declared ONCE for both roots. The Station panel and the
+   * Overview are the same frame at different moments and the space handoff
+   * reuses the station handoff's tokens verbatim, so two copies of these values
+   * is simply two things to keep in step by hand. */
+  /* ======================================================================
+   * 6. THE STATION PANEL — the right-hand dock panel while DOCKED
+   * ----------------------------------------------------------------------
+   * The hangars, the ship bays, the corporation's divisions and the station's
+   * services, as table ROWS. It replaced a grid of large tiles that used a
+   * 1200px-wide dock column to show about eight things.
+   *
+   * ⚠ DOCKED ONLY. In space the same frame holds § 7's Overview. NONE of the
+   * rules here may be written so that they can reach it: everything is under
+   * `.stn-panel`, and the palette is scoped to the two panel roots rather than
+   * added to the global `@theme` tokens. `dockPanelStates.test.ts` fails if the
+   * frame's shared rules or the global tokens move.
+   *
+   * ⚠ THE FRAME NO LONGER DRESSES EITHER PANEL. `.dock-panel-head`,
+   * `.dock-panel-body`, `.dock-collapse` and `.dock-overview` are gone: both
+   * arms bring their own header and their own pinned strips, so what the frame
+   * owns is the border, the width, the collapse strip and the resize handle,
+   * and `.dock-host` hands a panel the whole box.
+   *
+   * WHY THESE PANELS HAVE THEIR OWN PALETTE AND DENSITY.
+   * Same reason as the Pilot Hangar in section 5: the rest of this file dresses
+   * PANELS — framed blocks of prose and record tables with 40px controls. These
+   * two are dense, cold, square tables that have to stay readable in a 260px
+   * column and use the room in a 1200px one.
+   *
+   * ⚠ THE WIDTH QUESTION IS `@container`, NOT `@media` (R85). A panel here lives
+   * in a column the player drags, so "is there room for another column" is a
+   * question about THIS panel and never about the browser window. Asking the
+   * viewport is exactly the bug R85 fixed.
+   *
+   * ⚠ AND `container-type` MAKES A PANEL A CONTAINING BLOCK for its
+   * `position: fixed` descendants, so every popover here is `absolute` against
+   * its own panel root on purpose.
+   * ==================================================================== */
+
+  /* The palette, declared ONCE for both roots. The Station panel and the
+   * Overview are the same frame at different moments and the space handoff
+   * reuses the station handoff's tokens verbatim, so two copies of these values
+   * is simply two things to keep in step by hand. */
+  .stn-panel,
+  .spc-panel {
     --stn-page: #0a1119;
     --stn-raised: #0e1826;
     --stn-surface: #0c131d;
@@ -6991,6 +6949,481 @@
 
     .stn-ship-colhead,
     .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 190px 160px 150px; }
+  }
+
+
+  /* ======================================================================
+   * 7. THE OVERVIEW — the right-hand dock panel while IN SPACE
+   * ----------------------------------------------------------------------
+   * What is around your ship, what you have picked, and everything you can do
+   * to it. The in-space counterpart of § 6's Station panel, and it reuses that
+   * section's palette verbatim rather than declaring a second one: they are the
+   * same frame at different moments, and two nearly-identical palettes is how
+   * two panels drift apart.
+   *
+   * ⚠ IN SPACE ONLY. Docked, the same frame holds `.stn-panel`. Nothing here
+   * may be written so that it can reach the Station panel — everything is under
+   * `.spc-panel`, and `spaceWorkspaceStates.test.ts` fails if the panel is ever
+   * mounted outside an `isDocked` guard.
+   *
+   * ⚠ THE WIDTH TIERS ARE `@container`, NOT `@media` (R85), for the same reason
+   * as § 6: this panel lives in a column the player drags, so "is there room
+   * for the Type and Group columns" is a question about THIS panel and never
+   * about the browser window.
+   *
+   * ⚠ AND `container-type` MAKES THIS A CONTAINING BLOCK for `position: fixed`
+   * descendants, so the range menu is `absolute` against this root on purpose.
+   * ==================================================================== */
+
+  .spc-panel {
+    container-type: inline-size;
+    container-name: space;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    /* ⚠ Load-bearing, exactly as on `.stn-panel`: `inline-size` containment
+     * stops the CONTENT sizing the element, so a host that makes this a flex
+     * item would collapse it to zero. It takes its width from the parent. */
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--stn-page);
+    color: var(--stn-text);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* The same reset § 6 needs, and for the same reason: the app dresses bare
+   * elements as PANELS, which is right for a page of them and wrong inside a
+   * dense list. `:where()` carries no specificity, so every `.spc-*` class
+   * below wins on source order. Reset first, dress after. */
+  .spc-panel :where(section, .panel) {
+    position: static;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+  }
+  .spc-panel :where(section, .panel)::before { content: none; }
+  .spc-panel :where(ul, ol) { list-style: none; margin: 0; padding: 0; }
+  .spc-panel :where(li, p, h2, h3, dl, dt, dd) { margin: 0; }
+  .spc-panel :where(button) {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: normal;
+    line-height: 1.2;
+    transition: none;
+  }
+  .spc-panel :where(input, select) {
+    min-height: 0;
+    padding: 0;
+    max-width: none;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+  }
+  .spc-panel button:hover:not(:disabled) { background: none; border-color: inherit; }
+  .spc-panel button:disabled { opacity: 1; }
+  .spc-panel button, .spc-panel input { font-family: inherit; font-size: 13px; border-radius: 0; }
+  .spc-panel button:focus-visible,
+  .spc-panel input:focus-visible {
+    outline: 2px solid var(--stn-accent);
+    outline-offset: -2px;
+  }
+
+  /* --- 7.1 the header --------------------------------------------------- */
+
+  .spc-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 12px;
+    background: var(--stn-raised);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-head-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  .spc-head-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-icon-btn {
+    flex: none;
+    min-height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    cursor: pointer;
+  }
+  .spc-icon-btn:hover:not(:disabled) { border-color: var(--stn-accent); color: var(--stn-bright); }
+
+  /* --- 7.2 the threat strip --------------------------------------------- */
+  /*
+   * ⚠ ABOVE THE LIST AND OUTSIDE THE SCROLLER, on purpose: a warning you have
+   * to scroll to is a warning you will miss. It is also the only element here
+   * that ignores the preset and the row cap — no filter may hide something that
+   * is shooting at you.
+   */
+  .spc-threats {
+    flex: none;
+    padding: 8px 12px;
+    background: #1b1113;
+    border-bottom: 1px solid #4a2c2c;
+    color: var(--stn-danger-text);
+  }
+  .spc-threats-head { font-size: 12px; }
+  .spc-threat-list { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .spc-threat {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  .spc-threat-name {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    color: var(--stn-danger-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-threat-name:hover { color: var(--stn-bright); }
+  .spc-threat-kind { color: var(--stn-muted); white-space: nowrap; }
+  .spc-threat-range { color: var(--stn-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* --- 7.3 what is picked, and what you can do to it -------------------- */
+
+  .spc-selected {
+    flex: none;
+    padding: 8px 10px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-selected-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .spc-selected-icon { display: flex; }
+  .spc-selected-icon .type-icon { width: 28px; height: 28px; }
+  .spc-selected-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .spc-selected-name .spc-name { font-weight: 600; }
+  .spc-locked-badge {
+    flex: none;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-warn);
+  }
+  .spc-locked-badge.acquiring { color: var(--stn-muted); }
+
+  /* The verb bar. Every action the model returns is drawn — including the ones
+   * it returns DISABLED, wearing the sentence that says why. Dropping one
+   * silently leaves a player wondering where a button went. */
+  .spc-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .spc-action { display: flex; }
+  .spc-action-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    width: 54px;
+    min-height: 44px;
+    padding: 4px 2px;
+    background: #0f1a28;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-btn-text);
+    cursor: pointer;
+  }
+  .spc-action.ranged .spc-action-btn { width: 58px; }
+  .spc-action-btn:hover:not(:disabled) { border-color: var(--stn-accent); color: var(--stn-bright); }
+  .spc-action-btn:disabled { color: var(--stn-disabled); cursor: default; }
+  .spc-glyph {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* ⚠ THE WORD IS NOT DECORATION. A tooltip does not exist on a touch screen,
+   * and this panel has a touch tier — so the verb is always under the glyph. */
+  .spc-action-label {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-align: center;
+    line-height: 1.1;
+  }
+  .spc-action-more {
+    width: 16px;
+    min-height: 44px;
+    background: #0f1a28;
+    border: 1px solid var(--stn-line-strong);
+    border-left: 0;
+    color: var(--stn-btn-text);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .spc-action-more:hover:not(:disabled) { border-color: var(--stn-accent); }
+
+  /* --- 7.4 the distance menu -------------------------------------------- */
+
+  .spc-menu-shade { position: absolute; inset: 0; z-index: 40; }
+  .spc-menu {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    top: 92px;
+    z-index: 41;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+  }
+  .spc-menu-head {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .spc-menu-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .spc-chip {
+    min-height: 28px;
+    padding: 0 10px;
+    background: var(--stn-page);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .spc-chip.on {
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+  .spc-menu-custom { display: flex; align-items: center; gap: 6px; }
+  .spc-menu-custom input {
+    width: 68px;
+    min-height: 28px;
+    padding: 0 6px;
+    background: var(--stn-page);
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+  }
+  .spc-menu-unit { color: var(--stn-muted); font-size: 12px; }
+  .spc-btn {
+    min-height: 28px;
+    padding: 0 10px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .spc-btn:hover:not(:disabled) { border-color: var(--stn-accent); }
+
+  /* --- 7.5 the filter row ----------------------------------------------- */
+
+  .spc-filters {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-tabs { display: flex; flex-wrap: wrap; }
+  .spc-tab {
+    min-height: 26px;
+    padding: 0 8px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--stn-secondary);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .spc-tab:hover:not(.on) { color: var(--stn-bright); }
+  .spc-tab.on { color: var(--stn-bright); border-bottom-color: var(--stn-accent); }
+  .spc-search {
+    flex: 1 1 130px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 0 8px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+  }
+  .spc-search-glyph { color: var(--stn-muted); }
+  .spc-search input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; }
+
+  /* --- 7.6 the list ----------------------------------------------------- */
+
+  .spc-content {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--stn-line-strong) var(--stn-page);
+  }
+  .spc-content::-webkit-scrollbar { width: 8px; height: 8px; }
+  .spc-content::-webkit-scrollbar-track { background: var(--stn-page); border-left: 1px solid var(--stn-hair); }
+  .spc-content::-webkit-scrollbar-thumb { background: var(--stn-line-strong); border: 2px solid var(--stn-page); }
+  .spc-content::-webkit-scrollbar-thumb:hover { background: var(--stn-accent-strong); }
+
+  .spc-colhead,
+  .spc-row-btn {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) 84px;
+    column-gap: 8px;
+    align-items: center;
+    min-width: 0;
+    text-align: left;
+  }
+  .spc-colhead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 26px;
+    padding: 0 10px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .spc-sort {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+  .spc-sort.on { color: var(--stn-accent); }
+
+  .spc-rows { min-width: 0; }
+  .spc-row { border-bottom: 1px solid var(--stn-hair); border-left: 2px solid transparent; }
+  .spc-row:hover { background: var(--stn-hover); }
+  .spc-row.picked { background: var(--stn-picked); border-left-color: var(--stn-accent-strong); }
+  .spc-row-btn {
+    width: 100%;
+    min-height: 40px;
+    padding: 2px 10px 2px 8px;
+    cursor: pointer;
+  }
+  .spc-cell-icon { display: flex; }
+  .spc-cell-icon .type-icon { width: 20px; height: 20px; }
+  .spc-cell-name { display: flex; flex-direction: column; min-width: 0; }
+  .spc-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* ⚠ A hostile's name is tinted AND the threat strip names it above the list.
+   * Colour is never the only thing that says something is shooting at you. */
+  .spc-row.hostile .spc-name,
+  .spc-name.hostile { color: var(--stn-danger-text); }
+  .spc-lock-mark { color: var(--stn-warn); margin-left: 4px; }
+  .spc-meta {
+    font-size: 11px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-cell-type,
+  .spc-cell-group {
+    display: none;
+    color: var(--stn-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-cell-range {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  /* Far things are dimmer, so the near ones read first. The figure is still
+   * there — this is emphasis, not a hidden reading. */
+  .spc-cell-range.far { color: var(--stn-muted); }
+
+  .spc-empty { padding: 18px 12px; color: var(--stn-muted); }
+  .spc-note {
+    margin: 0;
+    padding: 6px 12px;
+    color: var(--stn-muted);
+    font-size: 12px;
+    text-wrap: pretty;
+  }
+  .spc-note.bad { color: var(--stn-danger-text); }
+  .spc-selected .spc-note { padding: 4px 0 0; }
+
+  /* --- 7.7 the width tiers ---------------------------------------------- */
+  /*
+   * Mobile-first: the rules above are the narrowest panel, and the Type and
+   * Group columns arrive when the panel has earned the room for them. The
+   * per-row meta line carries the same two readings until then.
+   */
+  @container space (min-width: 560px) {
+    .spc-colhead,
+    .spc-row-btn { grid-template-columns: 24px minmax(0, 1.4fr) minmax(0, 1fr) 90px 92px; }
+    .spc-cell-type,
+    .spc-cell-group { display: block; }
+    .spc-meta { display: none; }
+    .spc-row-btn { min-height: 32px; }
+    .spc-search { flex: none; width: 200px; }
+    .spc-menu { left: auto; right: 10px; width: 320px; }
   }
 
 }

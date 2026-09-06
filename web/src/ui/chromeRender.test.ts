@@ -251,8 +251,17 @@ test("the neocom launches every openable panel for the current state", () => {
   assert.doesNotMatch(docked, /Flight/, "an in-space-only tab leaked into the docked rail");
   assert.match(docked, /Fitting/, "the docked Fitting tab is missing");
   assert.doesNotMatch(space, /Fitting/, "a docked-only tab leaked into the in-space rail");
-  // The overview is fixed chrome (the dock panel), not a rail entry.
-  assert.doesNotMatch(space, /Around Your Ship/, "the overview leaked into the rail");
+  // ⚠ "Around Your Ship" IS a rail entry again, and only for a while.
+  //
+  // It used to be fixed chrome — it WAS the in-space dock panel, so a rail entry
+  // would have opened a second copy of what was already on screen. The dock
+  // panel is `SpaceOverview` now, and `Overview.svelte` still holds the sections
+  // that have not moved yet: the flight strip with Stop, the drone controls, the
+  // equipment list. A pilot in space needs a way to reach those while they are
+  // between homes, so it is a window until Phase 4 empties and deletes it — and
+  // this assertion goes with it.
+  assert.match(space, /Around Your Ship/, "the transitional overview window is unreachable");
+  assert.doesNotMatch(docked, /Around Your Ship/, "an in-space-only tab leaked into the docked rail");
 });
 
 test("the panel host renders the real panel for a selected tab", () => {

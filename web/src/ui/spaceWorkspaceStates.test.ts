@@ -80,7 +80,7 @@ test("docked, the workspace is the rail, the desktop and the station panel", () 
   const body = workspace(true);
   assert.match(body, /class="workspace"/);
   assert.match(body, /class="desktop"/, "the window surface is the docked workspace too");
-  assert.match(body, /class="stn-host"/, "the dock frame holds the station panel");
+  assert.match(body, /class="stn-panel"/, "the dock frame holds the station panel");
 });
 
 test("⚠ none of the in-space chrome reaches a docked pilot", () => {
@@ -91,7 +91,7 @@ test("⚠ none of the in-space chrome reaches a docked pilot", () => {
   assert.doesNotMatch(body, /class="tactical"/, "the radar leaked into the station");
   assert.doesNotMatch(body, /class="hud-bar"/, "the ship HUD leaked into the station");
   assert.doesNotMatch(body, /class="targets-panel"/, "the target panel leaked into the station");
-  assert.doesNotMatch(body, /class="dock-overview"/, "the overview leaked into the station");
+  assert.doesNotMatch(body, /class="spc-panel"/, "the overview leaked into the station");
   assert.doesNotMatch(body, /in-space/, "the in-space workspace modifier leaked");
 });
 
@@ -102,8 +102,8 @@ test("in space the same workspace is the radar, the HUD and the overview", () =>
   assert.match(body, /class="desktop has-view"/);
   assert.match(body, /class="tactical"/);
   assert.match(body, /class="hud-bar"/);
-  assert.match(body, /class="dock-overview"/);
-  assert.doesNotMatch(body, /class="stn-host"/, "the station panel leaked into space");
+  assert.match(body, /class="spc-panel"/);
+  assert.doesNotMatch(body, /class="stn-panel"/, "the station panel leaked into space");
 });
 
 /**
@@ -187,11 +187,26 @@ test("a window can never be resized below the floor", () => {
   assert.equal(wins[0]?.h, MIN_H);
 });
 
-test("⚠ the dock panel's contents are chrome, never a floating window", () => {
-  // `overview` is the in-space dock panel. If the redesign ever made it a
-  // window, two copies of it would be on screen at once and the dock column
-  // would be empty.
-  assert.equal(isWindowTab("overview"), false);
+test("⚠ the dock panel's contents have no TabID at all", () => {
+  // Neither half of the frame can be opened as a window, and that is now true
+  // by CONSTRUCTION rather than by a list: `StationPanel` and `SpaceOverview`
+  // are components with no tab id, so there is nothing to open.
+  //
+  // `overview` is a window again on purpose — `Overview.svelte` still holds the
+  // sections that have not moved yet (the flight strip with Stop, the drones,
+  // the equipment list) and a pilot in space needs a way to reach them while
+  // they are between homes. It goes when that file does.
+  const ws = source("Workspace.svelte");
+  assert.match(ws, /<DockPanel/, "the frame is mounted by Workspace, not opened as a window");
+  const dockPanelSource = source("DockPanel.svelte");
+  for (const panel of ["StationPanel", "SpaceOverview"]) {
+    assert.match(dockPanelSource, new RegExp(`<${panel}`), `${panel} is not in the frame`);
+    assert.doesNotMatch(
+      source("PanelHost.svelte"),
+      new RegExp(`<${panel}`),
+      `${panel} can be opened as a floating window`,
+    );
+  }
   assert.equal(isWindowTab("market"), true);
 });
 
@@ -275,4 +290,52 @@ test("⚠ a window is always reconciled back inside its surface", () => {
   assert.match(desktop, /new ResizeObserver/, "nothing watches the surface's size");
   assert.match(desktop, /Math\.min\(/, "nothing clamps a window's size");
   assert.match(desktop, /Math\.max\(0/, "nothing clamps a window's position");
+});
+
+// --- 5. the in-space panel, and what it may not lose ------------------------
+
+test("⚠ the overview claims the space feed", () => {
+  // Found by driving it: the panel it replaced was what asked for a snapshot,
+  // and for a few minutes nothing did — the radar read NOTHING ON GRID and
+  // every gauge read a dash, on a ship sitting in a belt. Nothing was broken;
+  // nobody had asked.
+  const panel = source("SpaceOverview.svelte");
+  assert.match(panel, /flow\.startSpacePolling\(\)/, "the panel must claim the feed");
+  assert.match(panel, /return \(\) => flow\.stopSpacePolling\(\)/, "and hand it back");
+  assert.match(panel, /flow\.loadSpaceSnapshot\(\)/, "and ask for one immediately");
+  assert.match(panel, /flow\.loadTargets\(\)/, "the locks decide a row's ⌖ and Release lock");
+});
+
+test("⚠ every verb the model returns is drawn, including the blocked ones", () => {
+  // `actionsForRow` returns an action that cannot be used right now WITH the
+  // sentence that says why, and the bar renders it disabled wearing that
+  // sentence. Dropping one silently leaves a player wondering where a button
+  // went; leaving it enabled promises something the ship cannot do.
+  const panel = source("SpaceOverview.svelte");
+  assert.match(panel, /\{#each selectedActions as action/, "the bar must iterate the model");
+  assert.match(panel, /action\.unavailable \?\? action\.label/, "a blocked verb wears its reason");
+  assert.match(panel, /disabled=\{busy\.has\(action\.concern\) \|\| action\.unavailable !== null\}/);
+  assert.doesNotMatch(panel, /action\.unavailable === null \?[\s\S]{0,40}\{#each/, "no filtering");
+});
+
+test("⚠ busy is a SET, so one pending call cannot grey out every verb", () => {
+  const panel = source("SpaceOverview.svelte");
+  assert.match(panel, /busy = \$state<ReadonlySet<ActionConcern>>/);
+  assert.match(panel, /busy\.has\(action\.concern\)/, "a verb is disabled by its OWN concern");
+});
+
+test("⚠ the threat strip reads the whole snapshot, not the filtered rows", () => {
+  // No preset, no search and no row cap may hide something that is shooting at
+  // you. `hostileRows` takes the snapshot; `presetSnapshot` is the filtered one.
+  const panel = source("SpaceOverview.svelte");
+  assert.match(panel, /hostileRows\(snapshot, origin\)/);
+  assert.doesNotMatch(panel, /hostileRows\(presetSnapshot/, "a preset must not hide a hostile");
+});
+
+test("the panel names the distances it flies at, and stores them in one place", () => {
+  // The ▾ writes through to `flyingDistances`, so Settings, the radial menu and
+  // the radar cannot disagree with the button the player just pressed.
+  const panel = source("SpaceOverview.svelte");
+  assert.match(panel, /setDistance\(rangeStorageKey\(kind\)/);
+  assert.doesNotMatch(panel, /localStorage/, "the panel keeps no range store of its own");
 });

@@ -711,9 +711,14 @@ test("R30 slice F: the collapses are native <details>, and never hide their stat
   // summary reads back the labels from the SAME fixed menu the picker offers,
   // so it can only ever say something the player could have chosen — never a
   // raw metre count and never "10.0 km".
+  //
+  // ⚠ The two hold defaults are the in-space handoff's (5 km / 10 km), not
+  // retail's 1 km each — a 1 km orbit is the wrong first answer for almost
+  // every hull this client flies, and a player who has never opened Settings
+  // should not find that out by scraping an asteroid. See flyingDistances.ts.
   assert.match(body, /Warp\s+As close as it can/, "the warp default, in its own words");
-  assert.match(body, /Orbit\s+1 km/);
-  assert.match(body, /Hold\s+1 km/);
+  assert.match(body, /Orbit\s+5 km/);
+  assert.match(body, /Hold\s+10 km/);
   assert.doesNotMatch(body, /Warp\s+1000\b/, "R7d/R9a: never the raw number");
   // The drone summary carries the one fact it may not hide: how many are OUT.
   assert.match(body, /class="collapse-hint">[\s\S]{0,40}(None|out|Looking|Could not)/);
