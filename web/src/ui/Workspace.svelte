@@ -92,12 +92,36 @@
   let wins = $state<WinState[]>([]);
   let dockCollapsed = $state(false);
   let dockWidth = $state(DEFAULT_DOCK_WIDTH);
+  /**
+   * ⚠ THE PREFERENCE, NOT THE FLAG. The player can ask the docked Station panel
+   * to take the whole work area, which HIDES the desktop. That must be
+   * impossible in space — a pilot who undocked into a hidden desktop, no HUD
+   * and no locked-target panel would have no way back to any of them.
+   *
+   * So the real flag is DERIVED (`stationExpanded`, below) rather than reset by
+   * an effect: undocking cannot leave it stale, because there is no stored
+   * state to be stale. The preference itself is remembered, so docking again
+   * brings the expanded panel back.
+   */
+  let expandPreferred = $state(false);
   let targetsX = $state(DEFAULT_TARGETS_POS.x);
   let targetsY = $state(DEFAULT_TARGETS_POS.y);
+  const stationExpanded = $derived(isDocked && expandPreferred);
   const openIds = $derived(new Set(wins.map((w) => w.id)));
   const focused = $derived(computeFocusedId(wins));
 
-  const open = (id: TabID): void => { wins = openWindow(wins, id); };
+  // Opening a window GIVES THE WORK AREA BACK. While the Station panel has the
+  // whole column the desktop is hidden, so a window opened into it would appear
+  // nowhere at all and the rail would look broken. Asking for a panel is asking
+  // for the canvas it lives on.
+  //
+  // ⚠ Deliberately not in `openFromNeocom`: while docked, picking "Inventory &
+  // Ship" there folds into the dock panel instead of opening a window, and that
+  // pick must not throw the expansion away.
+  const open = (id: TabID): void => {
+    expandPreferred = false;
+    wins = openWindow(wins, id);
+  };
   // The Neocom pick, with one de-dupe: while docked, Inventory & Ship IS the
   // permanent dock panel — expand it, snap it to the Ship Inventory tab (the
   // visible response when it was already expanded, e.g. sitting on Station
@@ -140,6 +164,7 @@
       dockWidth = saved ? saved.dockWidth : DEFAULT_DOCK_WIDTH;
       targetsX = saved ? saved.targetsX : DEFAULT_TARGETS_POS.x;
       targetsY = saved ? saved.targetsY : DEFAULT_TARGETS_POS.y;
+      expandPreferred = saved ? saved.stationExpanded : false;
       loadedFor = online.characterID;
     } else if (!online && loadedFor !== null) {
       wins = [];
@@ -147,6 +172,7 @@
       dockWidth = DEFAULT_DOCK_WIDTH;
       targetsX = DEFAULT_TARGETS_POS.x;
       targetsY = DEFAULT_TARGETS_POS.y;
+      expandPreferred = false;
       loadedFor = null;
     }
   });
@@ -154,7 +180,14 @@
   // Persist on any layout change, debounced so a drag doesn't hammer storage.
   $effect(() => {
     const id = loadedFor;
-    const layout = { wins: wins.map((w) => ({ ...w })), dockCollapsed, dockWidth, targetsX, targetsY };
+    const layout = {
+      wins: wins.map((w) => ({ ...w })),
+      dockCollapsed,
+      dockWidth,
+      targetsX,
+      targetsY,
+      stationExpanded: expandPreferred,
+    };
     if (id === null) return;
     const handle = setTimeout(() => saveLayout(id, layout), 300);
     return () => clearTimeout(handle);
@@ -223,7 +256,10 @@
       <ErrorBoundary name="Bot readout">
         <CustomBotReadout {store} {flow} />
       </ErrorBoundary>
-      <div class="work-main">
+      <!-- `station-expanded` hides the desktop, so it is bound to the DERIVED
+           flag and never to the preference: in space the class cannot be set
+           however the preference was left. -->
+      <div class="work-main" class:station-expanded={stationExpanded}>
         <ErrorBoundary name="Desktop">
           <Desktop
             {store}
@@ -247,7 +283,9 @@
           inventoryPing={dockInventoryPing}
           collapsed={dockCollapsed}
           width={dockWidth}
+          expanded={stationExpanded}
           onToggle={toggleDock}
+          onToggleExpand={() => (expandPreferred = !expandPreferred)}
           onResize={(w) => (dockWidth = w)}
         />
         {#if !isDocked}

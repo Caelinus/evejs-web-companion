@@ -101,6 +101,8 @@
     flow,
     ping = 0,
     onCollapse = null,
+    expanded = false,
+    onToggleExpand = null,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -116,6 +118,14 @@
      * here. Null when there is nothing to collapse into — the mobile home.
      */
     onCollapse?: (() => void) | null;
+    /** The panel currently has the whole work area. */
+    expanded?: boolean;
+    /**
+     * Ask the shell to give the panel the whole work area, or hand it back.
+     * ⚠ The panel only EMITS this; the shell owns whether it may happen, and
+     * gates it on being docked. Null where there is nothing to expand into.
+     */
+    onToggleExpand?: (() => void) | null;
   } = $props();
 
   // Stable store identity for this component's life; the slices are
@@ -1101,6 +1111,18 @@
     >
       <span aria-hidden="true">↻</span><span class="stn-icon-word">Refresh</span>
     </button>
+    {#if onToggleExpand}
+      <button
+        type="button"
+        class="stn-icon-btn"
+        title={expanded ? "Give the work area back" : "Take the whole work area"}
+        aria-label={expanded ? "Give the work area back" : "Take the whole work area"}
+        aria-pressed={expanded}
+        onclick={onToggleExpand}
+      >
+        <span aria-hidden="true">{expanded ? "⤡" : "⤢"}</span>
+      </button>
+    {/if}
     {#if onCollapse}
       <button type="button" class="stn-icon-btn" title="Collapse" aria-label="Collapse" onclick={onCollapse}>
         <span aria-hidden="true">›</span>

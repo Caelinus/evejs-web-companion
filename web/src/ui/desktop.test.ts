@@ -39,6 +39,7 @@ test("a saved layout holding the same tab twice comes back holding it once", () 
     dockWidth: 340,
     targetsX: 20,
     targetsY: 12,
+    stationExpanded: false,
   });
   const loaded = loadLayout(140000005);
   assert.deepEqual((loaded?.wins ?? []).map((w) => w.id), ["market", "wallet"]);
@@ -50,4 +51,39 @@ test("opening a tab that is already open still never adds a second window", () =
   const once = openWindow([], "market");
   const twice = openWindow(once, "market");
   assert.deepEqual(twice.map((w) => w.id), ["market"]);
+});
+
+test("a layout saved before the expand toggle existed comes back un-expanded", () => {
+  // ⚠ Not merely tidiness. `stationExpanded` HIDES the desktop, so an absent
+  // field that read as anything but false would hide it for every player whose
+  // layout predates the toggle.
+  installStorage();
+  localStorage.setItem(
+    "evejs-web-desktop:v1:140000006",
+    JSON.stringify({ wins: [], dockCollapsed: false, dockWidth: 340, targetsX: 20, targetsY: 12 }),
+  );
+  assert.equal(loadLayout(140000006)?.stationExpanded, false);
+});
+
+test("the expand preference itself round-trips, so a dock comes back expanded", () => {
+  installStorage();
+  const layout = {
+    wins: [],
+    dockCollapsed: false,
+    dockWidth: 340,
+    targetsX: 20,
+    targetsY: 12,
+    stationExpanded: true,
+  };
+  saveLayout(140000007, layout);
+  assert.equal(loadLayout(140000007)?.stationExpanded, true);
+});
+
+test("a nonsense expand field is not truthy — only a real true expands", () => {
+  installStorage();
+  localStorage.setItem(
+    "evejs-web-desktop:v1:140000008",
+    JSON.stringify({ wins: [], dockWidth: 340, stationExpanded: "yes" }),
+  );
+  assert.equal(loadLayout(140000008)?.stationExpanded, false);
 });

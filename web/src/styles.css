@@ -6106,6 +6106,26 @@
    * never on the critical path on a touch-sized panel.
    * ==================================================================== */
 
+  /* ── the docked panel taking the whole work area ──────────────────────
+   *
+   * The player can hand the Station panel the entire column. The desktop is
+   * HIDDEN rather than unmounted: every floating window keeps its own state
+   * (a half-written bot script, a market search, a scroll position), which
+   * remounting would throw away for what is only a change of view.
+   *
+   * ⚠ BOTH SELECTORS REQUIRE A CLASS THAT ONLY EXISTS WHILE DOCKED.
+   * `station-expanded` is bound to Workspace's DERIVED flag (`isDocked &&
+   * preference`), never to the stored preference, so a pilot in space cannot
+   * reach either rule however they left the panel. Undocking into a hidden
+   * desktop with no HUD and no target panel would leave no way back to any of
+   * them. */
+  .work-main.station-expanded > .desktop { display: none; }
+  .dock-panel.expanded {
+    flex: 1;
+    width: auto;
+    max-width: none;
+  }
+
   /* The two places the panel is mounted have to give it the whole box: it sizes
    * itself and pins its own action bar, so a host that scrolls or pads would
    * put the action bar below the fold. Both hosts are docked-only branches. */

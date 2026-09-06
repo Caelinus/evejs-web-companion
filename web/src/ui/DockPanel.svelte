@@ -33,6 +33,8 @@
     onToggle,
     onResize,
     inventoryPing = 0,
+    expanded = false,
+    onToggleExpand = null,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -41,6 +43,14 @@
     width: number;
     onToggle: () => void;
     onResize: (w: number) => void;
+    /**
+     * The docked panel has been asked to take the whole work area. ⚠ Comes from
+     * Workspace ALREADY ANDed with `isDocked`, so it is false in space however
+     * the player left the preference — the Overview must never hide the desktop.
+     */
+    expanded?: boolean;
+    /** Null when the shell offers no expansion (the mobile home has none). */
+    onToggleExpand?: (() => void) | null;
     /**
      * Bumped when the Neocom's "Inventory & Ship" is picked while docked:
      * the panel snaps to the Ship Inventory tab so the pick has a visible
@@ -79,18 +89,37 @@
   }
 </script>
 
-<aside class="dock-panel" class:collapsed style={collapsed ? "" : `width:${width}px`} aria-label={title}>
+<!-- Expanded, the panel takes the column, so it must NOT carry a pixel width:
+     an inline style outranks any rule that would stretch it. -->
+<aside
+  class="dock-panel"
+  class:collapsed
+  class:expanded={expanded && !collapsed}
+  style={collapsed || expanded ? "" : `width:${width}px`}
+  aria-label={title}
+>
   {#if collapsed}
     <button type="button" class="dock-expand" title={`Show ${title}`} aria-label={`Show ${title}`} onclick={onToggle}>
       <span class="dock-expand-label">{title}</span>
     </button>
   {:else}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <span class="dock-resize" title="Drag to resize" onpointerdown={startResize}></span>
+    {#if !expanded}
+      <!-- Nothing to drag while the panel owns the whole column; the width it
+           was dragged to is remembered and comes back when it is docked again. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span class="dock-resize" title="Drag to resize" onpointerdown={startResize}></span>
+    {/if}
     {#if isDocked}
       <div class="stn-host">
         <ErrorBoundary name="Station">
-          <StationPanel {store} {flow} ping={inventoryPing} onCollapse={onToggle} />
+          <StationPanel
+            {store}
+            {flow}
+            {expanded}
+            {onToggleExpand}
+            ping={inventoryPing}
+            onCollapse={onToggle}
+          />
         </ErrorBoundary>
       </div>
     {:else}

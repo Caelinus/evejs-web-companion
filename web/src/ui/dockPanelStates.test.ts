@@ -70,6 +70,7 @@ function onlineStore(docked: boolean): unknown {
 function dockPanel(options: {
   readonly isDocked: boolean;
   readonly collapsed?: boolean;
+  readonly expanded?: boolean;
 }): string {
   return render(DockPanel as never, {
     props: {
@@ -77,8 +78,10 @@ function dockPanel(options: {
       flow: fakeFlow(),
       isDocked: options.isDocked,
       collapsed: options.collapsed ?? false,
+      expanded: options.expanded ?? false,
       width: 340,
       onToggle: () => {},
+      onToggleExpand: () => {},
       onResize: () => {},
     },
   } as never).body;
@@ -155,15 +158,22 @@ test("the in-space branch of DockPanel.svelte does not mention the station panel
 // --- 2. the shared frame CSS ------------------------------------------------
 
 /**
- * Every rule in the stylesheet whose selector touches the dock frame, as
+ * Every rule in the stylesheet that can apply to the dock frame IN SPACE, as
  * `selector{body}`, whitespace-normalised and sorted. Comments are stripped
  * first so re-wording a note is never a "change".
+ *
+ * ⚠ Selectors that also require `.expanded` / `.station-expanded` are left out,
+ * and that is not a loophole. Those classes are bound to Workspace's DERIVED
+ * `isDocked && preference` flag, so nothing written under them can be reached
+ * by a pilot in space — which is the property this whole suite is about, and
+ * which is pinned separately below rather than assumed here.
  */
 function dockFrameRules(): string {
   const css = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
   const rules: string[] = [];
   for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const s = (selector ?? "").trim().replace(/\s+/g, " ");
+    if (/\bexpanded\b/.test(s)) continue;
     if (/\.dock-(panel|overview|resize|collapse|expand)/.test(s)) {
       rules.push(`${s}{${(body ?? "").trim().replace(/\s+/g, " ")}}`);
     }
@@ -191,6 +201,78 @@ test("⚠ the dock frame's CSS is shared with the in-space Overview and is uncha
     sha256(dockFrameRules()),
     "37687642292c11e023978bfe4e9f69b445aea07cac635a5894954e785b558314",
   );
+});
+
+// --- 2b. the expanded panel, which hides the desktop ------------------------
+
+test("⚠ expanding is gated on being DOCKED by derivation, not by a reset", () => {
+  // Expanding HIDES the desktop. A pilot who undocked into a hidden desktop
+  // would also have no HUD and no locked-target panel, and no control left to
+  // bring any of them back. So the flag Workspace renders with is computed as
+  // `isDocked && preference`: there is no stored state that could go stale and
+  // no effect whose ordering could be wrong.
+  const workspace = readFileSync(path.join(UI_DIR, "Workspace.svelte"), "utf8");
+  assert.match(
+    workspace,
+    /const stationExpanded = \$derived\(isDocked && expandPreferred\);/,
+    "the expanded flag must be derived from isDocked, not reset after the fact",
+  );
+  assert.match(workspace, /class:station-expanded=\{stationExpanded\}/);
+  assert.doesNotMatch(
+    workspace,
+    /class:station-expanded=\{expandPreferred\}/,
+    "the remembered preference must never drive the class directly",
+  );
+});
+
+test("⚠ every rule that hides the desktop requires a docked-only class", () => {
+  // The counterpart to the extractor's exclusion above: whatever is written
+  // under those class names, it cannot apply without them.
+  const css = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+  let found = 0;
+  for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (!/\.desktop\b/.test(selector ?? "")) continue;
+    if (!/display:\s*none/.test(body ?? "")) continue;
+    found += 1;
+    assert.match(
+      selector ?? "",
+      /\.station-expanded\b/,
+      `a rule hides the desktop without the docked-only class: ${selector}`,
+    );
+  }
+  assert.equal(found, 1, "expected exactly one rule to hide the desktop");
+});
+
+test("the expansion is offered only where there is something to expand into", () => {
+  // The mobile home has no work area to take, so it passes no handler and the
+  // panel draws no control — the button cannot exist where it would do nothing.
+  const mobile = readFileSync(path.join(UI_DIR, "MobileWorkspace.svelte"), "utf8");
+  assert.doesNotMatch(mobile, /onToggleExpand/);
+  const stationPanel = readFileSync(path.join(UI_DIR, "StationPanel.svelte"), "utf8");
+  assert.match(stationPanel, /\{#if onToggleExpand\}/, "the control must be conditional on the handler");
+});
+
+test("expanded, the frame drops its pixel width so the column can stretch it", () => {
+  // An inline `width` outranks any rule that would stretch the panel, so an
+  // expanded frame must not emit one at all.
+  const body = dockPanel({ isDocked: true, expanded: true });
+  const frame = /<aside[^>]*>/.exec(body)?.[0] ?? "";
+  assert.match(frame, /class="dock-panel expanded"/);
+  assert.doesNotMatch(frame, /style="width:/, "an expanded panel must carry no fixed width");
+  // Non-vacuous: an ordinary docked panel DOES carry one.
+  const ordinary = /<aside[^>]*>/.exec(dockPanel({ isDocked: true }))?.[0] ?? "";
+  assert.match(ordinary, /style="width:340px"/);
+  assert.match(body, /class="stn-host"/, "and it is still the station panel inside");
+  assert.doesNotMatch(body, /class="dock-resize"/, "there is nothing to drag against");
+});
+
+test("in space the frame is never expanded, whatever it is handed", () => {
+  // DockPanel renders the flag it is given; Workspace is what guarantees the
+  // value. This pins the other half: handed `true`, the in-space arm is still
+  // the Overview and the control is nowhere on screen.
+  const body = dockPanel({ isDocked: false, expanded: true });
+  assert.match(body, /class="dock-overview"/);
+  assert.doesNotMatch(body, /Take the whole work area/, "the control leaked into space");
 });
 
 // --- 3. the global design tokens --------------------------------------------
@@ -235,4 +317,20 @@ test("⚠ the frame's width limits are the ones the Overview was built against",
   // decide — the station panel gets a narrower tier instead.
   assert.match(DOCK_PANEL_SOURCE, /const MIN_W = 240;/);
   assert.match(DOCK_PANEL_SOURCE, /const MAX_W = 900;/);
+});
+
+test("opening a window gives the work area back", () => {
+  // The expanded panel HIDES the desktop, so a window opened while it is
+  // expanded would land somewhere invisible and the launcher rail would look
+  // broken. Asking for a panel is asking for the canvas it lives on.
+  const workspace = readFileSync(path.join(UI_DIR, "Workspace.svelte"), "utf8");
+  const opener = workspace.slice(workspace.indexOf("const open = (id: TabID)"));
+  const body = opener.slice(0, opener.indexOf("};") + 2);
+  assert.match(body, /expandPreferred = false;/, "opening a window must un-expand");
+  assert.match(body, /openWindow\(wins, id\)/);
+  // ...but the docked Neocom pick that folds INTO the dock panel must not, or
+  // choosing "Inventory & Ship" would throw the expansion away.
+  const neocom = workspace.slice(workspace.indexOf("const openFromNeocom"));
+  const neocomBody = neocom.slice(0, neocom.indexOf("\n  };"));
+  assert.doesNotMatch(neocomBody, /expandPreferred/);
 });

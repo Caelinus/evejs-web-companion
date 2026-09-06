@@ -127,6 +127,16 @@ export interface DesktopLayout {
   readonly dockWidth: number;
   readonly targetsX: number;
   readonly targetsY: number;
+  /**
+   * The player asked the docked Station panel to take the whole work area.
+   *
+   * ⚠ A PREFERENCE, NOT A STATE. It is remembered even while the pilot is in
+   * space, where it means nothing — Workspace DERIVES the real flag as
+   * `isDocked && this`, so undocking can never leave somebody in space with the
+   * desktop and the HUD hidden. Storing the preference is what makes the panel
+   * come back expanded on the next dock.
+   */
+  readonly stationExpanded: boolean;
 }
 
 const STORAGE_VERSION = 1;
@@ -180,7 +190,16 @@ export function loadLayout(characterID: number): DesktopLayout | null {
       typeof o.dockWidth === "number" && o.dockWidth >= MIN_DOCK_WIDTH ? o.dockWidth : DEFAULT_DOCK_WIDTH;
     const targetsX = isFiniteNumber(o.targetsX) ? o.targetsX : DEFAULT_TARGETS_POS.x;
     const targetsY = isFiniteNumber(o.targetsY) ? o.targetsY : DEFAULT_TARGETS_POS.y;
-    return { wins, dockCollapsed: o.dockCollapsed === true, dockWidth, targetsX, targetsY };
+    return {
+      wins,
+      dockCollapsed: o.dockCollapsed === true,
+      dockWidth,
+      targetsX,
+      targetsY,
+      // Absent in every layout saved before the expand toggle existed, and
+      // `=== true` is what makes that read as "not expanded" rather than throw.
+      stationExpanded: o.stationExpanded === true,
+    };
   } catch {
     return null;
   }

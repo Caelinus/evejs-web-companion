@@ -228,8 +228,24 @@ replaces had: the five locations, all four bay states, unknown-volume rendering,
 selection, the action bar with its inline confirm, drag and drop, the container location, merge,
 stack-all, the repair two-step and the session controls.
 
-**Phase 2 - expand/dock toggle.** Shell change. See 5.4 - it is the only piece that can reach space
-and it does not ship until its guard test does.
+**Phase 2 - expand/dock toggle. DONE.** The docked panel can take the whole work area; the desktop
+is hidden, not unmounted, so every floating window keeps its own state.
+
+Two things settled differently from 5.4:
+
+- **The flag is DERIVED, not reset.** `Workspace` keeps a remembered *preference* and renders
+  `stationExpanded = isDocked && expandPreferred`. There is no stored flag that could be stale and
+  no effect whose ordering could be wrong — undocking cannot leave anybody in space with the
+  desktop, the HUD and the target panel hidden, by construction rather than by cleanup.
+- **The preference lives in `DesktopLayout`, not a new key.** 5.4 warned off widening it because
+  `loadLayout` would silently drop an unknown field; the answer was to update the validator, which
+  is one storage key and one place instead of two. A layout saved before the toggle existed reads
+  as un-expanded, and `desktop.test.ts` pins that — an absent field that read as anything else
+  would hide the desktop for every existing player.
+
+One trap found while building it: opening a window from the launcher rail while expanded would put
+it behind a hidden desktop. `open()` now gives the work area back, while the docked Neocom pick that
+folds *into* the dock panel deliberately does not.
 
 **Phase 3 - optional, a separate decision.** Adopt the same panel for the in-space floating
 "Inventory & Ship" window and retire `InventoryShip.svelte`. Deliberately last: it is the change the
