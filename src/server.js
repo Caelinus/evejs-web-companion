@@ -16309,6 +16309,25 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
     res.status(400).json({ ok: false, error: "INVALID_SHIP", message: "A ship is required." });
     return;
   }
+  // ?keys=ore,mineral — read only these bays.
+  //
+  // ⚠ THIS IS A COST CONTROL, NOT A FILTER FOR TIDINESS. The full read costs one
+  // GetCapacity per candidate flag — twenty-seven of them — which is fine once
+  // for a panel and far too much for a bot that wants to know how much room the
+  // ore hold has before it reaches into a can. Naming the two bays it cares
+  // about turns that into two calls. An unknown or empty key list means the
+  // whole enumeration, exactly as before.
+  const requestedKeys = String(req.query.keys || "")
+    .split(",")
+    .map((key) => key.trim())
+    .filter(Boolean);
+  const wanted = requestedKeys.length > 0
+    ? SHIP_BAYS.filter((bay) => requestedKeys.includes(bay.key))
+    : SHIP_BAYS;
+  if (requestedKeys.length > 0 && wanted.length === 0) {
+    res.status(400).json({ ok: false, error: "INVALID_BAY", message: "No such ship bay." });
+    return;
+  }
   // The bind is the SAME call a container binds with — a ship's bays are just
   // its own inventory, so there is no ship-specific bind method.
   const spec = containerBindSpec(shipID);
@@ -16316,7 +16335,7 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
     // One capacity read per candidate flag, all independent: a hull that
     // refuses one bay must not blank the other twenty-six.
     const settled = await Promise.allSettled(
-      SHIP_BAYS.map((bay) =>
+      wanted.map((bay) =>
         boundCall(held, req.webSessionID, spec, "GetCapacity", [bay.flag], null),
       ),
     );
@@ -16326,7 +16345,7 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
         return;
       }
     }
-    const readings = SHIP_BAYS.map((bay, index) => {
+    const readings = wanted.map((bay, index) => {
       const outcome = settled[index];
       if (outcome.status !== "fulfilled") {
         // Could not look. NOT "the hull lacks this bay".

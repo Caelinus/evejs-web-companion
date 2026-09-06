@@ -12,8 +12,8 @@ import {
 } from "../bridge/stationPanel.ts";
 import { decodeCapacity, decodeContainer, decodeInventoryRows } from "../bridge/inventoryShip.ts";
 import { decodeShipBays } from "../bridge/shipBays.ts";
-import { FREIGHT_BAYS, planBayTransfers } from "../bridge/bayRouting.ts";
-import { fitWithin, holdFreeM3 } from "../bridge/holdFit.ts";
+import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
+import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { buildSlots, decodeChargeFits, decodeResources, decodeShipAttributes } from "../bridge/fitting.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import {
@@ -5921,45 +5921,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * got a 0-capacity destination and a NotEnoughCargoSpace every single time.
    * Measured against a live bot: 227 consecutive refusals over twelve hours.
    *
-   * So: `planBayTransfers` picks destinations from the hull's OWN bay list, a
-   * refused specialised bay spills its rows into cargo rather than aborting the
-   * haul, and only a haul where NOTHING moved is reported as a failure.
+   * So: `planLootTransfers` walks each row's chain of SPECIALISED bays against
+   * the hull's own list and their measured room, splitting where only part of a
+   * stack fits — and only a haul where something was attempted AND refused is
+   * reported as a failure. What fits nowhere stays in the can.
    */
   async function transferLootedRows(
     rows: readonly InventoryItemRow[],
     from: { readonly kind: "container"; readonly itemID: number },
     bays: readonly ShipBay[],
-    holds: readonly MiningHold[] | null,
+    freeFor: (bay: string | null) => number | null,
   ): Promise<void> {
-    const groups = planBayTransfers(rows, bays);
-    const byID = new Map(rows.map((row) => [row.itemID, row]));
-    // Live free space per destination. `holds` is the mining-holds read, which
-    // is one call and already covers every bay this path routes into — ore, ice,
-    // gas, asteroid and cargo. A destination it does not cover reads as null,
-    // which `fitWithin` treats as "cannot compute", handing the stack to the
-    // server exactly as this path always did.
-    const freeFor = (bay: string | null): number | null => {
-      const hold = (holds ?? []).find((entry) => entry.key === (bay ?? "cargo"));
-      const capacity = hold?.capacity ?? null;
-      if (capacity === null || capacity.capacity === null || capacity.used === null) {
-        return null;
-      }
-      return holdFreeM3({ capacity: capacity.capacity, used: capacity.used });
-    };
-
-    const spilled: number[] = [];
     let moved = 0;
     let lastError: unknown = null;
-    const send = async (itemIDs: readonly number[], bay: string | null, qty: number | null) => {
-      if (itemIDs.length === 0) {
-        return;
-      }
+    for (const transfer of planLootTransfers(rows, bays, freeFor)) {
       try {
         await api.transferItems(
-          itemIDs,
+          transfer.itemIDs,
           from,
-          bay === null ? { kind: "cargo" } : { kind: "shipBay", bay },
-          qty,
+          transfer.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: transfer.bay },
+          transfer.qty,
           callOptions,
         );
         moved += 1;
@@ -5967,38 +5948,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         if (isSessionLost(error)) {
           throw error;
         }
+        // No spill-to-cargo backstop here any more, and none is needed: the
+        // planner already walked this row's whole chain and ENDED at the cargo
+        // hold, so a refusal means the destination it measured has less room
+        // than it was told — not that a fallback was never tried.
         lastError = error;
-        if (bay !== null) {
-          spilled.push(...itemIDs);
-        }
       }
-    };
-
-    for (const group of groups) {
-      const groupRows = group.itemIDs.map((id) => byID.get(id)).filter((row): row is InventoryItemRow => row !== undefined);
-      const fit = fitWithin(groupRows, freeFor(group.bay));
-      await send(fit.whole.map((row) => row.itemID), group.bay, null);
-      if (fit.split !== null) {
-        // A SPLIT, and it must go on its own: the bridge refuses a quantity when
-        // more than one stack is named. This is the call that drains a can
-        // holding more than the ship can carry, a load at a time.
-        await send([fit.split.row.itemID], group.bay, fit.split.quantity);
-      }
-      // Volume unknown — issued apart so the server's verdict on these cannot
-      // take the measured stacks down with them.
-      await send(fit.unknown.map((row) => row.itemID), group.bay, null);
-      // `fit.deferred` is deliberately not sent. It does not fit, and asking
-      // anyway is the refusal loop this whole change exists to end.
     }
-    if (spilled.length > 0) {
-      // A specialised bay turned these down after all. Cargo is the fallback
-      // every hull has; unfitted on purpose, because this is already the
-      // backstop and the server is the last word on it.
-      await send(spilled, null, null);
-    }
-    // Something landed somewhere: progress. NOTHING was even attempted — every
-    // row deferred because the ship is full — is not a failure either: it is the
-    // block's cue to go and unload, which `lootContainers` reads from the holds.
+    // Nothing asked for at all — every row fits nowhere — is not a failure. It
+    // is the block's cue to go and unload, which the loot deciders read from
+    // the holds. Only an attempt that was made AND refused counts.
     if (moved === 0 && lastError !== null) {
       throw lastError;
     }
@@ -6070,20 +6029,33 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      * offered whole and refused.
      */
     const lootFrom = async (containerID: number): Promise<void> => {
-      const [contents, holdsResult] = await Promise.all([
+      const bays = await activeShipBays();
+      // Room is asked for BY NAME, and only for the freight bays this hull has
+      // — a handful of capacity calls rather than the twenty-seven a full bay
+      // read costs. Without it every bay outside the mining-holds route
+      // (mineral, salvage, planetary, command-centre) had no measurable room and
+      // fell back to offering whole stacks, so the bays the operator asked to be
+      // supported were routed to but never actually fitted.
+      const keys = bays
+        .filter((entry) => entry.present === true && FREIGHT_BAYS.has(entry.key))
+        .map((entry) => entry.key);
+      const shipID = capabilityCache.peek().shipID ?? store.inventory.get().activeShipID;
+      const [contents, roomRead] = await Promise.all([
         api.openContainer(containerID, callOptions),
-        api.getMiningHolds(callOptions).catch(() => null),
+        shipID === null
+          ? Promise.resolve(null)
+          : api.getShipBays(shipID, callOptions, [...keys, "cargo"]).catch(() => null),
       ]);
       const rows = decodeInventoryRows(contents.list, contents.volumes);
       if (rows.length === 0) {
         return;
       }
-      await transferLootedRows(
-        rows,
-        { kind: "container", itemID: containerID },
-        await activeShipBays(),
-        holdsResult === null ? null : decodeMiningHolds(holdsResult.holds),
-      );
+      const room = roomRead === null ? [] : decodeShipBays(roomRead.bays);
+      // null is "we could not read that bay's room", which the planner treats as
+      // "hand it over and let the server judge" — never as "no room".
+      const freeFor = (bay: string | null): number | null =>
+        holdFreeM3(room.find((entry) => entry.key === (bay ?? "cargo"))?.capacity ?? null);
+      await transferLootedRows(rows, { kind: "container", itemID: containerID }, bays, freeFor);
     };
     return {
       observe: async (hint) => {

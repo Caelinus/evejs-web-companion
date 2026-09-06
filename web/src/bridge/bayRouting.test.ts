@@ -13,6 +13,7 @@ import {
   BAY_PREFERENCES,
   FREIGHT_BAYS,
   planBayTransfers,
+  planLootTransfers,
   preferredBays,
   type BayPreference,
 } from "./bayRouting.ts";
@@ -178,4 +179,121 @@ test("ammunition is left in cargo rather than filling a hold the bot will not em
   // Charge category 8. Deliberate: see FREIGHT_BAYS on why the ammo hold is
   // treated as kit even though a Hoarder hauls charges for a living.
   assert.deepEqual(preferredBays(row(1, 8, 83)), []);
+});
+
+// ── The chain: specialised bays only, cargo is not a backstop ──────────────
+
+function vrow(itemID: number, categoryID: number | null, groupID: number | null, quantity: number, volume: number | null) {
+  return { itemID, typeID: 1, groupID, categoryID, flagID: null, quantity, singleton: false, volume };
+}
+
+const FREE = (map: Record<string, number | null>) => (bay: string | null) => map[bay ?? "cargo"] ?? null;
+
+test("ore that OVERFLOWS the ore hold stays in the can — it never lands in cargo", () => {
+  // The operator's rule, and not a preference: "if the ore bay exists, no ore in
+  // ship cargo." Also the safe reading — deliver-ore empties the specialised
+  // holds, so ore pushed into a barge's cargo is ore nothing will ever unload.
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 1000, 1)],
+    [bay("ore", true)],
+    FREE({ ore: 400, cargo: 5000 }),
+  );
+  assert.deepEqual(out, [{ bay: "ore", itemIDs: [1], qty: 400 }]);
+  assert.equal(out.some((t) => t.bay === null), false, "cargo was not offered the overflow");
+});
+
+test("a hull with NO ore hold takes the ore into cargo, which is what cargo is for", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 300, 1)],
+    [bay("ore", false)],
+    FREE({ cargo: 5000 }),
+  );
+  assert.deepEqual(out, [{ bay: null, itemIDs: [1], qty: null }]);
+});
+
+test("a stack that fits its bay entirely moves whole", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 100, 1)],
+    [bay("ore", true)],
+    FREE({ ore: 5000, cargo: 500 }),
+  );
+  assert.deepEqual(out, [{ bay: "ore", itemIDs: [1], qty: null }]);
+});
+
+test("ice cascades to the MINING hold when the ice hold is full — both are specialised", () => {
+  // Chaining between specialised bays is still right: flag 134 takes ice since
+  // patch 19.11. What is forbidden is falling through to the cargo hold.
+  const out = planLootTransfers(
+    [vrow(1, 25, 423, 1000, 1)],
+    [bay("ice", true), bay("ore", true)],
+    FREE({ ice: 400, ore: 600, cargo: 5000 }),
+  );
+  assert.deepEqual(out, [
+    { bay: "ice", itemIDs: [1], qty: 400 },
+    { bay: "ore", itemIDs: [1], qty: 600 },
+  ]);
+});
+
+test("two stacks bound for one bay cannot both be promised the same room", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 300, 1), vrow(2, 25, 462, 300, 1)],
+    [bay("ore", true)],
+    FREE({ ore: 400, cargo: 5000 }),
+  );
+  const oreUnits = out
+    .filter((t) => t.bay === "ore")
+    .reduce((sum, t) => sum + (t.qty ?? 300), 0);
+  assert.equal(oreUnits, 400, "the ore hold is allocated exactly once");
+  assert.equal(out.some((t) => t.bay === null), false, "and the rest waits, rather than going to cargo");
+});
+
+test("a destination whose room cannot be READ is handed the row whole", () => {
+  // No arithmetic is possible, so the server rules on it — holdFit's standing
+  // rule — and the chain stops rather than guessing further down it.
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 100, 1)],
+    [bay("ore", true)],
+    FREE({ ore: null, cargo: 1000 }),
+  );
+  assert.deepEqual(out, [{ bay: "ore", itemIDs: [1], qty: null }]);
+});
+
+test("a row of unknown VOLUME is handed over whole at its first choice", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 100, null)],
+    [bay("ore", true)],
+    FREE({ ore: 5000, cargo: 500 }),
+  );
+  assert.deepEqual(out, [{ bay: "ore", itemIDs: [1], qty: null }]);
+});
+
+test("a full ship asks for nothing at all", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 100, 1)],
+    [bay("ore", true)],
+    FREE({ ore: 0, cargo: 0 }),
+  );
+  assert.deepEqual(out, []);
+});
+
+test("minerals go to a mineral hold when the hull has one, and stay out of cargo", () => {
+  // The bays the operator listed are routed AND measured, not merely routed.
+  const out = planLootTransfers(
+    [vrow(1, 4, 18, 1000, 1)],
+    [bay("mineral", true), bay("ore", true)],
+    FREE({ mineral: 600, ore: 5000, cargo: 5000 }),
+  );
+  assert.deepEqual(out, [{ bay: "mineral", itemIDs: [1], qty: 600 }]);
+});
+
+test("loot with no bay of its own still goes to cargo, alongside bay-bound rows", () => {
+  const out = planLootTransfers(
+    [vrow(1, 25, 462, 100, 1), vrow(2, 7, 60, 5, 1)],
+    [bay("ore", true)],
+    FREE({ ore: 5000, cargo: 500 }),
+  );
+  assert.deepEqual(out, [
+    { bay: "ore", itemIDs: [1], qty: null },
+    { bay: null, itemIDs: [2], qty: null },
+  ]);
 });

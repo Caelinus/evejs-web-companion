@@ -187,6 +187,124 @@ export function preferredBays(
 }
 
 /**
+ * One transfer to issue: some rows to one destination. `qty` is set only for a
+ * SPLIT, which the bridge allows on a single stack alone.
+ */
+export interface BayTransfer {
+  readonly bay: string | null;
+  readonly itemIDs: readonly number[];
+  readonly qty: number | null;
+}
+
+/**
+ * Everything the ship can take from a can, allocated across its bays.
+ *
+ * A row walks its chain of SPECIALISED bays in order — an ice hold before the
+ * mining hold that also takes ice — taking room wherever there is some and
+ * splitting when only part of a stack fits. The cargo hold is the chain only for
+ * a row that has no specialised bay on this hull at all; see the note in the
+ * body on why a full bay must not fall through to it.
+ *
+ * Room is tracked as it is allocated, so two stacks bound for the same bay
+ * cannot both be promised the same cubic metre.
+ *
+ * `freeFor` returning null means that destination's room could not be READ. A
+ * row that reaches such a destination is handed over whole and the server judges
+ * it — holdFit's standing rule — and the chain stops there, because there is no
+ * arithmetic left to do.
+ */
+export function planLootTransfers(
+  rows: readonly InventoryItemRow[],
+  bays: readonly ShipBay[],
+  freeFor: (bay: string | null) => number | null,
+  preferences: readonly BayPreference[] = BAY_PREFERENCES,
+): readonly BayTransfer[] {
+  const room = new Map<string | null, number | null>();
+  const roomFor = (bay: string | null): number | null => {
+    if (!room.has(bay)) {
+      room.set(bay, freeFor(bay));
+    }
+    return room.get(bay) ?? null;
+  };
+
+  // Whole-stack moves per destination merge into one call; a split needs its own.
+  const whole = new Map<string | null, number[]>();
+  const splits: BayTransfer[] = [];
+  const order: (string | null)[] = [];
+  const noteWhole = (bay: string | null, itemID: number): void => {
+    const bucket = whole.get(bay);
+    if (bucket === undefined) {
+      whole.set(bay, [itemID]);
+      order.push(bay);
+    } else {
+      bucket.push(itemID);
+    }
+  };
+
+  for (const row of rows) {
+    // ⚠ THE CARGO HOLD IS NOT A BACKSTOP FOR A FULL SPECIALISED BAY. The
+    // operator's rule, and it is not a preference: "if the ore bay exists, no
+    // ore in ship cargo." So cargo ends the chain only for a row that has NO
+    // specialised bay on this hull — never for one whose bay is merely full.
+    //
+    // It is also the safe reading. `deliver-ore` empties the specialised holds
+    // and falls back to cargo only on a hull that has none, so ore pushed into
+    // the cargo hold of a barge is ore nothing will ever unload: it would sit
+    // there taking room until the hold jammed, which is the dead end this whole
+    // line of work started from.
+    //
+    // What does not fit the right bay stays in the can and waits for a trip
+    // with room.
+    const preferred = preferredBays(row, preferences).filter((key) => bayIsPresent(bays, key));
+    const chain: (string | null)[] = preferred.length > 0 ? preferred : [null];
+    let left = row.quantity;
+    const unit = row.volume ?? null;
+    for (const bay of chain) {
+      if (left <= 0) {
+        break;
+      }
+      const free = roomFor(bay);
+      if (free === null || unit === null || !(unit > 0)) {
+        // Nothing measurable here. Hand over what is left and let the server
+        // rule on it; there is no point walking further down the chain on a
+        // guess.
+        splits.push({ bay, itemIDs: [row.itemID], qty: left === row.quantity ? null : left });
+        left = 0;
+        break;
+      }
+      const fits = Math.min(left, Math.floor(free / unit));
+      if (fits <= 0) {
+        continue;
+      }
+      if (fits === row.quantity) {
+        noteWhole(bay, row.itemID);
+      } else {
+        splits.push({ bay, itemIDs: [row.itemID], qty: fits });
+      }
+      room.set(bay, free - fits * unit);
+      left -= fits;
+    }
+    // Whatever is still left fits nowhere on this hull. It stays in the can.
+  }
+
+  const out: BayTransfer[] = [];
+  for (const bay of order) {
+    if (bay === null) {
+      continue;
+    }
+    out.push({ bay, itemIDs: whole.get(bay) ?? [], qty: null });
+  }
+  out.push(...splits.filter((transfer) => transfer.bay !== null));
+  // Cargo last, so the fallback is spent on what genuinely had nowhere else.
+  const cargoWhole = whole.get(null);
+  if (cargoWhole !== undefined && cargoWhole.length > 0) {
+    out.push({ bay: null, itemIDs: cargoWhole, qty: null });
+  }
+  out.push(...splits.filter((transfer) => transfer.bay === null));
+  return out.filter((transfer) => transfer.itemIDs.length > 0);
+}
+
+/**
  * Split `rows` into one group per destination, given what the hull actually has.
  *
  * Groups come back in a STABLE order — specialised bays in the order

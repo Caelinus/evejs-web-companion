@@ -679,8 +679,13 @@ export interface RawShipBaysResult {
 export async function getShipBays(
   shipID: number,
   options: ApiOptions = {},
+  keys: readonly string[] = [],
 ): Promise<RawShipBaysResult> {
-  const data = await getJson(`/api/bridge/ship/${shipID}/bays`, options);
+  // Naming the bays turns 27 capacity calls into as many as were asked for,
+  // which is what makes this affordable on a bot's loot path rather than only
+  // once for a panel.
+  const query = keys.length > 0 ? `?keys=${encodeURIComponent(keys.join(","))}` : "";
+  const data = await getJson(`/api/bridge/ship/${shipID}/bays${query}`, options);
   return {
     shipID: asNumberOrNull(data.shipID) ?? shipID,
     bays: data.bays ?? null,

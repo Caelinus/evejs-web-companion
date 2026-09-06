@@ -395,6 +395,46 @@ test("the hold read asks for the WHOLE ladder, cargo included", async () => {
   );
 });
 
+test("GET /bays?keys= reads ONLY the bays asked for", async () => {
+  // The full read costs one GetCapacity per candidate flag — twenty-seven of
+  // them. That is fine once for a panel and far too much for a bot that wants
+  // to know how much room the ore hold has before reaching into a can, so the
+  // loot path names the two or three bays it cares about.
+  const { gateway, baseUrl } = await docked();
+  const { response, payload } = await apiRequest(
+    baseUrl,
+    `/api/bridge/ship/${SHIP_ID}/bays?keys=ore,cargo`,
+  );
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.deepEqual(payload.bays.map((bay) => bay.key), ["cargo", "ore"]);
+
+  const flags = boundOf(gateway, "invbroker", "GetCapacity").map((call) => Number(call.args[0]));
+  assert.equal(flags.length, 2, `only the named bays were read, got ${flags.join(",")}`);
+  assert.ok(flags.includes(FLAG_ORE_HOLD));
+});
+
+test("GET /bays with no keys still reads the whole enumeration", async () => {
+  const { gateway, baseUrl } = await docked();
+  const { payload } = await apiRequest(baseUrl, `/api/bridge/ship/${SHIP_ID}/bays`);
+  assert.ok(payload.bays.length > 20, "every candidate bay is still reported");
+  assert.ok(
+    boundOf(gateway, "invbroker", "GetCapacity").length > 20,
+    "and every one of them was actually read",
+  );
+});
+
+test("GET /bays?keys= with nothing recognisable is refused, not silently widened", async () => {
+  // Answering the FULL enumeration for a typo would quietly cost a bot the
+  // twenty-seven calls it was trying to avoid.
+  const { baseUrl } = await docked();
+  const { response, payload } = await apiRequest(
+    baseUrl,
+    `/api/bridge/ship/${SHIP_ID}/bays?keys=nosuchbay`,
+  );
+  assert.equal(response.status, 400);
+  assert.equal(payload.error, "INVALID_BAY");
+});
+
 test("R7d/R9a: the response names each hold and never leaks a flag number", async () => {
   const { baseUrl } = await docked();
   const { payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
