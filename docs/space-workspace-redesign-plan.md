@@ -404,6 +404,41 @@ gets its three pickers in place of the raw id inputs; `Mining` gets its in-space
 Jettison, and Compress over a facility picker built on `compressionFacility`. `Overview.svelte` is
 deleted at the end of this phase, and that deletion is the phase's real deliverable.
 
+### ⚠ 4.1 What the survey found that this plan had not counted
+
+Before writing any of it, three read-only surveys went over `Overview.svelte`'s test suites, the
+`Flight` inputs, and the jettison/compress path. Deleting the cockpit is a bigger job than §4 said,
+because **four capabilities have no new home**, and the failure mode is not a red test — it is a
+capability that stops existing with every remaining test green.
+
+| # | What has no home | Why it matters |
+| --- | --- | --- |
+| 1 | The **equipment table** | `ModuleRack` is a *different widget*, not a replacement: it cannot power an OFFLINE module up, has no "Use it on" target picker, and shows no cycle length. Fitting is **docked-only** — so deleting the cockpit removes the only way to online a module IN SPACE. |
+| 2 | **Mine** and **Haul** | `SpaceOverview`'s dispatcher names them and refuses: *"… is in the Around Your Ship window for now."* Neither is a single flow call; both need real implementations before the cockpit goes. |
+| 3 | The flight strip's **where / doing / wrong** narration | The bot's own words, the first refusal, and where you are. Stop already moved to the HUD; the narration did not. §1.2 sends it to Flight's Status grid. |
+| 4 | ~~"Send drones" on a hostile row~~ | ✅ **Done in 4a.** It was the fastest path in the client from "something is shooting me" to "my drones are on it" — no lock, no window. `SpaceOverview` never had it. |
+
+Plus five smaller corrections to this document:
+
+* **`api.ts` is `web/src/app/api.ts`, not `src/api.ts`.** `src/` is plain JavaScript. Both the
+  jettison and compress **routes already exist** (`/api/bridge/ship/jettison`,
+  `/api/bridge/mining/compress`) and so do their `api.ts` functions — they are reachable today only
+  from the bot-script action dispatcher. The **only** missing layer is `AppFlow`.
+* **Jump is not two independent gate ids.** `GateLink` carries `destinationGateID`, so picking one
+  gate on the grid determines the far side. Two pickers would be a worse UI than one, and the
+  authoritative "is this a gate" test is gate-graph membership (`gateLinkFor`) — *not* `kind` or
+  `groupID === 10`, which `gateLinks.ts` explicitly warns against.
+* **`dockStationID` feeds TWO calls**, `dock` and `dockAt`. One picked value, two buttons.
+* **`IN_SPACE_DEFAULT` is `"overview"`**, and `MobileWorkspace.svelte` mounts the cockpit too. Both
+  move with the deletion.
+* **`shell.ts` and `shell.test.ts` are dead** as of Phase 3 — nothing but the test imports
+  `SPACE_PANELS` now that the HUD lost its nav buttons. They go with this phase, for exactly the
+  reason `chromeRender.test.ts`'s own header records about the shells it replaced.
+
+**Order, revised.** 4a ✅ the two windows + Send drones. 4b the equipment window. 4c Flight (the
+narration, then the pickers). 4d Mining (two `AppFlow` verbs, holds, Jettison, Compress). 4e Mine
+and Haul in `SpaceOverview`, then the deletion and the suite re-anchoring.
+
 **Phase 5 — mobile.** The 1D stacked collapsible cards in `MobileWorkspace`.
 
 ---
