@@ -1,6 +1,7 @@
 # What stays aboard — a design for unload/jettison policy
 
-Design doc. **Part 1 and Part 1b are implemented**; Parts 2 and 3 are not. It exists because the current behaviour is only
+Design doc. **All three parts are implemented** (Part 1, Part 1b, `exceptBays`
+and `keepItems`). It exists because the current behaviour is only
 safe by accident, and the accident is about to end.
 
 ## The problem
@@ -386,3 +387,35 @@ server, exactly as before, so this can only ever do better than the old path.
 **Also hardened:** `readTypeVolumes` now returns an empty map when the static
 tables cannot answer, instead of throwing. A reference lookup must not be able
 to 500 a read the player asked for — it did, on a fake without `getType`.
+
+
+---
+
+# Addendum - Parts 2 and 3 as shipped (2026-09-06)
+
+Both arguments landed on the per-block shape the operator chose.
+
+**`exceptBays` (bay level).** On `unload-cargo`. Named bays are left out of BOTH
+directions - neither emptied at the station nor filled with loot - so the
+fill-set and empty-set stay in agreement. Fuel and ammo joined `FREIGHT_BAYS` at
+the same time, which is what made that argument necessary rather than merely
+nice: a bay a bot may fill has to be one it can empty, and emptying a combat
+hull's charges strands it.
+
+**`keepItems` (item level).** On `unload-cargo` and `jettison-cargo`. Matched on
+typeID or groupID, never on a name (R47). A group rule is the one to reach for:
+every grade of a mining crystal shares a group, where a type list needs a dozen
+entries and silently misses the thirteenth. The editor offers what is actually
+in the hangar or cargo, with "All like this" building the group rule and
+labelling it by an exemplar, because the client has no group-name table and
+inventing one would read worse than showing a name the player recognises.
+
+**The unknown-classification rule cuts opposite ways, as designed**, and this is
+the part worth remembering: unloading a row whose group cannot be read MOVES it
+(the station hangar is one drag from undone, and holding it back would stall the
+block's empty check for ever); jettisoning it KEEPS it (a can despawns, so
+"I could not tell" must never be enough to throw something into space).
+
+Not built, and not currently needed: a script-level default underneath the
+per-block arguments. The shapes are additive, so one can be added later without
+disturbing what exists.

@@ -1651,6 +1651,29 @@ test("remote-cap: a mate out of reach is closed on, and the transfer is bounded"
 
 const jettisonStep: MacroStep = { id: "jc", kind: "macro", macro: "jettison-cargo", args: {} };
 
+test("jettison-cargo: keepItems is honoured, and an UNREADABLE row is never thrown out", () => {
+  // ⚠ The one block where getting this wrong cannot be undone: a jettisoned
+  // stack goes into a can that despawns. So unlike the unload block, a row this
+  // client cannot classify stays aboard.
+  const keepCrystals: MacroStep = {
+    id: "jc3", kind: "macro", macro: "jettison-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const rows = [
+    { itemID: 11, typeID: 1230, groupID: 462, categoryID: 25, quantity: 50, singleton: false },
+    { itemID: 12, typeID: 3389, groupID: 483, categoryID: 8, quantity: 2, singleton: false },
+    { itemID: 13, typeID: 999, groupID: null, categoryID: null, quantity: 1, singleton: false },
+  ];
+  const cargo = { rows, capacity: null } as unknown as ScriptObservation["cargo"];
+  const t = jettison(keepCrystals, obs({ cargo }), {}, {});
+  assert.ok(t.action.kind === "jettison");
+  assert.deepEqual(
+    t.action.kind === "jettison" ? [...t.action.itemIDs] : [],
+    [11],
+    "the ore went out; the crystals and the unidentifiable stack stayed",
+  );
+});
+
 test("jettison-cargo: dumps the whole hold, or only the picked item; empty is done", () => {
   const rows = [
     { itemID: 11, typeID: 34, quantity: 100, singleton: false },

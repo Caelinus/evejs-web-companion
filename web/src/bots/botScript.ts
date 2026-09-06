@@ -251,7 +251,32 @@ export type Arg =
    * directions — neither filled with loot nor emptied at the station — because
    * a bay a bot fills but will not empty jams after one load.
    */
-  | { readonly kind: "bayList"; readonly bays: readonly string[] };
+  | { readonly kind: "bayList"; readonly bays: readonly string[] }
+  /**
+   * Items the block must LEAVE ABOARD. Empty or absent = leave nothing, which is
+   * the shipped behaviour.
+   *
+   * The case it exists for: spare mining crystals in the cargo hold, beside the
+   * ore and salvage the trip was for. No bay rule can separate those, because
+   * they are all in the same bay.
+   */
+  | { readonly kind: "itemList"; readonly items: readonly ItemMatchArg[] };
+
+/**
+ * One thing to leave aboard, matched on the game's own classification and never
+ * on a name (R47, the same rule as OreFamilyArg): names are localised, renamed
+ * and ambiguous.
+ *
+ * A `group` match is the one worth reaching for — every grade and variant of a
+ * mining crystal shares a group, where a type list would need a dozen entries
+ * and would silently miss the thirteenth. `name` is the display hint; for a
+ * group it names an EXEMPLAR ("items like Simple Veldspar Mining Crystal II"),
+ * because the client has no group-name table and inventing one would be worse
+ * than showing the player something they can recognise.
+ */
+export type ItemMatchArg =
+  | { readonly match: "type"; readonly typeID: number; readonly name: string }
+  | { readonly match: "group"; readonly groupID: number; readonly name: string };
 
 /**
  * One ORE FAMILY the mine block prefers — Veldspar, Kernite, … — identified by
@@ -271,6 +296,9 @@ export const MAX_ORE_LIST = 10;
 
 /** A hull has a couple of dozen bays; a list longer than this is not a choice. */
 export const MAX_BAY_LIST = 12;
+
+/** Past a dozen kept items a player is describing a loadout, not an exception. */
+export const MAX_ITEM_LIST = 12;
 
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";

@@ -191,6 +191,16 @@ const BAY_LABELS: Readonly<Record<string, string>> = {
   drone: "drone bay",
 };
 
+/** "the ore hold and the fuel bay", or "" when nothing is named. */
+function keptItemsPhrase(step: MacroStep): string {
+  const arg = step.args["keepItems"];
+  if (arg === undefined || arg.kind !== "itemList" || arg.items.length === 0) {
+    return "";
+  }
+  const names = arg.items.map((item) => item.name).filter((name) => name.length > 0);
+  return names.length === 0 ? "" : `, keeping ${names.join(" and ")} aboard`;
+}
+
 export function placePhrase(place: string): string {
   switch (place) {
     case "hangar":
@@ -382,9 +392,10 @@ function macroPhrase(step: MacroStep): string {
         except !== undefined && except.kind === "bayList"
           ? except.bays.map((key) => BAY_LABELS[key] ?? key)
           : [];
+      const kept = keptItemsPhrase(step);
       return names.length === 0
-        ? "Empty the ship into the hangar"
-        : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone`;
+        ? `Empty the ship into the hangar${kept}`
+        : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone${kept}`;
     }
     case "hardeners-on":
       return "Switch every hardener and damage control on";
@@ -497,7 +508,7 @@ function macroPhrase(step: MacroStep): string {
         item !== undefined && item.kind === "itemType" && item.name !== null && item.name.length > 0
           ? `all your ${item.name}`
           : "everything in the cargo hold";
-      return `Jettison ${what} into space`;
+      return `Jettison ${what} into space${keptItemsPhrase(step)}`;
     }
     case "jettison-ore": {
       const item = step.args["item"];

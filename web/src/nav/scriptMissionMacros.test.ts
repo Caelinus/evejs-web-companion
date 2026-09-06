@@ -433,6 +433,63 @@ test("unload-cargo: a bay named in exceptBays is left alone", () => {
   );
 });
 
+test("unload-cargo: items named in keepItems stay aboard, wherever they are", () => {
+  // The case no bay rule can answer: spare mining crystals sit in the CARGO
+  // hold, beside the ore and salvage the trip was for.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withKeep = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const tick = unload(
+    withKeep,
+    obs({
+      cargo: {
+        rows: [
+          { itemID: 51, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 5, singleton: false },
+          { itemID: 52, typeID: 3389, groupID: 483, categoryID: 8, flagID: null, quantity: 2, singleton: false },
+        ],
+        capacity: null,
+      },
+      shipBays: NO_SPECIAL_BAYS,
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds");
+  const groups = tick.action.kind === "unloadHolds" ? tick.action.groups : [];
+  assert.deepEqual(
+    groups,
+    [{ bay: null, itemIDs: [51] }],
+    "the minerals went ashore; the crystals stayed",
+  );
+});
+
+test("unload-cargo: an unclassifiable row is MOVED, since the hangar is recoverable", () => {
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withKeep = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const tick = unload(
+    withKeep,
+    obs({
+      cargo: {
+        rows: [{ itemID: 60, typeID: 999, groupID: null, categoryID: null, flagID: null, quantity: 1, singleton: false }],
+        capacity: null,
+      },
+      shipBays: NO_SPECIAL_BAYS,
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds", "it still unloads what it cannot classify");
+});
+
 test("unload-cargo: a ship whose holds could not be READ never passes for empty", () => {
   // `shipBays: null` is "we could not look". Reporting done here is exactly the
   // conflation that let a full ore hold sail through this block.

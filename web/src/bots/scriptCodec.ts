@@ -45,7 +45,9 @@ import {
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
   ROCK_PICKS,
+  type ItemMatchArg,
   MAX_BAY_LIST,
+  MAX_ITEM_LIST,
   MAX_ORE_LIST,
   SCRIPT_FORMAT,
   SCRIPT_VERSION,
@@ -619,6 +621,35 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     }
     return { kind: "bayList", bays: bays.slice(0, MAX_BAY_LIST) };
   }
+  if (expected === "itemList") {
+    const arr = asArray(obj["items"], SAY.badArg(label));
+    const seen = new Set<string>();
+    const items: ItemMatchArg[] = [];
+    for (const entry of arr) {
+      const itemObj = asObject(entry, SAY.badArg(label));
+      const match = itemObj["match"];
+      const name = readText(itemObj["name"], { min: 0, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+      if (match !== "type" && match !== "group") {
+        refuse(SAY.badArg(label));
+      }
+      const idField = match === "type" ? "typeID" : "groupID";
+      const id = itemObj[idField];
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        refuse(SAY.badArg(label));
+      }
+      const key = `${match}:${id}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      items.push(
+        match === "type"
+          ? { match: "type", typeID: id as number, name }
+          : { match: "group", groupID: id as number, name },
+      );
+    }
+    return { kind: "itemList", items: items.slice(0, MAX_ITEM_LIST) };
+  }
   if (expected === "bookmark") {
     const id = obj["bookmarkID"];
     if (id !== null && id !== undefined && (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) {
@@ -1154,6 +1185,15 @@ function orderArg(arg: Arg): unknown {
       };
     case "bayList":
       return { kind: "bayList", bays: [...arg.bays] };
+    case "itemList":
+      return {
+        kind: "itemList",
+        items: arg.items.map((item) =>
+          item.match === "type"
+            ? { match: "type", typeID: item.typeID, name: item.name }
+            : { match: "group", groupID: item.groupID, name: item.name },
+        ),
+      };
     default: {
       // ⚠ EXHAUSTIVE ON PURPOSE. Every Arg kind MUST serialise here, or an export
       // silently drops it (the reader accepts an arg the writer forgets). A new

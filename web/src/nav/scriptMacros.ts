@@ -38,6 +38,7 @@ import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
 import { isUnreachable, refusalFor, shouldSetAside } from "./refusalLedger.ts";
+import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
 
 const WAIT = { kind: "wait" } as const;
 const ACTING = { kind: "acting" } as const;
@@ -820,6 +821,19 @@ const defendWithDrones: MacroDecider = (_step, obs, mem) => {
 // packageAboard / gateOffer). Cross-block facts (the agent, the mission) ride
 // the run BOARD; each block confirms by re-read, one action per tick.
 
+/** The "leave this aboard" rules on a step, or none. */
+function keepRules(step: MacroStep): readonly KeepRule[] {
+  const arg = step.args["keepItems"];
+  if (arg === undefined || arg.kind !== "itemList") {
+    return [];
+  }
+  return arg.items.map((item) =>
+    item.match === "type"
+      ? ({ match: "type", typeID: item.typeID } as const)
+      : ({ match: "group", groupID: item.groupID } as const),
+  );
+}
+
 const MAX_BLOCK_ATTEMPTS = 5; // presses/moves per block before it says so and stops
 
 function boardNum(board: ScriptBoard, key: string): number | null {
@@ -1310,15 +1324,20 @@ const unloadCargo: MacroDecider = (step, obs, mem) => {
   const except = new Set<string>(
     exceptArg !== undefined && exceptArg.kind === "bayList" ? exceptArg.bays : [],
   );
+  // Items to leave aboard, whichever bay they are in. "move" on an unreadable
+  // row: it lands in the station hangar, which is one drag from undone, and
+  // holding back what cannot be classified would stall the empty check for ever.
+  const keep = keepRules(step);
   const groups: { readonly bay: string | null; readonly itemIDs: readonly number[] }[] = [];
-  if (cargo !== null && cargo.rows.length > 0) {
-    groups.push({ bay: null, itemIDs: cargo.rows.map((row) => row.itemID) });
+  const cargoRows = cargo === null ? [] : movableRows(cargo.rows, keep, "move");
+  if (cargoRows.length > 0) {
+    groups.push({ bay: null, itemIDs: cargoRows.map((row) => row.itemID) });
   }
   for (const bay of bays ?? []) {
     if (bay.present !== true || !FREIGHT_BAYS.has(bay.key) || except.has(bay.key)) {
       continue;
     }
-    const items = bay.items ?? [];
+    const items = movableRows(bay.items ?? [], keep, "move");
     if (items.length > 0) {
       groups.push({ bay: bay.key, itemIDs: items.map((row) => row.itemID) });
     }
@@ -2980,7 +2999,14 @@ const jettisonCargo: MacroDecider = (step, obs, mem) => {
   const item = step.args["item"];
   const wanted =
     item !== undefined && item.kind === "itemType" && item.typeID !== null ? item.typeID : null;
-  const rows = cargo.rows.filter((row) => wanted === null || row.typeID === wanted);
+  // ⚠ "keep" ON AN UNREADABLE ROW, and this is the block where that matters.
+  // A jettisoned stack goes into a can that despawns: there is no undo, so
+  // "I could not tell what this is" must never be enough to throw it into space.
+  const rows = movableRows(
+    cargo.rows.filter((row) => wanted === null || row.typeID === wanted),
+    keepRules(step),
+    "keep",
+  );
   if (rows.length === 0) {
     return tick(WAIT, "Nothing left in the hold to jettison.", "Jettisoning", { kind: "done" });
   }

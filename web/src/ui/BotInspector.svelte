@@ -30,6 +30,8 @@
     type SubBotNode,
     type WorldRef,
     MAX_ISK_ARG,
+    MAX_ITEM_LIST,
+    type ItemMatchArg,
     MAX_ORE_LIST,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
@@ -90,7 +92,7 @@
     currentStation?: { id: number; name: string } | null;
     belts?: readonly { itemID: number; name: string; systemName?: string | null }[];
     equipment?: readonly { groupID: number; label: string }[];
-    items?: readonly { typeID: number; name: string }[];
+    items?: readonly { typeID: number; groupID?: number | null; name: string }[];
     pilots?: readonly { characterID: number; characterName: string }[];
     agents?: readonly { agentID: number; name: string; stationName?: string | null; solarSystemName?: string | null }[];
     fittings?: readonly { fittingID: number; name: string }[];
@@ -211,6 +213,36 @@
     // An emptied list is DROPPED rather than saved empty, so a step nobody
     // touched exports exactly as it was imported.
     onArg(key, next.length === 0 ? undefined : { kind: "bayList", bays: next });
+  }
+
+  /** The items a step has been told to keep aboard. */
+  function itemListValue(step: MacroStep, key: string): readonly ItemMatchArg[] {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "itemList" ? arg.items : [];
+  }
+
+  let keepQuery = $state("");
+
+  function keepMatches(query: string): readonly { typeID: number; groupID?: number | null; name: string }[] {
+    const q = query.trim().toLowerCase();
+    if (q.length === 0) return [];
+    return items.filter((it) => it.name.toLowerCase().includes(q)).slice(0, 8);
+  }
+
+  function keepId(entry: ItemMatchArg): string {
+    return entry.match === "type" ? `type:${entry.typeID}` : `group:${entry.groupID}`;
+  }
+
+  function addKeep(key: string, chosen: readonly ItemMatchArg[], entry: ItemMatchArg): void {
+    if (chosen.length >= MAX_ITEM_LIST || chosen.some((c) => keepId(c) === keepId(entry))) return;
+    onArg(key, { kind: "itemList", items: [...chosen, entry] });
+    keepQuery = "";
+  }
+
+  function removeKeep(key: string, chosen: readonly ItemMatchArg[], id: string): void {
+    const items_ = chosen.filter((c) => keepId(c) !== id);
+    // An emptied list is DROPPED, so an untouched step exports as it imported.
+    onArg(key, items_.length === 0 ? undefined : { kind: "itemList", items: items_ });
   }
 
   // ── Turning what a widget reports back into an argument ─────────────────────
@@ -480,6 +512,67 @@
         allowSystems={arg.widget === "destination-picker"}
         onPick={(ref) => setWorldRef(arg, ref)}
       />
+    </div>
+  {:else if arg.widget === "item-list-picker"}
+    {@const chosenKeep = itemListValue(step, arg.key)}
+    {@const keepHits = keepMatches(keepQuery)}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> - optional</span>{/if}
+      </span>
+      <span class="inspector-suffix">
+        Anything listed here stays on the ship. "All like this" keeps every
+        variant, which is usually what you want for crystals or ammunition.
+      </span>
+      <input
+        id={fieldId}
+        type="text"
+        placeholder="search what is aboard by name"
+        value={keepQuery}
+        oninput={(e) => (keepQuery = e.currentTarget.value)}
+      />
+      {#if keepHits.length > 0}
+        <ul class="market-picker">
+          {#each keepHits as hit (hit.typeID)}
+            <li>
+              <button
+                type="button"
+                class="pick-row"
+                onclick={() => addKeep(arg.key, chosenKeep, { match: "type", typeID: hit.typeID, name: hit.name })}
+              >
+                <span class="pick-main"><span class="pick-name">{hit.name}</span></span>
+              </button>
+              {#if hit.groupID !== null && hit.groupID !== undefined}
+                <button
+                  type="button"
+                  class="pick-row"
+                  onclick={() =>
+                    addKeep(arg.key, chosenKeep, {
+                      match: "group",
+                      groupID: hit.groupID as number,
+                      name: `items like ${hit.name}`,
+                    })}
+                >
+                  <span class="pick-main"><span class="pick-name">All like this</span></span>
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if items.length === 0}
+        <span class="inspector-suffix">Nothing is in the hangar or cargo to pick from.</span>
+      {/if}
+      {#if chosenKeep.length > 0}
+        <ul class="keep-list">
+          {#each chosenKeep as entry (keepId(entry))}
+            <li>
+              <span>{entry.name}</span>
+              <button type="button" onclick={() => removeKeep(arg.key, chosenKeep, keepId(entry))}>Remove</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
   {:else if arg.widget === "bay-list-picker"}
     {@const chosenBays = bayListValue(step, arg.key)}

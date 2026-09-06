@@ -82,7 +82,13 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   // `exceptBays` keeps named bays out of the unload — the ammo hold on a combat
   // hull, the fuel bay on a jump-capable one. Optional: absent means empty
   // everything, which is what the block says on the tin.
-  "unload-cargo": { args: [{ key: "exceptBays", kind: "bayList", required: false }], untilRequired: false },
+  "unload-cargo": {
+    args: [
+      { key: "exceptBays", kind: "bayList", required: false },
+      { key: "keepItems", kind: "itemList", required: false },
+    ],
+    untilRequired: false,
+  },
   // Sweep the grid's wrecks with salvage drones and/or fitted salvagers; done
   // when nothing salvageable is left. Loot only touches YOUR OWN wrecks.
   "salvage-wrecks": { args: [], untilRequired: false },
@@ -190,8 +196,14 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   "remote-cap": { args: [], untilRequired: false },
   // ── Cargo extras. Jettison takes an OPTIONAL item filter: absent = the whole
   // cargo hold goes into the can, set = only that item type.
+  // `keepItems` matters more here than anywhere: a jettisoned stack goes into a
+  // can that despawns, so this is the one block where getting it wrong cannot
+  // be undone.
   "jettison-cargo": {
-    args: [{ key: "item", kind: "itemType", required: false }],
+    args: [
+      { key: "item", kind: "itemType", required: false },
+      { key: "keepItems", kind: "itemList", required: false },
+    ],
     untilRequired: false,
   },
   // Same optional item filter as jettison-cargo, but empties the ORE hold (or
