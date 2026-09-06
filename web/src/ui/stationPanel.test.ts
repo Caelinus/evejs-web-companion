@@ -634,3 +634,59 @@ test("⚠ the panel claims no class name the app already styles globally", () =>
     );
   }
 });
+
+test("⚠ a completed move leaves no selection behind, in the store or on screen", () => {
+  // Found by driving the panel: after a confirmed move the bar read
+  // "1 selected · 0 m³" — the ids the server had just moved were still ticked
+  // in the store, but they were no longer rows in the place they were ticked
+  // in. Two halves, and both are needed: every mutation clears the ticks, and
+  // the count comes from the ROWS so the bar can never claim a selection it
+  // cannot act on.
+  assert.match(SOURCE, /function finishAction\(\): void \{[\s\S]{0,200}flow\.clearSelection\(\)/);
+  assert.match(SOURCE, /const selectedCount = \$derived\(selectedRows\.length\)/);
+  for (const call of ["transferItems", "trashItems", "mergeStacks"]) {
+    const at = SOURCE.indexOf(`flow.${call}(`);
+    assert.notEqual(at, -1, `${call} is not called`);
+    assert.match(
+      SOURCE.slice(at, at + 260),
+      /finishAction\(\)/,
+      `${call} does not clear the selection it acted on`,
+    );
+  }
+});
+
+test("⚠ a drop with nothing ticked offers no confirm at all", () => {
+  // Found by driving the panel: a drag carries the SELECTION rather than its own
+  // item list, so a drop that arrives with nothing ticked has nothing to move —
+  // and it asked "Move 0 stacks · 0 m³ to Ore hold?" behind a Confirm that could
+  // not act.
+  const at = SOURCE.indexOf("function dropOnPlace(");
+  assert.notEqual(at, -1);
+  const body = SOURCE.slice(at, SOURCE.indexOf("\n  }", at));
+  assert.match(body, /selectedCount === 0/, "a drop must check it has something to move");
+  assert.ok(
+    body.indexOf("selectedCount === 0") < body.indexOf('pending = { kind: "move"'),
+    "the check must come before the confirm is opened",
+  );
+});
+
+test("the quantity column carries the NUMBER, and the state column the word", () => {
+  // Both said "assembled" before, which left the quantity nowhere on screen.
+  const hangar = locationView(panel(), "hangar");
+  const crate = hangar.slice(hangar.indexOf("Small Standard Container"));
+  assert.match(crate, /class="stn-cell-qty">1</, "an assembled thing still has a quantity");
+  assert.match(crate, /class="stn-cell-state">assembled</);
+});
+
+test("a name that has to be truncated is still readable on hover", () => {
+  const hangar = locationView(panel(), "hangar");
+  assert.match(hangar, /class="stn-name" title="Veldspar"/);
+});
+
+test("Escape closes whichever popover is open", () => {
+  // A source assertion: Svelte's server generator does not emit event handlers
+  // into the markup at all, so a render can never show one is wired.
+  assert.match(SOURCE, /function onKeydown\(event: KeyboardEvent\)/);
+  assert.match(SOURCE, /event\.key !== "Escape"/);
+  assert.match(SOURCE, /<div class="stn-panel"[^>]*onkeydown=\{onKeydown\}/);
+});

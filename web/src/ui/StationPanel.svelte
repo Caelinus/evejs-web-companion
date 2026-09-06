@@ -182,6 +182,15 @@
     y: number;
   } | null>(null);
   let panelEl = $state<HTMLElement | null>(null);
+
+  /** Escape closes whichever popover is open, before anything else reads it. */
+  function onKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    if (menu === null && !targetMenuOpen) return;
+    menu = null;
+    targetMenuOpen = false;
+    event.stopPropagation();
+  }
   /** The narrow tier's "Move to… ▾": one control instead of a row of them. */
   let targetMenuOpen = $state(false);
 
@@ -356,7 +365,14 @@
     return rowsIn($inventory, place).filter((row) => selection.includes(row.itemID));
   });
 
-  const selectedCount = $derived(selection.length);
+  /**
+   * ⚠ COUNTED FROM THE ROWS, NOT FROM THE TICKED IDS. The two disagree the
+   * moment a mutation succeeds: the ids the server has just moved are still in
+   * the store's selection, but they are no longer rows in the place they were
+   * ticked in. Counting ids put "1 selected · 0 m³" in the bar after a completed
+   * move — a selection the bar could not act on and a volume of nothing.
+   */
+  const selectedCount = $derived(selectedRows.length);
   const selectedVolume = $derived(sumVolume(selectedRows));
   const mergeable = $derived(
     selectedRows.length === 2 && canMergeStacks(selectedRows[0]!, selectedRows[1]!),
@@ -453,8 +469,7 @@
       }
       await run(async () => {
         await flow.trashItems([...selection], place);
-        selectionPlace = null;
-        pending = null;
+        finishAction();
       });
       return;
     }
@@ -480,9 +495,21 @@
     }
     await run(async () => {
       await flow.transferItems([...selection], from, asked.place, verdict.quantity);
-      selectionPlace = null;
-      pending = null;
+      finishAction();
     });
+  }
+
+  /**
+   * What every successful mutation leaves behind: nothing. The ticked ids are
+   * dropped too — they name rows that are no longer where they were ticked, and
+   * leaving them in the store makes the action bar offer to act on them again.
+   */
+  function finishAction(): void {
+    flow.clearSelection();
+    selectionPlace = null;
+    pending = null;
+    targetMenuOpen = false;
+    menu = null;
   }
 
   async function mergeSelection(): Promise<void> {
@@ -493,7 +520,7 @@
     }
     await run(async () => {
       await flow.mergeStacks(order.source.itemID, order.destination.itemID, place);
-      selectionPlace = null;
+      finishAction();
     });
   }
 
@@ -585,6 +612,12 @@
       // Refused, and SAID — through the panel's own message line, so a rejected
       // drop reads the same way a rejected click does.
       error = verdict;
+      return;
+    }
+    // ⚠ A drag carries the SELECTION, not its own item list, so a drop that
+    // arrives with nothing ticked has nothing to move. Without this it asked
+    // "Move 0 stacks · 0 m³ to Ore hold?" and its Confirm did nothing at all.
+    if (selectedCount === 0) {
       return;
     }
     pending = { kind: "move", place, label };
@@ -943,14 +976,17 @@
       <TypeIcon typeID={row.typeID} name={nameOf(row)} size="sm" />
     </span>
     <span class="stn-cell-name">
-      <span class="stn-name">{nameOf(row)}</span>
+      <span class="stn-name" title={nameOf(row)}>{nameOf(row)}</span>
       <!-- Only shown at the narrow tier, where there is no room for the m³ and
            state columns; it is the same two readings, on one line. -->
       <span class="stn-meta">
         {#if totalVolume(row) !== null}{volumeCell(totalVolume(row))} m³ · {/if}{stateText(row)}
       </span>
     </span>
-    <span class="stn-cell-qty">{amountText(row)}</span>
+    <!-- The number, always. An assembled thing is called one in the State
+         column beside it (and in the narrow tier's meta line), so captioning
+         this cell "assembled" too said it twice and left the quantity nowhere. -->
+    <span class="stn-cell-qty">{amount(row.quantity)}</span>
     <span class="stn-cell-unit">{volumeCell(row.volume ?? null)}</span>
     <span class="stn-cell-vol">{volumeCell(totalVolume(row))}</span>
     <span class="stn-cell-state">{stateText(row)}</span>
@@ -1096,7 +1132,8 @@
   </section>
 {/snippet}
 
-<div class="stn-panel" bind:this={panelEl}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="stn-panel" bind:this={panelEl} onkeydown={onKeydown}>
   <!-- ============================================================= header -->
   <div class="stn-head">
     <span class="stn-head-title">Station</span>

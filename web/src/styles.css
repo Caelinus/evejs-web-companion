@@ -6883,7 +6883,7 @@
     .stn-icon-word { display: inline; }
 
     .stn-colhead,
-    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 90px 100px 90px 130px; }
+    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 80px 88px 70px 116px; }
     .stn-cell-vol,
     .stn-cell-state { display: block; }
     .stn-meta { display: none; }
