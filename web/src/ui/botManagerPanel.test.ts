@@ -43,10 +43,19 @@ test("the Bot Manager panel renders on first mount without throwing", () => {
   assert.match(text, /Bot manager/i);
 });
 
-test("the panel says plainly that the library is shared, not private", () => {
-  const text = visibleText(renderPanel());
-  assert.match(text, /shared/i);
-  assert.match(text, /any account|everyone|anyone/i);
+test("deleting a bot says plainly that the library is shared, not private", () => {
+  // ⚠ THE WARNING MOVED, IT DID NOT GO. The panel used to carry a standing note
+  // saying the library is shared; that note is gone, and the fact now reaches a
+  // player at the moment it can cost them something — the delete confirm. That
+  // is the better place for it (a standing paragraph is read once and then never
+  // again), but it is also the ONLY place left, so it is worth pinning: the row
+  // being deleted may not be the caller's own, and "delete this bot" alone would
+  // not say so.
+  const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
+  const confirm = source.match(/Delete .{0,200}cannot be undone\./s);
+  assert.ok(confirm, "the delete confirm is gone");
+  assert.match(confirm[0], /shared/i);
+  assert.match(confirm[0], /any account|everyone|anyone/i);
 });
 
 test("first mount reads as loading, never as an empty library", () => {

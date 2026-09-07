@@ -263,21 +263,6 @@
   <header class="panel-head">
     <h2>Pilots</h2>
   </header>
-  <p class="note">
-    Every pilot you have open in this browser tab, plus every character with a
-    bot still running on the server even if it has no tab open here. A bot
-    running in a tab stops when that tab closes; a bot running on the server
-    keeps flying — though every server run has a time limit.
-  </p>
-  <!-- Carried over with the Server Bots panel this region absorbed. Both
-       sentences answer a question a player asks OF this list and nowhere else:
-       why a character will not select, and what survives a server restart. -->
-  <p class="note">
-    A character a server bot is flying cannot be selected until the bot stops.
-    After a server restart, only the exact same script can start over, and only
-    when every step is safe to re-check; other runs stop and ask you to review
-    them again.
-  </p>
 
   {#if pilotsError}
     <p class="note error">{pilotsError}</p>
@@ -371,11 +356,6 @@
   <header class="panel-head">
     <h2>Bot manager</h2>
   </header>
-  <p class="note">
-    Every bot saved on this server, by any account. Loading, editing or
-    deleting a bot here affects everyone who uses it — the library is shared,
-    not private to whoever saved it.
-  </p>
 
   <div class="controls">
     <label>
