@@ -11,9 +11,22 @@
   import StationPanel from "./StationPanel.svelte";
   import ShipHud from "./ShipHud.svelte";
   import ModuleRack from "./ModuleRack.svelte";
+  import MobileCard from "./MobileCard.svelte";
+  import DronesPanel from "./DronesPanel.svelte";
+  import ShotsPanel from "./ShotsPanel.svelte";
+  import Flight from "./Flight.svelte";
+  import Mining from "./Mining.svelte";
+  import {
+    MOBILE_CARDS,
+    isCollapsed,
+    readCollapsed,
+    tabsShownInStack,
+    toggleCollapsed,
+    writeCollapsed,
+  } from "./mobileCards.ts";
   import TargetBracket from "./TargetBracket.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
-  import { visibleTabsFor, type TabID } from "./tabs.ts";
+  import { isLaunchable, visibleTabsFor, type TabID } from "./tabs.ts";
   import { isWindowTab } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -41,12 +54,40 @@
     if (!$fitting.loaded) void flow.loadFitting().catch(() => {});
   });
 
+  /**
+   * Which cards of the in-space stack are folded away.
+   *
+   * ⚠ READ ONCE, ON MOUNT, NOT IN A `$derived`. `localStorage` is not reactive
+   * and throws outright in some private-window configurations, so it is touched
+   * exactly where a failure can be caught and turned into "nothing folded" —
+   * which is the safe direction: a card a pilot cannot see they are missing is
+   * the failure this whole screen is built to avoid.
+   */
+  let collapsed = $state(readCollapsed(typeof localStorage === "undefined" ? null : localStorage));
+  function toggleCard(id: string): void {
+    collapsed = toggleCollapsed(collapsed, id);
+    writeCollapsed(typeof localStorage === "undefined" ? null : localStorage, collapsed);
+  }
+
   // The openable panels for the current state (chrome tabs excluded); "home" is
   // the null selection. While docked, "Inventory & Ship" is dropped from the
   // bar — the docked home IS that content, so the tab would be a duplicate.
+  //
+  // ⚠ AND IN SPACE, EVERYTHING THE STACK ALREADY SHOWS IS DROPPED TOO. Those
+  // six panels are the home screen; offering each of them again in the bar
+  // costs a tap target and teaches nothing — the same call the HUD's nav
+  // buttons lost on the desktop.
   const tabs = $derived(
     visibleTabsFor(isDocked).filter(
-      (tab) => isWindowTab(tab.id) && !(isDocked && tab.id === "inventory"),
+      (tab) =>
+        isWindowTab(tab.id) &&
+        // ⚠ AND NOT A CONTEXTUAL PANEL. `Show Info` only ever opens because
+        // something was clicked, so a bar entry for it could only open onto
+        // nothing. The desktop rail has always filtered these out; this bar
+        // never did, and offered it on every phone.
+        isLaunchable(tab) &&
+        !(isDocked && tab.id === "inventory") &&
+        !(!isDocked && tabsShownInStack().has(tab.id)),
     ),
   );
   let selected = $state<TabID | null>(null);
@@ -74,21 +115,48 @@
         <StationPanel {store} {flow} />
       </ErrorBoundary>
     {:else}
-      <ErrorBoundary name="Ship HUD">
-        <section class="mobile-hud">
-          <ShipHud {store} />
-          <ModuleRack {store} {flow} />
-        </section>
-        <TargetBracket {store} />
-      </ErrorBoundary>
       <!--
-        The in-space overview. It was the old cockpit until that file was taken
-        apart; `SpaceOverview` is the same list with the redesign's shape, and
-        it is what the desktop dock panel shows too — one component, two frames.
+        ============================================ the in-space stack (1D) ==
+
+        ⚠ ONE COLUMN OF COLLAPSIBLE CARDS, AND NO RADAR. The radar is a picture
+        that needs room to mean anything and there is none on a phone; once it
+        goes, the desktop's three-cell grid is three things fighting over 380px.
+        So the order is fixed, the page scrolls, and the pilot decides what they
+        are doing by folding away what they are not: a miner folds Shots, someone
+        in a fight folds Mining.
+
+        Every card is the SAME COMPONENT the desktop uses. There is no mobile
+        variant of any of these panels — a second implementation is a second
+        thing to keep honest, and the honesty is the whole product.
       -->
-      <ErrorBoundary name="Overview">
-        <SpaceOverview {store} {flow} />
-      </ErrorBoundary>
+      <TargetBracket {store} />
+      {#each MOBILE_CARDS as card (card.id)}
+        <MobileCard
+          title={card.title}
+          collapsed={isCollapsed(collapsed, card.id)}
+          scrolls={card.scrolls}
+          onToggle={() => toggleCard(card.id)}
+        >
+          <ErrorBoundary name={card.title}>
+            {#if card.id === "ship"}
+              <div class="mobile-hud">
+                <ShipHud {store} />
+                <ModuleRack {store} {flow} />
+              </div>
+            {:else if card.id === "overview"}
+              <SpaceOverview {store} {flow} />
+            {:else if card.id === "drones"}
+              <DronesPanel {store} {flow} />
+            {:else if card.id === "shots"}
+              <ShotsPanel {store} {flow} />
+            {:else if card.id === "flight"}
+              <Flight {store} {flow} />
+            {:else if card.id === "mining"}
+              <Mining {store} {flow} />
+            {/if}
+          </ErrorBoundary>
+        </MobileCard>
+      {/each}
     {/if}
   </main>
 

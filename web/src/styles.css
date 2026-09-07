@@ -3964,6 +3964,90 @@
   }
   .mobile-nav-home.active { background: var(--color-panel-2); }
 
+  /* ------------------------------------ the in-space mobile stack (1D) --
+   * One column of collapsible cards. The desktop's grid needs a radar and two
+   * more cells; a phone has room for neither, so the arrangement changes and
+   * the COMPONENTS do not — every card below is the same panel the desktop
+   * mounts. */
+  .mob-card {
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    min-width: 0;
+  }
+  .mob-card-head { margin: 0; font-size: inherit; font-weight: inherit; }
+  .mob-card-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    /* 40px, not the handoff's 32: R8's tap target wins over the mock's density,
+     * and this is the control a pilot presses most on this screen. */
+    min-height: 40px;
+    padding: 0 0.6rem;
+    background: var(--color-panel-2);
+    border: 0;
+    border-bottom: 1px solid var(--color-line);
+    color: var(--color-text-bright);
+    text-align: left;
+  }
+  .mob-card.collapsed .mob-card-toggle { border-bottom: 0; }
+  .mob-card-chevron {
+    flex: 0 0 auto;
+    font-size: 9px;
+    color: var(--color-muted);
+  }
+  .mob-card-title {
+    flex: 0 0 auto;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .mob-card-hint {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .mob-card-body { padding: 0.5rem 0.6rem; min-width: 0; }
+  /* ⚠ A LIST BODY CAPS AND SCROLLS INSIDE ITSELF. Without this a full overview
+   * pushes the next card's header a screen and a half away, and the fold
+   * control a pilot is reaching for is the thing that scrolled off. */
+  .mob-card-body.scrolls {
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  /* The panels inside a card already draw their own frame for the desktop; the
+   * card IS the frame here, so the inner one would be a box in a box. */
+  .mob-card-body > .panel,
+  .mob-card-body > .spc-panel {
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  .mob-card-body > .panel > .panel-head,
+  .mob-card-body > .spc-panel > .spc-head {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+  /* ⚠ THE PANEL'S OWN TITLE IS HIDDEN, BUT NOT ITS HEAD ROW.
+   *
+   * FOUND LIVE: five of the six cards read "OVERVIEW / OVERVIEW", "DRONES /
+   * DRONES" — the card header and the panel's own heading, one above the other.
+   * The title goes because the card already says it.
+   *
+   * The rest of that row STAYS, and that is the load-bearing half: it is where
+   * the counts live ("84 things in range", "2 out"), and those are exactly what
+   * a card must not hide. Hiding the whole head would have been one selector
+   * shorter and would have taken the numbers with it. */
+  .mob-card-body > .spc-panel > .spc-head > .spc-head-title,
+  .mob-card-body > .panel > .panel-head > h2 {
+    display: none;
+  }
+
   /* ===================================================== settings panel --
    * The client's own settings (Settings.svelte) — plain panel form controls in
    * the shared design language. */
@@ -4417,6 +4501,14 @@
   }
   .module-slot {
     position: relative;
+    /* ⚠ THE HOLD GESTURE ONLY WORKS IF THE BROWSER LETS IT. Without this, a
+     * press on a slot is claimed by the page's own scroll and long-press
+     * handling before 600ms is up — so on the touch tier the whole point of
+     * replacing shift-click would have been lost. `none` on the slot itself
+     * costs nothing: it is 42px, and the page scrolls everywhere around it. */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
     /* 42px, the handoff's slot box — and, not by accident, a real touch target
      * where the old 2.2rem (35px) was not. */
     width: 42px;

@@ -468,7 +468,35 @@ only appears once a row is picked, and SSR picks nothing.
 drone rows; `panelFirstMount` lists the four panels the cockpit became. `IN_SPACE_DEFAULT` is
 `flight` — the overview is fixed chrome, so it is never something to land on.
 
-**Phase 5 — mobile.** The 1D stacked collapsible cards in `MobileWorkspace`.
+**Phase 5 — mobile. DONE.** The 1D stacked collapsible cards in `MobileWorkspace`: Ship → Overview
+→ Drones → Shots fired → Navigation & Flight → Mining, one column, page scrolls, no radar. Every
+card mounts the SAME component the desktop does — a mobile variant of any of these panels would be a
+second thing to keep honest, and every capability check in the suite would then only be checking one
+of the two.
+
+⚠ **A folded card is NOT RENDERED, not hidden.** These bodies poll, tick and animate; `display:none`
+would leave every one of them running behind a closed header, on the device least able to afford it.
+
+⚠ **An unknown or unreadable fold reads as OPEN.** A private window throws outright on
+`localStorage`, and a stored value can be anything. Only a real `true` folds a card — because a
+folded card is one a pilot cannot see they are missing, which is the failure this screen is built to
+avoid. Only the folded ones are written, so a card added later can never arrive pre-folded.
+
+**Two things the live run changed.** The handoff caps *list* bodies at 320px; `Flight`'s body
+measured **1,427px** on a 375×812 phone — not a list, and nearly two screens — so it caps for the
+rule's REASON rather than its letter. And five of the six cards read "OVERVIEW / OVERVIEW": the card
+header plus the panel's own. The panel's TITLE is hidden, and the rest of its head row kept, because
+that is where the counts live ("84 things in range", "None out") and those are exactly what a folded
+card must not take with it.
+
+**`touch-action: none` on the module slots** — the gesture Phase 3 introduced FOR this tier. Without
+it a press is claimed by the page's scroll and long-press handling long before the 600 ms hold
+completes, so overloading on a phone would have been exactly as unreachable as the shift-click it
+replaced.
+
+**And one pre-existing bug:** the mobile nav bar filtered on `isWindowTab` but never on
+`isLaunchable`, so it offered **Show Info** — a contextual panel that only opens because something
+was clicked — on every phone, where it could only ever open onto nothing.
 
 ---
 
