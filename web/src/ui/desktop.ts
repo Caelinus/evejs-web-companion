@@ -10,6 +10,7 @@
 // model (App drops them; loadLayout filters them out).
 
 import { TABS, type TabID } from "./tabs.ts";
+import { isGlobalTab } from "./globalWindow.ts";
 
 export interface WinState {
   readonly id: TabID;
@@ -102,7 +103,13 @@ export function openWindow(
   id: TabID,
   size?: { readonly w?: number; readonly h?: number },
 ): WinState[] {
-  if (!isWindowTab(id)) return wins.slice();
+  // ⚠ AND NOT A GLOBAL TAB EITHER. The Bot Manager is a window, but it belongs
+  // to App's layer above the per-pilot workspaces (globalWindow.ts) — letting a
+  // desktop open its own would put a second, character-scoped copy of the
+  // roster on screen, which is the exact thing the hoist removes. Kept out of
+  // `isWindowTab` because the launcher rail filters on that and must go on
+  // OFFERING the panel; what is refused here is a workspace window of it.
+  if (!isWindowTab(id) || isGlobalTab(id)) return wins.slice();
   const z = topZ(wins) + 1;
   const existing = wins.find((w) => w.id === id);
   if (existing) {
@@ -200,6 +207,10 @@ function isWinState(v: unknown): v is WinState {
     typeof o.id === "string" &&
     KNOWN_TABS.has(o.id) &&
     isWindowTab(o.id as TabID) &&
+    // A layout saved before a tab became global still carries a window for it.
+    // Dropping it here is the migration: the global layer has its own storage,
+    // and letting the old entry through would draw a per-pilot second copy.
+    !isGlobalTab(o.id as TabID) &&
     isFiniteNumber(o.x) &&
     isFiniteNumber(o.y) &&
     isFiniteNumber(o.w) &&

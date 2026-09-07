@@ -26,6 +26,7 @@
   import CustomBotReadout from "./CustomBotReadout.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import { deriveDocked, type TabID } from "./tabs.ts";
+  import { isGlobalTab } from "./globalWindow.ts";
   import {
     openWindow,
     focusWindow,
@@ -48,6 +49,9 @@
     store,
     flow,
     sessions,
+    globalOpenIds,
+    onOpenGlobal,
+    openRequest,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -59,6 +63,25 @@
      * one panel and no other.
      */
     sessions?: readonly Session[];
+    /**
+     * The global-layer tabs currently on screen, so the rail can light their
+     * entries like any other open window. App owns that layer (globalWindow.ts);
+     * a workspace only reads it.
+     */
+    globalOpenIds?: ReadonlySet<TabID>;
+    /** Hand a global tab up to App, which owns the layer it opens on. */
+    onOpenGlobal?: (id: TabID) => void;
+    /**
+     * A panel App wants opened HERE, as a counter that App bumps.
+     *
+     * ⚠ A COUNTER, NOT AN ID, for the reason the Show Info effect below spells
+     * out: the global Bot Manager's Edit button asks for the Bot Builder, and
+     * asking a second time for the panel already open must still raise it. This
+     * is the one path INTO a workspace from above it, and it is deliberately a
+     * prop rather than a registered callback — data flows down, the same shape
+     * `dockInventoryPing` already uses.
+     */
+    openRequest?: { readonly id: TabID; readonly n: number } | null;
   } = $props();
 
   // The store's identity is stable for this component's lifetime (App keys each
@@ -120,6 +143,15 @@
   // Ship" there folds into the dock panel instead of opening a window, and that
   // pick must not throw the expansion away.
   const open = (id: TabID): void => {
+    // ⚠ A GLOBAL TAB NEVER LANDS ON THIS DESKTOP. It opens on App's layer above
+    // every workspace, because it outlives the pilot switch that tears this one
+    // down (globalWindow.ts). It also must not clear the station expansion:
+    // nothing was added to the hidden desktop, so there is nothing to give the
+    // work area back for.
+    if (isGlobalTab(id)) {
+      onOpenGlobal?.(id);
+      return;
+    }
     expandPreferred = false;
     wins = openWindow(wins, id);
   };
@@ -142,8 +174,15 @@
   // The rail highlights what is on screen. While docked, the expanded dock
   // panel IS the Inventory & Ship content, so its entry lights up like an
   // open window's would (openIds itself only tracks floating windows).
+  // The global layer's windows are on screen too, so they light up in the rail
+  // exactly like a workspace window — from here the distinction is invisible,
+  // which is the point.
   const neocomOpenIds = $derived(
-    isDocked && !dockCollapsed ? new Set<TabID>([...openIds, "inventory"]) : openIds,
+    new Set<TabID>([
+      ...openIds,
+      ...(globalOpenIds ?? []),
+      ...(isDocked && !dockCollapsed ? (["inventory"] as TabID[]) : []),
+    ]),
   );
   const focus = (id: TabID): void => { wins = focusWindow(wins, id); };
   const close = (id: TabID): void => { wins = closeWindow(wins, id); };
@@ -215,6 +254,20 @@
     // Skip the initial reading: a restored session must not pop an info window
     // nobody asked for.
     if (count > 0) open("showInfo");
+  });
+
+  // A panel App asked to be opened on THIS desktop — today, the Bot Builder,
+  // requested by the Edit button in the global Bot Manager. Watches the counter
+  // and not the id, for the same reason the Show Info effect above does: asking
+  // twice for the same panel must still raise it, and it may have been closed or
+  // buried in between.
+  let servedOpenRequest = 0;
+  $effect(() => {
+    const request = openRequest;
+    if (!request || request.n === servedOpenRequest) return;
+    servedOpenRequest = request.n;
+    // Skip the initial reading, so a restored session opens nothing unasked.
+    if (request.n > 0) open(request.id);
   });
 
   // Read flight status once online so the docked/in-space flag is authoritative
