@@ -2602,7 +2602,14 @@
       "surface panel"
       "hud     panel";
   }
-  .workspace.in-space .work-main > .hud-bar { max-height: 21rem; }
+  /* ⚠ 24rem, RAISED FROM 21. The ceiling exists so a hull with a great many
+   * slots cannot squeeze the radar to nothing, and 21rem was measured when the
+   * cell held ONE line of clusters. Three of them wrap to two lines on a 1280px
+   * window with the dock panel open, which is 340px of content against a 336px
+   * ceiling — the cell scrolled to hide four pixels. The radar still keeps the
+   * clear majority of the surface, and `.hud-body` still scrolls beyond this
+   * rather than pushing the radar off the screen. */
+  .workspace.in-space .work-main > .hud-bar { max-height: 24rem; }
   .work-main > .desktop { grid-area: surface; }
   .work-main > .dock-panel { grid-area: panel; }
   .work-main > .hud-bar { grid-area: hud; }
@@ -3575,7 +3582,15 @@
    * named. */
   .hud-head-state {
     min-width: 0;
-    justify-self: end;
+    /* ⚠ NO `justify-self: end` HERE — `text-align` DOES THE SAME JOB SAFELY.
+     *
+     * FOUND ON A NARROW WINDOW. `justify-self: end` sizes a grid item to its
+     * CONTENT and then aligns that box to the end of its track, so the item was
+     * as wide as the sentence rather than as wide as the column it was in:
+     * `overflow: hidden` had nothing to clip, and the text ran left out of a
+     * 118px track across 235px, straight under the Stop button. Stretched to
+     * the track — the default — the box is the column, the ellipsis works, and
+     * `text-align: right` still puts the words on the right. */
     text-align: right;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3585,42 +3600,73 @@
   }
   .hud-head-state.stopped { color: var(--color-muted); }
   .hud-head-state.error { color: var(--color-danger); }
+  /* ⚠ A WRAPPING ROW, NOT A FIXED SET OF COLUMNS. READ THIS BEFORE ADDING ONE.
+   *
+   * The three clusters — cargo, the gauge, the racks — sit centred as a group
+   * on one line while there is room, and a cluster that does not fit moves to
+   * the NEXT LINE rather than being squeezed. That priority is the whole point:
+   * flex wraps an item before it shrinks one, and the rack has a hard minimum
+   * (26px gutter + 132px header + 182px of slots + gaps = 356px) below which it
+   * stops being readable.
+   *
+   * FOUND BY THE OPERATOR, at a window a hair above the mobile breakpoint. This
+   * was a three-column grid with a `@media (max-width: 820px)` override that
+   * collapsed it to `1fr` — a rule written when the body had TWO clusters and
+   * stacking was the whole answer. With three it forced all of them into one
+   * 323px column, the rack overflowed it by 33px, and `overflow: auto` turned
+   * that into a horizontal scrollbar with the slots strung down the right-hand
+   * edge. That breakpoint is gone: wrapping is width-driven by definition, so
+   * there is no number left to keep in sync.
+   *
+   * ⚠ CENTRED, AND THE CLUSTERS KEEP THEIR OWN WIDTHS. The gauge is a fixed
+   * 170px; cargo is as wide as the bay names it holds; the rack is its own
+   * width rather than everything left over — that last one matters, because a
+   * rack stretched across a wide cell puts its four slots at the left edge of a
+   * 660px box with the right half of the instrument empty.
+   *
+   * ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
+   * overflows equally on BOTH sides, and the left overflow cannot be scrolled
+   * to — a cluster too wide for the cell would lose its left edge with no way
+   * to reach it. `safe` falls back to start-alignment at exactly that point,
+   * and a browser that does not know the keyword drops the declaration and gets
+   * plain left alignment, which is the right thing to degrade to.
+   *
+   * ⚠ THE SLOTS THEMSELVES STAY LEFT-ALIGNED INSIDE EACH RACK ROW. High, mid
+   * and low hold different numbers of modules, and centring each row would
+   * stagger the columns against each other — the rack reads as a grid only
+   * because every row starts at the same x.
+   *
+   * ⚠ AND IT IS THE CONTAINER FOR THE RACK'S NARROW FORM. `container-type` is
+   * safe HERE and nowhere closer to the rack: this box sits in `grid-area: hud`
+   * under a `minmax(0, 1fr)` column, so its inline size comes from outside and
+   * never from its contents. On `.module-rack` it would sever the very
+   * content-sizing that gives the rack its width. */
   .hud-body {
-    display: grid;
-    /* ⚠ THE PAIR IS CENTRED, NOT PINNED LEFT.
-     *
-     * It used to be `170px minmax(0, 1fr)` — a fixed gauge column with the rack
-     * stretched across everything left over. But a rack is at most four slots
-     * wide, so on a wide cell the slots sat at the left edge of a 660px box and
-     * the right half of the instrument panel was empty: the two clusters hugged
-     * the left third of a cell they were supposed to occupy.
-     *
-     * The rack column is `max-content` now — its real width — and the two
-     * columns are centred as a group, so the gauge and the rack stay together
-     * and sit in the middle of whatever width the cell has.
-     *
-     * ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its
-     * box overflows equally on BOTH sides, and the left overflow cannot be
-     * scrolled to — a rack too wide for the cell would lose its first slots
-     * with no way to reach them. `safe` falls back to start-alignment at
-     * exactly that point. A browser that does not know the keyword drops the
-     * whole declaration and gets the old left-aligned behaviour, which is the
-     * right thing to degrade to.
-     *
-     * ⚠ THE SLOTS THEMSELVES STAY LEFT-ALIGNED INSIDE EACH ROW. High, mid and
-     * low hold different numbers of modules, and centring each row would
-     * stagger the columns against each other — the rack reads as a grid, and it
-     * only reads that way because every row starts at the same x. */
-    /* ⚠ THREE CLUSTERS NOW: cargo, the gauge, the racks. The cargo column is
-     * `auto` — as wide as the bay names it happens to hold — and it sits FIRST,
-     * in the space the centred pair already left empty on the left. */
-    grid-template-columns: auto 170px minmax(0, max-content);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
     justify-content: safe center;
-    gap: 0.6rem 1.6rem;
+    /* 1rem between clusters, not 1.6. The wider gap was set when there were two
+     * of them and the cell had air to spare; with three it is 51px of nothing
+     * standing between the rack and one line. */
+    gap: 0.6rem 1rem;
     padding: 0.5rem 0.75rem 0.25rem;
     min-height: 0;
     overflow: auto;
+    container-type: inline-size;
+    container-name: hud;
   }
+  /* Each cluster keeps its own width and wraps rather than shrinking; `0 1` so
+   * a cluster that is ALONE on a line and still too wide can give way rather
+   * than overflow. */
+  .hud-body > .hud-cluster { flex: 0 1 auto; min-width: 0; }
+  /* ⚠ 150px, WHICH IS THE WHEEL'S OWN CAP — it was 170. That number came from
+   * the handoff's two-column grid, where a fixed gauge column stopped the racks
+   * shuffling sideways as the cell grew. Nothing needs it now: the wheel is
+   * capped at 150 and the readout under it is 119, so the extra 20px was blank
+   * either side of the instrument. Measured, and it is the difference between
+   * one line and two on a 1280px window. */
+  .hud-body > .ship-gauges { flex: 0 0 150px; }
   /* ---------------------------------------------------- the cargo readout --
    * Deliberately the same shape as a rack row — name, bar, reading, on one
    * line — because it is the same kind of statement and sits eight pixels from
@@ -3860,7 +3906,11 @@
     .desktop { min-height: 60vh; }
     .dock-panel { width: auto; max-width: none; }
     .dock-panel.collapsed { width: auto; }
-    .hud-body { grid-template-columns: 1fr; }
+    /* ⚠ `.hud-body { grid-template-columns: 1fr }` WAS HERE, AND IT IS GONE.
+     * It collapsed the cell's clusters into one column, which was right while
+     * there were two of them and wrong the moment there were three — see the
+     * note on `.hud-body`. It wraps on its own now, at whatever width it runs
+     * out of room, so there is no breakpoint to keep in step with it. */
   }
 
   /* ============================================== notices: toasts + log (R80) --
@@ -5234,33 +5284,57 @@
    * cell is 21rem and stacks too, as the reference always had it — so the only
    * thing left that is genuinely mobile is the size. */
   .mob-card-body > .hud-bar .hud-wheel { max-width: 170px; }
-  /* ⚠ ON A PHONE THE HEADER SITS ABOVE ITS SLOTS, NOT BESIDE THEM.
+  /* ⚠ IN A NARROW CELL THE HEADER SITS ABOVE ITS SLOTS, NOT BESIDE THEM.
    *
-   * MEASURED, and it is not close. The rack area on a 375px phone is 335px. The
+   * MEASURED, and it is not close. The rack area on a 375px phone is 335px: the
    * gutter takes 42 and four high slots need 182, which leaves 111 for a header
    * whose own minimum is 102 — before either gap. Every arrangement that keeps
-   * the header beside the slots fits by a handful of pixels on THIS phone and
+   * the header beside the slots fits by a handful of pixels on THAT phone and
    * wraps on a 360px one, and a rack that wraps to 3+1 while the racks under it
    * sit half empty reads as a bug.
    *
    * So the slots take the full width on their own line and the header keeps the
    * line above it. The header is still ONE line — which was the point — and the
-   * heat bar gets the whole width to be read across, which it never had.
+   * heat bar gets the whole width to be read across, which it never had. The
+   * gutter column stays, so the banking icon is still on the high rack's header
+   * and still on its centre line.
    *
-   * The gutter column stays, so the banking icon is still on the high rack's
-   * header and still on its centre line. */
-  .mob-card-body .module-rack-rows {
-    grid-template-columns: auto minmax(0, 1fr);
-    row-gap: 0.2rem;
+   * ⚠ THIS USED TO BE KEYED ON `.mob-card-body` — THE PHONE — AND THAT WAS THE
+   * WRONG QUESTION. A desktop window dragged to just above the mobile
+   * breakpoint gives the rack the same 340-odd pixels and got none of this: it
+   * kept the wide shape and scrolled sideways. It is a WIDTH question, so it is
+   * a `@container` one (R85), and one rule now covers the phone and the narrow
+   * window alike. 420px is the rack's own minimum (356) plus the gauge column
+   * it would otherwise be sharing the line with. */
+  /* ⚠ WHEN THE CLUSTERS STACK, CARGO GOES LAST.
+   *
+   * Stacked, the cell is at its 21rem ceiling and scrolls — so the order stops
+   * being cosmetic and becomes which instrument you can see without scrolling
+   * for it. The gauge and the rack are what a pilot flies by; cargo is what
+   * they check between trips. In the DOM cargo is first, because on a wide cell
+   * it belongs in the space on the left; `order` moves it rather than the
+   * markup, so a screen reader's order follows the visual one either way.
+   *
+   * `order: 1` and nothing else: everything defaults to 0, so this is "after
+   * the others" without numbering the others. */
+  @container hud (max-width: 420px) {
+    .hud-body > .cargo-cluster { order: 1; }
   }
-  .mob-card-body .rack-slots {
-    grid-column: 1 / -1;
-    /* The racks would otherwise run together: with the slots on their own line
-     * the gap between a header and ITS slots and the gap between two racks are
-     * the same gap. This is what separates one rack from the next. */
-    margin-bottom: 0.35rem;
+
+  @container hud (max-width: 420px) {
+    .module-rack-rows {
+      grid-template-columns: auto minmax(0, 1fr);
+      row-gap: 0.2rem;
+    }
+    .rack-slots {
+      grid-column: 1 / -1;
+      /* The racks would otherwise run together: with the slots on their own
+       * line the gap between a header and ITS slots and the gap between two
+       * racks are the same gap. This is what separates one rack from the next. */
+      margin-bottom: 0.35rem;
+    }
+    .rack-slots:last-child { margin-bottom: 0; }
   }
-  .mob-card-body .rack-slots:last-child { margin-bottom: 0; }
   .mob-card-body > .hud-bar > .hud-body > .module-rack { margin-top: 0.7rem; }
   /* ⚠ THE "MODULES" HEADING IS CLIPPED FOR BOTH TIERS NOW, by the `.hud-bar`
    * rule above — the reference has no such heading on either, and a rule

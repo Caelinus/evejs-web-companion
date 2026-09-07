@@ -290,7 +290,7 @@ test("⚠ ONE GRID FOR ALL THREE RACKS — the rows are `display: contents`", ()
   assert.match(CSS, /\.module-rack-rows > \.rack-hint,/);
 });
 
-test("⚠ ON A PHONE THE SLOTS TAKE THEIR OWN LINE, and it is not a squeeze", () => {
+test("⚠ IN A NARROW CELL THE SLOTS TAKE THEIR OWN LINE, and it is not a squeeze", () => {
   // MEASURED, and not close. The rack area on a 375px phone is 335px: the
   // gutter takes 42 and four high slots need 182, leaving 111 for a header
   // whose own minimum is 102 — before either gap. Every arrangement that keeps
@@ -298,12 +298,26 @@ test("⚠ ON A PHONE THE SLOTS TAKE THEIR OWN LINE, and it is not a squeeze", ()
   // wraps on a 360px one, and a high rack wrapped to 3+1 above two half-empty
   // racks reads as a bug.
   //
-  // The header keeps its own line, which is what "one line" asked for; the
-  // slots get the full width; and the heat bar gets a width worth reading
-  // across, which it never had beside them. Verified at 375px AND 360px: four,
-  // three and two slots, each on one line, no sideways scroll.
-  assert.match(CSS, /\.mob-card-body \.module-rack-rows \{[\s\S]{0,200}grid-template-columns: auto minmax\(0, 1fr\);/);
-  assert.match(CSS, /\.mob-card-body \.rack-slots \{[\s\S]{0,300}grid-column: 1 \/ -1;/);
+  // ⚠ IT USED TO BE KEYED ON `.mob-card-body` — THE PHONE — AND THAT WAS THE
+  // WRONG QUESTION. A desktop window dragged to just above the mobile
+  // breakpoint hands the rack the same 340-odd pixels and got none of this: it
+  // kept the wide shape and scrolled sideways. It is a WIDTH question, so it is
+  // a `@container` one (R85), and one rule covers the phone and the narrow
+  // window alike. Verified at 375, 760 and 900: four, three and two slots, each
+  // on one line, no sideways scroll.
+  assert.match(CSS, /@container hud \(max-width: 420px\) \{[\s\S]{0,200}\.module-rack-rows \{[\s\S]{0,200}grid-template-columns: auto minmax\(0, 1fr\);/);
+  assert.match(CSS, /\.rack-slots \{[\s\S]{0,300}grid-column: 1 \/ -1;/);
+  assert.equal(
+    /\.mob-card-body \.module-rack-rows/.test(CSS),
+    false,
+    "the rack's narrow form is keyed on the tier again",
+  );
+  // ⚠ THE CONTAINER IS `.hud-body`, AND NOWHERE CLOSER. That box sits in
+  // `grid-area: hud` under a `minmax(0, 1fr)` column, so its inline size comes
+  // from outside and never from its contents. On `.module-rack` itself,
+  // `container-type` would sever the content-sizing that gives the rack its
+  // width in the first place.
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,2600}container-type: inline-size;[\s\S]{0,80}container-name: hud;/);
 });
 
 test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {

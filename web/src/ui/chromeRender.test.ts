@@ -42,6 +42,17 @@ const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HUD_SOURCE = readFileSync(path.join(UI_DIR, "HudBar.svelte"), "utf8");
 /** The stylesheet, line endings normalised — the working copy is CRLF. */
 const CSS = readFileSync(path.join(UI_DIR, "..", "styles.css"), "utf8").replace(/\r\n/g, "\n");
+/**
+ * The same stylesheet with its comments stripped.
+ *
+ * ⚠ FOR ASSERTIONS THAT PROVE A RULE IS ABSENT. The notes in this file quote
+ * the rules they describe — the one left where the old `@media` override was
+ * spells out `.hud-body { grid-template-columns: 1fr }` word for word — so a
+ * guard run against the raw text finds the prose and reports the rule it was
+ * written to catch. `squareCorners.test.ts` does the same, for the same
+ * reason.
+ */
+const CSS_NO_COMMENTS = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** A flow stub — the server generator never runs onMount / handlers. */
 function fakeFlow(): unknown {
@@ -321,26 +332,59 @@ test("⚠ THE SPEED AND THE NUMBERS SIT AGAINST THE WHEEL, not at the floor of i
   assert.match(CSS, /\.hud-bar \.hud-wheel \{[\s\S]{0,900}margin-bottom: -1\.8rem;/);
 });
 
-test("⚠ THE GAUGE AND THE RACK ARE CENTRED AS A PAIR, not stretched from the left", () => {
-  // The rack column used to be `minmax(0, 1fr)`. A rack is at most four slots
-  // wide, so on a wide cell the slots sat at the left edge of a 660px box and
-  // the right half of the instrument panel was empty — the two clusters hugged
-  // the left third of a cell they were meant to occupy. Measured live after the
-  // change: 235px of margin on each side, exactly.
+test("⚠ THE CLUSTERS WRAP RATHER THAN SQUEEZE, and there is no breakpoint left", () => {
+  // FOUND BY THE OPERATOR, at a window a hair above the mobile breakpoint. The
+  // body was a three-column grid with a `@media (max-width: 820px)` override
+  // that collapsed it to `1fr` — a rule written when there were TWO clusters
+  // and stacking was the whole answer. With three it forced all of them into
+  // one 323px column, the rack overflowed it by 33px, and `overflow: auto`
+  // turned that into a horizontal scrollbar with the slots strung down the
+  // right-hand edge.
   //
-  // The leading `auto` is the cargo readout, which arrived later and sits in
-  // the space the centred pair had left empty on the left. It does not change
-  // the claim: the clusters are still one centred group, and the rack column
-  // is still its own width rather than everything left over.
-  assert.match(CSS, /\.hud-body \{[\s\S]{0,2200}grid-template-columns: auto 170px minmax\(0, max-content\);/);
-  // ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
-  // overflows on BOTH sides and the left overflow cannot be scrolled to, so a
-  // rack too wide for the cell would lose its first slots with no way to reach
-  // them. `safe` falls back to start-alignment at exactly that point.
-  assert.match(CSS, /justify-content: safe center;/);
+  // A wrapping row cannot do that: flex moves an item to the next LINE before
+  // it shrinks one, and the rack has a hard minimum (26px gutter + 132px header
+  // + 182px of slots + gaps = 356px) below which it stops being readable.
+  // Verified live at 1600, 1280, 900, 760 and 375: no sideways scroll at any of
+  // them.
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,2600}display: flex;/);
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,2600}flex-wrap: wrap;/);
+  // ⚠ AND THE BREAKPOINT IS GONE, not adjusted. Wrapping is width-driven by
+  // definition, so there is no number left to keep in step with the number of
+  // clusters — which is exactly how the last one went stale.
+  assert.equal(
+    /@media \(max-width: 820px\)[\s\S]{0,600}\.hud-body/.test(CSS_NO_COMMENTS),
+    false,
+    "a breakpoint is overriding the cell's layout again",
+  );
 });
 
-test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 21rem IS A CEILING, NOT A HEIGHT", () => {
+test("⚠ CENTRED, AND EACH CLUSTER KEEPS ITS OWN WIDTH", () => {
+  // The rack column used to be `minmax(0, 1fr)`. A rack is at most four slots
+  // wide, so on a wide cell the slots sat at the left edge of a 660px box and
+  // the right half of the instrument panel was empty. Measured at 1600px after
+  // the change: 160px of margin on the left, 161 on the right, one line.
+  assert.match(CSS, /justify-content: safe center;/);
+  assert.match(CSS, /\.hud-body > \.hud-cluster \{ flex: 0 1 auto; min-width: 0; \}/);
+  // ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
+  // overflows on BOTH sides and the left overflow cannot be scrolled to, so a
+  // cluster too wide for the cell would lose its left edge with no way to reach
+  // it. `safe` falls back to start-alignment at exactly that point.
+  //
+  // The gauge is 150px — the wheel's own cap. It was 170, left over from the
+  // handoff's two-column grid, and the extra 20 was blank either side.
+  assert.match(CSS, /\.hud-body > \.ship-gauges \{ flex: 0 0 150px; \}/);
+});
+
+test("⚠ WHEN THEY STACK, CARGO GOES LAST", () => {
+  // Stacked, the cell is at its ceiling and scrolls, so the order stops being
+  // cosmetic and becomes which instrument you can see without scrolling for it.
+  // The gauge and the rack are what a pilot flies by. In the DOM cargo is
+  // first, because on a wide cell it belongs in the space on the left, so this
+  // moves it with `order` rather than with the markup.
+  assert.match(CSS, /@container hud \(max-width: 420px\) \{[\s\S]{0,80}\.hud-body > \.cargo-cluster \{ order: 1; \}/);
+});
+
+test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 24rem IS A CEILING, NOT A HEIGHT", () => {
   // It was a fixed 21rem, measured against content that has since changed: the
   // footer came off the cell and the number stayed, leaving a band of empty
   // panel under the racks. A measured height is only ever right for what it was
@@ -351,7 +395,12 @@ test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 21rem IS A CEILING, NOT A HEIGHT
   // ceiling: a hull with a great many slots must not squeeze the radar to
   // nothing, and `.hud-body` scrolls when it hits it.
   assert.match(CSS, /\.workspace\.in-space \.work-main \{[\s\S]{0,1400}grid-template-rows: minmax\(0, 1fr\) auto;/);
-  assert.match(CSS, /\.workspace\.in-space \.work-main > \.hud-bar \{ max-height: 21rem; \}/);
+  // ⚠ RAISED FROM 21rem. That was measured when the cell held ONE line of
+  // clusters; three of them wrap to two lines on a 1280px window with the dock
+  // panel open, which is 340px of content against a 336px ceiling — the cell
+  // scrolled to hide four pixels. The radar still keeps the clear majority of
+  // the surface (435px against the cell's 378 at that width).
+  assert.match(CSS, /\.workspace\.in-space \.work-main > \.hud-bar \{ max-height: 24rem; \}/);
   assert.match(CSS, /\.hud-body \{[\s\S]{0,2000}overflow: auto;/, "the ceiling has nothing to scroll");
 });
 
