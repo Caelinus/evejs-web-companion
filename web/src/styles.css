@@ -4746,24 +4746,34 @@
      * as tall as one slot, so this is also the row height. It was two literals
      * before and they disagreed the moment the gutter arrived. */
     --rack-slot: 42px;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+    /* ⚠ ONE GRID FOR ALL THREE RACKS, and the rows are `display: contents`.
+     *
+     * Each row used to be its own grid, which meant an `auto` column sized to
+     * that ROW's content: the gutter would have been the button's width on the
+     * high rack and zero on the other two, and the three labels would have
+     * started at three different x. Sharing one grid is what makes a column a
+     * column — the same reason the label cell is fixed-width one level in.
+     *
+     * `align-items: center` here is what puts the banking icon, the rack name,
+     * the heat bar, the reading and every module tile on one line, whatever
+     * height a row happens to take when its slots wrap. */
+    display: grid;
+    grid-template-columns: auto 132px minmax(0, 1fr);
+    align-items: center;
+    gap: 0.35rem 8px;
     margin-top: 0.4rem;
   }
-  /* The rack's own gutter and its rows. The gutter holds the banking toggle and
-   * is TOP-aligned, so it sits beside the high rack — the only rack whose
-   * modules banking can affect. */
-  .rack-stack {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    min-width: 0;
-  }
-  .rack-rows {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+  /* Not a box of its own — its three cells are the grid's. */
+  .rack-row { display: contents; }
+  /* Everything that is not a rack row spans the whole width. */
+  .module-rack-rows > .rack-hint,
+  .module-rack-rows > .rack-damage,
+  .module-rack-rows > .rack-error { grid-column: 1 / -1; }
+  /* The gutter cell. Empty on the mid and low racks, which is why the column is
+   * `auto` and not a number: it is exactly as wide as the one control in it. */
+  .rack-gutter {
+    display: grid;
+    place-items: center;
     min-width: 0;
   }
   /* ⚠ AN ICON BUTTON, SO IT IS DELIBERATELY BELOW THE GLOBAL 40px. Same
@@ -4775,15 +4785,9 @@
     display: grid;
     place-items: center;
     width: 26px;
-    /* ⚠ AS TALL AS A RACK ROW, WHICH IS AS TALL AS A SLOT.
-     *
-     * At 26px square it was top-aligned against a 42px row, so its glyph rode
-     * 8px above the centre line that the rack's name, its heat bar and every
-     * module tile share — the one line in this instrument that everything else
-     * is on. Matching the row's height and centring inside it puts the icon on
-     * that line without moving anything else.
-     *
-     * The extra height is hit area, not ink: the glyph stays 16px. */
+    /* ⚠ AS TALL AS A SLOT, WHICH IS HIT AREA AND NOT INK — the glyph stays 16px.
+     * The CENTRING is the grid's job now (see `.module-rack-rows`); this is
+     * only about being a target worth aiming at. */
     height: var(--rack-slot, 42px);
     min-height: 0;
     padding: 0;
@@ -4818,19 +4822,6 @@
    * slots happened to stop wrapping: three rows, three different positions, and
    * nothing you could read down. A fixed first column is what makes the three
    * readings a column. */
-  .rack-row {
-    display: grid;
-    /* ⚠ 132px, MEASURED against the widest thing the header holds — "HIGH", the
-     * bar at its minimum, and the italic "heat not known" — all on one line.
-     * FIXED, still: the three labels are different words, so an `auto` column
-     * would size to each row's own text and the slots would start at three
-     * different x positions. A fixed first column is what makes the three
-     * readings a column and the three racks a grid. */
-    grid-template-columns: 132px minmax(0, 1fr);
-    gap: 8px;
-    align-items: center;
-    min-width: 0;
-  }
   /* ⚠ THE HEADER IS ONE LINE: name, bar, reading, read left to right.
    *
    * It used to stack them, which made every rack row two lines tall against a
@@ -5151,6 +5142,33 @@
    * cell is 21rem and stacks too, as the reference always had it — so the only
    * thing left that is genuinely mobile is the size. */
   .mob-card-body > .hud-bar .hud-wheel { max-width: 170px; }
+  /* ⚠ ON A PHONE THE HEADER SITS ABOVE ITS SLOTS, NOT BESIDE THEM.
+   *
+   * MEASURED, and it is not close. The rack area on a 375px phone is 335px. The
+   * gutter takes 42 and four high slots need 182, which leaves 111 for a header
+   * whose own minimum is 102 — before either gap. Every arrangement that keeps
+   * the header beside the slots fits by a handful of pixels on THIS phone and
+   * wraps on a 360px one, and a rack that wraps to 3+1 while the racks under it
+   * sit half empty reads as a bug.
+   *
+   * So the slots take the full width on their own line and the header keeps the
+   * line above it. The header is still ONE line — which was the point — and the
+   * heat bar gets the whole width to be read across, which it never had.
+   *
+   * The gutter column stays, so the banking icon is still on the high rack's
+   * header and still on its centre line. */
+  .mob-card-body .module-rack-rows {
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: 0.2rem;
+  }
+  .mob-card-body .rack-slots {
+    grid-column: 1 / -1;
+    /* The racks would otherwise run together: with the slots on their own line
+     * the gap between a header and ITS slots and the gap between two racks are
+     * the same gap. This is what separates one rack from the next. */
+    margin-bottom: 0.35rem;
+  }
+  .mob-card-body .rack-slots:last-child { margin-bottom: 0; }
   .mob-card-body > .hud-bar > .hud-body > .module-rack { margin-top: 0.7rem; }
   /* ⚠ THE "MODULES" HEADING IS CLIPPED FOR BOTH TIERS NOW, by the `.hud-bar`
    * rule above — the reference has no such heading on either, and a rule

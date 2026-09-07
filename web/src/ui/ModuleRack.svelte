@@ -376,57 +376,68 @@
 </script>
 
 <div class="module-rack-rows" aria-label="Module rack">
-  <div class="rack-stack">
-    <!--
-      WEAPON BANKING — one click fires every gun in the group.
-      ⚠ IT IS AN ICON IN THE RACK'S OWN GUTTER, NOT A LABELLED BUTTON UNDER IT.
-      It used to be a strip below the racks: a sentence of state and a button
-      spelling out the action, two lines away from the guns it acts on. Beside
-      the high rack it is next to the only modules it can affect, and the cell
-      is a fixed height where a whole row of chrome is expensive.
-      ⚠ THE STATE IS IN WORDS, NOT ONLY IN THE GLYPH. `title` and the accessible
-      name both carry the action AND what is true right now, and `aria-pressed`
-      says it again in a way a screen reader reads as state. The two glyphs
-      differ in SHAPE — a joined chain against a broken one — so the difference
-      never depends on telling two colours apart.
-      ⚠ AND IT IS DRAWN, NOT AN EMOJI, for the reason the overload dot is: at
-      this size a platform emoji is whatever font happened to answer, and
-      several of them are unreadable smudges.
-    -->
-    {#if weaponsCount > 1 && flow}
-      {@const linked = bankedCount > 0}
-      <button
-        type="button"
-        class="rack-bank"
-        class:linked
-        aria-pressed={linked}
-        disabled={pendingItemID !== null}
-        title={linked
-          ? `Unlink weapons — ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked`
-          : "Link weapons — weapons fire one at a time"}
-        aria-label={linked
-          ? `Unlink weapons. ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked.`
-          : "Link weapons. Weapons fire one at a time."}
-        onclick={() => setBanks(!linked)}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <!-- The two halves of the chain, which both states share. -->
-          <path d="M10.2 6.4 12.4 4.2a4.2 4.2 0 0 1 5.9 5.9l-2.2 2.2" />
-          <path d="M13.8 17.6 11.6 19.8a4.2 4.2 0 0 1-5.9-5.9l2.2-2.2" />
-          {#if linked}
-            <!-- Joined: the bar between them is the link. -->
-            <path d="M8.8 15.2 15.2 8.8" />
-          {:else}
-            <!-- Broken: no bar, and two ticks where it parted. -->
-            <path d="M9.6 13 8.2 11.6" />
-            <path d="M14.4 11 15.8 12.4" />
-          {/if}
-        </svg>
-      </button>
-    {/if}
-    <div class="rack-rows">
   {#each rows as row (row.family)}
     <div class="rack-row">
+      <!--
+        THE GUTTER CELL — empty on every rack but the high one.
+
+        ⚠ IT IS A CELL OF THE ROW, NOT A COLUMN BESIDE THE RACK. The button used
+        to live in a gutter alongside the whole stack, top-aligned to it. That
+        put it on the high row's centre line only while that row was exactly one
+        slot tall — on a phone the high rack wraps to two lines and the icon was
+        left 23px above everything it was supposed to line up with. As a cell of
+        the row it is centred by the same rule as the name, the heat bar and the
+        tiles, whatever the row's height.
+      -->
+      <span class="rack-gutter">
+        <!--
+          WEAPON BANKING — one click fires every gun in the group.
+          ⚠ IT IS AN ICON IN THE RACK'S OWN GUTTER, NOT A LABELLED BUTTON UNDER IT.
+          It used to be a strip below the racks: a sentence of state and a button
+          spelling out the action, two lines away from the guns it acts on. Beside
+          the high rack it is next to the only modules it can affect, and the cell
+          is a fixed height where a whole row of chrome is expensive.
+          ⚠ THE STATE IS IN WORDS, NOT ONLY IN THE GLYPH. `title` and the accessible
+          name both carry the action AND what is true right now, and `aria-pressed`
+          says it again in a way a screen reader reads as state. The two glyphs
+          differ in SHAPE — a joined chain against a broken one — so the difference
+          never depends on telling two colours apart.
+          ⚠ AND IT IS DRAWN, NOT AN EMOJI, for the reason the overload dot is: at
+          this size a platform emoji is whatever font happened to answer, and
+          several of them are unreadable smudges.
+        -->
+        {#if row.family === "high" && weaponsCount > 1 && flow}
+          {@const linked = bankedCount > 0}
+          <button
+            type="button"
+            class="rack-bank"
+            class:linked
+            aria-pressed={linked}
+            disabled={pendingItemID !== null}
+            title={linked
+              ? `Unlink weapons — ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked`
+              : "Link weapons — weapons fire one at a time"}
+            aria-label={linked
+              ? `Unlink weapons. ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked.`
+              : "Link weapons. Weapons fire one at a time."}
+            onclick={() => setBanks(!linked)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <!-- The two halves of the chain, which both states share. -->
+              <path d="M10.2 6.4 12.4 4.2a4.2 4.2 0 0 1 5.9 5.9l-2.2 2.2" />
+              <path d="M13.8 17.6 11.6 19.8a4.2 4.2 0 0 1-5.9-5.9l2.2-2.2" />
+              {#if linked}
+                <!-- Joined: the bar between them is the link. -->
+                <path d="M8.8 15.2 15.2 8.8" />
+              {:else}
+                <!-- Broken: no bar, and two ticks where it parted. -->
+                <path d="M9.6 13 8.2 11.6" />
+                <path d="M14.4 11 15.8 12.4" />
+              {/if}
+            </svg>
+          </button>
+        {/if}
+      </span>
       <!--
         THE ROW HEADER — the rack's name, its heat bar and the reading, on ONE
         LINE in a fixed column.
@@ -611,8 +622,6 @@
       </div>
     </div>
   {/each}
-    </div>
-  </div>
   {#if unknown}
     <p class="rack-hint muted">Modules appear once your ship's fitting has loaded.</p>
   {/if}

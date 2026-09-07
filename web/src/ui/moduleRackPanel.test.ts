@@ -293,9 +293,14 @@ test("⚠ THE HEAT READING IS PART OF THE ROW HEADER, on one line with the name"
   // each other. Measured live after the fix: all three start at the same x and
   // are the same width.
   assert.match(CSS_SOURCE, /\.rack-name \{[\s\S]{0,500}flex: 0 0 22px;/);
-  // The label cell still comes FIRST and is still fixed — the claim above.
-  const at = CSS_SOURCE.indexOf("  .rack-row {");
-  assert.match(CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at)), /grid-template-columns: \d+px minmax\(0, 1fr\)/);
+  // The label cell still comes second (after the gutter) and is still fixed —
+  // the claim above. The columns moved from `.rack-row` to the shared grid on
+  // `.module-rack-rows`; see the `display: contents` test in mobileStack.
+  const at = CSS_SOURCE.indexOf("  .module-rack-rows {");
+  assert.match(
+    CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at)),
+    /grid-template-columns: auto \d+px minmax\(0, 1fr\)/,
+  );
 });
 
 test("⚠ THE GUTTER ICON IS ON THE RACK'S CENTRE LINE — FOUND BY EYE", () => {
@@ -333,8 +338,14 @@ test("⚠ WEAPON BANKING IS AN ICON IN THE RACK'S GUTTER, and still says what it
   assert.match(RACK_SOURCE, /<svg viewBox="0 0 24 24" aria-hidden="true">/);
   assert.equal(/rack-banks/.test(RACK_SOURCE), false, "the old strip came back");
   assert.equal(/rack-banks/.test(CSS_SOURCE), false, "the old strip's styling came back");
-  // It sits in a gutter that is TOP-aligned, so it is level with the high rack.
-  assert.match(CSS_SOURCE, /\.rack-stack \{[\s\S]{0,300}align-items: flex-start;/);
+  // It sits in a GUTTER CELL of the high row, so the row's own centring puts it
+  // on the same line as the name, the bar and the tiles — whatever height the
+  // row takes when its slots wrap. It was a column beside the whole stack, and
+  // on a phone, where the high rack wraps, that left it 23px high.
+  assert.match(RACK_SOURCE, /<span class="rack-gutter">/);
+  assert.match(RACK_SOURCE, /\{#if row\.family === "high" && weaponsCount > 1 && flow\}/);
+  assert.equal(/rack-stack/.test(CSS_SOURCE), false, "the old gutter column came back");
+  assert.match(CSS_SOURCE, /\.module-rack-rows \{[\s\S]{0,1200}align-items: center;/);
   assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,400}width: 26px;/);
   // Under a coarse pointer only the WIDTH grows — the height is already a
   // slot, and a slot clears R8's minimum on its own.
@@ -350,13 +361,16 @@ test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots
   // The handoff's row is `44px minmax(0,1fr)`: a fixed label cell holding the
   // rack name, the bar and the reading, then the slots. A fixed first column is
   // what makes the three readings a column at all.
-  const rule = CSS_SOURCE.slice(CSS_SOURCE.indexOf("  .rack-row {"), CSS_SOURCE.indexOf("  .rack-name"));
-  assert.ok(rule.length > 0, "the .rack-row rule is not where this test looks");
+  // The columns live on `.module-rack-rows` now, shared by all three rows —
+  // see the `display: contents` test in mobileStack.test.ts.
+  const at = CSS_SOURCE.indexOf("  .module-rack-rows {");
+  const rule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
+  assert.ok(rule.length > 0, "the shared grid is not where this test looks");
   assert.match(rule, /display: grid/);
-  assert.match(rule, /grid-template-columns: \d+px minmax\(0, 1fr\)/);
+  assert.match(rule, /grid-template-columns: auto \d+px minmax\(0, 1fr\)/);
   assert.equal(/margin-left: auto/.test(CSS_SOURCE.slice(
     CSS_SOURCE.indexOf("  .rack-row-label {"),
-    CSS_SOURCE.indexOf("  .rack-slots"),
+    CSS_SOURCE.indexOf("  .rack-slots {"),
   )), false, "the heat drifted to the end of the row again");
   // And in the markup, the label cell holds all three pieces — before the slots.
   const label = RACK_SOURCE.slice(

@@ -276,6 +276,36 @@ test("the gauge takes 170px on a phone where the cell gives it 150", () => {
   assert.match(CSS, /\.hud-bar \.hud-wheel \{[^}]*max-width: 150px/);
 });
 
+test("⚠ ONE GRID FOR ALL THREE RACKS — the rows are `display: contents`", () => {
+  // Each row used to be its own grid, which meant an `auto` column sized to
+  // that ROW's content: the gutter would have been the button's width on the
+  // high rack and zero on the other two, and the three labels would have
+  // started at three different x. Sharing one grid is what makes a column a
+  // column. Measured live on both tiers: all three labels start at the same x
+  // and all three heat bars are the same width.
+  assert.match(CSS, /\.module-rack-rows \{[\s\S]{0,1200}grid-template-columns: auto 132px minmax\(0, 1fr\);/);
+  assert.match(CSS, /\.rack-row \{ display: contents; \}/);
+  // Anything that is not a rack row spans the whole width rather than landing
+  // in a column.
+  assert.match(CSS, /\.module-rack-rows > \.rack-hint,/);
+});
+
+test("⚠ ON A PHONE THE SLOTS TAKE THEIR OWN LINE, and it is not a squeeze", () => {
+  // MEASURED, and not close. The rack area on a 375px phone is 335px: the
+  // gutter takes 42 and four high slots need 182, leaving 111 for a header
+  // whose own minimum is 102 — before either gap. Every arrangement that keeps
+  // the header beside the slots fits by a handful of pixels on that phone and
+  // wraps on a 360px one, and a high rack wrapped to 3+1 above two half-empty
+  // racks reads as a bug.
+  //
+  // The header keeps its own line, which is what "one line" asked for; the
+  // slots get the full width; and the heat bar gets a width worth reading
+  // across, which it never had beside them. Verified at 375px AND 360px: four,
+  // three and two slots, each on one line, no sideways scroll.
+  assert.match(CSS, /\.mob-card-body \.module-rack-rows \{[\s\S]{0,200}grid-template-columns: auto minmax\(0, 1fr\);/);
+  assert.match(CSS, /\.mob-card-body \.rack-slots \{[\s\S]{0,300}grid-column: 1 \/ -1;/);
+});
+
 test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {
   // A solid square on a rack of round faces reads as a fitted module whose icon
   // failed to load — the one thing an empty slot must not look like. Nothing
