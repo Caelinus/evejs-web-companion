@@ -81,9 +81,19 @@ export const TABS: readonly TabDef[] = [
   // all; it was only ever labelled that way because route planning was assumed
   // to happen before undocking.
   { id: "travel", label: "Travel", where: "both" },
-  // Bots run IN SPACE (mining/mission loops), so their commands must stay
-  // reachable after undocking — available in both states.
-  { id: "bots", label: "Bots", where: "both" },
+  // The two BUILT-IN bots (mining, mission): their live requirement checklists
+  // and their setup forms. Runs in space, so it stays available in both states.
+  //
+  // ⚠ NOT LAUNCHABLE — reached from the Bot Manager, the one door onto bots.
+  // The Manager's pilot rows offer the built-ins in the same picker as the saved
+  // scripts and open this panel to set one up. It could not simply be DELETED
+  // along with its entry: the Manager can start a saved script on any pilot
+  // because a script has an id to hand to a runner, but a built-in is code in
+  // nav/botRegistry.ts with no id and a setup form of its own (which belt, which
+  // agent), read against one pilot's fitting and holds. That does not compress
+  // into a row of a multi-pilot table, so it stays a panel and the Manager
+  // points at it.
+  { id: "bots", label: "Bots", where: "both", launchable: false },
   // ⚠ NOT LAUNCHABLE — reached from the Bot Manager, which is the ONE door onto
   // bots. It is not contextual in Show Info's sense (it opens perfectly well on
   // nothing: a new, empty bot), so this is a grouping decision rather than a

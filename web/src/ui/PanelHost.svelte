@@ -46,6 +46,7 @@
     tab,
     onOpen,
     sessions,
+    onFocusPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -56,6 +57,19 @@
     // Optional and forwarded only to the Bot Manager panel, which is the only
     // one that needs to see pilots beyond its own store/flow.
     sessions?: readonly Session[];
+    /**
+     * Make another held pilot the active one. Forwarded only to the Bot Manager,
+     * for the same reason `sessions` is: it is the one panel that acts on pilots
+     * other than its own store's.
+     *
+     * ⚠ IT EXISTS FOR THE BUILT-IN BOTS. A saved script can be started on any
+     * pilot from the Manager without leaving it, because the row calls that
+     * pilot's own flow. A built-in bot cannot: its setup lives in a per-pilot
+     * panel reading that pilot's fitting, holds and flight status, and only ONE
+     * pilot's workspace is mounted at a time. So reaching it means going to that
+     * pilot first, and this is how the Manager says so.
+     */
+    onFocusPilot?: (sessionID: string) => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -124,7 +138,7 @@
 {:else if tab === "botBuilder"}
   <BotBuilder {store} {flow} />
 {:else if tab === "botManager"}
-  <BotManager {store} {flow} {sessions} onOpen={(id) => onOpen?.(id)} />
+  <BotManager {store} {flow} {sessions} onOpen={(id) => onOpen?.(id)} {onFocusPilot} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

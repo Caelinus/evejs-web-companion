@@ -36,6 +36,7 @@
     flow,
     isDocked,
     sessions,
+    onFocusPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -44,6 +45,8 @@
     // can show every held pilot, not just this session's active one. Optional:
     // every other caller/panel is unaffected. See PanelHost.svelte.
     sessions?: readonly Session[];
+    /** Make another held pilot active — forwarded to the Bot Manager only. */
+    onFocusPilot?: (sessionID: string) => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -123,7 +126,7 @@
        scrolling padded column it has always had. -->
   <main class="mobile-main" class:mobile-main-station={effective === null && isDocked}>
     {#if effective !== null}
-      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} />
+      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} {onFocusPilot} />
     {:else if isDocked}
       <!-- Docked home = the same Station panel as the desktop's right-hand dock,
            at its narrowest tier. There is no strip to fold into on a phone, so

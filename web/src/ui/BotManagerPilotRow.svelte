@@ -30,6 +30,7 @@
     serverRunState,
     type PilotRunState,
   } from "../bots/pilotRoster.ts";
+  import { BOTS } from "../nav/botRegistry.ts";
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
@@ -42,6 +43,7 @@
     ownerFlow,
     scripts,
     onChanged,
+    onSetUpBuiltIn,
   }: {
     session?: Session;
     serverBot: ServerBot | null;
@@ -55,6 +57,11 @@
     scripts: readonly BotScriptSummary[];
     /** Fires after a stop OR a start, so the panel refreshes the roster and server-bot list either way. */
     onChanged: () => void;
+    /**
+     * Go to this pilot and open the built-in bots panel. Absent on a row with
+     * no session — there is no pilot here to go to.
+     */
+    onSetUpBuiltIn?: () => void;
   } = $props();
 
   // A tab run with no server claim reads as "nothing running" here — the same
@@ -224,7 +231,25 @@
   // not any `store`/`flow` belonging to the panel around it. Getting this
   // backwards would start a bot on whatever pilot happens to be active
   // instead of the one this row is showing.
-  let selectedScriptID = $state<string | null>(null);
+  /**
+   * What the picker is set to: a saved script's id, or a built-in bot's id.
+   *
+   * ⚠ THE TWO KINDS DO NOT START THE SAME WAY, which is why the picker cannot
+   * simply be a longer list of scripts. A saved script has a scriptID, so it can
+   * be handed to `startCustomBot` here or to the server. A built-in has no
+   * script at all — it is code in `nav/botRegistry.ts` — so the server path,
+   * which takes a scriptID, cannot express it, and its setup (which belt, which
+   * station, which agent) lives in its own per-pilot panel. So picking one
+   * offers exactly one action, and that action is to go there.
+   */
+  const BUILT_IN_PREFIX = "built-in:";
+  let selectedValue = $state<string | null>(null);
+  const selectedBuiltIn = $derived(
+    selectedValue !== null && selectedValue.startsWith(BUILT_IN_PREFIX)
+      ? selectedValue.slice(BUILT_IN_PREFIX.length)
+      : null,
+  );
+  const selectedScriptID = $derived(selectedBuiltIn === null ? selectedValue : null);
   let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
   let startError = $state<string | null>(null);
 
@@ -358,13 +383,38 @@
         <div class="pilot-launch">
           <label class="pilot-launch-bot">
             Bot
-            <select bind:value={selectedScriptID} disabled={busy}>
+            <!-- ⚠ TWO GROUPS, NAMED. The built-ins ship with the client and the
+                 saved ones were written by somebody here; they start differently
+                 (see `selectedValue` above), so a flat list would offer two
+                 kinds of thing under one word and then change the buttons
+                 underneath without explaining why. -->
+            <select bind:value={selectedValue} disabled={busy}>
               <option value={null}>Choose a bot</option>
-              {#each scripts as script (script.scriptID)}
-                <option value={script.scriptID}>{script.name}</option>
-              {/each}
+              <optgroup label="Built in">
+                {#each BOTS as builtIn (builtIn.id)}
+                  <option value={`${BUILT_IN_PREFIX}${builtIn.id}`}>{builtIn.name}</option>
+                {/each}
+              </optgroup>
+              {#if scripts.length > 0}
+                <optgroup label="Saved">
+                  {#each scripts as script (script.scriptID)}
+                    <option value={script.scriptID}>{script.name}</option>
+                  {/each}
+                </optgroup>
+              {/if}
             </select>
           </label>
+          {#if selectedBuiltIn !== null}
+            <!-- A built-in needs setting up against THIS pilot's ship before it
+                 can start, and that is a panel, not a row. Going there is the
+                 only honest action to offer. -->
+            <div class="pilot-launch-run">
+              <button type="button" class="primary" disabled={busy} onclick={() => onSetUpBuiltIn?.()}>
+                Set up
+              </button>
+              <span class="pilot-launch-where">check its requirements and start it</span>
+            </div>
+          {:else}
           <div class="pilot-launch-run">
             <ActionButton
               action="run-here"
@@ -392,6 +442,7 @@
               </select>
             </label>
           </div>
+          {/if}
         </div>
       {:else if runState.mode === "none"}
         <!-- A server-only row: no tab is open here to hold this character, so

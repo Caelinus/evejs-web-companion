@@ -146,20 +146,30 @@ test("the panel offers a way to write a bot that does not exist yet", () => {
   assert.match(text, /New bot/i);
 });
 
-test("New bot opens the Bot Builder, and nothing else", () => {
-  // The SSR harness has no click, so reach the handler the way the template
-  // does: render with an onOpen spy and press the button through its markup.
-  // What matters is the tab id — an opener pointing anywhere else would leave
-  // the Builder unreachable with an empty library.
-  const html = renderPanel();
-  assert.match(html, /New bot/);
-  // The panel names exactly one tab to open, and it is the Builder.
+test("the Manager is the door onto BOTH panels that left the rail", () => {
+  // `botBuilder` and `bots` are both `launchable: false` now, so the rail cannot
+  // reach either. This panel is the only way in, and each door is a different
+  // question: "write or change a bot" (the Builder) and "set up one of the
+  // built-ins on this pilot" (Bots). If either opener is lost or retargeted,
+  // that panel becomes unreachable and nothing else in the app will say so.
   const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
-  const opened = [...source.matchAll(/onOpen\?\.\("([a-zA-Z]+)"\)/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(opened)], ["botBuilder"]);
-  assert.equal(opened.length, 2, "both the Edit action and New bot must open it");
+  const opened = new Set([...source.matchAll(/onOpen\?\.\("([a-zA-Z]+)"\)/g)].map((m) => m[1]));
+  assert.deepEqual([...opened].sort(), ["botBuilder", "bots"]);
 });
 
+test("setting up a built-in goes to that pilot FIRST, then opens the panel", () => {
+  // ⚠ ORDER MATTERS AND IS THE WHOLE POINT. The Manager lists every held pilot,
+  // but only ONE pilot's workspace is mounted, and the built-in bots panel reads
+  // the mounted pilot's fitting, holds and flight status. Opening it without
+  // switching would show one pilot's ship under another pilot's name — a
+  // checklist about the wrong ship, which a player would act on.
+  const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
+  const focus = source.indexOf("onFocusPilot?.(session.id)");
+  const openBots = source.indexOf('onOpen?.("bots")');
+  assert.ok(focus >= 0, "the Manager no longer focuses the pilot it is acting on");
+  assert.ok(openBots >= 0, "the Manager no longer opens the built-in bots panel");
+  assert.ok(focus < openBots, "the pilot must be focused before the panel opens");
+});
 test("the empty library points at the button, not at a launcher entry that is gone", () => {
   // ⚠ The regression this guards is a dead end, not a typo. The old copy read
   // "Build one in the Bot Builder", which was a direction to a rail entry that

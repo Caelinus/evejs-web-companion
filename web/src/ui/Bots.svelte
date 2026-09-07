@@ -222,9 +222,16 @@
     is gone. Saved bots are shared: anyone with a character here can run any of
     them.
   </p>
+  <!-- ⚠ NOT "the Bot Manager tab" ANY MORE. There is no such rail entry to send
+       anybody to, and this panel is reached FROM the Manager rather than beside
+       it, so the old sentence pointed backwards up the path the player just
+       walked. What is worth saying instead is what this panel is FOR, since the
+       Manager is where they came from and where everything else lives. -->
   <p class="note">
-    Saved bots, every pilot's current run, and starting one on a pilot you are
-    not sitting in right now — that all lives in the Bot Manager tab.
+    These two bots ship with the client, so they are set up here against your
+    ship rather than picked from the saved library. Saved bots, every pilot's
+    current run, and starting one on a pilot you are not sitting in right now
+    all live in the Bot Manager.
   </p>
   {#if runningName}
     <p class="stat-line">

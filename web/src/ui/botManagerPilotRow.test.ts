@@ -118,6 +118,41 @@ test("a character with no tab open here cannot be started, and says why", () => 
   assert.match(text, /No tab is open here/i);
 });
 
+// --- the built-in bots, now that Bots has no rail entry ---------------------
+
+test("the picker offers the built-in bots as well as the saved ones", () => {
+  // The Bots panel is `launchable: false` now, so this picker is where a player
+  // discovers that mining and mission bots exist at all.
+  const text = visibleText(renderRow({ session: fakeSession() }));
+  assert.match(text, /Mining bot/);
+  assert.match(text, /Mission bot/);
+  assert.match(text, /Sample belt loop/);
+});
+
+test("the two kinds are named as separate groups, not run together in one list", () => {
+  // They start differently, so offering them as one flat list would change the
+  // buttons underneath with nothing on screen explaining why.
+  const html = renderRow({ session: fakeSession() });
+  assert.match(html, /<optgroup label="Built in"/);
+  assert.match(html, /<optgroup label="Saved"/);
+});
+
+test("the built-ins are offered even when nothing has been saved yet", () => {
+  // The Saved group disappears with an empty library; the built-ins must not,
+  // or a fresh install has a picker with nothing in it.
+  const html = renderRow({ session: fakeSession(), scripts: [] });
+  assert.match(visibleText(html), /Mining bot/);
+  assert.doesNotMatch(html, /<optgroup label="Saved"/);
+});
+
+test("a row with no session held here offers no built-in setup either", () => {
+  // Nothing in this tab is holding that pilot, so there is no ship to check a
+  // built-in's requirements against and nowhere to go.
+  const text = visibleText(renderRow({ session: undefined, serverBot: null }));
+  assert.doesNotMatch(text, /Set up/);
+  assert.match(text, /No tab is open here/i);
+});
+
 // --- what the row absorbed from the Server Bots panel ----------------------
 //
 // These three facts had exactly one home before — the standalone Server Bots

@@ -140,13 +140,14 @@ test("Show Info is NOT launchable from the rail", () => {
  * Two different reasons, both legitimate, and worth keeping distinct:
  *  • `showInfo` is CONTEXTUAL — it opens on the thing you clicked, so a rail
  *    entry could only ever open it onto nothing.
- *  • `botBuilder` is GROUPED — it opens perfectly well on nothing (a new, empty
- *    bot), but the rail carried four bot entries and the Bot Manager is the one
- *    door onto bots now. It is reached from there.
+ *  • `botBuilder` and `bots` are GROUPED — both open perfectly well on nothing
+ *    (a new, empty bot; the built-in checklists), but the rail carried four bot
+ *    entries and the Bot Manager is the one door onto bots now. Both are
+ *    reached from there.
  *
  * Anything NOT on this list must stay launchable.
  */
-const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder"]);
+const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots"]);
 
 test("every OTHER tab is still launchable", () => {
   // ⚠ `launchable` is absent on every pre-existing tab and absent means yes. A

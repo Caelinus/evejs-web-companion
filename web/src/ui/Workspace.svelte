@@ -52,6 +52,7 @@
     globalOpenIds,
     onOpenGlobal,
     openRequest,
+    onFocusPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -82,6 +83,13 @@
      * `dockInventoryPing` already uses.
      */
     openRequest?: { readonly id: TabID; readonly n: number } | null;
+    /**
+     * Make another held pilot active. Threaded through to the Bot Manager only
+     * (see PanelHost.svelte): on a phone the Manager is an ordinary panel of
+     * this workspace rather than App's global window, so this is the mobile half
+     * of the same wiring App does for the desktop layer.
+     */
+    onFocusPilot?: (sessionID: string) => void;
   } = $props();
 
   // The store's identity is stable for this component's lifetime (App keys each
@@ -298,7 +306,7 @@
   <DockWipe {isDocked} />
   <NoticeBridge {store} />
   <Toasts />
-  <MobileWorkspace {store} {flow} {isDocked} {sessions} />
+  <MobileWorkspace {store} {flow} {isDocked} {sessions} {onFocusPilot} />
 {:else}
   <DockWipe {isDocked} />
   <!-- Mounted once for the whole workspace, and once each: the bridge is what

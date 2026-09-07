@@ -464,6 +464,7 @@
         {globalOpenIds}
         {openRequest}
         onOpenGlobal={openGlobalTab}
+        onFocusPilot={switchTo}
       />
     </ErrorBoundary>
   {/key}
@@ -515,6 +516,7 @@
             tab={globalWin.id}
             onOpen={requestOpenInWorkspace}
             {sessions}
+            onFocusPilot={switchTo}
           />
         </DesktopWindow>
       </ErrorBoundary>
