@@ -33,8 +33,8 @@
   import Standings from "./Standings.svelte";
   import CharacterSheet from "./CharacterSheet.svelte";
   import Settings from "./Settings.svelte";
-import ShowInfo from "./ShowInfo.svelte";
-import NoticeLog from "./NoticeLog.svelte";
+  import ShowInfo from "./ShowInfo.svelte";
+  import NoticeLog from "./NoticeLog.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import { deriveDocked, tabLabel, type TabID } from "./tabs.ts";
   import type { ClientStore } from "../store/clientStore.ts";
@@ -138,7 +138,26 @@ import NoticeLog from "./NoticeLog.svelte";
   <CharacterSheet {store} {flow} />
 {:else if tab === "settings"}
   <Settings {store} {flow} />
+{:else if tab === "log"}
+  <!--
+    ⚠ THIS BRANCH WAS MISSING, AND NOTHING SAID SO. `NoticeLog` was imported
+    here and never rendered, so the Neocom's "Log" fell through to the `{:else}`
+    below and told the player the panel no longer existed. `panelHost.test.ts`
+    now walks every tab in `tabs.ts` against this chain so the next one cannot
+    hide the same way.
+  -->
+  <NoticeLog />
+{:else if tab === "showInfo"}
+  <!--
+    ⚠ THE SECOND ONE, FOUND BY THE SAME TEST. Show Info was imported here and
+    never rendered either — and the workspace OPENS this tab itself whenever a
+    panel asks to show info about something, so every one of those fell
+    through the same way. Nothing anywhere reported it.
+  -->
+  <ShowInfo {store} {flow} />
 {:else}
-  <p class="error">This panel is no longer available.</p>
+  <!-- Every tab in `tabs.ts` is named above; this is the arm for a `TabID` that
+       does not exist yet, and it says so rather than guessing. -->
+  <p class="empty">There is no panel called {tab} yet.</p>
 {/if}
 </ErrorBoundary>

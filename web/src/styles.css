@@ -3913,33 +3913,45 @@
      * out of room, so there is no breakpoint to keep in step with it. */
   }
 
-  /* ============================================== notices: toasts + log (R80) --
-   * The transient half and the permanent half of one list. A toast is a recent
+  /* ============================================== notices: flash + log (R80) --
+   * The transient half and the permanent half of one list. A flash is a recent
    * notice that has not been dismissed; the log keeps every one.
    *
+   * ⚠ IT IS CENTRED, AND IT IS NOT IN THE MIDDLE. Horizontally centred, parked
+   * in the upper band at 16vh — in the line of sight without being in the line
+   * of fire, because dead centre is where the ship is and where a pilot clicks.
+   * The column is centred by `margin-inline: auto` inside a full-width fixed
+   * strip rather than by `translateX(-50%)`, so a flash that grows a second line
+   * does not have to be re-centred and nothing is ever composited on a half
+   * pixel.
+   *
    * ⚠ THE STACK NEVER EATS A CLICK. `pointer-events: none` on the container and
-   * `auto` on the toasts themselves, so the gaps between them — and everything
+   * `auto` on the flashes themselves, so the gaps between them — and everything
    * underneath — stay live. A pilot is usually mid-action when one of these
    * fires, and a notification that swallowed the click they were making would be
-   * worse than no notification.
+   * worse than no notification. Over the middle of the screen that stops being
+   * politeness and starts being the difference between a warning and a misfire.
    *
-   * Severity is a WORD on every toast and every log row; the colour repeats it
+   * Severity is a WORD on every flash and every log row; the colour repeats it
    * and never carries it alone. */
   .toasts {
     position: fixed;
-    top: calc(var(--char-bar-h) + 0.6rem);
-    right: 0.7rem;
+    top: max(calc(var(--char-bar-h) + 0.6rem), 16vh);
+    left: 0;
+    right: 0;
     z-index: 450;
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 0.4rem;
-    width: min(22rem, calc(100vw - 1.4rem));
+    padding-inline: 0.7rem;
     pointer-events: none;
   }
   .toast {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
+    width: min(26rem, 100%);
     padding: 0.5rem 0.55rem;
     background: color-mix(in srgb, var(--color-panel) 94%, transparent);
     -webkit-backdrop-filter: blur(10px);
@@ -3959,6 +3971,11 @@
     gap: 0.1rem;
     min-width: 0;
     flex: 1;
+    /* ⚠ CENTRED TEXT, WHICH A LIST WOULD NEVER GET. These are one or two
+       lines read at a glance and gone; a ragged left edge under a centred
+       column reads as misalignment rather than as text. The LOG, where the
+       same notices pile up and are scanned down, stays left-aligned. */
+    text-align: center;
   }
   .toast-kind {
     font-family: var(--font-display);
