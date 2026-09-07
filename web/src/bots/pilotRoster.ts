@@ -23,6 +23,7 @@
 
 import type { ServerBot } from "../app/api.ts";
 import { BOTS } from "../nav/botRegistry.ts";
+import { BOT_RISK_LABELS } from "./runPolicy.ts";
 import type { BotsState, CustomBotState } from "../store/types.ts";
 
 /** How a pilot is currently being flown by a bot, or that nothing is. */
@@ -247,6 +248,55 @@ export function serverOnlyBots(
 ): readonly ServerBot[] {
   const held = new Set(heldCharacterIDs);
   return serverBots.filter((bot) => bot.endedAt === null && !held.has(bot.characterID));
+}
+
+// --- what a LIVE server bot is, beyond its status ---------------------------
+//
+// A server bot is flying a character with nobody watching, so three facts about
+// it are not decoration: which revision of the script is actually running, what
+// it was permitted to do, and when the server will stop it regardless. These
+// used to be rendered inline by ServerBots.svelte and existed nowhere else; they
+// are pure string work over a `ServerBot`, so they belong here with the rest of
+// this module's wording, and both surfaces that show a server bot now read them
+// from one place rather than each spelling them out.
+
+/** The runtime cap in words — minutes under an hour, whole hours above it. */
+function runtimeCapWords(maxRuntimeMinutes: number): string {
+  return maxRuntimeMinutes < 60
+    ? `${maxRuntimeMinutes} min`
+    : `${maxRuntimeMinutes / 60} hr`;
+}
+
+/**
+ * What this bot was permitted to do, spelled out from its granted risk classes.
+ *
+ * ⚠ AN EMPTY LIST IS A SENTENCE, NOT A BLANK. "No consequential permissions" is a
+ * meaningful and reassuring thing to read next to a bot flying your ship; an
+ * empty string there would read as a failed lookup instead.
+ */
+export function riskWords(bot: ServerBot): string {
+  return bot.riskClasses.length === 0
+    ? "No consequential permissions"
+    : bot.riskClasses.map((risk) => BOT_RISK_LABELS[risk]).join("; ");
+}
+
+/**
+ * The one provenance line for a live server bot: which revision is running, what
+ * it may do, and when the server will stop it anyway.
+ */
+export function serverBotProvenance(bot: ServerBot): string {
+  return `Revision ${bot.scriptRev} · ${riskWords(bot)} · limit ${runtimeCapWords(bot.maxRuntimeMinutes)}`;
+}
+
+/**
+ * Said under a bot the server picked back up after a restart, null otherwise.
+ * `runOutcomePhrase` states the same fact for a run that has already ENDED; this
+ * is the live form, for a bot still flying.
+ */
+export function resumedNote(bot: ServerBot): string | null {
+  return bot.resumedAt === null
+    ? null
+    : "Restarted with the server after its saved revision and safe steps were checked.";
 }
 
 // --- recent runs (region C) --------------------------------------------------

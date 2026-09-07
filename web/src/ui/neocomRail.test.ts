@@ -154,6 +154,22 @@ test("the rail follows the docked / in-space state", () => {
   assert.equal(/aria-label="Fitting"/.test(inSpace), false);
 });
 
+test("the rail offers ONE way into the bots that run on the server, not two", () => {
+  // The Server Bots entry is gone: the Bot Manager's pilots region lists the
+  // same rows beside the tab runs and the pilots that could take one. This is a
+  // crowding fix, so what it guards against is the entry quietly coming back
+  // and the rail growing a second door onto one subject again.
+  for (const docked of [true, false]) {
+    const body = renderRail(docked);
+    assert.match(body, /aria-label="Bot Manager"/);
+    assert.equal(
+      body.includes('aria-label="Server Bots"'),
+      false,
+      "Server Bots must not sit in the launcher rail",
+    );
+  }
+});
+
 test("R7d: the rail renders no bare numeric game ID", () => {
   const body = renderRail(false, { cashBalance: "184250000.55" });
   assert.equal(body.includes(String(CHARACTER_ID)), false, "the characterID must never show");

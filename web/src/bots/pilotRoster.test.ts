@@ -7,8 +7,11 @@ import {
   mergeServerRosters,
   pilotRunState,
   RECENT_RUNS_ARE_NOT_DURABLE,
+  resumedNote,
+  riskWords,
   runOutcomePhrase,
   serverBotFor,
+  serverBotProvenance,
   serverOnlyBots,
   serverRunState,
   tabRunState,
@@ -361,6 +364,49 @@ test("lastAlertPhrase says 'just now' for a very recent alert", () => {
   assert.equal(lastAlertPhrase(bot, nowMs), "Low on ammo (just now)");
 });
 
+
+// ─── what a LIVE server bot is, beyond its status ────────────────────────────
+//
+// These moved here out of ServerBots.svelte when the Bot Manager absorbed that
+// panel. Two surfaces render them now, so a change to the wording has to be a
+// change in one place — which is the whole reason they are functions and not
+// template expressions.
+
+test("riskWords spells out every granted permission, not the class names", () => {
+  const words = riskWords(serverBot({ riskClasses: ["financial", "destructive"] }));
+  assert.match(words, /spend or commit ISK/);
+  assert.match(words, /permanently lose assets/);
+  // The raw class token is an internal name, never player-facing (R9a).
+  assert.doesNotMatch(words, /financial|destructive/);
+});
+
+test("an empty grant is a sentence, not a blank", () => {
+  // A blank here would read as a failed lookup next to a bot flying your ship.
+  assert.equal(riskWords(serverBot({ riskClasses: [] })), "No consequential permissions");
+});
+
+test("serverBotProvenance carries the revision, the grant and the runtime cap", () => {
+  const line = serverBotProvenance(
+    serverBot({ scriptRev: 7, riskClasses: ["combat"], maxRuntimeMinutes: 240 }),
+  );
+  assert.match(line, /Revision 7/);
+  assert.match(line, /weapons, drones, or combat modules/);
+  assert.match(line, /limit 4 hr/);
+});
+
+test("a runtime cap under an hour reads in minutes, not a fraction of an hour", () => {
+  // 0.5 hr is the bug this guards: the cap is a number of minutes, and dividing
+  // unconditionally would print "limit 0.5 hr" for a half-hour run.
+  const line = serverBotProvenance(serverBot({ maxRuntimeMinutes: 30 }));
+  assert.match(line, /limit 30 min/);
+  assert.doesNotMatch(line, /hr/);
+});
+
+test("resumedNote is null for a bot that never restarted, and a sentence for one that did", () => {
+  assert.equal(resumedNote(serverBot({ resumedAt: null })), null);
+  const note = resumedNote(serverBot({ resumedAt: "2026-09-02T13:00:00.000Z" }));
+  assert.match(note ?? "", /Restarted with the server/);
+});
 // ─── the not-durable caveat ──────────────────────────────────────────────────
 
 test("the recent-runs caveat is exported once, and says the history is not durable", () => {

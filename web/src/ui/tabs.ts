@@ -21,7 +21,6 @@ export type TabID =
   | "travel"
   | "bots"
   | "botBuilder"
-  | "serverBots"
   | "botManager"
   | "inventory"
   | "market"
@@ -86,9 +85,13 @@ export const TABS: readonly TabDef[] = [
   // reachable after undocking — available in both states.
   { id: "bots", label: "Bots", where: "both" },
   { id: "botBuilder", label: "Bot Builder", where: "both" },
-  // Server-side bots keep flying with the tab closed, so the readout that
-  // watches them must be reachable from anywhere, in any state.
-  { id: "serverBots", label: "Server Bots", where: "both" },
+  // ⚠ THERE IS NO "Server Bots" ENTRY, AND THAT IS NOT AN OVERSIGHT. Server-side
+  // bots keep flying with the tab closed, so a readout that watches them must be
+  // reachable from anywhere — and the Bot Manager IS that readout: its pilots
+  // region lists every server bot beside the tab runs and the pilots that could
+  // take one. A second entry for the same rows only ever meant two ways into one
+  // subject in a rail that already has too many. `ServerBots.svelte` still
+  // exists, mounted on character select, which has no Manager to hold it.
   { id: "botManager", label: "Bot Manager", where: "both" },
   // In space only — flying, what's around the ship, mining.
   { id: "flight", label: "Flight", where: "in-space" },

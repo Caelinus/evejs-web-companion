@@ -22,7 +22,14 @@
   import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
   import type { Session } from "../app/sessions.ts";
   import type { AppFlow } from "../app/flow.ts";
-  import { pilotRunState, serverRunState, type PilotRunState } from "../bots/pilotRoster.ts";
+  import {
+    lastAlertPhrase,
+    pilotRunState,
+    resumedNote,
+    serverBotProvenance,
+    serverRunState,
+    type PilotRunState,
+  } from "../bots/pilotRoster.ts";
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
@@ -146,6 +153,33 @@
     session !== undefined && runState.mode === "tab" && bots?.runningBotID === "custom",
   );
   const customStatus = $derived(customBot?.status ?? null);
+
+  // ⚠ A LIVE SERVER BOT SAYS MORE THAN ITS STATUS WORD. These three lines are
+  // what the standalone Server Bots panel showed and this row did not, and they
+  // are the reason that panel could not simply be deleted:
+  //
+  //  • the ALERT is the whole delivery. A server bot has no browser to notify,
+  //    so if this row does not print `lastAlert`, an "alert me" watch that fired
+  //    an hour ago reaches nobody at all. `runState.detail` cannot carry it —
+  //    that is pauseReason/phase/why, none of which an alert is.
+  //  • RESUMED says the server restarted mid-run and picked this bot back up.
+  //  • PROVENANCE says which revision is flying, what it was permitted to do,
+  //    and when the server will stop it regardless of anything here.
+  //
+  // Only for a bot that is still flying: an ended run is region C's subject, and
+  // `serverBotFor` has already excluded ended bots from a held pilot's row.
+  const liveServerBot = $derived(
+    serverBot !== null && serverBot.endedAt === null ? serverBot : null,
+  );
+  // Date.now() at render: the phrase is relative ("4 minutes ago") and this row
+  // re-renders on every roster poll, which is exactly when it can change.
+  const serverAlert = $derived(
+    liveServerBot === null ? null : lastAlertPhrase(liveServerBot, Date.now()),
+  );
+  const serverResumed = $derived(liveServerBot === null ? null : resumedNote(liveServerBot));
+  const serverProvenance = $derived(
+    liveServerBot === null ? null : serverBotProvenance(liveServerBot),
+  );
 
   function pause(): void {
     session?.flow.pauseCustomBot();
@@ -283,6 +317,17 @@
     {#if runState.detail}
       <p class="note why">{runState.detail}</p>
     {/if}
+    {#if serverAlert}
+      <!-- Above the quieter lines and marked: this is the only notification a
+           server bot ever gives. -->
+      <p class="alert">{serverAlert}</p>
+    {/if}
+    {#if serverResumed}
+      <p class="note why">{serverResumed}</p>
+    {/if}
+    {#if serverProvenance}
+      <p class="note why">{serverProvenance}</p>
+    {/if}
   </td>
   <td data-label="Actions">
     <span class="row-actions">
@@ -363,3 +408,16 @@
     {/if}
   </td>
 </tr>
+
+<style>
+  /* The one line in this row worth interrupting the eye for. A server bot has no
+     browser to notify, so an alert reaching the player at all depends on it not
+     looking like the muted notes around it — same treatment the standalone
+     Server Bots panel gave the same fact. */
+  .alert {
+    margin: 0.3rem 0 0;
+    color: var(--color-accent);
+    border-left: 2px solid var(--color-accent);
+    padding-left: 0.4rem;
+  }
+</style>

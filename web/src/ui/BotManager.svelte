@@ -20,6 +20,7 @@
   // and error/empty/loading kept as three distinguishable states rather than
   // collapsed into one "nothing to show".
   import { onMount } from "svelte";
+  import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import {
     listBotScripts,
     getBotScript,
@@ -58,6 +59,20 @@
     onOpen?: (tab: TabID) => void;
     sessions?: readonly Session[];
   } = $props();
+
+  /**
+   * How often the server roster is re-read.
+   *
+   * ⚠ THE SERVER ROSTER IS THE ONE LIST HERE THAT CHANGES BY ITSELF. Every other
+   * list in this panel only moves when somebody acts — in this tab or another —
+   * so an onMount read is enough for them. A server bot is running on a machine
+   * nobody in this browser is driving: it changes phase, raises an alert and hits
+   * its runtime cap with no local event to notice. Without this the roster would
+   * be frozen at whenever the panel was opened, which is worse than showing
+   * nothing — a stale "Running" is a lie a player will act on. 3s matches what
+   * the standalone Server Bots panel polled at.
+   */
+  const SERVER_ROSTER_POLL_MS = 3000;
 
   /** Direct api.ts calls must ride THIS pilot's full flow options. */
   const botOpts = () => flow.requestOptions();
@@ -150,7 +165,12 @@
 
   onMount(() => {
     void refresh();
-    void refreshPilots();
+    // Guarded, like every other periodic read — see app/skipWhileBusy.ts. Only
+    // the roster repeats; the library is not a self-changing list.
+    const beat = skipWhileBusy(refreshPilots);
+    void beat();
+    const timer = setInterval(() => void beat(), SERVER_ROSTER_POLL_MS);
+    return () => clearInterval(timer);
   });
 
   // Which of the honest states we are in, decided by the pure module so the
@@ -233,7 +253,16 @@
     Every pilot you have open in this browser tab, plus every character with a
     bot still running on the server even if it has no tab open here. A bot
     running in a tab stops when that tab closes; a bot running on the server
-    keeps flying.
+    keeps flying — though every server run has a time limit.
+  </p>
+  <!-- Carried over with the Server Bots panel this region absorbed. Both
+       sentences answer a question a player asks OF this list and nowhere else:
+       why a character will not select, and what survives a server restart. -->
+  <p class="note">
+    A character a server bot is flying cannot be selected until the bot stops.
+    After a server restart, only the exact same script can start over, and only
+    when every step is safe to re-check; other runs stop and ask you to review
+    them again.
   </p>
 
   {#if pilotsError}

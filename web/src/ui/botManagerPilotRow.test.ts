@@ -118,6 +118,82 @@ test("a character with no tab open here cannot be started, and says why", () => 
   assert.match(text, /No tab is open here/i);
 });
 
+// --- what the row absorbed from the Server Bots panel ----------------------
+//
+// These three facts had exactly one home before — the standalone Server Bots
+// panel — and its rail entry is gone. If the row stops printing them they are
+// not merely harder to find, they are unreachable while a pilot is online, so
+// each gets its own test rather than riding along in a broader render check.
+
+test("a live server bot's alert reaches the row — it is the only notification one ever gives", () => {
+  const text = visibleText(
+    renderRow({
+      serverBot: fakeServerBot({
+        lastAlert: { message: "Shields dropped below the level you set.", atMs: Date.now() },
+      }),
+    }),
+  );
+  assert.match(text, /Shields dropped below the level you set/);
+  // Relative age, not a clock time: the row cannot know the reader's timezone.
+  assert.match(text, /just now|minute|hour/i);
+});
+
+test("an alert is not swallowed by the status detail line", () => {
+  // `detail` is pauseReason/phase/why. A bot with all three set AND an alert
+  // must still show the alert — the bug this guards is the alert being dropped
+  // because the row already had a line to print.
+  const text = visibleText(
+    renderRow({
+      serverBot: fakeServerBot({
+        phase: "Hauling",
+        why: "The ore hold filled up.",
+        pauseReason: "Waiting for the hold to empty.",
+        lastAlert: { message: "A neutral pilot entered the belt.", atMs: Date.now() },
+      }),
+    }),
+  );
+  assert.match(text, /A neutral pilot entered the belt/);
+});
+
+test("a live server bot states its revision, its permissions and its time limit", () => {
+  const text = visibleText(
+    renderRow({ serverBot: fakeServerBot({ scriptRev: 4, riskClasses: ["combat"], maxRuntimeMinutes: 720 }) }),
+  );
+  assert.match(text, /Revision 4/);
+  assert.match(text, /weapons, drones, or combat modules/i);
+  assert.match(text, /limit 12 hr/);
+});
+
+test("a bot granted nothing consequential says so, rather than showing a blank", () => {
+  const text = visibleText(renderRow({ serverBot: fakeServerBot({ riskClasses: [] }) }));
+  assert.match(text, /No consequential permissions/i);
+});
+
+test("a bot the server picked back up after a restart says so while it is still flying", () => {
+  const text = visibleText(
+    renderRow({ serverBot: fakeServerBot({ resumedAt: "2026-09-02T13:00:00.000Z" }) }),
+  );
+  assert.match(text, /Restarted with the server/i);
+});
+
+test("an ENDED server bot gets none of those live lines — that is the recent-runs strip's job", () => {
+  // `serverBotFor` already keeps ended bots off a held pilot's row; this pins
+  // the row's own half of that rule so the two cannot disagree.
+  const text = visibleText(
+    renderRow({
+      serverBot: fakeServerBot({
+        status: "stopped",
+        endedAt: "2026-09-02T14:00:00.000Z",
+        resumedAt: "2026-09-02T13:00:00.000Z",
+        lastAlert: { message: "A neutral pilot entered the belt.", atMs: Date.now() },
+      }),
+    }),
+  );
+  assert.doesNotMatch(text, /Revision/);
+  assert.doesNotMatch(text, /Restarted with the server/i);
+  assert.doesNotMatch(text, /A neutral pilot entered the belt/);
+});
+
 test("no raw numeric id reaches the row (R7d)", () => {
   const text = visibleText(renderRow({ session: fakeSession(), serverBot: fakeServerBot() }));
   assert.doesNotMatch(text, /\b\d{4,}\b/);
