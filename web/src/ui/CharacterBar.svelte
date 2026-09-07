@@ -49,5 +49,19 @@
   <button type="button" class="char-bar-hangar" onclick={onHangar} title="Pilot hangar — every pilot, squads and accounts">
     Pilots
   </button>
-  <button type="button" class="char-bar-add" onclick={onAdd}>+ Add character</button>
+  <!--
+    ⚠ THE LABEL IS TWO PIECES SO A NARROW BAR CAN DROP ONE.
+
+    At 375px the whole bar is 359px of usable width and this button alone took
+    119 of it, which crushed the pilot CHIP — the one thing the bar exists to
+    show — down to an 11px stub with nothing readable in it. The "+" carries
+    the button on a phone; the words come back as soon as there is room.
+
+    `aria-label` is unconditional, so the button is never just a plus sign to
+    anything that reads it aloud.
+  -->
+  <button type="button" class="char-bar-add" onclick={onAdd} aria-label="Add character">
+    <span aria-hidden="true">+</span>
+    <span class="char-bar-add-text">Add character</span>
+  </button>
 </div>

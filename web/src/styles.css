@@ -2682,6 +2682,31 @@
     overflow-x: auto;
     overflow-y: hidden;
   }
+  .char-bar-add { display: inline-flex; align-items: center; gap: 0.3rem; }
+  /* ⚠ THE PILOT CHIP MUST NOT BE THE THING THAT GIVES WAY.
+   *
+   * At 375px the bar has 359px to spend, and brand + status + Pilots + "+ Add
+   * character" + gaps took 316 of it — leaving the chip 11px, an empty bracket
+   * with the pilot's name clipped away inside it. The bar exists to say who you
+   * are; that is the last thing it may drop.
+   *
+   * So on a narrow bar the ADD button loses its words (the "+" and its
+   * `aria-label` carry it) and the status loses its text — the dot keeps the
+   * colour, and its `title` keeps the word. Neither is what the bar is for. */
+  @media (max-width: 560px) {
+    .char-bar-add-text { display: none; }
+    .char-bar-status-text { display: none; }
+    .char-bar-list { flex: 1 1 8rem; }
+    /* ⚠ AND THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so
+     * that several pilots line up as identical tabs — right on a wide bar, and
+     * 15px too wide for a phone, which clipped the one chip's own edge. With a
+     * single pilot there is nothing to line up with; the name already
+     * truncates with an ellipsis, so shrinking costs nothing and fitting is
+     * worth more than matching. */
+    /* `.char-bar-list >` for specificity: the base `.char-chip` rule is later in
+     * this file, and an equal-weight selector earlier would silently lose. */
+    .char-bar-list > .char-chip { flex: 0 1 11rem; min-width: 0; }
+  }
   .char-bar-add,
   .char-bar-hangar {
     flex: 0 0 auto;
