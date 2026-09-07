@@ -25,7 +25,7 @@
   } from "./mobileCards.ts";
   import TargetBracket from "./TargetBracket.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
-  import { isLaunchable, visibleTabsFor, type TabID } from "./tabs.ts";
+  import { isLaunchable, isTabVisible, visibleTabsFor, type TabID } from "./tabs.ts";
   import { isWindowTab } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -90,8 +90,26 @@
     ),
   );
   let selected = $state<TabID | null>(null);
-  // Drop a selection the current state no longer offers (docked-only after undock).
-  const effective = $derived(selected !== null && tabs.some((t) => t.id === selected) ? selected : null);
+  /**
+   * The panel actually shown: the selection, unless the current state no longer
+   * offers it (a docked-only panel after undocking), in which case: home.
+   *
+   * ⚠ IT CHECKS VISIBILITY, NOT THE TAB BAR. These are different questions and
+   * conflating them made every CONTEXTUAL panel unreachable on a phone. `tabs`
+   * above is the BAR, and it deliberately drops panels that must not be offered
+   * cold — Show Info, which opens on the thing you tapped, and the Bot Builder,
+   * which opens from the Bot Manager. Requiring the selection to be in `tabs`
+   * meant tapping Show Info on an overview row, or Edit in the Bot Manager, set
+   * `selected` and then bounced straight back to home: the panel could be asked
+   * for and never appear.
+   *
+   * A panel opened by an explicit act is wanted, whether or not the bar lists a
+   * way to ask for it cold. What must still be dropped is one this STATE cannot
+   * show at all, which is what `isTabVisible` answers.
+   */
+  const effective = $derived(
+    selected !== null && isTabVisible(selected, isDocked) && isWindowTab(selected) ? selected : null,
+  );
 </script>
 
 <div class="mobile-ws">

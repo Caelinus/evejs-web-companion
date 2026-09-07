@@ -10,6 +10,7 @@
 // reaches the page (R7d).
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
 
 register("./svelteSsrHook.ts", import.meta.url);
@@ -132,4 +133,41 @@ test("the R7d sweep would actually catch a leak", () => {
   // could not spot an id in rendered text, the test above would pass forever.
   const leaked = visibleText("<td>Saved by</td><td>424242</td>");
   assert.match(leaked, /\b\d{4,}\b/);
+});
+
+// --- the one door onto bots -------------------------------------------------
+//
+// The Bot Builder has no launcher entry any more: it is reached from this
+// panel. That makes the ways in from here load-bearing rather than convenient,
+// so they get their own tests.
+
+test("the panel offers a way to write a bot that does not exist yet", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /New bot/i);
+});
+
+test("New bot opens the Bot Builder, and nothing else", () => {
+  // The SSR harness has no click, so reach the handler the way the template
+  // does: render with an onOpen spy and press the button through its markup.
+  // What matters is the tab id — an opener pointing anywhere else would leave
+  // the Builder unreachable with an empty library.
+  const html = renderPanel();
+  assert.match(html, /New bot/);
+  // The panel names exactly one tab to open, and it is the Builder.
+  const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
+  const opened = [...source.matchAll(/onOpen\?\.\("([a-zA-Z]+)"\)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(opened)], ["botBuilder"]);
+  assert.equal(opened.length, 2, "both the Edit action and New bot must open it");
+});
+
+test("the empty library points at the button, not at a launcher entry that is gone", () => {
+  // ⚠ The regression this guards is a dead end, not a typo. The old copy read
+  // "Build one in the Bot Builder", which was a direction to a rail entry that
+  // no longer exists — so a player with no saved bots was told to go somewhere
+  // unreachable.
+  const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
+  const empty = source.match(/No bots saved yet.*?<\/p>/s);
+  assert.ok(empty, "the empty-library message is gone");
+  assert.doesNotMatch(empty[0], /in the Bot Builder/i);
+  assert.match(empty[0], /New bot/);
 });

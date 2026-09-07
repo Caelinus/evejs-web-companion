@@ -84,7 +84,14 @@ export const TABS: readonly TabDef[] = [
   // Bots run IN SPACE (mining/mission loops), so their commands must stay
   // reachable after undocking — available in both states.
   { id: "bots", label: "Bots", where: "both" },
-  { id: "botBuilder", label: "Bot Builder", where: "both" },
+  // ⚠ NOT LAUNCHABLE — reached from the Bot Manager, which is the ONE door onto
+  // bots. It is not contextual in Show Info's sense (it opens perfectly well on
+  // nothing: a new, empty bot), so this is a grouping decision rather than a
+  // structural one: four bot entries in the rail was three too many, and the
+  // Builder is the one a player reaches for AFTER deciding to write or change a
+  // bot — which is a decision made while looking at the library. The Manager
+  // offers "New bot" and an Edit on every saved row; those are the two ways in.
+  { id: "botBuilder", label: "Bot Builder", where: "both", launchable: false },
   // ⚠ THERE IS NO "Server Bots" ENTRY, AND THAT IS NOT AN OVERSIGHT. Server-side
   // bots keep flying with the tab closed, so a readout that watches them must be
   // reachable from anywhere — and the Bot Manager IS that readout: its pilots

@@ -134,12 +134,48 @@ test("Show Info is NOT launchable from the rail", () => {
   );
 });
 
+/**
+ * The tabs deliberately kept OUT of the launcher rail, and why each is.
+ *
+ * Two different reasons, both legitimate, and worth keeping distinct:
+ *  • `showInfo` is CONTEXTUAL — it opens on the thing you clicked, so a rail
+ *    entry could only ever open it onto nothing.
+ *  • `botBuilder` is GROUPED — it opens perfectly well on nothing (a new, empty
+ *    bot), but the rail carried four bot entries and the Bot Manager is the one
+ *    door onto bots now. It is reached from there.
+ *
+ * Anything NOT on this list must stay launchable.
+ */
+const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder"]);
+
 test("every OTHER tab is still launchable", () => {
   // ⚠ `launchable` is absent on every pre-existing tab and absent means yes. A
   // truthiness test instead of `!== false` would empty the entire rail, which is
-  // the kind of change that looks like a styling bug.
+  // the kind of change that looks like a styling bug. This is also the guard
+  // that makes hiding a tab from the rail a DELIBERATE act: a panel quietly
+  // dropping off it is otherwise invisible until somebody goes looking for it.
   for (const tab of TABS) {
-    if (tab.id === "showInfo") continue;
+    if (NOT_IN_THE_RAIL.has(tab.id)) continue;
     assert.equal(isLaunchable(tab), true, `the '${tab.id}' tab must stay launchable`);
+  }
+});
+
+test("every tab kept out of the rail is still VISIBLE, so its window can stay open", () => {
+  // Not launchable and not visible are different facts. A tab that is not
+  // VISIBLE has its window closed by the state filter, which would shut the Bot
+  // Builder the moment it opened.
+  for (const id of NOT_IN_THE_RAIL) {
+    for (const docked of [true, false]) {
+      assert.equal(
+        visibleTabsFor(docked).some((entry) => entry.id === id),
+        true,
+        `'${id}' must stay visible while ${docked ? "docked" : "in space"}`,
+      );
+      assert.equal(
+        launchableTabsFor(docked).some((entry) => entry.id === id),
+        false,
+        `'${id}' must not sit in the rail`,
+      );
+    }
   }
 });
