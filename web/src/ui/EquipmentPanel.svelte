@@ -209,10 +209,6 @@
 <section class="panel equipment-panel">
   <div class="panel-head"><h2>Your equipment</h2></div>
 
-  <p class="note">
-    Everything fitted that can be switched on. Pick a locked target first if the
-    equipment needs one — your ship will say so if it does.
-  </p>
   <!--
     ⚠ R30 slice E — the sentence that used to be here told the player to go to
     the Fitting tab to power equipment up. It is DELETED, not reworded: the

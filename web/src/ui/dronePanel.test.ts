@@ -274,14 +274,43 @@ const AN_ORPHANED_DRONE = { ...A_SPACE_DRONE, controlled: false };
 
 // --- The Drones section ------------------------------------------------------
 
-test("the panel says LAUNCHING is the defence, in a player's words", () => {
-  const text = visibleText(droneScene());
-  // ⚠ The single most important sentence in this feature. The server
-  // auto-engages idle combat drones against whatever shoots the ship, so a
-  // miner who launches is defended without another click — and a player who is
-  // not told that will sit there clicking Engage.
-  assert.match(text, /Drones you launch defend you on their own/i);
-  assert.match(text, /attack anything that\s+shoots your ship/i);
+test("⚠ THE PANEL EXPLAINS NOTHING — no paragraph on how drones work", () => {
+  // ⚠ THIS TEST USED TO ASSERT THE OPPOSITE, AND THE REVERSAL IS THE
+  // OPERATOR'S CALL: "UI is not a place to explain how drones work".
+  //
+  // It read "the panel says LAUNCHING is the defence, in a player's words", and
+  // pinned two sentences telling the player that launched drones auto-engage
+  // whatever shoots them. The fact is true and still worth knowing — a panel is
+  // not where someone learns it, and a paragraph a player reads once is a
+  // paragraph they read past forever afterwards.
+  //
+  // What must NOT come back is prose about the game's rules. What stays is
+  // state and refusals, and the two tests below hold those.
+  const text = visibleText(droneScene({ inSpace: [A_SPACE_DRONE] }));
+  for (const prose of [
+    "defend you on their own",
+    "without you doing anything else",
+    "Use Attack to pick a target",
+    "call them back",
+  ]) {
+    assert.equal(text.includes(prose), false, `the panel explains again: "${prose}"`);
+  }
+});
+
+test("what SURVIVED the cull is state and refusals, not prose", () => {
+  // The distinction that decides what a panel may say. The server's limits are
+  // a reading; "Lock something first" is why a button will not do anything, and
+  // R30 puts that ON the button rather than in a line underneath it.
+  const text = visibleText(droneScene({ inSpace: [A_SPACE_DRONE], maxActiveDrones: 5 }));
+  assert.match(text, /Drones at once/, "the server's own limit is state, and stays");
+  const body = droneScene({ inSpace: [A_SPACE_DRONE] });
+  assert.match(body, /<button[^>]*disabled[^>]*>[\s\S]{0,60}Lock something first/);
+  // ...and never as a paragraph under the controls again.
+  assert.equal(
+    /class="note">Lock something first/.test(body),
+    false,
+    "the reason went back to being a note instead of the button's own words",
+  );
 });
 
 test("the bay and what is in space are shown SEPARATELY, both by name", () => {

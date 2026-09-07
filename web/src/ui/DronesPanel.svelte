@@ -158,6 +158,22 @@
   );
 
   /**
+   * Why an order that needs a TARGET cannot run, or null.
+   *
+   * ⚠ THIS IS A REASON, NOT AN EXPLANATION, and the difference is where it
+   * goes. It used to be a paragraph under the buttons saying "Lock something
+   * first to give your drones a target" — a line a player reads once and then
+   * reads past forever, sitting below a control that was greyed out in silence.
+   * R30's rule puts it ON the control: the button says what is stopping it.
+   *
+   * The flight gate comes first: if none of these drones are ours to fly, that
+   * is true whatever is locked.
+   */
+  const targetOrderUnavailable = $derived(
+    groupOrderUnavailable ?? (autoTargetID <= 0 ? "Lock something first" : null),
+  );
+
+  /**
    * How many drones are OUT, in three words.
    *
    * ⚠ IT CAME WITH THE LIFT, AND IT IS NOT REDUNDANT WITH THE LIST BELOW.
@@ -263,11 +279,16 @@
     <span class="drone-summary">{droneSummary}</span>
   </div>
 
-  <p class="note">
-    Drones you launch defend you on their own — they will attack anything that
-    shoots your ship, without you doing anything else. Use Attack to pick a
-    target yourself, or Bring home to call them back.
-  </p>
+  <!--
+    ⚠ NO PARAGRAPH EXPLAINING HOW DRONES WORK. There was one, and it is gone at
+    the operator's call: "UI is not a place to explain how drones work". The
+    rule it stated — that launched drones defend you on their own — is true and
+    is still worth a player knowing; a panel is not where they learn it.
+
+    What stays is STATE (the server's limits) and REASONS on the controls that
+    cannot run. Neither is explanation: one is what your ship reports, the other
+    is why a button will not do anything, and R30 puts that on the button.
+  -->
   <p class="note">{droneLimitText}</p>
   {#if error}
     <p class="error" role="alert">{error}</p>
@@ -394,19 +415,19 @@
       -->
       <button
         type="button"
-        disabled={busy || autoTargetID <= 0 || groupOrderUnavailable !== null}
-        title={groupOrderUnavailable ?? ""}
+        disabled={busy || targetOrderUnavailable !== null}
+        title={targetOrderUnavailable ?? ""}
         onclick={() => run(() => flow.engageDrones(allDroneIDs, autoTargetID))}
       >
-        {groupOrderUnavailable ?? "Attack what I have locked"}
+        {targetOrderUnavailable ?? "Attack what I have locked"}
       </button>
       <button
         type="button"
-        disabled={busy || autoTargetID <= 0 || groupOrderUnavailable !== null}
-        title={groupOrderUnavailable ?? ""}
+        disabled={busy || targetOrderUnavailable !== null}
+        title={targetOrderUnavailable ?? ""}
         onclick={() => run(() => flow.mineWithDrones(allDroneIDs, autoTargetID))}
       >
-        {groupOrderUnavailable ?? "Mine what I have locked"}
+        {targetOrderUnavailable ?? "Mine what I have locked"}
       </button>
       <button
         type="button"
@@ -417,9 +438,6 @@
         {groupOrderUnavailable ?? "Bring them all home"}
       </button>
     </p>
-    {#if autoTargetID <= 0}
-      <p class="note">Lock something first to give your drones a target.</p>
-    {/if}
   {/if}
 
   <h3>In the bay</h3>

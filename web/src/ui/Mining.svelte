@@ -290,9 +290,6 @@
     there. A test asserts the sentence cannot come back — which is why this
     comment describes it rather than quoting it.
   -->
-  <p class="note">
-    What you have mined, and what to do with it.
-  </p>
   {#if error}
     <p class="error">{error}</p>
   {/if}
@@ -431,10 +428,6 @@
           </li>
         {/each}
       </ul>
-      <p class="note">
-        One stack at a time, and your ship has the last word: ore with no
-        compressed form is simply left as it is.
-      </p>
     {/if}
   </section>
 

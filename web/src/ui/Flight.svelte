@@ -247,10 +247,6 @@
       </button>
     </p>
   </header>
-  <p class="note">
-    Fly manually, one step at a time: undock, warp, jump, and dock. Use the
-    Travel tab to let the autopilot do it for you.
-  </p>
   {#if error}
     <p class="error">{error}</p>
   {/if}
@@ -299,7 +295,6 @@
 {#if $flight.loaded && $flight.status && !$flight.status.inSpace}
   <section>
     <h2>Undock</h2>
-    <p class="note">Leave the station and enter space to warp, jump, and dock.</p>
     <p>
       <button type="button" disabled={busy} onclick={() => run(() => flow.undock())}>
         Undock
@@ -315,12 +310,6 @@
       <button type="button" disabled={busy} onclick={() => run(() => flow.stopShip())}>
         Stop the ship
       </button>
-    </p>
-    <p class="note">
-      Cuts the engines and switches the autopilot off, so nothing starts flying
-      you somewhere again. To orbit something, hold a distance from it, line up
-      with it or warp to a chosen distance, open the Overview tab and use the
-      buttons on the row for the thing you want.
     </p>
   </section>
 
@@ -380,7 +369,6 @@
     {#if $space.gateLinksError}
       <p class="error">{$space.gateLinksError}</p>
     {/if}
-    <p class="note">Refresh flight status to see the new system.</p>
   </section>
 
   <section>
@@ -415,12 +403,6 @@
       >
         Dock
       </button>
-    </p>
-    <p class="note">
-      Dock on its own needs the ship to be alongside already. Take me there and
-      dock will fly the rest of the way for you and report each step as it goes.
-      Either way the station itself confirms it — the ship is only docked once
-      your flight status says so.
     </p>
   </section>
 {/if}
