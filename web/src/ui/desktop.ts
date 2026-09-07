@@ -1,6 +1,6 @@
 // The desktop window model (the "always-open desktop" refactor): which panels
 // are open as floating windows, where each sits, its stacking order, and whether
-// it is collapsed to its title bar. Pure data + reducers so the rules are
+// it has been put away. Pure data + reducers so the rules are
 // unit-testable without a DOM — DesktopWindow.svelte owns only the pointer math
 // and bounds clamping that genuinely needs the element.
 //
@@ -18,18 +18,22 @@ export interface WinState {
   readonly w: number;
   readonly h: number;
   readonly z: number;
-  /** Shaded to its title bar. Still on screen, still where you left it. */
-  readonly collapsed: boolean;
   /**
    * Put away — not drawn at all, and reachable only from the window strip.
    *
-   * ⚠ THIS IS NOT `collapsed` UNDER ANOTHER NAME, and they are not worth
-   * merging. Collapsing shades a window you are still watching, so its title
-   * stays where you put it and you can read it at a glance; minimizing gets it
-   * out of the way entirely. A window can be both — minimize a collapsed window
-   * and it comes back collapsed, which is what you left.
+   * ⚠ THERE USED TO BE A SECOND HIDE BESIDE THIS ONE, and it is gone at the
+   * operator's call. `collapsed` shaded a window down to its title bar; the
+   * redesign added this one, and for a while both shipped because they are
+   * genuinely different acts — shading keeps a window you are still watching
+   * where you put it, putting away gets it out of the way entirely.
    *
-   * ⚠ AND A MINIMIZED WINDOW MUST ALWAYS HAVE A WAY BACK. It is hidden, not
+   * Two ways to get a window out of the way is still one too many, and the
+   * shade is the weaker of the two: it goes on occupying the desktop, goes on
+   * overlapping whatever is under it, and leaves a stub the player has to find
+   * again. A chip in the strip is a better handle than a floating stub. So `—`,
+   * the glyph a player already reads as "minimize", is this.
+   *
+   * ⚠ AND A PUT-AWAY WINDOW MUST ALWAYS HAVE A WAY BACK. It is hidden, not
    * closed, so the strip lists it and the launcher rail still counts it as
    * open. A hide with no visible handle is a window the player has lost.
    */
@@ -105,7 +109,7 @@ export function openWindow(
     // Opening from the launcher must always REVEAL the panel — so it un-shades
     // and un-hides, not just raises. Picking a rail entry and watching nothing
     // happen because the window was minimized is the whole bug this prevents.
-    return wins.map((w) => (w.id === id ? { ...w, z, collapsed: false, minimized: false } : w));
+    return wins.map((w) => (w.id === id ? { ...w, z, minimized: false } : w));
   }
   const next: WinState = {
     id,
@@ -114,7 +118,6 @@ export function openWindow(
     w: size?.w ?? DEFAULT_W,
     h: size?.h ?? DEFAULT_H,
     z,
-    collapsed: false,
     minimized: false,
   };
   return [...wins, next];
@@ -142,9 +145,6 @@ export function resizeWindow(wins: readonly WinState[], id: TabID, w: number, h:
   return wins.map((win) => (win.id === id ? { ...win, w: cw, h: ch } : win));
 }
 
-export function toggleCollapse(wins: readonly WinState[], id: TabID): WinState[] {
-  return wins.map((w) => (w.id === id ? { ...w, collapsed: !w.collapsed } : w));
-}
 
 /**
  * Put a window away, or bring it back. Coming back also raises it: a window
@@ -204,11 +204,16 @@ function isWinState(v: unknown): v is WinState {
     isFiniteNumber(o.y) &&
     isFiniteNumber(o.w) &&
     isFiniteNumber(o.h) &&
-    isFiniteNumber(o.z) &&
-    typeof o.collapsed === "boolean"
+    isFiniteNumber(o.z)
     // ⚠ `minimized` is deliberately NOT required. Every layout saved before it
     // existed lacks the field, and demanding it would throw away every window
     // those players had open. It is read as `=== true` below instead.
+    //
+    // ⚠ NOR IS `collapsed`, AND IT USED TO BE. Layouts written while the shade
+    // existed still carry it; requiring it would now reject every one of those,
+    // and rejecting a layout throws away the windows a player had open. An
+    // unknown field is simply ignored — which is what makes dropping a field
+    // safe in a way that adding one is not.
   );
 }
 
@@ -234,10 +239,24 @@ export function loadLayout(characterID: number): DesktopLayout | null {
         seen.add(w.id);
         return true;
       })
-      // Absent in every layout written before the window strip existed, and
-      // `=== true` is what makes that read as "on screen" rather than throwing
-      // a returning player's whole desktop into the strip.
-      .map((w) => ({ ...w, minimized: (w as { minimized?: unknown }).minimized === true }));
+      // ⚠ REBUILT FIELD BY FIELD, NOT SPREAD. A stale key that rides in on a
+      // `{ ...w }` is a key that gets written straight back out on the next
+      // save and lives forever — `collapsed` is exactly that, left behind by
+      // every layout saved while the window shade existed. Naming the fields is
+      // what makes REMOVING one actually remove it.
+      //
+      // `minimized` is absent in every layout written before the window strip,
+      // and `=== true` is what makes that read as "on screen" rather than
+      // throwing a returning player's whole desktop into the strip.
+      .map((w) => ({
+        id: w.id,
+        x: w.x,
+        y: w.y,
+        w: w.w,
+        h: w.h,
+        z: w.z,
+        minimized: (w as { minimized?: unknown }).minimized === true,
+      }));
     const dockWidth =
       typeof o.dockWidth === "number" && o.dockWidth >= MIN_DOCK_WIDTH ? o.dockWidth : DEFAULT_DOCK_WIDTH;
     const targetsX = isFiniteNumber(o.targetsX) ? o.targetsX : DEFAULT_TARGETS_POS.x;

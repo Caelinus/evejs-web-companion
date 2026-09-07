@@ -3332,7 +3332,6 @@
     overflow: auto;
     padding: 0.6rem 0.7rem;
   }
-  .win.collapsed { height: auto !important; }
 
   /* Resize affordances — the right / bottom edges and the SE corner. */
   .win-resize { position: absolute; touch-action: none; }

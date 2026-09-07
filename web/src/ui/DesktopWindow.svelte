@@ -1,6 +1,6 @@
 <script lang="ts">
   // One floating panel window on the desktop: a title bar (drag to move,
-  // double-click to collapse, buttons to collapse/close) over a scrollable body
+  // double-click to put away, buttons to put away/close) over a scrollable body
   // that hosts the real panel. Free-floating and resizable from the right/bottom
   // edges and the SE corner. Pure chrome + pointer math: all window STATE lives in
   // the desktop model (desktop.ts); this component only reports moves/resizes up
@@ -14,7 +14,6 @@
     focused,
     onFocus,
     onClose,
-    onToggleCollapse,
     onToggleMinimize,
     onMove,
     onResize,
@@ -25,7 +24,6 @@
     focused: boolean;
     onFocus: () => void;
     onClose: () => void;
-    onToggleCollapse: () => void;
     /** Put the window away. It stays open, and the strip is how it comes back. */
     onToggleMinimize: () => void;
     onMove: (x: number, y: number) => void;
@@ -98,16 +96,31 @@
   bind:this={el}
   class="win"
   class:focused
-  class:collapsed={win.collapsed}
-  style="left:{win.x}px; top:{win.y}px; width:{win.w}px; {win.collapsed ? '' : `height:${win.h}px;`} z-index:{win.z};"
+  style="left:{win.x}px; top:{win.y}px; width:{win.w}px; height:{win.h}px; z-index:{win.z};"
   onpointerdown={onFocus}
   aria-label={title}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <header class="win-bar" onpointerdown={startDrag} ondblclick={onToggleCollapse}>
+  <!--
+    ⚠ DOUBLE-CLICKING THE BAR PUTS THE WINDOW AWAY, WHERE IT USED TO SHADE IT.
+    It is the same gesture on the same target; what it does now is the thing
+    that survived — see the note on the buttons below.
+  -->
+  <header class="win-bar" onpointerdown={startDrag} ondblclick={onToggleMinimize}>
     <span class="win-title">{title}</span>
     <span class="win-actions">
-      <!-- Put away, shade, close — in order of how much they take away. -->
+      <!--
+        ⚠ TWO BUTTONS, NOT THREE. There used to be a "collapse" that shaded a
+        window down to its title bar, alongside a "put away" that hid it into
+        the strip at the bottom. Two ways to get a window out of the way is one
+        too many — and the shade is the weaker of the two: it still occupies the
+        desktop, still overlaps whatever is under it, and leaves a stub a pilot
+        has to find again. Put-away leaves a chip in the strip, which is a
+        better handle than a floating stub.
+
+        So the shade is gone, and `—` — the glyph a player already reads as
+        "minimize" — is the put-away.
+      -->
       <button
         type="button"
         class="win-btn"
@@ -115,15 +128,7 @@
         aria-label="Put away"
         onpointerdown={(e) => e.stopPropagation()}
         onclick={onToggleMinimize}
-      >⌄</button>
-      <button
-        type="button"
-        class="win-btn"
-        title={win.collapsed ? "Expand" : "Collapse"}
-        aria-label={win.collapsed ? "Expand" : "Collapse"}
-        onpointerdown={(e) => e.stopPropagation()}
-        onclick={onToggleCollapse}
-      >{win.collapsed ? "▢" : "—"}</button>
+      >—</button>
       <button
         type="button"
         class="win-btn win-close"
@@ -135,15 +140,13 @@
     </span>
   </header>
 
-  {#if !win.collapsed}
-    <div class="win-body">
-      {@render children()}
-    </div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <span class="win-resize win-resize-e" title="Resize" onpointerdown={(e) => startResize(e, "e")}></span>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <span class="win-resize win-resize-s" title="Resize" onpointerdown={(e) => startResize(e, "s")}></span>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <span class="win-resize win-resize-se" title="Resize" onpointerdown={(e) => startResize(e, "se")}></span>
-  {/if}
+  <div class="win-body">
+    {@render children()}
+  </div>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <span class="win-resize win-resize-e" title="Resize" onpointerdown={(e) => startResize(e, "e")}></span>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <span class="win-resize win-resize-s" title="Resize" onpointerdown={(e) => startResize(e, "s")}></span>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <span class="win-resize win-resize-se" title="Resize" onpointerdown={(e) => startResize(e, "se")}></span>
 </section>

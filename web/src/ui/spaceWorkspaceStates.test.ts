@@ -345,3 +345,32 @@ test("the panel names the distances it flies at, and stores them in one place", 
   assert.match(panel, /setDistance\(rangeStorageKey\(kind\)/);
   assert.doesNotMatch(panel, /localStorage/, "the panel keeps no range store of its own");
 });
+
+// --- the window chrome ------------------------------------------------------
+
+test("⚠ A WINDOW HAS TWO CHROME BUTTONS, NOT THREE — and no shade", () => {
+  // ⚠ THE SHADE IS GONE AT THE OPERATOR'S CALL. `collapsed` shaded a window to
+  // its title bar; `minimized` puts it away into the strip. Both shipped for a
+  // while because they are genuinely different acts — but two ways to get a
+  // window out of the way is one too many, and the shade is the weaker: it goes
+  // on occupying the desktop, goes on overlapping what is under it, and leaves
+  // a stub the player has to find again. A chip in the strip is a better handle.
+  const win = source("DesktopWindow.svelte");
+  assert.equal(/collapsed/.test(win), false, "the shade came back");
+  assert.equal(/onToggleCollapse/.test(win), false, "the shade's handler came back");
+  // `—` is the put-away now: the glyph a player already reads as "minimize".
+  assert.match(win, /aria-label="Put away"[\s\S]{0,200}>—<\/button>/);
+  assert.match(win, /aria-label="Close"/);
+  // And the model has one hide, not two.
+  const model = source("desktop.ts");
+  assert.equal(/export function toggleCollapse/.test(model), false);
+  assert.match(model, /export function toggleMinimize/);
+});
+
+test("⚠ DOUBLE-CLICKING THE TITLE BAR DOES THE SURVIVING THING", () => {
+  // The gesture used to shade. It is the same gesture on the same target, so
+  // leaving it wired to a handler that no longer exists would have been a dead
+  // double-click — and silently, because nothing renders a gesture.
+  const win = source("DesktopWindow.svelte");
+  assert.match(win, /ondblclick=\{onToggleMinimize\}/);
+});

@@ -31,7 +31,6 @@
     closeWindow,
     moveWindow,
     resizeWindow,
-    toggleCollapse,
     toggleMinimize,
     focusedId as computeFocusedId,
     loadLayout,
@@ -149,7 +148,6 @@
   const close = (id: TabID): void => { wins = closeWindow(wins, id); };
   const move = (id: TabID, x: number, y: number): void => { wins = moveWindow(wins, id, x, y); };
   const resize = (id: TabID, w: number, h: number): void => { wins = resizeWindow(wins, id, w, h); };
-  const collapse = (id: TabID): void => { wins = toggleCollapse(wins, id); };
   const minimize = (id: TabID): void => { wins = toggleMinimize(wins, id); };
   const toggleDock = (): void => { dockCollapsed = !dockCollapsed; };
 
@@ -272,7 +270,6 @@
             {isDocked}
             onFocus={focus}
             onClose={close}
-            onToggleCollapse={collapse}
             onToggleMinimize={minimize}
             onMove={move}
             onResize={resize}

@@ -32,7 +32,6 @@
     isDocked,
     onFocus,
     onClose,
-    onToggleCollapse,
     onToggleMinimize,
     onMove,
     onResize,
@@ -46,7 +45,6 @@
     isDocked: boolean;
     onFocus: (id: TabID) => void;
     onClose: (id: TabID) => void;
-    onToggleCollapse: (id: TabID) => void;
     onToggleMinimize: (id: TabID) => void;
     onMove: (id: TabID, x: number, y: number) => void;
     onResize: (id: TabID, w: number, h: number) => void;
@@ -85,7 +83,7 @@
       // comes back with its title bar past the edge and no handle to drag.
       for (const win of wins) {
         const w = Math.min(win.w, Math.max(MIN_W, areaW));
-        const h = win.collapsed ? win.h : Math.min(win.h, Math.max(MIN_H, areaH));
+        const h = Math.min(win.h, Math.max(MIN_H, areaH));
         if (w !== win.w || h !== win.h) onResize(win.id, w, h);
         const x = Math.min(Math.max(0, win.x), Math.max(0, areaW - w));
         const y = Math.min(Math.max(0, win.y), Math.max(0, areaH - h));
@@ -123,7 +121,6 @@
       focused={focused === win.id}
       onFocus={() => onFocus(win.id)}
       onClose={() => onClose(win.id)}
-      onToggleCollapse={() => onToggleCollapse(win.id)}
       onToggleMinimize={() => onToggleMinimize(win.id)}
       onMove={(x, y) => onMove(win.id, x, y)}
       onResize={(w, h) => onResize(win.id, w, h)}

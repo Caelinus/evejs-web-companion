@@ -254,6 +254,21 @@ That is a second, different hide beside `collapsed`, and two shade-like states o
 confuse. ✅ **Decided: add `minimized` to `WinState` and keep `collapsed`**; the strip lists every open
 window and a chip's dot distinguishes visible from minimized. Collapse shades a window you are still
 looking at; minimize puts it away. They are different acts and the handoff wants both. The rail keeps meaning "open".
+
+⚠ **REVERSED AFTER THE FACT, at the operator's call: `collapsed` is gone.** Both did ship, and the
+reasoning above is still true — they *are* different acts. It is just not a difference worth two
+controls. The shade is the weaker of the two: it goes on occupying the desktop, goes on overlapping
+whatever is under it, and leaves a stub the player has to find again, where a put-away leaves a chip
+in the strip, which is a better handle than a floating stub.
+
+So a window has **two** chrome buttons, not three — `—` (put away) and `✕` (close) — and `—` is the
+glyph a player already reads as "minimize". Double-clicking the title bar puts the window away,
+where it used to shade it: the same gesture on the same target, doing the thing that survived.
+
+⚠ **A layout saved while the shade existed still loads.** `collapsed` is not required by the
+validator, and `loadLayout` now rebuilds each window FIELD BY FIELD rather than spreading it — a
+stale key that rides in on a `{ ...w }` is one that gets written straight back out on the next save
+and lives forever. Naming the fields is what makes removing one actually remove it.
 Both must be persisted through `DesktopLayout`, whose validator has to learn the field the way it
 just learned `stationExpanded` — an absent field reads `false`.
 
