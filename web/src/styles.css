@@ -4607,6 +4607,45 @@
    * Styling that let the two numbers read as a scoreboard while the caption
    * faded away would be the lie the caption exists to prevent, which is why it
    * keeps body-text size and sits directly under them. */
+  /* ------------------------------------------------- the grid picker (§7) --
+   * A filter over a native <select>: pick something that is on the grid, BY
+   * NAME. It replaced the last raw-id fields in the client.
+   *
+   * The select stays native on purpose — keyboard-operable, type-ahead
+   * searchable and screen-reader announced for free, none of which a
+   * div-and-listbox reimplementation gets right by accident (R8). */
+  .grid-picker {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    flex: 1 1 14rem;
+  }
+  .grid-picker-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .grid-picker-label {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-muted);
+  }
+  .grid-picker-filter input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 32px;
+  }
+  .grid-picker select {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+  }
+  .grid-picker-empty { font-size: 11px; }
+
   /* ⚠ A PANEL INSIDE A WINDOW HAS NO PADDING TO BLEED PAST.
    *
    * `.panel-head`'s negative inline margin exists to reach the edges of a

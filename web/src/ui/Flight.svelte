@@ -6,11 +6,18 @@
   // logic runs on the BFF (which holds the beyonce bound park handle) and in
   // app/flow.ts. Manual buttons only — the autopilot decide-loop is R5b.
   import { onMount } from "svelte";
-  import { BridgeCallError } from "../bridge/callMethod.ts";
   import { isSessionLost } from "../app/flow.ts";
+  import GridPicker from "./GridPicker.svelte";
+  import { rowOptions } from "./gridPicker.ts";
+  import { doingText, whereText, wrongText } from "./flightNarration.ts";
+  import { buildOverviewRows } from "../space/overview.ts";
+  import { jumpBlockedReason, jumpLabel } from "../space/gateLinks.ts";
+  import { isDockableKind } from "../space/rowActions.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
-  import { nameKey } from "../store/names.ts";
+  import type { OverviewRow } from "../space/overview.ts";
+  import type { PickOption } from "./gridPicker.ts";
+  import { nameKey, resolvedName } from "../store/names.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
 
   let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
@@ -21,6 +28,14 @@
   const inventory = store.inventory;
   // svelte-ignore state_referenced_locally
   const names = store.names;
+  // svelte-ignore state_referenced_locally
+  const space = store.space;
+  // svelte-ignore state_referenced_locally
+  const targeting = store.targeting;
+  // svelte-ignore state_referenced_locally
+  const bot = store.bot;
+  // svelte-ignore state_referenced_locally
+  const travel = store.travel;
 
   // R7c — the flight status carries the active ship's ITEM id but no typeID, so
   // resolve the ship TYPE name by cross-referencing the inventory slice (the
@@ -56,12 +71,11 @@
   let busy = $state(false);
   let error = $state("");
 
-  // Operator-chosen movement targets (game IDs). The route/pathfinding solver
-  // that would fill these automatically is R5b; here the operator picks them.
-  let warpTargetID = $state("");
-  let fromGateID = $state("");
-  let toGateID = $state("");
-  let dockStationID = $state("");
+  // What the player has PICKED, by id — but never typed. Each one is filled by
+  // choosing a named thing off the grid; see the pickers below.
+  let warpTargetID = $state(0);
+  let jumpGateID = $state(0);
+  let dockStationID = $state(0);
 
   async function run(action: () => Promise<void>): Promise<void> {
     if (busy) {
@@ -93,11 +107,6 @@
     return () => flow.stopSpacePolling();
   });
 
-  function parseID(value: string): number {
-    const id = Number(value);
-    return Number.isSafeInteger(id) && id > 0 ? id : 0;
-  }
-
   // Show the resolved system/station/structure NAME (goal R7a), falling back to
   // the raw ID only until the flow resolves it (or when it has no static name).
   function locationText(): string {
@@ -124,6 +133,93 @@
     }
     return $flight.solarSystemName ?? "unknown system";
   }
+
+  // --- the grid, as things you can pick ---------------------------------------
+  //
+  // ⚠ THIS IS WHERE THE RAW-ID FIELDS WENT. The panel used to ask a player to
+  // type a "stargate / celestial ID", a "source stargate ID" and a "destination
+  // station ID" — numbers the client is forbidden to show them (R7d), so the
+  // three controls could only be used by someone reading the server's database.
+  // Everything below is picked BY NAME off the grid the ship is actually on.
+
+  const snapshot = $derived($space.snapshot);
+  const origin = $derived(snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 });
+
+  /** What to call a row. Its own name where it has one, else what kind it is. */
+  function rowName(row: OverviewRow): string {
+    if (row.name && row.name.length > 0) {
+      return row.name;
+    }
+    return resolvedName($names.resolved, "type", row.typeID, "");
+  }
+
+  /** Everything on the grid, nearest first — the ship's own row already dropped. */
+  const gridRows = $derived(
+    buildOverviewRows(snapshot, origin, { sort: "distance", cap: 400 }).rows,
+  );
+
+  /** Warp takes anything on the grid. */
+  const warpOptions = $derived(rowOptions(gridRows, rowName));
+
+  /**
+   * Dock takes stations and structures.
+   *
+   * ⚠ THE ROW'S KIND DECIDES, exactly as `rowActions.ts` decides it — never the
+   * name, the distance or the category number. One rule, one place.
+   */
+  const dockOptions = $derived(
+    rowOptions(gridRows.filter((row) => isDockableKind(row.kind)), rowName),
+  );
+
+  /**
+   * Jump takes ONE gate, and that is the whole fix.
+   *
+   * ⚠ THE FAR SIDE IS NOT A SECOND CHOICE. `GateLink` carries
+   * `destinationGateID`, so picking a gate in this system already determines
+   * the gate you arrive at. The old panel asked for both and let a player pair
+   * two gates that have nothing to do with each other — a command the server
+   * can only refuse.
+   *
+   * ⚠ AND BEING IN THE GATE GRAPH IS WHAT MAKES SOMETHING A GATE. Not the
+   * snapshot's coarse `kind`, which does not tell a stargate from any other
+   * structure, and not a group number. `gateLinks.ts` says so in as many words,
+   * and this reads the same graph the autopilot flies.
+   */
+  const jumpOptions = $derived.by<PickOption[]>(() => {
+    const byID = new Map(gridRows.map((row) => [row.itemID, row] as const));
+    return $space.gateLinks.map((link) => {
+      const row = byID.get(link.gateID) ?? null;
+      const blocked = jumpBlockedReason(link);
+      return {
+        id: link.gateID,
+        // `jumpLabel` names the far system, or says plainly that it cannot.
+        label: row ? rowName(row) || jumpLabel(link) : jumpLabel(link),
+        // The destination, and the reason when there is one — a gate we cannot
+        // send is still LISTED, wearing its reason, rather than hidden.
+        hint: blocked ?? (link.toSystemName ? `to ${link.toSystemName}` : "destination not in the star map"),
+      };
+    });
+  });
+
+  const pickedGate = $derived($space.gateLinks.find((link) => link.gateID === jumpGateID) ?? null);
+  /** Why the picked gate cannot be jumped, or null. Rendered ON the control. */
+  const jumpUnavailable = $derived(pickedGate === null ? null : jumpBlockedReason(pickedGate));
+
+  // --- what is happening, in the words of whatever is doing it ----------------
+  //
+  // Lifted from the cockpit's flight strip. The rules are in
+  // `flightNarration.ts`; nothing here synthesizes a sentence.
+
+  const whereLine = $derived(whereText($flight, snapshot, $names.resolved));
+  const doingLine = $derived(doingText($bot, $travel));
+  const wrongLine = $derived(
+    wrongText({
+      flightActionError: $flight.actionError,
+      travelFailureReason: $travel.failureReason,
+      botFailureReason: $bot.failureReason,
+      targetingActionError: $targeting.actionError,
+    }),
+  );
 
   function shipStateText(): string {
     const status = $flight.status;
@@ -157,6 +253,25 @@
   </p>
   {#if error}
     <p class="error">{error}</p>
+  {/if}
+</section>
+
+<!--
+  R30 slice C — the three lines the cockpit's flight strip answered: WHERE am I,
+  what is happening, and what went wrong. They came here when that panel was
+  taken apart, and the rules came with them (`flightNarration.ts`):
+
+  ⚠ NOTHING IS SYNTHESIZED. Hand-flying shows no "doing" line at all, because
+  there is no authority to quote — an invented "Approaching…" is
+  indistinguishable, to a player, from a sentence the autopilot really wrote.
+-->
+<section class="flight-strip">
+  <p class="strip-where">{whereLine}</p>
+  {#if doingLine}
+    <p class="strip-doing">{doingLine}</p>
+  {/if}
+  {#if wrongLine}
+    <p class="strip-wrong error">{wrongLine}</p>
   {/if}
 </section>
 
@@ -210,18 +325,20 @@
   </section>
 
   <section>
-    <h2>Warp to a gate / celestial</h2>
+    <h2>Warp to something</h2>
     <p class="controls">
-      <label>
-        Target ID
-        <input type="number" min="1" bind:value={warpTargetID} placeholder="stargate / celestial ID" />
-      </label>
+      <GridPicker
+        label="Warp to"
+        options={warpOptions}
+        bind:value={warpTargetID}
+        emptyText="Nothing on the grid to warp to yet."
+      />
       <button
         type="button"
-        disabled={busy || parseID(warpTargetID) === 0}
-        onclick={() => run(() => flow.warpTo(parseID(warpTargetID)))}
+        disabled={busy || warpTargetID === 0}
+        onclick={() => run(() => flow.warpTo(warpTargetID))}
       >
-        Warp to target
+        Warp to it
       </button>
     </p>
   </section>
@@ -229,32 +346,51 @@
   <section>
     <h2>Jump through a stargate</h2>
     <p class="controls">
-      <label>
-        From gate ID
-        <input type="number" min="1" bind:value={fromGateID} placeholder="source stargate ID" />
-      </label>
-      <label>
-        To gate ID
-        <input type="number" min="1" bind:value={toGateID} placeholder="destination stargate ID" />
-      </label>
+      <!--
+        ⚠ ONE GATE, NOT TWO. This asked for a source AND a destination gate id.
+        The link carries its own far side, so the second field could only ever
+        be filled correctly by copying what the first one implied — or wrongly,
+        pairing two unrelated gates into a command the server can only refuse.
+      -->
+      <GridPicker
+        label="Gate"
+        options={jumpOptions}
+        bind:value={jumpGateID}
+        emptyText="No stargates in the star map for this system."
+      />
+      <!--
+        R30's rule: a control that cannot work is DRAWN, wearing its reason.
+        The only blocking case is a graph edge with no gate recorded on the far
+        side — `CmdStargateJump` needs both ends, so there is nothing honest to
+        send. Being far from the gate is NOT blocked here: the server owns that
+        refusal and states its own range.
+      -->
       <button
         type="button"
-        disabled={busy || parseID(fromGateID) === 0 || parseID(toGateID) === 0}
-        onclick={() => run(() => flow.jump(parseID(fromGateID), parseID(toGateID)))}
+        disabled={busy || pickedGate === null || jumpUnavailable !== null}
+        title={jumpUnavailable ?? ""}
+        onclick={() =>
+          pickedGate && run(() => flow.jump(pickedGate.gateID, pickedGate.destinationGateID))}
       >
-        Jump
+        {jumpUnavailable ?? (pickedGate ? jumpLabel(pickedGate) : "Jump")}
       </button>
     </p>
+    {#if $space.gateLinksError}
+      <p class="error">{$space.gateLinksError}</p>
+    {/if}
     <p class="note">Refresh flight status to see the new system.</p>
   </section>
 
   <section>
     <h2>Dock at a station</h2>
     <p class="controls">
-      <label>
-        Station ID
-        <input type="number" min="1" bind:value={dockStationID} placeholder="destination station ID" />
-      </label>
+      <!-- One picked place, two different verbs — see the note below. -->
+      <GridPicker
+        label="Station"
+        options={dockOptions}
+        bind:value={dockStationID}
+        emptyText="Nothing on this grid you could dock at."
+      />
       <!--
         R24 slice B — two different things, named as two different things.
         "Dock" is the raw single command: it only works if the ship is already
@@ -264,15 +400,15 @@
       -->
       <button
         type="button"
-        disabled={busy || parseID(dockStationID) === 0}
-        onclick={() => run(() => flow.dockAt(parseID(dockStationID)))}
+        disabled={busy || dockStationID === 0}
+        onclick={() => run(() => flow.dockAt(dockStationID))}
       >
         Take me there and dock
       </button>
       <button
         type="button"
-        disabled={busy || parseID(dockStationID) === 0}
-        onclick={() => run(() => flow.dock(parseID(dockStationID)))}
+        disabled={busy || dockStationID === 0}
+        onclick={() => run(() => flow.dock(dockStationID))}
       >
         Dock
       </button>
