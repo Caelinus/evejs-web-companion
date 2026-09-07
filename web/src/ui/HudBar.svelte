@@ -21,7 +21,8 @@
   // surface that is always on screen — and it must never be disabled; see below.
   import ModuleRack from "./ModuleRack.svelte";
   import ShipHud from "./ShipHud.svelte";
-  import { shipStateSentence } from "./shipHud.ts";
+  import { shipIsStopped, shipModeLabel, shipStateSentenceFor } from "./shipHud.ts";
+  import { distanceMeters, formatDistance } from "../space/overview.ts";
   import { resolvedName } from "../store/names.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -84,7 +85,49 @@
   const showHull = $derived(
     shipNameText === null || shipNameText.toLowerCase() !== hullText.toLowerCase(),
   );
-  const stateText = $derived(shipStateSentence(ship));
+  /**
+   * The right-hand word in the header: ORBIT, WARP, STOP.
+   *
+   * The header is the glance — what ship, and what it is doing — and this is
+   * the second half of that. It goes quiet rather than blue when the ship is
+   * stopped, because "stopped" is the absence of activity and should not read
+   * as an event.
+   */
+  const modeText = $derived(shipModeLabel(ship?.mode ?? null));
+  const stopped = $derived(shipIsStopped(ship?.mode ?? null));
+
+  /**
+   * What the ship is acting ON, when the server says. Usually it does not.
+   *
+   * ⚠ NOT GUESSED FROM WHAT THIS PANEL LAST ORDERED. A course set by a bot, by
+   * another client or by a previous session is the common case while this app
+   * is running, and a sentence assembled from a stale local memory is
+   * indistinguishable, to a player, from one the ship reported.
+   */
+  const actedOn = $derived.by(() => {
+    const selfRow = ($space.snapshot?.entities ?? []).find((e) => e.itemID === ship?.itemID) ?? null;
+    const targetID = selfRow?.targetEntityID ?? null;
+    if (targetID === null) {
+      return { name: null as string | null, metres: null as number | null };
+    }
+    const target = ($space.snapshot?.entities ?? []).find((e) => e.itemID === targetID) ?? null;
+    if (!target) {
+      return { name: null as string | null, metres: null as number | null };
+    }
+    const name =
+      target.name && target.name.length > 0
+        ? target.name
+        : resolvedName($names.resolved, "type", target.typeID, "");
+    const from = ship?.position ?? null;
+    return {
+      name: name.length > 0 ? name : null,
+      metres: from ? distanceMeters(from, target.position) : null,
+    };
+  });
+
+  const stateText = $derived(
+    shipStateSentenceFor(ship, actedOn.name, actedOn.metres, formatDistance),
+  );
 
   /**
    * The refusal from the LAST press of Stop — "" when nothing went wrong.
@@ -127,6 +170,10 @@
     {#if showHull}
       <span class="hud-head-hull">{hullText}</span>
     {/if}
+    {#if modeText}
+      <!-- The other half of the glance: what the ship is doing, right-aligned. -->
+      <span class="hud-head-mode" class:stopped>{modeText}</span>
+    {/if}
   </header>
 
   <div class="hud-body">
@@ -142,8 +189,19 @@
 
   <footer class="hud-foot">
     <span class="hud-foot-state">{stateText}</span>
+    <!--
+      ⚠ THE ONE HINT LEFT IN THE APP, AND IT IS NOT ABOUT THE GAME. Press-and-
+      hold has no affordance — there is nothing on a slot that says a long press
+      does something different from a short one, and the ring that fills only
+      appears once you are already holding. This says what the two gestures are;
+      it explains a CONTROL, not a rule of EVE.
+
+      Desktop only: a phone has no room for it, and the whole point of the
+      gesture is that it is the one that works on a touch screen.
+    -->
+    <span class="hud-foot-hint">click = on/off · hold ≈ 0.6 s = overload</span>
     <!-- No `disabled`, ever. See stopShip above. -->
-    <button type="button" class="primary hud-stop" onclick={() => stopShip()}>Stop the ship</button>
+    <button type="button" class="hud-stop" onclick={() => stopShip()}>Stop</button>
     {#if stopError}
       <span class="hud-foot-error error" role="alert">{stopError}</span>
     {/if}

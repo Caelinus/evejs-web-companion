@@ -86,3 +86,57 @@ export function shipStateSentence(
   }
   return speed > 0 ? "Under way." : "Holding position.";
 }
+
+/**
+ * The SHORT state word for the HUD header — ORBIT, WARP, STOP.
+ *
+ * ⚠ IT IS THE SERVER'S OWN WORD, UPPERCASED, and unknown modes pass straight
+ * through rather than being mapped to something friendlier. The header is a
+ * glance, and a mode this client has never seen is still a real thing the ship
+ * is doing: printing it verbatim is worse-looking and more truthful than
+ * printing "—" over a hull that is clearly moving.
+ *
+ * `null` is the only case with nothing to say.
+ */
+export function shipModeLabel(mode: string | null | undefined): string | null {
+  const trimmed = (mode ?? "").trim();
+  return trimmed.length > 0 ? trimmed.toUpperCase() : null;
+}
+
+/** True when the ship is stopped — the header word goes quiet rather than blue. */
+export function shipIsStopped(mode: string | null | undefined): boolean {
+  return /^stop(ped)?$/i.test((mode ?? "").trim());
+}
+
+/**
+ * The footer sentence, with the thing it is doing it TO when the server says so.
+ *
+ * ⚠ THE TARGET HALF IS CONDITIONAL BECAUSE THE READING IS. The design asks for
+ * "Orbiting Caldari Sentry Gun I at 5 km"; the ship's own row carries
+ * `targetEntityID`, and on this server it is null — so there is nothing to name.
+ *
+ * ⚠ AND IT IS NOT GUESSED FROM WHAT THIS CLIENT LAST ORDERED. The panel knows
+ * which row it sent an orbit to, and using that would be wrong the moment a bot,
+ * another client or a previous session set the course — which is most of the
+ * time this app is running. A sentence assembled from a stale local memory is
+ * indistinguishable, to a player, from one the ship reported.
+ */
+export function shipStateSentenceFor(
+  ship: {
+    readonly mode: string | null;
+    readonly velocity: { readonly x: number; readonly y: number; readonly z: number } | null;
+  } | null,
+  /** What the ship is acting on, already NAMED by the caller, or null. */
+  targetName: string | null,
+  /** Metres to it, or null when it cannot be measured. */
+  targetMetres: number | null,
+  formatDistance: (metres: number) => string,
+): string {
+  const base = shipStateSentence(ship);
+  if (targetName === null) {
+    return base;
+  }
+  const at = targetMetres === null ? "" : ` at ${formatDistance(targetMetres)}`;
+  // "Orbiting." -> "Orbiting Caldari Sentry Gun I at 5 km"
+  return `${base.replace(/\.$/, "")} ${targetName}${at}`;
+}

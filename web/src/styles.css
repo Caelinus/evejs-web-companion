@@ -3534,11 +3534,25 @@
     color: var(--color-muted);
     font-size: 0.85rem;
   }
+  /* What the ship is DOING, right-aligned — the other half of the glance.
+   * Quiet rather than blue when stopped: "stopped" is the absence of activity
+   * and should not read as an event. */
+  .hud-head-mode {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--color-accent-bright, var(--color-accent));
+  }
+  .hud-head-mode.stopped { color: var(--color-muted); }
   .hud-body {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-    gap: 0.6rem;
-    padding: 0.6rem;
+    /* The reference's `170px minmax(0,1fr)`: a fixed gauge column, racks take
+     * the rest. Fixed, so the racks do not shuffle sideways as the cell grows. */
+    grid-template-columns: 170px minmax(0, 1fr);
+    gap: 0.6rem 0.9rem;
+    padding: 0.5rem 0.75rem 0.25rem;
     min-height: 0;
     overflow: auto;
   }
@@ -3557,9 +3571,33 @@
     color: var(--color-muted);
     font-size: 0.85rem;
   }
-  /* Stop keeps a full touch target (R8) and never shrinks below its words —
-   * it is the one control here a pilot presses without looking. */
-  .hud-stop { flex: 0 0 auto; min-height: 40px; white-space: nowrap; }
+  /* The gesture legend. Small and quiet: it is there for the first press, not
+   * the thousandth, and it is hidden entirely where there is no room. */
+  .hud-foot-hint {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  @media (max-width: 720px) {
+    .hud-foot-hint { display: none; }
+  }
+  /* Stop keeps a full touch target (R8) and never shrinks below its word —
+   * it is the one control here a pilot presses without looking. A ghost rather
+   * than a filled accent: it is the footer's only button, so nothing needs
+   * out-shouting, and a solid blue block beside a state line reads as an alert. */
+  .hud-stop {
+    flex: 0 0 auto;
+    min-height: 40px;
+    white-space: nowrap;
+    background: var(--color-panel-3);
+    border: 1px solid var(--color-line-strong);
+    color: var(--color-text-bright);
+  }
+  .hud-stop:hover { border-color: var(--color-danger); }
   .hud-foot-error { flex: 1 0 100%; font-size: 0.85rem; }
 
   /* The HUD cell owns its own frame, so its clusters must not draw a second
@@ -3605,9 +3643,19 @@
    * exists to reach the edges of a PADDED panel; the cell's clusters have no
    * padding to reach past, so it bled 32px outside its own box and that was the
    * whole of the HUD's sideways scroll (R8). */
+  /* ⚠ CLIPPED, NOT REMOVED — the rack section is `aria-labelledby` it, so
+   * taking it out of the tree takes the section's accessible name with it. The
+   * reference has no such heading, and it earns none: HIGH / MID / LOW label
+   * the rows, and the cell is already titled SHIP. */
   .hud-bar .panel-head {
-    margin: 0 0 0.45rem;
-    padding: 0 0 0.3rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
     background: none;
   }
 
@@ -3619,26 +3667,30 @@
    * the rack being readable at a glance is the entire point of the cell, so the
    * gauge is what gives way, not the racks. Side by side it is ~136px, which is
    * the wheel's own height and nothing more. */
+  /* ⚠ THE REFERENCE'S SHAPE: the gauge with its numbers UNDER it, in a fixed
+   * 170px column, and the racks in the rest.
+   *
+   * The first build put the readout BESIDE the wheel to save height, back when
+   * the cell was 17rem and the racks were being cut off. The cell is 21rem now
+   * and the racks fit, so the layout can be the one the design asked for —
+   * which reads better anyway: three numbers in a row under the thing they
+   * describe, rather than a column beside it. */
   .hud-bar .ship-hud {
-    flex-direction: row;
+    flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    gap: 0.8rem;
-  }
-  .hud-bar .hud-wheel { flex: 0 1 8.5rem; }
-  .hud-bar .hud-readout {
-    flex: 1 1 auto;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 0.25rem;
-    min-width: 0;
-  }
-  .hud-bar .hud-readout-row {
-    flex-direction: row;
-    align-items: baseline;
     gap: 0.4rem;
   }
+  .hud-bar .hud-wheel { flex: 0 0 auto; max-width: 150px; }
+  .hud-bar .hud-readout {
+    flex: 0 0 auto;
+    flex-direction: row;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0.1rem 0.9rem;
+    min-width: 0;
+  }
+  .hud-bar .hud-readout-row { flex-direction: column; align-items: center; }
 
   /* Narrow screens: stack the rail on top and drop the dock panel below the
    * desktop. The desktop windowing is a large-screen feature; this only keeps
@@ -4868,43 +4920,16 @@
     padding: 0;
     overflow: visible;
   }
-  .mob-card-body > .hud-bar .ship-hud {
-    flex-direction: column;
-    align-items: center;
-    gap: 0.4rem;
-  }
-  .mob-card-body > .hud-bar .hud-readout {
-    flex-direction: row;
-    justify-content: center;
-    align-items: flex-start;
-    gap: 0.1rem 1.2rem;
-  }
-  .mob-card-body > .hud-bar .hud-readout-row { flex-direction: column; align-items: center; }
-  /* The reference's cap: 170px, where the desktop cell squeezes it to 136. */
-  .mob-card-body > .hud-bar .hud-wheel { flex: 0 0 auto; max-width: 170px; }
+  /* ⚠ THE STACKING IS THE SHARED RULE NOW. The gauge sat BESIDE its numbers in
+   * the desktop cell for one phase, back when the cell was 17rem and the racks
+   * were being cut off; a phone stacked them and needed its own overrides. The
+   * cell is 21rem and stacks too, as the reference always had it — so the only
+   * thing left that is genuinely mobile is the size. */
+  .mob-card-body > .hud-bar .hud-wheel { max-width: 170px; }
   .mob-card-body > .hud-bar > .hud-body > .module-rack { margin-top: 0.7rem; }
-  /* ⚠ THE "MODULES" HEADING IS HIDDEN FROM SIGHT, NOT REMOVED.
-   *
-   * The desktop cell needs it: two clusters sit side by side and the rack has to
-   * say which one it is. Stacked in a card already titled SHIP, above rows
-   * labelled HIGH / MID / LOW, it is a line of text that tells a reader nothing
-   * they cannot see — and the reference has no such heading.
-   *
-   * `display: none` would have been wrong: the rack section is
-   * `aria-labelledby` this heading, so removing it from the tree takes the
-   * section's accessible name with it. Clipped instead — still read aloud,
-   * still the section's name, just not occupying a row. */
-  .mob-card-body > .hud-bar .module-rack > .panel-head {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
-  }
+  /* ⚠ THE "MODULES" HEADING IS CLIPPED FOR BOTH TIERS NOW, by the `.hud-bar`
+   * rule above — the reference has no such heading on either, and a rule
+   * written twice is a rule that drifts. */
   .mob-card-body > .hud-bar > .hud-foot {
     margin-top: 0.7rem;
     padding: 0.45rem 0;

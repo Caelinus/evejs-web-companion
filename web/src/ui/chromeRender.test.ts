@@ -233,6 +233,25 @@ test("the HUD header names the ship once, not the same word twice", () => {
   );
 });
 
+test("the header carries the ship's state, right-aligned", () => {
+  // The other half of the glance: what ship, and what it is doing. The fixture
+  // ship is stopped, so the word goes quiet rather than blue.
+  const body = renderHud(inSpaceStore());
+  assert.match(body, /class="hud-head-mode[^"]*"[^>]*>STOP</);
+  assert.match(body, /class="hud-head-mode stopped"/, "a stopped ship must not read as an event");
+});
+
+test("the footer says what the two module gestures are", () => {
+  // ⚠ THE ONE HINT LEFT IN THE APP, AND IT IS NOT ABOUT THE GAME. Press-and-hold
+  // has no affordance — nothing on a slot says a long press differs from a short
+  // one, and the ring that fills only appears once you are already holding. This
+  // explains a CONTROL, not a rule of EVE, which is the line the rest of the
+  // prose was cut on.
+  const text = visibleText(renderHud(inSpaceStore()));
+  assert.match(text, /click = on\/off/);
+  assert.match(text, /hold ≈ 0\.6 s = overload/);
+});
+
 // --- Stop, and the rule that travels with it ---------------------------------
 //
 // These three moved here from `flightStrip.test.ts` when Stop moved from the
@@ -241,12 +260,16 @@ test("the HUD header names the ship once, not the same word twice", () => {
 // which is exactly the moment other requests are in flight.
 
 test("in space, the HUD carries Stop", () => {
-  assert.match(visibleText(renderHud(inSpaceStore())), /Stop the ship/);
+  // ⚠ THE LABEL IS "Stop", NOT "Stop the ship". It sits in a footer whose left
+  // half is already a sentence about the ship, so the longer label was saying
+  // "ship" twice in one row; the reference's is the short one.
+  assert.ok(visibleText(renderHud(inSpaceStore())).includes("Stop"));
+  assert.match(renderHud(inSpaceStore()), /class="hud-stop"/);
 });
 
 test("STOP IS NEVER DISABLED — not by a shared flag, not by its own", () => {
   const body = renderHud(inSpaceStore());
-  const index = body.indexOf("Stop the ship");
+  const index = body.indexOf('class="hud-stop"');
   assert.ok(index > 0, "the Stop control is rendered");
   const openTag = body.lastIndexOf("<button", index);
   const buttonTag = body.slice(openTag, index);

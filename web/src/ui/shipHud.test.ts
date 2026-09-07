@@ -3,8 +3,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
-import { resourceGauges, capacitorSegments, shipStateSentence } from "./shipHud.ts";
+import { resourceGauges, capacitorSegments, shipStateSentence, shipIsStopped, shipModeLabel, shipStateSentenceFor } from "./shipHud.ts";
 
 test("resourceGauges is shield/armor/hull, outer to inner, carrying the ratios", () => {
   const gauges = resourceGauges({ shieldRatio: 1, armorRatio: 0.5, hullRatio: 0.2 });
@@ -76,4 +77,71 @@ test("no mode and no velocity is not known, rather than 'holding position'", () 
 test("a null mode with a real velocity still reports movement", () => {
   assert.equal(shipStateSentence({ mode: null, velocity: STILL }), "Holding position.");
   assert.equal(shipStateSentence({ mode: null, velocity: { x: 0, y: 3, z: 4 } }), "Under way.");
+});
+
+// --- the header's state word -------------------------------------------------
+
+test("the header word is the server's OWN mode, uppercased", () => {
+  assert.equal(shipModeLabel("orbit"), "ORBIT");
+  assert.equal(shipModeLabel("WARP"), "WARP");
+  assert.equal(shipModeLabel("  goto "), "GOTO");
+});
+
+test("⚠ AN UNKNOWN MODE PASSES STRAIGHT THROUGH, rather than becoming a dash", () => {
+  // The header is a glance, and a mode this client has never seen is still a
+  // real thing the ship is doing. Printing it verbatim is worse-looking and
+  // more truthful than printing "—" over a hull that is clearly moving.
+  assert.equal(shipModeLabel("SOMETHING_NEW"), "SOMETHING_NEW");
+  // Only "nothing at all" has nothing to say.
+  assert.equal(shipModeLabel(null), null);
+  assert.equal(shipModeLabel("   "), null);
+});
+
+test("stopped is recognised, so the word can go quiet instead of blue", () => {
+  assert.equal(shipIsStopped("STOP"), true);
+  assert.equal(shipIsStopped("stopped"), true);
+  assert.equal(shipIsStopped("ORBIT"), false);
+  assert.equal(shipIsStopped(null), false);
+});
+
+// --- the footer sentence, and what it may not invent -------------------------
+
+const km = (metres: number) => `${Math.round(metres / 1000)} km`;
+
+test("the sentence NAMES what the ship is acting on, when the server says", () => {
+  const ship = { mode: "orbit", velocity: { x: 100, y: 0, z: 0 } };
+  assert.equal(
+    shipStateSentenceFor(ship, "Caldari Sentry Gun I", 5000, km),
+    "Orbiting Caldari Sentry Gun I at 5 km",
+  );
+});
+
+test("⚠ NO TARGET MEANS THE PLAIN SENTENCE — never an invented one", () => {
+  // The design asks for "Orbiting X at N km". The ship's own row carries
+  // `targetEntityID`, and on this server it is null — so there is nothing to
+  // name, and the sentence says only what is known.
+  const ship = { mode: "orbit", velocity: { x: 100, y: 0, z: 0 } };
+  assert.equal(shipStateSentenceFor(ship, null, null, km), "Orbiting.");
+  assert.equal(shipStateSentenceFor(ship, null, 5000, km), "Orbiting.");
+});
+
+test("a named target with no measurable range is still named", () => {
+  // Half a fact is better than none, and the half that is missing is simply
+  // absent rather than guessed at.
+  const ship = { mode: "orbit", velocity: { x: 100, y: 0, z: 0 } };
+  assert.equal(shipStateSentenceFor(ship, "Some Rock", null, km), "Orbiting Some Rock");
+});
+
+test("⚠ THE TARGET IS NOT TAKEN FROM WHAT THIS CLIENT LAST ORDERED", () => {
+  // A course set by a bot, by another client or by a previous session is the
+  // common case while this app is running, and a sentence assembled from a
+  // stale local memory is indistinguishable, to a player, from one the ship
+  // reported. The HUD reads the SNAPSHOT's own row and nothing else.
+  const hud = readFileSync(new URL("./HudBar.svelte", import.meta.url), "utf8");
+  assert.match(hud, /selfRow\?\.targetEntityID \?\? null/);
+  assert.equal(
+    /lastOrbit|lastOrdered|rememberedTarget/.test(hud),
+    false,
+    "the HUD grew a memory of what it ordered",
+  );
 });

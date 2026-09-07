@@ -245,20 +245,23 @@ test("the HUD's own header is hidden in a card, but the rack's is only CLIPPED",
   // the section's accessible name with it — it is clipped instead: still read
   // aloud, just not occupying a row.
   assert.match(CSS, /\.mob-card-body > \.hud-bar > \.hud-head \{ display: none; \}/);
-  const rackHead = CSS.slice(
-    CSS.indexOf(".mob-card-body > .hud-bar .module-rack > .panel-head"),
-    CSS.indexOf(".mob-card-body > .hud-bar > .hud-foot"),
-  );
+  // ⚠ ONE RULE FOR BOTH TIERS. It was written twice — once for the card, once
+  // for the cell — until the desktop HUD was matched to the reference and
+  // stopped wanting the heading either. A rule written twice is a rule that
+  // drifts.
+  const at = CSS.indexOf("  .hud-bar .panel-head {");
+  const rackHead = CSS.slice(at, at + 400);
   assert.ok(rackHead.length > 0, "the rack heading rule is not where this test looks");
   assert.equal(/display: none/.test(rackHead), false, "the accessible name was removed, not clipped");
   assert.match(rackHead, /clip-path: inset\(50%\)/);
 });
 
-test("the gauge takes the reference's 170px on a phone, not the cell's 136", () => {
-  // The desktop cell squeezes the wheel to sit beside its numbers; a phone has
-  // the vertical room, and the reference stacks them.
-  assert.match(CSS, /\.mob-card-body > \.hud-bar \.hud-wheel \{[^}]*max-width: 170px/);
-  assert.match(CSS, /\.mob-card-body > \.hud-bar \.ship-hud \{[^}]*flex-direction: column/);
+test("the gauge takes 170px on a phone where the cell gives it 150", () => {
+  // Both tiers stack the gauge above its numbers now — that is the reference's
+  // shape and the shared rule. The phone simply has room for a bigger wheel.
+  assert.match(CSS, /\.mob-card-body > \.hud-bar \.hud-wheel \{ max-width: 170px; \}/);
+  assert.match(CSS, /\.hud-bar \.ship-hud \{[\s\S]{0,120}flex-direction: column/);
+  assert.match(CSS, /\.hud-bar \.hud-wheel \{[^}]*max-width: 150px/);
 });
 
 test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {
