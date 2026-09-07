@@ -273,3 +273,31 @@ test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
   );
   assert.equal(/Heat 0/.test(visibleText(body)), false, "not known must never render as 0");
 });
+
+test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots", () => {
+  // FOUND BY EYE, ON THE PHONE. The first build pushed the heat to the end of
+  // the row with `margin-left: auto`, so each rack's reading landed wherever
+  // that rack's slots happened to stop wrapping — three rows, three different
+  // positions, and nothing you could read down.
+  //
+  // The handoff's row is `44px minmax(0,1fr)`: a fixed label cell holding the
+  // rack name, the bar and the reading, then the slots. A fixed first column is
+  // what makes the three readings a column at all.
+  const rule = CSS_SOURCE.slice(CSS_SOURCE.indexOf("  .rack-row {"), CSS_SOURCE.indexOf("  .rack-name"));
+  assert.ok(rule.length > 0, "the .rack-row rule is not where this test looks");
+  assert.match(rule, /display: grid/);
+  assert.match(rule, /grid-template-columns: \d+px minmax\(0, 1fr\)/);
+  assert.equal(/margin-left: auto/.test(CSS_SOURCE.slice(
+    CSS_SOURCE.indexOf("  .rack-row-label {"),
+    CSS_SOURCE.indexOf("  .rack-slots"),
+  )), false, "the heat drifted to the end of the row again");
+  // And in the markup, the label cell holds all three pieces — before the slots.
+  const label = RACK_SOURCE.slice(
+    RACK_SOURCE.indexOf('class="rack-row-label"'),
+    RACK_SOURCE.indexOf('class="rack-slots"'),
+  );
+  assert.ok(label.length > 0, "the label cell no longer precedes the slots");
+  assert.match(label, /rack-name/);
+  assert.match(label, /rack-heat-track/);
+  assert.match(label, /rack-heat-value/);
+});

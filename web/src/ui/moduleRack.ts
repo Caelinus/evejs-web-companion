@@ -334,3 +334,36 @@ export function cycleProgressPercent(
     : Math.min(elapsed, cycle.durationMs);
   return Math.max(0, Math.min(100, Math.round((within / cycle.durationMs) * 100)));
 }
+
+/**
+ * Which band a RACK HEAT reading is in — the colour the bar and its number take.
+ *
+ * ⚠ THE THRESHOLDS ARE THE HANDOFF'S: cool below 30%, warm below 60%, hot above.
+ * They are not `rackDamageBand`'s, and the two must not be merged: damage is the
+ * scar heat leaves behind and heat is what is in the rack now, so a module can
+ * be badly scarred in a cold rack and an undamaged one can be about to burn.
+ *
+ * `null` is "not known" and has no band — the bar draws its track and nothing
+ * else. It must never fall through to the cool colour, which would read as a
+ * cold rack.
+ */
+export function rackHeatBand(heat: number | null): "cool" | "warm" | "hot" | null {
+  if (heat === null) {
+    return null;
+  }
+  if (heat < 0.3) return "cool";
+  if (heat < 0.6) return "warm";
+  return "hot";
+}
+
+/**
+ * The words under a rack's heat bar.
+ *
+ * ⚠ IT ALWAYS CONTAINS THE WORD "heat", because in the design the bar has no
+ * other label — the rack's NAME is above it and the reading is below, and
+ * nothing else says what the bar measures. So the unknown case is "heat not
+ * known" rather than a bare dash, which would leave a nameless empty bar.
+ */
+export function rackHeatText(heat: number | null): string {
+  return heat === null ? "heat not known" : `${Math.round(heat * 100)}% heat`;
+}

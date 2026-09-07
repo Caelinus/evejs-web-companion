@@ -12,6 +12,8 @@ import {
   rackDamageBand,
   rackDamageText,
   rackDamageWedge,
+  rackHeatBand,
+  rackHeatText,
   rackHoldAction,
   rackIsEmpty,
   rackModuleBurntOut,
@@ -506,4 +508,34 @@ test("a supplied heat reading is carried through untouched, for the day there is
   );
   assert.equal(rows[0]!.heat, 0.25);
   assert.equal(rows[1]!.heat, null, "an unlisted rack must not read as cold");
+});
+
+// --- the rack heat bar's own bands ------------------------------------------
+
+test("⚠ AN UNKNOWN HEAT HAS NO BAND — it must not fall through to 'cool'", () => {
+  // The whole failure this stub exists to avoid: a bar that draws in the cool
+  // colour because nobody told it anything.
+  assert.equal(rackHeatBand(null), null);
+  assert.equal(rackHeatText(null), "heat not known");
+});
+
+test("the bands are the handoff's, and are NOT the damage bands", () => {
+  // Damage is the scar heat leaves behind; this is the heat in the rack now. A
+  // module can be badly scarred in a cold rack, and an undamaged one can be
+  // about to burn — so the two thresholds must not be merged.
+  assert.equal(rackHeatBand(0.1), "cool");
+  assert.equal(rackHeatBand(0.29), "cool");
+  assert.equal(rackHeatBand(0.3), "warm");
+  assert.equal(rackHeatBand(0.59), "warm");
+  assert.equal(rackHeatBand(0.6), "hot");
+  assert.equal(rackHeatBand(1), "hot");
+});
+
+test("⚠ THE WORDS ALWAYS CONTAIN 'heat' — the bar has no other label", () => {
+  // In the design the rack's NAME is above the bar and the reading is below it;
+  // nothing else says what the bar measures. A bare dash would leave a nameless
+  // empty bar.
+  assert.match(rackHeatText(null), /heat/);
+  assert.match(rackHeatText(0.22), /heat/);
+  assert.equal(rackHeatText(0.22), "22% heat");
 });

@@ -25,6 +25,8 @@
     rackDamageBand,
     rackDamageText,
     rackDamageWedge,
+    rackHeatBand,
+    rackHeatText,
     rackHoldAction,
     rackIsEmpty,
     rackModuleBurntOut,
@@ -376,7 +378,49 @@
 <div class="module-rack-rows" aria-label="Module rack">
   {#each rows as row (row.family)}
     <div class="rack-row">
-      <span class="rack-row-label">{row.label}</span>
+      <!--
+        THE LABEL CELL — the rack's name, its heat bar and the reading, stacked
+        in a fixed column.
+
+        ⚠ IT IS FIXED-WIDTH AND IT COMES FIRST, and both halves of that matter.
+        The first build put the heat AFTER the slots with `margin-left: auto`,
+        so where it landed depended on how many slots that rack happened to wrap
+        — three rows, three different positions, and nothing to read down. A
+        fixed first column is what makes the three readings a column at all.
+      -->
+      <span
+        class="rack-row-label"
+        title={row.heat === null
+          ? `${row.label} rack heat is not something this client can read yet.`
+          : `${row.label} rack heat ${Math.round(row.heat * 100)}% — overloaded modules heat the whole rack`}
+      >
+        <span class="rack-name">{row.label}</span>
+        <!--
+          RACK HEAT — a stub, and it says so.
+
+          ⚠ THE TRACK IS EMPTY AND THE WORDS READ "heat not known". It must
+          NEVER be drawn as 0, and NEVER filled from the modules' damage: an
+          empty bar reads as COLD, which is the single most dangerous thing this
+          instrument could say wrongly, and accumulated damage is the SCAR heat
+          left behind, not the heat in the rack now. A player overloading on the
+          strength of the wrong one burns modules out.
+
+          `row.heat` is typed `number | null` and is null for every row today;
+          the rendering is already correct for the day a real reading arrives,
+          which is why it is here rather than commented out.
+        -->
+        <span class="rack-heat-track" aria-hidden="true">
+          {#if row.heat !== null}
+            <span
+              class={`rack-heat-fill ${rackHeatBand(row.heat)}`}
+              style={`width:${Math.round(row.heat * 100)}%`}
+            ></span>
+          {/if}
+        </span>
+        <span class={`rack-heat-value ${rackHeatBand(row.heat) ?? "unknown"}`}>
+          {rackHeatText(row.heat)}
+        </span>
+      </span>
       <div class="rack-slots">
         {#if row.slots.length === 0}
           <span class="rack-empty muted">—</span>
@@ -501,38 +545,6 @@
           {/each}
         {/if}
       </div>
-      <!--
-        RACK HEAT — a stub, and it says so.
-
-        ⚠ THE TRACK IS EMPTY AND THE VALUE READS "not known". It must NEVER be
-        drawn as 0, and it must NEVER be filled from the modules' damage: an
-        empty bar reads as COLD, which is the single most dangerous thing this
-        instrument could say wrongly, and accumulated damage is the SCAR heat
-        left behind, not the heat in the rack now. Those are different numbers
-        and a player overloading on the strength of the wrong one burns modules
-        out.
-
-        `row.heat` is typed `number | null` and is null for every row today; the
-        rendering below is already correct for the day a real reading arrives,
-        which is why it is here rather than commented out.
-      -->
-      <span
-        class="rack-heat"
-        class:unknown={row.heat === null}
-        title={row.heat === null
-          ? `${row.label} rack heat is not something this client can read yet.`
-          : `${row.label} rack heat: ${Math.round(row.heat * 100)}%`}
-      >
-        <span class="rack-heat-label">Heat</span>
-        <span class="rack-heat-track" aria-hidden="true">
-          {#if row.heat !== null}
-            <span class="rack-heat-fill" style={`width:${Math.round(row.heat * 100)}%`}></span>
-          {/if}
-        </span>
-        <span class="rack-heat-value">
-          {row.heat === null ? "not known" : `${Math.round(row.heat * 100)}%`}
-        </span>
-      </span>
     </div>
   {/each}
   {#if unknown}
