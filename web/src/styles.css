@@ -3730,7 +3730,22 @@
     justify-content: flex-start;
     gap: 0.4rem;
   }
-  .hud-bar .hud-wheel { flex: 0 0 auto; max-width: 150px; }
+  .hud-bar .hud-wheel {
+    flex: 0 0 auto;
+    max-width: 150px;
+    /* ⚠ NEGATIVE, AND MEASURED AGAINST THE SAME EMPTY BAND AS THE SPEED.
+     *
+     * The wheel's box is square but its ink stops at 72% of the height (see
+     * `.wheel-speed`), so laying the readout out below the BOX left a band of
+     * nothing between the instrument and its own numbers. This closes the part
+     * of that band the speed does not use.
+     *
+     * It is deliberately smaller than the band: the speed lives down there, and
+     * pulling the readout up the full 28% would run the two together. Measured
+     * at -1.8rem the numbers sit 15px under the speed, which is a gap you can
+     * see across and not a gap you can lose things in. */
+    margin-bottom: -1.8rem;
+  }
   .hud-bar .hud-readout {
     flex: 0 0 auto;
     flex-direction: row;
@@ -4642,7 +4657,17 @@
   .wheel-speed {
     position: absolute;
     left: 50%;
-    bottom: 0;
+    /* ⚠ 26%, WHICH IS WHERE THE ARCS STOP — not the bottom of the box.
+     *
+     * The wheel is a SQUARE, and the arcs are a 240 degree sweep with a 120
+     * degree notch centred on the bottom: the lowest ink is at 75 + 66*cos(60)
+     * = 108 of a 150 viewBox, so the bottom 28% of the box is empty. Parked at
+     * `bottom: 0` the speed sat at the floor of that empty band, a clear
+     * finger's width below the instrument it belongs to.
+     *
+     * At 26% it sits just inside the notch, close under the CAP reading, which
+     * is what the notch is FOR. */
+    bottom: 26%;
     transform: translateX(-50%);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
@@ -4721,6 +4746,56 @@
     gap: 0.35rem;
     margin-top: 0.4rem;
   }
+  /* The rack's own gutter and its rows. The gutter holds the banking toggle and
+   * is TOP-aligned, so it sits beside the high rack — the only rack whose
+   * modules banking can affect. */
+  .rack-stack {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rack-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  /* ⚠ AN ICON BUTTON, SO IT IS DELIBERATELY BELOW THE GLOBAL 40px. Same
+   * argument as `.hud-stop`: R8's minimum is a touch target and this cell is a
+   * fixed height, so the exception is scoped to the pointer that makes it safe
+   * and reversed under `pointer: coarse` below. */
+  .rack-bank {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 1px solid transparent;
+    color: var(--color-muted);
+  }
+  .rack-bank svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+  .rack-bank:hover:not(:disabled) {
+    background: none;
+    border-color: var(--color-line-strong);
+    color: var(--color-text-bright);
+  }
+  /* Banked: lit in the accent, and the glyph itself is a joined chain rather
+   * than a broken one — the state never rests on the colour. */
+  .rack-bank.linked { color: var(--color-accent); }
+  @media (pointer: coarse) {
+    .rack-bank { width: 40px; height: 40px; }
+  }
   /* ⚠ A GRID, NOT A WRAPPING FLEX ROW — the handoff's `44px minmax(0,1fr)`.
    *
    * The first build was a flex row with the heat pushed to the end by
@@ -4730,19 +4805,40 @@
    * readings a column. */
   .rack-row {
     display: grid;
-    grid-template-columns: 52px minmax(0, 1fr);
+    /* ⚠ 132px, MEASURED against the widest thing the header holds — "HIGH", the
+     * bar at its minimum, and the italic "heat not known" — all on one line.
+     * FIXED, still: the three labels are different words, so an `auto` column
+     * would size to each row's own text and the slots would start at three
+     * different x positions. A fixed first column is what makes the three
+     * readings a column and the three racks a grid. */
+    grid-template-columns: 132px minmax(0, 1fr);
     gap: 8px;
     align-items: center;
     min-width: 0;
   }
-  /* The label cell: rack name, heat bar, reading — stacked, in that order. */
+  /* ⚠ THE HEADER IS ONE LINE: name, bar, reading, read left to right.
+   *
+   * It used to stack them, which made every rack row two lines tall against a
+   * 42px slot and left "heat not known" sitting under its rack's name like a
+   * second label. Inline, the row header reads as one statement — "HIGH, this
+   * much heat" — and the row is as tall as its slots and no taller.
+   *
+   * The bar takes the slack between the two texts, so the three bars start and
+   * end at the same x on every row and can be compared down the column. */
   .rack-row-label {
     display: flex;
-    flex-direction: column;
-    gap: 3px;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
   }
   .rack-name {
+    /* ⚠ A FIXED 22px, WHICH IS "HIGH" MEASURED. At `auto` each name sized to
+     * its own word — HIGH 22px, LOW 20, MID 17 — and the bar took up the slack,
+     * so the three heat bars started at three different x and could not be read
+     * down against each other. That is the same failure the fixed label COLUMN
+     * exists to prevent, one level in. */
+    flex: 0 0 22px;
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
@@ -4972,7 +5068,11 @@
    * this is the heat in the rack now. */
   .rack-heat-track {
     display: block;
-    width: 100%;
+    /* Takes the slack in the one-line header rather than spanning it: the name
+     * and the reading are fixed, so the bar is what varies, and it varies the
+     * same amount on all three rows. */
+    flex: 1 1 auto;
+    min-width: 20px;
     height: 3px;
     background: var(--color-field);
   }
@@ -4981,6 +5081,8 @@
   .rack-heat-fill.warm { background: var(--color-warn); }
   .rack-heat-fill.hot { background: var(--color-danger); }
   .rack-heat-value {
+    flex: 0 0 auto;
+    white-space: nowrap;
     font-size: 9px;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
@@ -5235,14 +5337,6 @@
 
   /* Weapon banking: the racks look identical banked or not, so the state is
    * said in words next to the control that changes it. */
-  .rack-banks {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.4rem;
-    margin-top: 0.5rem;
-  }
-  .rack-banks-state { font-size: 0.78rem; color: var(--color-muted); }
   /* No fill and no border: the dashed ring inside IS the empty slot. A solid box
    * here reads as a fitted module with a missing icon. */
   /* Nothing left to un-paint — the tile carries no box for an empty slot to

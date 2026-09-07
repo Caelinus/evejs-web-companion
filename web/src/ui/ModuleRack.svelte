@@ -376,11 +376,64 @@
 </script>
 
 <div class="module-rack-rows" aria-label="Module rack">
+  <div class="rack-stack">
+    <!--
+      WEAPON BANKING — one click fires every gun in the group.
+      ⚠ IT IS AN ICON IN THE RACK'S OWN GUTTER, NOT A LABELLED BUTTON UNDER IT.
+      It used to be a strip below the racks: a sentence of state and a button
+      spelling out the action, two lines away from the guns it acts on. Beside
+      the high rack it is next to the only modules it can affect, and the cell
+      is a fixed height where a whole row of chrome is expensive.
+      ⚠ THE STATE IS IN WORDS, NOT ONLY IN THE GLYPH. `title` and the accessible
+      name both carry the action AND what is true right now, and `aria-pressed`
+      says it again in a way a screen reader reads as state. The two glyphs
+      differ in SHAPE — a joined chain against a broken one — so the difference
+      never depends on telling two colours apart.
+      ⚠ AND IT IS DRAWN, NOT AN EMOJI, for the reason the overload dot is: at
+      this size a platform emoji is whatever font happened to answer, and
+      several of them are unreadable smudges.
+    -->
+    {#if weaponsCount > 1 && flow}
+      {@const linked = bankedCount > 0}
+      <button
+        type="button"
+        class="rack-bank"
+        class:linked
+        aria-pressed={linked}
+        disabled={pendingItemID !== null}
+        title={linked
+          ? `Unlink weapons — ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked`
+          : "Link weapons — weapons fire one at a time"}
+        aria-label={linked
+          ? `Unlink weapons. ${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked.`
+          : "Link weapons. Weapons fire one at a time."}
+        onclick={() => setBanks(!linked)}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <!-- The two halves of the chain, which both states share. -->
+          <path d="M10.2 6.4 12.4 4.2a4.2 4.2 0 0 1 5.9 5.9l-2.2 2.2" />
+          <path d="M13.8 17.6 11.6 19.8a4.2 4.2 0 0 1-5.9-5.9l2.2-2.2" />
+          {#if linked}
+            <!-- Joined: the bar between them is the link. -->
+            <path d="M8.8 15.2 15.2 8.8" />
+          {:else}
+            <!-- Broken: no bar, and two ticks where it parted. -->
+            <path d="M9.6 13 8.2 11.6" />
+            <path d="M14.4 11 15.8 12.4" />
+          {/if}
+        </svg>
+      </button>
+    {/if}
+    <div class="rack-rows">
   {#each rows as row (row.family)}
     <div class="rack-row">
       <!--
-        THE LABEL CELL — the rack's name, its heat bar and the reading, stacked
-        in a fixed column.
+        THE ROW HEADER — the rack's name, its heat bar and the reading, on ONE
+        LINE in a fixed column.
+
+        ⚠ ONE LINE, NOT A STACK. Stacked, every rack row stood two lines tall
+        beside a 42px slot and "heat not known" read as a second label hanging
+        under its rack's name. Inline it is one statement about one rack.
 
         ⚠ IT IS FIXED-WIDTH AND IT COMES FIRST, and both halves of that matter.
         The first build put the heat AFTER the slots with `margin-left: auto`,
@@ -558,30 +611,10 @@
       </div>
     </div>
   {/each}
+    </div>
+  </div>
   {#if unknown}
     <p class="rack-hint muted">Modules appear once your ship's fitting has loaded.</p>
-  {/if}
-  {#if weaponsCount > 1}
-    <!--
-      Banking makes one click fire every gun in the group. The control says
-      which way it will go, because the whole point is that the racks look
-      identical either way — the difference is what a click does.
-    -->
-    <div class="rack-banks">
-      <span class="rack-banks-state">
-        {bankedCount > 0
-          ? `${bankedCount} weapon${bankedCount === 1 ? "" : "s"} banked`
-          : "Weapons fire one at a time"}
-      </span>
-      {#if flow}
-        <button
-          type="button"
-          class="minor"
-          disabled={pendingItemID !== null}
-          onclick={() => setBanks(bankedCount === 0)}
-        >{bankedCount > 0 ? "Unlink weapons" : "Link weapons"}</button>
-      {/if}
-    </div>
   {/if}
   {#if damagedModules.length > 0}
     <!--

@@ -282,6 +282,46 @@ test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
   assert.equal(/Heat 0/.test(visibleText(body)), false, "not known must never render as 0");
 });
 
+test("⚠ THE HEAT READING IS PART OF THE ROW HEADER, on one line with the name", () => {
+  // It used to be stacked under the rack's name, which made every rack row two
+  // lines tall beside a 42px slot and left "heat not known" reading as a second
+  // label hanging under HIGH. Inline it is one statement about one rack.
+  assert.match(CSS_SOURCE, /\.rack-row-label \{[\s\S]{0,700}flex-direction: row;/);
+  // ⚠ AND THE NAME IS A FIXED WIDTH. At `auto` each name sized to its own word
+  // — HIGH 22px, LOW 20, MID 17 — and the bar took up the slack, so the three
+  // heat bars started at three different x and could not be read down against
+  // each other. Measured live after the fix: all three start at the same x and
+  // are the same width.
+  assert.match(CSS_SOURCE, /\.rack-name \{[\s\S]{0,500}flex: 0 0 22px;/);
+  // The label cell still comes FIRST and is still fixed — the claim above.
+  const at = CSS_SOURCE.indexOf("  .rack-row {");
+  assert.match(CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at)), /grid-template-columns: \d+px minmax\(0, 1fr\)/);
+});
+
+test("⚠ WEAPON BANKING IS AN ICON IN THE RACK'S GUTTER, and still says what it is", () => {
+  // It was a strip under the racks: a sentence of state and a button spelling
+  // out the action, two lines from the guns it acts on. It is an icon beside
+  // the HIGH rack now — the only rack whose modules banking can affect.
+  //
+  // ⚠ THE WORDS DID NOT GO WITH THE LABEL. `title` and the accessible name both
+  // carry the action AND what is true right now, and `aria-pressed` says the
+  // state again in a way a screen reader reads as state. The two glyphs differ
+  // in SHAPE — a joined chain against a broken one — so nothing rests on colour.
+  assert.match(RACK_SOURCE, /class="rack-bank"/);
+  assert.match(RACK_SOURCE, /aria-pressed=\{linked\}/);
+  assert.match(RACK_SOURCE, /"Link weapons — weapons fire one at a time"/);
+  assert.match(RACK_SOURCE, /`Unlink weapons — \$\{bankedCount\} weapon/);
+  assert.match(RACK_SOURCE, /aria-label=\{linked$/m);
+  // Drawn, not an emoji — the reason the overload dot is drawn.
+  assert.match(RACK_SOURCE, /<svg viewBox="0 0 24 24" aria-hidden="true">/);
+  assert.equal(/rack-banks/.test(RACK_SOURCE), false, "the old strip came back");
+  assert.equal(/rack-banks/.test(CSS_SOURCE), false, "the old strip's styling came back");
+  // It sits in a gutter that is TOP-aligned, so it is level with the high rack.
+  assert.match(CSS_SOURCE, /\.rack-stack \{[\s\S]{0,300}align-items: flex-start;/);
+  assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,400}width: 26px;/);
+  assert.match(CSS_SOURCE, /@media \(pointer: coarse\) \{[\s\S]{0,120}\.rack-bank \{ width: 40px;/);
+});
+
 test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots", () => {
   // FOUND BY EYE, ON THE PHONE. The first build pushed the heat to the end of
   // the row with `margin-left: auto`, so each rack's reading landed wherever

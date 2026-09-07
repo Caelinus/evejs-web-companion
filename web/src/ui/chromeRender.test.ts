@@ -292,6 +292,20 @@ test("⚠ STOP IS IN THE HEADER, CENTRED BY THE GRID AND NOT BY WHAT IS BESIDE I
   assert.match(css, /\.hud-stop \{[\s\S]{0,200}justify-self: center;/);
 });
 
+test("⚠ THE SPEED AND THE NUMBERS SIT AGAINST THE WHEEL, not at the floor of its box", () => {
+  // The wheel's box is SQUARE but its ink is not: a 240 degree sweep with a 120
+  // degree notch on the bottom puts the lowest stroke at 72% of the height, so
+  // the bottom 28% of the box is empty. The speed was parked at `bottom: 0` —
+  // the floor of that empty band, a finger's width below the instrument it
+  // belongs to — and the readout was laid out below the BOX rather than below
+  // the ink.
+  //
+  // Measured live after the change: 5px from the CAP reading to the speed, 17px
+  // from the speed to the numbers.
+  assert.match(CSS, /\.wheel-speed \{[\s\S]{0,900}bottom: 26%;/);
+  assert.match(CSS, /\.hud-bar \.hud-wheel \{[\s\S]{0,900}margin-bottom: -1\.8rem;/);
+});
+
 test("⚠ THE GAUGE AND THE RACK ARE CENTRED AS A PAIR, not stretched from the left", () => {
   // The rack column used to be `minmax(0, 1fr)`. A rack is at most four slots
   // wide, so on a wide cell the slots sat at the left edge of a 660px box and
