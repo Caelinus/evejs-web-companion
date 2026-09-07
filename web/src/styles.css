@@ -2693,20 +2693,64 @@
    * So on a narrow bar the ADD button loses its words (the "+" and its
    * `aria-label` carry it) and the status loses its text — the dot keeps the
    * colour, and its `title` keeps the word. Neither is what the bar is for. */
-  @media (max-width: 560px) {
-    .char-bar-add-text { display: none; }
-    .char-bar-status-text { display: none; }
-    .char-bar-list { flex: 1 1 8rem; }
-    /* ⚠ AND THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so
-     * that several pilots line up as identical tabs — right on a wide bar, and
-     * 15px too wide for a phone, which clipped the one chip's own edge. With a
-     * single pilot there is nothing to line up with; the name already
-     * truncates with an ellipsis, so shrinking costs nothing and fitting is
-     * worth more than matching. */
-    /* `.char-bar-list >` for specificity: the base `.char-chip` rule is later in
-     * this file, and an equal-weight selector earlier would silently lose. */
-    .char-bar-list > .char-chip { flex: 0 1 11rem; min-width: 0; }
+  /* ⚠ DRIVEN BY THE COMPONENT'S OWN `narrow` FLAG, NOT A `@media` HERE.
+   *
+   * The bar CHANGES SHAPE below the breakpoint — a strip of pilot tabs becomes
+   * one pilot and a switcher — which is markup, not styling, so the decision
+   * has to be made in the component anyway. Keeping the number in both places
+   * would be keeping two things equal by hand. */
+  .char-bar.narrow .char-bar-add-text { display: none; }
+  .char-bar.narrow .char-bar-status-text { display: none; }
+  .char-bar.narrow .char-bar-list { flex: 0 1 auto; min-width: 0; }
+  /* ⚠ THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so several
+   * pilots line up as identical tabs — right on a wide bar, and too wide for a
+   * phone. With one chip on screen there is nothing to line up with, and the
+   * name already truncates.
+   *
+   * `.char-bar-list >` for specificity: the base `.char-chip` rule is later in
+   * this file, and an equal-weight selector earlier would silently lose. */
+  .char-bar.narrow .char-bar-list > .char-chip {
+    flex: 0 1 auto;
+    min-width: 0;
+    min-height: 1.7rem;
+    padding: 0.1rem 0.5rem;
   }
+  /* The switcher: a `▾` the width of a thumb, next to the pilot it changes. */
+  .char-bar-switch {
+    flex: 0 0 auto;
+    align-self: center;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0;
+    font-size: 10px;
+    background: var(--color-panel-3);
+    border: 1px solid var(--color-line);
+    color: var(--color-muted);
+  }
+  .char-bar-switch[aria-expanded="true"] {
+    border-color: var(--color-accent);
+    color: var(--color-text-bright);
+  }
+  /* The list of the others. Under the bar, over everything else — and behind a
+   * shade, so the next tap anywhere closes it. */
+  .char-bar-shade { position: fixed; inset: 0; z-index: 60; }
+  .char-bar-pilots {
+    position: absolute;
+    top: calc(var(--char-bar-h) - 4px);
+    left: 0.5rem;
+    right: 0.5rem;
+    z-index: 61;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 0.4rem;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line-strong);
+    box-shadow: 0 8px 20px rgb(0 0 0 / 0.5);
+  }
+  .char-bar-pilots > .char-chip { flex: 0 0 auto; width: 100%; }
   .char-bar-add,
   .char-bar-hangar {
     flex: 0 0 auto;

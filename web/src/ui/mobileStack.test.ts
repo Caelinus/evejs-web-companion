@@ -318,34 +318,6 @@ test("⚠ A WINDOWED PANEL DOES NOT REPEAT THE WINDOW'S OWN TITLE", () => {
   assert.match(rule, /clip-path: inset\(50%\)/);
 });
 
-// --- the character bar on a phone -------------------------------------------
-
-test("⚠ THE PILOT CHIP IS THE LAST THING THE BAR MAY DROP", () => {
-  // FOUND BY EYE. At 375px the bar has 359px to spend, and brand + status +
-  // Pilots + "+ Add character" + gaps took 316 of it — leaving the chip 11px:
-  // an empty bracket with the pilot's name clipped away inside it, which reads
-  // as a rendering fault rather than as a squeezed control.
-  //
-  // The bar exists to say WHO you are. So on a narrow bar the add button loses
-  // its words and the status loses its text; neither is what the bar is for.
-  const at = CSS.indexOf(".char-bar-add-text { display: none; }");
-  assert.ok(at > 0, "the narrow-bar block is not where this test looks");
-  const block = CSS.slice(at - 400, at + 1200);
-  assert.match(block, /@media \(max-width: 560px\)/, "the rules are not behind a narrow query");
-  assert.match(block, /\.char-bar-add-text \{ display: none; \}/);
-  assert.match(block, /\.char-bar-status-text \{ display: none; \}/);
-  // ...and the chip gives up the fixed width it only needs when there are
-  // several pilots to line up.
-  assert.match(block, /\.char-bar-list > \.char-chip \{ flex: 0 1 11rem; min-width: 0; \}/);
-});
-
-test("⚠ NEITHER HIDDEN LABEL LEAVES A CONTROL UNNAMED", () => {
-  // A "+" with no accessible name is a button nothing can read, and a coloured
-  // dot with no word is state carried by colour alone. Both keep a name.
-  const bar = readFileSync(path.join(UI_DIR, "CharacterBar.svelte"), "utf8");
-  assert.match(bar, /aria-label="Add character"/, "the + button has no accessible name");
-  assert.match(bar, /class="char-bar-status[^"]*" title=/, "the status dot carries no word");
-  // The words that are hidden are hidden by CSS, so they are still in the tree.
-  assert.match(bar, /class="char-bar-add-text">Add character</);
-  assert.match(bar, /class="char-bar-status-text">\{statusLabel\}</);
-});
+// ⚠ THE CHARACTER BAR'S OWN CLAIMS MOVED TO `characterBarNarrow.test.ts`.
+// They lived here for one turn because the bar was found while looking at the
+// phone; the bar is app chrome above every workspace, not part of this stack.
