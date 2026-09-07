@@ -292,6 +292,21 @@ test("⚠ STOP IS IN THE HEADER, CENTRED BY THE GRID AND NOT BY WHAT IS BESIDE I
   assert.match(css, /\.hud-stop \{[\s\S]{0,200}justify-self: center;/);
 });
 
+test("⚠ THE CARGO READOUT IS IN THE CELL, AND NOT ON THE PHONE", () => {
+  // The cell answers what shape the ship is in and what its modules are doing;
+  // for a miner or a hauler, how full the holds are is the third question asked
+  // on the same two-second cycle, and it lived only behind a window you had to
+  // open. It is FIRST in the body, in the space the centred pair already left.
+  //
+  // ⚠ The card hides it. That card is already a scroll, and a third block above
+  // the gauge would push the module rack below the fold on the tier where the
+  // fold is tightest — and Mining and Inventory & Ship are both one tap away in
+  // the tab strip there.
+  assert.match(HUD_SOURCE, /import CargoBays from "\.\/CargoBays\.svelte";/);
+  assert.match(HUD_SOURCE, /<CargoBays \{store\} \{flow\} \/>/);
+  assert.match(CSS, /\.mob-card-body \.cargo-cluster \{ display: none; \}/);
+});
+
 test("⚠ THE SPEED AND THE NUMBERS SIT AGAINST THE WHEEL, not at the floor of its box", () => {
   // The wheel's box is SQUARE but its ink is not: a 240 degree sweep with a 120
   // degree notch on the bottom puts the lowest stroke at 72% of the height, so
@@ -312,7 +327,12 @@ test("⚠ THE GAUGE AND THE RACK ARE CENTRED AS A PAIR, not stretched from the l
   // the right half of the instrument panel was empty — the two clusters hugged
   // the left third of a cell they were meant to occupy. Measured live after the
   // change: 235px of margin on each side, exactly.
-  assert.match(CSS, /\.hud-body \{[\s\S]{0,1800}grid-template-columns: 170px minmax\(0, max-content\);/);
+  //
+  // The leading `auto` is the cargo readout, which arrived later and sits in
+  // the space the centred pair had left empty on the left. It does not change
+  // the claim: the clusters are still one centred group, and the rack column
+  // is still its own width rather than everything left over.
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,2200}grid-template-columns: auto 170px minmax\(0, max-content\);/);
   // ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
   // overflows on BOTH sides and the left overflow cannot be scrolled to, so a
   // rack too wide for the cell would lose its first slots with no way to reach

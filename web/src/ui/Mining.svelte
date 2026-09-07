@@ -28,6 +28,7 @@
   import { resolvedName, type NameRef } from "../store/names.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import { holdCapacityText, holdFillPercent } from "./holdFill.ts";
   import type { MiningHold } from "../store/types.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
 
@@ -70,27 +71,16 @@
   }
 
   /**
-   * A hold's fill, as the SERVER reported it. Anything the ship did not say
-   * reads as "not known" — never as 0, which would look like an empty hold.
+   * ⚠ THE ARITHMETIC LIVES IN `holdFill.ts` NOW, not here.
+   *
+   * These were two private functions on this panel until the HUD grew a cargo
+   * readout. Two places answering "how full is the ore hold" from two copies of
+   * the same `null` handling is two places to get ABSENT / EMPTY / UNKNOWN
+   * wrong in — and this panel's copy was the one that got it right, so it is
+   * the one that moved.
    */
-  function capacityText(hold: MiningHold): string {
-    const capacity = hold.capacity;
-    if (!capacity || capacity.capacity === null) {
-      return "not known";
-    }
-    const used = capacity.used === null ? null : capacity.used;
-    if (used === null) {
-      return `holds ${capacity.capacity.toLocaleString()} m³`;
-    }
-    return `${used.toLocaleString()} of ${capacity.capacity.toLocaleString()} m³`;
-  }
-  function fillPercent(hold: MiningHold): number | null {
-    const capacity = hold.capacity;
-    if (!capacity || capacity.capacity === null || capacity.used === null || capacity.capacity <= 0) {
-      return null;
-    }
-    return Math.min(100, Math.round((capacity.used / capacity.capacity) * 100));
-  }
+  const capacityText = holdCapacityText;
+  const fillPercent = holdFillPercent;
 
   const allItems = $derived(holds.flatMap((hold) => hold.items ?? []));
 

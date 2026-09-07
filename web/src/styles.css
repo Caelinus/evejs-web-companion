@@ -3611,13 +3611,100 @@
      * low hold different numbers of modules, and centring each row would
      * stagger the columns against each other — the rack reads as a grid, and it
      * only reads that way because every row starts at the same x. */
-    grid-template-columns: 170px minmax(0, max-content);
+    /* ⚠ THREE CLUSTERS NOW: cargo, the gauge, the racks. The cargo column is
+     * `auto` — as wide as the bay names it happens to hold — and it sits FIRST,
+     * in the space the centred pair already left empty on the left. */
+    grid-template-columns: auto 170px minmax(0, max-content);
     justify-content: safe center;
     gap: 0.6rem 1.6rem;
     padding: 0.5rem 0.75rem 0.25rem;
     min-height: 0;
     overflow: auto;
   }
+  /* ---------------------------------------------------- the cargo readout --
+   * Deliberately the same shape as a rack row — name, bar, reading, on one
+   * line — because it is the same kind of statement and sits eight pixels from
+   * it. A second visual language for "how full is this thing" inside one
+   * instrument would read as two instruments. */
+  .cargo-bays {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .cargo-head {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--color-muted);
+  }
+  .cargo-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .cargo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    min-width: 0;
+  }
+  .cargo-bay {
+    display: grid;
+    /* ⚠ FIXED, AND WIDE ENOUGH FOR THE LONGEST NAME. One grid per bay would let
+     * each row size to its own words and the bars would not line up — the same
+     * failure the rack rows had. 84px is measured: "CARGO HOLD" needs 70 at
+     * this size and clipped at 66, and the fleet and ship maintenance bays are
+     * longer still. A clipped bay NAME is worse than a narrow bar: the bar is a
+     * glance you can take again, the name is which hold you are looking at. */
+    grid-template-columns: 84px minmax(2.5rem, 1fr) 2.6rem;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .cargo-bay-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted);
+  }
+  /* ⚠ AN EMPTY TRACK IS DRAWN, AN UNKNOWN FILL IS NOT. The track is the hold's
+   * outline and is always right; the FILL is a reading, and a hold nobody
+   * measured gets no fill at all — see CargoBays.svelte. */
+  .cargo-track {
+    display: block;
+    height: 3px;
+    min-width: 0;
+    background: var(--color-field);
+  }
+  .cargo-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-accent);
+  }
+  .cargo-fill.warn { background: var(--color-warn); }
+  .cargo-fill.full { background: var(--color-danger); }
+  .cargo-bay-value {
+    justify-self: end;
+    white-space: nowrap;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted);
+  }
+  .cargo-bay-value.warn { color: var(--color-warn); }
+  .cargo-bay-value.full { color: var(--color-danger); }
+  /* Italic, so a reading that does not exist never reads as one that does —
+   * the same treatment the rack heat's unknown gets. */
+  .cargo-bay-value.unknown { font-style: italic; }
+
   /* Stop keeps a full touch target (R8) and never shrinks below its word — it
    * is the one control here a pilot presses without looking. A ghost rather
    * than a filled accent: it is the header's only button, so nothing needs
@@ -5131,6 +5218,11 @@
     grid-template-columns: auto minmax(0, 1fr);
   }
   .mob-card-body > .hud-bar > .hud-head > .hud-head-ship { display: none; }
+  /* ⚠ NO CARGO READOUT ON THE PHONE. The card is already a scroll, and a third
+   * block above the gauge would push the module rack below the fold on the tier
+   * where the fold is tightest. The holds are one tap away in Mining and in
+   * Inventory & Ship, both of which are in the tab strip. */
+  .mob-card-body .cargo-cluster { display: none; }
   .mob-card-body > .hud-bar > .hud-body {
     display: block;
     padding: 0;

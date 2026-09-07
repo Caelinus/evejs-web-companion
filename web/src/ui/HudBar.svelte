@@ -21,6 +21,7 @@
   // surface that is always on screen — and it must never be disabled; see below.
   import ModuleRack from "./ModuleRack.svelte";
   import ShipHud from "./ShipHud.svelte";
+  import CargoBays from "./CargoBays.svelte";
   import { shipIsStopped, shipStateSentenceFor } from "./shipHud.ts";
   import { distanceMeters, formatDistance } from "../space/overview.ts";
   import { resolvedName } from "../store/names.ts";
@@ -203,6 +204,21 @@
   </header>
 
   <div class="hud-body">
+    <!--
+      ⚠ THE THIRD QUESTION A PILOT ASKS WITHOUT OPENING ANYTHING. The cell
+      already answers what shape the ship is in and what its modules are doing;
+      for a miner or a hauler, how full the holds are is the one that decides
+      when the trip ends. It lived only in the Mining and Inventory panels —
+      a window you had to open to learn something you need on a two-second
+      cycle.
+
+      It is FIRST, in the space the centred pair already left empty on the left,
+      and the mobile card hides it: see CargoBays.svelte.
+    -->
+    <section class="hud-cluster cargo-cluster" aria-label="Cargo holds">
+      <CargoBays {store} {flow} />
+    </section>
+
     <section class="hud-cluster ship-gauges" aria-label="Ship status">
       <ShipHud {store} />
     </section>
