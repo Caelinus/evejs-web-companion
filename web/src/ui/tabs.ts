@@ -33,7 +33,6 @@ export type TabID =
   | "fleet"
   | "scanner"
   | "mail"
-  | "chat"
   | "wallet"
   | "corpWallet"
   | "standings"
@@ -96,7 +95,6 @@ export const TABS: readonly TabDef[] = [
   { id: "activity", label: "Activity", where: "both" },
   { id: "fleet", label: "Fleet", where: "both" },
   { id: "mail", label: "Mail", where: "both" },
-  { id: "chat", label: "Chat", where: "both" },
   { id: "wallet", label: "Wallet", where: "both" },
   { id: "corpWallet", label: "Corp Wallet", where: "both" },
   { id: "standings", label: "Standings", where: "both" },

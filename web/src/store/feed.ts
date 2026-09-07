@@ -23,9 +23,6 @@ import type {
   AgentFinderRow,
   AgentFinderTarget,
   AgentRow,
-  ChatChannel,
-  ChatChannelState,
-  ChatMessage,
   CharacterSummary,
   CharStanding,
   Colony,
@@ -846,27 +843,6 @@ export type FeedEvent =
   /** An "alert me" watch fired: what it said, and when (epoch ms). */
   | { readonly type: "custom-bot/alert"; readonly message: string; readonly atMs: number }
   | { readonly type: "custom-bot/cleared" }
-  // Goal R7 — the Chat panel (Local + Corp). A channel read completed (roster +
-  // recent backlog) — the panel polls while open (READ is a backlog poll).
-  | {
-      readonly type: "chat/loaded";
-      readonly channel: ChatChannel;
-      readonly channelState: ChatChannelState;
-    }
-  // The active channel tab changed (Local <-> Corp).
-  | { readonly type: "chat/active"; readonly channel: ChatChannel }
-  // A chat read/send failed non-fatally; null clears it after success.
-  | { readonly type: "chat/error"; readonly message: string | null }
-  // Drop the chat state (character offline / logged out).
-  | { readonly type: "chat/cleared" }
-  // Goal R10 — one chat message pushed over the live channel (gateway chat
-  // emitter -> WS -> BFF SSE), appended to the channel's backlog. Deduplicated
-  // against what a poll already delivered, so live and poll can coexist.
-  | {
-      readonly type: "chat/message";
-      readonly channel: ChatChannel;
-      readonly message: ChatMessage;
-    }
   // Goal R10 — the live push channel's connection state. Drives poll cadence
   // (fast when the channel is down, slow safety net when it is live); it is not
   // a correctness signal, since every bridge response still drains

@@ -50,7 +50,7 @@ export const CATEGORY_LABEL: Readonly<Record<BlockCategory, string>> = {
   planets: "Planets",
   exploration: "Exploration",
   fleet: "Fleet",
-  social: "Chat & Social",
+  social: "Social",
   flow: "Flow & Timing",
 };
 
@@ -361,18 +361,6 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "combat",
     "Camps the spot you parked it at and attacks any player ship that shows up — or one pilot alone, if you pick one. Locks them, holds them still with a warp disruptor or scrambler if you have one fitted, webs them, then sets the drones on them and runs the guns. Keeps watching for as long as it is left on; a watch or your own hand stops it.",
     "Being in space, with guns fitted or combat drones in the bay",
-  ),
-  "hunt-player": entry(
-    "hunt-player",
-    "combat",
-    "Roams from system to system looking for a player, staying within your jump limit of where it started. Watches local chat for company, sweeps the directional scanner, warps down the hits, and attacks the ship it finds — holding it in place first if you have a warp disruptor or scrambler fitted.",
-    "Being in space, with guns fitted or combat drones in the bay",
-  ),
-  "send-chat": entry(
-    "send-chat",
-    "social",
-    "Says a line you wrote in local or corp chat, once, then moves on. Put it inside an If to announce something only when a check holds — like calling for help when shields drop.",
-    "A message to send",
   ),
   "set-destination": entry(
     "set-destination",

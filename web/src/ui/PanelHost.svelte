@@ -25,7 +25,6 @@
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
   import ServerBots from "./ServerBots.svelte";
-  import Chat from "./Chat.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
   import Standings from "./Standings.svelte";
@@ -109,6 +108,6 @@ import NoticeLog from "./NoticeLog.svelte";
 {:else if tab === "settings"}
   <Settings {store} {flow} />
 {:else}
-  <Chat {store} {flow} />
+  <p class="error">This panel is no longer available.</p>
 {/if}
 </ErrorBoundary>

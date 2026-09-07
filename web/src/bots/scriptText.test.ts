@@ -39,8 +39,6 @@ function sampleCondition(kind: ConditionKind): Condition {
       return { kind, fraction: 0.9 };
     case "drone-health-below":
       return { kind, fraction: 0.4 };
-    case "players-in-system-above":
-      return { kind, count: 0 };
     case "hold-empty":
     case "hostile-on-grid":
     case "targeted-by-player":

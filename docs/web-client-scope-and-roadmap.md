@@ -2,6 +2,8 @@
 
 **Status:** Active — rewritten 2026-07-18. Supersedes the 2026-07-12 planning baseline and its Goal 0A–0F ladder. The old goal ladder, its execution records, and the deleted `docs/progress.md` live in this repository's git history (through commit `8dccc5d`); do not resurrect their retired decisions (section 11).
 
+**Current scope update (2026-09-07):** The web companion no longer includes Local/Corp chat. Its panel, polling, browser bot chat/roster dependencies, gateway routes, synthetic XMPP bridge, and browser LSC exposure were retired. Retail/XMPP chat remains part of EveJS. The R7/R7b entries below are historical implementation records, not current companion behavior.
+
 **Related repositories:** `eve.js` (game server, sole authority) and `evejs-web-poc` (browser client).
 
 ## 1. Goal

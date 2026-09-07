@@ -25,10 +25,7 @@
     MAX_QTY_ARG,
     MIN_ISK_ARG,
     MIN_QTY_ARG,
-    MAX_TEXT_ARG_LEN,
     MAX_INTERRUPTS,
-    DEFAULT_HUNT_MAX_JUMPS,
-    DEFAULT_HUNT_RANGE_AU,
     conditionAllowedAt,
     startingStation,
   } from "../bots/botScript.ts";
@@ -264,19 +261,16 @@
         ? ({ kind } as Condition)
         : isWallet
           ? ({ kind, isk: 10_000_000 } as Condition)
-          : kind === "players-in-system-above"
-            ? // Zero = "anyone else at all", the setting a solo miner wants.
-              ({ kind, count: 0 } as Condition)
-            : kind === "cargo-full"
+          : kind === "cargo-full"
               ? ({ kind, fraction: 0.9 } as Condition)
               : ({ kind, fraction: 0.3 } as Condition);
     // Sensible first responses: money and a full hold are not dangers, so they
-    // just stop; a pirate launches drones; being targeted or joined by players is
-    // news rather than damage, so it tells you; anything about health heads home.
+    // just stop; a pirate launches drones; being targeted is news rather than
+    // damage, so it tells you; anything about health heads home.
     const respond: InterruptResponse =
       kind === "hostile-on-grid"
         ? "launch-drones"
-        : kind === "targeted-by-player" || kind === "players-in-system-above"
+        : kind === "targeted-by-player"
           ? "alert"
           : isWallet || kind === "cargo-full"
             ? "pause"
@@ -364,27 +358,6 @@
     }
     if (macro === "invite-to-fleet") {
       return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
-    }
-    if (macro === "hunt-player") {
-      // `only` stays ABSENT (any player); the leash and scanner reach start on
-      // their shared defaults so the sentence reads honestly from the start.
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: {
-          maxJumps: { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS },
-          range: { kind: "count", value: DEFAULT_HUNT_RANGE_AU },
-        },
-      };
-    }
-    if (macro === "send-chat") {
-      return {
-        id,
-        kind: "macro",
-        macro,
-        args: { channel: { kind: "chatChannel", channel: "local" }, message: { kind: "text", text: "" } },
-      };
     }
     if (macro === "set-destination") {
       // Unbound on purpose: there is no sensible default place to fly to, and the
@@ -741,23 +714,6 @@
       j,
     );
   }
-  // The send-chat block's channel + message.
-  function chatChannelValue(step: MacroStep): string {
-    const arg = step.args["channel"];
-    return arg !== undefined && arg.kind === "chatChannel" ? arg.channel : "local";
-  }
-  function setStepChatChannel(i: number, raw: string, side: Side | null = null, j = -1): void {
-    const channel = raw === "corp" ? "corp" : "local";
-    updateStep(i, (s) => ({ ...s, args: { ...s.args, channel: { kind: "chatChannel", channel } } }), side, j);
-  }
-  function textArgValue(step: MacroStep, key: string): string {
-    const arg = step.args[key];
-    return arg !== undefined && arg.kind === "text" ? arg.text : "";
-  }
-  function setStepTextArg(i: number, key: string, raw: string, side: Side | null = null, j = -1): void {
-    const text = raw.slice(0, MAX_TEXT_ARG_LEN);
-    updateStep(i, (s) => ({ ...s, args: { ...s.args, [key]: { kind: "text", text } } }), side, j);
-  }
   function setStepFitting(i: number, fittingID: number, side: Side | null = null, j = -1): void {
     const match = savedFittings.find((f) => f.fittingID === fittingID);
     if (match === undefined) return;
@@ -1044,7 +1000,6 @@
     <button onclick={() => addWatch("wallet-below")} disabled={hasWatch("wallet-below")}>Watch Wallet (low)</button>
     <button onclick={() => addWatch("wallet-above")} disabled={hasWatch("wallet-above")}>Watch Wallet (high)</button>
     <button onclick={() => addWatch("cargo-full")} disabled={hasWatch("cargo-full")}>Watch Cargo Hold</button>
-    <button onclick={() => addWatch("players-in-system-above")} disabled={hasWatch("players-in-system-above")}>Watch for Players</button>
     <button onclick={() => addWatch("targeted-by-player")} disabled={hasWatch("targeted-by-player")}>Watch for Being Targeted</button>
     <button onclick={() => addWatch("drone-health-below")} disabled={hasWatch("drone-health-below")}>Watch Drones</button>
   </div>
@@ -1281,22 +1236,13 @@
               {/if}
             </span>
           {/if}
-          {#if step.macro === "attack-player" || step.macro === "hunt-player"}
+          {#if step.macro === "attack-player"}
             <span class="inline-edit">
               target
               <select value={onlyArgID(step) ?? ""} onchange={(e) => setStepOnly(i, e.currentTarget.value, side, j)}>
                 <option value="">any player</option>
                 {#each knownPilots as p (p.characterID)}<option value={p.characterID}>{p.characterName}</option>{/each}
               </select>
-            </span>
-          {/if}
-          {#if step.macro === "hunt-player"}
-            <span class="inline-edit">
-              up to
-              <input class="pct" type="number" min="1" max="30" placeholder={String(DEFAULT_HUNT_MAX_JUMPS)} value={countArgValue(step, "maxJumps") ?? ""} oninput={(e) => setStepCountArg(i, "maxJumps", e.currentTarget.value, 1, 30, side, j)} />
-              jumps from home, scanning
-              <input class="pct" type="number" min="1" max="100" placeholder={String(DEFAULT_HUNT_RANGE_AU)} value={countArgValue(step, "range") ?? ""} oninput={(e) => setStepCountArg(i, "range", e.currentTarget.value, 1, 100, side, j)} />
-              AU
             </span>
           {/if}
           {#if step.macro === "set-destination"}
@@ -1384,17 +1330,6 @@
               <select value={moveArg(step, "item")} onchange={(e) => setMoveItem(i, e.currentTarget.value, side, j)}>
                 <option value="">everything in the ore hold</option>
                 {#each knownItems as it (it.typeID)}<option value={it.typeID}>{it.name}</option>{/each}
-              </select>
-            </span>
-          {/if}
-          {#if step.macro === "send-chat"}
-            <span class="inline-edit">
-              say
-              <input class="chat-in" type="text" maxlength={MAX_TEXT_ARG_LEN} placeholder="write the message…" value={textArgValue(step, "message")} oninput={(e) => setStepTextArg(i, "message", e.currentTarget.value, side, j)} />
-              in
-              <select value={chatChannelValue(step)} onchange={(e) => setStepChatChannel(i, e.currentTarget.value, side, j)}>
-                <option value="local">local chat</option>
-                <option value="corp">corp chat</option>
               </select>
             </span>
           {/if}
@@ -1710,9 +1645,6 @@
   }
   input.isk-in {
     width: 8rem;
-  }
-  input.chat-in {
-    width: 14rem;
   }
   select.belt-pick {
     max-width: 14rem;

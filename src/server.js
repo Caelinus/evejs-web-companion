@@ -439,8 +439,25 @@ app.use((req, res, next) => {
 // confirmation-gated BFF route. The BFF also projects browser session fields
 // onto an explicit presentation-only allowlist; `userid` always comes from the
 // signed login session. Wire contract: docs/bridge-wire-contract.md.
+const RETIRED_WEB_COMPANION_CHAT_CALLS = new Set([
+  "LSC.GetChannels",
+  "LSC.SendMessage",
+]);
+
 app.post("/api/bridge/call", requireAuth, async (req, res, next) => {
   const body = req.body || {};
+  if (
+    typeof body.service === "string" &&
+    typeof body.method === "string" &&
+    RETIRED_WEB_COMPANION_CHAT_CALLS.has(`${body.service}.${body.method}`)
+  ) {
+    res.status(404).json({
+      ok: false,
+      error: "BRIDGE_METHOD_UNAVAILABLE",
+      message: `${body.service}.${body.method} is not available in the web companion.`,
+    });
+    return;
+  }
   if (isBridgeWritePair(body.service, body.method)) {
     res.status(403).json({
       ok: false,
@@ -5695,14 +5712,13 @@ app.post("/api/bridge/bookmarks/move", requireAuth, async (req, res, next) => {
 //     later); confirm-gated here.
 //
 // ⚠ EXTRA-CARE writes — reachable + confirm-gated, NEVER fired on the live world
-// in this plumbing pass: CreateCharacterWithDoll (creates a whole character),
-// LSC.SendMessage (sends an OUTWARD chat message), CancelCharacterDeletePrepare
-// (char-lifecycle).
+// in this plumbing pass: CreateCharacterWithDoll (creates a whole character) and
+// CancelCharacterDeletePrepare (char-lifecycle).
 //
 // FAST-MODE educated-guess responses: every handler returns null except
 // AddOwnerNote (a new noteID), ToggleValidation (a bool) and CreateCharacterWithDoll
 // (the new characterID) — dispatchBridgeWrite surfaces `result` for those; the
-// decoders (web/src/bridge/{characterProfile,charAccount,chat}.ts) read the acks.
+// decoders (web/src/bridge/{characterProfile,charAccount}.ts) read the acks.
 
 // --- charMgr WRITES (12) — all SESSION-scoped -------------------------------
 
@@ -6147,24 +6163,6 @@ app.post("/api/bridge/gm/slash", requireAuth, async (req, res, next) => {
     return;
   }
   await dispatchBridgeWrite(req, res, next, "slash", "SlashCmd", [command]);
-});
-
-// --- LSC WRITES (1) ---------------------------------------------------------
-
-// ⚠ EXTRA-CARE (OUTWARD — sends a live chat message) — reachable + gated, NEVER
-// fired live. SendMessage(channelID, message).
-app.post("/api/bridge/chat/send-message", requireAuth, async (req, res, next) => {
-  if (!requireWriteConfirmation(req, res, "This sends a message to that channel. This must be confirmed explicitly.")) {
-    return;
-  }
-  const body = req.body || {};
-  const message = typeof body.message === "string" ? body.message : "";
-  if (!message.trim()) {
-    res.status(400).json({ ok: false, error: "MESSAGE_EMPTY", message: "A message is required." });
-    return;
-  }
-  const channelID = body.channelID !== undefined ? Number(body.channelID) || 0 : 0;
-  await dispatchBridgeWrite(req, res, next, "LSC", "SendMessage", [channelID, message]);
 });
 
 // --- R89 FINANCIAL WRITES ---------------------------------------------------
@@ -12098,16 +12096,16 @@ app.get("/api/bridge/calendar", requireAuth, async (req, res, next) => {
   }
 });
 
-// --- R60 plumbing sweep: lookup / presence / social reads (no UI) -------------
-// PLUMBING ONLY: three routes make the lookupSvc SEARCH, onlineStatus presence,
-// and LSC/account social READS reachable + decodable so a later goal builds UI
+// --- R60 plumbing sweep: lookup / presence reads (no UI) ---------------------
+// PLUMBING ONLY: two routes make the lookupSvc SEARCH and onlineStatus presence
+// reads reachable + decodable so a later goal builds UI
 // cheaply. No panel/tab/store slice ships. Every read is an allowlisted
 // TOP-LEVEL call on the held session, scoped to the logged-in character
 // server-side; each route batches its reads with Promise.allSettled (empty ≠
 // failed; each read carries its own error code), and a SESSION_NOT_FOUND on any
 // read surfaces via next() so the page returns to character select. The raw
 // retail-shaped results ship out; the browser decodes them
-// (web/src/bridge/{lookup,presence,social}.ts).
+// (web/src/bridge/{lookup,presence}.ts).
 
 // A trimmed string from a query param, or "". Used for the lookup search term.
 function stringQuery(value) {
@@ -12255,49 +12253,6 @@ app.get("/api/bridge/presence", requireAuth, async (req, res, next) => {
         onlineStatus: settledCode(onlineStatus),
         initialState: settledCode(initialState),
         prime: settledCode(prime),
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// GET /api/bridge/social — two unrelated social reads (Promise.allSettled):
-//   • LSC.GetChannels() -> a Rowset with the 16 channel-info columns, one line
-//     per channel the session is in (the docked Local channel). ownerID kept as
-//     data (R7d); the message/join/leave LSC writers stay refused.
-//   • account.GetDefaultContactCost() -> ⚠ null in this world (a `return null`
-//     stub; the CSPA contact charge is not modelled). A legitimate "no default
-//     cost" answer, not a failure.
-app.get("/api/bridge/social", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) {
-    return;
-  }
-  try {
-    const [channels, defaultContactCost] = await Promise.allSettled([
-      heldTopLevelCall(held, req.webSessionID, "LSC", "GetChannels", [], null),
-      heldTopLevelCall(held, req.webSessionID, "account", "GetDefaultContactCost", [], null),
-    ]);
-    for (const outcome of [channels, defaultContactCost]) {
-      if (outcome.status === "rejected" && outcome.reason && outcome.reason.code === "SESSION_NOT_FOUND") {
-        next(outcome.reason);
-        return;
-      }
-    }
-    const settledCode = (outcome) =>
-      outcome.status === "rejected"
-        ? String((outcome.reason && outcome.reason.code) || "READ_FAILED")
-        : null;
-    const settledValue = (outcome) =>
-      outcome.status === "fulfilled" ? outcome.value.result : null;
-    res.json({
-      ok: true,
-      channels: settledValue(channels),
-      defaultContactCost: settledValue(defaultContactCost),
-      errors: {
-        channels: settledCode(channels),
-        defaultContactCost: settledCode(defaultContactCost),
       },
     });
   } catch (error) {
@@ -14501,85 +14456,6 @@ app.get("/api/bridge/killboard", requireAuth, async (req, res, next) => {
     );
     res.json({ ok: true, requested: { limit, startKillID }, killmails: outcome.result });
   } catch (error) {
-    next(error);
-  }
-});
-
-// --- R7 Local + Corp chat ---------------------------------------------------
-// The browser reads a channel's member roster + recent backlog and sends
-// messages to Local or Corp on the held session. Chat delivery bypasses the
-// notification drain, so READ is a backlog poll: the panel polls /chat/read on
-// a modest interval while it is open, and stops when it closes. The BFF holds
-// the bridgeSessionID server-side (never in browser JS); the browser addresses
-// channels by name only. Wire contract: docs/bridge-wire-contract.md.
-
-const CHAT_CHANNELS = new Set(["local", "corp"]);
-
-function normalizeChatChannel(res, value) {
-  const channel = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!CHAT_CHANNELS.has(channel)) {
-    res.status(400).json({
-      ok: false,
-      error: "INVALID_CHANNEL",
-      message: "channel must be 'local' or 'corp'.",
-    });
-    return null;
-  }
-  return channel;
-}
-
-app.get("/api/bridge/chat/:channel", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) {
-    return;
-  }
-  const channel = normalizeChatChannel(res, req.params.channel);
-  if (!channel) {
-    return;
-  }
-  try {
-    const outcome = await gateway.readChat(
-      held.bridgeSessionID,
-      channel,
-      { userid: held.accountID },
-      { limit: Number(req.query.limit) || undefined },
-    );
-    res.json({ ok: true, chat: outcome.chat, notifications: outcome.notifications });
-  } catch (error) {
-    if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
-    }
-    next(error);
-  }
-});
-
-app.post("/api/bridge/chat/:channel/send", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) {
-    return;
-  }
-  const channel = normalizeChatChannel(res, req.params.channel);
-  if (!channel) {
-    return;
-  }
-  const message = typeof req.body?.message === "string" ? req.body.message : "";
-  if (!message.trim()) {
-    res.status(400).json({
-      ok: false,
-      error: "EMPTY_MESSAGE",
-      message: "message must be a non-empty string.",
-    });
-    return;
-  }
-  try {
-    const outcome = await gateway.sendChat(held.bridgeSessionID, channel, message, {
-      userid: held.accountID,
-    });
-    res.json({ ok: true, chat: outcome.chat, notifications: outcome.notifications });
-  } catch (error) {
-    if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
-    }
     next(error);
   }
 });
@@ -18812,6 +18688,16 @@ app.use("/assets", express.static(path.join(webAppDir, "assets"), {
   immutable: true,
   maxAge: "30d",
 }));
+
+// API requests must never fall through to the SPA document. In particular, a
+// retired endpoint needs a real refusal rather than index.html with a 200.
+app.use("/api", (req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: "API_ROUTE_NOT_FOUND",
+    message: "This web companion API route is not available.",
+  });
+});
 
 app.use(express.static(webAppDir));
 app.get(/.*/, (req, res) => {

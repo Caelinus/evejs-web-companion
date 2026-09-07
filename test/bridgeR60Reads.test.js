@@ -1,6 +1,6 @@
 "use strict";
 
-// Goal R60 (PLUMBING ONLY — no UI): the three lookup/presence/social READ routes
+// Goal R60 (PLUMBING ONLY — no UI): the lookup/presence READ routes
 // wired for later UI. Each dispatches allowlisted TOP-LEVEL reads on the held
 // session:
 //   • GET /api/bridge/lookup — the nine lookupSvc SEARCH reads. ⚠ THESE TAKE A
@@ -9,8 +9,6 @@
 //     empty ≠ failed.
 //   • GET /api/bridge/presence — onlineStatus.GetOnlineStatus([targetID]) +
 //     GetInitialState (arg-less) + Prime (arg-less).
-//   • GET /api/bridge/social — LSC.GetChannels (arg-less) + account.GetDefault-
-//     ContactCost (arg-less).
 // The fixtures are the real retail shapes captured live from Farmer on
 // 2026-07-22. Wire contract: docs/bridge-wire-contract.md.
 
@@ -120,31 +118,6 @@ const INITIAL_STATE_RESULT = rowset(
   ["contactID", "online"],
   [],
 );
-// social: one Local channel; null contact cost.
-const CHANNELS_RESULT = rowset(
-  "util.Rowset",
-  [
-    "channelID",
-    "ownerID",
-    "displayName",
-    "motd",
-    "comparisonKey",
-    "memberless",
-    "password",
-    "mailingList",
-    "cspa",
-    "temporary",
-    "languageRestriction",
-    "groupMessageID",
-    "channelMessageID",
-    "mode",
-    "subscribed",
-    "estimatedMemberCount",
-  ],
-  [list([30000144, 1, "Local", "motd", "local_30000144", false, null, false, 0, false, false, 0, 0, 3, true, 1])],
-);
-const DEFAULT_CONTACT_COST_RESULT = null;
-
 const RESULTS = {
   "lookupSvc.LookupCharacters": CHARACTERS_RESULT,
   "lookupSvc.LookupEvePlayerCharacters": CHARACTERS_RESULT,
@@ -158,8 +131,6 @@ const RESULTS = {
   "onlineStatus.GetOnlineStatus": ONLINE_STATUS_RESULT,
   "onlineStatus.GetInitialState": INITIAL_STATE_RESULT,
   "onlineStatus.Prime": INITIAL_STATE_RESULT,
-  "LSC.GetChannels": CHANNELS_RESULT,
-  "account.GetDefaultContactCost": DEFAULT_CONTACT_COST_RESULT,
 };
 
 function fakeAuth() {
@@ -262,6 +233,23 @@ async function apiRequest(baseUrl, path, options = {}) {
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   return { response, payload: await response.json() };
+}
+
+/**
+ * A removed API route can intentionally have no JSON response body. Keep this
+ * separate from apiRequest so the removal contract tests the HTTP boundary,
+ * rather than accidentally depending on Express's fallback representation.
+ */
+async function rawApiRequest(baseUrl, path, options = {}) {
+  const headers = { "content-type": "application/json", ...(options.headers || {}) };
+  if (options.authenticated !== false) {
+    headers.cookie = `evejs_web_poc=${COOKIE_TOKEN}`;
+  }
+  return ORIGINAL_FETCH(`${baseUrl}${path}`, {
+    method: options.method || "GET",
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
 }
 
 async function selectOnServer(baseUrl) {
@@ -377,22 +365,41 @@ test("presence defaults targetID to 0 when the query omits it", async () => {
   assert.deepEqual(callFor(gateway, "GetOnlineStatus").args, [0]);
 });
 
-test("GET /api/bridge/social dispatches LSC.GetChannels + account.GetDefaultContactCost (arg-less)", async () => {
+test("retired companion chat endpoints are unavailable and never dispatch LSC", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });
   await selectOnServer(baseUrl);
 
-  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/social");
-  assert.equal(response.status, 200);
-  assert.equal(payload.ok, true);
-  assert.deepEqual(payload.channels, CHANNELS_RESULT);
-  assert.equal(payload.defaultContactCost, null);
-  assert.deepEqual(payload.errors, { channels: null, defaultContactCost: null });
+  const retiredRequests = [
+    { method: "GET", path: "/api/bridge/chat/local" },
+    { method: "POST", path: "/api/bridge/chat/local/send", body: { message: "o7" } },
+    {
+      method: "POST",
+      path: "/api/bridge/chat/send-message",
+      body: { channelID: 0, message: "o7", confirm: true },
+    },
+    { method: "GET", path: "/api/bridge/social" },
+    {
+      method: "POST",
+      path: "/api/bridge/call",
+      body: { service: "LSC", method: "GetChannels", args: [], kwargs: null },
+    },
+    {
+      method: "POST",
+      path: "/api/bridge/call",
+      body: { service: "LSC", method: "SendMessage", args: [0, "o7"], kwargs: null },
+    },
+  ];
 
-  assert.equal(callFor(gateway, "GetChannels").service, "LSC");
-  assert.deepEqual(callFor(gateway, "GetChannels").args, []);
-  assert.equal(callFor(gateway, "GetDefaultContactCost").service, "account");
-  assert.deepEqual(callFor(gateway, "GetDefaultContactCost").args, []);
+  for (const request of retiredRequests) {
+    const response = await rawApiRequest(baseUrl, request.path, request);
+    assert.equal(response.status, 404, `${request.method} ${request.path}`);
+  }
+  assert.deepEqual(
+    gateway.calls.call.filter((call) => call.service === "LSC"),
+    [],
+    "retired chat requests must stop at the BFF, never reaching the gateway",
+  );
 });
 
 test("one failed lookup read carries its own error code; the rest still return (empty ≠ failed)", async () => {
@@ -429,7 +436,7 @@ test("a lost live session unwinds each R60 route (404 SESSION_NOT_FOUND)", async
       throw error;
     },
   });
-  for (const path of ["/api/bridge/lookup", "/api/bridge/presence", "/api/bridge/social"]) {
+  for (const path of ["/api/bridge/lookup", "/api/bridge/presence"]) {
     const { baseUrl } = await startTestServer({ gateway });
     await selectOnServer(baseUrl);
     const { response, payload } = await apiRequest(baseUrl, path);
@@ -439,7 +446,7 @@ test("a lost live session unwinds each R60 route (404 SESSION_NOT_FOUND)", async
 });
 
 test("each R60 route requires a live session (409 NO_LIVE_SESSION with no character online)", async () => {
-  for (const path of ["/api/bridge/lookup", "/api/bridge/presence", "/api/bridge/social"]) {
+  for (const path of ["/api/bridge/lookup", "/api/bridge/presence"]) {
     const { baseUrl } = await startTestServer();
     const { response, payload } = await apiRequest(baseUrl, path);
     assert.equal(response.status, 409, path);

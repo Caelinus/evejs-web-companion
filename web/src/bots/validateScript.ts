@@ -158,9 +158,6 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
             : "Pick the pilot to invite.",
       });
     }
-    if (arg.kind === "text" && arg.text.trim().length === 0) {
-      problems.push({ path: step.id, sentence: "Write the message this step says." });
-    }
     if (arg.kind === "destination" && arg.ref.id === null) {
       problems.push({ path: step.id, sentence: "Pick where this step sets the destination to." });
     }

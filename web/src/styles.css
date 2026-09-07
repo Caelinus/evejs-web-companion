@@ -475,7 +475,7 @@
     border-color: var(--color-line-strong);
     color: var(--color-text);
   }
-  /* Active/selected state (nav tabs, chat sub-tabs, selected agent chip). */
+  /* Active/selected state (nav tabs and selected-agent chip). */
   button.active {
     background: linear-gradient(180deg, var(--color-accent-bright) 0%, var(--color-accent) 100%);
     border-color: var(--color-accent-bright);

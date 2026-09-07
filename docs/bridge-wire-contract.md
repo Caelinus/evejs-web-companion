@@ -1,6 +1,8 @@
 # Bridge wire contract (v1) — whitelisted `callMethod` path
 
-**Status:** Active, established by goal R1 (2026-07-18); extended by goal R2 (persistent browser-backed sessions, same date), goal R3 (2026-07-19, the bound-object bridge — see "Bound-object bridge (R3)"), goal R4 (agents/missions + deferred call responses), goal R5a (2026-07-19, the space bridge — see "Space bridge & session-into-space (R5a)"), goal R5b (2026-07-19, the client-side route solver + browser autopilot decide-loop — see "Client-side route solver & browser autopilot (R5b)"), goal R6 (2026-07-19, courier completion + the Step-12 reward readout — see "Courier completion & reward readout (R6)"), goal R6a (2026-07-19, the Agent Finder — a static agent-list route + client-side jump-distance sort; see "Agent Finder static route (R6a)"), and goal R7 (2026-07-19, Local + Corp chat — presence/read/send for the browser session; see "Local + Corp chat (R7)"), and goal R35 (2026-07-21, the distribution-mission rail measured on the live server — the refused-`DoAction` shape, why the journal cannot report success, and the courier package load re-pointed from `/inventory/move` to the verifying `/inventory/transfer`; see "The distribution-mission rail, as measured live (R35)"). Later goals build on this contract; change it deliberately and update this file with the change.
+**Status:** Active, established by goal R1 (2026-07-18); extended by goal R2 (persistent browser-backed sessions, same date), goal R3 (2026-07-19, the bound-object bridge — see "Bound-object bridge (R3)"), goal R4 (agents/missions + deferred call responses), goal R5a (2026-07-19, the space bridge — see "Space bridge & session-into-space (R5a)"), goal R5b (2026-07-19, the client-side route solver + browser autopilot decide-loop — see "Client-side route solver & browser autopilot (R5b)"), goal R6 (2026-07-19, courier completion + the Step-12 reward readout — see "Courier completion & reward readout (R6)"), goal R6a (2026-07-19, the Agent Finder — a static agent-list route + client-side jump-distance sort; see "Agent Finder static route (R6a)"), and goal R35 (2026-07-21, the distribution-mission rail measured on the live server — the refused-`DoAction` shape, why the journal cannot report success, and the courier package load re-pointed from `/inventory/move` to the verifying `/inventory/transfer`; see "The distribution-mission rail, as measured live (R35)"). Later goals build on this contract; change it deliberately and update this file with the change.
+
+> **Current scope update (2026-09-07):** The web companion's Local/Corp chat integration is retired. There are no companion `/chat/read`, `/chat/send`, or `/api/bridge/chat/*` routes; `LSC.GetChannels` and `LSC.SendMessage` are not browser calls; and no synthetic web-session XMPP bridge remains. Retail/XMPP chat is unaffected. The R7 material below is retained as historical architecture and execution context only.
 
 This is the transport seam that lets the browser drive real EveJS `Handle_*` calls. The unit it mirrors is the retail call tuple **(service, method, args, kwargs)**; the gateway dispatches it through the same seam a retail client hits: `serviceManager.lookup(service).callMethod(method, args, session, kwargs)`.
 
@@ -1787,6 +1789,8 @@ reconciles the docked station:
   `/api/map/graph` and `/api/map/resolve` — NOT a gateway/bridge call.
 
 ## Local + Corp chat (R7)
+
+> **Retired from the web companion on 2026-09-07.** This section records the former R7 design; it is not part of the current wire contract.
 
 Retail chat runs over XMPP, and its delivery **deliberately bypasses** the
 `sendServiceNotification`/`sendNotification`/`sendSessionChange` surfaces the

@@ -197,24 +197,6 @@ export const MAX_ISK_ARG = 100_000_000_000;
 export const MIN_QTY_ARG = 1;
 export const MAX_QTY_ARG = 10_000_000;
 
-/**
- * A short free-text argument a player writes (a chat message). One line, capped
- * well under the document byte ceiling; the codec strips control characters the
- * same way it does for names.
- */
-export const MAX_TEXT_ARG_LEN = 200;
-
-/** The chat channels a block can talk in — a closed vocabulary, like ItemPlace. */
-export type ChatChannelArg = "local" | "corp";
-export const CHAT_CHANNEL_ARGS: readonly ChatChannelArg[] = Object.freeze<ChatChannelArg[]>([
-  "local",
-  "corp",
-]);
-
-/** The hunt block's editable defaults — shared by the editor and the runtime. */
-export const DEFAULT_HUNT_MAX_JUMPS = 3;
-export const DEFAULT_HUNT_RANGE_AU = 14;
-
 export type Arg =
   | { readonly kind: "belt"; readonly belt: BeltArg }
   | { readonly kind: "station"; readonly ref: WorldRef }
@@ -245,8 +227,6 @@ export type Arg =
   | { readonly kind: "qty"; readonly value: number }
   /** A character to act on (invite to a fleet). null charID = an unbound slot to pick. */
   | { readonly kind: "character"; readonly charID: number | null; readonly name: string | null }
-  /** A chat channel to talk in — a closed vocabulary, validated by the codec. */
-  | { readonly kind: "chatChannel"; readonly channel: ChatChannelArg }
   /**
    * WHERE TO GO: a station or a whole solar system. Distinct from the `station`
    * kind because the autopilot can be pointed at a system (arrive in space, no
@@ -255,10 +235,7 @@ export type Arg =
    */
   | { readonly kind: "destination"; readonly ref: WorldRef }
   /** Which rock a mining step reaches for first. */
-  | { readonly kind: "rockPick"; readonly pick: RockPick }
-  /** A short line of text the player writes (a chat message). Never empty at run
-   * time — the validator flags a blank one before the bot can start. */
-  | { readonly kind: "text"; readonly text: string };
+  | { readonly kind: "rockPick"; readonly pick: RockPick };
 
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";
@@ -306,11 +283,6 @@ export type Condition =
    * — for a hauler, a looter, a salvager, anything whose hold is not ore.
    */
   | { readonly kind: "cargo-full"; readonly fraction: number }
-  /**
-   * How many OTHER pilots are in this solar system, from the local chat roster.
-   * `count` is the number it takes to fire: "more than 0" is "I am not alone".
-   */
-  | { readonly kind: "players-in-system-above"; readonly count: number }
   /** A player's ship on this grid has THIS ship locked — you are being hunted. */
   | { readonly kind: "targeted-by-player" }
   /** One of your drones out in space has dropped below this health. */
@@ -331,7 +303,6 @@ export const CONDITION_KINDS: readonly ConditionKind[] = Object.freeze<Condition
   "wallet-above",
   "hostile-on-grid",
   "cargo-full",
-  "players-in-system-above",
   "targeted-by-player",
   "drone-health-below",
 ]);
@@ -351,13 +322,9 @@ export function conditionSites(kind: ConditionKind): readonly ConditionSite[] {
   // wrong moment (the belt-empty-on-tick-one trap). As an always-armed watch they
   // fail safe by simply not firing.
   //   • hostile-on-grid / targeted-by-player / drone-health-below — grid reads.
-  //   • players-in-system-above — an awareness watch on who else is here; it is a
-  //     roster read, not an own-ship fact, and "do this step until someone shows
-  //     up" is a watch in disguise.
   return kind === "hostile-on-grid" ||
     kind === "targeted-by-player" ||
-    kind === "drone-health-below" ||
-    kind === "players-in-system-above"
+    kind === "drone-health-below"
     ? ["interrupt"]
     : ["until", "interrupt"];
 }
@@ -472,12 +439,8 @@ export type MacroID =
   | "create-fleet"
   | "invite-to-fleet"
   | "join-fleet"
-  // ── The PvP set. Camp a grid / roam and hunt another player's ship.
+  // ── The PvP set. Camp a grid and attack another player's ship.
   | "attack-player"
-  | "hunt-player"
-  // ── Social. Say something in a chat channel (pairs with a branch for
-  //    "announce when a check holds").
-  | "send-chat"
   // ── Movement extras. Point the autopilot somewhere; run for the nearest dock.
   | "set-destination"
   | "dock-at-nearest"
@@ -533,8 +496,6 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "invite-to-fleet",
   "join-fleet",
   "attack-player",
-  "hunt-player",
-  "send-chat",
   "set-destination",
   "dock-at-nearest",
   "remote-cap",

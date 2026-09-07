@@ -85,7 +85,7 @@ test("in space shows the flight tabs and hides fitting + travel", () => {
 });
 
 test("the 'both' tabs (including Activity, Fleet and both wallets) show in either state", () => {
-  const both = ["inventory", "market", "activity", "fleet", "wallet", "corpWallet", "chat"] as const;
+  const both = ["inventory", "market", "activity", "fleet", "wallet", "corpWallet"] as const;
   for (const id of both) {
     assert.ok(idsOf(true).includes(id), `${id} visible docked`);
     assert.ok(idsOf(false).includes(id), `${id} visible in space`);

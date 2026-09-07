@@ -61,12 +61,6 @@ export interface ScriptObservation {
    * inventory read a hauler needs.
    */
   readonly cargoFraction?: number | null;
-  /**
-   * How many OTHER pilots share this solar system (self excluded). Read from the
-   * local chat roster, only when a watch or a hunt step needs it. null =
-   * unreadable, which never fires a watch.
-   */
-  readonly otherPilotsInSystem?: number | null;
   /** True when a PLAYER's ship on this grid has locked this ship. */
   readonly targetedByPlayer?: boolean | null;
   /** The lowest health, 0..1, among YOUR drones out in space; null with none out. */
@@ -179,31 +173,6 @@ export interface ScriptObservation {
   readonly activeShipID?: number | null;
   /** Item ids the repair shop quotes as DAMAGED (read when a repair step is active). */
   readonly damagedItemIDs?: readonly number[] | null;
-  // ── Hunt reads (the hunt-player block). Read ONLY when a hunt step is active,
-  //    so no other bot pays for a chat-roster read or a directional scan.
-  /**
-   * The OTHER pilots in this solar system, from the local chat roster (self
-   * already removed). Empty = genuinely alone; null = the roster was unreadable.
-   */
-  readonly localPlayers?: readonly { readonly characterID: number; readonly name: string | null }[] | null;
-  /**
-   * This tick's directional-scan hits (entity ids within the block's range).
-   * The scan sees everything — celestials included — so the block subtracts what
-   * is already on grid before chasing a hit. null = the scan was unreadable.
-   */
-  readonly dscanHitIDs?: readonly number[] | null;
-  /**
-   * Where the roam may go next: the current system's distance from the hunt's
-   * home system, and each neighbouring system with its own distance. null when
-   * the map could not be read this tick.
-   */
-  readonly huntRoam?: {
-    readonly jumpsFromAnchor: number | null;
-    readonly neighbors: readonly {
-      readonly systemID: number;
-      readonly jumpsFromAnchor: number | null;
-    }[];
-  } | null;
   /**
    * The character's PI colonies, projected to what the restart block needs:
    * each colony's extractor pins with their last program + expiry. Read only
@@ -277,8 +246,6 @@ export function evaluateCondition(condition: Condition, obs: ScriptObservation):
       return fromBool(obs.hostileOnGrid);
     case "cargo-full":
       return atLeast(obs.cargoFraction ?? null, condition.fraction);
-    case "players-in-system-above":
-      return above(obs.otherPilotsInSystem ?? null, condition.count);
     case "targeted-by-player":
       return fromBool(obs.targetedByPlayer ?? null);
     case "drone-health-below":

@@ -98,8 +98,9 @@ test("encode then decode is a lossless round trip", () => {
 
 // The golden fixture only exercises belt/station/equipment args, so on its own it
 // cannot catch a serialiser that forgets a kind. This document uses EVERY OTHER
-// arg kind (count, corp, agent, fitting, itemType, place, bookmark) — if any is
-// dropped on encode it round-trips lossily and this fails.
+// arg kind (count, corp, agent, fitting, itemType, place, bookmark, character,
+// destination, rockPick) — if any is dropped on encode it round-trips lossily
+// and this fails.
 function everyArgKind(): BotScript {
   return {
     format: SCRIPT_FORMAT,
@@ -166,30 +167,11 @@ function everyArgKind(): BotScript {
       {
         id: "a8",
         kind: "macro",
-        macro: "hunt-player",
-        args: {
-          only: { kind: "character", charID: 90000002, name: "Prey Pilot" },
-          maxJumps: { kind: "count", value: 5 },
-          range: { kind: "count", value: 14 },
-        },
-      },
-      {
-        id: "a9",
-        kind: "macro",
-        macro: "send-chat",
-        args: {
-          channel: { kind: "chatChannel", channel: "corp" },
-          message: { kind: "text", text: "Shields are dropping — need a hand at the belt." },
-        },
-      },
-      {
-        id: "a10",
-        kind: "macro",
         macro: "set-destination",
         args: { destination: { kind: "destination", ref: { entity: "system", id: 30000142, name: "Jita", systemName: null } } },
       },
       {
-        id: "a11",
+        id: "a9",
         kind: "macro",
         macro: "mine-at-belt",
         args: {
@@ -222,7 +204,7 @@ test("a SYSTEM destination keeps its own entity; a belt in that slot is refused"
   assert.equal(refused.ok, false, "a belt is not somewhere the autopilot can be sent");
 });
 
-test("the new watch kinds round-trip, and a pilot COUNT is not dropped", () => {
+test("the current watch kinds round-trip", () => {
   const doc: BotScript = {
     format: SCRIPT_FORMAT,
     version: SCRIPT_VERSION,
@@ -231,17 +213,14 @@ test("the new watch kinds round-trip, and a pilot COUNT is not dropped", () => {
     home: { entity: "station", id: null, name: null, systemName: null, starting: true },
     interrupts: [
       { id: "w1", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" },
-      { id: "w2", when: { kind: "players-in-system-above", count: 3 }, respond: "alert" },
-      { id: "w3", when: { kind: "targeted-by-player" }, respond: "alert" },
-      { id: "w4", when: { kind: "drone-health-below", fraction: 0.4 }, respond: "pause" },
-      { id: "w5", when: { kind: "cargo-full", fraction: 0.85 }, respond: "pause" },
+      { id: "w2", when: { kind: "targeted-by-player" }, respond: "alert" },
+      { id: "w3", when: { kind: "drone-health-below", fraction: 0.4 }, respond: "pause" },
+      { id: "w4", when: { kind: "cargo-full", fraction: 0.85 }, respond: "pause" },
     ],
     program: [{ id: "s1", kind: "macro", macro: "undock", args: {} }],
   };
   const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
   assert.deepStrictEqual(round, doc);
-  const crowd = round.interrupts.find((r) => r.id === "w2");
-  assert.ok(crowd !== undefined && "count" in crowd.when && crowd.when.count === 3, "the count must survive the export");
 });
 
 test("an interrupt-only condition is refused as a step's stop-when", () => {
@@ -262,6 +241,28 @@ test("encode then decode round-trips EVERY arg kind losslessly", () => {
   const { doc, warnings } = mustAccept(decodeScriptText(text));
   assert.deepStrictEqual(doc, everyArgKind());
   assert.deepStrictEqual([...warnings], []);
+});
+
+test("legacy web-companion chat constructs are refused rather than stripped", () => {
+  for (const macro of ["hunt-player", "send-chat"]) {
+    const legacy = clone();
+    legacy.program = [{ id: `legacy-${macro}`, kind: "macro", macro, args: {} }];
+    assert.equal(
+      mustRefuse(decodeScriptValue(legacy)),
+      `This script uses "${macro}", which needs the retired web-companion chat feature.`,
+    );
+  }
+
+  const legacyCondition = clone();
+  legacyCondition.interrupts.push({
+    id: "legacy-local-watch",
+    when: { kind: "players-in-system-above", count: 0 },
+    respond: "alert",
+  });
+  assert.equal(
+    mustRefuse(decodeScriptValue(legacyCondition)),
+    "This script uses \"players-in-system-above\", which needs the retired web-companion chat feature.",
+  );
 });
 
 test("a valid branch decodes; nested / all-empty / off-site branches are refused", () => {

@@ -162,16 +162,6 @@ test("cargo-full: the ORDINARY hold, tri-state, and unreadable never fires", () 
   assert.equal(evaluateCondition(full, obs({ oreHoldFraction: 1, cargoFraction: 0 })), "not-met");
 });
 
-test("players-in-system-above: zero means anyone at all; alone is not-met; unread cannot tell", () => {
-  const anyone = { kind: "players-in-system-above", count: 0 } as const;
-  assert.equal(evaluateCondition(anyone, obs({ otherPilotsInSystem: 1 })), "met");
-  assert.equal(evaluateCondition(anyone, obs({ otherPilotsInSystem: 0 })), "not-met");
-  assert.equal(evaluateCondition(anyone, obs({ otherPilotsInSystem: null })), "cannot-tell");
-  const crowd = { kind: "players-in-system-above", count: 3 } as const;
-  assert.equal(evaluateCondition(crowd, obs({ otherPilotsInSystem: 3 })), "not-met", "more THAN three");
-  assert.equal(evaluateCondition(crowd, obs({ otherPilotsInSystem: 4 })), "met");
-});
-
 test("targeted-by-player: tri-state over the lock reading", () => {
   const locked = { kind: "targeted-by-player" } as const;
   assert.equal(evaluateCondition(locked, obs({ targetedByPlayer: true })), "met");
@@ -191,7 +181,7 @@ test("drone-health-below: no drones out reads cannot-tell, never healthy", () =>
 });
 
 test("the new grid/awareness conditions are interrupt-only (the belt-empty guard)", () => {
-  for (const kind of ["targeted-by-player", "drone-health-below", "players-in-system-above"] as const) {
+  for (const kind of ["targeted-by-player", "drone-health-below"] as const) {
     assert.equal(conditionAllowedAt(kind, "until"), false, `${kind} must not be a stop-when`);
     assert.equal(conditionAllowedAt(kind, "interrupt"), true, `${kind} must be usable as a watch`);
   }

@@ -72,7 +72,6 @@ const PANELS = [
   "Bots",
   // The player Bot Builder editor.
   "BotBuilder",
-  "Chat",
   // R50 — the two wallet tabs.
   "Wallet",
   "CorpWallet",

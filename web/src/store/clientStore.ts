@@ -31,8 +31,6 @@ import type {
   AgentFinderState,
   BotsState,
   AgentsState,
-  ChatChannelState,
-  ChatState,
   CharacterSummary,
   FlightState,
   FleetCenterState,
@@ -175,7 +173,6 @@ export interface ClientState {
   readonly missionBot: MissionBotState;
   readonly customBot: CustomBotState;
   readonly bots: BotsState;
-  readonly chat: ChatState;
   readonly live: LiveState;
   readonly names: NamesState;
   readonly feed: FeedSlice;
@@ -679,22 +676,6 @@ const INITIAL_TRAVEL: TravelState = Object.freeze({
   failureReason: null,
 });
 
-const EMPTY_CHAT_CHANNEL: ChatChannelState = Object.freeze({
-  roomName: null,
-  corporationID: null,
-  solarSystemID: null,
-  roster: Object.freeze([]) as ChatChannelState["roster"],
-  messages: Object.freeze([]) as ChatChannelState["messages"],
-  loaded: false,
-});
-
-const INITIAL_CHAT: ChatState = Object.freeze({
-  activeChannel: "local" as ChatState["activeChannel"],
-  local: EMPTY_CHAT_CHANNEL,
-  corp: EMPTY_CHAT_CHANNEL,
-  error: null,
-});
-
 // Static reference names (goal R7c): resolved once, kept for the app's life
 // (they can't change). Not reset on offline/logout — the flow's name cache is
 // kept in step, and re-resolving immutable data would only cause needless
@@ -706,10 +687,6 @@ const INITIAL_NAMES: NamesState = Object.freeze({
 // R10 live channel: how many pushed session notifications to keep. A bounded
 // tail — this is a liveness record for the page to react to, not a log.
 const LIVE_NOTIFICATION_LIMIT = 50;
-// How many messages a channel backlog keeps once live pushes start appending.
-// Matches the gateway's default backlog read so live and polled state converge.
-const CHAT_BACKLOG_LIMIT = 50;
-
 const INITIAL_LIVE: LiveState = Object.freeze({
   status: "idle" as LiveState["status"],
   epoch: null,
@@ -763,7 +740,6 @@ export interface ClientStore {
   readonly missionBot: ReadableSignal<MissionBotState>;
   readonly customBot: ReadableSignal<CustomBotState>;
   readonly bots: ReadableSignal<BotsState>;
-  readonly chat: ReadableSignal<ChatState>;
   readonly live: ReadableSignal<LiveState>;
   readonly names: ReadableSignal<NamesState>;
   readonly feed: ReadableSignal<FeedSlice>;
@@ -822,7 +798,6 @@ export function createClientStore(): ClientStore {
   const missionBot = createSignal<MissionBotState>(INITIAL_MISSION_BOT);
   const customBot = createSignal<CustomBotState>(INITIAL_CUSTOM_BOT);
   const bots = createSignal<BotsState>(INITIAL_BOTS);
-  const chat = createSignal<ChatState>(INITIAL_CHAT);
   const live = createSignal<LiveState>(INITIAL_LIVE);
   const names = createSignal<NamesState>(INITIAL_NAMES);
   const feed = createSignal<FeedSlice>(INITIAL_FEED);
@@ -868,7 +843,6 @@ export function createClientStore(): ClientStore {
     missionBot: missionBot.get(),
     customBot: customBot.get(),
     bots: bots.get(),
-    chat: chat.get(),
     live: live.get(),
     names: names.get(),
     feed: feed.get(),
@@ -920,7 +894,6 @@ export function createClientStore(): ClientStore {
         travel.set(INITIAL_TRAVEL);
         bot.set(INITIAL_BOT);
         customBot.set(INITIAL_CUSTOM_BOT);
-        chat.set(INITIAL_CHAT);
         live.set(INITIAL_LIVE);
         break;
       case "character/list": {
@@ -980,7 +953,6 @@ export function createClientStore(): ClientStore {
         travel.set(INITIAL_TRAVEL);
         bot.set(INITIAL_BOT);
         customBot.set(INITIAL_CUSTOM_BOT);
-        chat.set(INITIAL_CHAT);
         live.set(INITIAL_LIVE);
         break;
       case "character/offline":
@@ -1014,7 +986,6 @@ export function createClientStore(): ClientStore {
         travel.set(INITIAL_TRAVEL);
         bot.set(INITIAL_BOT);
         customBot.set(INITIAL_CUSTOM_BOT);
-        chat.set(INITIAL_CHAT);
         live.set(INITIAL_LIVE);
         break;
       case "station/relocated": {
@@ -2193,55 +2164,6 @@ export function createClientStore(): ClientStore {
       case "mission-bot/cleared":
         missionBot.set(INITIAL_MISSION_BOT);
         break;
-      case "chat/loaded": {
-        const current = chat.get();
-        chat.set({
-          ...current,
-          [event.channel]: event.channelState,
-          // A successful read clears any stale read/send error.
-          error: null,
-        });
-        break;
-      }
-      case "chat/active":
-        chat.set({ ...chat.get(), activeChannel: event.channel });
-        break;
-      case "chat/error":
-        chat.set({ ...chat.get(), error: event.message });
-        break;
-      case "chat/cleared":
-        chat.set(INITIAL_CHAT);
-        break;
-      // R10 — a live-pushed message. The safety-net poll and the push channel
-      // both deliver the same backlog entries, so an append that duplicates a
-      // message already present is dropped: a message is identified by its
-      // author, text, and timestamp (the gateway backlog entry has no ID).
-      case "chat/message": {
-        const current = chat.get();
-        const channelState = current[event.channel];
-        const incoming = event.message;
-        const duplicate = channelState.messages.some(
-          (existing) =>
-            existing.createdAtMs === incoming.createdAtMs &&
-            existing.characterID === incoming.characterID &&
-            existing.message === incoming.message,
-        );
-        if (duplicate) {
-          break;
-        }
-        const messages = [...channelState.messages, incoming];
-        chat.set({
-          ...current,
-          [event.channel]: {
-            ...channelState,
-            messages: messages.slice(-CHAT_BACKLOG_LIMIT),
-            // A live message proves the channel exists even before its first
-            // read completes.
-            loaded: true,
-          },
-        });
-        break;
-      }
       // R10 — the live push channel's own state.
       case "live/status":
         live.set({ ...live.get(), status: event.status });
@@ -2396,7 +2318,6 @@ export function createClientStore(): ClientStore {
     missionBot: readonlySignal(missionBot),
     customBot: readonlySignal(customBot),
     bots: readonlySignal(bots),
-    chat: readonlySignal(chat),
     live: readonlySignal(live),
     names: readonlySignal(names),
     feed: readonlySignal(feed),

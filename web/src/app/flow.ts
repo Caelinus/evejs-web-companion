@@ -108,7 +108,6 @@ import type {
   ActivityCalendarResponseRow,
   ActivityNotificationRow,
   AgentAction,
-  ChatChannel,
   DestinationMatch,
   DroneInSpace,
   DroneOrderReport,
@@ -120,12 +119,6 @@ import type {
   SlotFamily,
   StationStatic,
 } from "../store/types.ts";
-import {
-  decodeChatChannel,
-  decodeChatChannelName,
-  decodeMessageEntry,
-} from "../bridge/chat.ts";
-import { decodeDirectionalScanHitIDs } from "../bridge/boundScanWrites.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
 import {
   buildSystemGraph,
@@ -899,17 +892,6 @@ export interface AppFlow {
   /** Abort the autopilot loop (it stops and never calls the bridge again). */
   abortRoute(): void;
   /**
-   * R7 — read a chat channel's member roster + recent backlog (Local or Corp)
-   * and push it to the store. The panel polls this while open (READ is a backlog
-   * poll). A lost session unwinds to offline; any other failure surfaces through
-   * the chat slice.
-   */
-  loadChat(channel: ChatChannel): Promise<void>;
-  /** R7 — send a message to a chat channel, then refresh its backlog. */
-  sendChatMessage(channel: ChatChannel, message: string): Promise<void>;
-  /** R7 — switch the active chat tab (Local <-> Corp). */
-  setChatChannel(channel: ChatChannel): void;
-  /**
    * R7c — request display names for a set of `{kind, id}` refs (names-everywhere).
    * Fire-and-forget: unresolved refs are batched into one /api/names round-trip,
    * cached (including a definitive "unknown" so they never refetch), and pushed
@@ -927,7 +909,7 @@ export interface AppFlow {
    * forever in the browser's request queue. The roster owner (App.svelte)
    * keeps push on for the ACTIVE pilot only. A pilot without push still works:
    * every bridge response carries its notification drain and the panels poll;
-   * only live chat/notification push waits until the pilot is active again.
+   * only live notification push waits until the pilot is active again.
    * Enabling while the character is online (re-)opens the stream immediately.
    */
   setLivePush(enabled: boolean): void;
@@ -1054,10 +1036,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   // --- R10 live event channel ---------------------------------------------
   // One SSE subscription per online character, opened when select succeeds and
-  // closed when the character goes offline. It feeds the store the session
-  // notifications the page used to discard and the chat messages the Chat panel
-  // used to poll for. Liveness only: every bridge response still carries its
-  // notification drain, so a channel that never opens costs latency, not data.
+  // closed when the character goes offline. It feeds the store session
+  // notifications the page used to discard. Liveness only: every bridge response
+  // still carries its notification drain, so a channel that never opens costs
+  // latency, not data.
   let liveStream: api.BridgeEventSubscription | null = null;
 
   function applyLiveFrame(frame: unknown): void {
@@ -1086,14 +1068,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const epoch = typeof cursor.epoch === "string" ? cursor.epoch : null;
     const sequence = typeof cursor.sequence === "number" ? cursor.sequence : 0;
 
-    // The gateway could not replay from our cursor: what we hold may have gaps,
-    // so re-read the active chat channel rather than pretend the backlog is
-    // continuous.
+    // The gateway could not replay from our cursor: reset the live cursor rather
+    // than pretending the notification history is continuous.
     if (record.type === "snapshot") {
       store.apply({ type: "live/resynchronize", epoch, sequence });
-      if (record.reason === "cursor_not_replayable") {
-        void loadChat(store.chat.get().activeChannel);
-      }
       return;
     }
     if (record.type !== "event") {
@@ -1101,14 +1079,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
 
     const event = (record.event ?? {}) as Record<string, JsonValue>;
-    if (event.kind === "chat") {
-      const channel = event.channel === "corp" ? "corp" : "local";
-      const message = decodeMessageEntry(event.entry);
-      if (message) {
-        store.apply({ type: "chat/message", channel, message });
-      }
-      return;
-    }
     if (event.kind === "notification") {
       const notification = (event.notification ?? {}) as Record<string, JsonValue>;
       const method = typeof notification.method === "string" ? notification.method : null;
@@ -3164,49 +3134,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       }
     }
     requestNames(refs);
-  }
-
-  // R7 — read a chat channel's roster + backlog and push it to the store. The
-  // panel polls this while open (READ is a backlog poll). A lost session unwinds
-  // to offline; any other failure surfaces through the chat slice so the panel
-  // stays put and shows the reason.
-  async function loadChat(channel: ChatChannel): Promise<void> {
-    try {
-      const raw = await api.readChat(channel, callOptions);
-      store.apply({
-        type: "chat/loaded",
-        channel: decodeChatChannelName(raw, channel),
-        channelState: decodeChatChannel(raw),
-      });
-    } catch (error) {
-      if (isSessionLost(error)) {
-        stopLiveStream();
-        store.apply({ type: "character/offline" });
-        throw error;
-      }
-      store.apply({ type: "chat/error", message: errorWords(error) });
-    }
-  }
-
-  async function sendChatMessage(channel: ChatChannel, message: string): Promise<void> {
-    const trimmed = message.trim();
-    if (!trimmed) {
-      return;
-    }
-    try {
-      await api.sendChat(channel, trimmed, callOptions);
-    } catch (error) {
-      if (isSessionLost(error)) {
-        stopLiveStream();
-        store.apply({ type: "character/offline" });
-        throw error;
-      }
-      store.apply({ type: "chat/error", message: errorWords(error) });
-      return;
-    }
-    // Reflect the sent message immediately by re-reading the channel backlog
-    // (loadChat clears the error on success).
-    await loadChat(channel);
   }
 
   // Load the docked station's agent roster (agentMgr.GetAgents, filtered to the
@@ -5838,13 +5765,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   ): ScriptRunnerDeps {
     const walletWatched = watchedKinds.has("wallet-below") || watchedKinds.has("wallet-above");
     const cargoWatched = watchedKinds.has("cargo-full");
-    const rosterWatched = watchedKinds.has("players-in-system-above");
     // One finder result per run: the found agent does not change under the bot.
     let foundAgentCache: NonNullable<ScriptObservation["foundAgent"]> | null = null;
-    // The hunt's jump-distance table, computed once per home system (a full
-    // breadth-first sweep over the gate graph is too much to redo every tick).
-    let huntDistanceAnchor: number | null = null;
-    let huntDistances: Map<number, number> | null = null;
     const capabilityCache = createCapabilityCache(
       {
         value: initialCapabilities,
@@ -6056,63 +5978,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             cargoFraction = null;
           }
         }
-        // ── Hunt reads (hunt-player only) — the local roster, a directional
-        // sweep, and the roam map. Each best-effort: a failure lands as null
-        // (unreadable, never an empty sky or an empty system).
-        let localPlayers: ScriptObservation["localPlayers"] = null;
-        let dscanHitIDs: ScriptObservation["dscanHitIDs"] = null;
-        let huntRoam: ScriptObservation["huntRoam"] = null;
-        // The roster is read for the hunt block AND for a players-in-system watch.
-        if (macro === "hunt-player" || rosterWatched) {
-          const selfID = store.station.get().online?.characterID ?? null;
-          try {
-            const roster = decodeChatChannel(await api.readChat("local", callOptions)).roster;
-            localPlayers = roster
-              .filter((m) => selfID === null || m.characterID !== selfID)
-              .map((m) => ({ characterID: m.characterID, name: m.name }));
-          } catch {
-            localPlayers = null;
-          }
-        }
-        if (macro === "hunt-player") {
-          // The sweep is a bound scan write (confirm-gated on the BFF); only
-          // meaningful with the ship in space. The server clamps the range to
-          // the ship's own scanner reach.
-          if (status.inSpace === true) {
-            try {
-              const rangeAU =
-                typeof hint.board["huntRangeAU"] === "number" ? (hint.board["huntRangeAU"] as number) : 14;
-              const raw = await api.coneScan(api.DSCAN_FULL_SWEEP_RADIANS, rangeAU * api.AU_METERS, callOptions);
-              dscanHitIDs = decodeDirectionalScanHitIDs(raw);
-            } catch {
-              dscanHitIDs = null;
-            }
-          }
-          try {
-            const current = status.solarSystemID;
-            if (current !== null) {
-              const anchor =
-                typeof hint.board["huntAnchorSystemID"] === "number"
-                  ? (hint.board["huntAnchorSystemID"] as number)
-                  : current;
-              const graph = await loadRouteGraph();
-              if (huntDistances === null || huntDistanceAnchor !== anchor) {
-                huntDistances = distancesFrom(graph, anchor);
-                huntDistanceAnchor = anchor;
-              }
-              const table = huntDistances;
-              huntRoam = {
-                jumpsFromAnchor: table.get(current) ?? null,
-                neighbors: graph.neighbors(current).map((edge) => ({
-                  systemID: edge.toSystemID,
-                  jumpsFromAnchor: table.get(edge.toSystemID) ?? null,
-                })),
-              };
-            }
-          } catch {
-            huntRoam = null;
-          }
-        }
         // The travel reading is a synchronous look at the shared autopilot — no
         // gateway call — so EVERY tick carries it (travel-to-station rides it too).
         const travel: ScriptObservation["travel"] = autopilot
@@ -6287,10 +6152,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           jumpsToDropoff,
           anomalies,
           scannerOperations,
-          localPlayers,
-          dscanHitIDs,
-          huntRoam,
-          otherPilotsInSystem: localPlayers === null ? null : localPlayers.length,
           targetedByPlayer,
           lowestDroneHealth,
           cargoFraction,
@@ -6587,11 +6448,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // ends in space at the destination system.
             await startRoute(action.systemID);
             return;
-          case "sendChat":
-            // The verified R7 chat send. No readable echo to confirm against —
-            // the block is one-shot by design, so a refusal costs one line.
-            await api.sendChat(action.channel, action.message, callOptions);
-            return;
           case "alert":
             deliverAlert(action.message);
             return;
@@ -6787,7 +6643,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * `until`s, and branch forks (including branches inside a loop).
    *
    * This is the READ GATE. Several conditions cost a gateway call per tick that no
-   * other bot should pay for: the wallet, the local-chat roster, the inventory. So
+   * other bot should pay for: the wallet and the inventory. So
    * the whole doc is walked ONCE at start (it cannot change under a run) and the
    * observe function reads only what something actually watches. A kind missing
    * from this set means its reading stays null — and null never fires a watch, which
@@ -7779,14 +7635,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     abortRoute() {
       autopilot?.abort();
-    },
-
-    loadChat,
-
-    sendChatMessage,
-
-    setChatChannel(channel) {
-      store.apply({ type: "chat/active", channel });
     },
 
     requestNames,

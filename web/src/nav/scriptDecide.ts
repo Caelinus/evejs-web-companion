@@ -126,8 +126,6 @@ export type ScriptAction =
    * way their surface allows.
    */
   | { readonly kind: "alert"; readonly message: string }
-  /** Say one line in a chat channel (the verified R7 chat send). */
-  | { readonly kind: "sendChat"; readonly channel: "local" | "corp"; readonly message: string }
   /** ⚠ Dump these cargo items into space as a container anyone can take. */
   | { readonly kind: "jettison"; readonly itemIDs: readonly number[] }
   /** Stack everything loose in the docked station's hangar. */

@@ -41,16 +41,13 @@ import {
   MIN_QTY_ARG,
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
-  CHAT_CHANNEL_ARGS,
   ROCK_PICKS,
-  MAX_TEXT_ARG_LEN,
   SCRIPT_FORMAT,
   SCRIPT_VERSION,
   conditionAllowedAt,
   BOARD_SLOTS,
   countProgramNode,
   type Arg,
-  type ChatChannelArg,
   type RockPick,
   type BoardSlot,
   type BeltArg,
@@ -88,6 +85,11 @@ export type DecodeResult =
 // simply cannot be imported until it gets one.
 
 const KNOWN_MACROS = new Set<string>(Object.keys(MACRO_SPECS));
+// These were valid v1 script constructs while the browser owned chat. Preserve
+// their names only to refuse old saved/imported documents plainly; never add
+// them back to the authoring schema.
+const RETIRED_WEB_COMPANION_CHAT_MACROS = new Set(["hunt-player", "send-chat"]);
+const RETIRED_WEB_COMPANION_CHAT_CONDITIONS = new Set(["players-in-system-above"]);
 // Derived from the format's own list, so a new response can never be forgotten here.
 const KNOWN_RESPONSES = new Set<InterruptResponse>(INTERRUPT_RESPONSES);
 const WORLD_ENTITIES = new Set<WorldEntity>(["station", "belt", "agent", "system"]);
@@ -119,6 +121,10 @@ const SAY = {
     safe.length > 0
       ? `This script uses an action this app does not have: "${safe}".`
       : "This script uses an action this app does not have.",
+  retiredWebCompanionChatFeature: (safe: string): string =>
+    safe.length > 0
+      ? `This script uses "${safe}", which needs the retired web-companion chat feature.`
+      : "This script needs the retired web-companion chat feature.",
   unknownCondition: "This script uses a check this app does not have.",
   conditionOffSite:
     "This script checks for something out in space at a point where the ship may not be there yet.",
@@ -387,11 +393,14 @@ function readBranchSide(raw: unknown, ctx: Ctx): readonly MacroStep[] {
 }
 
 function readMacroStep(obj: Readonly<Record<string, unknown>>, ctx: Ctx): MacroStep {
-  const id = readRawId(obj["id"]);
   const macro = obj["macro"];
+  if (typeof macro === "string" && RETIRED_WEB_COMPANION_CHAT_MACROS.has(macro)) {
+    refuse(SAY.retiredWebCompanionChatFeature(safeToken(macro)));
+  }
   if (typeof macro !== "string" || !KNOWN_MACROS.has(macro)) {
     refuse(SAY.unknownMacro(safeToken(macro)));
   }
+  const id = readRawId(obj["id"]);
   const spec = MACRO_SPECS[macro as MacroID];
   const args = readArgs(obj["args"], spec, ctx);
 
@@ -538,19 +547,6 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     }
     return { kind: "rockPick", pick: pick as RockPick };
   }
-  if (expected === "chatChannel") {
-    const channel = obj["channel"];
-    if (typeof channel !== "string" || !CHAT_CHANNEL_ARGS.includes(channel as ChatChannelArg)) {
-      refuse(SAY.badArg(label));
-    }
-    return { kind: "chatChannel", channel: channel as ChatChannelArg };
-  }
-  if (expected === "text") {
-    // A blank message is a fixable draft problem (the validator lists it), not a
-    // refusal — min 0 keeps an in-progress save loadable.
-    const text = readText(obj["text"], { min: 0, max: MAX_TEXT_ARG_LEN, allowNewline: false }, ctx, SAY.badArg(label));
-    return { kind: "text", text };
-  }
   if (expected === "bookmark") {
     const id = obj["bookmarkID"];
     if (id !== null && id !== undefined && (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) {
@@ -676,6 +672,9 @@ function readCondition(raw: unknown, site: ConditionSite, ctx: Ctx): Condition {
 }
 
 function buildCondition(obj: Readonly<Record<string, unknown>>, kind: unknown, ctx: Ctx): Condition {
+  if (typeof kind === "string" && RETIRED_WEB_COMPANION_CHAT_CONDITIONS.has(kind)) {
+    refuse(SAY.retiredWebCompanionChatFeature(safeToken(kind)));
+  }
   switch (kind) {
     case "hold-empty":
       return { kind: "hold-empty" };
@@ -712,21 +711,6 @@ function buildCondition(obj: Readonly<Record<string, unknown>>, kind: unknown, c
       };
     case "targeted-by-player":
       return { kind: "targeted-by-player" };
-    case "players-in-system-above": {
-      const raw = obj["count"];
-      if (typeof raw !== "number" || !Number.isFinite(raw)) {
-        refuse(SAY.badNumber);
-      }
-      // ZERO IS LEGAL AND MEANINGFUL here (unlike a count ARG, which starts at 1):
-      // "more than 0 other pilots" is "I am not alone any more", the most useful
-      // setting of all. Clamped to 0..MAX_COUNT_ARG with the usual warning.
-      const n = Math.trunc(raw);
-      const clamped = Math.min(MAX_COUNT_ARG, Math.max(0, n));
-      if (clamped !== n) {
-        ctx.warn(WARN.clampCount("The pilot count", clamped));
-      }
-      return { kind: "players-in-system-above", count: clamped };
-    }
     default:
       return refuse(SAY.unknownCondition);
   }
@@ -1046,12 +1030,6 @@ function orderCondition(condition: Condition): unknown {
   if ("isk" in condition) {
     return { kind: condition.kind, isk: condition.isk };
   }
-  // ⚠ `count` must be written too, or a "more than 3 pilots" watch would export as
-  // "more than 0" — a silently DIFFERENT watch, which is the same class of bug as
-  // the arg kinds the writer used to drop.
-  if ("count" in condition) {
-    return { kind: condition.kind, count: condition.count };
-  }
   return { kind: condition.kind };
 }
 
@@ -1097,10 +1075,6 @@ function orderArg(arg: Arg): unknown {
       return { kind: "qty", value: arg.value };
     case "character":
       return { kind: "character", charID: arg.charID, name: arg.name };
-    case "chatChannel":
-      return { kind: "chatChannel", channel: arg.channel };
-    case "text":
-      return { kind: "text", text: arg.text };
     case "destination":
       return { kind: "destination", ref: orderRef(arg.ref) };
     case "rockPick":

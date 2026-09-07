@@ -47,7 +47,6 @@ const PLUMBING_SWEEP_WRITE_METHODS = freezeMethodMap({
   accessGroupBookmarkMgr: ["AddFolder", "UpdateFolder", "DeleteFolder", "BookmarkStaticLocation", "UpdateBookmark", "DeleteBookmarks", "MoveBookmarksToFolderAndSubfolder"],
   charMgr: ["SetCharacterDescription", "SetActivityStatus", "LogSettings", "AddContact", "DeleteContacts", "EditContactsRelationshipID", "BlockOwners", "UnblockOwners", "SetNote", "AddOwnerNote", "EditOwnerNote", "RemoveOwnerNote"],
   charUnboundMgr: ["CancelCharacterDeletePrepare", "ToggleValidation", "CreateCharacterWithDoll", "UpdateCharacterGender", "UpdateCharacterBloodline"],
-  LSC: ["SendMessage"],
   account: ["SetContactCost", "GiveCash", "GiveCashFromCorpAccount"],
   LPSvc: ["ExchangeConcordLP", "TransferLPFromMyWalletToOtherCorp", "TransferLPFromMyCorpWalletToOtherCorp"],
   LPStoreMgr: ["TakeOfferForCharacter", "TakeOfferForCorporation"],

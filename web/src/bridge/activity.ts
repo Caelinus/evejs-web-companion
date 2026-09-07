@@ -271,7 +271,7 @@ export function liveActivityTitle(notification: LiveNotification): string {
     return "Combat update";
   }
   if (source.includes("fleet")) return "Fleet updated";
-  if (source.includes("chat") || source.includes("message")) return "Chat activity";
+  if (source.includes("message")) return "Session message";
   if (
     source.includes("destiny") ||
     source.includes("warp") ||

@@ -91,11 +91,11 @@ test("changing an interrupt to a consequential response makes an old grant stale
 });
 
 test("risk classes are closed and emitted in stable order", () => {
-  const result = analyzeBotRunPolicy(script([step("buy-item"), step("jettison-cargo"), step("send-chat")]));
-  assert.deepEqual(result.riskClasses, ["financial", "inventory", "social", "destructive"]);
+  const result = analyzeBotRunPolicy(script([step("buy-item"), step("jettison-cargo"), step("attack-player")]));
+  assert.deepEqual(result.riskClasses, ["financial", "inventory", "combat", "destructive"]);
   assert.ok(result.riskClasses.every((risk) => BOT_RISK_CLASSES.includes(risk)));
   assert.equal(result.restartSafe, false);
-  assert.deepEqual(result.restartBlockers, ["buy-item", "jettison-cargo", "send-chat"]);
+  assert.deepEqual(result.restartBlockers, ["buy-item", "jettison-cargo", "attack-player"]);
 });
 
 test("branches and loop bodies are classified, not only top-level steps", () => {

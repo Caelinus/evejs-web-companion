@@ -136,10 +136,6 @@ export function macroName(macro: MacroID): string {
       return "Join a fleet";
     case "attack-player":
       return "Attack players here";
-    case "hunt-player":
-      return "Hunt a player down";
-    case "send-chat":
-      return "Say something in chat";
     case "set-destination":
       return "Set the destination and fly";
     case "dock-at-nearest":
@@ -161,11 +157,6 @@ export function macroName(macro: MacroID): string {
     case "recover-scan-probes":
       return "Recover scan probes";
   }
-}
-
-/** A chat channel, as a player reads it. */
-export function chatChannelPhrase(channel: string): string {
-  return channel === "corp" ? "corp chat" : "local chat";
 }
 
 /** A named board slot, as a player reads it — never a key, never an id. */
@@ -219,10 +210,6 @@ export function conditionSentence(condition: Condition): string {
       return "a pirate shows up";
     case "cargo-full":
       return `the cargo hold is ${pct(condition.fraction)} full`;
-    case "players-in-system-above":
-      return condition.count === 0
-        ? "another pilot comes into this system"
-        : `more than ${condition.count} other ${condition.count === 1 ? "pilot is" : "pilots are"} in this system`;
     case "targeted-by-player":
       return "another player locks onto your ship";
     case "drone-health-below":
@@ -464,19 +451,6 @@ function macroPhrase(step: MacroStep): string {
           : null;
       return name !== null ? `Attack ${name} if they appear here` : "Attack any player who appears here";
     }
-    case "hunt-player": {
-      const only = step.args["only"];
-      const prey =
-        only !== undefined && only.kind === "character" && only.name !== null && only.name.length > 0
-          ? only.name
-          : "a player";
-      const jumps = step.args["maxJumps"];
-      const reach =
-        jumps !== undefined && jumps.kind === "count"
-          ? ` up to ${jumps.value} ${jumps.value === 1 ? "jump" : "jumps"} from home`
-          : "";
-      return `Roam and hunt ${prey}${reach}`;
-    }
     case "set-destination": {
       const dest = step.args["destination"];
       const where =
@@ -515,15 +489,5 @@ function macroPhrase(step: MacroStep): string {
       return "Analyze signatures with the current probe formation";
     case "recover-scan-probes":
       return "Recover every active scan probe to the ship";
-    case "send-chat": {
-      const message = step.args["message"];
-      const words =
-        message !== undefined && message.kind === "text" && message.text.length > 0
-          ? `"${message.text}"`
-          : "a message you write";
-      const channel = step.args["channel"];
-      const where = channel !== undefined && channel.kind === "chatChannel" ? channel.channel : "local";
-      return `Say ${words} in ${chatChannelPhrase(where)}`;
-    }
   }
 }

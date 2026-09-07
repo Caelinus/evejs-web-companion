@@ -52,7 +52,7 @@ disposable.** Closing a tab closes that client — the server never keeps drivin
 ```
 
 - **Bridge-only.** Every read and every mutation goes through `POST /api/bridge/*` (the
-  retail call tuple, bound objects, the persistent session, flight, chat) or the
+  retail call tuple, bound objects, the persistent session, and flight) or the
   login-gated read-only static routes (`/api/map/*`, `/api/names`, `/api/agents/find`)
   that serve EveJS's static reference export the way retail resolves names from its local
   static DB. The web process **never** touches gameplay SQLite.
@@ -195,7 +195,7 @@ powershell -Command "[Convert]::ToBase64String((1..32|%{Get-Random -Max 256}))"
 Setting it unconditionally is the recommendation. EveJS ignores an incoming token when its
 own `EVEJS_WEB_GATEWAY_TOKEN` is unset and falls back to the loopback rule, so a token that
 is not needed costs nothing — and you stop having to think about which combination you are
-in. Note the push channel (live notifications and chat) enforces this too, on a *narrower*
+in. Note the push channel (live notifications) enforces this too, on a *narrower*
 rule than the request routes; without a token the UI silently degrades to polling.
 
 ### The other two Docker gotchas

@@ -897,22 +897,11 @@ test("join-fleet: not in a fleet -> keep accepting; in a fleet -> done", () => {
 // ── The PvP set ──────────────────────────────────────────────────────────────
 
 const attack = SCRIPT_MACROS["attack-player"]!;
-const hunt = SCRIPT_MACROS["hunt-player"]!;
-const say = SCRIPT_MACROS["send-chat"]!;
 const attackStep: MacroStep = { id: "ap", kind: "macro", macro: "attack-player", args: {} };
 const attackOnlyStep: MacroStep = {
   id: "ap2", kind: "macro", macro: "attack-player",
   args: { only: { kind: "character", charID: 90002, name: "Prey" } },
 };
-const huntStep: MacroStep = {
-  id: "hp", kind: "macro", macro: "hunt-player",
-  args: { maxJumps: { kind: "count", value: 3 }, range: { kind: "count", value: 14 } },
-};
-const sayStep: MacroStep = {
-  id: "sc", kind: "macro", macro: "send-chat",
-  args: { channel: { kind: "chatChannel", channel: "local" }, message: { kind: "text", text: "o7" } },
-};
-
 /** A player's ship on grid: a non-NPC hull with a pilot that is not you. */
 function playerShip(itemID: number, characterID: number, x = 20000): SpaceEntity {
   return entity({ itemID, kind: "ship", characterID, isNpc: false, position: { x, y: 0, z: 0 } });
@@ -966,130 +955,6 @@ test("attack-player: locked -> guns onto them; no guns and no drones -> blocked"
 test("attack-player: docked -> blocked with an undock hint", () => {
   const t = attack(attackStep, obs({ flightStatus: flight({ docked: true, inSpace: false }) }), {}, {});
   assert.equal(t.outcome.kind, "blocked");
-});
-
-test("hunt-player: first tick marks the starting system as home on the board", () => {
-  const t = hunt(huntStep, obs({ snapshot: snapshot([]), weaponModuleIDs: [700] }), {}, {});
-  assert.equal(t.action.kind, "wait");
-  assert.equal(t.boardPatch?.["huntAnchorSystemID"], 30000142);
-  assert.equal(t.boardPatch?.["huntRangeAU"], 14);
-});
-
-const HUNT_BOARD = { huntAnchorSystemID: 30000142, huntRangeAU: 14 };
-
-test("hunt-player: prey on grid beats searching -> lock them", () => {
-  const prey = playerShip(801, 90001);
-  const t = hunt(
-    huntStep,
-    obs({ snapshot: snapshot([prey]), weaponModuleIDs: [700], localPlayers: [{ characterID: 90001, name: "Prey" }] }),
-    {},
-    HUNT_BOARD,
-  );
-  assert.ok(t.action.kind === "lock" && t.action.targetID === 801);
-});
-
-test("hunt-player: someone in local + an off-grid scanner hit -> warp down the hit", () => {
-  const gate = entity({ itemID: 701, kind: "stargate", name: "Gate" });
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([gate]),
-      weaponModuleIDs: [700],
-      localPlayers: [{ characterID: 90001, name: "Prey" }],
-      dscanHitIDs: [701, 555000],
-    }),
-    {},
-    HUNT_BOARD,
-  );
-  assert.ok(t.action.kind === "warp" && t.action.targetID === 555000, `expected a warp to the off-grid hit, got ${t.action.kind}`);
-  assert.equal(t.nextMem["chaseID"], 555000);
-});
-
-test("hunt-player: a chased hit that came up empty is not chased twice", () => {
-  const gate = entity({ itemID: 701, kind: "stargate", name: "Gate" });
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([gate]),
-      weaponModuleIDs: [700],
-      localPlayers: [{ characterID: 90001, name: "Prey" }],
-      dscanHitIDs: [555000],
-    }),
-    { chaseID: 555000, chaseIssued: true, chaseSawWarp: true },
-    HUNT_BOARD,
-  );
-  // The only hit is now visited: the hunt moves to a fresh vantage point instead.
-  assert.ok(t.action.kind === "warp" && t.action.targetID === 701);
-});
-
-test("hunt-player: local empty -> roam one system over, inside the leash", () => {
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([]),
-      weaponModuleIDs: [700],
-      localPlayers: [],
-      huntRoam: {
-        jumpsFromAnchor: 0,
-        neighbors: [
-          { systemID: 30000144, jumpsFromAnchor: 1 },
-          { systemID: 30000200, jumpsFromAnchor: 9 },
-        ],
-      },
-    }),
-    {},
-    HUNT_BOARD,
-  );
-  assert.ok(t.action.kind === "startSystemRoute" && t.action.systemID === 30000144, "must pick the in-leash neighbor");
-  assert.equal(t.nextMem["roamSystemID"], 30000144);
-});
-
-test("hunt-player: boxed in past the leash -> head back toward home, never sit", () => {
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([]),
-      weaponModuleIDs: [700],
-      localPlayers: [],
-      huntRoam: {
-        jumpsFromAnchor: 4,
-        neighbors: [
-          { systemID: 30000300, jumpsFromAnchor: 5 },
-          { systemID: 30000301, jumpsFromAnchor: 4 },
-        ],
-      },
-    }),
-    {},
-    HUNT_BOARD,
-  );
-  assert.ok(t.action.kind === "startSystemRoute" && t.action.systemID === 30000301);
-});
-
-test("hunt-player: riding the autopilot to the roam target -> wait, do not re-issue", () => {
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([]),
-      weaponModuleIDs: [700],
-      localPlayers: [],
-      travel: { status: "running", destinationStationID: null, destinationSystemID: 30000144, remainingJumps: 1, failureReason: null },
-    }),
-    { roamSystemID: 30000144 },
-    HUNT_BOARD,
-  );
-  assert.equal(t.action.kind, "wait");
-  assert.match(t.why, /Riding/);
-});
-
-test("send-chat: says it once, then done; a blank message is blocked", () => {
-  const first = say(sayStep, obs({}), {}, {});
-  assert.ok(first.action.kind === "sendChat" && first.action.channel === "local" && first.action.message === "o7");
-  assert.equal(say(sayStep, obs({}), first.nextMem, {}).outcome.kind, "done");
-  const blank: MacroStep = {
-    id: "sc2", kind: "macro", macro: "send-chat",
-    args: { channel: { kind: "chatChannel", channel: "corp" }, message: { kind: "text", text: "  " } },
-  };
-  assert.equal(say(blank, obs({}), {}, {}).outcome.kind, "blocked");
 });
 
 // ── Tackle before guns ───────────────────────────────────────────────────────
@@ -1357,74 +1222,6 @@ test("attack-player: a NEW target gets a fresh tackle try (the bound resets)", (
   assert.equal(t.nextMem["pointTries"], undefined, "a re-pick clears the spent tackle counters");
   assert.equal(t.nextMem["webTries"], undefined);
   assert.ok(first.itemID === 801);
-});
-
-test("hunt-player: the tackle counter survives ticks mid-fight", () => {
-  const prey = playerShip(801, 90001, IN_RANGE);
-  const world = obs({
-    snapshot: snapshot([prey], { activeModuleIDs: [] }),
-    lockedTargetIDs: [801], weaponModuleIDs: [700], tackleModuleIDs: [650],
-    localPlayers: [{ characterID: 90001, name: "Prey" }],
-  });
-  let mem: MacroMemory = { targetID: 801, lockIssued: true, waited: 0, dronesOn: null, visitedHits: "999" };
-  const picked: number[] = [];
-  for (let i = 0; i < 5; i++) {
-    const t = hunt(huntStep, world, mem, HUNT_BOARD);
-    if (t.action.kind === "activate") picked.push(t.action.moduleID);
-    mem = t.nextMem;
-  }
-  assert.equal(picked.filter((m) => m === 650).length, 3, "the bound counts across ticks inside the hunt too");
-  assert.ok(picked.includes(700));
-});
-
-test("hunt-player: roaming to a new system forgets the old system's scanner hits", () => {
-  // ⚠ `visitedHits` used to ride along on every jump. A hunt that came back to a
-  // system it had already swept still counted those hits as visited and refused
-  // to chase them — so the longer it roamed, the more of its own hunting ground
-  // it was blind to. It also grew with no cap, unlike `triedItemIDs`.
-  const t = hunt(
-    huntStep,
-    obs({
-      snapshot: snapshot([]),
-      weaponModuleIDs: [700],
-      localPlayers: [],
-      huntRoam: { jumpsFromAnchor: 0, neighbors: [{ systemID: 30000144, jumpsFromAnchor: 1 }] },
-    }),
-    // Arrive carrying a long visited list and a half-finished chase.
-    { visitedHits: "111,222,333", vantageID: 555, chaseID: 333, chaseIssued: true, chaseSawWarp: true, chaseWaited: 4 },
-    HUNT_BOARD,
-  );
-  assert.ok(t.action.kind === "startSystemRoute" && t.action.systemID === 30000144);
-  assert.equal(t.nextMem["visitedHits"], undefined, "the old system's hits must not follow it");
-  assert.equal(t.nextMem["vantageID"], undefined, "nor the vantage point it was scanning from");
-  assert.equal(t.nextMem["chaseIssued"], undefined, "nor a chase that cannot be resolved over there");
-  assert.equal(t.nextMem["roamSystemID"], 30000144, "and the roam's own state is set");
-});
-
-test("hunt-player: the BURN is remembered across ticks too, not re-issued forever", () => {
-  // ⚠ The hunt block hand-copies the combat keys into the engage, so anything
-  // engagePrey remembers has to be listed there or it resets every tick. When
-  // `approached` was missed, the hunt re-issued the approach on every single tick
-  // — and since only one action fires per tick, that starves the whole ladder:
-  // the bot would burn toward its target and never shoot it.
-  const prey = playerShip(801, 90001, 30000);
-  const world = obs({
-    snapshot: snapshot([prey], { activeModuleIDs: [] }),
-    lockedTargetIDs: [801], weaponModuleIDs: [700], tackleModuleIDs: [650],
-    localPlayers: [{ characterID: 90001, name: "Prey" }],
-  });
-  let mem: MacroMemory = { targetID: 801, lockIssued: true, waited: 0, dronesOn: null, visitedHits: "999" };
-  const kinds: string[] = [];
-  for (let i = 0; i < 5; i++) {
-    const t = hunt(huntStep, world, mem, HUNT_BOARD);
-    kinds.push(t.action.kind);
-    mem = t.nextMem;
-  }
-  assert.equal(
-    kinds.filter((k) => k === "approach").length,
-    1,
-    `the burn is issued once inside the hunt as well; got ${kinds.join(",")}`,
-  );
 });
 
 // ── Movement extras, cargo extras, cap chain ─────────────────────────────────

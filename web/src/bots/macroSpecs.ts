@@ -174,26 +174,6 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [{ key: "only", kind: "character", required: false }],
     untilRequired: false,
   },
-  // hunt-player roams from where it starts: `maxJumps` bounds how far from that
-  // starting system it may wander (default 3), `range` is the directional
-  // scanner's reach in AU (default 14, the scanner's own full reach).
-  "hunt-player": {
-    args: [
-      { key: "only", kind: "character", required: false },
-      { key: "maxJumps", kind: "count", required: false },
-      { key: "range", kind: "count", required: false },
-    ],
-    untilRequired: false,
-  },
-  // ── Social. Both args REQUIRED: a message with no words or no channel is
-  // meaningless, so the block will not start until they are set.
-  "send-chat": {
-    args: [
-      { key: "channel", kind: "chatChannel", required: true },
-      { key: "message", kind: "text", required: true },
-    ],
-    untilRequired: false,
-  },
   // ── Movement extras.
   // set-destination points the autopilot at a station OR a whole system and is
   // done once the trip is under way — it does not wait for the arrival, so a
