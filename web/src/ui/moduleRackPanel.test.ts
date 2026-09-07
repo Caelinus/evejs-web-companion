@@ -176,15 +176,11 @@ test("a rack with no flow renders every module disabled (read-only mount)", () =
   }
 });
 
-// A module winding down must not wear the danger styling or role="alert": the
-// click worked, the cycle is simply finishing. The markup carries two distinct
-// elements so a note can never be mistaken for a failure.
-test("the rack has separate markup for a refusal and for a winding-down note", () => {
+// A refusal is the only thing the rack itself says now. The winding-down note
+// went to the centre flash — see the reversal at the bottom of this file.
+test("a refusal is an alert, on the control that refused (R30)", () => {
   const source = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
   assert.match(source, /class="rack-error" role="alert"/, "a refusal is an alert");
-  assert.match(source, /class="rack-note" aria-live="polite"/, "a note is not");
-  // And the note is the ELSE branch, so the two can never render together.
-  assert.match(source, /\{#if error\}[\s\S]*\{:else if windingDown\}/);
 });
 
 test("R7d — no raw ids reach the player's eyes", () => {
@@ -383,46 +379,50 @@ test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots
   assert.match(label, /rack-heat-value/);
 });
 
-// --- the winding-down note ---------------------------------------------------
+// --- the winding-down note, and where it went --------------------------------
+//
+// ⚠ REVERSED, BY THE OPERATOR, WITH THE SCREENSHOT TO PROVE IT. Three tests
+// used to live here pinning a `windingDownID` state, a `windingDown` derived
+// and a `.rack-note` paragraph under the rack — including one earned the hard
+// way, that the note must clear itself when it stops being true.
+//
+// That fix was right about WHEN and wrong about WHERE. The rack sits in the
+// HUD, which is on screen for the entire session, so a sentence about the next
+// few seconds rendered as a paragraph bolted to the bottom of it reads as a
+// standing condition no matter how correctly it is derived. It was reported a
+// second time, still on screen, still looking permanent.
+//
+// So it is a notice now: raised once at the click, retired by the flash's own
+// clock, and kept in the log for anyone who looks away. All three of those
+// tests describe machinery that no longer exists, which is why they are gone
+// rather than adjusted — but the claim they were protecting has to survive the
+// move, so it is restated below against the new home.
 
-test("⚠ THE WINDING-DOWN NOTE CLEARS ITSELF WHEN IT STOPS BEING TRUE", () => {
-  // FOUND BY THE OPERATOR, ON SCREEN. "… stops when its current cycle ends" was
-  // a plain string, set on the click and cleared only by the NEXT rack action —
-  // so it sat there long after the cycle had ended, describing a module that
-  // had been dark for minutes. A sentence about a transient state has to be as
-  // transient as the state, or it is a stale claim the player cannot date.
-  //
-  // It is derived from the SNAPSHOT now: the note names the module only while
-  // the ship still reports it running.
-  assert.match(RACK_SOURCE, /const windingDown = \$derived\.by/);
-  assert.match(RACK_SOURCE, /let windingDownID = \$state<number \| null>\(null\)/);
+test("⚠ THE WINDING-DOWN NOTE IS A NOTICE, NOT A LINE UNDER THE RACK", () => {
+  assert.match(RACK_SOURCE, /import \{ notify \} from "\.\/notices\.ts";/);
+  assert.match(RACK_SOURCE, /detail: "Stops when its current cycle ends\.",/);
+  assert.match(RACK_SOURCE, /kind: "info",/, "the module did as it was told; that is not a warning");
+  // And nothing of the paragraph is left to come back.
+  assert.equal(/rack-note/.test(RACK_SOURCE), false, "the paragraph survived");
+  assert.equal(/windingDown/.test(RACK_SOURCE), false, "the state survived");
+  const css = readFileSync(path.join(UI_DIR, "..", "styles.css"), "utf8");
+  assert.equal(/\.rack-note/.test(css), false, "the style survived the markup");
+});
+
+test("it is still raised only for a module that is actually still running", () => {
+  // The whole reason to say anything: the tile stays LIT after the click. A
+  // module that stopped immediately needs no explanation, and an unknown
+  // `activeModuleIDs` is not a reason to assert one either — `?? []` stays
+  // silent rather than claiming a cycle that may not be running.
   assert.match(
     RACK_SOURCE,
-    /running !== null && !running\.includes\(itemID\)/,
-    "the note does not consult what is actually running",
+    /action === "deactivate" &&\s+\(\$space\.snapshot\?\.ship\?\.activeModuleIDs \?\? \[\]\)\.includes\(module\.itemID\)/,
   );
 });
 
-test("⚠ AN UNKNOWN `activeModuleIDs` KEEPS THE NOTE, rather than clearing it", () => {
-  // `null` is "the server did not say what is running". Clearing on that would
-  // assert the module HAS stopped, which is the one thing we would not know —
-  // the same rule the Running column follows two files over.
-  const block = RACK_SOURCE.slice(
-    RACK_SOURCE.indexOf("const windingDown = $derived.by"),
-    RACK_SOURCE.indexOf("function moduleName"),
-  );
-  assert.ok(block.length > 0, "the derived note is not where this test looks");
-  assert.match(block, /running !== null/, "a null reading must not clear the note");
-  assert.equal(
-    /running === null/.test(block.replace(/running !== null/g, "")),
-    false,
-    "a null reading was given a branch of its own",
-  );
-});
-
-test("a module that has left the fit entirely takes its note with it", () => {
-  // Unfitted, or the fit re-read without it: there is nothing left to name, so
-  // there is nothing to say.
-  const block = RACK_SOURCE.slice(RACK_SOURCE.indexOf("const windingDown = $derived.by"));
-  assert.match(block.slice(0, 900), /if \(!module\) \{[\s\S]{0,200}return "";/);
+test("the notice is keyed per module, so two modules are two notices", () => {
+  // Keyed on the title alone, switching off a second module inside the 30s
+  // dedupe window would say nothing at all — and the player would be back to a
+  // lit tile with no explanation, which is the bug this note exists for.
+  assert.match(RACK_SOURCE, /key: `module-winding-down:\$\{module\.itemID\}`,/);
 });

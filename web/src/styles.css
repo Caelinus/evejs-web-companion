@@ -5585,14 +5585,6 @@
     color: var(--color-danger);
     margin: 0.3rem 0 0;
   }
-  /* A module winding down is NOT a failure, so it must not wear the danger
-   * colour: the click worked and the cycle is finishing. */
-  .rack-note {
-    font-size: 0.78rem;
-    color: var(--color-muted);
-    margin: 0.3rem 0 0;
-  }
-
   /* Placeholder affordance — dashed panel + a pill, so a stub never reads as a
    * finished panel that happens to be empty. */
   .placeholder-hint { color: var(--color-muted); margin: 0.4rem 0 0; }
