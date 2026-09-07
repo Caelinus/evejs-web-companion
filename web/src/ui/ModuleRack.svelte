@@ -540,7 +540,18 @@
                 {/if}
               </button>
             {:else}
-              <span class="module-slot empty" title={rackSlotTitle("", null)}></span>
+              <!--
+                ⚠ AN EMPTY SLOT IS A DASHED RING, NOT A FILLED BOX. It was a
+                solid square, which on a rack of round faces reads as a fitted
+                module whose icon failed to load — the one thing an empty slot
+                must not look like. The handoff draws it dashed and empty, and
+                that is a shape nothing else on the rack has.
+              -->
+              <span class="module-slot empty" title={rackSlotTitle("", null)}>
+                <svg class="slot-ring" viewBox="0 0 42 42" aria-hidden="true">
+                  <circle class="slot-ring-empty" cx="21" cy="21" r="17" />
+                </svg>
+              </span>
             {/if}
           {/each}
         {/if}

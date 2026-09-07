@@ -9,8 +9,7 @@
   import PanelHost from "./PanelHost.svelte";
   import SpaceOverview from "./SpaceOverview.svelte";
   import StationPanel from "./StationPanel.svelte";
-  import ShipHud from "./ShipHud.svelte";
-  import ModuleRack from "./ModuleRack.svelte";
+  import HudBar from "./HudBar.svelte";
   import MobileCard from "./MobileCard.svelte";
   import DronesPanel from "./DronesPanel.svelte";
   import ShotsPanel from "./ShotsPanel.svelte";
@@ -139,10 +138,21 @@
         >
           <ErrorBoundary name={card.title}>
             {#if card.id === "ship"}
-              <div class="mobile-hud">
-                <ShipHud {store} />
-                <ModuleRack {store} {flow} />
-              </div>
+              <!--
+                ⚠ THE WHOLE HUD, NOT JUST THE GAUGE AND THE RACKS.
+                
+                This card was `ShipHud` + `ModuleRack`, which left the phone
+                with no STOP button on the one screen a pilot looks at — it was
+                three cards down, inside Navigation & Flight, behind a fold. The
+                reference puts the ship's state and Stop in this card's footer,
+                and it is right: Stop is the control you reach for when things
+                are going wrong, and it must not be behind anything.
+
+                `HudBar` is that header + gauge + racks + footer, and it is the
+                same component the desktop cell is. Its own header is hidden
+                here because the card header already says SHIP.
+              -->
+              <HudBar {store} {flow} />
             {:else if card.id === "overview"}
               <SpaceOverview {store} {flow} />
             {:else if card.id === "drones"}

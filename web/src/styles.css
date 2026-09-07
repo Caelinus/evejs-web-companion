@@ -4650,6 +4650,13 @@
     stroke-width: 2.5;
   }
   .slot-ring-track { stroke: var(--color-line); }
+  /* An empty slot: dashed and hollow. Nothing else on the rack is dashed, so it
+   * can never be mistaken for a fitted module whose icon failed to load. */
+  .slot-ring-empty {
+    stroke: var(--color-line);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+  }
   /* THE HEAT-DAMAGE WEDGE — how burnt this module already is. Three bands, and
    * each is also a different arc LENGTH (see rackDamageWedge), so the reading
    * never depends on telling two colours apart. */
@@ -4697,6 +4704,67 @@
   .rack-heat-value.hot { color: var(--color-danger); }
   /* Italic, so a reading that does not exist never reads as one that does. */
   .rack-heat-value.unknown { font-style: italic; }
+
+  /* ⚠ THE HUD INSIDE A MOBILE CARD.
+   *
+   * `.hud-bar` is the desktop's fixed-height grid cell; in a card it has to
+   * size to its content, and the card header already names it, so its own
+   * header goes. The gauge stacks ABOVE its numbers here rather than beside
+   * them — a phone has the vertical room the desktop cell does not, and the
+   * reference stacks them. */
+  .mob-card-body > .hud-bar {
+    display: block;
+    background: none;
+    border: 0;
+  }
+  .mob-card-body > .hud-bar > .hud-head { display: none; }
+  .mob-card-body > .hud-bar > .hud-body {
+    display: block;
+    padding: 0;
+    overflow: visible;
+  }
+  .mob-card-body > .hud-bar .ship-hud {
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .mob-card-body > .hud-bar .hud-readout {
+    flex-direction: row;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0.1rem 1.2rem;
+  }
+  .mob-card-body > .hud-bar .hud-readout-row { flex-direction: column; align-items: center; }
+  /* The reference's cap: 170px, where the desktop cell squeezes it to 136. */
+  .mob-card-body > .hud-bar .hud-wheel { flex: 0 0 auto; max-width: 170px; }
+  .mob-card-body > .hud-bar > .hud-body > .module-rack { margin-top: 0.7rem; }
+  /* ⚠ THE "MODULES" HEADING IS HIDDEN FROM SIGHT, NOT REMOVED.
+   *
+   * The desktop cell needs it: two clusters sit side by side and the rack has to
+   * say which one it is. Stacked in a card already titled SHIP, above rows
+   * labelled HIGH / MID / LOW, it is a line of text that tells a reader nothing
+   * they cannot see — and the reference has no such heading.
+   *
+   * `display: none` would have been wrong: the rack section is
+   * `aria-labelledby` this heading, so removing it from the tree takes the
+   * section's accessible name with it. Clipped instead — still read aloud,
+   * still the section's name, just not occupying a row. */
+  .mob-card-body > .hud-bar .module-rack > .panel-head {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  .mob-card-body > .hud-bar > .hud-foot {
+    margin-top: 0.7rem;
+    padding: 0.45rem 0;
+    background: none;
+  }
 
   /* ------------------------------------------------- the Shots window (§7) --
    * The combat log as its own window. The totals sit above the table with the
@@ -4903,7 +4971,9 @@
     margin-top: 0.5rem;
   }
   .rack-banks-state { font-size: 0.78rem; color: var(--color-muted); }
-  .module-slot.empty { background: var(--color-field); cursor: default; }
+  /* No fill and no border: the dashed ring inside IS the empty slot. A solid box
+   * here reads as a fitted module with a missing icon. */
+  .module-slot.empty { background: none; border-color: transparent; cursor: default; }
   /* A click in flight: presentation only — the glow itself waits for the poll. */
   .module-slot.pending { animation: rack-pending 0.8s ease-in-out infinite alternate; }
   @keyframes rack-pending {

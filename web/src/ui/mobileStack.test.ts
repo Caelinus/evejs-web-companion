@@ -179,8 +179,7 @@ test("every card mounts the SAME component the desktop uses", () => {
   // honest, and every capability check in this suite would then only be
   // checking one of the two.
   for (const component of [
-    "ShipHud",
-    "ModuleRack",
+    "HudBar",
     "SpaceOverview",
     "DronesPanel",
     "ShotsPanel",
@@ -219,4 +218,56 @@ test("the radar is not on the phone at all", () => {
   // It is a picture that needs room to mean anything, and there is none. It is
   // not hidden with CSS — it is simply never mounted here.
   assert.equal(/Radar|<Desktop/.test(WORKSPACE), false, "the radar reached the mobile workspace");
+});
+
+// --- the ship card, against the reference ------------------------------------
+
+test("⚠ STOP IS ON THE SHIP CARD — not three cards down, behind a fold", () => {
+  // FOUND BY COMPARING WITH THE HANDOFF. The card was `ShipHud` + `ModuleRack`,
+  // which left the phone with no Stop on the one screen a pilot looks at: it
+  // was inside Navigation & Flight, two cards below, and that card can be
+  // folded away. Stop is the control you reach for when things are going wrong.
+  //
+  // The card mounts `HudBar` — the same component the desktop cell is — which
+  // is header, gauge, racks and the footer carrying the ship's state and Stop.
+  assert.match(WORKSPACE, /<HudBar \{store\} \{flow\} \/>/);
+  assert.equal(
+    /<ShipHud/.test(WORKSPACE),
+    false,
+    "the card went back to mounting half the HUD",
+  );
+});
+
+test("the HUD's own header is hidden in a card, but the rack's is only CLIPPED", () => {
+  // ⚠ TWO DIFFERENT TREATMENTS, ON PURPOSE. The HUD's header duplicates the
+  // card's own title, so it is `display: none`. The rack's "Modules" heading is
+  // what `aria-labelledby` points at, so removing it from the tree would take
+  // the section's accessible name with it — it is clipped instead: still read
+  // aloud, just not occupying a row.
+  assert.match(CSS, /\.mob-card-body > \.hud-bar > \.hud-head \{ display: none; \}/);
+  const rackHead = CSS.slice(
+    CSS.indexOf(".mob-card-body > .hud-bar .module-rack > .panel-head"),
+    CSS.indexOf(".mob-card-body > .hud-bar > .hud-foot"),
+  );
+  assert.ok(rackHead.length > 0, "the rack heading rule is not where this test looks");
+  assert.equal(/display: none/.test(rackHead), false, "the accessible name was removed, not clipped");
+  assert.match(rackHead, /clip-path: inset\(50%\)/);
+});
+
+test("the gauge takes the reference's 170px on a phone, not the cell's 136", () => {
+  // The desktop cell squeezes the wheel to sit beside its numbers; a phone has
+  // the vertical room, and the reference stacks them.
+  assert.match(CSS, /\.mob-card-body > \.hud-bar \.hud-wheel \{[^}]*max-width: 170px/);
+  assert.match(CSS, /\.mob-card-body > \.hud-bar \.ship-hud \{[^}]*flex-direction: column/);
+});
+
+test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {
+  // A solid square on a rack of round faces reads as a fitted module whose icon
+  // failed to load — the one thing an empty slot must not look like. Nothing
+  // else on the rack is dashed.
+  const rack = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
+  assert.match(rack, /class="slot-ring-empty"/);
+  assert.match(CSS, /\.slot-ring-empty \{[^}]*stroke-dasharray: 3 3/);
+  const box = CSS.slice(CSS.indexOf("  .module-slot.empty {"));
+  assert.match(box.slice(0, 160), /background: none/, "the empty slot kept a solid fill");
 });
