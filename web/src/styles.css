@@ -4741,6 +4741,11 @@
   }
   /* The HUD module rack — three rows (high / mid / low) of slot tiles. */
   .module-rack-rows {
+    /* ⚠ THE SLOT BOX, WRITTEN DOWN ONCE. The tile, and anything that has to
+     * line up with a rack row, both read it from here — a rack row is exactly
+     * as tall as one slot, so this is also the row height. It was two literals
+     * before and they disagreed the moment the gutter arrived. */
+    --rack-slot: 42px;
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
@@ -4770,7 +4775,16 @@
     display: grid;
     place-items: center;
     width: 26px;
-    height: 26px;
+    /* ⚠ AS TALL AS A RACK ROW, WHICH IS AS TALL AS A SLOT.
+     *
+     * At 26px square it was top-aligned against a 42px row, so its glyph rode
+     * 8px above the centre line that the rack's name, its heat bar and every
+     * module tile share — the one line in this instrument that everything else
+     * is on. Matching the row's height and centring inside it puts the icon on
+     * that line without moving anything else.
+     *
+     * The extra height is hit area, not ink: the glyph stays 16px. */
+    height: var(--rack-slot, 42px);
     min-height: 0;
     padding: 0;
     background: none;
@@ -4794,7 +4808,8 @@
    * than a broken one — the state never rests on the colour. */
   .rack-bank.linked { color: var(--color-accent); }
   @media (pointer: coarse) {
-    .rack-bank { width: 40px; height: 40px; }
+    /* Only the WIDTH needs the touch minimum — the height is already a slot. */
+    .rack-bank { width: var(--rack-slot, 42px); }
   }
   /* ⚠ A GRID, NOT A WRAPPING FLEX ROW — the handoff's `44px minmax(0,1fr)`.
    *
@@ -4862,10 +4877,11 @@
     touch-action: none;
     -webkit-user-select: none;
     user-select: none;
-    /* 42px, the handoff's slot box — and, not by accident, a real touch target
-     * where the old 2.2rem (35px) was not. */
-    width: 42px;
-    height: 42px;
+    /* The handoff's slot box — and, not by accident, a real touch target where
+     * the old 2.2rem (35px) was not. The number itself lives on
+     * `.module-rack-rows`, because the gutter has to line up with it. */
+    width: var(--rack-slot, 42px);
+    height: var(--rack-slot, 42px);
     display: flex;
     align-items: center;
     justify-content: center;

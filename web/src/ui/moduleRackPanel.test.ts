@@ -298,6 +298,23 @@ test("⚠ THE HEAT READING IS PART OF THE ROW HEADER, on one line with the name"
   assert.match(CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at)), /grid-template-columns: \d+px minmax\(0, 1fr\)/);
 });
 
+test("⚠ THE GUTTER ICON IS ON THE RACK'S CENTRE LINE — FOUND BY EYE", () => {
+  // At 26px square, top-aligned against a 42px row, the glyph rode 8px above
+  // the line the rack's name, its heat bar and every module tile share. That is
+  // the one line this instrument has, and the only thing that was off it was
+  // the control that had just been added to it.
+  //
+  // ⚠ THE SLOT BOX IS WRITTEN DOWN ONCE, and that is the actual fix. The tile
+  // and the gutter both read `--rack-slot`, so a rack row and the icon beside
+  // it cannot disagree about how tall a row is. Two literals is how they came
+  // to disagree in the first place.
+  assert.match(CSS_SOURCE, /\.module-rack-rows \{[\s\S]{0,400}--rack-slot: 42px;/);
+  assert.match(CSS_SOURCE, /width: var\(--rack-slot, 42px\);/);
+  assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,900}height: var\(--rack-slot, 42px\);/);
+  // The extra height is hit area, not ink — the glyph itself stays 16px.
+  assert.match(CSS_SOURCE, /\.rack-bank svg \{[\s\S]{0,120}width: 16px;/);
+});
+
 test("⚠ WEAPON BANKING IS AN ICON IN THE RACK'S GUTTER, and still says what it is", () => {
   // It was a strip under the racks: a sentence of state and a button spelling
   // out the action, two lines from the guns it acts on. It is an icon beside
@@ -319,7 +336,9 @@ test("⚠ WEAPON BANKING IS AN ICON IN THE RACK'S GUTTER, and still says what it
   // It sits in a gutter that is TOP-aligned, so it is level with the high rack.
   assert.match(CSS_SOURCE, /\.rack-stack \{[\s\S]{0,300}align-items: flex-start;/);
   assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,400}width: 26px;/);
-  assert.match(CSS_SOURCE, /@media \(pointer: coarse\) \{[\s\S]{0,120}\.rack-bank \{ width: 40px;/);
+  // Under a coarse pointer only the WIDTH grows — the height is already a
+  // slot, and a slot clears R8's minimum on its own.
+  assert.match(CSS_SOURCE, /@media \(pointer: coarse\) \{[\s\S]{0,200}\.rack-bank \{ width: var\(--rack-slot, 42px\);/);
 });
 
 test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots", () => {
