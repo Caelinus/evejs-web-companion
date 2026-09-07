@@ -150,6 +150,39 @@ test("the bar renders with one pilot and with three, and names every one", () =>
   }
 });
 
+// --- the switch actually switches -------------------------------------------
+
+test("⚠ THE ACTIVE CHIP IS KEYED ON ITS SESSION, or a switch changes nothing", () => {
+  // FOUND LIVE. Switching pilot moved the whole workspace — the header went
+  // from "DOCKED · a station" to "IN SPACE · a system" — and the bar went on
+  // naming the pilot you had just left.
+  //
+  // `CharacterChip` reads its session's store slices ONCE, at init: it has to,
+  // because `$station` needs a stable top-level binding. So handing a live
+  // instance a different `session` prop changes nothing at all — it keeps
+  // rendering the pilot it was created for, silently and convincingly.
+  //
+  // The desktop strip never hits this because `{#each … (session.id)}` keys
+  // every chip. The narrow bar renders ONE chip for whichever pilot is active,
+  // so it has to say so itself.
+  const narrowArm = BAR.slice(BAR.indexOf("{#if narrow}"), BAR.indexOf("{:else}"));
+  assert.ok(narrowArm.length > 0, "the narrow arm is not where this test looks");
+  assert.match(narrowArm, /\{#key activeSession\.id\}/, "the active chip is not keyed on its session");
+  assert.match(
+    narrowArm.slice(narrowArm.indexOf("{#key activeSession.id}")),
+    /^[\s\S]{0,400}<CharacterChip/,
+    "the key does not wrap the chip",
+  );
+});
+
+test("the chip says out loud that it binds to one session", () => {
+  // The next reader has to be able to see why the key exists, from the file
+  // that makes it necessary — not only from the one that supplies it.
+  const chip = readFileSync(path.join(UI_DIR, "CharacterChip.svelte"), "utf8");
+  assert.match(chip, /BOUND TO ONE SESSION FOR ITS WHOLE LIFE/);
+  assert.match(chip, /MUST KEY IT ON `session\.id`/);
+});
+
 // --- what the narrow bar hides, and what it must not ------------------------
 
 test("⚠ NEITHER HIDDEN LABEL LEAVES A CONTROL UNNAMED", () => {

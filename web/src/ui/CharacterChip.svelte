@@ -21,7 +21,19 @@
     compact?: boolean;
   } = $props();
 
-  // Stable session identity (App keys chips by session.id).
+  // ⚠ THIS COMPONENT IS BOUND TO ONE SESSION FOR ITS WHOLE LIFE, AND EVERY
+  // CALLER MUST KEY IT ON `session.id`.
+  //
+  // The two slices below are read out of `session.store` ONCE, at init. That is
+  // deliberate — they are store-contract signals and `$station` needs a stable
+  // top-level binding — but it means changing the `session` PROP on a live
+  // instance does nothing at all: the chip goes on rendering the pilot it was
+  // created for, silently and convincingly.
+  //
+  // The desktop strip gets this right for free (`{#each … (session.id)}`). The
+  // narrow bar renders a single chip for whichever pilot is active, and without
+  // a `{#key}` it showed the previous pilot's name and location after every
+  // switch — while the workspace underneath had correctly switched.
   // svelte-ignore state_referenced_locally
   const station = session.store.station;
   // svelte-ignore state_referenced_locally

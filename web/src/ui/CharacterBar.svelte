@@ -83,12 +83,22 @@
     -->
     <div class="char-bar-list">
       {#if activeSession}
-        <CharacterChip
-          session={activeSession}
-          active={true}
-          compact={true}
-          onSelect={() => others.length > 0 && (switching = !switching)}
-        />
+        <!--
+          ⚠ `{#key}`, AND IT IS LOAD-BEARING. `CharacterChip` reads its session's
+          store slices once at init — it has to, because `$station` needs a
+          stable top-level binding — so handing a live instance a different
+          `session` changes nothing: it goes on rendering the pilot it was
+          created for. The desktop strip never hits this because `{#each … (id)}`
+          keys every chip; this one chip has to say so itself.
+        -->
+        {#key activeSession.id}
+          <CharacterChip
+            session={activeSession}
+            active={true}
+            compact={true}
+            onSelect={() => others.length > 0 && (switching = !switching)}
+          />
+        {/key}
       {/if}
       {#if others.length > 0}
         <button
