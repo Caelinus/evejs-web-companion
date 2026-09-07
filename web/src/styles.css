@@ -3587,10 +3587,33 @@
   .hud-head-state.error { color: var(--color-danger); }
   .hud-body {
     display: grid;
-    /* The reference's `170px minmax(0,1fr)`: a fixed gauge column, racks take
-     * the rest. Fixed, so the racks do not shuffle sideways as the cell grows. */
-    grid-template-columns: 170px minmax(0, 1fr);
-    gap: 0.6rem 0.9rem;
+    /* ⚠ THE PAIR IS CENTRED, NOT PINNED LEFT.
+     *
+     * It used to be `170px minmax(0, 1fr)` — a fixed gauge column with the rack
+     * stretched across everything left over. But a rack is at most four slots
+     * wide, so on a wide cell the slots sat at the left edge of a 660px box and
+     * the right half of the instrument panel was empty: the two clusters hugged
+     * the left third of a cell they were supposed to occupy.
+     *
+     * The rack column is `max-content` now — its real width — and the two
+     * columns are centred as a group, so the gauge and the rack stay together
+     * and sit in the middle of whatever width the cell has.
+     *
+     * ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its
+     * box overflows equally on BOTH sides, and the left overflow cannot be
+     * scrolled to — a rack too wide for the cell would lose its first slots
+     * with no way to reach them. `safe` falls back to start-alignment at
+     * exactly that point. A browser that does not know the keyword drops the
+     * whole declaration and gets the old left-aligned behaviour, which is the
+     * right thing to degrade to.
+     *
+     * ⚠ THE SLOTS THEMSELVES STAY LEFT-ALIGNED INSIDE EACH ROW. High, mid and
+     * low hold different numbers of modules, and centring each row would
+     * stagger the columns against each other — the rack reads as a grid, and it
+     * only reads that way because every row starts at the same x. */
+    grid-template-columns: 170px minmax(0, max-content);
+    justify-content: safe center;
+    gap: 0.6rem 1.6rem;
     padding: 0.5rem 0.75rem 0.25rem;
     min-height: 0;
     overflow: auto;

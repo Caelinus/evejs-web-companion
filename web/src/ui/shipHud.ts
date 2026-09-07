@@ -121,6 +121,40 @@ export function shipIsStopped(mode: string | null | undefined): boolean {
  * time this app is running. A sentence assembled from a stale local memory is
  * indistinguishable, to a player, from one the ship reported.
  */
+/**
+ * How each state names the thing it is acting ON, by the same key
+ * `shipStateSentence` switches on.
+ *
+ * ⚠ A STATE THAT IS ABSENT HERE TAKES NO OBJECT, AND THAT IS THE POINT.
+ *
+ * FOUND ON SCREEN. This used to strip the full stop off whatever
+ * `shipStateSentence` returned and staple the target onto the end of it,
+ * whatever the sentence was. A stopped ship still has a `targetEntityID` from
+ * whatever it was last doing, so the header read
+ *
+ *     "Engines stopped Caldari Sentry Gun II at 1.3 km"
+ *
+ * which is not a sentence, and worse, reads as though the ship had stopped the
+ * gun. "In warp" had the same shape. Only the states that genuinely act on
+ * something name it, and each names it with the preposition that state actually
+ * takes -- "Holding range on X", not "Holding range X".
+ */
+const OBJECT_PHRASE: Readonly<Record<string, string>> = {
+  orbit: "Orbiting",
+  orbiting: "Orbiting",
+  approach: "Approaching",
+  approaching: "Approaching",
+  align: "Aligning to",
+  aligning: "Aligning to",
+  keepatrange: "Holding range on",
+  dock: "Docking at",
+  docking: "Docking at",
+  jump: "Jumping to",
+  jumping: "Jumping to",
+  warp: "In warp to",
+  warping: "In warp to",
+};
+
 export function shipStateSentenceFor(
   ship: {
     readonly mode: string | null;
@@ -136,7 +170,15 @@ export function shipStateSentenceFor(
   if (targetName === null) {
     return base;
   }
+  const key = (ship?.mode ?? "").trim().toLowerCase().replace(/[^a-z]/g, "");
+  const phrase = OBJECT_PHRASE[key];
+  if (phrase === undefined) {
+    // Stopped, drifting, or a mode this build has never heard of. The target is
+    // real but this state does not act on it, so the sentence says only what it
+    // knows -- which is the same rule the rest of this file follows.
+    return base;
+  }
   const at = targetMetres === null ? "" : ` at ${formatDistance(targetMetres)}`;
   // "Orbiting." -> "Orbiting Caldari Sentry Gun I at 5 km"
-  return `${base.replace(/\.$/, "")} ${targetName}${at}`;
+  return `${phrase} ${targetName}${at}`;
 }

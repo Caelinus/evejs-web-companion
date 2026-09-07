@@ -132,6 +132,35 @@ test("a named target with no measurable range is still named", () => {
   assert.equal(shipStateSentenceFor(ship, "Some Rock", null, km), "Orbiting Some Rock");
 });
 
+test("⚠ A STOPPED SHIP DOES NOT NAME A TARGET — FOUND ON SCREEN", () => {
+  // The header read "Engines stopped Caldari Sentry Gun II at 1.3 km". A
+  // stopped ship still carries a `targetEntityID` from whatever it was last
+  // doing, and this function used to strip the full stop off ANY sentence and
+  // staple the target on. It is not a sentence, and it reads as though the ship
+  // had stopped the gun.
+  const stopped = { mode: "stop", velocity: { x: 0, y: 0, z: 0 } };
+  assert.equal(shipStateSentenceFor(stopped, "Some Rock", 1300, km), "Engines stopped.");
+  // Same shape, same rule: a mode this build has never heard of describes
+  // itself and claims nothing about the target.
+  const unknown = { mode: "SOMETHING_NEW", velocity: { x: 0, y: 0, z: 0 } };
+  assert.equal(
+    shipStateSentenceFor(unknown, "Some Rock", 1300, km),
+    shipStateSentence(unknown),
+  );
+});
+
+test("each state names its object with the preposition that state actually takes", () => {
+  // "Holding range X" and "Aligning X" are not English. The verb decides the
+  // join, so the table carries the whole phrase rather than a bare participle.
+  const at = (mode: string): string =>
+    shipStateSentenceFor({ mode, velocity: { x: 1, y: 0, z: 0 } }, "Some Rock", 5000, km);
+  assert.equal(at("orbit"), "Orbiting Some Rock at 5 km");
+  assert.equal(at("approach"), "Approaching Some Rock at 5 km");
+  assert.equal(at("align"), "Aligning to Some Rock at 5 km");
+  assert.equal(at("keepatrange"), "Holding range on Some Rock at 5 km");
+  assert.equal(at("warp"), "In warp to Some Rock at 5 km");
+});
+
 test("⚠ THE TARGET IS NOT TAKEN FROM WHAT THIS CLIENT LAST ORDERED", () => {
   // A course set by a bot, by another client or by a previous session is the
   // common case while this app is running, and a sentence assembled from a

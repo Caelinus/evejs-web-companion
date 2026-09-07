@@ -292,6 +292,20 @@ test("⚠ STOP IS IN THE HEADER, CENTRED BY THE GRID AND NOT BY WHAT IS BESIDE I
   assert.match(css, /\.hud-stop \{[\s\S]{0,200}justify-self: center;/);
 });
 
+test("⚠ THE GAUGE AND THE RACK ARE CENTRED AS A PAIR, not stretched from the left", () => {
+  // The rack column used to be `minmax(0, 1fr)`. A rack is at most four slots
+  // wide, so on a wide cell the slots sat at the left edge of a 660px box and
+  // the right half of the instrument panel was empty — the two clusters hugged
+  // the left third of a cell they were meant to occupy. Measured live after the
+  // change: 235px of margin on each side, exactly.
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,1800}grid-template-columns: 170px minmax\(0, max-content\);/);
+  // ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
+  // overflows on BOTH sides and the left overflow cannot be scrolled to, so a
+  // rack too wide for the cell would lose its first slots with no way to reach
+  // them. `safe` falls back to start-alignment at exactly that point.
+  assert.match(CSS, /justify-content: safe center;/);
+});
+
 test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 21rem IS A CEILING, NOT A HEIGHT", () => {
   // It was a fixed 21rem, measured against content that has since changed: the
   // footer came off the cell and the number stayed, leaving a band of empty
@@ -304,7 +318,7 @@ test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 21rem IS A CEILING, NOT A HEIGHT
   // nothing, and `.hud-body` scrolls when it hits it.
   assert.match(CSS, /\.workspace\.in-space \.work-main \{[\s\S]{0,1400}grid-template-rows: minmax\(0, 1fr\) auto;/);
   assert.match(CSS, /\.workspace\.in-space \.work-main > \.hud-bar \{ max-height: 21rem; \}/);
-  assert.match(CSS, /\.hud-body \{[\s\S]{0,400}overflow: auto;/, "the ceiling has nothing to scroll");
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,2000}overflow: auto;/, "the ceiling has nothing to scroll");
 });
 
 test("⚠ STOP IS SHORTER THAN R8's 40px, AND ONLY WHERE A MOUSE IS DOING THE PRESSING", () => {
