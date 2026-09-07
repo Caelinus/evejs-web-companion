@@ -113,9 +113,13 @@
     {#if isDocked}
       <div class="dock-host">
         <ErrorBoundary name="Station">
+          <!-- Inside the `{#if isDocked}` arm, so it is always true here — but
+               written down rather than left to the prop's default, because the
+               default is what a forgetful mount silently gets. -->
           <StationPanel
             {store}
             {flow}
+            isDocked={true}
             {expanded}
             {onToggleExpand}
             ping={inventoryPing}

@@ -112,7 +112,7 @@
            at its narrowest tier. There is no strip to fold into on a phone, so
            it is given no collapse control. -->
       <ErrorBoundary name="Station">
-        <StationPanel {store} {flow} />
+        <StationPanel {store} {flow} isDocked={true} />
       </ErrorBoundary>
     {:else}
       <!--

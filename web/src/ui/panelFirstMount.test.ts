@@ -46,11 +46,11 @@ const PANELS = [
   "Workspace",
   "LoginForm",
   "CharacterSelect",
-  // The docked right-hand dock panel. It renders with nothing but a store and a
-  // flow, exactly as it does on a cold mount before the first read answers.
+  // The "Inventory & Ship" panel, in BOTH states: the right-hand dock frame
+  // while docked, the Neocom's floating window while flying, and the mobile
+  // home. It renders with nothing but a store and a flow, exactly as it does on
+  // a cold mount before the first read answers.
   "StationPanel",
-  // Still mounted IN SPACE, as the Neocom's floating Inventory & Ship window.
-  "InventoryShip",
   "Fitting",
   "Industry",
   "Market",

@@ -4,7 +4,7 @@
   // mapping lives, so App and both shells stay thin routers. Every panel here is
   // a pre-existing, working component; only the two state SHELLS themselves are
   // still placeholder chrome.
-  import InventoryShip from "./InventoryShip.svelte";
+  import StationPanel from "./StationPanel.svelte";
   import Fitting from "./Fitting.svelte";
   import Industry from "./Industry.svelte";
   import Market from "./Market.svelte";
@@ -36,7 +36,7 @@
 import ShowInfo from "./ShowInfo.svelte";
 import NoticeLog from "./NoticeLog.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
-  import { tabLabel, type TabID } from "./tabs.ts";
+  import { deriveDocked, tabLabel, type TabID } from "./tabs.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
   import type { Session } from "../app/sessions.ts";
@@ -58,6 +58,22 @@ import NoticeLog from "./NoticeLog.svelte";
     // one that needs to see pilots beyond its own store/flow.
     sessions?: readonly Session[];
   } = $props();
+
+  // svelte-ignore state_referenced_locally
+  const flight = store.flight;
+  // svelte-ignore state_referenced_locally
+  const stationSlice = store.station;
+
+  /**
+   * Whether the pilot is docked, from the AUTHORITATIVE flag.
+   *
+   * ⚠ THE "Inventory & Ship" WINDOW IS THE STATION PANEL NOW, in both states —
+   * one component, told where it is. It replaced `InventoryShip.svelte`, which
+   * drew the Ship Hangar, Item Hangar and Corporate Hangar tabs while flying:
+   * three places a pilot in space cannot reach, showing whatever the last
+   * docked read had left in the store.
+   */
+  const isDocked = $derived(deriveDocked($flight.status, $stationSlice.online));
 </script>
 
 <!-- One panel's failure is that panel's failure: a boundary per host keeps a
@@ -65,7 +81,7 @@ import NoticeLog from "./NoticeLog.svelte";
      with it, and names the panel in the report (see ErrorBoundary.svelte). -->
 <ErrorBoundary name={tabLabel(tab)}>
 {#if tab === "inventory"}
-  <InventoryShip {store} {flow} />
+  <StationPanel {store} {flow} {isDocked} />
 {:else if tab === "fitting"}
   <Fitting {store} {flow} showInventory={() => onOpen?.("inventory")} />
 {:else if tab === "industry"}

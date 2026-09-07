@@ -31,7 +31,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -600,20 +600,42 @@ test("the panel invents no capacity: every number on screen came from the server
   }
 });
 
-test("⚠ the panel is mounted from docked branches only", () => {
-  // The whole reason this component exists rather than a rewrite of
-  // InventoryShip: a pilot in space must not be able to reach it. Grep, so the
-  // claim is checked and not merely asserted in a comment.
+test("⚠ every mount TELLS the panel which state it is in", () => {
+  // ⚠ THIS TEST USED TO SAY THE OPPOSITE, AND THE REVERSAL IS DELIBERATE.
+  //
+  // It read "the panel is mounted from docked branches only", because that was
+  // the whole reason this component existed rather than a rewrite of
+  // `InventoryShip.svelte`: a change made for a docked pilot must not reach one
+  // in space. That held while the two panels coexisted.
+  //
+  // `InventoryShip` is gone. It drew the Ship Hangar, Item Hangar and Corporate
+  // Hangar tabs while flying — three places a pilot in space cannot reach, and
+  // not empty either: they showed whatever the last docked read had left in the
+  // store, which is worse, because a stale list of hulls in a station reads as
+  // something you could act on. This panel is the "Inventory & Ship" window in
+  // both states now, and it is told which one.
+  //
+  // So the invariant moved rather than went. `isDocked` DEFAULTS to true — it
+  // has to, or every pre-existing docked mount would have to be edited — which
+  // means a mount that forgets to pass it draws station tabs to a flying pilot
+  // and looks entirely fine doing it. Every mount naming the panel must name
+  // the flag with it.
   for (const file of ["DockPanel.svelte", "MobileWorkspace.svelte", "PanelHost.svelte"]) {
     const source = readFileSync(path.join(UI_DIR, file), "utf8");
-    if (!source.includes("StationPanel")) continue;
-    assert.match(source, /isDocked/, `${file} mounts the panel without an isDocked guard`);
+    if (!source.includes("<StationPanel")) continue;
+    const mount = /<StationPanel[^>]*>/.exec(source)?.[0] ?? "";
+    assert.match(
+      mount,
+      /isDocked/,
+      `${file} mounts the panel without telling it where the pilot is: ${mount}`,
+    );
   }
-  const host = readFileSync(path.join(UI_DIR, "PanelHost.svelte"), "utf8");
+  // And the old panel really is gone, so there is no second implementation left
+  // to disagree with this one about what a flying pilot may reach.
   assert.equal(
-    host.includes("StationPanel"),
+    existsSync(path.join(UI_DIR, "InventoryShip.svelte")),
     false,
-    "PanelHost opens floating windows in space — the station panel must not be one",
+    "two inventory panels is two things to keep honest",
   );
 });
 
@@ -689,4 +711,58 @@ test("Escape closes whichever popover is open", () => {
   assert.match(SOURCE, /function onKeydown\(event: KeyboardEvent\)/);
   assert.match(SOURCE, /event\.key !== "Escape"/);
   assert.match(SOURCE, /<div class="stn-panel"[^>]*onkeydown=\{onKeydown\}/);
+});
+
+// --- claims carried over when `InventoryShip.svelte` was deleted -------------
+//
+// ⚠ `inventoryCards.test.ts` went with that file. Most of its 41 tests were
+// about a presentation this panel deliberately replaced — a tile GRID, and a
+// four-tab strip whose names no longer exist — and re-pointing those would have
+// meant rewriting the claim as well as the anchor, which is how a suite quietly
+// becomes a description of whatever was built.
+//
+// These four were not about the grid. They are the ones this file did not
+// already make, restated against the panel that stands.
+
+test("a hull shows every bay it HAS, with used and capacity, from the server's numbers", () => {
+  // The bay-state tests above prove absent/empty/unreadable/unchecked are four
+  // different things. This is the ordinary case they are the exceptions to:
+  // a hull with several real bays draws all of them, each with its own reading.
+  const bays = visibleText(locationView(panel(), "ship"));
+  assert.match(bays, /Cargo hold/);
+  assert.match(bays, /Ore hold/);
+  assert.match(bays, /Drone bay/);
+});
+
+test("⚠ AN EMPTY HANGAR AND ONE NOT YET READ ARE DIFFERENT SENTENCES", () => {
+  // The same rule as the bays, one level up. "Nothing here" is a fact about the
+  // hangar; a hangar nobody could read is a fact about the READ, and showing it
+  // as empty is the lie this codebase keeps having to un-tell.
+  const empty = visibleText(locationView(panel(), "hangar"));
+  const failed = visibleText(locationView(panel({ hangarError: "the session ended" }), "hangar"));
+  assert.match(failed, /could not be loaded|the session ended/);
+  assert.doesNotMatch(failed, /Nothing here but your ships/, "a failed read is not an empty hangar");
+  assert.notEqual(empty, failed, "the two states must not render the same");
+});
+
+test("a thing whose name has not resolved still renders a row, not a crash", () => {
+  // Names arrive after the rows do, every time. A row that cannot be named yet
+  // is drawn and named later — never `undefined`, never `[object Object]`.
+  const text = visibleText(panel({ names: false }));
+  assert.doesNotMatch(text, /undefined/);
+  assert.doesNotMatch(text, /\[object Object\]/);
+});
+
+test("R8: the tap target is the ROW, which is how this panel resolves the 40px rule", () => {
+  // ⚠ THE CARRIED-OVER CLAIM WAS "every control clears 40px", AND IT IS FALSE
+  // HERE — deliberately, and it was decided before this change. The tile grid
+  // this panel replaced met the floor on every control; this one is dense on
+  // purpose (`.stn-btn-more` is 26px, the action bar 32px), and the tension is
+  // resolved BEHAVIOURALLY instead: below 560px the per-row Move column is
+  // removed entirely, the row itself becomes the target, and moving is done
+  // from the action bar. The small controls are never on the critical path on a
+  // touch-sized panel. See `docs/station-panel.md`.
+  //
+  // So what is pinned is the thing that actually carries the rule: the row.
+  assert.match(CSS, /\.stn-row \{[\s\S]{0,200}min-height: 46px/);
 });

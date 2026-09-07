@@ -100,6 +100,7 @@
     store,
     flow,
     ping = 0,
+    isDocked = true,
     onCollapse = null,
     expanded = false,
     onToggleExpand = null,
@@ -112,6 +113,26 @@
      * already on screen. 0 = never picked; never fires on mount.
      */
     ping?: number;
+    /**
+     * Whether the pilot is DOCKED.
+     *
+     * ⚠ THIS PANEL IS THE IN-SPACE "Inventory & Ship" WINDOW TOO NOW, and that
+     * is what this flag is for. It replaced `InventoryShip.svelte`, which drew
+     * the Ship Hangar, Item Hangar and Corporate Hangar tabs while flying —
+     * three places a pilot in space cannot reach at all. They were not empty:
+     * they showed whatever the last docked read had left in the store, which is
+     * worse than empty, because a stale list of hulls in a station reads as
+     * something you could act on.
+     *
+     * In space the panel offers the ship's own bays and any container opened on
+     * the grid, and nothing else. `moveDestinations` is told the same thing, so
+     * the "Move to…" menu cannot offer a hangar either.
+     *
+     * ⚠ THE DEFAULT IS `true`. Every mount that existed before this prop was a
+     * docked one (the dock frame, the mobile home), so the default has to leave
+     * them alone; only the in-space caller writes it down.
+     */
+    isDocked?: boolean;
     /**
      * Fold the panel to the dock's thin strip. The panel carries its own header
      * (it replaces the dock frame's), so the frame's collapse control lives
@@ -138,6 +159,8 @@
   const names = store.names;
   // svelte-ignore state_referenced_locally
   const fitting = store.fitting;
+  // svelte-ignore state_referenced_locally
+  const space = store.space;
 
   // ⚠ NOT `class:active`. The app's component layer styles a bare
   // `button.active` as a FILLED ACCENT control, and that selector outranks a
@@ -401,7 +424,7 @@
    * correctly before anything is ticked.
    */
   function targetsFrom(place: InventoryPlace | null): readonly MoveDestination[] {
-    return moveDestinations($inventory, place, containerName());
+    return moveDestinations($inventory, place, containerName(), isDocked);
   }
 
   /** The place the current location IS, for the action bar before a tick. */
@@ -675,7 +698,13 @@
       collapsed: false,
       readOnly: false,
       error: null,
-      emptyText: "Empty — move things here from the hangar.",
+      // ⚠ FOUND LIVE: THIS NAMED THE HANGAR TO A PILOT IN SPACE, who has none.
+      // The sentence was written for the docked panel, where "the hangar" is
+      // one tab away; out on a belt it points at a place the player cannot
+      // reach and the server will not move anything into.
+      emptyText: isDocked
+        ? "Empty — move things here from the hangar."
+        : "Empty — move things here from your other bays, or from a container on the grid.",
       targets: targetsFrom(over.place),
       stackKey: null,
       ...over,
@@ -774,25 +803,59 @@
     return bayGroups.reduce((total, group) => total + (group.rows?.length ?? 0), 0);
   }
 
+  /**
+   * The places this panel can show, for the state the pilot is actually in.
+   *
+   * ⚠ IN SPACE THAT IS THE SHIP'S OWN BAYS, AND A CONTAINER ON THE GRID. The
+   * ship hangar, the item hangar, the corp hangar and the station's services
+   * are all things you reach from INSIDE a station; a flying pilot cannot open
+   * any of them, and the server refuses every move into them.
+   *
+   * They are not drawn empty, they are not drawn disabled — they are ABSENT.
+   * A tab wearing "you cannot use this right now" is a tab a pilot still has to
+   * read past on every single visit, and there is nothing behind these four but
+   * whatever the last docked read happened to leave in the store.
+   */
   const locations = $derived.by<readonly Location[]>(() => {
     const list: Location[] = [
       {
         id: "ship",
-        label: openShip ? `${typeName(openShip.typeID)} bays` : "Ship bays",
+        label: openShip ? `${typeName(hullTypeID)} bays` : "Ship bays",
         badge: openShip ? `${bayItemCount()}` : "",
       },
-      { id: "ships", label: "Ship hangar", badge: `${ships.length}` },
-      { id: "hangar", label: "Item hangar", badge: `${hangarThings($inventory).length}` },
+    ];
+    if (isDocked) {
+      list.push({ id: "ships", label: "Ship hangar", badge: `${ships.length}` });
+      list.push({ id: "hangar", label: "Item hangar", badge: `${hangarThings($inventory).length}` });
       // The badge counts what is in the division on screen, the way every other
       // location's does; WHICH division is named by the chips inside the view,
       // where there is room for it.
-      { id: "corp", label: "Corp hangar", badge: selectedDivision ? `${selectedDivision.rows.length}` : "" },
-    ];
+      list.push({
+        id: "corp",
+        label: "Corp hangar",
+        badge: selectedDivision ? `${selectedDivision.rows.length}` : "",
+      });
+    }
     if (container) {
       list.push({ id: "container", label: containerName(), badge: `${container.rows.length}` });
     }
-    list.push({ id: "services", label: "Station services", badge: "" });
+    if (isDocked) {
+      list.push({ id: "services", label: "Station services", badge: "" });
+    }
     return list;
+  });
+
+  /**
+   * A view the current state no longer offers falls back to the ship's bays.
+   *
+   * Undocking with the Item hangar open would otherwise leave the panel sitting
+   * on a location that is not in its own tab strip, showing a list of things in
+   * a station the pilot has just left.
+   */
+  $effect(() => {
+    if (!locations.some((location) => location.id === view)) {
+      view = "ship";
+    }
   });
 
   const isInventoryView = $derived(
@@ -881,6 +944,45 @@
       $inventory.cargo.rows.find((r) => r.itemID === itemID);
     return row ? row.typeID : null;
   }
+
+  /**
+   * The open hull's TYPE, from whichever source actually has it.
+   *
+   * ⚠ `openShip.typeID` IS 0 IN SPACE, AND THAT IS NOT A BUG IN THIS PANEL.
+   * The flow reads it off the row the player clicked the hull FROM — a row in
+   * the ship hangar or the cargo hold — and in space there is no ship hangar to
+   * click one in, so it falls back to 0 and the tab reads "your ship bays".
+   *
+   * The snapshot has it: the same hull, from the ship the pilot is flying. It
+   * is only used when the open ship IS that ship, so this can never name one
+   * hull with another's type.
+   */
+  const hullTypeID = $derived.by<number>(() => {
+    const open = openShip;
+    if (!open) {
+      return 0;
+    }
+    if (open.typeID > 0) {
+      return open.typeID;
+    }
+    const ship = $space.snapshot?.ship ?? null;
+    return ship && ship.itemID === open.itemID ? ship.typeID : 0;
+  });
+
+  /**
+   * The OPEN HULL's own type name, for the tab that says whose bays these are.
+   *
+   * ⚠ FOUND LIVE IN SPACE: the tab read "your ship bays" rather than
+   * "Procurer bays". Docked, the ship hangar's rows carry that typeID and the
+   * row sweep asks for it as a side effect; in space there is no ship hangar,
+   * so nothing was asking and the fallback stood in permanently. A panel that
+   * needs a name asks for it — the same lesson the module rack learned.
+   */
+  $effect(() => {
+    if (hullTypeID > 0 && $names.resolved[nameKey("type", hullTypeID)] === undefined) {
+      flow.requestNames([{ kind: "type", id: hullTypeID }]);
+    }
+  });
 
   // R7d — a quoted item renders as its type NAME; its item id is never shown.
   $effect(() => {
@@ -1136,7 +1238,13 @@
 <div class="stn-panel" bind:this={panelEl} onkeydown={onKeydown}>
   <!-- ============================================================= header -->
   <div class="stn-head">
-    <span class="stn-head-title">Station</span>
+    <!--
+      ⚠ "STATION" IS ONLY TRUE HALF THE TIME NOW. The panel is the "Inventory &
+      Ship" window in space as well, where a header naming a station the pilot
+      undocked from is exactly the kind of stale label this rewrite exists to
+      remove. In space it says what it is actually showing.
+    -->
+    <span class="stn-head-title">{isDocked ? "Station" : "Ship"}</span>
     <span class="stn-head-hint">{stationHint}</span>
     <button
       type="button"
@@ -1254,6 +1362,20 @@
     </section>
 
     <!-- ----------------------------------------------------- ship hangar -->
+    <!--
+      ⚠ THE STATION-ONLY VIEWS ARE NOT RENDERED IN SPACE AT ALL.
+
+      Every location renders and the inactive ones carry `hidden`, so a
+      selection survives a tab switch — that is the panel's design and it is
+      tested. But `hidden` is the wrong tool for a place the pilot cannot reach:
+      it would leave the ship hangar, the item hangar and the corp hangar
+      building their groups out of whatever the last docked read left in the
+      store, one poll at a time, for a hull that is out on a belt.
+
+      Absent means absent. The tab strip drops them (see `locations`) and so
+      does the DOM.
+    -->
+    {#if isDocked}
     <section class="stn-view" id="stn-view-ships" role="tabpanel" aria-labelledby="stn-tab-ships" hidden={view !== "ships"}>
       <div class="stn-group-head">
         <span class="stn-group-title">Your ships</span>
@@ -1351,6 +1473,10 @@
     </section>
 
     <!-- -------------------------------------------------- open container -->
+    {/if}
+
+    <!-- A container is opened ON THE GRID as well as in a station, so it is the
+         one non-ship location a flying pilot can reach. -->
     <section class="stn-view" id="stn-view-container" role="tabpanel" aria-labelledby="stn-tab-container" hidden={view !== "container"}>
       {#if containerGroup}
         <p class="stn-controls">
@@ -1371,6 +1497,7 @@
     </section>
 
     <!-- -------------------------------------------------- station services -->
+    {#if isDocked}
     <section class="stn-view stn-services" id="stn-view-services" role="tabpanel" aria-labelledby="stn-tab-services" hidden={view !== "services"}>
       <div class="stn-services-col">
         <h3 class="stn-section">Station</h3>
@@ -1498,6 +1625,7 @@
         {/if}
       </div>
     </section>
+    {/if}
   </div>
 
   <!-- ========================================================== action bar -->

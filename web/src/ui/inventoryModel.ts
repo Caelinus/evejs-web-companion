@@ -151,9 +151,22 @@ export function moveDestinations(
   inventory: InventoryState,
   current: InventoryPlace | null,
   containerName: string,
+  /**
+   * Whether the pilot is DOCKED.
+   *
+   * ⚠ IN SPACE THERE IS NO HANGAR AND NO CORP OFFICE TO MOVE INTO. Both are
+   * station storage: reachable only from inside one, and the server refuses
+   * either from out on the grid. Offering them would be the silent decline
+   * again — a live destination that can only ever bounce the stack back.
+   *
+   * ⚠ AND THE DEFAULT IS `true` ON PURPOSE. Every caller that existed before
+   * this argument was a docked one, so the default has to be the one that
+   * leaves them alone; only the in-space caller writes it down.
+   */
+  docked = true,
 ): readonly MoveDestination[] {
   const options: MoveDestination[] = [];
-  if (!samePlace(current, { kind: "hangar" })) {
+  if (docked && !samePlace(current, { kind: "hangar" })) {
     options.push({ label: "Station hangar", place: { kind: "hangar" } });
   }
   if (inventory.activeShipID && !samePlace(current, { kind: "cargo" })) {
@@ -178,7 +191,7 @@ export function moveDestinations(
       place: { kind: "container", itemID: container.itemID },
     });
   }
-  if (inventory.corp.available) {
+  if (docked && inventory.corp.available) {
     for (const division of inventory.corp.divisions) {
       if (samePlace(current, { kind: "corp", division: division.division })) {
         continue;

@@ -187,25 +187,32 @@ test("a window can never be resized below the floor", () => {
   assert.equal(wins[0]?.h, MIN_H);
 });
 
-test("⚠ the dock panel's contents have no TabID at all", () => {
-  // Neither half of the frame can be opened as a window, and that is now true
-  // by CONSTRUCTION rather than by a list: `StationPanel` and `SpaceOverview`
-  // are components with no tab id, so there is nothing to open.
+test("⚠ the OVERVIEW half of the dock frame has no TabID at all", () => {
+  // ⚠ THIS USED TO COVER BOTH HALVES, AND NOW COVERS ONE. The claim was that
+  // neither `StationPanel` nor `SpaceOverview` could be opened as a floating
+  // window, so a docked surface could never appear over a pilot in space.
   //
-  // ⚠ AND THERE IS NO `overview` TAB EITHER, ANY MORE. It was a window for one
-  // phase while the old cockpit was taken apart; the file is gone and so is the
-  // tab. The dock panel is the overview, and it is always on screen.
+  // `StationPanel` IS a window now, on purpose: it is the "Inventory & Ship"
+  // panel in both states, and it replaced `InventoryShip.svelte`, which drew
+  // three station-only locations while flying. The guarantee moved with it —
+  // the panel is told `isDocked` by every mount, and `stationPanelActions.test`
+  // holds that in space it offers the ship's own bays and nothing else. That is
+  // a stronger promise than "cannot be opened at all", because it is about what
+  // the pilot can actually reach rather than which frame is on screen.
+  //
+  // The overview half is unchanged: it is the dock panel, always there, and
+  // opening a second copy of it in a window would be two of the same thing.
   const ws = source("Workspace.svelte");
   assert.match(ws, /<DockPanel/, "the frame is mounted by Workspace, not opened as a window");
   const dockPanelSource = source("DockPanel.svelte");
   for (const panel of ["StationPanel", "SpaceOverview"]) {
     assert.match(dockPanelSource, new RegExp(`<${panel}`), `${panel} is not in the frame`);
-    assert.doesNotMatch(
-      source("PanelHost.svelte"),
-      new RegExp(`<${panel}`),
-      `${panel} can be opened as a floating window`,
-    );
   }
+  assert.doesNotMatch(
+    source("PanelHost.svelte"),
+    /<SpaceOverview/,
+    "the overview can be opened as a second, floating copy of the dock panel",
+  );
   assert.equal(isWindowTab("market"), true);
 });
 
