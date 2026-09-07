@@ -238,13 +238,25 @@ test("⚠ STOP IS ON THE SHIP CARD — not three cards down, behind a fold", () 
   );
 });
 
-test("the HUD's own header is hidden in a card, but the rack's is only CLIPPED", () => {
-  // ⚠ TWO DIFFERENT TREATMENTS, ON PURPOSE. The HUD's header duplicates the
-  // card's own title, so it is `display: none`. The rack's "Modules" heading is
-  // what `aria-labelledby` points at, so removing it from the tree would take
-  // the section's accessible name with it — it is clipped instead: still read
-  // aloud, just not occupying a row.
-  assert.match(CSS, /\.mob-card-body > \.hud-bar > \.hud-head \{ display: none; \}/);
+test("the HUD's SHIP NAME is hidden in a card, but the rack's heading is only CLIPPED", () => {
+  // ⚠ THREE DIFFERENT TREATMENTS, ON PURPOSE.
+  //
+  // The HUD header's ship name duplicates the card's own title, so it is
+  // `display: none`. THE HEADER ITSELF IS NOT — it used to be, back when the
+  // name was all it held, and Stop lives in that row now. Hiding it would take
+  // the control a pilot reaches for when things go wrong off the phone
+  // entirely, which has happened on this tier once already and was caught only
+  // by flying it.
+  //
+  // The rack's "Modules" heading is what `aria-labelledby` points at, so
+  // removing it from the tree would take the section's accessible name with it
+  // — it is clipped instead: still read aloud, just not occupying a row.
+  assert.match(CSS, /\.mob-card-body > \.hud-bar > \.hud-head > \.hud-head-ship \{ display: none; \}/);
+  assert.equal(
+    /\.mob-card-body > \.hud-bar > \.hud-head \{ display: none; \}/.test(CSS),
+    false,
+    "the card hides the row Stop lives in",
+  );
   // ⚠ ONE RULE FOR BOTH TIERS. It was written twice — once for the card, once
   // for the cell — until the desktop HUD was matched to the reference and
   // stopped wanting the heading either. A rule written twice is a rule that
@@ -271,8 +283,16 @@ test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {
   const rack = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
   assert.match(rack, /class="slot-ring-empty"/);
   assert.match(CSS, /\.slot-ring-empty \{[^}]*stroke-dasharray: 3 3/);
-  const box = CSS.slice(CSS.indexOf("  .module-slot.empty {"));
-  assert.match(box.slice(0, 160), /background: none/, "the empty slot kept a solid fill");
+  // ⚠ THIS USED TO CHECK THAT THE EMPTY SLOT CANCELLED THE TILE'S FILL AND
+  // BORDER. There is no longer a fill or a border to cancel: the square box
+  // came off every slot, filled or empty, because it drew a bordered rectangle
+  // around the circle in the same line colour and won. So the claim moves up a
+  // level — nothing on the rack paints a box, which is a stronger statement
+  // than the empty slot un-painting one.
+  const at = CSS.indexOf("  .module-slot {");
+  const tile = CSS.slice(at, CSS.indexOf("\n  }", at));
+  assert.match(tile, /border: none;/, "the tile got its box back");
+  assert.match(tile, /background: none;/, "the tile got its fill back");
 });
 
 test("⚠ THE CARD CARRIES NO `<section>` DRESSING — no band, no hairline", () => {

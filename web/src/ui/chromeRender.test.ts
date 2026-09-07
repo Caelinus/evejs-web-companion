@@ -40,6 +40,8 @@ const TargetBracket = (await import("./TargetBracket.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HUD_SOURCE = readFileSync(path.join(UI_DIR, "HudBar.svelte"), "utf8");
+/** The stylesheet, line endings normalised — the working copy is CRLF. */
+const CSS = readFileSync(path.join(UI_DIR, "..", "styles.css"), "utf8").replace(/\r\n/g, "\n");
 
 /** A flow stub — the server generator never runs onMount / handlers. */
 function fakeFlow(): unknown {
@@ -233,23 +235,32 @@ test("the HUD header names the ship once, not the same word twice", () => {
   );
 });
 
-test("the header carries the ship's state, right-aligned", () => {
-  // The other half of the glance: what ship, and what it is doing. The fixture
-  // ship is stopped, so the word goes quiet rather than blue.
+test("⚠ THE HEADER CARRIES THE SENTENCE, NOT THE ONE-WORD MODE", () => {
+  // REVERSED, BY THE OPERATOR. The header used to say "ORBIT" and a footer
+  // underneath said "Orbiting Foo at 2.1 AU". Both described the same thing and
+  // the short one described it worse — it is the sentence with the useful half
+  // removed. The sentence took the header slot and the footer went with the
+  // duplication.
+  //
+  // The fixture ship is stopped, so the line goes quiet rather than blue.
   const body = renderHud(inSpaceStore());
-  assert.match(body, /class="hud-head-mode[^"]*"[^>]*>STOP</);
-  assert.match(body, /class="hud-head-mode stopped"/, "a stopped ship must not read as an event");
+  assert.match(body, /class="hud-head-state[^"]*"[^>]*>Engines stopped\./);
+  assert.match(body, /class="hud-head-state stopped"/, "a stopped ship must not read as an event");
+  assert.equal(/hud-head-mode/.test(body), false, "the one-word mode came back");
 });
 
-test("the footer says what the two module gestures are", () => {
-  // ⚠ THE ONE HINT LEFT IN THE APP, AND IT IS NOT ABOUT THE GAME. Press-and-hold
-  // has no affordance — nothing on a slot says a long press differs from a short
-  // one, and the ring that fills only appears once you are already holding. This
-  // explains a CONTROL, not a rule of EVE, which is the line the rest of the
-  // prose was cut on.
-  const text = visibleText(renderHud(inSpaceStore()));
-  assert.match(text, /click = on\/off/);
-  assert.match(text, /hold ≈ 0\.6 s = overload/);
+test("⚠ THE CELL IS TWO ROWS — THE FOOTER IS GONE, AND SO IS THE GESTURE LEGEND", () => {
+  // The legend read "click = on/off · hold ≈ 0.6 s = overload". It was kept once
+  // as the one hint in the app that explains a CONTROL rather than a rule of
+  // EVE — press-and-hold genuinely has no affordance. The operator cut it
+  // anyway, along with the row it sat in: a legend that is on screen for every
+  // second of every session is paying for the thousandth press to help with the
+  // first.
+  const body = renderHud(inSpaceStore());
+  const text = visibleText(body);
+  assert.equal(/click = on\/off/.test(text), false, "the gesture legend came back");
+  assert.equal(/overload/.test(text), false, "the legend came back in other words");
+  assert.equal(/hud-foot/.test(body), false, "the footer row came back");
 });
 
 // --- Stop, and the rule that travels with it ---------------------------------
@@ -260,11 +271,39 @@ test("the footer says what the two module gestures are", () => {
 // which is exactly the moment other requests are in flight.
 
 test("in space, the HUD carries Stop", () => {
-  // ⚠ THE LABEL IS "Stop", NOT "Stop the ship". It sits in a footer whose left
-  // half is already a sentence about the ship, so the longer label was saying
-  // "ship" twice in one row; the reference's is the short one.
+  // ⚠ THE LABEL IS "Stop", NOT "Stop the ship". It sits in a row that already
+  // carries a sentence about the ship, so the longer label was saying "ship"
+  // twice in one row; the reference's is the short one.
   assert.ok(visibleText(renderHud(inSpaceStore())).includes("Stop"));
   assert.match(renderHud(inSpaceStore()), /class="hud-stop"/);
+});
+
+test("⚠ STOP IS IN THE HEADER, CENTRED BY THE GRID AND NOT BY WHAT IS BESIDE IT", () => {
+  // It moved out of the footer when the footer went. Centring it with the grid
+  // rather than with auto margins is the point: `1fr auto 1fr` puts it at the
+  // middle of the CELL, so it does not drift as the ship's name and the state
+  // sentence change length. It is the control a pilot presses without looking.
+  const body = renderHud(inSpaceStore());
+  const head = body.slice(body.indexOf('class="hud-head"'), body.indexOf("</header>"));
+  assert.ok(head.length > 0, "the header is not where this test looks");
+  assert.match(head, /class="hud-stop"/, "Stop is not in the header");
+  const css = CSS;
+  assert.match(css, /\.hud-head \{[\s\S]{0,300}grid-template-columns: 1fr auto 1fr;/);
+  assert.match(css, /\.hud-stop \{[\s\S]{0,200}justify-self: center;/);
+});
+
+test("⚠ AND IT SURVIVES ON A PHONE, where the header used to be hidden whole", () => {
+  // The mobile card hid `.hud-head` outright, because the card's own title
+  // already named the ship. With Stop in that row, hiding it would take the
+  // control off the phone entirely — which has happened on this tier once
+  // already, and was only caught by flying it. Only the NAME is hidden now.
+  const css = CSS;
+  assert.equal(
+    /\.mob-card-body > \.hud-bar > \.hud-head \{ display: none; \}/.test(css),
+    false,
+    "the mobile card hides the row Stop lives in",
+  );
+  assert.match(css, /\.mob-card-body > \.hud-bar > \.hud-head > \.hud-head-ship \{ display: none; \}/);
 });
 
 test("STOP IS NEVER DISABLED — not by a shared flag, not by its own", () => {

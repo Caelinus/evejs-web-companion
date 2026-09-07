@@ -21,7 +21,7 @@
   // surface that is always on screen — and it must never be disabled; see below.
   import ModuleRack from "./ModuleRack.svelte";
   import ShipHud from "./ShipHud.svelte";
-  import { shipIsStopped, shipModeLabel, shipStateSentenceFor } from "./shipHud.ts";
+  import { shipIsStopped, shipStateSentenceFor } from "./shipHud.ts";
   import { distanceMeters, formatDistance } from "../space/overview.ts";
   import { resolvedName } from "../store/names.ts";
   import type { ClientStore } from "../store/clientStore.ts";
@@ -86,14 +86,15 @@
     shipNameText === null || shipNameText.toLowerCase() !== hullText.toLowerCase(),
   );
   /**
-   * The right-hand word in the header: ORBIT, WARP, STOP.
+   * ⚠ THE HEADER USED TO CARRY A ONE-WORD MODE — ORBIT, WARP, STOP — with the
+   * full sentence in a footer underneath. Both said the same thing and the
+   * short one said less: "ORBIT" does not say what is being orbited or how far
+   * away it is, and the sentence does. So the sentence took the header's
+   * right-hand slot and the footer went with the duplication.
    *
-   * The header is the glance — what ship, and what it is doing — and this is
-   * the second half of that. It goes quiet rather than blue when the ship is
-   * stopped, because "stopped" is the absence of activity and should not read
-   * as an event.
+   * `shipIsStopped` survives the change: it still quiets the line, because
+   * "stopped" is the absence of activity and should not read as an event.
    */
-  const modeText = $derived(shipModeLabel(ship?.mode ?? null));
   const stopped = $derived(shipIsStopped(ship?.mode ?? null));
 
   /**
@@ -159,20 +160,45 @@
 </script>
 
 <div class="hud-bar">
-  <!-- The header: which ship this instrument is about. 32px, so it costs the
-       gauges almost nothing, and it is what makes the cell self-describing when
-       three windows are floating over the radar. -->
+  <!--
+    The header: which ship this instrument is about, what it is doing, and the
+    one control a pilot presses without looking.
+
+    ⚠ THE FOOTER IS GONE, AND THIS IS WHERE IT WENT. The cell used to be three
+    rows: a header saying ORBIT, the instruments, and a footer carrying the full
+    state sentence, a gesture legend and Stop. Two of those three were saying
+    something the other already said — "ORBIT" is the sentence with the useful
+    half removed — and the third was a legend for a gesture. One row, and the
+    instruments get the height back.
+
+    Three columns, `1fr auto 1fr`: Stop is centred against the CELL and not
+    against whatever the ship happens to be called, so it does not drift as the
+    name and the sentence change length. It is the control reached for when
+    things are going wrong; it has to be in the same place every time.
+  -->
   <header class="hud-head">
-    <span class="hud-head-tag">Ship</span>
-    {#if shipNameText}
-      <span class="hud-head-name">{shipNameText}</span>
-    {/if}
-    {#if showHull}
-      <span class="hud-head-hull">{hullText}</span>
-    {/if}
-    {#if modeText}
-      <!-- The other half of the glance: what the ship is doing, right-aligned. -->
-      <span class="hud-head-mode" class:stopped>{modeText}</span>
+    <span class="hud-head-ship">
+      <span class="hud-head-tag">Ship</span>
+      {#if shipNameText}
+        <span class="hud-head-name">{shipNameText}</span>
+      {/if}
+      {#if showHull}
+        <span class="hud-head-hull">{hullText}</span>
+      {/if}
+    </span>
+
+    <!-- No `disabled`, ever. See stopShip above. -->
+    <button type="button" class="hud-stop" onclick={() => stopShip()}>Stop</button>
+
+    {#if stopError}
+      <!-- ⚠ THE REFUSAL TAKES THE STATE'S PLACE, rather than being appended
+           beside it. It is the same row and there is one slot; a reason Stop
+           did nothing is worth more, right then, than a sentence about what the
+           ship is still doing — and it sits next to the button that refused,
+           which is where R30 wants it. -->
+      <span class="hud-head-state error" role="alert">{stopError}</span>
+    {:else}
+      <span class="hud-head-state" class:stopped>{stateText}</span>
     {/if}
   </header>
 
@@ -187,23 +213,4 @@
     </section>
   </div>
 
-  <footer class="hud-foot">
-    <span class="hud-foot-state">{stateText}</span>
-    <!--
-      ⚠ THE ONE HINT LEFT IN THE APP, AND IT IS NOT ABOUT THE GAME. Press-and-
-      hold has no affordance — there is nothing on a slot that says a long press
-      does something different from a short one, and the ring that fills only
-      appears once you are already holding. This says what the two gestures are;
-      it explains a CONTROL, not a rule of EVE.
-
-      Desktop only: a phone has no room for it, and the whole point of the
-      gesture is that it is the one that works on a touch screen.
-    -->
-    <span class="hud-foot-hint">click = on/off · hold ≈ 0.6 s = overload</span>
-    <!-- No `disabled`, ever. See stopShip above. -->
-    <button type="button" class="hud-stop" onclick={() => stopShip()}>Stop</button>
-    {#if stopError}
-      <span class="hud-foot-error error" role="alert">{stopError}</span>
-    {/if}
-  </footer>
 </div>

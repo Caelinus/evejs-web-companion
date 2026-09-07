@@ -244,16 +244,24 @@ test("the slot ring is a drawn CIRCLE, not a rounded corner (R53)", () => {
   // The round slot face is an SVG circle INSIDE the square tile — the same
   // exception `.fit-ring-guide` already is.
   assert.match(RACK_SOURCE, /<circle class="slot-ring-track"/);
-  const slotRule = CSS_SOURCE.slice(
-    CSS_SOURCE.indexOf("  .module-slot {"),
-    CSS_SOURCE.indexOf("button.module-slot:hover"),
-  );
+  // ⚠ BOUNDED BY THE RULE'S OWN BRACE. It used to run to
+  // `button.module-slot:hover`, which was the next rule until hover moved onto
+  // the ring — after which this slice swept up half the rack's styling and the
+  // claim stopped being about the tile at all.
+  const at = CSS_SOURCE.indexOf("  .module-slot {");
+  const slotRule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
   assert.ok(slotRule.length > 0, "the .module-slot rule is not where this test looks");
   assert.equal(
     /border-radius/.test(slotRule),
     false,
     "the tile was rounded — draw the circle, do not round the box",
   );
+  // ⚠ AND THE TILE IS NOT PAINTED AT ALL. The square box came off: it drew a
+  // filled bordered rectangle around the circle, both in the same line colour,
+  // and the square won. The 42px box stays as layout and touch target; the ring
+  // is the only thing drawn.
+  assert.match(slotRule, /border: none;/, "the tile got its box back");
+  assert.match(slotRule, /background: none;/, "the tile got its fill back");
 });
 
 // --- rack heat: a stub that admits it ----------------------------------------
