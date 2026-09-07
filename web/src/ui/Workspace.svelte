@@ -52,7 +52,8 @@
     globalOpenIds,
     onOpenGlobal,
     openRequest,
-    onFocusPilot,
+    onOpenRequestServed,
+    sessionID,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -82,14 +83,11 @@
      * prop rather than a registered callback — data flows down, the same shape
      * `dockInventoryPing` already uses.
      */
-    openRequest?: { readonly id: TabID; readonly n: number } | null;
-    /**
-     * Make another held pilot active. Threaded through to the Bot Manager only
-     * (see PanelHost.svelte): on a phone the Manager is an ordinary panel of
-     * this workspace rather than App's global window, so this is the mobile half
-     * of the same wiring App does for the desktop layer.
-     */
-    onFocusPilot?: (sessionID: string) => void;
+    openRequest?: { readonly id: TabID; readonly n: number; readonly sessionID: string } | null;
+    /** Tell App this workspace has served the request, so it can drop it. */
+    onOpenRequestServed?: () => void;
+    /** This workspace's own session id, so it can tell whose request is whose. */
+    sessionID?: string;
   } = $props();
 
   // The store's identity is stable for this component's lifetime (App keys each
@@ -269,23 +267,48 @@
   // and not the id, for the same reason the Show Info effect above does: asking
   // twice for the same panel must still raise it, and it may have been closed or
   // buried in between.
-  // ⚠ SEEDED FROM THE COUNTER AS IT STANDS AT MOUNT, NOT FROM ZERO. The counter
-  // lives in App and only ever climbs, across every pilot; a workspace mounted
-  // later must not treat the requests made before it existed as its own. Seeding
-  // from zero did exactly that: opening the Bot Builder from the global Bot
-  // Manager and then switching pilots re-opened it on the pilot switched TO, and
-  // on every pilot switched to after that, because each fresh Workspace read a
-  // non-zero counter it had never served. Only a bump that happens while THIS
-  // workspace is mounted is a request addressed to it.
-  // svelte-ignore state_referenced_locally
-  let servedOpenRequest = openRequest?.n ?? 0;
+  let mobileOpenRequest = $state<{ id: TabID; n: number } | null>(null);
+  // A panel App wants opened on THIS workspace — the Bot Manager asking for the
+  // Bot Builder, or for the built-in bots panel on a particular pilot.
+  //
+  // ⚠ IT IS ADDRESSED, NOT MERELY TIMED, and two bugs are the reason why.
+  //
+  // The request lives in App, above the `{#key active.id}` that remounts a
+  // workspace per pilot, so a bare counter is ambiguous in both directions:
+  //
+  //  • Serving any request whose number we had not seen replayed OLD ones. A
+  //    workspace mounted later started at zero, read a counter bumped for some
+  //    earlier pilot, and opened that panel too — so opening the Bot Builder and
+  //    then switching pilots opened it again on the pilot switched TO, and on
+  //    every pilot after that.
+  //
+  //  • Seeding the mark from the counter AS IT STANDS AT MOUNT fixed that and
+  //    broke the opposite case. "Set up this built-in on that pilot" switches
+  //    pilots and asks for the panel in ONE tick, so by the time the new
+  //    workspace mounts the counter already includes the request meant for it —
+  //    which it then read as ancient history and ignored. The pilot switched and
+  //    no panel opened.
+  //
+  // Neither is a timing problem, so neither has a timing fix. The request names
+  // the pilot it is for; a workspace serves only its own and says so, and App
+  // drops it once served, which is what stops a later remount finding it again.
+  let servedOpenRequest = 0;
   $effect(() => {
     const request = openRequest;
-    if (!request || request.n === servedOpenRequest) return;
+    if (!request || request.sessionID !== sessionID) return;
+    if (request.n === servedOpenRequest) return;
     servedOpenRequest = request.n;
-    open(request.id);
+    // ⚠ THE MOBILE WORKSPACE HAS NO WINDOWS TO OPEN INTO. `open()` puts a window
+    // on the desktop, which on a phone nothing renders — the request would be
+    // silently swallowed. There the panel is a SELECTION, so the request is
+    // handed down for MobileWorkspace to apply to its own.
+    if (isMobile) {
+      mobileOpenRequest = { id: request.id, n: request.n };
+    } else {
+      open(request.id);
+    }
+    onOpenRequestServed?.();
   });
-
   // Read flight status once online so the docked/in-space flag is authoritative
   // (character select does not read it). Subsequent flight steps keep it fresh.
   $effect(() => {
@@ -306,7 +329,7 @@
   <DockWipe {isDocked} />
   <NoticeBridge {store} />
   <Toasts />
-  <MobileWorkspace {store} {flow} {isDocked} {sessions} {onFocusPilot} />
+  <MobileWorkspace {store} {flow} {isDocked} {sessions} openRequest={mobileOpenRequest} />
 {:else}
   <DockWipe {isDocked} />
   <!-- Mounted once for the whole workspace, and once each: the bridge is what

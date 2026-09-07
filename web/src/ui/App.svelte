@@ -392,25 +392,38 @@
   };
 
   /**
-   * A panel the global window asked to be opened on the ACTIVE workspace — the
-   * Bot Manager's Edit button asking for the Bot Builder.
+   * A panel the global window asked to be opened on a pilot's workspace — the
+   * Bot Manager asking for the Bot Builder, or for the built-in bots panel.
    *
-   * ⚠ A COUNTER, SO ASKING TWICE WORKS. Watching an id alone would make the
-   * second Edit click do nothing when the Builder was already open — and by then
-   * it may have been closed or buried. Workspace serves it and ignores the
-   * initial reading; see its `openRequest` effect.
+   * ⚠ IT NAMES THE PILOT IT IS FOR. Only one workspace is mounted, and it is
+   * remounted per pilot, so an unaddressed request is ambiguous: a workspace
+   * cannot tell "asked for before I existed" from "asked for as I was being
+   * created". Both cases happen here — see Workspace.svelte's effect for the two
+   * bugs that came of guessing — so the request carries a session id, the
+   * matching workspace serves it, and it is dropped the moment it is served.
+   *
+   * The counter is what makes asking TWICE work: the same panel requested again
+   * must still be raised, and it may have been closed or buried in between.
    */
-  let openRequest = $state<{ id: TabID; n: number } | null>(null);
-  const requestOpenInWorkspace = (id: TabID): void => {
-    // A global tab would be asking the workspace for something the workspace
-    // does not own; open it here instead.
+  let openRequest = $state<{ id: TabID; n: number; sessionID: string } | null>(null);
+  let openRequestCount = 0;
+  /**
+   * Open `id` on `sessionID`'s workspace, making that pilot active first when it
+   * is not already — the panels reached this way read the MOUNTED pilot's store,
+   * so opening one for a pilot who is not on screen would show the wrong ship.
+   */
+  const requestOpenInWorkspace = (id: TabID, sessionID?: string): void => {
+    // A global tab would be asking a workspace for something it does not own.
     if (isGlobalTab(id)) {
       openGlobalTab(id);
       return;
     }
-    openRequest = { id, n: (openRequest?.n ?? 0) + 1 };
+    const target = sessionID ?? activeId;
+    if (target === null) return;
+    if (target !== activeId) switchTo(target);
+    openRequestCount += 1;
+    openRequest = { id, n: openRequestCount, sessionID: target };
   };
-
   // The layer spans the viewport, so a window dragged or sized for a bigger one
   // can end up with its title bar and resize handles past the edge, with nothing
   // on screen to pull it back. Desktop.svelte reconciles its own windows the same
@@ -463,8 +476,9 @@
         {sessions}
         {globalOpenIds}
         {openRequest}
+        sessionID={active.id}
+        onOpenRequestServed={() => (openRequest = null)}
         onOpenGlobal={openGlobalTab}
-        onFocusPilot={switchTo}
       />
     </ErrorBoundary>
   {/key}
@@ -516,7 +530,6 @@
             tab={globalWin.id}
             onOpen={requestOpenInWorkspace}
             {sessions}
-            onFocusPilot={switchTo}
           />
         </DesktopWindow>
       </ErrorBoundary>

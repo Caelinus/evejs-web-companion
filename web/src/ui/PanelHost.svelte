@@ -46,30 +46,24 @@
     tab,
     onOpen,
     sessions,
-    onFocusPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
     tab: TabID;
-    // Lets a panel navigate to another tab (e.g. Agent Finder -> Travel).
-    onOpen?: (tab: TabID) => void;
+    /**
+     * Lets a panel navigate to another tab (e.g. Agent Finder -> Travel).
+     *
+     * The optional `sessionID` says WHICH pilot's workspace to open it on, and
+     * exists for the Bot Manager: it lists every held pilot, and setting up a
+     * built-in bot on one of them has to happen on that pilot's workspace,
+     * because the panel reads the mounted pilot's fitting and holds. Omitted
+     * means the active pilot, which is what every other caller wants.
+     */
+    onOpen?: (tab: TabID, sessionID?: string) => void;
     // R107 — the full pilot roster (every session, not just the active one).
     // Optional and forwarded only to the Bot Manager panel, which is the only
     // one that needs to see pilots beyond its own store/flow.
     sessions?: readonly Session[];
-    /**
-     * Make another held pilot the active one. Forwarded only to the Bot Manager,
-     * for the same reason `sessions` is: it is the one panel that acts on pilots
-     * other than its own store's.
-     *
-     * ⚠ IT EXISTS FOR THE BUILT-IN BOTS. A saved script can be started on any
-     * pilot from the Manager without leaving it, because the row calls that
-     * pilot's own flow. A built-in bot cannot: its setup lives in a per-pilot
-     * panel reading that pilot's fitting, holds and flight status, and only ONE
-     * pilot's workspace is mounted at a time. So reaching it means going to that
-     * pilot first, and this is how the Manager says so.
-     */
-    onFocusPilot?: (sessionID: string) => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -138,7 +132,7 @@
 {:else if tab === "botBuilder"}
   <BotBuilder {store} {flow} />
 {:else if tab === "botManager"}
-  <BotManager {store} {flow} {sessions} onOpen={(id) => onOpen?.(id)} {onFocusPilot} />
+  <BotManager {store} {flow} {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

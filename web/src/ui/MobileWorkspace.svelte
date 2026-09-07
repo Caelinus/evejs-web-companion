@@ -36,7 +36,7 @@
     flow,
     isDocked,
     sessions,
-    onFocusPilot,
+    openRequest,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -45,8 +45,14 @@
     // can show every held pilot, not just this session's active one. Optional:
     // every other caller/panel is unaffected. See PanelHost.svelte.
     sessions?: readonly Session[];
-    /** Make another held pilot active — forwarded to the Bot Manager only. */
-    onFocusPilot?: (sessionID: string) => void;
+    /**
+     * A panel Workspace wants shown here, as a counter it bumps.
+     *
+     * There are no windows on a phone, so what a desktop serves by opening one,
+     * this serves by CHANGING THE SELECTION. The counter, rather than a bare id,
+     * is what makes asking twice for the same panel work.
+     */
+    openRequest?: { readonly id: TabID; readonly n: number } | null;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -110,6 +116,14 @@
    * way to ask for it cold. What must still be dropped is one this STATE cannot
    * show at all, which is what `isTabVisible` answers.
    */
+  let servedOpenRequest = 0;
+  $effect(() => {
+    const request = openRequest;
+    if (!request || request.n === servedOpenRequest) return;
+    servedOpenRequest = request.n;
+    selected = request.id;
+  });
+
   const effective = $derived(
     selected !== null && isTabVisible(selected, isDocked) && isWindowTab(selected) ? selected : null,
   );
@@ -126,7 +140,7 @@
        scrolling padded column it has always had. -->
   <main class="mobile-main" class:mobile-main-station={effective === null && isDocked}>
     {#if effective !== null}
-      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} {onFocusPilot} />
+      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} />
     {:else if isDocked}
       <!-- Docked home = the same Station panel as the desktop's right-hand dock,
            at its narrowest tier. There is no strip to fold into on a phone, so

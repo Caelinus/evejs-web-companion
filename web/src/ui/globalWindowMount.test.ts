@@ -71,27 +71,46 @@ test("the layer is given the ACTIVE pilot's store and flow, rather than capturin
 
 // ─── the open-request counter ────────────────────────────────────────────────
 
-test("a workspace serves only the open requests made while it existed", () => {
-  // ⚠ THE BUG THIS PINS, WHICH A LIVE SESSION FOUND AND NO TEST DID. App's open
-  // request is a counter shared by every workspace, and it only ever climbs. A
-  // Workspace that seeds its served-mark from ZERO therefore reads any earlier
-  // request as one addressed to it: opening the Bot Builder from the global Bot
-  // Manager and then switching pilots re-opened the Builder on the pilot
-  // switched TO, and on every pilot switched to after that.
+test("an open request is ADDRESSED to a pilot, not merely timed", () => {
+  // ⚠ TWO BUGS, OPPOSITE DIRECTIONS, BOTH FOUND BY CLICKING. App's request lives
+  // above the `{#key active.id}` that remounts a workspace per pilot, so a bare
+  // counter cannot tell "asked for before I existed" from "asked for AS I was
+  // being created" — and both happen here:
   //
-  // Seeding from the counter as it stands at mount is the fix, and it is a
-  // one-token difference from the bug — hence a sweep: nothing else in the repo
-  // can tell the two apart.
-  const seed = WORKSPACE.match(/let\s+servedOpenRequest\s*=\s*([^;]+);/)?.[1];
-  assert.equal(typeof seed, "string", "Workspace no longer seeds a served-request mark");
+  //  • Serving any unseen number replayed old requests: opening the Bot Builder
+  //    and then switching pilots opened it again on the pilot switched TO, and
+  //    on every pilot after that, each saving it into their own layout.
+  //  • Seeding the mark from the counter at mount fixed that and broke the
+  //    other: "Set up this built-in on that pilot" switches pilots and asks for
+  //    the panel in ONE tick, so the new workspace saw a counter that already
+  //    included its own request and ignored it. The pilot switched, no panel.
+  //
+  // Neither is a timing problem, so neither has a timing fix. The request names
+  // the pilot; the matching workspace serves it and says so; App drops it.
+  const effect = WORKSPACE.slice(WORKSPACE.indexOf("servedOpenRequest"));
   assert.match(
-    seed ?? "",
-    /openRequest\?\.n/,
-    "servedOpenRequest must start from the counter as it stands at mount, not from 0 — " +
-      "seeding from 0 replays every earlier request onto each newly mounted workspace",
+    effect,
+    /request\.sessionID !== sessionID/,
+    "a workspace must ignore a request addressed to a different pilot",
   );
+  assert.match(
+    effect,
+    /onOpenRequestServed\?\.\(\)/,
+    "a served request must be reported, so App can drop it before a remount finds it",
+  );
+  assert.match(APP, /onOpenRequestServed=\{\(\) => \(openRequest = null\)\}/);
+  assert.match(APP, /sessionID=\{active\.id\}/);
 });
 
+test("a request for a pilot who is not active switches to them first", () => {
+  // The panels reached this way read the MOUNTED pilot's store. Opening one for
+  // a pilot who is not on screen would show the wrong ship under the right name.
+  const opener = APP.slice(APP.indexOf("const requestOpenInWorkspace"));
+  const switchAt = opener.indexOf("switchTo(target)");
+  const setAt = opener.indexOf("openRequest = {");
+  assert.ok(switchAt >= 0, "the opener no longer switches pilots");
+  assert.ok(setAt > switchAt, "the pilot must be switched before the request is made");
+});
 test("the request is passed down as a prop, not pulled from a shared singleton", () => {
   // Data flows down. A registered callback or module-level store would let a
   // workspace be driven by something it cannot see in its own props, which is

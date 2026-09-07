@@ -53,14 +53,11 @@
     flow,
     onOpen,
     sessions,
-    onFocusPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
-    onOpen?: (tab: TabID) => void;
+    onOpen?: (tab: TabID, sessionID?: string) => void;
     sessions?: readonly Session[];
-    /** Make another held pilot active — see PanelHost.svelte for why. */
-    onFocusPilot?: (sessionID: string) => void;
   } = $props();
 
   /**
@@ -304,15 +301,16 @@
         <tbody>
           {#each heldSessions as session (session.id)}
             {@const characterID = session.store.station.get().online?.characterID ?? null}
+            <!-- ⚠ `onSetUpBuiltIn` NAMES THIS ROW'S PILOT, never the active one.
+                 The panel it opens reads the MOUNTED pilot's ship, so an
+                 unaddressed open would show one pilot's hull under another's
+                 name — a requirement checklist about the wrong ship. -->
             <BotManagerPilotRow
               {session}
               serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
               {scripts}
               onChanged={refreshPilots}
-              onSetUpBuiltIn={() => {
-                onFocusPilot?.(session.id);
-                onOpen?.("bots");
-              }}
+              onSetUpBuiltIn={() => onOpen?.("bots", session.id)}
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}

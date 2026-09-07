@@ -148,27 +148,28 @@ test("the panel offers a way to write a bot that does not exist yet", () => {
 
 test("the Manager is the door onto BOTH panels that left the rail", () => {
   // `botBuilder` and `bots` are both `launchable: false` now, so the rail cannot
-  // reach either. This panel is the only way in, and each door is a different
-  // question: "write or change a bot" (the Builder) and "set up one of the
-  // built-ins on this pilot" (Bots). If either opener is lost or retargeted,
+  // reach either. This panel is the only way in, and each door answers a
+  // different question: "write or change a bot" (the Builder) and "set up one of
+  // the built-ins on this pilot" (Bots). If either opener is lost or retargeted,
   // that panel becomes unreachable and nothing else in the app will say so.
   const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
-  const opened = new Set([...source.matchAll(/onOpen\?\.\("([a-zA-Z]+)"\)/g)].map((m) => m[1]));
+  const opened = new Set([...source.matchAll(/onOpen\?\.\("([a-zA-Z]+)"/g)].map((m) => m[1]));
   assert.deepEqual([...opened].sort(), ["botBuilder", "bots"]);
 });
 
-test("setting up a built-in goes to that pilot FIRST, then opens the panel", () => {
-  // ⚠ ORDER MATTERS AND IS THE WHOLE POINT. The Manager lists every held pilot,
+test("setting up a built-in names THIS ROW'S pilot, not whoever is active", () => {
+  // ⚠ THE BUG THIS PINS SHOWS THE WRONG SHIP. The Manager lists every held pilot,
   // but only ONE pilot's workspace is mounted, and the built-in bots panel reads
-  // the mounted pilot's fitting, holds and flight status. Opening it without
-  // switching would show one pilot's ship under another pilot's name — a
-  // checklist about the wrong ship, which a player would act on.
+  // the mounted pilot's fitting, holds and flight status. An unaddressed open
+  // would put one pilot's hull under another pilot's name — a requirement
+  // checklist about a ship that is not the one named, which a player would act
+  // on. Addressing it is what lets App switch pilots first.
   const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
-  const focus = source.indexOf("onFocusPilot?.(session.id)");
-  const openBots = source.indexOf('onOpen?.("bots")');
-  assert.ok(focus >= 0, "the Manager no longer focuses the pilot it is acting on");
-  assert.ok(openBots >= 0, "the Manager no longer opens the built-in bots panel");
-  assert.ok(focus < openBots, "the pilot must be focused before the panel opens");
+  assert.match(
+    source,
+    /onOpen\?\.\("bots",\s*session\.id\)/,
+    "opening the built-in bots panel must name the row's own session",
+  );
 });
 test("the empty library points at the button, not at a launcher entry that is gone", () => {
   // ⚠ The regression this guards is a dead end, not a typo. The old copy read
