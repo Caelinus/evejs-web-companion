@@ -261,13 +261,21 @@
   // and not the id, for the same reason the Show Info effect above does: asking
   // twice for the same panel must still raise it, and it may have been closed or
   // buried in between.
-  let servedOpenRequest = 0;
+  // ⚠ SEEDED FROM THE COUNTER AS IT STANDS AT MOUNT, NOT FROM ZERO. The counter
+  // lives in App and only ever climbs, across every pilot; a workspace mounted
+  // later must not treat the requests made before it existed as its own. Seeding
+  // from zero did exactly that: opening the Bot Builder from the global Bot
+  // Manager and then switching pilots re-opened it on the pilot switched TO, and
+  // on every pilot switched to after that, because each fresh Workspace read a
+  // non-zero counter it had never served. Only a bump that happens while THIS
+  // workspace is mounted is a request addressed to it.
+  // svelte-ignore state_referenced_locally
+  let servedOpenRequest = openRequest?.n ?? 0;
   $effect(() => {
     const request = openRequest;
     if (!request || request.n === servedOpenRequest) return;
     servedOpenRequest = request.n;
-    // Skip the initial reading, so a restored session opens nothing unasked.
-    if (request.n > 0) open(request.id);
+    open(request.id);
   });
 
   // Read flight status once online so the docked/in-space flag is authoritative

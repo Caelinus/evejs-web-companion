@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const APP = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+const WORKSPACE = readFileSync(fileURLToPath(new URL("./Workspace.svelte", import.meta.url)), "utf8");
 
 /** Blank out HTML comments, so the sweep reads MARKUP and not prose about it. */
 function withoutComments(source: string): string {
@@ -66,4 +67,35 @@ test("the layer is given the ACTIVE pilot's store and flow, rather than capturin
   const layer = MARKUP.slice(layerAt);
   assert.match(layer, /store=\{active\.store\}/);
   assert.match(layer, /flow=\{active\.flow\}/);
+});
+
+// ─── the open-request counter ────────────────────────────────────────────────
+
+test("a workspace serves only the open requests made while it existed", () => {
+  // ⚠ THE BUG THIS PINS, WHICH A LIVE SESSION FOUND AND NO TEST DID. App's open
+  // request is a counter shared by every workspace, and it only ever climbs. A
+  // Workspace that seeds its served-mark from ZERO therefore reads any earlier
+  // request as one addressed to it: opening the Bot Builder from the global Bot
+  // Manager and then switching pilots re-opened the Builder on the pilot
+  // switched TO, and on every pilot switched to after that.
+  //
+  // Seeding from the counter as it stands at mount is the fix, and it is a
+  // one-token difference from the bug — hence a sweep: nothing else in the repo
+  // can tell the two apart.
+  const seed = WORKSPACE.match(/let\s+servedOpenRequest\s*=\s*([^;]+);/)?.[1];
+  assert.equal(typeof seed, "string", "Workspace no longer seeds a served-request mark");
+  assert.match(
+    seed ?? "",
+    /openRequest\?\.n/,
+    "servedOpenRequest must start from the counter as it stands at mount, not from 0 — " +
+      "seeding from 0 replays every earlier request onto each newly mounted workspace",
+  );
+});
+
+test("the request is passed down as a prop, not pulled from a shared singleton", () => {
+  // Data flows down. A registered callback or module-level store would let a
+  // workspace be driven by something it cannot see in its own props, which is
+  // what makes the staleness above hard to reason about in the first place.
+  assert.match(withoutComments(WORKSPACE), /openRequest,/);
+  assert.match(MARKUP, /\{openRequest\}/);
 });
