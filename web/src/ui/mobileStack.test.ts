@@ -271,3 +271,49 @@ test("⚠ AN EMPTY SLOT IS A DASHED RING, never a filled box", () => {
   const box = CSS.slice(CSS.indexOf("  .module-slot.empty {"));
   assert.match(box.slice(0, 160), /background: none/, "the empty slot kept a solid fill");
 });
+
+test("⚠ THE CARD CARRIES NO `<section>` DRESSING — no band, no hairline", () => {
+  // FOUND BY EYE. `.mob-card` is a `<section>`, and this app dresses every
+  // `<section>` as a panel: padding, a bottom margin, and an accent hairline —
+  // a 1px line inset from each side that starts accent-blue and fades to
+  // transparent on the right. Together they drew an empty padded band across
+  // the top of every card with a blue mark floating at its left edge, tapering
+  // away to the right, above a header that should meet its own edges.
+  //
+  // The station and space panels cancelled the same hairline for the same
+  // reason; this is the third, and the HUD's two clusters and any panel inside
+  // a card are the fourth and fifth.
+  for (const selector of [
+    ".mob-card::before { content: none; }",
+    ".hud-bar .hud-cluster::before { content: none; }",
+    ".mob-card-body > .panel::before,",
+  ]) {
+    assert.ok(CSS.includes(selector), `${selector} — the section hairline is still drawn`);
+  }
+  assert.match(
+    CSS.slice(CSS.indexOf(".mob-card-body > .panel::before,")),
+    /^[\s\S]{0,120}content: none/,
+    "the panel-in-card hairline is not cancelled",
+  );
+  // And the card itself has no padding to open a band with.
+  const rule = CSS.slice(CSS.indexOf("  .mob-card {"), CSS.indexOf("  .mob-card::before"));
+  assert.match(rule, /padding: 0;/);
+  assert.match(rule, /margin: 0;/);
+});
+
+test("⚠ A WINDOWED PANEL DOES NOT REPEAT THE WINDOW'S OWN TITLE", () => {
+  // The title bar says EQUIPMENT and the panel underneath said "YOUR
+  // EQUIPMENT" again, in a 42px band, on every window.
+  //
+  // The title is CLIPPED rather than removed: panels are `aria-labelledby`
+  // their heading, so taking it out of the tree takes the accessible name with
+  // it. The head ROW stays, because that is where a panel's own controls and
+  // counts live — it only collapses when the title was all it had.
+  const rule = CSS.slice(
+    CSS.indexOf(".win-body > .panel > .panel-head > h2"),
+    CSS.indexOf(".win-body > .panel > .panel-head:not("),
+  );
+  assert.ok(rule.length > 0, "the rule is not where this test looks");
+  assert.equal(/display: none/.test(rule), false, "the accessible name was removed, not clipped");
+  assert.match(rule, /clip-path: inset\(50%\)/);
+});

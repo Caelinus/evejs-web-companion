@@ -3497,6 +3497,42 @@
   /* The HUD cell owns its own frame, so its clusters must not draw a second
    * one inside it — two nested boxes around one instrument reads as a bug. */
   .hud-bar .hud-cluster { background: none; border: 0; padding: 0; min-width: 0; }
+  /* ...and the accent hairline with them. A `<section>` gets one for free, and
+   * the gauges and the racks are two sections inside one cell — so the cell drew
+   * a fading blue line above each of them, for no frame that exists. */
+  .hud-bar .hud-cluster::before { content: none; }
+  /* ⚠ A WINDOWED PANEL DOES NOT REPEAT ITS OWN NAME.
+   *
+   * The window's title bar already says EQUIPMENT, DRONES, SHOTS FIRED — and
+   * then the panel underneath said "YOUR EQUIPMENT", "DRONES", "SHOTS FIRED"
+   * again, in a 42px band, on every window. It is the same doubling the mobile
+   * cards had, one frame up.
+   *
+   * The TITLE goes; the head row stays, because that is where a panel's own
+   * controls live (Mining's Refresh, the station panel's collapse) and where its
+   * counts live. And the title is CLIPPED rather than removed: panels are
+   * `aria-labelledby` their heading, so taking it out of the tree takes the
+   * section's accessible name with it. */
+  .win-body > .panel > .panel-head > h2 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* With nothing visible left in it, the head collapses rather than leaving the
+   * band it was drawn for. A head that still has controls keeps its box. */
+  .win-body > .panel > .panel-head:not(:has(> *:not(h2))) {
+    margin-bottom: 0;
+    padding-block: 0;
+    border-bottom: 0;
+    background: none;
+    min-height: 0;
+  }
+
   /* ⚠ AND THE HEAD MUST NOT BLEED HERE. `.panel-head`'s negative inline margin
    * exists to reach the edges of a PADDED panel; the cell's clusters have no
    * padding to reach past, so it bled 32px outside its own box and that was the
@@ -3969,12 +4005,47 @@
    * more cells; a phone has room for neither, so the arrangement changes and
    * the COMPONENTS do not — every card below is the same panel the desktop
    * mounts. */
+  /* ⚠ THE CARD IS A `<section>`, AND THE APP DRESSES EVERY `<section>`.
+   *
+   * It arrived with the global panel's padding, its bottom margin AND its accent
+   * hairline — a 1px line inset from each side that starts accent-blue and fades
+   * to transparent on the right. Together those drew an empty padded band across
+   * the top of every card with a blue mark floating at its left edge, tapering
+   * away to the right. That is decoration for a panel with a title inside it;
+   * this card's header is a full-width button that should meet its own edges.
+   *
+   * The station and space panels cancelled the same hairline for the same
+   * reason (`.stn-panel`, `.spc-panel` below); this is the third. */
   .mob-card {
     background: var(--color-panel);
     border: 1px solid var(--color-line);
+    padding: 0;
+    margin: 0;
     min-width: 0;
   }
-  .mob-card-head { margin: 0; font-size: inherit; font-weight: inherit; }
+  .mob-card::before { content: none; }
+  /* ⚠ THE CARD'S HEADING IS AN `h2`, AND THE APP DRESSES BARE `h2`s.
+   *
+   * `section > h2::before` gives every section heading a small accent tick, and
+   * the card IS a `<section>` — so the tick opened a line box of its own ABOVE
+   * the fold button: a 20px empty strip on top of every card with a blue mark
+   * floating at its left, 60px of header where 40 was drawn. The heading is
+   * here for the document outline, not for decoration; the button inside it is
+   * the whole control.
+   *
+   * Zero-specificity `:where()` so nothing has to out-rank anything — the same
+   * reset the station panel needed when the app dressed its sections as panels. */
+  :where(.mob-card-head) {
+    margin: 0;
+    padding: 0;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: 0;
+    letter-spacing: normal;
+    text-transform: none;
+    color: inherit;
+  }
+  .mob-card-head::before { content: none; display: none; }
   .mob-card-toggle {
     display: flex;
     align-items: center;
@@ -4027,6 +4098,12 @@
     background: none;
     border: 0;
     padding: 0;
+  }
+  /* Same as the window body does for the same reason: the card IS the frame, so
+   * the panel inside must not draw a second one — hairline included. */
+  .mob-card-body > .panel::before,
+  .mob-card-body > .spc-panel::before {
+    content: none;
   }
   .mob-card-body > .panel > .panel-head,
   .mob-card-body > .spc-panel > .spc-head {
