@@ -330,7 +330,8 @@
       <GridPicker
         label="Warp to"
         options={warpOptions}
-        bind:value={warpTargetID}
+        value={warpTargetID}
+        onPick={(id) => (warpTargetID = id)}
         emptyText="Nothing on the grid to warp to yet."
       />
       <button
@@ -355,7 +356,8 @@
       <GridPicker
         label="Gate"
         options={jumpOptions}
-        bind:value={jumpGateID}
+        value={jumpGateID}
+        onPick={(id) => (jumpGateID = id)}
         emptyText="No stargates in the star map for this system."
       />
       <!--
@@ -388,7 +390,8 @@
       <GridPicker
         label="Station"
         options={dockOptions}
-        bind:value={dockStationID}
+        value={dockStationID}
+        onPick={(id) => (dockStationID = id)}
         emptyText="Nothing on this grid you could dock at."
       />
       <!--

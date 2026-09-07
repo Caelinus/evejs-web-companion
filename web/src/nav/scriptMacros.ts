@@ -32,7 +32,8 @@ import {
   packageAboard,
 } from "./missionBotLoop.ts";
 import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotLoop.ts";
-import { canMyShipOrderDrone, hostileRows } from "../space/overview.ts";
+import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
+import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 
 const WAIT = { kind: "wait" } as const;
@@ -2648,25 +2649,10 @@ const tidyHangar: MacroDecider = (_step, obs, mem) => {
 // refusal told us why.
 const COMPRESS_MAX_TRIES_PER_STACK = 1;
 
-/** Ships on grid that are live compression facilities: own hull first, then mates. */
-function compressionFacilities(snapshot: SpaceSnapshot | null): readonly SpaceEntity[] {
-  if (snapshot === null) {
-    return [];
-  }
-  const selfID = snapshot.ship?.itemID ?? null;
-  const facilities = snapshot.entities.filter(
-    // `?? null` is load-bearing: an ABSENT reading (an older server, a row the
-    // gateway did not project) must read as "not a facility", never as an
-    // unknown worth firing at.
-    (e) => e.kind === "ship" && (e.compressionFacility ?? null) !== null && e.isNpc === false,
-  );
-  // Own ship first: no range problem to solve, and no fleet check to fail.
-  return [...facilities].sort((left, right) => {
-    const leftSelf = left.itemID === selfID ? 0 : 1;
-    const rightSelf = right.itemID === selfID ? 0 : 1;
-    return leftSelf - rightSelf;
-  });
-}
+// ⚠ THE FACILITY RULE MOVED TO `space/compression.ts`, and this now imports it.
+// The Mining panel needs the same answer, and the branch two copies get wrong
+// is the `?? null` one — an ABSENT reading has to mean "not a facility", never
+// "an unknown worth firing at". One implementation, one place to get it right.
 
 function parseTried(mem: MacroMemory): readonly string[] {
   const raw = mem["triedItemIDs"];

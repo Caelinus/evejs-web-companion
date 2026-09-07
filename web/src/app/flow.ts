@@ -712,6 +712,29 @@ export interface AppFlow {
    * confirms first (showing the quote and the tax) and the BFF confirms again.
    */
   reprocessItems(itemIDs: readonly number[]): Promise<void>;
+  /**
+   * ⚠ JETTISON — dumps these stacks into space as a container ANYONE can take.
+   *
+   * It is destructive in the way that matters most to a miner: the ore is not
+   * gone, it is on the grid and no longer yours in any practical sense. The
+   * panel confirms first and the BFF route is confirm-gated as well.
+   *
+   * ⚠ AND IT IS JUDGED BY THE HOLD, NOT BY THE ANSWER. The call answers without
+   * saying which stacks left, so this re-reads the holds and reports a silent
+   * decline when nothing actually moved — never a phantom success.
+   */
+  jettisonItems(itemIDs: readonly number[]): Promise<void>;
+  /**
+   * ⚠ COMPRESS ONE ORE STACK against a mining support ship on the grid — your
+   * own hull or a fleet-mate's, running an Industrial Core plus a compression
+   * module. `space/compression.ts` decides which hulls qualify.
+   *
+   * ⚠ THE SERVER REFUSES WITH ONE SILENCE. A missing facility, an out-of-range
+   * one, a foreign item and an ore with no compressed form are all the same
+   * `compressed: false`. So a refusal re-reads the hold and says it was refused
+   * — it never names a cause it does not have.
+   */
+  compressOre(itemID: number, facilityID: number): Promise<void>;
   // --- R25 slice A: drones -------------------------------------------------
   //
   // ⚠ NOT ONE of these four server calls can be trusted on its return value.
@@ -3910,6 +3933,94 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       store.apply({
         type: "mining/silent-decline",
         message: partial(result.moved.length, result.requested.length),
+      });
+    }
+  }
+
+  /**
+   * ⚠ JETTISON. The stacks leave the ship into a container in space that anyone
+   * can take. Confirm-gated at the BFF; the panel confirms first as well.
+   *
+   * ⚠ JUDGED BY THE HOLD. The route does not report which stacks left, so the
+   * only honest test is whether they are still in the hold afterwards. A stack
+   * that is still there did not go, and that is a silent decline — the failure
+   * mode this whole client exists to stop looking like a success.
+   */
+  async function jettisonItems(itemIDs: readonly number[]): Promise<void> {
+    if (itemIDs.length === 0) {
+      return;
+    }
+    try {
+      await api.jettisonItems(itemIDs, callOptions);
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      store.apply({
+        type: "mining/action-error",
+        message: `Jettison refused: ${flightRefusalWords(error)}`,
+      });
+      return;
+    }
+    store.apply({ type: "mining/action", action: "Jettison" });
+    await loadMiningHolds().catch(() => {});
+    const stillHeld = new Set(
+      store
+        .get()
+        .mining.holds.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID)),
+    );
+    const left = itemIDs.filter((itemID) => !stillHeld.has(itemID));
+    if (left.length === 0) {
+      store.apply({
+        type: "mining/silent-decline",
+        message: "Nothing was jettisoned, and the server gave no reason.",
+      });
+      return;
+    }
+    if (left.length < itemIDs.length) {
+      store.apply({
+        type: "mining/silent-decline",
+        message: `Only ${left.length} of ${itemIDs.length} stacks were jettisoned. The server did not say why the rest stayed.`,
+      });
+    }
+  }
+
+  /**
+   * ⚠ COMPRESS ONE STACK, against a support ship on the grid.
+   *
+   * ⚠ THE REFUSAL IS ONE SILENCE, AND THIS DOES NOT GUESS AT IT. The server
+   * answers `compressed: false` for a missing facility, an out-of-range one, a
+   * foreign item and an ore that has no compressed form alike. Naming one of
+   * those would put an invented cause on screen beside real ones, so the
+   * message says what is actually known: it was refused, and the hold has been
+   * re-read so the player can see for themselves.
+   */
+  async function compressOre(itemID: number, facilityID: number): Promise<void> {
+    let attempt;
+    try {
+      attempt = await api.compressOreInSpace(itemID, facilityID, callOptions);
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      store.apply({
+        type: "mining/action-error",
+        message: `Compress refused: ${flightRefusalWords(error)}`,
+      });
+      return;
+    }
+    store.apply({ type: "mining/action", action: "Compress" });
+    // Whatever happened, the hold is the ground truth now.
+    await loadMiningHolds().catch(() => {});
+    if (!attempt.compressed) {
+      store.apply({
+        type: "mining/silent-decline",
+        message:
+          "That stack was not compressed. Your ship gave no reason — check the support ship is in range and still running its gear, and that the ore has a compressed form.",
       });
     }
   }
@@ -7522,6 +7633,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     loadReprocessingQuote,
     unloadMiningHolds,
     reprocessItems,
+    jettisonItems,
+    compressOre,
     loadSkills,
     loadPlanets,
     selectColony,

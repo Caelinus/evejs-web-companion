@@ -17,6 +17,14 @@
   // R27 — the shared item icon: one cached picture per thing, falling back
   // to a name-derived tile whenever the icon cache has no entry (or no cache).
   import TypeIcon from "./TypeIcon.svelte";
+  import GridPicker from "./GridPicker.svelte";
+  import {
+    compressionFacilities,
+    compressionRefusal,
+    facilityDistanceMeters,
+  } from "../space/compression.ts";
+  import { formatDistance } from "../space/overview.ts";
+  import type { PickOption } from "./gridPicker.ts";
   import { resolvedName, type NameRef } from "../store/names.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -31,6 +39,8 @@
   const flight = store.flight;
   // svelte-ignore state_referenced_locally
   const names = store.names;
+  // svelte-ignore state_referenced_locally
+  const space = store.space;
 
   let busy = $state(false);
   let error = $state("");
@@ -148,6 +158,94 @@
     } finally {
       busy = false;
     }
+  }
+
+  // --- in space: what you can do with a full hold out here --------------------
+  //
+  // ⚠ THE HOLD SECTIONS ABOVE ALREADY WORKED IN SPACE; THE ACTIONS DID NOT.
+  // Unload and Refine both need a station, so a flying miner with a full hold
+  // had a panel that could only tell them to dock. These two are what the game
+  // actually offers out here.
+
+  /** Every stack sitting in a hold — what a jettison or a compress acts on. */
+  const heldStacks = $derived(
+    holds.flatMap((hold) =>
+      (hold.items ?? []).map((item) => ({
+        itemID: item.itemID,
+        label: itemName(item.typeID),
+        quantity: item.quantity,
+      })),
+    ),
+  );
+
+  /**
+   * The support ships on grid that could compress for you — own hull first.
+   *
+   * The rule is `space/compression.ts`, shared with the `compress-ore` bot
+   * macro rather than copied: the branch two copies get wrong is the absent
+   * reading, which must mean "not a facility" and never "worth trying".
+   */
+  const facilities = $derived(compressionFacilities($space.snapshot));
+  const facilityOptions = $derived<PickOption[]>(
+    facilities.map((facility) => {
+      const own = facility.itemID === ($space.snapshot?.ship?.itemID ?? null);
+      const distance = facilityDistanceMeters($space.snapshot, facility);
+      return {
+        id: facility.itemID,
+        label: facility.name && facility.name.length > 0
+          ? facility.name
+          : resolvedName($names.resolved, "type", facility.typeID, "A support ship"),
+        hint: own ? "your own ship" : distance === null ? "range not known" : formatDistance(distance),
+      };
+    }),
+  );
+  /**
+   * What the player explicitly picked, or 0 for "they have not".
+   *
+   * ⚠ THE DEFAULT IS DERIVED, NOT WRITTEN IN BY AN EFFECT. It falls back to the
+   * first candidate — own hull when it qualifies, which is the one with no
+   * range problem to solve and no fleet check to fail. Seeding it through an
+   * effect instead would leave one frame where the select says "Pick one…" and
+   * the button is already armed with something else, and would not happen at
+   * all on a server-rendered first paint.
+   */
+  let pickedFacilityID = $state(0);
+  const facilityID = $derived(
+    pickedFacilityID !== 0 ? pickedFacilityID : (facilities[0]?.itemID ?? 0),
+  );
+  const pickedFacility = $derived(facilities.find((f) => f.itemID === facilityID) ?? null);
+  /**
+   * Why compressing would not work, or null. Only the two things the BROWSER
+   * can know: there is no facility, or we are measurably outside its own stated
+   * reach. Everything else is the server's call, refused with one silence.
+   */
+  const compressRefusal = $derived(compressionRefusal($space.snapshot, pickedFacility));
+
+  /**
+   * The armed half of the two-step jettison, keyed to the exact stacks.
+   *
+   * ⚠ JETTISON IS DESTRUCTIVE IN THE WAY THAT MATTERS TO A MINER: the ore is
+   * not destroyed, it is sitting on the grid in a container anyone can take. So
+   * it gets the same two-step treatment reprocessing has, and the confirmation
+   * disarms the moment the selection changes — a confirmation must never
+   * outlive the thing it was shown for.
+   */
+  let jettisonArmedFor = $state<string | null>(null);
+  const jettisonArmed = $derived(
+    jettisonArmedFor !== null && jettisonArmedFor === selectionKey(selected),
+  );
+
+  async function jettison(): Promise<void> {
+    await run(() => flow.jettisonItems(selected));
+    selected = [];
+    jettisonArmedFor = null;
+  }
+
+  async function compress(itemID: number): Promise<void> {
+    if (facilityID === 0) {
+      return;
+    }
+    await run(() => flow.compressOre(itemID, facilityID));
   }
 
   async function unload(): Promise<void> {
@@ -275,6 +373,107 @@
     {/each}
   {/if}
 </section>
+
+<!--
+  ============================================================== IN SPACE =====
+  What a full hold can do out here. Both sections are drawn only in space, for
+  the same reason Unload and Refine are drawn only docked: a control that could
+  never work in the current state is not a control, it is a decoration that
+  wastes a press.
+-->
+{#if !docked}
+  <section class="bulk">
+    <h2>Compress it</h2>
+    <!--
+      ⚠ COMPRESSION HAPPENS AT A SHIP, NOT A FACILITY YOU FLY TO. It is a mining
+      support hull on this grid — your own or a fleet-mate's — running an
+      Industrial Core plus a compression module. `space/compression.ts` decides
+      which hulls qualify, and the bot macro reads the same rule.
+    -->
+    {#if facilityOptions.length === 0}
+      <!--
+        R30's rule: nothing on grid to compress against is a SENTENCE, not a
+        hidden button. The player is told what would have to be true.
+      -->
+      <p class="note">
+        No mining support ship on this grid is running its compression gear.
+        Bring one, or switch yours on, and it will appear here.
+      </p>
+    {:else if heldStacks.length === 0}
+      <p class="note">Nothing in your holds to compress.</p>
+    {:else}
+      <p class="controls">
+        <GridPicker
+          label="Compress at"
+          options={facilityOptions}
+          value={facilityID}
+          onPick={(id) => (pickedFacilityID = id)}
+          emptyText="No support ship on this grid."
+        />
+      </p>
+      {#if compressRefusal}
+        <!-- Drawn, wearing its reason — never a greyed control in silence. -->
+        <p class="note error">{compressRefusal}</p>
+      {/if}
+      <ul class="compress-list">
+        {#each heldStacks as stack (stack.itemID)}
+          <li>
+            <span class="compress-name">{stack.label}</span>
+            <span class="compress-qty">{stack.quantity.toLocaleString()}</span>
+            <button
+              type="button"
+              disabled={busy || facilityID === 0 || compressRefusal !== null}
+              title={compressRefusal ?? ""}
+              onclick={() => compress(stack.itemID)}
+            >
+              Compress
+            </button>
+          </li>
+        {/each}
+      </ul>
+      <p class="note">
+        One stack at a time, and your ship has the last word: ore with no
+        compressed form is simply left as it is.
+      </p>
+    {/if}
+  </section>
+
+  <section class="bulk">
+    <h2>Dump it into space</h2>
+    <!--
+      ⚠ JETTISON IS NOT "DELETE", AND IT IS NOT SAFE EITHER. The ore ends up in
+      a container floating on the grid that ANYONE can take. That is why it gets
+      the same two-step arming that reprocessing has, and why the words say
+      plainly what happens rather than calling it "drop".
+    -->
+    {#if selected.length === 0}
+      <p class="note">Pick what you want to dump from the list above.</p>
+    {:else if !jettisonArmed}
+      <p class="controls">
+        <button
+          type="button"
+          disabled={busy}
+          onclick={() => (jettisonArmedFor = selectionKey(selected))}
+        >
+          Dump {selected.length} into space…
+        </button>
+      </p>
+      <p class="note">
+        It goes into a container floating right here, which anyone who comes
+        past can take. Nothing is destroyed and nothing is yours any more.
+      </p>
+    {:else}
+      <p class="controls">
+        <button type="button" class="danger" disabled={busy} onclick={jettison}>
+          Yes — dump {selected.length} into space
+        </button>
+        <button type="button" disabled={busy} onclick={() => (jettisonArmedFor = null)}>
+          Keep it
+        </button>
+      </p>
+    {/if}
+  </section>
+{/if}
 
 <section class="bulk">
   <h2>Move it to your hangar</h2>

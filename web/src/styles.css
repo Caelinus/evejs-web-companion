@@ -4607,6 +4607,38 @@
    * Styling that let the two numbers read as a scoreboard while the caption
    * faded away would be the lie the caption exists to prevent, which is why it
    * keeps body-text size and sits directly under them. */
+  /* Compress: one row per stack in the hold, each with its own button. One
+   * stack at a time is the server's own shape — it answers per stack — and a
+   * "compress everything" button would hide which ones it quietly skipped. */
+  .compress-list {
+    list-style: none;
+    margin: 0.4rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .compress-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--color-row-line);
+  }
+  .compress-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .compress-qty {
+    flex: 0 0 auto;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .compress-list button { flex: 0 0 auto; min-height: 40px; }
+
   /* ------------------------------------------------- the grid picker (§7) --
    * A filter over a native <select>: pick something that is on the grid, BY
    * NAME. It replaced the last raw-id fields in the client.

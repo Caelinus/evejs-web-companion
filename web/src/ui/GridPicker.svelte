@@ -25,15 +25,26 @@
   let {
     label,
     options,
-    value = $bindable(0),
+    value,
+    onPick,
     emptyText,
     filterPlaceholder = "Filter by name",
   }: {
     /** What the control is called, e.g. "Warp to". */
     label: string;
     options: readonly PickOption[];
-    /** The picked id, or 0 for none. Bindable. */
-    value?: number;
+    /**
+     * The picked id, or 0 for none.
+     *
+     * ⚠ ONE-WAY, WITH `onPick` BACK — deliberately not `$bindable`. A caller may
+     * want a DEFAULT (the Mining panel defaults to your own hull, which is the
+     * candidate with no range problem to solve), and a two-way binding forces
+     * that default to be written in by an effect, which never runs under SSR
+     * and leaves one frame where the control and the button disagree about what
+     * is selected.
+     */
+    value: number;
+    onPick: (id: number) => void;
     /** What to say when there is nothing on the grid to pick. */
     emptyText: string;
     filterPlaceholder?: string;
@@ -50,12 +61,12 @@
    * warps off, a filter is typed. Holding on to an id that is no longer offered
    * would leave a control armed with something the server cannot act on, and
    * the failure would arrive as a refusal for a thing the player can no longer
-   * see. Better to clear it and make them pick again.
+   * see. Better to tell the caller and make them pick again.
    */
   $effect(() => {
     const kept = keepPick(value, shown);
     if (kept !== value) {
-      value = kept;
+      onPick(kept);
     }
   });
 </script>
@@ -75,7 +86,11 @@
   {#if options.length === 0}
     <span class="note grid-picker-empty">{emptyText}</span>
   {:else}
-    <select bind:value aria-label={label}>
+    <select
+      {value}
+      onchange={(event) => onPick(Number((event.currentTarget as HTMLSelectElement).value))}
+      aria-label={label}
+    >
       <option value={0}>Pick one…</option>
       {#each shown as option (option.id)}
         <option value={option.id}>
