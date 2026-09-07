@@ -99,7 +99,7 @@
       return;
     }
     error = "";
-    windingDown = "";
+    windingDownID = null;
     try {
       await flow.setWeaponBanks(linked);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -123,7 +123,42 @@
    * seconds and the player deserves to know why rather than wondering whether
    * the click registered.
    */
-  let windingDown = $state("");
+  let windingDownID = $state<number | null>(null);
+
+  /**
+   * ⚠ THE NOTE CLEARS ITSELF WHEN IT STOPS BEING TRUE.
+   *
+   * It used to be a plain string, set on the click and cleared only by the
+   * NEXT rack action — so "… stops when its current cycle ends" sat on screen
+   * long after the cycle had ended, describing a module that had been dark for
+   * minutes. A sentence about a transient state has to be as transient as the
+   * state, or it is just a stale claim the player has no way to date.
+   *
+   * ⚠ AN UNKNOWN `activeModuleIDs` KEEPS THE NOTE. `null` is "the server did
+   * not say what is running", and clearing on that would assert the module has
+   * stopped — which is the one thing we would not know. Only a list that
+   * actually omits it takes the note away.
+   */
+  const windingDown = $derived.by(() => {
+    const itemID = windingDownID;
+    if (itemID === null) {
+      return "";
+    }
+    const module = rows
+      .flatMap((row) => row.slots)
+      .map((slot) => slot.module)
+      .find((m) => m !== null && m.itemID === itemID);
+    if (!module) {
+      // Unfitted, or the fit was re-read and no longer carries it. Nothing to
+      // name, so nothing to say.
+      return "";
+    }
+    const running = $space.snapshot?.ship?.activeModuleIDs ?? null;
+    if (running !== null && !running.includes(itemID)) {
+      return "";
+    }
+    return `${moduleName(module.typeID)} stops when its current cycle ends.`;
+  });
   /**
    * Redraw tick for the cycle sweep. DISPLAY ONLY — every value it feeds comes
    * from the SERVER's own cycle stamp, and nothing here advances past what the
@@ -301,7 +336,7 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
+    windingDownID = null;
     try {
       await flow.setModuleOverload(module.itemID, !module.overloaded);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -321,7 +356,7 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
+    windingDownID = null;
     try {
       await flow.repairModule(module.itemID);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -342,7 +377,7 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
+    windingDownID = null;
     try {
       if (action === "deactivate") {
         // typeID rides along so the BFF can name a prop mod's effect — an
@@ -365,7 +400,7 @@
       ) {
         // Told to stop, still cycling — retail stops at the end of the current
         // cycle. Say so, or the still-lit tile reads as a click that did nothing.
-        windingDown = `${moduleName(module.typeID)} stops when its current cycle ends.`;
+        windingDownID = module.itemID;
       }
     } catch (cause) {
       error = `${moduleName(module.typeID)}: ${String(cause)}`;

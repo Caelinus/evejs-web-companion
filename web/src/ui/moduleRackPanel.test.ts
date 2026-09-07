@@ -382,3 +382,47 @@ test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots
   assert.match(label, /rack-heat-track/);
   assert.match(label, /rack-heat-value/);
 });
+
+// --- the winding-down note ---------------------------------------------------
+
+test("⚠ THE WINDING-DOWN NOTE CLEARS ITSELF WHEN IT STOPS BEING TRUE", () => {
+  // FOUND BY THE OPERATOR, ON SCREEN. "… stops when its current cycle ends" was
+  // a plain string, set on the click and cleared only by the NEXT rack action —
+  // so it sat there long after the cycle had ended, describing a module that
+  // had been dark for minutes. A sentence about a transient state has to be as
+  // transient as the state, or it is a stale claim the player cannot date.
+  //
+  // It is derived from the SNAPSHOT now: the note names the module only while
+  // the ship still reports it running.
+  assert.match(RACK_SOURCE, /const windingDown = \$derived\.by/);
+  assert.match(RACK_SOURCE, /let windingDownID = \$state<number \| null>\(null\)/);
+  assert.match(
+    RACK_SOURCE,
+    /running !== null && !running\.includes\(itemID\)/,
+    "the note does not consult what is actually running",
+  );
+});
+
+test("⚠ AN UNKNOWN `activeModuleIDs` KEEPS THE NOTE, rather than clearing it", () => {
+  // `null` is "the server did not say what is running". Clearing on that would
+  // assert the module HAS stopped, which is the one thing we would not know —
+  // the same rule the Running column follows two files over.
+  const block = RACK_SOURCE.slice(
+    RACK_SOURCE.indexOf("const windingDown = $derived.by"),
+    RACK_SOURCE.indexOf("function moduleName"),
+  );
+  assert.ok(block.length > 0, "the derived note is not where this test looks");
+  assert.match(block, /running !== null/, "a null reading must not clear the note");
+  assert.equal(
+    /running === null/.test(block.replace(/running !== null/g, "")),
+    false,
+    "a null reading was given a branch of its own",
+  );
+});
+
+test("a module that has left the fit entirely takes its note with it", () => {
+  // Unfitted, or the fit re-read without it: there is nothing left to name, so
+  // there is nothing to say.
+  const block = RACK_SOURCE.slice(RACK_SOURCE.indexOf("const windingDown = $derived.by"));
+  assert.match(block.slice(0, 900), /if \(!module\) \{[\s\S]{0,200}return "";/);
+});
