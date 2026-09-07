@@ -292,6 +292,35 @@ test("⚠ STOP IS IN THE HEADER, CENTRED BY THE GRID AND NOT BY WHAT IS BESIDE I
   assert.match(css, /\.hud-stop \{[\s\S]{0,200}justify-self: center;/);
 });
 
+test("⚠ THE HUD CELL SIZES TO ITS CONTENT — 21rem IS A CEILING, NOT A HEIGHT", () => {
+  // It was a fixed 21rem, measured against content that has since changed: the
+  // footer came off the cell and the number stayed, leaving a band of empty
+  // panel under the racks. A measured height is only ever right for what it was
+  // measured against, and this one had already been 17rem and 19rem before.
+  //
+  // `auto` cannot be wrong in either direction — it cannot cut the rack short
+  // and it cannot leave a gap. What the old number was actually protecting is a
+  // ceiling: a hull with a great many slots must not squeeze the radar to
+  // nothing, and `.hud-body` scrolls when it hits it.
+  assert.match(CSS, /\.workspace\.in-space \.work-main \{[\s\S]{0,1400}grid-template-rows: minmax\(0, 1fr\) auto;/);
+  assert.match(CSS, /\.workspace\.in-space \.work-main > \.hud-bar \{ max-height: 21rem; \}/);
+  assert.match(CSS, /\.hud-body \{[\s\S]{0,400}overflow: auto;/, "the ceiling has nothing to scroll");
+});
+
+test("⚠ STOP IS SHORTER THAN R8's 40px, AND ONLY WHERE A MOUSE IS DOING THE PRESSING", () => {
+  // The operator asked for the row to be shorter, and the row is exactly as
+  // tall as Stop. R8's 40px is a TOUCH minimum, and this row sits at the top of
+  // a fixed-height cell where every pixel it takes comes off the instruments
+  // underneath. 30px is a comfortable mouse target and is not a finger target,
+  // so the exception is scoped to the pointer that makes it safe.
+  //
+  // ⚠ ON `pointer: coarse`, NOT ON A WIDTH. A desktop-width tablet lands on
+  // this same cell, and a breakpoint would hand it the 30px button. The query
+  // asks the question that actually matters.
+  assert.match(CSS, /\.hud-stop \{[\s\S]{0,900}min-height: 30px;/);
+  assert.match(CSS, /@media \(pointer: coarse\) \{\n\s*\.hud-stop \{ min-height: 40px; \}/);
+});
+
 test("⚠ AND IT SURVIVES ON A PHONE, where the header used to be hidden whole", () => {
   // The mobile card hid `.hud-head` outright, because the card's own title
   // already named the ship. With Stop in that row, hiding it would take the

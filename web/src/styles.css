@@ -2583,16 +2583,26 @@
     grid-template-areas: "surface panel";
   }
   .workspace.in-space .work-main {
-    /* ⚠ 21rem, MEASURED, not chosen. At the old 17rem the low rack was cut four
-     * pixels short of its own row, and at 19rem the weapon-banking strip under
-     * it was. A rack you cannot see the bottom of is the one thing this cell
-     * exists to prevent. The radar is `minmax(0, 1fr)` and just gives the rem
-     * up; it is the surface with room to spare. */
-    grid-template-rows: minmax(0, 1fr) 21rem;
+    /* ⚠ THE HUD ROW SIZES TO ITS CONTENT, AND 21rem IS NOW ONLY A CEILING.
+     *
+     * It used to be a fixed 21rem, measured: at 17rem the low rack was cut four
+     * pixels short of its own row and at 19rem the weapon-banking strip under
+     * it was, and a rack you cannot see the bottom of is the one thing this
+     * cell exists to prevent. But a measured height is only right for the
+     * content it was measured against -- the footer came off the cell and the
+     * number stayed, leaving a band of empty panel below the racks.
+     *
+     * `auto` cannot be wrong in either direction: it cannot cut the rack short
+     * and it cannot leave a gap. The 21rem survives as a `max-height` on the
+     * cell itself, which is the half of the old number that was actually doing
+     * work -- a hull with a great many slots must not squeeze the radar to
+     * nothing, and `.hud-body` already scrolls. */
+    grid-template-rows: minmax(0, 1fr) auto;
     grid-template-areas:
       "surface panel"
       "hud     panel";
   }
+  .workspace.in-space .work-main > .hud-bar { max-height: 21rem; }
   .work-main > .desktop { grid-area: surface; }
   .work-main > .dock-panel { grid-area: panel; }
   .work-main > .hud-bar { grid-area: hud; }
@@ -3513,8 +3523,10 @@
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 0.5rem;
-    min-height: 48px;
-    padding: 0.25rem 0.6rem;
+    /* Driven by Stop, which is the tallest thing in it. Low enough that the row
+     * costs the instruments almost nothing; see the note on `.hud-stop`. */
+    min-height: 34px;
+    padding: 0.15rem 0.6rem;
     border-bottom: 1px solid var(--color-line);
     background: var(--color-panel-2);
     min-width: 0;
@@ -3590,12 +3602,27 @@
    * reads as an alert. */
   .hud-stop {
     justify-self: center;
-    min-height: 40px;
-    padding-inline: 1.1rem;
+    /* ⚠ BELOW THE GLOBAL 40px, AND R8 IS NOT BROKEN BY IT.
+     *
+     * R8's minimum is a TOUCH target, and this row is the top of a fixed-height
+     * cell where every pixel it takes comes off the instruments underneath it.
+     * With a mouse, 30px is a comfortable target; with a finger it is not. So
+     * the exception is scoped to the pointer that makes it safe and reversed
+     * for the one that does not, below.
+     *
+     * ⚠ SCOPED ON `pointer: coarse`, NOT ON A WIDTH. The phone tier is not the
+     * only touch screen — a desktop-width tablet lands on this same cell, and a
+     * breakpoint would hand it a 30px Stop. The query asks the question that
+     * actually matters: is this being pressed with a finger. */
+    min-height: 30px;
+    padding: 0.25rem 1.1rem;
     white-space: nowrap;
     background: var(--color-panel-3);
     border: 1px solid var(--color-line-strong);
     color: var(--color-text-bright);
+  }
+  @media (pointer: coarse) {
+    .hud-stop { min-height: 40px; }
   }
   .hud-stop:hover { border-color: var(--color-danger); }
 
