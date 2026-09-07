@@ -7,7 +7,7 @@
   // PanelHost) — just one at a time, no windows, no drag.
   import WorkspaceHeader from "./WorkspaceHeader.svelte";
   import PanelHost from "./PanelHost.svelte";
-  import Overview from "./Overview.svelte";
+  import SpaceOverview from "./SpaceOverview.svelte";
   import StationPanel from "./StationPanel.svelte";
   import ShipHud from "./ShipHud.svelte";
   import ModuleRack from "./ModuleRack.svelte";
@@ -81,8 +81,13 @@
         </section>
         <TargetBracket {store} />
       </ErrorBoundary>
+      <!--
+        The in-space overview. It was the old cockpit until that file was taken
+        apart; `SpaceOverview` is the same list with the redesign's shape, and
+        it is what the desktop dock panel shows too — one component, two frames.
+      -->
       <ErrorBoundary name="Overview">
-        <Overview {store} {flow} />
+        <SpaceOverview {store} {flow} />
       </ErrorBoundary>
     {/if}
   </main>

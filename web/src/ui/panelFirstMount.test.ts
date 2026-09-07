@@ -63,7 +63,13 @@ const PANELS = [
   "AgentsMissions",
   "AgentFinder",
   "Flight",
-  "Overview",
+  // ⚠ "Overview" WAS THE COCKPIT, and it does not exist. What it became is
+  // listed instead — each of these renders on a cold store, which is exactly the
+  // paint a pilot gets on the first frame after undocking.
+  "SpaceOverview",
+  "DronesPanel",
+  "ShotsPanel",
+  "EquipmentPanel",
   "MiningBot",
   "MissionBot",
   "Mining",

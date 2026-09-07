@@ -4607,6 +4607,38 @@
    * Styling that let the two numbers read as a scoreboard while the caption
    * faded away would be the lie the caption exists to prevent, which is why it
    * keeps body-text size and sits directly under them. */
+  /* A hostile, marked in the ROW LIST as well as the threat strip. A word, so
+   * the marking never depends on telling the colour apart. */
+  .spc-row-badge {
+    align-self: flex-start;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0 3px;
+    border: 1px solid var(--stn-danger-text, var(--color-danger));
+    color: var(--stn-danger-text, var(--color-danger));
+  }
+
+  /* Mine this: one line per laser. See the markup note — a single shared
+   * verdict loses every refusal but the last. */
+  .spc-mine-reports {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+  }
+  .spc-mine-reports li {
+    display: flex;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .spc-mine-reports li.bad { color: var(--stn-danger-text); }
+  .spc-mine-name { flex: 0 0 auto; color: var(--color-text-bright); }
+  .spc-mine-outcome { min-width: 0; }
+
   /* Compress: one row per stack in the hold, each with its own button. One
    * stack at a time is the server's own shape — it answers per stack — and a
    * "compress everything" button would hide which ones it quietly skipped. */
@@ -4697,7 +4729,8 @@
   /* "Send drones" on a hostile row — the cockpit's fastest path, carried back
    * into the threat strip. Small and inline, because it sits inside a row that
    * is already an alert and must not become the loudest thing in it. */
-  .spc-threat-send {
+  .spc-threat-send,
+  .spc-threat-lock {
     flex: 0 0 auto;
     min-height: 28px;
     padding: 0.1rem 0.45rem;
@@ -4706,7 +4739,8 @@
     border: 1px solid var(--color-line);
     color: var(--color-text);
   }
-  .spc-threat-send:hover:not(:disabled) { border-color: var(--color-danger); }
+  .spc-threat-send:hover:not(:disabled),
+  .spc-threat-lock:hover:not(:disabled) { border-color: var(--color-danger); }
 
   .shot-totals {
     display: flex;

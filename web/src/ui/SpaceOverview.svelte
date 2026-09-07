@@ -26,7 +26,7 @@
   // that is shooting at you" is a rule the presets exist to keep.
   import { onMount } from "svelte";
   import TypeIcon from "./TypeIcon.svelte";
-  import { spaceSelection } from "../space/selection.ts";
+  import { SELECTION_GONE, selectionHasVanished, spaceSelection } from "../space/selection.ts";
   import { overviewPreset } from "../space/overviewPreset.ts";
   import { OVERVIEW_PRESETS, applyPreset } from "../space/overviewPresets.ts";
   import {
@@ -38,7 +38,15 @@
     type OverviewRow,
     type OverviewSort,
   } from "../space/overview.ts";
-  import { actionsForRow, type ActionConcern, type RowAction, type RowActionID } from "../space/rowActions.ts";
+  import {
+    actionsForRow,
+    activatableModules,
+    isDockableKind,
+    miningModules,
+    type ActionConcern,
+    type RowAction,
+    type RowActionID,
+  } from "../space/rowActions.ts";
   import { dispatchRowAction, isSingleCallAction } from "../space/rowActionRunner.ts";
   import { gateLinkFor, type GateLink } from "../space/gateLinks.ts";
   import { orderableDroneIDs } from "./droneFlight.ts";
@@ -81,6 +89,10 @@
   const flight = store.flight;
   // svelte-ignore state_referenced_locally
   const drones = store.drones;
+  // svelte-ignore state_referenced_locally
+  const fitting = store.fitting;
+  // svelte-ignore state_referenced_locally
+  const mining = store.mining;
 
   /**
    * The nearest N rows the list keeps.
@@ -181,6 +193,26 @@
   const selectionNotice = $derived($noticeSignal);
 
   /**
+   * ⚠ THE THING YOU PICKED CAN LEAVE THE GRID, AND YOU HAVE TO BE TOLD.
+   *
+   * A rock is mined out, a ship warps off — and the action bar would go on
+   * offering warp and lock against an id the server no longer knows, failing
+   * with a refusal about something that is not on screen. The cockpit dropped
+   * the selection with a notice; when it was deleted this went with it, and
+   * `selectionHasVanished` was left with no caller at all.
+   *
+   * The check is caller-driven on purpose: the panel owns WHEN to ask, which is
+   * once per snapshot, and the sentinel case answers false because a destination
+   * that is not a ball in space can never leave one.
+   */
+  $effect(() => {
+    const present = new Set((snapshot?.entities ?? []).map((entity) => entity.itemID));
+    if (snapshot !== null && selectionHasVanished(selectedID, present)) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  });
+
+  /**
    * ⚠ LOOKED UP IN THE CURRENT ROWS EVERY TIME. A rock gets mined out and a ship
    * warps off; a bar holding the row it was handed would keep offering verbs
    * for something that is no longer there, and one that fell back to "the first
@@ -202,6 +234,14 @@
       locked: lockedIDs.has(row.itemID),
       acquiring: acquiringIDs.has(row.itemID),
       gateLink: row.gateLink,
+      // ⚠ FOUND LIVE: THIS WAS NEVER PASSED, so "Mine this" was permanently
+      // disabled reading "No mining equipment is switched on" — on a hull with
+      // three powered-up Miner Is. `minerCount ?? 0` defaults to zero, which is
+      // the safe direction for a context field but makes an unset one look
+      // exactly like an honest refusal. The verb was unreachable from this
+      // panel from the day it was written, and no test caught it because the
+      // action bar only renders once a row is picked, which SSR never does.
+      minerCount: minerRows.length,
     });
   });
 
@@ -244,21 +284,174 @@
     return kind === "orbit" ? ranges.orbit : ranges.hold;
   }
 
+  // --- the two verbs that are NOT one call -----------------------------------
+  //
+  // ⚠ `mine` AND `haul` EACH NEED THEIR OWN REPORTING, which is why
+  // `rowActionRunner.ts` refuses to run them rather than pretending it can.
+  // Mine reaches for every powered-up laser and each answers separately; haul
+  // runs a docking ladder and then a move. Both were the last things left in
+  // the old cockpit.
+
+  /** Every module the ship could switch on, named and grouped from the cache. */
+  const activatable = $derived(
+    activatableModules(
+      $fitting.slots,
+      (typeID) => resolvedName($names.resolved, "type", typeID, "") || null,
+      (typeID) => $names.resolved[nameKey("typeGroup", typeID)] ?? null,
+    ),
+  );
+  /**
+   * The lasers "Mine this" will reach for — high-slot, powered up, and filed by
+   * the GAME under a mining group.
+   *
+   * ⚠ SLOT AND GROUP TOGETHER, through the shared derivation. A module whose
+   * group has not resolved yet is left out — "cannot tell", not a claim it is
+   * idle — and joins as the group lands.
+   */
+  const minerRows = $derived(miningModules(activatable));
+
+  /**
+   * ⚠ ASK FOR THE FIT, AND FOR THE GROUP NAMES THAT DECIDE WHAT A MINER IS.
+   *
+   * FOUND LIVE: "Mine this" sat disabled reading "No mining equipment is
+   * switched on" on a hull with three powered-up Miner Is. `miningModules`
+   * needs the GAME'S GROUP name for each module — that is the whole point of
+   * R47, replacing an English-name guess with the game's own answer — and
+   * nothing on screen was asking the cache for `typeGroup`. A `null` group is
+   * "cannot tell", so every laser was correctly excluded, and the panel
+   * correctly reported a state that was not true.
+   *
+   * The fit itself is requested for the same reason the rack learned to: relying
+   * on another component's mount order is how a panel goes quiet when that
+   * component is a window nobody opened, or a HUD that mobile does not draw.
+   */
+  $effect(() => {
+    if (!$fitting.loaded) {
+      void flow.loadFitting().catch(() => {});
+      return;
+    }
+    const refs: NameRef[] = [];
+    const seen = new Set<number>();
+    for (const slot of $fitting.slots) {
+      const typeID = slot.module?.typeID;
+      if (typeof typeID !== "number" || seen.has(typeID)) {
+        continue;
+      }
+      seen.add(typeID);
+      if (($names.resolved[nameKey("typeGroup", typeID)] ?? null) === null) {
+        refs.push({ kind: "typeGroup", id: typeID });
+      }
+      if (resolvedName($names.resolved, "type", typeID, "") === "") {
+        refs.push({ kind: "type", id: typeID });
+      }
+    }
+    if (refs.length > 0) {
+      flow.requestNames(refs);
+    }
+  });
+
+  /**
+   * What each module did when Mine this reached for it.
+   *
+   * ⚠ THIS IS WHY MINE IS NOT A FAN-OUT-AND-FORGET. Every one of these calls
+   * lands its outcome in the SAME store slot, so a loop that just fired them
+   * all would leave only the last module's answer on screen and quietly lose
+   * the other refusals. Each module is read back individually right after its
+   * own call, and a module that was accepted-then-not-run (a silent decline) is
+   * reported as distinctly as one refused outright.
+   */
+  let mineReports = $state<readonly { label: string; outcome: string; ok: boolean }[]>([]);
+
+  async function mineThis(targetID: number): Promise<void> {
+    await runFor("module", async () => {
+      const reports: { label: string; outcome: string; ok: boolean }[] = [];
+      for (const module of minerRows) {
+        const label = module.label ?? "A mining laser";
+        // repeat: -1 is what mining MEANS — cycle after cycle until something
+        // stops it. The same argument the mining bot uses.
+        await flow.activateModule(module.itemID, { targetID, repeat: -1 });
+        // Read the AUTHORITY, not the return value. A successful action clears
+        // both slots, so whatever is in them now belongs to THIS module.
+        const refused = $targeting.actionError;
+        const declined = $targeting.silentDecline;
+        const running = $space.snapshot?.ship?.activeModuleIDs ?? null;
+        if (refused) {
+          reports.push({ label, outcome: refused, ok: false });
+        } else if (declined) {
+          reports.push({ label, outcome: declined, ok: false });
+        } else if (running !== null && !running.includes(module.itemID)) {
+          reports.push({
+            label,
+            outcome: "Started, and your ship does not show it running.",
+            ok: false,
+          });
+        } else {
+          reports.push({ label, outcome: "Running on it.", ok: true });
+        }
+      }
+      mineReports = reports;
+    });
+  }
+
+  /** Everything on this grid you could dock at, nearest first. By NAME (R7d). */
+  const stationsOnGrid = $derived(
+    rows.filter((row) => isDockableKind(row.kind)).map((row) => ({
+      itemID: row.itemID,
+      label: rowName(row),
+    })),
+  );
+  /** Every stack sitting in a hold — what a haul actually moves. */
+  const holdItemIDs = $derived(
+    $mining.holds.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID)),
+  );
+
+  /**
+   * Take the ore somewhere and put it down.
+   *
+   * Docked, that is one call. In space it is the R24 ladder (which closes the
+   * distance itself and narrates each phase) followed by a RE-READ of the holds
+   * — because the stack ids a station hangar will accept are read AFTER the
+   * dock, not before it, and a 200 on the dock is not proof it happened.
+   */
+  async function haulNow(): Promise<void> {
+    await runFor("hold", async () => {
+      if (inSpaceNow) {
+        const station = stationsOnGrid[0];
+        if (!station) {
+          return;
+        }
+        await flow.dockAt(station.itemID);
+      }
+      await flow.loadMiningHolds();
+      const ids = $mining.holds.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
+      if (ids.length === 0) {
+        return;
+      }
+      await flow.unloadMiningHolds(ids);
+      // And read them again, so what the panel shows is what the ship has —
+      // not what the call said it would have.
+      await flow.loadMiningHolds();
+    });
+  }
+
   function runAction(action: RowAction): void {
     const row = selectedRow;
     if (!row || action.unavailable !== null) {
       return;
     }
     rangeMenu = null;
-    // ⚠ `mine` and `haul` are NOT single calls — each reaches for several
-    // modules or runs a loop with its own reporting, and both still live in
-    // `Overview.svelte`. The dispatcher names them rather than pretending, so a
-    // panel that has not built them yet says so instead of doing nothing.
+    mineReports = [];
+    // ⚠ THE TWO MULTI-STEP VERBS ARE RUN HERE, NOT DELEGATED. They used to be
+    // answered with "…is in the Around Your Ship window for now", which was a
+    // pointer to a window that no longer exists. `rowActionRunner.ts` still
+    // refuses them, correctly: it is the SINGLE-CALL dispatcher, and these two
+    // need reporting it has no way to produce.
     if (!isSingleCallAction(action.id)) {
-      concernErrors = {
-        ...concernErrors,
-        [action.concern]: `${action.label} is in the Around Your Ship window for now.`,
-      };
+      if (action.id === "mine") {
+        void mineThis(row.itemID);
+      } else if (action.id === "haul") {
+        void haulNow();
+      }
       return;
     }
     void runFor(action.concern, async () => {
@@ -453,6 +646,35 @@
             </button>
             <span class="spc-threat-kind">{hostileLabel(threat) ?? "hostile"}</span>
             <span class="spc-threat-range">{formatDistance(threat.distance)}</span>
+            <!--
+              ⚠ LOCK, ON THE ROW — the other control the cockpit had here and
+              this panel had dropped. Locking is what you do FIRST when
+              something is shooting you, and routing it through "select the row,
+              then find Lock in the action bar" is two presses at the one moment
+              a pilot has none to spare. The three states are the target's, not
+              a guess: acquiring is not locked, and says so.
+            -->
+            {#if lockedIDs.has(threat.itemID)}
+              <button
+                type="button"
+                class="spc-threat-lock"
+                disabled={busy.has("lock")}
+                onclick={() => runFor("lock", () => flow.unlockTarget(threat.itemID))}
+              >
+                Release lock
+              </button>
+            {:else if acquiringIDs.has(threat.itemID)}
+              <button type="button" class="spc-threat-lock" disabled>Locking…</button>
+            {:else}
+              <button
+                type="button"
+                class="spc-threat-lock"
+                disabled={busy.has("lock")}
+                onclick={() => runFor("lock", () => flow.lockTarget(threat.itemID))}
+              >
+                Lock
+              </button>
+            {/if}
             {#if orderableDrones.length > 0}
               <!--
                 Only drawn when there is a flight to send. A hull with no drones
@@ -507,6 +729,23 @@
       {#each Object.entries(concernErrors) as [concern, words] (concern)}
         {#if words}<p class="spc-note bad">{words}</p>{/if}
       {/each}
+      <!--
+        ⚠ ONE LINE PER LASER, NEVER ONE SHARED VERDICT. Every activate lands its
+        outcome in the same store slot, so a fan-out that reported once would
+        show only the last module's answer and quietly lose the other refusals.
+        Each module is named, and a module that was accepted-then-not-run is
+        called out as distinctly as one refused outright.
+      -->
+      {#if mineReports.length > 0}
+        <ul class="spc-mine-reports">
+          {#each mineReports as report (report.label + report.outcome)}
+            <li class:bad={!report.ok}>
+              <span class="spc-mine-name">{report.label}</span>
+              <span class="spc-mine-outcome">{report.outcome}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {:else}
       <p class="spc-note">Nothing selected. Pick a row below, or a marker on the radar.</p>
     {/if}
@@ -602,9 +841,23 @@
                 <TypeIcon typeID={row.typeID} name={rowName(row)} size="sm" />
               </span>
               <span class="spc-cell-name">
-                <span class="spc-name">
+                <span class="spc-name" class:hostile={isHostile(row)}>
                   {rowName(row)}{#if lockedIDs.has(row.itemID)}<span class="spc-lock-mark" title="Locked">⌖</span>{/if}
                 </span>
+                {#if isHostile(row)}
+                  <!--
+                    ⚠ FOUND BY THE COCKPIT'S OWN SUITE WHEN IT WAS RE-POINTED
+                    HERE. The old list marked a rat in the ROWS as well as in the
+                    threat strip, and this panel had dropped that: the strip is
+                    capped at six and the list is what a miner is actually
+                    reading, so a hostile outside the top six became invisible in
+                    the place the player was looking.
+
+                    A WORD, not a colour. Someone who cannot tell the red still
+                    reads "Pirate".
+                  -->
+                  <span class="spc-row-badge">{hostileLabel(row) ?? "hostile"}</span>
+                {/if}
                 <span class="spc-meta">{typeName(row)} · {groupName(row)}</span>
               </span>
               <span class="spc-cell-type">{typeName(row)}</span>

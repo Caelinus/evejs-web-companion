@@ -335,17 +335,20 @@ test("the neocom launches every openable panel for the current state", () => {
   assert.doesNotMatch(docked, /Flight/, "an in-space-only tab leaked into the docked rail");
   assert.match(docked, /Fitting/, "the docked Fitting tab is missing");
   assert.doesNotMatch(space, /Fitting/, "a docked-only tab leaked into the in-space rail");
-  // ⚠ "Around Your Ship" IS a rail entry again, and only for a while.
+  // ⚠ "Around Your Ship" IS GONE, and this assertion is its headstone.
   //
-  // It used to be fixed chrome — it WAS the in-space dock panel, so a rail entry
-  // would have opened a second copy of what was already on screen. The dock
-  // panel is `SpaceOverview` now, and `Overview.svelte` still holds the sections
-  // that have not moved yet: the flight strip with Stop, the drone controls, the
-  // equipment list. A pilot in space needs a way to reach those while they are
-  // between homes, so it is a window until Phase 4 empties and deletes it — and
-  // this assertion goes with it.
-  assert.match(space, /Around Your Ship/, "the transitional overview window is unreachable");
-  assert.doesNotMatch(docked, /Around Your Ship/, "an in-space-only tab leaked into the docked rail");
+  // It was fixed chrome, then briefly a window while the cockpit was taken
+  // apart section by section, and now the file behind it does not exist. The
+  // overview is `SpaceOverview` in the dock panel — always on screen, never
+  // something to launch — and every section that used to sit under that tab has
+  // its own home: Drones, Shots Fired and Equipment are rail entries of their
+  // own, the gauges and racks are the HUD, and the flight narration is on
+  // Flight.
+  assert.doesNotMatch(space, /Around Your Ship/, "the deleted cockpit tab came back");
+  for (const moved of ["Drones", "Shots Fired", "Equipment"]) {
+    assert.match(space, new RegExp(moved), `${moved} must be reachable in space`);
+    assert.doesNotMatch(docked, new RegExp(moved), `${moved} leaked into the docked rail`);
+  }
 });
 
 test("the panel host renders the real panel for a selected tab", () => {

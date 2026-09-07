@@ -85,9 +85,17 @@ test("the workspace survives the first in-space paint with a running custom bot,
   assert.match(body, /In Space/);
 });
 
-test("Overview survives that same snapshot (drones, pirate, rock)", async () => {
+test("the panels that render drones survive that same snapshot (drones, pirate, rock)", async () => {
+  // ⚠ THE CRASH THIS REPRO WAS WRITTEN FOR WAS IN THE DRONE RENDER, and the
+  // cockpit that held it has been taken apart. The claim moved to the two
+  // components that render those rows now — the drones window and the overview
+  // panel — because a whole-workspace render (the test above) can go green
+  // while one panel inside an ErrorBoundary is quietly showing its fallback.
   const store = inSpaceBotStore();
-  const Overview = (await import("./Overview.svelte")).default;
-  const body = render(Overview as never, { props: { store, flow: fakeFlow() } } as never).body;
-  assert.equal(typeof body, "string");
+  const DronesPanel = (await import("./DronesPanel.svelte")).default;
+  const SpaceOverview = (await import("./SpaceOverview.svelte")).default;
+  for (const Panel of [DronesPanel, SpaceOverview]) {
+    const body = render(Panel as never, { props: { store, flow: fakeFlow() } } as never).body;
+    assert.equal(typeof body, "string");
+  }
 });

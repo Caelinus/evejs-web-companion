@@ -28,11 +28,11 @@ register("./svelteSsrHook.ts", import.meta.url);
 
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
-const Overview = (await import("./Overview.svelte")).default;
+const SpaceOverview = (await import("./SpaceOverview.svelte")).default;
 const DronesPanel = (await import("./DronesPanel.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const SOURCE = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
 const DRONES_SOURCE = readFileSync(path.join(UI_DIR, "DronesPanel.svelte"), "utf8");
 
 const SHIP_ID = 9001;
@@ -223,9 +223,16 @@ function sceneStore(options: SceneOptions = {}) {
   return store;
 }
 
-/** The scene as the old cockpit renders it. */
+/**
+ * The scene as the OVERVIEW PANEL renders it — the threat strip's home.
+ *
+ * ⚠ IT USED TO BE THE COCKPIT, AND THE COCKPIT IS GONE. The threat claims below
+ * are the originals; only the wording they match moved with the panel, because
+ * the redesign says "N hostiles on grid" where the cockpit said "Hostiles
+ * nearby". What must not change is WHICH things are called threats.
+ */
 function scene(options: SceneOptions = {}): string {
-  return render(Overview, {
+  return render(SpaceOverview, {
     props: { store: sceneStore(options), flow: fakeFlow() },
   }).body;
 }
@@ -351,7 +358,7 @@ test("a pirate is called a Pirate, and a player ship gets no badge", () => {
       players: [{ itemID: 60001, name: "Some Pilot" }],
     }),
   );
-  assert.match(text, /Hostiles nearby/);
+  assert.match(text, /hostiles? on grid/i);
   // R9a: the word a player uses. Never "NPC entity kind", never "nativeNpc".
   assert.match(text, /Pirate/);
   assert.doesNotMatch(text, /nativeNpc|npcEntityType|NPC entity/i);
@@ -366,18 +373,18 @@ test("police and drifters are labelled honestly — and only threats are listed"
   );
   // Law enforcement is an NPC that does not shoot a miner. Painting it as a
   // threat would make the colour meaningless.
-  assert.doesNotMatch(police, /Hostiles nearby/);
+  assert.doesNotMatch(police, /hostiles? on grid/i);
 
   const drifter = visibleText(
     scene({ hostiles: [{ itemID: 60003, name: "Drifter Battleship", npcEntityType: "drifter" }] }),
   );
-  assert.match(drifter, /Hostiles nearby/);
+  assert.match(drifter, /hostiles? on grid/i);
   assert.match(drifter, /Drifter/);
 });
 
 test("with nothing hostile around, no threat block is rendered at all", () => {
   const text = visibleText(scene({ players: [{ itemID: 60004, name: "Some Pilot" }] }));
-  assert.doesNotMatch(text, /Hostiles nearby/);
+  assert.doesNotMatch(text, /hostiles? on grid/i);
   assert.doesNotMatch(text, /You are taking damage/);
 });
 
@@ -386,25 +393,23 @@ test("the threat badge is a WORD, so colour is never the only signal", () => {
   const body = scene({
     hostiles: [{ itemID: RAT_ID, name: "Serpentis Scout", npcEntityType: "npc" }],
   });
-  assert.match(body, /class="threat-badge"[^>]*>\s*Pirate/);
+  assert.match(body, /class="spc-threat-kind"[^>]*>\s*Pirate/);
 });
 
 test("a hostile is marked in the ordinary overview list too", () => {
-  // Rocks and rats are always in the overview table now (the "Hide rocks & rats"
-  // toggle was removed), so a rat shows both in the loud "Hostiles nearby" block
-  // AND as a marked row in the list a player is already reading.
+  // Rocks and rats are always in the overview list, so a rat shows both in the
+  // loud threat strip AND as a marked row in the list a player is reading.
+  //
+  // ⚠ THIS CAUGHT A REAL LOSS WHEN IT WAS RE-POINTED AT THE NEW PANEL. The
+  // redesign had dropped the row marking entirely — and the strip is capped at
+  // six, so a hostile outside the top six had become invisible in the one place
+  // a miner actually looks.
   const body = scene({
     hostiles: [{ itemID: RAT_ID, name: "Serpentis Scout", npcEntityType: "npc" }],
   });
-  // The threat block is the loud version; the row marker is so the list a
-  // player is already reading is legible as well.
-  //
-  // ⚠ RE-POINTED IN R82: the grid became a list of `.ov-row` buttons, so the
-  // marked row is no longer a `<tr>`. The claim — a hostile is marked where the
-  // player is already looking, not only in the block above — is unchanged.
-  assert.match(body, /<button[^>]*class="ov-row[^"]*\bhostile\b/);
-  // And it still carries the WORD, so the colour is never the only signal.
-  assert.match(body, /class="threat-badge">Pirate</);
+  assert.match(body, /class="spc-name hostile"/, "the row does not mark the hostile");
+  // And it carries the WORD, so the colour is never the only signal.
+  assert.match(body, /class="spc-row-badge">Pirate</);
 });
 
 // --- Source-level guarantees -------------------------------------------------
@@ -453,15 +458,29 @@ test("the panel calls one flow method per drone verb, and no others", () => {
 });
 
 test("R8: every drone and threat control is a real button", () => {
-  const body = scene({
+  // ⚠ TWO RENDERS, BECAUSE THE CONTROLS LIVE IN TWO PANELS NOW. The drone verbs
+  // are the drones window's; Lock and Send drones are the threat strip's. One
+  // render could only have covered whichever half happened to be in the file
+  // this test still pointed at.
+  const drones = droneScene({
     bay: [{ itemID: BAY_DRONE_ID, typeID: DRONE_TYPE_ID, quantity: 1 }],
     inSpace: [A_SPACE_DRONE],
+  });
+  const threats = scene({
+    inSpace: [A_SPACE_DRONE],
+    droneEntities: [{ itemID: SPACE_DRONE_ID, name: "Hobgoblin I", controllerID: SHIP_ID }],
     hostiles: [{ itemID: RAT_ID, name: "Serpentis Scout", npcEntityType: "npc" }],
   });
-  for (const label of ["Launch", "Bring home", "Bring them all home", "Send drones", "Lock"]) {
+  for (const [body, label] of [
+    [drones, "Launch"],
+    [drones, "Bring home"],
+    [drones, "Bring them all home"],
+    [threats, "Send drones"],
+    [threats, "Lock"],
+  ] as const) {
     assert.match(
       body,
-      new RegExp(`<button[^>]*>[\\s\\S]{0,80}${label}`),
+      new RegExp("<button[^>]*>[\s\S]{0,80}" + label),
       `"${label}" must be a real button`,
     );
   }

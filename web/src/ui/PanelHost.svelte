@@ -17,7 +17,6 @@
   import AgentsMissions from "./AgentsMissions.svelte";
   import AgentFinder from "./AgentFinder.svelte";
   import Flight from "./Flight.svelte";
-  import Overview from "./Overview.svelte";
   import Mining from "./Mining.svelte";
   import DronesPanel from "./DronesPanel.svelte";
   import ShotsPanel from "./ShotsPanel.svelte";
@@ -91,8 +90,6 @@ import NoticeLog from "./NoticeLog.svelte";
   <AgentFinder {store} {flow} showTravel={() => onOpen?.("travel")} />
 {:else if tab === "flight"}
   <Flight {store} {flow} />
-{:else if tab === "overview"}
-  <Overview {store} {flow} />
 {:else if tab === "mining"}
   <Mining {store} {flow} />
 {:else if tab === "drones"}

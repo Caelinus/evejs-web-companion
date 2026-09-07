@@ -14,7 +14,6 @@ import type { FlightStatus, OnlineCharacterState } from "../store/types.ts";
 export type TabID =
   | "fitting"
   | "flight"
-  | "overview"
   | "mining"
   | "drones"
   | "shots"
@@ -73,7 +72,16 @@ export const TABS: readonly TabDef[] = [
   // tab INSIDE the docked Inventory & Ship dock panel, next to the hangars,
   // so the station never duplicates itself into a separate window.)
   { id: "fitting", label: "Fitting", where: "docked" },
-  { id: "travel", label: "Travel", where: "docked" },
+  // ⚠ TRAVEL IS REACHABLE IN SPACE NOW, and that is a restored capability
+  // rather than a new one. The old cockpit's overview list ended in a synthetic
+  // "Somewhere else…" row: a way to set a destination that is NOT on this grid,
+  // over `searchDestinations`. The redesigned overview panel is a list of what
+  // is around the ship and has no such row — so when the cockpit went, a flying
+  // pilot lost every way to route themselves anywhere off-grid, with Travel
+  // sitting one tab away and marked docked-only. It reads no docked state at
+  // all; it was only ever labelled that way because route planning was assumed
+  // to happen before undocking.
+  { id: "travel", label: "Travel", where: "both" },
   // Bots run IN SPACE (mining/mission loops), so their commands must stay
   // reachable after undocking — available in both states.
   { id: "bots", label: "Bots", where: "both" },
@@ -84,7 +92,6 @@ export const TABS: readonly TabDef[] = [
   { id: "botManager", label: "Bot Manager", where: "both" },
   // In space only — flying, what's around the ship, mining.
   { id: "flight", label: "Flight", where: "in-space" },
-  { id: "overview", label: "Around Your Ship", where: "in-space" },
   { id: "mining", label: "Mining", where: "in-space" },
   // Two sections of the old overview cockpit, now windows of their own. Both
   // are LAUNCHABLE on purpose: "where are my drones" and "what just hit me" are
@@ -142,7 +149,15 @@ export function launchableTabsFor(isDocked: boolean): readonly TabDef[] {
 
 /** The default landing tab for each state (item 4). */
 export const DOCKED_DEFAULT: TabID = "inventory";
-export const IN_SPACE_DEFAULT: TabID = "overview";
+/**
+ * ⚠ NOT "overview" ANY MORE — that tab no longer exists.
+ *
+ * "Around Your Ship" was the in-space landing panel while the cockpit was a
+ * window. The overview is FIXED CHROME now (the dock panel on the right, and
+ * the whole screen on mobile), so it is never something to land on: it is
+ * already there. Flight is the panel a pilot most often opens next.
+ */
+export const IN_SPACE_DEFAULT: TabID = "flight";
 
 /**
  * Docked vs in space, from the AUTHORITATIVE flag. Once a flight-status read has

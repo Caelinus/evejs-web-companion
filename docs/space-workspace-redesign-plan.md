@@ -435,9 +435,38 @@ Plus five smaller corrections to this document:
   `SPACE_PANELS` now that the HUD lost its nav buttons. They go with this phase, for exactly the
   reason `chromeRender.test.ts`'s own header records about the shells it replaced.
 
-**Order, revised.** 4a ✅ the two windows + Send drones. 4b the equipment window. 4c Flight (the
-narration, then the pickers). 4d Mining (two `AppFlow` verbs, holds, Jettison, Compress). 4e Mine
-and Haul in `SpaceOverview`, then the deletion and the suite re-anchoring.
+**Order, revised — all done.** 4a ✅ the two windows + Send drones. 4b ✅ the equipment window.
+4c ✅ Flight (the narration, then the pickers). 4d ✅ Mining (two `AppFlow` verbs, Jettison,
+Compress). 4e ✅ Mine and Haul in `SpaceOverview`, the deletion, and the suite re-anchoring.
+
+### 4.2 What the deletion itself found
+
+`Overview.svelte` is gone, and so are `shell.ts` / `shell.test.ts` (dead since Phase 3 took the
+HUD's nav buttons — a suite testing a module nothing imported, the exact trap `chromeRender.test.ts`
+records about the shells it replaced).
+
+Re-pointing the cockpit's suites at their new homes is what surfaced the rest. **Five capabilities
+had silently stopped existing**, none of them with a red test:
+
+| What | Where it went | How it was found |
+| --- | --- | --- |
+| **"Send drones" on a hostile row** | back on the threat strip | `dronePanel.test.ts`'s call-site count |
+| **Lock on a hostile row** | back on the threat strip | `dronePanel.test.ts`'s R8 button sweep |
+| **A hostile MARKED IN THE ROW LIST** | back, as a word badge | `dronePanel.test.ts`, re-pointed |
+| **A vanished selection dropped with a notice** | back in `SpaceOverview` | `selectionHasVanished` had no caller left |
+| **Setting a destination off this grid** | `travel` is a **both** tab now | the "Somewhere else…" row's test |
+
+And one that never worked at all: **`minerCount` was never passed to `actionsForRow`**, so "Mine
+this" was permanently disabled reading *"No mining equipment is switched on"* on a hull with three
+powered-up Miner Is. `minerCount ?? 0` is the safe default for an optional field, and it makes an
+UNSET one indistinguishable from an honest refusal. No render test could catch it: the action bar
+only appears once a row is picked, and SSR picks nothing.
+
+**Anchors moved, not deleted.** `dronePanel` splits between `DronesPanel` and `SpaceOverview`;
+`flightStrip` renders `Flight`; `overviewActions` splits across `SpaceOverview`, `EquipmentPanel`,
+`TargetsPanel`, `Mining` and `rowActions.ts`; the crash repro covers the two panels that render
+drone rows; `panelFirstMount` lists the four panels the cockpit became. `IN_SPACE_DEFAULT` is
+`flight` — the overview is fixed chrome, so it is never something to land on.
 
 **Phase 5 — mobile.** The 1D stacked collapsible cards in `MobileWorkspace`.
 

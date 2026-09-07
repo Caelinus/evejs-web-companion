@@ -192,10 +192,9 @@ test("⚠ the dock panel's contents have no TabID at all", () => {
   // by CONSTRUCTION rather than by a list: `StationPanel` and `SpaceOverview`
   // are components with no tab id, so there is nothing to open.
   //
-  // `overview` is a window again on purpose — `Overview.svelte` still holds the
-  // sections that have not moved yet (the flight strip with Stop, the drones,
-  // the equipment list) and a pilot in space needs a way to reach them while
-  // they are between homes. It goes when that file does.
+  // ⚠ AND THERE IS NO `overview` TAB EITHER, ANY MORE. It was a window for one
+  // phase while the old cockpit was taken apart; the file is gone and so is the
+  // tab. The dock panel is the overview, and it is always on screen.
   const ws = source("Workspace.svelte");
   assert.match(ws, /<DockPanel/, "the frame is mounted by Workspace, not opened as a window");
   const dockPanelSource = source("DockPanel.svelte");

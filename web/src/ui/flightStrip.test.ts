@@ -27,10 +27,11 @@ register("./svelteSsrHook.ts", import.meta.url);
 
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
-const Overview = (await import("./Overview.svelte")).default;
+const Flight = (await import("./Flight.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const SOURCE = readFileSync(path.join(UI_DIR, "Flight.svelte"), "utf8");
+const NARRATION = readFileSync(path.join(UI_DIR, "flightNarration.ts"), "utf8");
 
 const SHIP_ID = 9001;
 const SHIP_TYPE_ID = 622;
@@ -139,7 +140,7 @@ function inSpaceStore() {
 }
 
 function renderWith(store: unknown): string {
-  return render(Overview as never, { props: { store, flow: fakeFlow() } } as never).body;
+  return render(Flight as never, { props: { store, flow: fakeFlow() } } as never).body;
 }
 
 // --- where ------------------------------------------------------------------
@@ -319,12 +320,16 @@ test("in space, the strip no longer carries Stop — the HUD does", () => {
 // --- the structural claims --------------------------------------------------
 
 test("the busy state is a per-concern SET, not one flag", () => {
-  // A single shared flag is what greys out Stop mid-fight because a lock
-  // request happened to be pending.
-  assert.match(SOURCE, /busyConcerns\s*=\s*\$state<readonly Concern\[\]>/);
-  assert.match(SOURCE, /function concernBusy\(concern: Concern\): boolean/);
+  // ⚠ THE CLAIM MOVED WITH THE PANEL THAT HAS VERBS. The cockpit is gone; the
+  // component that now dispatches flight verbs against a picked row is
+  // `SpaceOverview`, and this is the rule that stops one in-flight request
+  // greying out every other control — including, historically, Stop, mid-fight,
+  // because a lock happened to be pending.
+  const overview = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
+  assert.match(overview, /let busy = \$state<ReadonlySet<ActionConcern>>/);
+  assert.match(overview, /busy\.has\(/, "controls must be disabled by their OWN concern");
   // And the exemption is written down so a later cleanup does not undo it.
-  assert.match(SOURCE, /DO NOT CLEAN THIS UP/);
+  assert.match(overview, /A SET, NOT A FLAG/);
 });
 
 test("the app no longer tells the player to go to the Flight tab to undock", () => {

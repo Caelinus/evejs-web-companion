@@ -39,7 +39,6 @@ export type NeocomGlyph = readonly string[];
 export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   // --- in space ---
   flight: ["M12 3l7 17-7-4-7 4z"],
-  overview: ["M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4", "M12 12h.01"],
   mining: ["M3 3l7 7", "M11 12l4-3 6 2-1 7-7 1z"],
   // Drones: three small craft flying out from a hull, in a wedge.
   drones: ["M12 4l3 4-3 2-3-2z", "M5 13l2.5 3.5L5 19", "M19 13l-2.5 3.5L19 19"],

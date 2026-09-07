@@ -322,3 +322,36 @@ test("the equipment window never sends a flying pilot to a docked-only tab", () 
   );
   assert.equal(/Fitting window/.test(text), false, "same instruction, reworded");
 });
+
+// --- the two verbs that are not one call -------------------------------------
+
+test("⚠ MINE AND HAUL ARE RUN HERE NOW, not answered with a pointer", () => {
+  // They used to be met with "…is in the Around Your Ship window for now" — a
+  // pointer to a window that no longer exists. `rowActionRunner.ts` still
+  // refuses them, correctly: it is the SINGLE-CALL dispatcher and these two
+  // need reporting it cannot produce.
+  const panel = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
+  // ⚠ THE PHRASE IS ALLOWED IN A COMMENT (that is the record of what changed);
+  // what must not exist is a TEMPLATE that can put it on screen.
+  assert.equal(
+    /`\$\{action\.label\} is in the/.test(panel),
+    false,
+    "the panel can still tell a player to open a window that does not exist",
+  );
+  assert.match(panel, /action\.id === "mine"/, "mine is not dispatched");
+  assert.match(panel, /action\.id === "haul"/, "haul is not dispatched");
+  // One line per laser, never one shared verdict — every activate lands its
+  // outcome in the same store slot.
+  assert.match(panel, /mineReports/);
+});
+
+test("⚠ minerCount IS PASSED — or Mine this can only ever refuse", () => {
+  // FOUND LIVE. `RowActionContext.minerCount` defaults to `?? 0`, which is the
+  // safe direction for an optional field but makes an UNSET one indistinguishable
+  // from an honest "no mining equipment is switched on". The panel never passed
+  // it, so the verb was unreachable from the day it was written — and no render
+  // test could catch it, because the action bar only appears once a row has been
+  // picked and SSR picks nothing.
+  const panel = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
+  assert.match(panel, /minerCount: minerRows\.length/);
+});

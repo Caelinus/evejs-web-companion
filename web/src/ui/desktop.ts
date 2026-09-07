@@ -50,12 +50,10 @@ const CASCADE_ORIGIN = 16;
 // in space — so neither can be opened as a window by construction rather than
 // by being listed here.
 //
-// `overview` used to be listed: it WAS the in-space dock panel. It is a window
-// again during the in-space redesign, because `Overview.svelte` still holds the
-// sections that have not moved yet — the flight strip with Stop, the drone
-// controls, the equipment list — and a pilot in space needs a way to reach them
-// while they are between homes. It goes when that file does (Phase 4), and the
-// rail entry goes with it.
+// `overview` used to be listed: it WAS the in-space dock panel. It became a
+// window for one phase, while the old cockpit was taken apart section by
+// section — and then that file was deleted and the tab with it. Every section
+// it held has its own home now, so there is nothing left for this set to name.
 const CHROME_TABS = new Set<TabID>([]);
 
 /** True when this tab opens as a floating window (i.e. is not fixed chrome). */
