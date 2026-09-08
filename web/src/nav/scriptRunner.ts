@@ -211,6 +211,12 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   let runID = "";
   /** The last decision actually written, so a quiet bot writes nothing. */
   let loggedDecision = "";
+  /**
+   * Whether this run's end line is already written. A run ends ONCE: stopping a
+   * bot that has already finished emits another terminal snapshot, and a log
+   * that says a run ended twice is a log nobody can count runs in.
+   */
+  let loggedEnd = false;
 
   /**
    * ⚠ RULE 4: THE RECORDER NEVER BREAKS THE RUN. A sink that throws — a full
@@ -244,6 +250,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return;
     }
     if (next.status === "stopped" || next.status === "error") {
+      if (loggedEnd) {
+        return;
+      }
+      loggedEnd = true;
       record({
         t: now(), kind: "end", run: runID, status: next.status,
         reason: next.pauseReason ?? next.why ?? null,
@@ -551,6 +561,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       // what tells a store to rotate the previous run's log out.
       runID = newRunID(Date.now());
       loggedDecision = "";
+      loggedEnd = false;
       record({ t: now(), kind: "start", run: runID, script: next.name, status: "running" });
       settle = 0;
       readFailures = 0;

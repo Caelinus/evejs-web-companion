@@ -519,3 +519,14 @@ test("⚠ RULE 4: a recorder that throws loses its lines, never the ship", async
   assert.deepEqual(h.issued, [{ kind: "undock" }], "the action still went out");
   assert.equal(h.runner.getStatus(), "running", "and the run is still running");
 });
+
+test("a run ends exactly once, however many times it is told to stop", async () => {
+  const { sink, lines } = recordingSink();
+  const h = harness({ log: sink });
+  h.runner.start(script([macroStep("u", "undock"), macroStep("d", "deliver-ore")]));
+  await h.runner.tick();
+  await h.runner.tick();
+  h.runner.stop();
+  h.runner.stop();
+  assert.equal(lines.filter((l) => l.kind === "end").length, 1, "a log nobody can count runs in is worth less");
+});
