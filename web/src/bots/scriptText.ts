@@ -298,9 +298,25 @@ export function alertSentence(row: InterruptRow): string {
   return `Your bot noticed: ${conditionSentence(row.when)}.`;
 }
 
+/**
+ * How a fight-back watch fights, when the player has said: which hostile first,
+ * and what it does about the fleet's call. Empty for every other response and
+ * for a watch left at the shipped ladder, so an ordinary row reads exactly as
+ * it always did.
+ */
+function watchFightPhrase(row: InterruptRow): string {
+  if (row.respond !== "fight-back") {
+    return "";
+  }
+  const classes = row.targets ?? [];
+  const order = classes.length === 0 ? "" : `, ${classes.map((cls) => TARGET_CLASS_WORD[cls]).join(" then ")} first`;
+  const squad = row.squad === undefined || row.squad === "off" ? "" : `, ${SQUAD_ROLE_WORD[row.squad]}`;
+  return `${order}${squad}`;
+}
+
 /** A whole "always watching" row: "If shields drop below 30%, dock at home and stop". */
 export function interruptSentence(row: InterruptRow): string {
-  return `If ${conditionSentence(row.when)}, ${responseSentence(row.respond)}`;
+  return `If ${conditionSentence(row.when)}, ${responseSentence(row.respond)}${watchFightPhrase(row)}`;
 }
 
 /** A whole step: its macro, its bound slots, and its "until" when it carries one. */

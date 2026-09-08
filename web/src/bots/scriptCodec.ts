@@ -180,6 +180,7 @@ const WARN = {
   droppedDuplicateOres: "Removed repeated entries from an ore priority list.",
   droppedUnknownBays: "Removed bays this app does not know from a step's leave-alone list.",
   droppedUnknownTargets: "Removed kinds of target this app does not know from a step's priority list.",
+  droppedWatchCombatSettings: "A watch that does not fight carried fighting settings; they were removed.",
   truncatedOreList: (max: number): string => `An ore priority list was cut down to ${max} entries.`,
 } as const;
 
@@ -322,7 +323,55 @@ function readInterruptRow(raw: unknown, ctx: Ctx): InterruptRow {
   if (builtIn !== undefined && builtIn !== "safety-floor") {
     refuse(SAY.unknownKey);
   }
-  return { id, when, respond: respond as InterruptResponse };
+  // How this watch FIGHTS — only a fight-back row does any fighting, so the two
+  // combat settings are read only there. On any other response they are dropped
+  // with a spoken warning rather than refused: a hand-edited file that says
+  // "dock and pause, calling the primary" is confused, not hostile, and keeping
+  // a setting the runner will never read would be the dishonest half.
+  const isFight = respond === "fight-back";
+  let squad: SquadRoleArg | undefined;
+  let targets: readonly TargetClassArg[] | undefined;
+  if (obj["squad"] !== undefined || obj["targets"] !== undefined) {
+    if (!isFight) {
+      ctx.warn(WARN.droppedWatchCombatSettings);
+    } else {
+      if (obj["squad"] !== undefined) {
+        const role = obj["squad"];
+        if (typeof role !== "string" || !SQUAD_ROLE_ARGS.includes(role as SquadRoleArg)) {
+          refuse(SAY.badResponse);
+        }
+        squad = role as SquadRoleArg;
+      }
+      if (obj["targets"] !== undefined) {
+        const arr = asArray(obj["targets"], SAY.badResponse);
+        const seen = new Set<string>();
+        const classes: TargetClassArg[] = [];
+        let droppedUnknown = false;
+        for (const item of arr) {
+          const key = readText(item, { min: 1, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badResponse);
+          if (!TARGET_CLASS_ARGS.includes(key as TargetClassArg)) {
+            droppedUnknown = true;
+            continue;
+          }
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          classes.push(key as TargetClassArg);
+        }
+        if (droppedUnknown) {
+          ctx.warn(WARN.droppedUnknownTargets);
+        }
+        targets = classes.slice(0, MAX_TARGET_LIST);
+      }
+    }
+  }
+  const base: InterruptRow = { id, when, respond: respond as InterruptResponse };
+  return {
+    ...base,
+    ...(squad === undefined ? {} : { squad }),
+    ...(targets === undefined ? {} : { targets }),
+  };
 }
 
 // ─── Program ─────────────────────────────────────────────────────────────────
@@ -1177,11 +1226,19 @@ function orderCondition(condition: Condition): unknown {
 }
 
 function orderInterrupt(row: InterruptRow): unknown {
-  return {
+  const base: Record<string, unknown> = {
     id: row.id,
     when: orderCondition(row.when),
     respond: row.respond,
   };
+  // Written only when set, so a watch that flies alone round-trips byte-identical.
+  if (row.squad !== undefined) {
+    base["squad"] = row.squad;
+  }
+  if (row.targets !== undefined) {
+    base["targets"] = [...row.targets];
+  }
+  return base;
 }
 
 function orderArg(arg: Arg): unknown {

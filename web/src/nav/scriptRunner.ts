@@ -23,6 +23,7 @@ import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
   activeSquadRole,
+  watchSquadRole,
   decideScriptAction,
   describeBoard,
   initialMemory,
@@ -52,6 +53,12 @@ export interface ObserveHint {
   readonly activeMacro: string | null;
   /** Whether that block follows the fleet's called primary (see activeSquadRole). */
   readonly squadRole: SquadRoleArg;
+  /**
+   * Whether a fight-back WATCH follows one (see watchSquadRole). Read on every
+   * tick, so the flow pairs it with hostiles actually being on grid before it
+   * pays for a board read.
+   */
+  readonly watchSquadRole: SquadRoleArg;
   readonly board: ScriptBoard;
 }
 
@@ -223,6 +230,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       obs = await deps.observe({
         activeMacro: activeMacroID(script, memory),
         squadRole: activeSquadRole(script, memory),
+        watchSquadRole: watchSquadRole(script),
         board: memory.board,
       });
     } catch (error) {

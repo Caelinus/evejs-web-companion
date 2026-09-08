@@ -32,6 +32,8 @@
     type ConditionKind,
     type InterruptResponse,
     type InterruptRow,
+    type SquadRoleArg,
+    type TargetClassArg,
     type MacroID,
     type MacroStep,
     type ProgramNode,
@@ -505,7 +507,36 @@
     const target = inspectorTarget;
     if (target === null || target.kind !== "watch") return;
     const id = target.watch.id;
-    watches = watches.map((row) => (row.id === id ? { ...row, respond } : row));
+    watches = watches.map((row) => {
+      if (row.id !== id) return row;
+      // Only a fight-back row fights, so a response change drops the fighting
+      // settings with it rather than leaving a setting nothing will ever read
+      // (the codec would strip them on the next load anyway, with a warning).
+      const { squad: _squad, targets: _targets, ...rest } = row;
+      return respond === "fight-back" ? { ...row, respond } : { ...rest, respond };
+    });
+  }
+
+  /** The fight-back watch's own combat settings — the same two a combat block has. */
+  function applyWatchFight(patch: { squad?: SquadRoleArg | null; targets?: readonly TargetClassArg[] | null }): void {
+    const target = inspectorTarget;
+    if (target === null || target.kind !== "watch") return;
+    const id = target.watch.id;
+    watches = watches.map((row) => {
+      if (row.id !== id) return row;
+      const next: InterruptRow = { ...row };
+      if (patch.squad !== undefined) {
+        // "off" is the default, so it is dropped rather than stored — an
+        // untouched watch exports exactly as it was imported.
+        if (patch.squad === null || patch.squad === "off") delete (next as { squad?: unknown }).squad;
+        else next.squad = patch.squad;
+      }
+      if (patch.targets !== undefined) {
+        if (patch.targets === null || patch.targets.length === 0) delete (next as { targets?: unknown }).targets;
+        else next.targets = [...patch.targets];
+      }
+      return next;
+    });
   }
 
   function applyAddToSide(side: "then" | "else", macro: MacroID): void {
@@ -843,6 +874,7 @@
     onArg={applyArg}
     onCondition={applyCondition}
     onRespond={applyRespond}
+    onWatchFight={applyWatchFight}
     onAddToSide={applyAddToSide}
     onSubBot={applySubBot}
     onClose={() => (selection = null)}

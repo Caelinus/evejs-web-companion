@@ -839,3 +839,51 @@ test("a fleet-fire role this app does not know refuses the file", () => {
   assert.match(mustRefuse(decodeScriptValue(withSquadRole("boss"))), /not set up correctly/i);
   assert.match(mustRefuse(decodeScriptValue(withSquadRole(2))), /not set up correctly/i);
 });
+
+// ─── A watch that fights carries the same two combat settings ───────────────
+
+function withWatch(row: any): any {
+  const doc = clone();
+  doc.interrupts.push(row);
+  return doc;
+}
+
+function lastWatch(doc: BotScript): any {
+  return doc.interrupts[doc.interrupts.length - 1];
+}
+
+test("a fight-back watch round-trips its fleet role and target order", () => {
+  const doc = withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "fight-back", squad: "call", targets: ["tackle", "logi"] }) as BotScript;
+  const { doc: round, warnings } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+  assert.deepStrictEqual(round, doc);
+  assert.deepStrictEqual([...warnings], []);
+});
+
+test("a watch left at the shipped ladder writes no settings at all", () => {
+  const doc = withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "fight-back" }) as BotScript;
+  const { doc: round } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+  assert.deepStrictEqual(Object.keys(lastWatch(round)).sort(), ["id", "respond", "when"]);
+});
+
+test("combat settings on a watch that does not fight are dropped, with a warning", () => {
+  const { doc, warnings } = mustAccept(
+    decodeScriptValue(withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "dock-and-pause", squad: "call", targets: ["tackle"] })),
+  );
+  assert.deepStrictEqual(Object.keys(lastWatch(doc)).sort(), ["id", "respond", "when"]);
+  assert.ok(warnings.some((w) => /does not fight/i.test(w)), warnings.join(" | "));
+});
+
+test("a fleet role this app does not know refuses the file", () => {
+  assert.match(
+    mustRefuse(decodeScriptValue(withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "fight-back", squad: "boss" }))),
+    /does not know/i,
+  );
+});
+
+test("a target class this app does not know is dropped from a watch, with a warning", () => {
+  const { doc, warnings } = mustAccept(
+    decodeScriptValue(withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "fight-back", targets: ["tackle", "capitals"] })),
+  );
+  assert.deepStrictEqual(lastWatch(doc).targets, ["tackle"]);
+  assert.ok(warnings.some((w) => /kinds of target/i.test(w)), warnings.join(" | "));
+});

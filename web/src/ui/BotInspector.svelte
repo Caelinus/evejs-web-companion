@@ -35,6 +35,7 @@
     MAX_ORE_LIST,
     TARGET_CLASS_ARGS,
     type TargetClassArg,
+    type SquadRoleArg,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
   import {
@@ -85,6 +86,7 @@
     onArg,
     onCondition,
     onRespond,
+    onWatchFight,
     onAddToSide,
     onSubBot,
     onClose,
@@ -112,6 +114,7 @@
      * from a step whose `until` is optional. */
     onCondition: (condition: Condition | undefined) => void;
     onRespond: (respond: InterruptResponse) => void;
+    onWatchFight: (patch: { squad?: SquadRoleArg | null; targets?: readonly TargetClassArg[] | null }) => void;
     onAddToSide: (side: "then" | "else", macro: MacroID) => void;
     onSubBot: (scriptID: string) => void;
     onClose: () => void;
@@ -345,6 +348,21 @@
     // Back to the default: drop the argument rather than storing "nearest",
     // so an untouched step exports exactly as it was imported.
     onArg(key, raw === "biggest" ? { kind: "rockPick", pick: "biggest" } : undefined);
+  }
+  // ── A fight-back WATCH fights like a block, so it edits like one ───────────
+  function addWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    if (chosen.includes(cls)) return;
+    onWatchFight({ targets: [...chosen, cls] });
+  }
+  function removeWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    onWatchFight({ targets: chosen.filter((c) => c !== cls) });
+  }
+  function moveWatchTarget(chosen: readonly TargetClassArg[], index: number, delta: -1 | 1): void {
+    const target = index + delta;
+    if (target < 0 || target >= chosen.length) return;
+    const classes = [...chosen];
+    [classes[index], classes[target]] = [classes[target], classes[index]];
+    onWatchFight({ targets: classes });
   }
   function setSquadRole(key: string, raw: string): void {
     // "off" is the default, so it is DROPPED rather than stored — an untouched
@@ -937,6 +955,74 @@
         {#each RESPONSE_OPTIONS as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
       </select>
     </label>
+    {#if watch.respond === "fight-back"}
+      {@const chosenWatchTargets = watch.targets ?? []}
+      {@const offeredWatch = TARGET_CLASS_ARGS.filter((cls) => !chosenWatchTargets.includes(cls))}
+      <label class="inspector-field" for={`watch-${watch.id}-squad`}>
+        <span class="inspector-label">
+          With the fleet<span class="inspector-optional"> — optional</span>
+        </span>
+        <select
+          id={`watch-${watch.id}-squad`}
+          value={watch.squad ?? "off"}
+          onchange={(e) => onWatchFight({ squad: e.currentTarget.value as SquadRoleArg })}
+        >
+          <option value="off">pick its own target</option>
+          <option value="call">call the primary for the fleet</option>
+          <option value="follow">shoot what the fleet calls</option>
+        </select>
+      </label>
+      <div class="inspector-field">
+        <span class="inspector-label">
+          Shoot first<span class="inspector-optional"> — optional</span>
+        </span>
+        {#if offeredWatch.length > 0}
+          <ul class="market-picker">
+            {#each offeredWatch as cls (cls)}
+              <li>
+                <button type="button" class="pick-row" onclick={() => addWatchTarget(chosenWatchTargets, cls)}>
+                  <span class="pick-main"><span class="pick-name">{targetClassWord(cls)}</span></span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if chosenWatchTargets.length > 0}
+          <ol class="ore-priority-list">
+            {#each chosenWatchTargets as cls, index (cls)}
+              <li>
+                <span class="ore-priority-rank">{index + 1}.</span>
+                <span class="ore-priority-name">{targetClassWord(cls)}</span>
+                <button
+                  type="button"
+                  class="minor"
+                  disabled={index === 0}
+                  onclick={() => moveWatchTarget(chosenWatchTargets, index, -1)}
+                >
+                  Move up
+                </button>
+                <button
+                  type="button"
+                  class="minor"
+                  disabled={index === chosenWatchTargets.length - 1}
+                  onclick={() => moveWatchTarget(chosenWatchTargets, index, 1)}
+                >
+                  Move down
+                </button>
+                <button type="button" class="danger" onclick={() => removeWatchTarget(chosenWatchTargets, cls)}>
+                  Remove
+                </button>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+        <span class="inspector-suffix">
+          This is the watch that actually fights while the bot is busy mining or hauling, so the
+          fleet settings live here too. Left alone: tacklers, then jammers, then logistics, then
+          everything else, and no word to the fleet.
+        </span>
+      </div>
+    {/if}
   {/if}
 
   {#each problems as problem (problem.sentence)}

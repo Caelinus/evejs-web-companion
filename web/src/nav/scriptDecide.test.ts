@@ -14,6 +14,7 @@ import {
   decideScriptAction,
   initialMemory,
   activeSquadRole,
+  watchSquadRole,
   type HomeTravelDecider,
   type MacroDecider,
   type MacroMemory,
@@ -803,4 +804,58 @@ test("activeSquadRole reads the active step's role, and is 'off' for everything 
   // A latched run (flying home to stop) consults no block at all.
   const latched: ScriptMemory = { ...initialMemory(withFollow), latched: { interruptID: null, reason: "stopping" } };
   assert.equal(activeSquadRole(withFollow, latched), "off");
+});
+
+// ── The watch fights like a block ────────────────────────────────────────────
+//
+// ⚠ THIS IS THE HANDLER THAT ACTUALLY FIGHTS. A combat BLOCK only looks at the
+// grid while it is the active step, and a working bot is mining or hauling when
+// the rats arrive — caught live: two fleeted miners sat through a spawn inside a
+// wait block until their shield watch pulled them home. So the watch carries the
+// same two combat settings a block does, and they have to reach the ladder.
+
+test("a fight-back watch hands its own combat settings to the borrowed ladder", () => {
+  const seenSteps: MacroStep[] = [];
+  const recording: MacroDecider = (step, _o, mem) => {
+    seenSteps.push(step);
+    return tick({ kind: "lock", targetID: 77 }, { kind: "acting" }, true, mem);
+  };
+  const row: InterruptRow = {
+    id: "fb",
+    when: { kind: "hostile-on-grid" },
+    respond: "fight-back",
+    squad: "call",
+    targets: ["tackle", "ewar"],
+  };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, row]);
+  decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), { ...registry, "fight-the-rats": recording }, home);
+
+  const seen = seenSteps[0];
+  assert.ok(seen !== undefined);
+  assert.deepEqual(seen.args["squad"], { kind: "squadRole", role: "call" });
+  assert.deepEqual(seen.args["targets"], { kind: "targetList", classes: ["tackle", "ewar"] });
+});
+
+test("a watch that says nothing about fighting passes no settings — the shipped ladder", () => {
+  const seenSteps: MacroStep[] = [];
+  const recording: MacroDecider = (step, _o, mem) => {
+    seenSteps.push(step);
+    return tick({ kind: "lock", targetID: 77 }, { kind: "acting" }, true, mem);
+  };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), { ...registry, "fight-the-rats": recording }, home);
+  assert.deepEqual(seenSteps[0]?.args, {});
+});
+
+test("watchSquadRole reads the document's watches, and following wins", () => {
+  const step = macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 });
+  const calling: InterruptRow = { ...fightBack, id: "c", squad: "call" };
+  const following: InterruptRow = { ...fightBack, id: "f", squad: "follow" };
+
+  assert.equal(watchSquadRole(script([step], [floor, fightBack])), "off", "a plain fight-back pays for no board read");
+  assert.equal(watchSquadRole(script([step], [floor, calling])), "call");
+  assert.equal(watchSquadRole(script([step], [floor, calling, following])), "follow", "only following needs the read");
+  // A setting on a watch that does not fight is not a fleet role.
+  const paused: InterruptRow = { id: "p", when: { kind: "hostile-on-grid" }, respond: "dock-and-pause", squad: "follow" };
+  assert.equal(watchSquadRole(script([step], [floor, paused])), "off");
 });

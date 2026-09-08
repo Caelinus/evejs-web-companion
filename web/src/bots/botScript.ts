@@ -545,6 +545,25 @@ export interface InterruptRow {
   readonly id: string;
   readonly when: Condition;
   readonly respond: InterruptResponse;
+  /**
+   * FIGHT-BACK ONLY: how this watch fights, exactly as a combat BLOCK would.
+   *
+   * ⚠ THE WATCH IS WHERE A FIGHT ACTUALLY HAPPENS, so it is where these belong.
+   * A combat block only looks at the grid while it is the ACTIVE STEP, and a
+   * working bot is almost never on that step — it is mining until the hold is
+   * full, or hauling, or flying somewhere. Rats arrive during THAT, which is
+   * why the response to "a pirate shows up" is a watch in the first place.
+   * Leaving the fleet ordering on blocks alone meant the one handler that fires
+   * in time was the one that could not call or follow: caught live, 2026-09-08,
+   * with two fleeted miners sitting through a Guristas spawn inside a wait
+   * block until their shield watch pulled them home, never having fought.
+   *
+   * Both are optional and mean exactly what they mean on a block: `squad` calls
+   * the fleet's primary or shoots the one it called, `targets` orders which
+   * kind of hostile dies first. Absent = fly alone, shipped ladder.
+   */
+  readonly squad?: SquadRoleArg;
+  readonly targets?: readonly TargetClassArg[];
 }
 
 // ─── Program nodes ───────────────────────────────────────────────────────────

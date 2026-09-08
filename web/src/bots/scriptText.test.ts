@@ -232,3 +232,19 @@ test("a combat step flying with the fleet says which part it plays", () => {
   };
   assert.doesNotMatch(stepSentence(alone), /fleet/, "flying alone is the default and says nothing");
 });
+
+test("a fight-back watch says how it fights, and an ordinary one still does not", () => {
+  const coordinated = interruptSentence({
+    id: "w1",
+    when: { kind: "hostile-on-grid" },
+    respond: "fight-back",
+    squad: "call",
+    targets: ["tackle"],
+  });
+  assert.match(coordinated, /If a pirate shows up/i);
+  assert.match(coordinated, /tacklers first/);
+  assert.match(coordinated, /calling the primary for the fleet/);
+
+  const plain = interruptSentence({ id: "w2", when: { kind: "hostile-on-grid" }, respond: "fight-back" });
+  assert.doesNotMatch(plain, /fleet|first/);
+});

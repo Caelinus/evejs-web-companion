@@ -385,6 +385,30 @@ export function activeSquadRole(script: BotScript, mem: ScriptMemory): SquadRole
   return arg !== undefined && arg.kind === "squadRole" ? arg.role : "off";
 }
 
+/**
+ * How this script's WATCHES fight, if any of them does — the other half of the
+ * observe hint's fleet question.
+ *
+ * A watch is armed on every tick, not just while some step is active, so this
+ * reads the document rather than the position. The flow pairs it with "are
+ * there hostiles on grid" before paying for a board read: a bot whose watch
+ * follows the fleet only needs to know the call when there is something to
+ * shoot. "follow" wins over "call" because only following needs the read.
+ */
+export function watchSquadRole(script: BotScript): SquadRoleArg {
+  let found: SquadRoleArg = "off";
+  for (const row of script.interrupts) {
+    if (row.respond !== "fight-back" || row.squad === undefined || row.squad === "off") {
+      continue;
+    }
+    if (row.squad === "follow") {
+      return "follow";
+    }
+    found = row.squad;
+  }
+  return found;
+}
+
 export function activeMacroID(script: BotScript, mem: ScriptMemory): string | null {
   if (
     mem.position.kind === "done" ||
@@ -783,7 +807,21 @@ function fireInterrupt(
       // and step ids share one namespace, so this needs no new memory slot — and
       // it keeps the watch's fight separate from any Fight-the-rats STEP the same
       // script might also run.
-      const step: MacroStep = { id: row.id, kind: "macro", macro: "fight-the-rats", args: {} };
+      // The row's own combat settings ride into the borrowed block as its args,
+      // so a watch fights exactly the way a block does — calling the fleet's
+      // primary, following one, ordering which hostile dies first. This is the
+      // handler that actually fires in a working bot (the program is busy
+      // mining or hauling when the rats arrive), so it is the one that has to
+      // be able to do these things.
+      const step: MacroStep = {
+        id: row.id,
+        kind: "macro",
+        macro: "fight-the-rats",
+        args: {
+          ...(row.squad === undefined ? {} : { squad: { kind: "squadRole" as const, role: row.squad } }),
+          ...(row.targets === undefined ? {} : { targets: { kind: "targetList" as const, classes: row.targets } }),
+        },
+      };
       const tick = fight(step, obs, mem.macroMem[row.id] ?? {}, mem.board);
       if (tick.outcome.kind !== "acting") {
         // Nothing left to fight — the grid is clear, nothing is inside targeting

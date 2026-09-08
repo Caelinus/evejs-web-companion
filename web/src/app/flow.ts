@@ -6257,7 +6257,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // null, which reads as "pick for yourself" rather than as a fault: a
         // follower whose fleet has gone quiet is still a working bot.
         let squadPrimaryTargetID: ScriptObservation["squadPrimaryTargetID"] = null;
-        if (hint.squadRole === "follow") {
+        // A following WATCH needs the call too — and it is the handler that
+        // actually fights in a working bot, since the program is mining or
+        // hauling when the rats arrive. It is armed every tick, so it is paired
+        // with hostiles being on grid: no rats, no read, no cost.
+        if (hint.squadRole === "follow" || (hint.watchSquadRole === "follow" && hostileOnGrid === true)) {
           try {
             squadPrimaryTargetID = (await api.readSquadPrimary(callOptions))?.targetID ?? null;
           } catch {
