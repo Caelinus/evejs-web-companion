@@ -165,6 +165,8 @@ const IDLE_SNAPSHOT: ScriptRunnerSnapshot = {
 const SETTLING = "Waiting between actions — watching your ship.";
 const READ_RETRY = "Could not read your ship just now — waiting to try again.";
 const READ_GAVE_UP = "Could not read your ship for several tries, so the bot stopped.";
+const READ_GAVE_UP_SENT_HOME =
+  "Could not read your ship for several tries, so the bot sent it to a station and stopped.";
 const SESSION_LOST = "Lost the connection to your ship, so the bot stopped.";
 const DECIDE_FAILED = "The bot hit an unexpected problem working out its next move, so it stopped.";
 
@@ -181,6 +183,12 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   // one is replaced only by `start`, so its bound is the one that binds.
   let ledger: RefusalLedger = createRefusalLedger();
   let last: ScriptRunnerSnapshot = IDLE_SNAPSHOT;
+  /**
+   * The last observation that actually arrived. Kept for ONE reason: when reads
+   * stop working there is nothing to decide with, but a station id read a few
+   * seconds ago is still a station id — see `sendToStationThenStop`.
+   */
+  let lastObs: ScriptObservation | null = null;
 
   function emit(next: ScriptRunnerSnapshot): void {
     last = next;
@@ -216,7 +224,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
       readFailures += 1;
       if (readFailures >= MAX_READ_FAILURES) {
-        pauseWith(READ_GAVE_UP);
+        await sendToStationThenStop();
         return;
       }
       emit({ ...last, status: "running", phase: READ_RETRY, why: READ_RETRY });
@@ -226,6 +234,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return; // pause/stop fired during the read
     }
     readFailures = 0;
+    lastObs = obs;
 
     // Deciding is pure and total BY DESIGN, but a macro adapter reaching into a
     // live snapshot could still throw on a shape the tests never saw. If it does,
@@ -322,6 +331,52 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   }
 
   /**
+   * A station this bot knew about while it could still see, best first: its own
+   * configured home, else where the run started, else the last station it was
+   * docked in. Null when it never learned one.
+   */
+  function lastKnownStationID(): number | null {
+    const seen = lastObs;
+    if (seen === null || seen.flightStatus?.docked === true) {
+      return null; // never saw anything, or it is already in a station
+    }
+    return seen.homeStationID ?? seen.startingStationID ?? seen.flightStatus?.stationID ?? null;
+  }
+
+  /**
+   * READS HAVE GIVEN UP — and a blind ship still must not be left floating.
+   *
+   * Nothing can be decided here: there is no observation, so no grid, no health,
+   * no target. But the autopilot is not driven by these reads — it runs its own
+   * loop with its own reads and its own bounds — so handing it a station id the
+   * bot knew a few seconds ago gets the ship moving toward a station even though
+   * this runner can no longer see it do so.
+   *
+   * Then it stops, and says which of the two things happened. It cannot report
+   * arrival: watching the ship dock is exactly the thing it has lost the ability
+   * to do, and claiming a ship is safe without seeing it is the lie this file
+   * avoids everywhere else.
+   *
+   * ⚠ THE SHIP IS NOT SAVED BY THIS, only pointed the right way. If it is held,
+   * the autopilot will be refused and will pause too — blind, there is no
+   * fighting free (nav/scriptMacros `fightTheWayOut` needs a grid to read).
+   */
+  async function sendToStationThenStop(): Promise<void> {
+    const stationID = lastKnownStationID();
+    if (stationID === null) {
+      pauseWith(READ_GAVE_UP);
+      return;
+    }
+    try {
+      await deps.issue({ kind: "startRoute", stationID });
+    } catch {
+      pauseWith(READ_GAVE_UP); // could not even ask — say the plain thing
+      return;
+    }
+    pauseWith(READ_GAVE_UP_SENT_HOME);
+  }
+
+  /**
    * The runner's OWN faults stop the bot too — a decider that threw, an order the
    * world keeps refusing — and they must not leave the ship parked in space any
    * more than the decider's faults may (nav/scriptDecide `stopSafely`, same rule
@@ -386,6 +441,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       memory = initialMemory(next);
       settle = 0;
       readFailures = 0;
+      lastObs = null;
       // A new run does not inherit the last one's grudges.
       ledger = createRefusalLedger();
       status = "running";

@@ -356,6 +356,74 @@ test("repeated read failures give up with a plain reason", async () => {
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
 });
 
+test("reads that give up send the ship to the last station it knew about", async () => {
+  // Blind, nothing can be DECIDED -- but the autopilot runs on its own reads, so
+  // a station id this bot saw seconds ago still gets the ship moving instead of
+  // leaving it floating where it went blind.
+  let reads = 0;
+  const issued: ScriptAction[] = [];
+  const progress: ScriptRunnerSnapshot[] = [];
+  const runner = createScriptRunner({
+    observe: async () => {
+      reads += 1;
+      if (reads > 1) {
+        throw new Error("read failed"); // not a session loss
+      }
+      return calm({ holdEmpty: false, homeStationID: 60000004 });
+    },
+    issue: async (a) => { issued.push(a); },
+    refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
+    sleep: async () => {},
+    onProgress: (s) => progress.push(s),
+    isSessionLost: (e) => e instanceof SessionLost,
+    registry,
+    travelHome: home,
+  });
+  runner.start(script([macroStep("a", "deliver-ore")]));
+  // Generous: the one good read issues an action, and the settle between actions
+  // costs ticks before the failures even start counting.
+  for (let i = 0; i < 30 && runner.getStatus() === "running"; i += 1) {
+    await runner.tick();
+  }
+
+  assert.equal(runner.getStatus(), "paused");
+  const route = issued.find((a) => a.kind === "startRoute");
+  assert.ok(route !== undefined && route.kind === "startRoute" && route.stationID === 60000004, "sent to the home it knew");
+  assert.match(progress.at(-1)?.pauseReason ?? "", /sent it to a station/i);
+});
+
+test("reads that give up with NO station ever seen say the plain thing", async () => {
+  // It never learned a station, so there is nothing honest to send it to.
+  let reads = 0;
+  const issued: ScriptAction[] = [];
+  const progress: ScriptRunnerSnapshot[] = [];
+  const runner = createScriptRunner({
+    observe: async () => {
+      reads += 1;
+      if (reads > 1) {
+        throw new Error("read failed");
+      }
+      return calm({ holdEmpty: false });
+    },
+    issue: async (a) => { issued.push(a); },
+    refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
+    sleep: async () => {},
+    onProgress: (s) => progress.push(s),
+    isSessionLost: (e) => e instanceof SessionLost,
+    registry,
+    travelHome: home,
+  });
+  runner.start(script([macroStep("a", "deliver-ore")]));
+  // Generous: the one good read issues an action, and the settle between actions
+  // costs ticks before the failures even start counting.
+  for (let i = 0; i < 30 && runner.getStatus() === "running"; i += 1) {
+    await runner.tick();
+  }
+  assert.equal(runner.getStatus(), "paused");
+  assert.equal(issued.some((a) => a.kind === "startRoute"), false, "no guessed destination");
+  assert.match(progress.at(-1)?.pauseReason ?? "", /so the bot stopped/i);
+});
+
 test("run() drives to a clean finish and stops", async () => {
   const h = harness();
   h.setObs(calm({ inSpace: true })); // undock already satisfied -> program done at once
