@@ -401,8 +401,26 @@ export function decideScriptAction(
     };
   }
 
-  // 3. The program, with the forward scan.
-  return runProgram(script, obs, scanMem, registry);
+  // 2.6 The fight-back watch's OTHER half: the pirate is gone, so the drones it
+  // committed come home and the hardeners IT switched on go back off.
+  const stand = standDownAfterFight(script, obs, scanMem);
+  if (stand.action !== null) {
+    return {
+      action: stand.action,
+      why: stand.why,
+      phase: "Standing down",
+      stepPath: stand.rowID,
+      interruptID: stand.rowID,
+      status: "running",
+      pauseReason: null,
+      memory: stand.memory,
+    };
+  }
+
+  // 3. The program, with the forward scan. `stand.memory` and not `scanMem`: the
+  // pass above forgets a finished stand-down record without spending a tick on
+  // it, and that forgetting has to reach the memory this returns.
+  return runProgram(script, obs, stand.memory, registry);
 }
 
 /**
@@ -467,6 +485,135 @@ function repairShutdown(
   return null;
 }
 
+/**
+ * Where a fight-back watch records what it will have to UNDO — the hardeners it
+ * switched on, and whether it has already called the drones in.
+ *
+ * It cannot share the borrowed ladder's memory entry (keyed by the row id
+ * itself): that ladder rewrites its memory wholesale on some rungs — picking a
+ * fresh primary starts from `{}` — which would lose the record mid-fight and
+ * leave the hardeners running for the rest of the run. Row ids and step ids
+ * share one namespace; the suffix keeps this key out of it.
+ */
+function standDownKey(rowID: string): string {
+  return `${rowID}:stand-down`;
+}
+
+// A type alias and not an interface on purpose: only an alias carries the
+// implicit index signature that lets a record be stored back into `macroMem`,
+// which is a `Record<string, unknown>` map.
+type StandDownRecord = {
+  /** Hardeners THIS watch switched on — so it is also the list it may switch off. */
+  readonly hardened: readonly number[];
+  readonly recalled: boolean;
+};
+
+function standDownRecord(mem: ScriptMemory, rowID: string): StandDownRecord {
+  const raw = mem.macroMem[standDownKey(rowID)] ?? {};
+  const hardened = raw["hardened"];
+  return {
+    hardened: Array.isArray(hardened) ? hardened.filter((id): id is number => typeof id === "number") : [],
+    recalled: raw["recalled"] === true,
+  };
+}
+
+/**
+ * The next fitted hardener a fight-back watch should light, or null when there
+ * is nothing to do.
+ *
+ * ⚠ ONE ATTEMPT PER HARDENER PER EPISODE, and that is the whole bound. The list
+ * of what the watch switched on doubles as the list of what it has already
+ * tried, so a hardener that will not come on is not retried every tick — which
+ * would starve the step under the watch exactly the way an unreleased fight
+ * would. The same list is why a hardener the player's own Hardeners-on block
+ * already lit is never claimed here, and so is never switched off by the
+ * stand-down: the watch only ever undoes its own work.
+ */
+function hardenerToLight(obs: ScriptObservation, mem: ScriptMemory, rowID: string): number | null {
+  if (obs.inSpace !== true) {
+    return null; // modules only run out in space
+  }
+  const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+  const tried = new Set(standDownRecord(mem, rowID).hardened);
+  return (obs.hardenerModuleIDs ?? []).find((id) => !active.has(id) && !tried.has(id)) ?? null;
+}
+
+interface StandDown {
+  readonly action: ScriptAction | null;
+  readonly why: string;
+  readonly rowID: string | null;
+  readonly memory: ScriptMemory;
+}
+
+/**
+ * The fight-back watch's OFF half: once the pirate is gone, put the ship back
+ * the way the watch found it — the drones it committed come home, then the
+ * hardeners it switched on go off.
+ *
+ * ⚠ THIS CANNOT LIVE IN `fireInterrupt`. A watch is only consulted while its
+ * condition is MET, so the moment the grid clears the fight-back row is never
+ * reached again and the borrowed ladder's own "grid clear — call the drones
+ * home" rung becomes unreachable: without this pass the drones stay in space and
+ * the hardeners burn capacitor for the rest of the run. Same shape as the repair
+ * thermostat above, and read the same way — only a NOT-MET condition stands the
+ * ship down, because standing down blind is the worst possible moment to drop
+ * the tank.
+ *
+ * IT NEVER WAITS. Every rung is a real action and shrinks the record, so the
+ * whole stand-down is one tick per hardener plus one for the recall, and then
+ * the program has the ship back. It does NOT hold the ship until the drones are
+ * actually in the bay: they fly home on their own, and starving the step to
+ * watch them do it is the one thing an always-armed response must not do.
+ */
+function standDownAfterFight(script: BotScript, obs: ScriptObservation, mem: ScriptMemory): StandDown {
+  let memory = mem;
+  for (const row of script.interrupts) {
+    const key = standDownKey(row.id);
+    if (row.respond !== "fight-back" || !(key in memory.macroMem)) {
+      continue;
+    }
+    if (evaluateCondition(row.when, obs) !== "not-met") {
+      continue;
+    }
+    const record = standDownRecord(memory, row.id);
+    if (obs.inSpace !== true) {
+      // Docked: the modules are off and the drones are in whatever the record
+      // says, so there is nothing to undo — just forget it.
+      memory = { ...memory, macroMem: omit(memory.macroMem, key) };
+      continue;
+    }
+    // The drones first, while the tank is still up.
+    const out = obs.combatDroneIDs ?? [];
+    if (!record.recalled && out.length > 0) {
+      return {
+        action: { kind: "recallDrones", droneIDs: out },
+        why: "The pirate is gone, so the drones come home.",
+        rowID: row.id,
+        memory: { ...memory, macroMem: { ...memory.macroMem, [key]: { ...record, recalled: true } } },
+      };
+    }
+    // Then the hardeners — only the ones still running, and only ours.
+    const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+    const next = record.hardened.find((id) => active.has(id));
+    if (next !== undefined) {
+      return {
+        action: { kind: "deactivate", moduleID: next },
+        why: "The pirate is gone, so the hardener goes back off.",
+        rowID: row.id,
+        memory: {
+          ...memory,
+          macroMem: {
+            ...memory.macroMem,
+            [key]: { hardened: record.hardened.filter((id) => id !== next), recalled: true },
+          },
+        },
+      };
+    }
+    memory = { ...memory, macroMem: omit(memory.macroMem, key) };
+  }
+  return { action: null, why: "", rowID: null, memory };
+}
+
 // ─── Interrupts ──────────────────────────────────────────────────────────────
 
 function fireInterrupt(
@@ -523,6 +670,31 @@ function fireInterrupt(
       if (fight === undefined) {
         return runProgram(script, obs, mem, registry);
       }
+      // THE TANK GOES UP FIRST. A hardener is instant and self-targeted, so it
+      // costs one tick and buys the whole fight — the same thing a player reaches
+      // for before they reach for the guns. Bounded to one attempt each per
+      // episode by `hardenerToLight`, and what it lights is written down so the
+      // stand-down can put it back (`standDownAfterFight`).
+      const hardener = hardenerToLight(obs, mem, row.id);
+      if (hardener !== null) {
+        const record = standDownRecord(mem, row.id);
+        return {
+          action: { kind: "activate", moduleID: hardener, targetID: 0 },
+          why: "A pirate showed up, so the hardeners go on before the fight.",
+          phase: "Hardening",
+          stepPath: row.id,
+          interruptID: row.id,
+          status: "running",
+          pauseReason: null,
+          memory: {
+            ...mem,
+            macroMem: {
+              ...mem.macroMem,
+              [standDownKey(row.id)]: { ...record, hardened: [...record.hardened, hardener] },
+            },
+          },
+        };
+      }
       // The ladder's memory (which target is primary, whether the lock was
       // issued, which target the drones are already on) is keyed by the WATCH
       // ROW's id in the same per-step memory map the program's steps use. Row ids
@@ -536,9 +708,21 @@ function fireInterrupt(
         // range, or this hull cannot fight at all. THIS IS THE RELEASE: the watch
         // drops the ship and the step under it carries on from where it was. An
         // always-armed response that never released would starve the program.
+        //
+        // Only the LADDER's memory goes. The stand-down record under
+        // `standDownKey` deliberately survives the release — it is the only note
+        // of which hardeners this watch switched on, and it is read after the
+        // condition clears, which is long after this row stops being consulted.
         const { [row.id]: _spent, ...rest } = mem.macroMem;
         return runProgram(script, obs, { ...mem, macroMem: rest }, registry);
       }
+      // The ladder is ACTING, so this watch has now committed the ship to a
+      // fight — write the stand-down record even when there was no hardener to
+      // light. Without this a hull with no hardeners fitted would fight, clear
+      // the grid, and leave its drones in space forever: the record is the only
+      // thing the stand-down looks for. Rewriting it each tick is idempotent —
+      // `standDownRecord` reads the existing one back, so a recall already
+      // issued stays issued.
       return {
         action: tick.action,
         why: tick.why,
@@ -547,7 +731,14 @@ function fireInterrupt(
         interruptID: row.id,
         status: "running",
         pauseReason: null,
-        memory: { ...mem, macroMem: { ...mem.macroMem, [row.id]: tick.nextMem } },
+        memory: {
+          ...mem,
+          macroMem: {
+            ...mem.macroMem,
+            [row.id]: tick.nextMem,
+            [standDownKey(row.id)]: standDownRecord(mem, row.id),
+          },
+        },
       };
     }
     case "repair": {

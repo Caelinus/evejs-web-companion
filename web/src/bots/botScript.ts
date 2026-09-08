@@ -347,20 +347,32 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *   • "launch-drones"  — put drones out and KEEP WORKING (the hostile "use
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
- *   • "fight-back"     — ACTUALLY FIGHT the pirate, then keep working: drones
- *                        out, lock the nearest hostile inside targeting range,
- *                        drones onto it, every idle gun onto it — the same
- *                        ladder the Fight-the-rats block runs, borrowed rather
- *                        than copied. It is what "launch-drones" is usually
- *                        mistaken for: launching drones tells them to defend,
- *                        it does not point them at anything.
+ *   • "fight-back"     — TANK UP AND ACTUALLY FIGHT the pirate, then keep
+ *                        working. Every fitted hardener and damage control goes
+ *                        on first — one tick each, the instant self-targeted
+ *                        move a player makes before they touch the guns — and
+ *                        then the fight: drones out, lock the nearest hostile
+ *                        inside targeting range, drones onto it, every idle gun
+ *                        onto it — the same ladder the Fight-the-rats block
+ *                        runs, borrowed rather than copied. It is what
+ *                        "launch-drones" is usually mistaken for: launching
+ *                        drones tells them to defend, it does not point them at
+ *                        anything.
+ *
+ *                        When the pirate is gone the watch STANDS THE SHIP DOWN
+ *                        — the drones it committed come home, then the hardeners
+ *                        it switched on go back off, so the next lap starts cold
+ *                        instead of burning capacitor on an empty grid. It undoes
+ *                        only its OWN work: a hardener the player's Hardeners-on
+ *                        block lit is never claimed and never switched off.
  *
  *                        ⚠ IT MUST NEVER OWN THE SHIP FOREVER. An interrupt
  *                        that keeps returning an action starves the step under
  *                        it, so the ladder hands control back the moment there
  *                        is nothing left to fight — grid clear, nothing inside
  *                        targeting range, or no way to fight at all — and the
- *                        program carries on from where it was.
+ *                        program carries on from where it was. The stand-down is
+ *                        bounded the same way: one action per rung, never a wait.
  */
 /**
  *   • "repair"         — switch the matching repairers ON while the condition

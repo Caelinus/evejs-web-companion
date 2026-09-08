@@ -442,9 +442,10 @@ export const RESPONSE_LABEL: Readonly<Record<InterruptResponse, string>> = {
   pause: "Just stop and wait",
   "launch-drones": "Send out combat drones and keep going",
   // The difference players trip over: launching drones only puts them out and
-  // lets them defend themselves. "Fight back" points them at something and runs
-  // the guns too.
-  "fight-back": "Fight back and keep going",
+  // lets them defend themselves. "Fight back" hardens the ship first, points them
+  // at something and runs the guns too — then stands the ship back down (drones
+  // in, its own hardeners off) once the pirate is gone.
+  "fight-back": "Harden up, fight back, then stand down",
   repair: "Run the repairers until it recovers",
   // "Let me know" changes nothing about the ship, so it is the one response
   // that is safe to stack ABOVE a real one — it speaks once, then steps aside.

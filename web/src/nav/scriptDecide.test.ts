@@ -458,6 +458,139 @@ test("fight-back releases the step even while the pirate is STILL there, when th
   assert.equal(r.action.kind, "activate");
 });
 
+// ─── fight-back: hardeners up, then the stand-down ───────────────────────────
+//
+// The watch owns two module decisions the ladder knows nothing about: the tank
+// goes up BEFORE the shooting, and it comes back down — with the drones — once
+// the pirate is gone. The second half cannot run inside `fireInterrupt` (a watch
+// stops being consulted the moment its condition clears), so these drive it
+// through whole ticks rather than the response alone.
+
+/** A snapshot whose only interesting part is which modules are running. */
+function running(...moduleIDs: number[]): ScriptObservation["snapshot"] {
+  return {
+    inSpace: true,
+    solarSystemID: 30000142,
+    shipID: 9001,
+    sampledAtMs: 1,
+    entities: [],
+    ship: { itemID: 9001, activeModuleIDs: moduleIDs },
+  } as unknown as ScriptObservation["snapshot"];
+}
+
+test("fight-back runs the hardeners up before it points anything at the pirate", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running() };
+
+  const first = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(first.action.kind, "activate", "the tank goes up first");
+  assert.equal(first.action.kind === "activate" ? first.action.moduleID : 0, 40);
+  assert.equal(first.action.kind === "activate" ? first.action.targetID : -1, 0, "self-targeted");
+  assert.equal(first.interruptID, "fb");
+
+  const second = decideScriptAction(s, obs({ ...pirate, snapshot: running(40) }), first.memory, fightRegistry, home);
+  assert.equal(second.action.kind === "activate" ? second.action.moduleID : 0, 41, "the second hardener");
+
+  // Everything hardened: NOW the ladder gets the ship.
+  const fighting = decideScriptAction(s, obs({ ...pirate, snapshot: running(40, 41) }), second.memory, fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+});
+
+test("fight-back leaves the player's own already-running hardener alone", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  // 40 is already on — a Hardeners-on block earlier in the program lit it.
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running(40) }),
+    initialMemory(s),
+    fightRegistry,
+    home,
+  );
+  assert.equal(r.action.kind === "activate" ? r.action.moduleID : 0, 41, "only the idle one");
+});
+
+test("a hardener that will not come on is tried once, not every tick", () => {
+  // Otherwise the watch would re-issue the same activate forever and starve the
+  // step underneath it — the same way an unreleased fight would.
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const stuck = { hostileOnGrid: true, hardenerModuleIDs: [40], snapshot: running() };
+  const tried = decideScriptAction(s, obs(stuck), initialMemory(s), fightRegistry, home);
+  assert.equal(tried.action.kind, "activate");
+  // Still not running next tick: the watch gives up on it and fights anyway.
+  const fighting = decideScriptAction(s, obs(stuck), tried.memory, fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+});
+
+test("once the pirate is gone the watch calls the drones in and switches its own hardeners off", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40], snapshot: running() };
+  const hardening = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(hardening.action.kind, "activate");
+
+  // Grid clear, drones still out, the watch's hardener still running.
+  const clear = { hostileOnGrid: false, hardenerModuleIDs: [40], snapshot: running(40), combatDroneIDs: [1, 2], dronesOut: true };
+  const recalling = decideScriptAction(s, obs(clear), hardening.memory, fightRegistry, home);
+  assert.equal(recalling.action.kind, "recallDrones", "the drones come home first, tank still up");
+  assert.deepEqual(recalling.action.kind === "recallDrones" ? recalling.action.droneIDs : [], [1, 2]);
+  assert.equal(recalling.interruptID, "fb");
+
+  // Then the hardener it lit goes back off.
+  const cooling = decideScriptAction(s, obs(clear), recalling.memory, fightRegistry, home);
+  assert.equal(cooling.action.kind, "deactivate");
+  assert.equal(cooling.action.kind === "deactivate" ? cooling.action.moduleID : 0, 40);
+
+  // Stood down: the step has the ship back, and it stays that way.
+  const stoodDown = { hostileOnGrid: false, hardenerModuleIDs: [40], snapshot: running(), dronesOut: false };
+  const mining = decideScriptAction(s, obs(stoodDown), cooling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+  assert.equal(mining.action.kind, "activate");
+  const stillMining = decideScriptAction(s, obs(stoodDown), mining.memory, fightRegistry, home);
+  assert.equal(stillMining.stepPath, "m", "the stand-down is over, not repeating");
+});
+
+test("the stand-down never switches off a hardener the watch did not switch on", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  // 40 was already running when the pirate arrived, so the watch only claims 41.
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running(40) };
+  const hardening = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(hardening.action.kind === "activate" ? hardening.action.moduleID : 0, 41);
+
+  const clear = { hostileOnGrid: false, hardenerModuleIDs: [40, 41], snapshot: running(40, 41) };
+  const cooling = decideScriptAction(s, obs(clear), hardening.memory, fightRegistry, home);
+  assert.equal(cooling.action.kind === "deactivate" ? cooling.action.moduleID : 0, 41, "its own, not the player's");
+  // Nothing of the watch's left running: 40 stays on and mining resumes.
+  const mining = decideScriptAction(s, obs(clear), cooling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+});
+
+test("a hull with no hardeners fitted still gets its drones back when the grid clears", () => {
+  // The stand-down record is written by the FIGHT as well as by the hardeners,
+  // so a droneboat with nothing to harden is not left with its drones in space.
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const fighting = decideScriptAction(s, obs({ hostileOnGrid: true, hardenerModuleIDs: [] }), initialMemory(s), fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+  const recalling = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [7], dronesOut: true }), fighting.memory, fightRegistry, home);
+  assert.equal(recalling.action.kind, "recallDrones");
+  assert.deepEqual(recalling.action.kind === "recallDrones" ? recalling.action.droneIDs : [], [7]);
+  // Nothing else to undo, so the step has the ship straight back.
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [] }), recalling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+});
+
+test("a fight-back watch that never got to act leaves the drones where it found them", () => {
+  // The ladder reported itself done on the first tick (out of range, or no way to
+  // fight), so the watch committed nothing — and must not call in drones some
+  // other block of the program deliberately put out.
+  const stalled: MacroDecider = () => tick({ kind: "wait" }, { kind: "done" });
+  const idleRegistry = { ...registry, "fight-the-rats": stalled };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const released = decideScriptAction(s, obs({ hostileOnGrid: true, hardenerModuleIDs: [] }), initialMemory(s), idleRegistry, home);
+  assert.equal(released.stepPath, "m");
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [7], dronesOut: true }), released.memory, idleRegistry, home);
+  assert.equal(mining.stepPath, "m", "no record, so no recall");
+  assert.equal(mining.action.kind, "activate");
+});
+
 test("a fight-back watch with no ratting macro in the registry leaves the program running", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
   const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), registry, home);
