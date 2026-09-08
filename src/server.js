@@ -17,6 +17,7 @@ const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
+const { createSquadBoard } = require("./squadBoard");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -106,6 +107,13 @@ app.locals.botScripts = botScripts;
 // belts repopulate and entries expire on their own.
 const beltMemory = options.beltMemory || createBeltMemory();
 app.locals.beltMemory = beltMemory;
+// Shared, in-process (never persisted — see src/squadBoard.js) call board: one
+// standing primary per FLEET, so pilots on one grid concentrate their fire
+// instead of each shooting whatever it ranked first for itself. Keyed by the
+// fleet id the BFF resolved from that fleet's own read, never by anything the
+// browser supplies.
+const squadBoard = options.squadBoard || createSquadBoard();
+app.locals.squadBoard = squadBoard;
 fs.mkdirSync(config.iconCacheDir, { recursive: true });
 
 app.disable("x-powered-by");
@@ -1004,6 +1012,50 @@ function fleetIDBindSpec(fleetID) {
     args: [[fleetID]],
     kwargs: null,
   };
+}
+
+/**
+ * The fleet id out of a GetInitState read envelope, as an EXACT decimal string —
+ * or null when the read failed, was refused (the fleetless case), or carried no
+ * fleet. The squad board keys on this, so it is the BFF's own answer to "which
+ * fleet is this session in", never a value the browser sent.
+ *
+ * ⚠ NEVER THROUGH Number. A fleet id is a game id that can exceed 2^53 (a live
+ * one already reads twelve digits), so a marshaled {type:"long"} is stringified
+ * rather than parsed — the same rule web/src/bridge/boundFleet.ts's `idData`
+ * follows on the other side of the wire. This reads the two marshaled shapes the
+ * gateway sends a util.KeyVal in: {type:"object", args:{type:"dict", entries}}
+ * and a bare {type:"dict", entries}. A shape it does not recognise is "unknown",
+ * which reads the same as no fleet, and no fleet means no board.
+ */
+function initStateFleetID(envelope) {
+  if (!envelope || envelope.error || !envelope.result) {
+    return null;
+  }
+  const result = envelope.result;
+  let entries = null;
+  if (result && result.type === "object" && result.args && result.args.type === "dict") {
+    entries = result.args.entries;
+  } else if (result && result.type === "dict") {
+    entries = result.entries;
+  }
+  if (!Array.isArray(entries)) {
+    return null;
+  }
+  const row = entries.find((entry) => Array.isArray(entry) && entry[0] === "fleetID");
+  if (!row) {
+    return null;
+  }
+  const value = row[1];
+  const raw =
+    value !== null && typeof value === "object" && value.type === "long" ? value.value : value;
+  if (typeof raw === "number") {
+    return Number.isSafeInteger(raw) && raw > 0 ? String(raw) : null;
+  }
+  if (typeof raw === "string" && /^\d+$/.test(raw) && raw !== "0") {
+    return raw;
+  }
+  return null;
 }
 
 // Fleet handles capture a fleet id at bind time. Membership can change without the
@@ -2015,6 +2067,21 @@ app.get("/api/bridge/bound-fleet", requireAuth, async (req, res, next) => {
         };
       }
     });
+    // ⚠ THE ONLY PLACE THE BFF LEARNS WHICH FLEET A SESSION IS IN. `held.fleetID`
+    // has been READ here since this route landed and was never written anywhere:
+    // it answered null for every session, which is why the client decoder takes
+    // GetInitState's own fleetID over it (boundFleet.ts, "the read outranks the
+    // cached field"). GetInitState is the fleet answering for itself, so it is
+    // what the BFF stamps too — refreshed on every read, because membership
+    // changes without the session changing.
+    //
+    // ANYTHING BUT A CLEAN FLEET ID CLEARS IT. A refused read (fleetless reads
+    // come back {error:"CALL_REFUSED", message:"FleetNotFound"}) and a failed one
+    // are treated alike on purpose: keeping the last known fleet would let a
+    // character who has LEFT keep reading that fleet's squad-board calls, and the
+    // board is advisory — a pilot whose fleet is momentarily unknown just falls
+    // back to its own target ladder, which is a working bot.
+    held.fleetID = initStateFleetID(reads.GetInitState);
     res.json({
       ok: true,
       characterID: held.characterID,
@@ -18666,6 +18733,77 @@ app.post("/api/bots/belt-memory", requireAuth, (req, res, next) => {
     }
     beltMemory.markDry(system, beltName, groupID);
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Shared squad board (goal: coordinate fire) ──────────────────────────────
+// In-process only, keyed by the FLEET id the BFF resolved from that fleet's own
+// GetInitState (see initStateFleetID). No gateway call either way — this is BFF-
+// local bookkeeping that lets pilots on one grid shoot the same ship, and it
+// touches nothing in the world. See src/squadBoard.js.
+//
+// ⚠ THE KEY IS NEVER TAKEN FROM THE REQUEST. A browser-supplied fleetID would
+// let any signed-in account read what another fleet is shooting (and call a
+// primary into it), which is the arg-injection shape this codebase refuses
+// everywhere else. Both routes use `held.fleetID`, which only a bound-fleet read
+// on THIS session can set — so a session that has not read its fleet yet gets a
+// typed refusal telling it to, rather than a guess.
+function requireSessionFleetID(req, res) {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return null;
+  }
+  if (!held.fleetID) {
+    res.status(409).json({
+      ok: false,
+      error: "FLEET_UNKNOWN",
+      message: "This character is not in a fleet, or its fleet has not been read yet.",
+    });
+    return null;
+  }
+  return held;
+}
+
+app.get("/api/bots/squad-board", requireAuth, (req, res, next) => {
+  try {
+    const held = requireSessionFleetID(req, res);
+    if (!held) {
+      return;
+    }
+    res.json({ ok: true, fleetID: held.fleetID, primary: squadBoard.primary(held.fleetID) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Call a primary for the session's fleet, or clear the standing call with a null
+// targetID. The caller is the SESSION's character, never a body field: a call is
+// only ever made in your own name.
+app.post("/api/bots/squad-board", requireAuth, (req, res, next) => {
+  try {
+    const held = requireSessionFleetID(req, res);
+    if (!held) {
+      return;
+    }
+    const body = req.body || {};
+    if (body.targetID === null || body.targetID === undefined) {
+      squadBoard.clear(held.fleetID);
+      res.json({ ok: true, fleetID: held.fleetID, primary: null });
+      return;
+    }
+    const targetID = strictPositiveID(body.targetID);
+    if (targetID === null) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_TARGET",
+        message: "targetID must be null or a positive id.",
+      });
+      return;
+    }
+    const primary = squadBoard.call(held.fleetID, targetID, held.characterID);
+    res.json({ ok: true, fleetID: held.fleetID, primary });
   } catch (error) {
     next(error);
   }
