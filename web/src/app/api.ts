@@ -9,6 +9,7 @@
 import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
+import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
 import {
   decodeCharCreationTables,
   type CharCreationTables,
@@ -1360,13 +1361,30 @@ export async function sendMail(
 }
 
 // --- R17 Contracts ----------------------------------------------------------
-// READS ONLY. Every contract mutator is refused at the gateway, so there is no
-// write surface here. The BFF issues five independent reads and hands back
-// their raw retail-shaped results, decoded in the flow with
-// bridge/contracts.ts.
+// The BFF issues five independent reads plus a fan-out for the contracts
+// ASSIGNED to this character, and hands back their raw retail-shaped results,
+// decoded in the flow with bridge/contracts.ts.
+//
+// One WRITE: accepting a contract. It is confirm-gated at the BFF and guarded
+// again in the game server, which refuses a contract you cannot accept and your
+// own unassigned contract. Everything else on the contract surface — creating,
+// completing, deleting, bidding — has a route but no caller here yet.
 
 export interface RawContractRead {
   readonly result: JsonValue;
+  readonly error: string | null;
+}
+
+/** The contracts assigned to this character, each fetched in full. */
+export interface RawAssignedContracts {
+  /** One GetContract bundle per contract, decoded in the flow. */
+  readonly results: readonly JsonValue[];
+  /**
+   * How many are assigned in total — BEFORE the BFF's fan-out limit. Larger
+   * than `results.length` means the list was cut short, not that contracts went
+   * missing.
+   */
+  readonly numAssigned: number;
   readonly error: string | null;
 }
 
@@ -1379,6 +1397,7 @@ export interface RawContractReads {
   readonly accepted: RawContractRead;
   readonly expired: RawContractRead;
   readonly summary: RawContractRead;
+  readonly assigned: RawAssignedContracts;
   /**
    * ⚠ True ONLY when the browse SUCCEEDED and found nothing. EveJS has no
    * NPC/seed contract generator, so an empty public browse is EXPECTED — but
@@ -1392,6 +1411,18 @@ function asContractRead(value: JsonValue | undefined): RawContractRead {
   const row = (value ?? {}) as Record<string, JsonValue>;
   return {
     result: row.result ?? null,
+    error: typeof row.error === "string" ? row.error : null,
+  };
+}
+
+function asAssignedContracts(value: JsonValue | undefined): RawAssignedContracts {
+  const row = (value ?? {}) as Record<string, JsonValue>;
+  const results = Array.isArray(row.results) ? (row.results as readonly JsonValue[]) : [];
+  return {
+    results,
+    // An older BFF sends no count at all; the rows themselves are then the
+    // whole truth, so nothing claims the list was cut short.
+    numAssigned: Number(row.numAssigned) || results.length,
     error: typeof row.error === "string" ? row.error : null,
   };
 }
@@ -1411,6 +1442,7 @@ export async function loadContracts(
     accepted: asContractRead(data.accepted),
     expired: asContractRead(data.expired),
     summary: asContractRead(data.summary),
+    assigned: asAssignedContracts(data.assigned),
     worldHasNoContracts: data.worldHasNoContracts === true,
   };
 }
@@ -1425,6 +1457,27 @@ export async function loadContractDetail(
     options,
   );
   return data.detail ?? null;
+}
+
+/**
+ * TAKE ON a contract. Moves ISK and items, and CANNOT be undone — which is why
+ * the BFF route refuses outright without `confirm: true` and the panel asks
+ * first.
+ *
+ * `forCorp` is false here and has no caller passing anything else: accepting on
+ * a corporation's behalf needs a corp role this panel cannot see, and guessing
+ * wrong would spend the corporation's ISK instead of the player's.
+ */
+export async function acceptContract(
+  contractID: number,
+  options: ApiOptions = {},
+): Promise<AcceptContractAck> {
+  const data = await postJson(
+    "/api/bridge/contracts/accept",
+    { contractID, forCorp: false, confirm: true },
+    options,
+  );
+  return decodeAcceptContractAck(data as unknown as JsonValue);
 }
 
 // --- R37 Personal Assets ----------------------------------------------------

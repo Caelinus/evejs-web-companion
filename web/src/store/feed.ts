@@ -376,9 +376,16 @@ export type FeedEvent =
       readonly outstanding: readonly ContractRow[];
       readonly accepted: readonly ContractRow[];
       readonly expired: readonly ContractRow[];
+      // Contracts someone else reserved for this character. They appear in NO
+      // other list -- not the browse (public only), not `outstanding` (what you
+      // issued), not `accepted` (what you took on) -- so without these the
+      // summary's "waiting for you" count refers to nothing on the page.
+      readonly assigned: readonly ContractRow[];
+      readonly numAssigned: number;
       readonly summary: ContractSummary | null;
       readonly browseError: string | null;
       readonly mineError: string | null;
+      readonly assignedError: string | null;
       // ⚠ True ONLY when the browse SUCCEEDED and found nothing. EveJS has no
       // contract generator, so that is expected — and it must never be
       // confused with a browse that failed.
@@ -387,6 +394,14 @@ export type FeedEvent =
   // One contract opened in full; null closes it.
   | { readonly type: "contracts/detail"; readonly detail: ContractDetail | null }
   | { readonly type: "contracts/detail-error"; readonly message: string | null }
+  // Taking a contract on. `contractID` while the write is in flight, null once
+  // it has settled either way -- a second click must not fire a second
+  // irreversible transfer.
+  | { readonly type: "contracts/accepting"; readonly contractID: number | null }
+  // The write landed. `contractID` is what the server said it accepted.
+  | { readonly type: "contracts/accepted"; readonly contractID: number }
+  // The server refused, in the words it used.
+  | { readonly type: "contracts/accept-error"; readonly message: string | null }
   // Drop the contracts state (character offline / logged out).
   | { readonly type: "contracts/cleared" }
   // Goal R37 — the Personal Assets page (charMgr global assets). READS ONLY:

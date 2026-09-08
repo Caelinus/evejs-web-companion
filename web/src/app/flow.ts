@@ -112,6 +112,7 @@ import type {
   ActivityCalendarResponseRow,
   ActivityNotificationRow,
   AgentAction,
+  ContractDetail,
   DestinationMatch,
   DroneInSpace,
   DroneOrderReport,
@@ -554,6 +555,16 @@ export interface AppFlow {
   openContract(contractID: number): Promise<void>;
   /** Close the open contract without touching the server. */
   closeContract(): void;
+  /**
+   * TAKE ON a contract. Moves ISK and items and CANNOT be undone — the panel
+   * asks before calling this, and the BFF refuses the call outright without an
+   * explicit confirmation.
+   *
+   * Reloads the panel afterwards rather than patching the lists by hand: an
+   * accepted contract leaves "waiting for you", joins "taken on", and changes
+   * every count in the summary, and only the server knows all of that.
+   */
+  acceptContract(contractID: number): Promise<void>;
   /**
    * Load the Personal Assets panel: every station holding this character's
    * items, and every NAME those need. READS ONLY — the bound global-assets
@@ -2779,6 +2790,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const outstanding = decodeContractList(reads.outstanding.result);
     const accepted = decodeContractList(reads.accepted.result);
     const expired = decodeContractList(reads.expired.result);
+    // Each assigned contract arrives as a full GetContract BUNDLE, not a list
+    // row — the panel only needs the row, but the detail decoder is what reads
+    // that bundle's packed shape correctly.
+    const assigned = reads.assigned.results
+      .map((bundle) => decodeContractDetail(bundle))
+      .filter((detail): detail is ContractDetail => detail !== null)
+      .map((detail) => detail.contract);
 
     store.apply({
       type: "contracts/loaded",
@@ -2789,11 +2807,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       outstanding,
       accepted,
       expired,
+      assigned,
+      // The BFF's count, not this list's length: the two differ exactly when
+      // the fan-out was cut short, which is the one case worth saying out loud.
+      numAssigned: reads.assigned.numAssigned,
       summary: reads.summary.error ? null : decodeContractSummary(reads.summary.result),
       browseError: reads.browse.error,
       // The player's own contracts come from three reads; any one failing
       // means the "yours" view is incomplete.
       mineError: reads.outstanding.error || reads.accepted.error || reads.expired.error,
+      assignedError: reads.assigned.error,
       worldHasNoContracts: reads.worldHasNoContracts,
     });
 
@@ -2801,7 +2824,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // issued by someone, runs between two stations in two systems, and may be
     // reserved for or taken by someone.
     const refs: NameRef[] = [];
-    for (const row of [...browse.contracts, ...outstanding, ...accepted, ...expired]) {
+    for (const row of [...browse.contracts, ...outstanding, ...accepted, ...expired, ...assigned]) {
       refs.push({ kind: "character", id: row.issuerID });
       refs.push({ kind: "corporation", id: row.issuerCorpID });
       refs.push({ kind: "station", id: row.startStationID });
@@ -2851,6 +2874,53 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   function closeContract(): void {
     store.apply({ type: "contracts/detail", detail: null });
+  }
+
+  async function acceptContract(contractID: number): Promise<void> {
+    store.apply({ type: "contracts/accepting", contractID });
+    let ack: Awaited<ReturnType<typeof api.acceptContract>>;
+    try {
+      ack = await api.acceptContract(contractID, callOptions);
+    } catch (error) {
+      store.apply({ type: "contracts/accepting", contractID: null });
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      // ⚠ THE SERVER'S OWN WORDS. A refusal here is specific and actionable
+      // — not enough ISK, no room for the cargo, someone else took it first —
+      // and rewording it into a house sentence would throw that away.
+      store.apply({
+        type: "contracts/accept-error",
+        message: contractRefusalMessage(error),
+      });
+      return;
+    }
+
+    // ⚠ A 200 IS NOT PROOF. AcceptContract answers the accepted contract ROW,
+    // and null when the settlement did not go through — an ack with no contract
+    // in it is a decline, and saying "taken on" there would be a lie the very
+    // next reload contradicts.
+    if (!ack.applied || ack.contractID <= 0) {
+      store.apply({ type: "contracts/accepting", contractID: null });
+      store.apply({
+        type: "contracts/accept-error",
+        message: "That contract was not taken on. Nothing was transferred.",
+      });
+      return;
+    }
+    store.apply({ type: "contracts/accepted", contractID: ack.contractID });
+
+    // The lists and every count in the summary have all moved; reload rather
+    // than guess at the new shape. The detail pane is reopened so the player
+    // sees the contract they now hold, with its status changed.
+    try {
+      await loadContracts(store.contracts.get().page);
+      await openContract(ack.contractID);
+    } finally {
+      store.apply({ type: "contracts/accepting", contractID: null });
+    }
   }
 
   // --- R37 Personal Assets --------------------------------------------------
@@ -7694,6 +7764,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     loadContracts,
     openContract,
     closeContract,
+    acceptContract,
     loadPersonalAssets,
     openAssetStation,
     setDestinationToAssetStation,

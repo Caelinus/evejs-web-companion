@@ -928,8 +928,7 @@ export interface ContractSummary {
 }
 
 /**
- * The Contracts page state (goal R17, Slice B). READS ONLY — every contract
- * mutator is refused at the gateway, so there is no action state here.
+ * The Contracts page state (goal R17, Slice B).
  *
  * The reads are INDEPENDENT: a public browse that fails must not hide the
  * player's own contracts, so each keeps its own error.
@@ -944,13 +943,40 @@ export interface ContractsState {
   readonly outstanding: readonly ContractRow[];
   readonly accepted: readonly ContractRow[];
   readonly expired: readonly ContractRow[];
+  /**
+   * Contracts SOMEONE ELSE reserved for this character (or their corp, or
+   * their alliance) and that are still waiting to be taken on.
+   *
+   * ⚠ THESE ARE IN NO OTHER LIST. `outstanding` is what you ISSUED,
+   * `accepted` what you TOOK ON, and the browse only ever holds PUBLIC
+   * contracts — a contract reserved for you is none of those. Without this the
+   * summary counts one waiting for you and nothing on the page can show it.
+   */
+  readonly assigned: readonly ContractRow[];
+  /**
+   * How many are assigned in total. Greater than `assigned.length` means the
+   * BFF's fan-out limit cut the list short — the panel says so rather than
+   * showing fewer than the count promised.
+   */
+  readonly numAssigned: number;
   readonly summary: ContractSummary | null;
   /** The contract currently opened in full, if any. */
   readonly detail: ContractDetail | null;
   readonly loaded: boolean;
   readonly browseError: string | null;
   readonly mineError: string | null;
+  readonly assignedError: string | null;
   readonly detailError: string | null;
+  /**
+   * Set while a contract is being taken on, and cleared when the reload that
+   * follows has landed. The panel disables the action rather than letting a
+   * second click fire a second irreversible transfer.
+   */
+  readonly accepting: number | null;
+  /** What the server said about the last accept, in the words it used. */
+  readonly acceptError: string | null;
+  /** The contract most recently taken on, for the panel to confirm by name. */
+  readonly acceptedContractID: number | null;
   /**
    * ⚠ TRUE ONLY WHEN THE BROWSE SUCCEEDED AND FOUND NOTHING — never inferred
    * from an absence. EveJS has no NPC/seed contract generator, so an empty

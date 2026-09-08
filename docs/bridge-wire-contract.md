@@ -1690,29 +1690,62 @@ Every contract **mutator** sits on the **same service** as the seven reads —
 `AcceptContract`, `CompleteContract`, `CreateContract`, `DeleteContract`,
 `DeleteMultipleContracts`, `SplitStack`, `SetContractExpired` — so a
 service-granular allowlist would have handed the browser the power to move a
-player's items and ISK. All are refused before dispatch and named in a test.
+player's items and ISK. Each has its own **confirm-gated POST route** (R91) and
+none is reachable from a read route, which is named in a test.
 `GetContractListForOwner` is the only read that *could* name another owner; the
 BFF only ever passes the session's own characterID, and the browser never
 chooses that argument. Auctions and bids are **stubbed server-side**
 (`PlaceBid` → `null`, `GetMyBids` → empty), so there is no bidding to build.
 
-**Accepting a contract is deliberately not implemented.** Its signature is
-unambiguous (`[contractID, forCorp]`, read positionally) — but it **transfers
-items and ISK**, and with no contract generator there is nothing in this world to
-accept, so the path could not be exercised end to end even once. A two-step
-confirm gate that has never been run is worse than no gate.
+**Accepting a contract is wired to the panel; nothing else is.** `AcceptContract`
+takes `[contractID, forCorp]` positionally, **transfers items and ISK** and
+cannot be undone — so the BFF route refuses outright without `confirm: true`,
+the panel asks on a screen that lists what changes hands, and the browser always
+sends `forCorp: false` (accepting for a corporation needs a role the panel
+cannot see). The game server guards it again: `canAcceptContract` refuses a
+contract you may not take, and your own **unassigned** contract is refused
+outright. A 200 is **not** proof — the handler answers the accepted contract
+row, and `null` when the settlement did not go through, so an ack with no
+contract in it is a decline. The other ten writes have routes and no caller.
+
+### ⚠ The trap: a count with no list behind it
+
+`GetLoginInfo.assignedToMe` counts the contracts **assigned to you**, and not
+one of the other four reads can return them:
+
+- `GetMyCurrentContractList` keys off **issuerID** (what you issued) and
+  **acceptorID** (what you took on) — an assignee is neither;
+- `GetMyExpiredContractList` keys off `contractNeedsAttention`;
+- `SearchContracts` with `availability: PUBLIC` cannot match a contract
+  **reserved for you**, which is by definition not public.
+
+So the panel reported "1 waiting for you" above four empty lists, with no way to
+see or take the contract. The fix reads the ids out of the count's **own**
+rowset (`assignedToMe` carries `[contractID, issuerID]` per line) and fetches
+each with `GetContract`. Deriving the list any other way drifts from the number
+on screen: an unfiltered `SearchContracts` pages at 100 and drops assignments
+past it, and `GetContractListForOwner` against your characterID misses every
+contract assigned to your **corp or alliance**, which the count includes.
+
+⚠ **A rowset line is a bare array**, not a marshalled row — `buildRowset` wraps
+the lines in a `list`, but each line is the plain positional array the handler
+pushed, and JSON carries it through as an array.
 
 ### BFF routes (this repo)
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/contracts?page=` | five independent reads under `Promise.allSettled` (browse + outstanding + accepted + expired + summary); pages by **100** |
+| `GET /api/bridge/contracts?page=` | five independent reads under `Promise.allSettled` (browse + outstanding + accepted + expired + summary), pages by **100**; then a second phase fanning `GetContract` out over the ids in `assignedToMe`, capped at **50** |
 | `GET /api/bridge/contracts/detail?contractID=` | `GetContract`; its `null` becomes a **404**, not an empty detail pane |
+| `POST /api/bridge/contracts/accept` | `AcceptContract [contractID, forCorp]`; **400 `CONFIRMATION_REQUIRED`** without `confirm: true` |
 
 Each read keeps its **own error**, so a failed public browse never hides the
-player's own contracts. ISK (`price` / `reward` / `collateral`) stays a **decimal
-string** the whole way — it exceeds 2^53 — and the four dates stay **bigints**
-(retail FILETIMEs) until they are rendered.
+player's own contracts, and one assigned contract that could not be fetched
+leaves the others in place with the shortfall reported as its own fact
+(`assigned.numAssigned` above `assigned.results.length`). ISK (`price` /
+`reward` / `collateral`) stays a **decimal string** the whole way — it exceeds
+2^53 — and the four dates stay **bigints** (retail FILETIMEs) until they are
+rendered.
 
 ## Agent Finder static route (R6a)
 
