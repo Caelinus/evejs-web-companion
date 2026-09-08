@@ -10,6 +10,15 @@
 //      keep flying it, then pause once docked.
 //   2. Otherwise, interrupts first (A4a): a met one fires; a pirate with an
 //      unreadable ship pauses.
+//   2.7 A STOP NEVER HAPPENS IN SPACE. Every fault the runner cannot work
+//      through — a blocked macro, the livelock guard, the step-tick cap, the
+//      cannot-tell streak, an unknown macro, the sealed acute pause — and the
+//      player's own "just stop" watch LATCH and fly the ship home first, then
+//      pause docked with the reason that sent it there. A bot parked in a belt
+//      is food: the rats keep coming and nobody is flying. `stopSafely` is the
+//      only way any of them stops, and the only bare pauses left in this file
+//      are the two at the END of that flight home (arrived, or it cannot be
+//      flown), which must be terminal or the ship would latch forever.
 //   3. Otherwise, the FORWARD SCAN runs the program: consult the active step's
 //      macro, and if the step is finished (its `until` met while the macro is
 //      armed, or the macro reports itself done) advance to the next node and
@@ -244,7 +253,12 @@ type Position =
   | { readonly kind: "done" };
 
 interface Latched {
-  readonly interruptID: string;
+  /**
+   * The watch row that sent the ship home, or NULL when a fault did — the
+   * livelock guard and the step-tick cap are the runner's own verdicts and have
+   * no row to point the readout at.
+   */
+  readonly interruptID: string | null;
   readonly reason: string;
 }
 
@@ -376,8 +390,9 @@ export function decideScriptAction(
   const res = resolveInterrupt(script.interrupts, obs, spentAlerts);
   if (res.kind === "safety-override") {
     // No interrupt row caused this — it is the sealed acute rule firing on its
-    // own, so there is honestly no interrupt id to report.
-    return paused(res.reason, scanMem, null);
+    // own, so there is honestly no interrupt id to report. A pirate is here and
+    // the ship is unreadable, which is the LAST state to sit still in: home first.
+    return stopSafely(res.reason, scanMem, null, obs, travelHome);
   }
   if (res.kind === "fire") {
     return fireInterrupt(script, res.row.id, obs, scanMem, travelHome, registry, false);
@@ -420,7 +435,7 @@ export function decideScriptAction(
   // 3. The program, with the forward scan. `stand.memory` and not `scanMem`: the
   // pass above forgets a finished stand-down record without spending a tick on
   // it, and that forgetting has to reach the memory this returns.
-  return runProgram(script, obs, stand.memory, registry);
+  return runProgram(script, obs, stand.memory, registry, travelHome);
 }
 
 /**
@@ -627,11 +642,16 @@ function fireInterrupt(
 ): ScriptTickResult {
   const row = script.interrupts.find((r) => r.id === rowID);
   if (row === undefined) {
-    return runProgram(script, obs, mem, registry);
+    return runProgram(script, obs, mem, registry, travelHome);
   }
   switch (row.respond) {
     case "pause":
-      return paused(stoppedBecause(conditionSentence(row.when)), mem, row.id);
+      // "Just stop and wait" still stops — from a STATION. The watch fired for a
+      // reason the player wanted to be told about, and leaving the ship parked in
+      // space to be told about it is how a mining bot ends up dead in a belt with
+      // a full hold. In space this now reads the same as "dock at home and stop";
+      // docked, it stops exactly where it stands.
+      return stopSafely(stoppedBecause(conditionSentence(row.when)), mem, row.id, obs, travelHome);
     case "dock-and-pause": {
       const latched: Latched = { interruptID: row.id, reason: stoppedBecause(conditionSentence(row.when)) };
       return continueHeadingHome(obs, { ...mem, latched }, travelHome);
@@ -645,7 +665,7 @@ function fireInterrupt(
       const combatOut = obs.combatDroneIDs ?? [];
       const combatBay = obs.combatDroneBayItemIDs ?? [];
       if (combatOut.length > 0 || combatBay.length === 0 || obs.dronesOut === true) {
-        return runProgram(script, obs, mem, registry, false);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       return {
         action: { kind: "launchDrones", droneItemIDs: combatBay },
@@ -668,7 +688,7 @@ function fireInterrupt(
       // apart — a fix to one is a fix to both.
       const fight = registry["fight-the-rats"];
       if (fight === undefined) {
-        return runProgram(script, obs, mem, registry);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       // THE TANK GOES UP FIRST. A hardener is instant and self-targeted, so it
       // costs one tick and buys the whole fight — the same thing a player reaches
@@ -714,7 +734,7 @@ function fireInterrupt(
         // of which hardeners this watch switched on, and it is read after the
         // condition clears, which is long after this row stops being consulted.
         const { [row.id]: _spent, ...rest } = mem.macroMem;
-        return runProgram(script, obs, { ...mem, macroMem: rest }, registry);
+        return runProgram(script, obs, { ...mem, macroMem: rest }, registry, travelHome);
       }
       // The ladder is ACTING, so this watch has now committed the ship to a
       // fight — write the stand-down record even when there was no hardener to
@@ -763,12 +783,12 @@ function fireInterrupt(
             memory: mem,
           };
         }
-        return runProgram(script, obs, mem, registry);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       const idle = reps.find((id) => !active.has(id));
       if (idle === undefined) {
         // Nothing to switch on (all running, or none fitted) — keep working.
-        return runProgram(script, obs, mem, registry);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       return {
         action: { kind: "activate", moduleID: idle, targetID: 0 },
@@ -866,6 +886,7 @@ function runProgram(
   obs: ScriptObservation,
   mem: ScriptMemory,
   registry: MacroRegistry,
+  travelHome: HomeTravelDecider,
 ): ScriptTickResult {
   let position = mem.position;
   let loopPass = mem.loopPass;
@@ -914,11 +935,11 @@ function runProgram(
         const samePlace = positionKey(position) === positionKey(mem.position);
         const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
         if (stepTicks > MAX_STEP_TICKS) {
-          return paused(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id);
+          return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         const streak = bumpCannotTellStreak(mem.cannotTellStreak, true);
         if (cannotTellStreakExhausted(streak)) {
-          return paused(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, branch.id);
+          return stopSafely(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         return {
           action: WAIT,
@@ -946,7 +967,7 @@ function runProgram(
           if (next.wrapped) {
             wraps += 1;
             if (wraps >= 2) {
-              return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+              return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
             }
           }
         } else {
@@ -965,7 +986,7 @@ function runProgram(
     const step = activeStep(script, position);
     const decider = registry[step.macro];
     if (decider === undefined) {
-      return paused(SAY.unknownMacro, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(SAY.unknownMacro, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
 
     const stepMem = macroMem[step.id] ?? {};
@@ -976,7 +997,7 @@ function runProgram(
     }
 
     if (tick.outcome.kind === "blocked") {
-      return paused(tick.outcome.reason, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(tick.outcome.reason, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
 
     if (tick.outcome.kind === "skipped") {
@@ -996,7 +1017,7 @@ function runProgram(
         if (next.wrapped) {
           wraps += 1;
           if (wraps >= 2) {
-            return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+            return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
           }
         }
         continue;
@@ -1030,7 +1051,7 @@ function runProgram(
       if (next.wrapped) {
         wraps += 1;
         if (wraps >= 2) {
-          return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+          return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
         }
       }
       continue;
@@ -1088,7 +1109,7 @@ function runProgram(
         if (next.wrapped) {
           wraps += 1;
           if (wraps >= 2) {
-            return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+            return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
           }
         }
         continue;
@@ -1102,11 +1123,11 @@ function runProgram(
     const samePlace = positionKey(position) === positionKey(mem.position);
     const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
     if (stepTicks > MAX_STEP_TICKS) {
-      return paused(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
     const streak = bumpCannotTellStreak(mem.cannotTellStreak, blindThisTick);
     if (cannotTellStreakExhausted(streak)) {
-      return paused(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
 
     return {
@@ -1135,7 +1156,7 @@ function runProgram(
 
   // The scan is bounded by construction; reaching here means it could not make
   // progress, which is the livelock case under another name.
-  return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+  return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
 }
 
 // ─── Position arithmetic ─────────────────────────────────────────────────────
@@ -1305,6 +1326,36 @@ function done(mem: ScriptMemory): ScriptTickResult {
     pauseReason: null,
     memory: { ...mem, position: { kind: "done" }, latched: null },
   };
+}
+
+/**
+ * STOP — BUT NEVER IN SPACE. Every stop the player did not personally press goes
+ * through here: it latches the reason and flies the ship home, and the pause
+ * itself happens on arrival (`continueHeadingHome`), carrying that same reason
+ * to the readout so the player still learns why.
+ *
+ * The reason this exists is a bot found paused in a belt with rats on top of it.
+ * A stop in space is not a safe state — it is an unattended ship with its guns
+ * off, and the longer nobody looks, the worse it gets. Docked is the only place
+ * a bot may come to rest.
+ *
+ * It costs nothing when the ship is already safe: `scriptTravelHome` reports
+ * "docked anywhere is done" on its first consultation, so the flight collapses
+ * to the plain pause it would have been, on the same tick.
+ *
+ * ⚠ THE TWO PAUSES INSIDE `continueHeadingHome` MUST STAY BARE — arriving home,
+ * and a home that cannot be flown to (no home station known). Routing those
+ * through here would re-latch the ship into a flight it has just finished or
+ * cannot make, and it would never stop at all.
+ */
+function stopSafely(
+  reason: string,
+  mem: ScriptMemory,
+  litID: string | null,
+  obs: ScriptObservation,
+  travelHome: HomeTravelDecider,
+): ScriptTickResult {
+  return continueHeadingHome(obs, { ...mem, latched: { interruptID: litID, reason } }, travelHome);
 }
 
 function paused(reason: string, mem: ScriptMemory, litID: string | null): ScriptTickResult {

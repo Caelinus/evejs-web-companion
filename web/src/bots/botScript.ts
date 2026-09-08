@@ -341,7 +341,16 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
 /**
  * What a fired interrupt does.
  *
- *   • "pause"          — stop where you are and say why.
+ * ⚠ NOTHING HERE EVER COMES TO REST IN SPACE. A stopped bot is an unattended
+ * ship with its guns off, and a mining bot that stopped in a belt is food, so
+ * every stop happens FROM A STATION: the runner flies home first and pauses on
+ * arrival, carrying the reason with it (nav/scriptDecide `stopSafely`). The same
+ * rule covers the runner's own faults — a blocked block, the livelock guard, the
+ * step-tick cap — which are not responses at all and so are not listed here.
+ *
+ *   • "pause"          — stop and say why, from a station. In space that means
+ *                        flying home first, which reads the same as
+ *                        "dock-and-pause"; docked, it stops on the spot.
  *   • "dock-and-pause" — break off, dock at home, pause (the safety-floor
  *                        response, and the hostile "run for the station" pick).
  *   • "launch-drones"  — put drones out and KEEP WORKING (the hostile "use

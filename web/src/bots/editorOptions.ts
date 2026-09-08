@@ -439,7 +439,9 @@ export function conditionUsesIsk(kind: ConditionKind): boolean {
  */
 export const RESPONSE_LABEL: Readonly<Record<InterruptResponse, string>> = {
   "dock-and-pause": "Dock at home and stop",
-  pause: "Just stop and wait",
+  // A bot never comes to rest in space, so this stops FROM A STATION: in space
+  // it flies home first and then stops, and docked it stops on the spot.
+  pause: "Stop and wait, from a station",
   "launch-drones": "Send out combat drones and keep going",
   // The difference players trip over: launching drones only puts them out and
   // lets them defend themselves. "Fight back" hardens the ship first, points them

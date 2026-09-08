@@ -3029,6 +3029,87 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
  * station published onto the run board — and puts the result on the observation.
  * The shared autopilot makes that station reachable from any system.
  */
+/**
+ * How many times the way home may be FOUGHT clear before the bot accepts that it
+ * is not getting out. Each attempt is a whole grid cleared, so three is already
+ * a long fight; past that, something other than a rat is wrong.
+ */
+const MAX_ESCAPE_ATTEMPTS = 3;
+
+/** The synthetic step the escape borrows the combat blocks under. */
+const ESCAPE_STEP: MacroStep = { id: "__escape__", kind: "macro", macro: "fight-the-rats", args: {} };
+
+/**
+ * ⚠ THE TRIP HOME FAILED, WHICH USUALLY MEANS SOMETHING IS HOLDING THE SHIP.
+ * A scrambled warp comes back as a plain refusal, the autopilot pauses with it,
+ * and `rideAutopilotTo` reports the trip BLOCKED. Treating that as "stop here"
+ * is how a bot ends up sitting still in a belt, tackled, guns off, until it dies
+ * — the ship is told to run, cannot run, and so does nothing at all.
+ *
+ * A pilot in that spot does not sit there: they harden up and kill the thing
+ * holding them, then leave. So does this. Both halves are BORROWED from the
+ * blocks that already do them, under their own nested memory so their counters
+ * (hardener attempts, which rat is primary) cannot collide with the trip's own
+ * bookkeeping in the shared home-memory slot.
+ *
+ * Returns null when there is nothing to do about it — nothing in reach to shoot,
+ * no way to shoot it, or the escape budget is spent — and the blocked trip then
+ * stands and stops the bot, which is the honest end.
+ */
+function fightTheWayOut(obs: ScriptObservation, mem: MacroMemory, stationID: number): MacroTick | null {
+  const snapshot = obs.snapshot ?? null;
+  if (snapshot === null || obs.inSpace !== true || obs.inWarp === true) {
+    return null; // cannot judge the grid, or already leaving
+  }
+  const tries = num(mem, "escapeTries") ?? 0;
+  if (tries >= MAX_ESCAPE_ATTEMPTS) {
+    return null;
+  }
+  const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
+  if (hostilesInReach(obs, snapshot, origin).length === 0) {
+    // Nothing left in reach. If we fought for this, ask for the route AGAIN:
+    // the autopilot's failure is sticky, so without a fresh start the trip stays
+    // blocked forever on a grid that is now clear. Counted, so a route that
+    // keeps failing for some OTHER reason cannot loop here.
+    if (!flag(mem, "escaping")) {
+      return null;
+    }
+    return tick(
+      { kind: "startRoute", stationID },
+      "The grid is clear — trying the trip home again.",
+      "Heading home",
+      ACTING,
+      false,
+      // The recall bookkeeping is cleared with it: `recallBeforeLeaving` marks
+      // the drones called in ONCE per trip, and the fight has just put them back
+      // out. Without this reset the retry would warp off and leave them behind.
+      {
+        ...mem,
+        escaping: false,
+        escapeTries: tries + 1,
+        escapeFight: {},
+        escapeHarden: {},
+        recalled: false,
+        recallWaited: 0,
+        aligned: false,
+      },
+    );
+  }
+  // Held. The tank goes up first, then the guns — the same order the pirate
+  // watch uses, and the same blocks.
+  const hardenMem = (mem["escapeHarden"] as MacroMemory | undefined) ?? {};
+  const harden = hardenersOn(ESCAPE_STEP, obs, hardenMem, {});
+  if (harden.outcome.kind === "acting") {
+    return { ...harden, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeHarden: harden.nextMem } };
+  }
+  const fightMem = (mem["escapeFight"] as MacroMemory | undefined) ?? {};
+  const fight = fightTheRats(ESCAPE_STEP, obs, fightMem, {});
+  if (fight.outcome.kind !== "acting") {
+    return null; // no way to fight — the blocked trip stands
+  }
+  return { ...fight, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeFight: fight.nextMem } };
+}
+
 export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
   if (obs.flightStatus?.docked === true) {
     // Docked ANYWHERE is safe — the point of a fired watch is to be in a
@@ -3047,12 +3128,21 @@ export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
       reason: "This bot does not know which station is home, so it stopped instead of flying to a guess.",
     });
   }
+  // The trip is judged BEFORE the drones are called in: a ship that cannot leave
+  // needs its drones out to shoot its way free, and pulling them in first would
+  // disarm it in the one moment it needs them.
+  const ride = rideAutopilotTo(obs, target, "Heading home");
+  if (ride !== null && ride.outcome.kind === "blocked") {
+    const escape = fightTheWayOut(obs, mem, target);
+    if (escape !== null) {
+      return escape;
+    }
+  }
   const onGrid = (obs.snapshot?.entities ?? []).some((e) => e.itemID === target);
   const recall = recallBeforeLeaving(obs, mem, "Heading home", onGrid ? target : null);
   if (recall !== null) {
     return recall;
   }
-  const ride = rideAutopilotTo(obs, target, "Heading home");
   if (ride !== null) {
     return ride;
   }

@@ -245,7 +245,7 @@ export function repeatSentence(repeat: Repeat): string {
 export function responseSentence(response: InterruptResponse): string {
   switch (response) {
     case "pause":
-      return "stop and wait";
+      return "get to a station and stop";
     case "dock-and-pause":
       return "dock at home and stop";
     case "launch-drones":

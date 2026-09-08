@@ -9,7 +9,7 @@ import type { FlightStatus, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnaps
 import type { MacroMemory } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
-import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
 
@@ -628,6 +628,106 @@ test("hardeners-on: switches idle hardeners on one per tick; all running -> done
 
   const none = hardeners(s, obs({ snapshot: snapshot([]), hardenerModuleIDs: [] }), {}, {});
   assert.equal(none.outcome.kind, "blocked");
+});
+
+// ─── Fighting the way out of a tackle ────────────────────────────────────────
+//
+// The one that cost four ships: shields dropped, the watch latched and told the
+// ship to run, the rat had it scrambled so the warp was refused, the autopilot
+// paused with that refusal — and the bot sat still in the belt with its guns off
+// until it died. A ship that cannot leave has to fight.
+
+const HOME = 60000004;
+/** The travel reading the autopilot leaves behind when a warp is refused. */
+const scrambled = {
+  status: "paused" as const,
+  destinationStationID: HOME,
+  remainingJumps: 2,
+  failureReason: "Warp refused: you are being warp scrambled.",
+};
+
+test("tackled: a refused trip home is fought, not sat through", () => {
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+
+  // The tank goes up first — one hardener per tick, same as everywhere else.
+  const harden = scriptTravelHome(
+    obs({ snapshot: snapshot([rat]), travel: scrambled, homeStationID: HOME, hardenerModuleIDs: [40], weaponModuleIDs: [500] }),
+    {},
+  );
+  assert.equal(harden.outcome.kind, "acting", "it must NOT report blocked and stop");
+  assert.ok(harden.action.kind === "activate" && harden.action.moduleID === 40, "hardener on");
+  assert.equal(harden.phase, "Fighting free");
+
+  // Hardened: now shoot whatever is holding the ship.
+  const fight = scriptTravelHome(
+    obs({
+      snapshot: snapshot([rat], { activeModuleIDs: [40] }),
+      travel: scrambled,
+      homeStationID: HOME,
+      hardenerModuleIDs: [40],
+      weaponModuleIDs: [500],
+    }),
+    harden.nextMem,
+  );
+  assert.ok(fight.action.kind === "lock" && fight.action.targetID === 6661, "locks the tackler");
+  assert.equal(fight.outcome.kind, "acting");
+});
+
+test("tackled: once the grid is clear the trip home is asked for again", () => {
+  // The autopilot's failure is sticky, so a cleared grid alone would leave the
+  // trip blocked forever. The escape re-issues the route, which resets it.
+  const clear = scriptTravelHome(
+    obs({ snapshot: snapshot([]), travel: scrambled, homeStationID: HOME, hardenerModuleIDs: [40] }),
+    { escaping: true, recalled: true },
+  );
+  assert.ok(clear.action.kind === "startRoute" && clear.action.stationID === HOME);
+  assert.equal(clear.nextMem["escaping"], false);
+  assert.equal(clear.nextMem["escapeTries"], 1);
+  assert.equal(clear.nextMem["recalled"], false, "the drones are called in again before the next warp");
+});
+
+test("tackled: the escape is bounded — a trip that keeps failing eventually stops", () => {
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const spent = scriptTravelHome(
+    obs({ snapshot: snapshot([rat]), travel: scrambled, homeStationID: HOME, weaponModuleIDs: [500] }),
+    { escapeTries: 3 },
+  );
+  assert.equal(spent.outcome.kind, "blocked", "three cleared grids is enough");
+  assert.match(spent.outcome.kind === "blocked" ? spent.outcome.reason : "", /could not be finished/i);
+});
+
+test("tackled: a blocked trip with nothing to shoot still stops honestly", () => {
+  const nothing = scriptTravelHome(
+    obs({ snapshot: snapshot([]), travel: scrambled, homeStationID: HOME }),
+    {},
+  );
+  assert.equal(nothing.outcome.kind, "blocked", "no fight was started, so there is nothing to retry");
+});
+
+test("tackled: a hull with no way to fight stops rather than pretending", () => {
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const unarmed = scriptTravelHome(
+    obs({ snapshot: snapshot([rat]), travel: scrambled, homeStationID: HOME, weaponModuleIDs: [], combatDroneBayItemIDs: [] }),
+    {},
+  );
+  assert.equal(unarmed.outcome.kind, "blocked");
+});
+
+test("a trip home that is NOT blocked is untouched by the escape", () => {
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  // Rats on grid, but the autopilot is flying fine: keep flying, do not brawl.
+  const flying = scriptTravelHome(
+    obs({
+      snapshot: snapshot([rat]),
+      travel: { status: "running", destinationStationID: HOME, remainingJumps: 2, failureReason: null },
+      homeStationID: HOME,
+      hardenerModuleIDs: [40],
+      weaponModuleIDs: [500],
+    }),
+    {},
+  );
+  assert.equal(flying.action.kind, "wait");
+  assert.match(flying.why, /autopilot has the ship/i);
 });
 
 test("fight: locks the NEAREST rat, drones on it, then every idle gun on it", () => {

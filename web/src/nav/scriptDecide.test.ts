@@ -206,18 +206,24 @@ test("a skipped step inside a loop is silent the second time round, and a loop o
   // Round two: the skip is silent and the scan runs on to the livelock guard,
   // because undock-in-space and skip-salvage between them do nothing.
   const second = decideScriptAction(s, obs({ inSpace: true }), first.memory, skipRegistry, home);
-  assert.equal(second.status, "paused");
-  assert.match(second.pauseReason ?? "", /nothing it can do/i);
+  assert.equal(second.status, "running", "in space it heads home rather than parking there");
+  assert.equal(second.action.kind, "warp");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, docked: true }), second.memory, skipRegistry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
 });
 
-test("a loop whose body can never do anything pauses on the livelock guard", () => {
+test("a loop whose body can never do anything trips the livelock guard, and heads home to stop", () => {
   // Body is a single undock, but the ship is already in space, so every pass
   // completes instantly issuing no world call.
   const loop: ProgramNode = { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [macroStep("u", "undock")] };
   const s = script([loop]);
   const r = decideScriptAction(s, obs({ inSpace: true }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /nothing it can do/i);
+  assert.equal(r.status, "running");
+  assert.equal(r.action.kind, "warp", "a livelock in space is flown home, not parked");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
 });
 
 // ─── Branches ────────────────────────────────────────────────────────────────
@@ -334,8 +340,10 @@ test("a loop whose branch sides do nothing still trips the livelock guard", () =
   };
   const s = script([loop], []);
   const r = decideScriptAction(s, obs({ inSpace: true, holdEmpty: true }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /nothing it can do/i);
+  assert.equal(r.action.kind, "warp", "heads home first");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, holdEmpty: true, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
 });
 
 test("a loop-level until still ends the loop when the body starts with a branch", () => {
@@ -367,13 +375,27 @@ test("an until does not advance the step while the macro is unarmed", () => {
 
 // ─── Interrupts ──────────────────────────────────────────────────────────────
 
-test("a plain-pause interrupt stops with the condition as its reason", () => {
+test("a plain-pause interrupt gets the ship to a station first, then stops with the condition as its reason", () => {
   const shields: InterruptRow = { id: "s", when: { kind: "shield-below", fraction: 0.3 }, respond: "pause" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, shields]);
   const r = decideScriptAction(s, obs({ shieldRatio: 0.2 }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
+  assert.equal(r.status, "running", "a watch the player set to STOP still does not stop in space");
+  assert.equal(r.action.kind, "warp");
   assert.equal(r.interruptID, "s");
-  assert.match(r.pauseReason ?? "", /shields/i);
+  const stopped = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.equal(stopped.interruptID, "s", "the row that stopped it is still named");
+  assert.match(stopped.pauseReason ?? "", /shields/i);
+});
+
+test("a plain-pause interrupt fired while ALREADY docked stops on the spot", () => {
+  // The flight home costs nothing when there is no flying to do: the travel
+  // decider reports done on its first consultation and the pause lands the same tick.
+  const wallet: InterruptRow = { id: "w", when: { kind: "wallet-below", isk: 100 }, respond: "pause" };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [wallet]);
+  const r = decideScriptAction(s, obs({ docked: true, inSpace: false, walletBalance: 10 }), initialMemory(s), registry, home);
+  assert.equal(r.status, "paused");
+  assert.equal(r.interruptID, "w");
 });
 
 test("a dock-and-pause interrupt flies home and then stops", () => {
@@ -612,16 +634,18 @@ test("a launch-drones interrupt with no combat drones to launch yields to the st
 
 // ─── Bounds: cannot-tell streak and the step-tick cap ────────────────────────
 
-test("an unreadable until pauses after the cannot-tell streak runs out", () => {
+test("an unreadable until heads home after the cannot-tell streak runs out", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
   let last = decideScriptAction(s, obs({ oreHoldFraction: null }), mem, registry, home);
-  for (let i = 0; i < MAX_CANNOT_TELL_STREAK + 2 && last.status === "running"; i += 1) {
+  for (let i = 0; i < MAX_CANNOT_TELL_STREAK + 2 && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
     last = decideScriptAction(s, obs({ oreHoldFraction: null }), mem, registry, home);
   }
-  assert.equal(last.status, "paused");
-  assert.match(last.pauseReason ?? "", /could not read/i);
+  assert.equal(last.action.kind, "warp", "it gives up by flying home, not by parking in space");
+  const stopped = decideScriptAction(s, obs({ oreHoldFraction: null, docked: true }), last.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /could not read/i);
 });
 
 test("a step that never finishes trips the step-tick cap", () => {
@@ -629,22 +653,52 @@ test("a step that never finishes trips the step-tick cap", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
   let last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
-  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.status === "running"; i += 1) {
+  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
     last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
   }
-  assert.equal(last.status, "paused");
-  assert.match(last.pauseReason ?? "", /very long time/i);
+  assert.equal(last.action.kind, "warp", "the cap sends it home rather than leaving it there");
+  const stopped = decideScriptAction(s, obs({ oreHoldFraction: 0, docked: true }), last.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /very long time/i);
 });
 
 // ─── A blocked macro ─────────────────────────────────────────────────────────
 
-test("a blocked macro pauses with the macro's own reason", () => {
-  const stuck: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "There are no rocks left here." });
+const stuck: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "There are no rocks left here." });
+const stuckRegistry = { ...registry, "mine-at-belt": stuck };
+
+test("a blocked macro heads home, then pauses with the macro's own reason", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
-  const r = decideScriptAction(s, obs(), initialMemory(s), { ...registry, "mine-at-belt": stuck }, home);
+  const r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, home);
+  assert.equal(r.status, "running", "a blocked belt is not a place to sit");
+  assert.equal(r.action.kind, "warp");
+  const stopped = decideScriptAction(s, obs({ docked: true }), r.memory, stuckRegistry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /no rocks left/i);
+});
+
+test("a fault stops in space after all when there is no home to fly to", () => {
+  // The one honest exception, and the bound that stops the latch being forever:
+  // if the way home is BLOCKED (no home station known), the runner stops where
+  // it is and says why, rather than flying at a guess or latching in a loop.
+  const noHome: HomeTravelDecider = () =>
+    tick({ kind: "wait" }, { kind: "blocked", reason: "This bot does not know which station is home." });
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, noHome);
   assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /no rocks left/i);
+  assert.match(r.pauseReason ?? "", /does not know which station is home/i);
+});
+
+test("a fault keeps flying home across ticks instead of re-deciding the fault every tick", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  let r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, home);
+  for (let i = 0; i < 4; i += 1) {
+    assert.equal(r.action.kind, "warp");
+    assert.equal(r.status, "running");
+    r = decideScriptAction(s, obs(), r.memory, stuckRegistry, home);
+  }
+  assert.equal(decideScriptAction(s, obs({ docked: true }), r.memory, stuckRegistry, home).status, "paused");
 });
 
 // ─── The "alert me" response ─────────────────────────────────────────────────
