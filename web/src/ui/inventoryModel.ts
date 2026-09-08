@@ -536,8 +536,16 @@ export function sortInventoryRows(
 /**
  * The typed move quantity, or null for "the whole stack". Blank, zero, negative
  * and nonsense all mean the whole stack — never a silent 0-unit move.
+ *
+ * ⚠ NOT ALWAYS A STRING. The box it comes from is `<input type="number">`, and
+ * Svelte binds that back as a NUMBER (null while it is empty) rather than the
+ * raw text — so a signature of `string` was a lie that threw
+ * "text.trim is not a function" the first time anybody typed an amount, and
+ * took the whole move with it. Every shape the binding can produce is accepted
+ * here, and only a whole positive count survives.
  */
-export function parseMoveQuantity(text: string): number | null {
+export function parseMoveQuantity(typed: string | number | null | undefined): number | null {
+  const text = typed === null || typed === undefined ? "" : String(typed);
   const parsed = Number(text);
   return text.trim() !== "" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
@@ -565,8 +573,8 @@ export function moveQuantityFor(options: {
   readonly selection: readonly number[];
   /** Those ids resolved back to rows, in the place the tick was made. */
   readonly selectedRows: readonly InventoryItemRow[];
-  /** Whatever is in the quantity box, verbatim. */
-  readonly typedQuantity: string;
+  /** Whatever is in the quantity box, verbatim — a number once it is typed in. */
+  readonly typedQuantity: string | number | null | undefined;
 }): MoveQuantity {
   const { inventory, destination, selection, selectedRows, typedQuantity } = options;
   const typed = selection.length === 1 ? parseMoveQuantity(typedQuantity) : null;

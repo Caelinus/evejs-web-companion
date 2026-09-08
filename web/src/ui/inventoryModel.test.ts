@@ -445,6 +445,20 @@ test("a blank or nonsense quantity means the whole stack, never a zero-unit move
   assert.equal(parseMoveQuantity("7"), 7);
 });
 
+test("⚠ THE QTY BOX HANDS BACK A NUMBER, AND THAT MUST NOT THROW", () => {
+  // `<input type="number">` binds back a number, or null while it is empty —
+  // never the raw text. Reading it as a string threw
+  // "text.trim is not a function" on Confirm move and lost the whole action, so
+  // the shapes the DOM actually produces are asserted here.
+  assert.equal(parseMoveQuantity(null), null);
+  assert.equal(parseMoveQuantity(undefined), null);
+  assert.equal(parseMoveQuantity(0), null);
+  assert.equal(parseMoveQuantity(-4), null);
+  assert.equal(parseMoveQuantity(2.5), null);
+  assert.equal(parseMoveQuantity(Number.NaN), null);
+  assert.equal(parseMoveQuantity(7), 7);
+});
+
 function move(over: Record<string, unknown>) {
   return moveQuantityFor({
     inventory: inventory(),
