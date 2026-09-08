@@ -158,10 +158,45 @@ test("a run being refused over and over STOPS, in the server's own words", async
   const latest = h.progress[h.progress.length - 1]!;
   assert.match(latest.pauseReason ?? "", /refusals in a row/);
   assert.match(latest.pauseReason ?? "", /room/i, "and says WHAT was refused");
+  // It does not stop WHERE IT STANDS: the first refusal cap latches and flies
+  // the ship home, so the run only really stops once the way home is being
+  // refused too. That is two budgets, not one, and still nothing like 227.
   assert.ok(
-    h.issued.length <= MAX_CONSECUTIVE_REFUSALS,
+    h.issued.some((a) => a.kind === "warp"),
+    "it tried to get the ship home before giving up",
+  );
+  assert.ok(
+    h.issued.length <= MAX_CONSECUTIVE_REFUSALS * 2,
     `it gave up after ${h.issued.length} attempts, not 227`,
   );
+});
+
+test("a refusal storm heads home first, and only stops in space if the way home is refused too", async () => {
+  // Only the DELIVER call is refused; the flight home is not. The bot must not
+  // come to rest in the belt it was refused in.
+  const h = harness({
+    issueThrows: (a) => (a.kind === "unloadOre" ? new Error("CALL_REFUSED: NotEnoughCargoSpace") : null),
+  });
+  h.setObs(calm({ holdEmpty: false }));
+  h.runner.start(script([macroStep("a", "deliver-ore")]));
+
+  let guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 200 && !h.issued.some((a) => a.kind === "warp")) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.ok(h.issued.some((a) => a.kind === "warp"), "the refusal cap sends it home");
+  assert.equal(h.runner.getStatus(), "running", "and it is still flying, not parked");
+
+  // Docked: now it stops, with the refusal as the reason.
+  h.setObs(calm({ holdEmpty: false, docked: true, inSpace: false }));
+  guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 50) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.match(h.progress[h.progress.length - 1]!.pauseReason ?? "", /refusals in a row/);
 });
 
 test("the pause reason survives the decider's cheerful why", async () => {

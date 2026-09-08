@@ -247,7 +247,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         deps.travelHome,
       );
     } catch (error) {
-      pauseWith(`${DECIDE_FAILED} (${String(error)})`);
+      stopOrHeadHome(`${DECIDE_FAILED} (${String(error)})`);
       return;
     }
     memory = result.memory;
@@ -298,7 +298,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
             : snapshot.entities.some((entity) => entity.itemID === targetID);
         const record = ledger.note(key, deps.refusalReason(error), Date.now(), stillOnGrid);
         if (record.count >= MAX_CONSECUTIVE_REFUSALS) {
-          pauseWith(
+          stopOrHeadHome(
             `Stopped after ${record.count} refusals in a row. ${record.words}`,
             result,
           );
@@ -319,6 +319,30 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     emit(toSnapshot(result, "running", ledger.records()));
+  }
+
+  /**
+   * The runner's OWN faults stop the bot too — a decider that threw, an order the
+   * world keeps refusing — and they must not leave the ship parked in space any
+   * more than the decider's faults may (nav/scriptDecide `stopSafely`, same rule
+   * and the same reason: four ships).
+   *
+   * So the first one LATCHES instead of pausing: the loop keeps ticking, the
+   * decider sees the latch and flies the ship home, and the pause happens on
+   * arrival carrying this reason. The flight issues different orders from the
+   * one that was being refused, which is usually the whole problem.
+   *
+   * ⚠ ONLY ONCE. A second fault while already heading home means the way out is
+   * failing too, and that is a real stop — otherwise a ship that cannot fly
+   * anywhere would loop here forever, never pausing and never telling anyone.
+   */
+  function stopOrHeadHome(reason: string, result?: ReturnType<typeof decideScriptAction>): void {
+    if (memory !== null && memory.latched === null) {
+      memory = { ...memory, latched: { interruptID: null, reason } };
+      emit({ ...last, status: "running", phase: "Heading home", why: reason, pauseReason: null });
+      return;
+    }
+    pauseWith(reason, result);
   }
 
   function pauseWith(reason: string, result?: ReturnType<typeof decideScriptAction>): void {
