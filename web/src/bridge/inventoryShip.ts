@@ -81,14 +81,36 @@ function decodeRowFields(fields: Record<string, JsonValue>, volumes: VolumeMap |
   const quantity = toNumber(fields.quantity);
   const stacksize = toNumber(fields.stacksize);
   const typeID = toNumber(fields.typeID);
+  // 1 for an assembled item, whether the wire spells it as a number or a
+  // boolean — boundInventory accepts both shapes for this same field and the
+  // two decoders must not disagree about what a singleton is.
+  const singleton = fields.singleton === true || toNumber(fields.singleton) === 1;
   return {
     itemID: toNumber(fields.itemID),
     typeID,
     groupID: toNumberOrNull(fields.groupID),
     categoryID: toNumberOrNull(fields.categoryID),
     flagID: toNumberOrNull(fields.flagID),
-    quantity: quantity || stacksize,
-    singleton: toNumber(fields.singleton) === 1,
+    // ⚠ AN ASSEMBLED ITEM CROSSES THE WIRE AS `quantity: -1`. That is retail's
+    // MARKER for "one object, not a count" — personalAssets, corpAssets,
+    // contractItems and shipBays each normalise it to 1 — and it is not a
+    // number anything may do arithmetic with. Left raw here, as it was, it fed
+    // a NEGATIVE quantity to every consumer that measures a stack:
+    //
+    //   * `planLootTransfers` starts at `left = row.quantity`, sees -1 <= 0 and
+    //     places the row nowhere. A wreck holding nothing but dropped modules
+    //     therefore planned NO transfers, and the loot path read that as "the
+    //     ship has no room for this can" — reporting "There is no room aboard"
+    //     against a hull whose holds were completely empty, and looting nothing.
+    //   * `moveQuantityFor` asks `unitsThatFit(-1, ...)`, gets 0 back, and
+    //     refuses a hand-drag into a ship bay with that same untrue "no room".
+    //   * `totalVolume` answered MINUS one unit's m3 for the row.
+    //
+    // One object is one. `singleton` is still what the panel reads to caption
+    // such a row "assembled" rather than "1", so this number is never shown for
+    // it — it exists for the arithmetic, and the arithmetic wants a count.
+    quantity: singleton ? 1 : quantity || stacksize,
+    singleton,
     volume: volumeFor(typeID, volumes),
   };
 }

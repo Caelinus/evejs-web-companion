@@ -624,6 +624,91 @@ test("a can that fits nowhere is SAID so, rather than retried in silence", async
   assert.match(refusals[0]!.words, /no room aboard/i);
 });
 
+test("a wreck holding nothing but an ASSEMBLED module is looted, not refused as full", async () => {
+  // ⚠ THE REGRESSION. A dropped module crosses the wire as `quantity: -1` —
+  // retail's marker for "one object", not a count — and `decodeRowFields` used
+  // to keep it. `planLootTransfers` starts at `left = row.quantity`, saw
+  // -1 <= 0, and placed the row nowhere; with no other row in the can that is
+  // nothing planned, which `transferLootedRows` reports as NO_ROOM_ABOARD.
+  //
+  // So a bot flying an empty hull past a wreck full of salvageable modules
+  // looted none of them and told the player, once per can, that there was no
+  // room aboard for it. The hold in this test is 16,000 m3 and untouched.
+  const CONTAINER_ID = 80005;
+  const store = createClientStore();
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: CHARACTER_ID,
+      characterName: "Test",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000000,
+    },
+    station: null,
+  });
+
+  const { fetch, requests } = makeFakeFetch((path, _method, body) => {
+    if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
+    if (path === "/api/bridge/space/snapshot") {
+      return {
+        status: 200,
+        body: spaceBodyWith({
+          itemID: CONTAINER_ID,
+          kind: "wreck",
+          name: "Wreck",
+          ownerID: CHARACTER_ID,
+          radius: 5,
+          position: { x: 1000, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+        }),
+      };
+    }
+    if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
+    if (path === "/api/names") return { status: 200, body: namesBody(body) };
+    if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
+    if (path.startsWith(`/api/bridge/ship/${SHIP_ID}/bays`)) {
+      return { status: 200, body: baysBody(SHIP_ID, ["cargo", "ore"]) };
+    }
+    if (path.startsWith("/api/bridge/inventory/container/")) {
+      return {
+        status: 200,
+        body: containerReads(
+          CONTAINER_ID,
+          // An assembled module, exactly as the wire sends one.
+          [packedRow({ itemID: 90070, typeID: 485, groupID: 55, categoryID: 7, flagID: null, quantity: -1, stacksize: 1, singleton: 1 })],
+          { "485": 5 },
+        ),
+      };
+    }
+    if (path === "/api/bridge/inventory/transfer") {
+      return { status: 200, body: { ok: true, applied: true, moved: [90070], declined: [], declinedSilently: false, notFound: [] } };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.startCustomBot(script({ id: "loot", kind: "macro", macro: "loot-wrecks", args: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  flow.stopCustomBot();
+
+  const transfer = requests.find((r) => r.path === "/api/bridge/inventory/transfer");
+  assert.ok(transfer, "the module was moved into the cargo hold");
+  assert.deepEqual(transfer.body, {
+    itemIDs: [90070],
+    from: { kind: "container", itemID: CONTAINER_ID },
+    to: { kind: "cargo" },
+  });
+  const refusals = store.customBot.get().refusals;
+  assert.equal(
+    refusals.some((entry) => /no room aboard/i.test(entry.words)),
+    false,
+    "and nothing claimed the empty ship was full",
+  );
+});
+
 test("a custom bot's loot-wrecks step dispatches openContainer + transferItems for an owned wreck (closes the pre-existing dispatch-test gap)", async () => {
   const WRECK_ID = 70001;
   const store = createClientStore();

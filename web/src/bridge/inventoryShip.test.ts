@@ -114,6 +114,35 @@ test("decodeInventoryRows falls back to stacksize when quantity is absent", () =
   assert.equal(rows[0]!.quantity, 42);
 });
 
+test("an assembled item counts as ONE, not as the -1 the wire carries", () => {
+  // ⚠ THE BUG THIS PINS. A dropped module in a wreck crosses as `quantity: -1`
+  // — retail's marker for "one object", the same convention personalAssets and
+  // shipBays already normalise. Kept raw, it was a negative quantity fed to
+  // every consumer that measures a stack: `planLootTransfers` saw -1 <= 0 and
+  // placed the row NOWHERE, so a wreck of nothing but modules planned no
+  // transfers and the loot path announced "There is no room aboard" at a hull
+  // with every hold empty.
+  const rows = decodeInventoryRows({
+    type: "list",
+    items: [
+      packedRow({ itemID: 90061, typeID: 485, groupID: 55, categoryID: 7, flagID: null, quantity: -1, stacksize: 1, singleton: 1 }),
+    ],
+  });
+  assert.equal(rows[0]!.quantity, 1, "one object is one, never minus one");
+  assert.equal(rows[0]!.singleton, true, "and it is still flagged assembled");
+});
+
+test("a singleton spelled as a BOOLEAN is still a singleton", () => {
+  // boundInventory accepts 1 and true for this field; the two decoders read the
+  // same wire and must not disagree about what an assembled item is.
+  const rows = decodeInventoryRows({
+    type: "list",
+    items: [packedRow({ itemID: 7, typeID: 485, quantity: -1, singleton: true })],
+  });
+  assert.equal(rows[0]!.quantity, 1);
+  assert.equal(rows[0]!.singleton, true);
+});
+
 test("decodeInventoryRows tolerates malformed input", () => {
   assert.deepEqual(decodeInventoryRows(null), []);
   assert.deepEqual(decodeInventoryRows({ type: "dict", entries: [] } as JsonValue), []);
