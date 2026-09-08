@@ -43,6 +43,7 @@ import type {
   LoopBlock,
   MacroID,
   MacroStep,
+  SquadRoleArg,
 } from "../bots/botScript.ts";
 import { alertSentence, conditionSentence, stepSentence } from "../bots/scriptText.ts";
 import {
@@ -119,6 +120,14 @@ export type ScriptAction =
    * by other pilots running the same bot, possibly in other systems.
    */
   | { readonly kind: "rememberBeltDry"; readonly systemName: string; readonly beltName: string; readonly groupID: number | null }
+  /**
+   * Tell the BFF's SHARED squad board which ship this pilot is on, so the fleet
+   * can concentrate its fire (`targetID` null clears the call). Like
+   * `rememberBeltDry` this is not a ship command at all — it moves nothing and
+   * fires nothing — but it costs a tick like every other action, which is why a
+   * calling block only sends it when its primary CHANGES.
+   */
+  | { readonly kind: "callPrimary"; readonly targetID: number | null }
   /** Move stacks between docked places (hangar / cargo / ore hold), qty = split. */
   | {
       readonly kind: "moveItems";
@@ -356,6 +365,26 @@ export function describeBoard(board: ScriptBoard): string | null {
  * flow reads agent/journal/cargo only when a mission block is active. Null when
  * the program is done or heading home (only the ship reads are needed then).
  */
+/**
+ * Whether the NEXT tick's block flies with the fleet — the second half of the
+ * observe hint, so the squad board is read only for a block that asked to
+ * follow one. "off" for every other block, and for no block at all: a bot that
+ * never mentions the fleet must not pay a board read per tick, and one that
+ * only CALLS does not need to read what it is about to overwrite.
+ */
+export function activeSquadRole(script: BotScript, mem: ScriptMemory): SquadRoleArg {
+  if (
+    mem.position.kind === "done" ||
+    mem.position.kind === "branch-enter" ||
+    mem.position.kind === "loop-branch-enter" ||
+    mem.latched !== null
+  ) {
+    return "off";
+  }
+  const arg = activeStep(script, mem.position)?.args["squad"];
+  return arg !== undefined && arg.kind === "squadRole" ? arg.role : "off";
+}
+
 export function activeMacroID(script: BotScript, mem: ScriptMemory): string | null {
   if (
     mem.position.kind === "done" ||

@@ -206,3 +206,29 @@ test("a combat step at the default ladder says nothing about order", () => {
   };
   assert.doesNotMatch(stepSentence(emptied), /first/);
 });
+
+test("a combat step flying with the fleet says which part it plays", () => {
+  const calling: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { squad: { kind: "squadRole", role: "call" } },
+  };
+  assert.match(stepSentence(calling), /calling the primary for the fleet/);
+
+  const following: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "attack-player",
+    args: { squad: { kind: "squadRole", role: "follow" } },
+  };
+  assert.match(stepSentence(following), /on the fleet's primary/);
+
+  const alone: MacroStep = {
+    id: "s3",
+    kind: "macro",
+    macro: "hunt-player",
+    args: { squad: { kind: "squadRole", role: "off" } },
+  };
+  assert.doesNotMatch(stepSentence(alone), /fleet/, "flying alone is the default and says nothing");
+});

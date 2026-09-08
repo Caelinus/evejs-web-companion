@@ -13,6 +13,7 @@ import {
   MAX_STEP_TICKS,
   decideScriptAction,
   initialMemory,
+  activeSquadRole,
   type HomeTravelDecider,
   type MacroDecider,
   type MacroMemory,
@@ -778,4 +779,28 @@ test("alert: a dock-and-pause row still fires with a spent alert row sitting abo
   assert.equal(results[0]?.action.kind, "alert");
   assert.equal(results[1]?.interruptID, "floor", "the dock-and-pause row is reached");
   assert.equal(results[2]?.status, "paused");
+});
+
+// ── The observe hint's fleet half ────────────────────────────────────────────
+//
+// A board read per tick is only paid for by a block that asked to FOLLOW one, so
+// this is the gate that keeps a mining bot from calling the squad board every
+// two seconds.
+
+test("activeSquadRole reads the active step's role, and is 'off' for everything else", () => {
+  const following: MacroStep = {
+    ...macroStep("s1", "fight-the-rats"),
+    args: { squad: { kind: "squadRole", role: "follow" } },
+  };
+  const plain = macroStep("s2", "mine-at-belt");
+
+  const withFollow = script([following]);
+  assert.equal(activeSquadRole(withFollow, initialMemory(withFollow)), "follow");
+
+  const withoutRole = script([plain]);
+  assert.equal(activeSquadRole(withoutRole, initialMemory(withoutRole)), "off", "a block with no squad arg pays nothing");
+
+  // A latched run (flying home to stop) consults no block at all.
+  const latched: ScriptMemory = { ...initialMemory(withFollow), latched: { interruptID: null, reason: "stopping" } };
+  assert.equal(activeSquadRole(withFollow, latched), "off");
 });

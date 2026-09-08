@@ -88,6 +88,7 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   { macro: "mine-at-belt", key: "pick", expect: /the biggest rock first/, why: "rock-pick-select" },
   { macro: "mine-at-belt", key: "ores", expect: /search ore by name/, why: "ore-list-picker" },
   { macro: "fight-the-rats", key: "targets", expect: /tacklers/, why: "target-list-picker" },
+  { macro: "fight-the-rats", key: "squad", expect: /shoot what the fleet calls/, why: "squad-role-select" },
   { macro: "request-mission", key: "agent", expect: /use the agent your bot finds/, why: "agent-picker" },
   { macro: "find-distribution-agent", key: "corporation", expect: /placeholder="any corporation"/, why: "corp-picker" },
   { macro: "refit-ship", key: "fitting", expect: /Test Fitting/, why: "fitting-picker" },

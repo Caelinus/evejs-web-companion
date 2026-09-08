@@ -2046,3 +2046,103 @@ test("attack players: the ladder ranks player hulls too", () => {
   const tick = attack(step, obs({ snapshot: snapshot([brick, tackle]), weaponModuleIDs: [500], targetGroupNames: GRID_GROUPS }), {}, {});
   assert.ok(tick.action.kind === "lock" && tick.action.targetID === 7002);
 });
+
+// ── flying with the fleet (the shared squad board) ───────────────────────────
+//
+// `squad: follow` shoots what the fleet called WHEN that ship is here; `squad:
+// call` says what this pilot is on, once per primary. Everything else is the
+// same engage, so these assert the pick and the one extra action.
+
+function fightStep(squad: "off" | "call" | "follow"): MacroStep {
+  return {
+    id: "f",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: squad === "off" ? {} : { squad: { kind: "squadRole", role: squad } },
+  };
+}
+
+const RAT_NEAR = entity({ itemID: 6661, typeID: BRICK_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 2000, y: 0, z: 0 } });
+const RAT_FAR = entity({ itemID: 6662, typeID: BRICK_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 40000, y: 0, z: 0 } });
+
+test("follow: the fleet's call outranks this pilot's own pick", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({ snapshot: snapshot([RAT_NEAR, RAT_FAR]), weaponModuleIDs: [500], squadPrimaryTargetID: 6662 }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662);
+  assert.match(tick.why, /fleet called/i);
+});
+
+test("follow: a call for a ship that is NOT here changes nothing", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const elsewhere = fight(
+    fightStep("follow"),
+    obs({ snapshot: snapshot([RAT_NEAR, RAT_FAR]), weaponModuleIDs: [500], squadPrimaryTargetID: 999999 }),
+    {},
+    {},
+  );
+  assert.ok(elsewhere.action.kind === "lock" && elsewhere.action.targetID === 6661, "its own ladder, unchanged");
+
+  // No call at all reads the same way — a quiet fleet never stalls a follower.
+  const quiet = fight(fightStep("follow"), obs({ snapshot: snapshot([RAT_NEAR, RAT_FAR]), weaponModuleIDs: [500] }), {}, {});
+  assert.ok(quiet.action.kind === "lock" && quiet.action.targetID === 6661);
+});
+
+test("follow: a NEW call mid-fight switches the primary", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const switched = fight(
+    fightStep("follow"),
+    obs({ snapshot: snapshot([RAT_NEAR, RAT_FAR]), weaponModuleIDs: [500], lockedTargetIDs: [6661], squadPrimaryTargetID: 6662 }),
+    { targetID: 6661, lockIssued: true, waited: 0, dronesOn: 6661 },
+    {},
+  );
+  assert.ok(switched.action.kind === "lock" && switched.action.targetID === 6662);
+});
+
+test("call: the fleet is told once per primary, then the fight goes on", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const state = obs({ snapshot: snapshot([RAT_NEAR]), weaponModuleIDs: [500], lockedTargetIDs: [6661] });
+
+  const called = fight(fightStep("call"), state, { targetID: 6661, lockIssued: true, waited: 0, dronesOn: null }, {});
+  assert.ok(called.action.kind === "callPrimary" && called.action.targetID === 6661);
+  assert.equal(called.nextMem["calledTargetID"], 6661);
+
+  // Next tick, with the call remembered, the guns come up as usual.
+  const shooting = fight(fightStep("call"), state, { ...called.nextMem }, {});
+  assert.ok(shooting.action.kind === "activate" && shooting.action.targetID === 6661);
+});
+
+test("call: the call is stood down when the grid clears", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const cleared = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: 6661 }, {});
+  assert.ok(cleared.action.kind === "callPrimary" && cleared.action.targetID === null);
+
+  // …and once it is down, the block finishes as it always did.
+  const done = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: null }, {});
+  assert.equal(done.outcome.kind, "done");
+});
+
+test("off: a block that never mentions the fleet never calls anything", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const state = obs({ snapshot: snapshot([RAT_NEAR]), weaponModuleIDs: [500], lockedTargetIDs: [6661], squadPrimaryTargetID: 6662 });
+  const tick = fight(fightStep("off"), state, { targetID: 6661, lockIssued: true, waited: 0, dronesOn: null }, {});
+  assert.notEqual(tick.action.kind, "callPrimary");
+  assert.ok(tick.action.kind === "activate" && tick.action.targetID === 6661, "and a call it is not following is ignored");
+});
+
+test("attack players: follow and call work the same way on a camp", () => {
+  const attack = SCRIPT_MACROS["attack-player"]!;
+  const one = entity({ itemID: 7001, typeID: BRICK_TYPE, kind: "ship", characterID: 90000001, position: { x: 3000, y: 0, z: 0 } });
+  const two = entity({ itemID: 7002, typeID: BRICK_TYPE, kind: "ship", characterID: 90000002, position: { x: 30000, y: 0, z: 0 } });
+  const follow: MacroStep = { id: "a", kind: "macro", macro: "attack-player", args: { squad: { kind: "squadRole", role: "follow" } } };
+  const tick = attack(follow, obs({ snapshot: snapshot([one, two]), weaponModuleIDs: [500], squadPrimaryTargetID: 7002 }), {}, {});
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 7002);
+
+  const call: MacroStep = { id: "a", kind: "macro", macro: "attack-player", args: { squad: { kind: "squadRole", role: "call" } } };
+  const empty = attack(call, obs({ snapshot: snapshot([]), weaponModuleIDs: [500] }), { calledTargetID: 7001 }, {});
+  assert.ok(empty.action.kind === "callPrimary" && empty.action.targetID === null, "an empty camp stands its call down");
+});

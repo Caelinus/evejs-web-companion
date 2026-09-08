@@ -46,6 +46,7 @@ import {
   ITEM_PLACES,
   ROCK_PICKS,
   TARGET_CLASS_ARGS,
+  SQUAD_ROLE_ARGS,
   type ItemMatchArg,
   MAX_BAY_LIST,
   MAX_ITEM_LIST,
@@ -59,6 +60,7 @@ import {
   type Arg,
   type RockPick,
   type TargetClassArg,
+  type SquadRoleArg,
   type OreFamilyArg,
   type BoardSlot,
   type BeltArg,
@@ -598,6 +600,13 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       ctx.warn(WARN.truncatedOreList(MAX_ORE_LIST));
     }
     return { kind: "oreList", ores: ores.slice(0, MAX_ORE_LIST) };
+  }
+  if (expected === "squadRole") {
+    const role = obj["role"];
+    if (typeof role !== "string" || !SQUAD_ROLE_ARGS.includes(role as SquadRoleArg)) {
+      refuse(SAY.badArg(label));
+    }
+    return { kind: "squadRole", role: role as SquadRoleArg };
   }
   if (expected === "targetList") {
     // A CLOSED VOCABULARY, checked here rather than trusted — the same rule as
@@ -1216,6 +1225,8 @@ function orderArg(arg: Arg): unknown {
       };
     case "targetList":
       return { kind: "targetList", classes: [...arg.classes] };
+    case "squadRole":
+      return { kind: "squadRole", role: arg.role };
     case "bayList":
       return { kind: "bayList", bays: [...arg.bays] };
     case "itemList":

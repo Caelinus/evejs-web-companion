@@ -18,7 +18,7 @@ import type {
 } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
-import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
+import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
@@ -99,6 +99,65 @@ function targetPriorityOf(step: MacroStep): readonly TargetClass[] {
 function targetGroupOf(obs: ScriptObservation): (typeID: number) => string | null {
   const groups = obs.targetGroupNames ?? null;
   return (typeID: number): string | null => (groups === null ? null : (groups[typeID] ?? null));
+}
+
+// ── Flying with the fleet (the shared squad board) ───────────────────────────
+//
+// Three small helpers, shared by every combat block so calling and following
+// behave identically wherever a fight happens.
+//
+// ⚠ A CALL COSTS A TICK, SO IT IS SENT ONLY WHEN THE PRIMARY CHANGES. One
+// action per tick is the whole engine: a block that re-called every tick would
+// never fire a gun. `calledTargetID` in the step's memory is what makes it once
+// per target, and it is dropped with the rest of that memory whenever the
+// primary is re-picked — a re-call then just refreshes the standing one, which
+// is exactly what a still-shooting caller wants.
+
+/** What this step does about the fleet's call: call one, follow one, or neither. */
+function squadRoleOf(step: MacroStep): SquadRoleArg {
+  const arg = step.args["squad"];
+  return arg !== undefined && arg.kind === "squadRole" ? arg.role : "off";
+}
+
+/**
+ * The called ship, IF it is one of the rows this block could shoot right now.
+ * A call for something that is not on this pilot's grid (or is out of its
+ * targeting range — the rows are already filtered to reach) is not a target for
+ * this pilot, so it answers null and the block picks for itself. That is what
+ * keeps a follower flying while the FC is two systems away.
+ */
+function calledOnGrid<T>(
+  obs: ScriptObservation,
+  rows: readonly T[],
+  itemIDOf: (row: T) => number,
+): T | null {
+  const called = obs.squadPrimaryTargetID ?? null;
+  if (called === null) {
+    return null;
+  }
+  return rows.find((row) => itemIDOf(row) === called) ?? null;
+}
+
+/** Tell the fleet what this pilot is on — once per primary. Null when there is nothing to say. */
+function callPrimary(
+  role: SquadRoleArg,
+  mem: MacroMemory,
+  targetID: number,
+  why: string,
+  phase: string,
+): MacroTick | null {
+  if (role !== "call" || num(mem, "calledTargetID") === targetID) {
+    return null;
+  }
+  return tick({ kind: "callPrimary", targetID }, why, phase, ACTING, true, { ...mem, calledTargetID: targetID });
+}
+
+/** Drop the standing call when there is nothing left to shoot. Null when none stands. */
+function standCallDown(role: SquadRoleArg, mem: MacroMemory, why: string, phase: string): MacroTick | null {
+  if (role !== "call" || num(mem, "calledTargetID") === null) {
+    return null;
+  }
+  return tick({ kind: "callPrimary", targetID: null }, why, phase, ACTING, true, { ...mem, calledTargetID: null });
 }
 
 /** Nearest entity in a set, by measured surface distance (unknown sorts last). */
@@ -1885,7 +1944,16 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
   const hostiles = hostilesInReach(obs, snapshot, origin);
   const roster = droneRoster(obs, "combat");
 
+  const role = squadRoleOf(step);
+
   if (hostiles.length === 0) {
+    // Stand the fleet's call down BEFORE leaving: a call outlives the ship it
+    // named for as long as its ttl, and a follower obeying one is a follower
+    // holding its guns on a wreck.
+    const standDown = standCallDown(role, mem, "Grid clear — standing the fleet's call down.", "Fighting");
+    if (standDown !== null) {
+      return standDown;
+    }
     if (roster.out.length > 0) {
       return tick({ kind: "recallDrones", droneIDs: roster.out }, "Grid clear — calling the drones home.", "Fighting", ACTING);
     }
@@ -1914,30 +1982,44 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
     });
   }
 
-  // The primary: the hostile the ladder ranks first (nearest inside a class —
-  // hostileRows is nearest-first, and the pick keeps that order on a tie),
-  // remembered so fire is CONCENTRATED — spread damage kills nothing.
+  // The primary: what the FLEET called when this block follows one and that ship
+  // is here, otherwise the hostile the ladder ranks first (nearest inside a
+  // class — hostileRows is nearest-first, and the pick keeps that order on a
+  // tie). Remembered either way so fire is CONCENTRATED — spread damage kills
+  // nothing, which is the whole reason both halves of this exist.
+  const called = role === "follow" ? calledOnGrid(obs, hostiles, (row) => row.itemID) : null;
   let targetID = num(mem, "targetID");
   if (targetID !== null && !hostiles.some((h) => h.itemID === targetID)) {
     targetID = null; // it died — next
   }
+  if (called !== null && targetID !== called.itemID) {
+    // The fleet called something else. Switching mid-fight is the POINT of
+    // following: an FC re-calls when the first primary stops being the problem.
+    targetID = null;
+  }
   if (targetID === null) {
     const primary =
+      called ??
       pickPrimary(
         hostiles,
         (row) => row.typeID,
         (row) => row.distance,
         targetGroupOf(obs),
         targetPriorityOf(step),
-      ) ?? hostiles[0]!;
+      ) ??
+      hostiles[0]!;
     return tick(
       { kind: "lock", targetID: primary.itemID },
-      "Locking the nearest pirate.",
+      called !== null ? "Locking what the fleet called." : "Locking the pirate at the top of the list.",
       "Fighting",
       ACTING,
       true,
       { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
     );
+  }
+  const call = callPrimary(role, mem, targetID, "Calling it for the fleet.", "Fighting");
+  if (call !== null) {
+    return call;
   }
   const locked = (obs.lockedTargetIDs ?? []).includes(targetID);
   if (!locked) {

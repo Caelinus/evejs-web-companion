@@ -6252,6 +6252,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
         const targetGroupNames = await classifyTargetGroups(snapshot, origin, macro, ship?.itemID ?? null);
+        // The fleet's called primary, for a block that asked to follow one. Every
+        // failure — no fleet, no call, a stale call, a refused read — lands as
+        // null, which reads as "pick for yourself" rather than as a fault: a
+        // follower whose fleet has gone quiet is still a working bot.
+        let squadPrimaryTargetID: ScriptObservation["squadPrimaryTargetID"] = null;
+        if (hint.squadRole === "follow") {
+          try {
+            squadPrimaryTargetID = (await api.readSquadPrimary(callOptions))?.targetID ?? null;
+          } catch {
+            squadPrimaryTargetID = null;
+          }
+        }
         const boardAgentID =
           typeof hint.board["agentID"] === "number" ? (hint.board["agentID"] as number) : null;
         let conversation: ScriptObservation["conversation"] = null;
@@ -6649,6 +6661,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           inFleet,
           fleetMemberCharacterIDs,
           targetGroupNames,
+          squadPrimaryTargetID,
           hardenerModuleIDs: capabilities.defense.hardeners,
           weaponModuleIDs: capabilities.defense.weapons,
           maxTargetRangeM: capabilities.maxTargetRangeM,
@@ -6737,6 +6750,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 throw new Error("Nothing moved to your hangar, and the server gave no reason.");
               }
             }
+            return;
+          case "callPrimary":
+            await api.callSquadPrimary(action.targetID, callOptions);
             return;
           case "rememberBeltDry":
             await api.rememberBeltDry(action.systemName, action.beltName, action.groupID, callOptions);

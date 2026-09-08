@@ -812,3 +812,30 @@ test("a target priority list that is not a list of words is refused", () => {
   assert.match(mustRefuse(decodeScriptValue(withTargetList("tackle"))), /not set up correctly/i);
   assert.match(mustRefuse(decodeScriptValue(withTargetList([{ cls: "tackle" }]))), /not set up correctly/i);
 });
+
+// ─── Flying with the fleet (a closed vocabulary of three) ────────────────────
+
+function withSquadRole(role: unknown): any {
+  const doc = clone();
+  doc.program.push({
+    id: "s9",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { squad: { kind: "squadRole", role } },
+  });
+  return doc;
+}
+
+test("a fleet-fire role round-trips through encode/decode with no warnings", () => {
+  for (const role of ["off", "call", "follow"]) {
+    const doc = withSquadRole(role);
+    const { doc: round, warnings } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+    assert.deepStrictEqual(round, doc, role);
+    assert.deepStrictEqual([...warnings], []);
+  }
+});
+
+test("a fleet-fire role this app does not know refuses the file", () => {
+  assert.match(mustRefuse(decodeScriptValue(withSquadRole("boss"))), /not set up correctly/i);
+  assert.match(mustRefuse(decodeScriptValue(withSquadRole(2))), /not set up correctly/i);
+});

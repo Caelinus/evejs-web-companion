@@ -251,6 +251,8 @@ export type Arg =
    * left off ranks last, never unshootable (nav/targetPriority.ts).
    */
   | { readonly kind: "targetList"; readonly classes: readonly TargetClassArg[] }
+  /** Whether this block calls the fleet's primary, follows it, or neither. */
+  | { readonly kind: "squadRole"; readonly role: SquadRoleArg }
   /**
    * Bays the block must LEAVE ALONE. Empty or absent = leave nothing alone,
    * which is the shipped behaviour.
@@ -346,6 +348,30 @@ export const TARGET_CLASS_ARGS: readonly TargetClassArg[] = Object.freeze<Target
 
 /** Four classes exist, so a list longer than four is a repeat, not a choice. */
 export const MAX_TARGET_LIST = 4;
+
+/**
+ * What a combat block does about the FLEET's call — the squad board (the BFF's
+ * shared, in-process call board, src/squadBoard.js).
+ *
+ *   • "off"    — the shipped behaviour, and still the default: this pilot picks
+ *                for itself and says nothing.
+ *   • "call"   — pick as normal, and TELL the fleet what this pilot is on, so
+ *                the followers converge on it. Costs one tick per new primary.
+ *   • "follow" — shoot what the fleet has called, whenever that ship is on this
+ *                pilot's own grid and in reach; otherwise pick as normal. A
+ *                follower is never stuck: no call, or a call for a ship that is
+ *                not here, is simply its own ladder again.
+ *
+ * A fleet with nobody calling is every pilot on "off" with extra steps, and a
+ * fleet where everyone calls is last-call-wins — both are the player's to
+ * arrange, and neither can wedge a bot.
+ */
+export type SquadRoleArg = "off" | "call" | "follow";
+export const SQUAD_ROLE_ARGS: readonly SquadRoleArg[] = Object.freeze<SquadRoleArg[]>([
+  "off",
+  "call",
+  "follow",
+]);
 
 // ─── Conditions ──────────────────────────────────────────────────────────────
 

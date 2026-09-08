@@ -1706,6 +1706,42 @@ export async function rememberBeltDry(
   await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
 }
 
+/** The fleet's standing call, from /api/bots/squad-board. */
+export interface SquadPrimary {
+  readonly targetID: number;
+  readonly calledByCharacterID: number | null;
+}
+
+/**
+ * The primary this character's FLEET has called, or null when nobody has called
+ * anything (or the call has gone stale). BFF-local, shared by every pilot in
+ * that fleet — see src/squadBoard.js.
+ *
+ * ⚠ THE FLEET IS THE SERVER'S ANSWER, NOT A PARAMETER. The route keys on the
+ * fleet the BFF resolved for this session, so there is nothing to pass and no
+ * way to read another fleet's call. A session whose fleet is unknown is refused
+ * (409 FLEET_UNKNOWN), which the caller reads as "no call" — never as an error
+ * worth stopping a bot for.
+ */
+export async function readSquadPrimary(options: ApiOptions = {}): Promise<SquadPrimary | null> {
+  const data = await getJson("/api/bots/squad-board", options);
+  const primary = data.primary;
+  if (typeof primary !== "object" || primary === null || Array.isArray(primary)) {
+    return null;
+  }
+  const row = primary as Record<string, JsonValue>;
+  const targetID = asNumberOrNull(row.targetID);
+  return targetID === null ? null : { targetID, calledByCharacterID: asNumberOrNull(row.calledByCharacterID) };
+}
+
+/** Call a primary for this character's fleet, or clear the call with null. */
+export async function callSquadPrimary(
+  targetID: number | null,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/bots/squad-board", { targetID }, options);
+}
+
 // --- R4 Agents & Missions (agentMgr bridge) --------------------------------
 // The BFF holds the bound agent handle; the browser addresses agents by game ID
 // and decodes the raw retail-shaped conversation/briefing/journal results with

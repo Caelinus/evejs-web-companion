@@ -181,6 +181,10 @@
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "rockPick" ? arg.pick : "nearest";
   }
+  function squadRoleValue(step: MacroStep, key: string): string {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "squadRole" ? arg.role : "off";
+  }
   function oreListValue(step: MacroStep, key: string): readonly { groupID: number; name: string }[] {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "oreList" ? arg.ores : [];
@@ -341,6 +345,11 @@
     // Back to the default: drop the argument rather than storing "nearest",
     // so an untouched step exports exactly as it was imported.
     onArg(key, raw === "biggest" ? { kind: "rockPick", pick: "biggest" } : undefined);
+  }
+  function setSquadRole(key: string, raw: string): void {
+    // "off" is the default, so it is DROPPED rather than stored — an untouched
+    // step exports exactly as it was imported, same rule as the rock pick.
+    onArg(key, raw === "call" || raw === "follow" ? { kind: "squadRole", role: raw } : undefined);
   }
   function setWorldRef(arg: ArgDescriptor, ref: WorldRef): void {
     onArg(arg.key, arg.kind === "destination" ? { kind: "destination", ref } : { kind: "station", ref });
@@ -807,6 +816,12 @@
         <select id={fieldId} value={rockPickValue(step, arg.key)} onchange={(e) => setRockPick(arg.key, e.currentTarget.value)}>
           <option value="nearest">the nearest rock first</option>
           <option value="biggest">the biggest rock first</option>
+        </select>
+      {:else if arg.widget === "squad-role-select"}
+        <select id={fieldId} value={squadRoleValue(step, arg.key)} onchange={(e) => setSquadRole(arg.key, e.currentTarget.value)}>
+          <option value="off">pick its own target</option>
+          <option value="call">call the primary for the fleet</option>
+          <option value="follow">shoot what the fleet calls</option>
         </select>
       {:else if arg.widget === "corp-picker"}
         <input

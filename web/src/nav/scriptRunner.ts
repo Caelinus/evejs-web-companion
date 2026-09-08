@@ -18,10 +18,11 @@
 //   • Session loss is the one error allowed to end the run; any other failed read
 //     becomes a wait, never a confident empty.
 
-import type { BotScript } from "../bots/botScript.ts";
+import type { BotScript, SquadRoleArg } from "../bots/botScript.ts";
 import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
+  activeSquadRole,
   decideScriptAction,
   describeBoard,
   initialMemory,
@@ -49,6 +50,8 @@ import {
  */
 export interface ObserveHint {
   readonly activeMacro: string | null;
+  /** Whether that block follows the fleet's called primary (see activeSquadRole). */
+  readonly squadRole: SquadRoleArg;
   readonly board: ScriptBoard;
 }
 
@@ -217,7 +220,11 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
     let obs: ScriptObservation;
     try {
-      obs = await deps.observe({ activeMacro: activeMacroID(script, memory), board: memory.board });
+      obs = await deps.observe({
+        activeMacro: activeMacroID(script, memory),
+        squadRole: activeSquadRole(script, memory),
+        board: memory.board,
+      });
     } catch (error) {
       if (deps.isSessionLost(error)) {
         setError(SESSION_LOST);
