@@ -764,3 +764,51 @@ test("a malformed ore priority list entry refuses the whole document", () => {
   loopE.body[0].args["ores"] = { kind: "oreList", ores: [{ groupID: 462, name: 123 }] };
   assert.equal(decodeScriptValue(badName).ok, false, "a non-string name must refuse");
 });
+
+// ─── Target priority (a ranking, over a closed vocabulary) ───────────────────
+
+function withTargetList(classes: unknown): any {
+  const doc = clone();
+  doc.program.push({
+    id: "s9",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes } },
+  });
+  return doc;
+}
+
+function targetsOf(doc: BotScript): unknown {
+  const step = doc.program[doc.program.length - 1];
+  if (step === undefined || step.kind !== "macro") throw new Error("fixture: last node is not a macro");
+  return step.args["targets"];
+}
+
+test("a target priority list round-trips through encode/decode with no warnings", () => {
+  const doc = withTargetList(["tackle", "logi"]) as BotScript;
+  const { doc: round, warnings } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+  assert.deepStrictEqual(round, doc);
+  assert.deepStrictEqual([...warnings], []);
+});
+
+test("a class this app does not know is dropped, with a spoken warning", () => {
+  const { doc, warnings } = mustAccept(decodeScriptValue(withTargetList(["tackle", "capitals", "logi"])));
+  assert.deepStrictEqual(targetsOf(doc), { kind: "targetList", classes: ["tackle", "logi"] });
+  assert.ok(warnings.some((w) => /kinds of target/i.test(w)), warnings.join(" | "));
+});
+
+test("a class named twice is one rung, not two", () => {
+  const { doc, warnings } = mustAccept(decodeScriptValue(withTargetList(["tackle", "tackle", "other"])));
+  assert.deepStrictEqual(targetsOf(doc), { kind: "targetList", classes: ["tackle", "other"] });
+  assert.deepStrictEqual([...warnings], [], "a repeat is tidied silently — nothing was lost");
+});
+
+test("an empty target priority list is valid (the shipped ladder)", () => {
+  const { doc } = mustAccept(decodeScriptValue(withTargetList([])));
+  assert.deepStrictEqual(targetsOf(doc), { kind: "targetList", classes: [] });
+});
+
+test("a target priority list that is not a list of words is refused", () => {
+  assert.match(mustRefuse(decodeScriptValue(withTargetList("tackle"))), /not set up correctly/i);
+  assert.match(mustRefuse(decodeScriptValue(withTargetList([{ cls: "tackle" }]))), /not set up correctly/i);
+});

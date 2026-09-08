@@ -45,10 +45,12 @@ import {
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
   ROCK_PICKS,
+  TARGET_CLASS_ARGS,
   type ItemMatchArg,
   MAX_BAY_LIST,
   MAX_ITEM_LIST,
   MAX_ORE_LIST,
+  MAX_TARGET_LIST,
   SCRIPT_FORMAT,
   SCRIPT_VERSION,
   conditionAllowedAt,
@@ -56,6 +58,7 @@ import {
   countProgramNode,
   type Arg,
   type RockPick,
+  type TargetClassArg,
   type OreFamilyArg,
   type BoardSlot,
   type BeltArg,
@@ -174,6 +177,7 @@ const WARN = {
   reassignedIds: "Renamed some step handles that were missing or repeated.",
   droppedDuplicateOres: "Removed repeated entries from an ore priority list.",
   droppedUnknownBays: "Removed bays this app does not know from a step's leave-alone list.",
+  droppedUnknownTargets: "Removed kinds of target this app does not know from a step's priority list.",
   truncatedOreList: (max: number): string => `An ore priority list was cut down to ${max} entries.`,
 } as const;
 
@@ -594,6 +598,33 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       ctx.warn(WARN.truncatedOreList(MAX_ORE_LIST));
     }
     return { kind: "oreList", ores: ores.slice(0, MAX_ORE_LIST) };
+  }
+  if (expected === "targetList") {
+    // A CLOSED VOCABULARY, checked here rather than trusted — the same rule as
+    // the bay list below. An unknown class is dropped rather than carried into
+    // the runner, which would rank it "unlisted" and silently change the
+    // ordering the player thought they saved. Duplicates are dropped too: a
+    // class twice in one ladder is a second rung that can never be reached.
+    const arr = asArray(obj["classes"], SAY.badArg(label));
+    const seen = new Set<string>();
+    const classes: TargetClassArg[] = [];
+    let droppedUnknown = false;
+    for (const item of arr) {
+      const key = readText(item, { min: 1, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+      if (!TARGET_CLASS_ARGS.includes(key as TargetClassArg)) {
+        droppedUnknown = true;
+        continue;
+      }
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      classes.push(key as TargetClassArg);
+    }
+    if (droppedUnknown) {
+      ctx.warn(WARN.droppedUnknownTargets);
+    }
+    return { kind: "targetList", classes: classes.slice(0, MAX_TARGET_LIST) };
   }
   if (expected === "bayList") {
     // A CLOSED VOCABULARY, checked here rather than trusted. Bay keys are the
@@ -1183,6 +1214,8 @@ function orderArg(arg: Arg): unknown {
         kind: "oreList",
         ores: arg.ores.map((ore) => ({ groupID: ore.groupID, name: ore.name })),
       };
+    case "targetList":
+      return { kind: "targetList", classes: [...arg.classes] };
     case "bayList":
       return { kind: "bayList", bays: [...arg.bays] };
     case "itemList":

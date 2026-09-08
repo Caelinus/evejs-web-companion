@@ -113,6 +113,20 @@ export interface ScriptObservation {
   readonly salvageDroneIDs?: readonly number[] | null;
   /** Bay stacks whose type or group could not be read this tick — in no role. */
   readonly unclassifiedDroneBayItemIDs?: readonly number[] | null;
+  /**
+   * The game's own GROUP NAME per ship type on this grid, for the combat blocks'
+   * target priority (see nav/targetPriority.ts) — the same resolve-then-judge
+   * pass the drone roles above make, over hostiles and other players instead of
+   * drones. Keyed by typeID, because a group belongs to a type and not to a
+   * hull sitting in space.
+   *
+   * A type missing from the map, or carrying null, is one whose group has not
+   * resolved: it is ranked with "everything else" rather than guessed into a
+   * class, and it is never dropped from the fight. Absent entirely (the whole
+   * field) means no read was made this tick, which is the same thing — the
+   * shipped ladder simply lands on nearest-first, exactly as before.
+   */
+  readonly targetGroupNames?: Readonly<Record<number, string | null>> | null;
   /** Fitted mining-module ids, refreshed when the active hull or fit changes. */
   readonly miningModuleIDs?: readonly number[];
   /** Fitted salvager ids, refreshed when the active hull or fit changes. */

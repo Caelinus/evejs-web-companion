@@ -33,6 +33,8 @@
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
+    TARGET_CLASS_ARGS,
+    type TargetClassArg,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
   import {
@@ -53,7 +55,7 @@
     WATCH_CONDITION_KINDS,
   } from "../bots/editorOptions.ts";
   import { MACRO_CATALOG_LIST, macroEntry } from "../bots/macroCatalogView.ts";
-  import { interruptSentence } from "../bots/scriptText.ts";
+  import { interruptSentence, targetClassWord } from "../bots/scriptText.ts";
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
   import StationPicker from "./StationPicker.svelte";
@@ -379,6 +381,30 @@
     // so an untouched — or fully cleared — step exports exactly as imported.
     onArg(key, ores.length === 0 ? undefined : { kind: "oreList", ores });
   }
+  // ── Target priority: an ORDERED pick over a fixed four-word vocabulary, so
+  // there is nothing to search — the classes not yet in the ladder are offered
+  // as buttons, and the ones in it are ordered exactly like the ore list.
+  function targetListValue(step: MacroStep, key: string): readonly TargetClassArg[] {
+    const arg = step.args[key];
+    return arg !== undefined && arg.kind === "targetList" ? arg.classes : [];
+  }
+  function addTargetClass(key: string, chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    if (chosen.includes(cls)) return;
+    onArg(key, { kind: "targetList", classes: [...chosen, cls] });
+  }
+  function removeTargetClass(key: string, chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    const classes = chosen.filter((c) => c !== cls);
+    // An emptied ladder is DROPPED rather than saved empty — the step goes back
+    // to the shipped order, which is what clearing the picker asks for.
+    onArg(key, classes.length === 0 ? undefined : { kind: "targetList", classes });
+  }
+  function moveTargetClass(key: string, chosen: readonly TargetClassArg[], index: number, delta: -1 | 1): void {
+    const target = index + delta;
+    if (target < 0 || target >= chosen.length) return;
+    const classes = [...chosen];
+    [classes[index], classes[target]] = [classes[target], classes[index]];
+    onArg(key, { kind: "targetList", classes });
+  }
   function moveOre(key: string, chosen: readonly { groupID: number; name: string }[], index: number, delta: -1 | 1): void {
     const target = index + delta;
     if (target < 0 || target >= chosen.length) return;
@@ -650,6 +676,58 @@
       {/if}
       <span class="inspector-suffix">
         First is mined first. Every grade of an ore counts; richer grades are mined before poorer ones.
+      </span>
+    </div>
+  {:else if arg.widget === "target-list-picker"}
+    {@const chosenTargets = targetListValue(step, arg.key)}
+    {@const offered = TARGET_CLASS_ARGS.filter((cls) => !chosenTargets.includes(cls))}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> — optional</span>{/if}
+      </span>
+      {#if offered.length > 0}
+        <ul class="market-picker">
+          {#each offered as cls (cls)}
+            <li>
+              <button type="button" class="pick-row" onclick={() => addTargetClass(arg.key, chosenTargets, cls)}>
+                <span class="pick-main"><span class="pick-name">{targetClassWord(cls)}</span></span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if chosenTargets.length > 0}
+        <ol class="ore-priority-list">
+          {#each chosenTargets as cls, index (cls)}
+            <li>
+              <span class="ore-priority-rank">{index + 1}.</span>
+              <span class="ore-priority-name">{targetClassWord(cls)}</span>
+              <button
+                type="button"
+                class="minor"
+                disabled={index === 0}
+                onclick={() => moveTargetClass(arg.key, chosenTargets, index, -1)}
+              >
+                Move up
+              </button>
+              <button
+                type="button"
+                class="minor"
+                disabled={index === chosenTargets.length - 1}
+                onclick={() => moveTargetClass(arg.key, chosenTargets, index, 1)}
+              >
+                Move down
+              </button>
+              <button type="button" class="danger" onclick={() => removeTargetClass(arg.key, chosenTargets, cls)}>
+                Remove
+              </button>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+      <span class="inspector-suffix">
+        First is shot first; the nearest one wins inside a group. Anything you leave out is still
+        shot, just last. Left empty: tacklers, then jammers, then logistics, then everything else.
       </span>
     </div>
   {:else}

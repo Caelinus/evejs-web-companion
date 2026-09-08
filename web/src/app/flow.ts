@@ -124,6 +124,7 @@ import type {
   MiningHold,
   ShipBay,
   SlotFamily,
+  SpaceVector,
   StationStatic,
 } from "../store/types.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
@@ -5790,6 +5791,67 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     };
   }
 
+  /**
+   * The game's own GROUP NAME for every ship on grid a combat block might shoot
+   * — the resolve half of nav/targetPriority.ts's resolve-then-judge pass, the
+   * same shape `classifyDroneRoles` uses for the drone bay.
+   *
+   * ⚠ NOT GATED ON A COMBAT BLOCK, gated on HOSTILES BEING THERE. The
+   * fight-back watch runs over whatever step is active — a mining step, a
+   * hauling step — so gating this on the active macro would leave the watch
+   * picking its primary blind, which is the one moment prioritising matters
+   * most. Player hulls are the exception: they are only prey under the PvP
+   * blocks, so they are resolved only there.
+   *
+   * Cheap after the first look: `requestNames` skips ids already cached or in
+   * flight, so this costs one round trip per NEW ship type, not one per tick,
+   * and nothing at all on an empty grid.
+   */
+  async function classifyTargetGroups(
+    snapshot: ReturnType<typeof decodeSpaceSnapshot>,
+    origin: SpaceVector,
+    macro: string | null,
+    shipID: number | null,
+  ): Promise<Readonly<Record<number, string | null>> | null> {
+    if (snapshot === null) {
+      return null;
+    }
+    const typeIDs = new Set<number>();
+    for (const row of hostileRows(snapshot, origin)) {
+      if (row.typeID !== null) {
+        typeIDs.add(row.typeID);
+      }
+    }
+    if (macro !== null && PVP_MACROS.has(macro)) {
+      for (const entity of snapshot.entities) {
+        if (
+          entity.kind === "ship" &&
+          entity.isNpc === false &&
+          entity.isSelf === false &&
+          entity.itemID !== shipID &&
+          entity.characterID !== null &&
+          entity.typeID !== null
+        ) {
+          typeIDs.add(entity.typeID);
+        }
+      }
+    }
+    if (typeIDs.size === 0) {
+      return null;
+    }
+    try {
+      await resolveNamesNow([...typeIDs].map((id) => ({ kind: "typeGroup" as const, id })));
+    } catch {
+      // An unresolved group ranks with "everything else"; the next tick asks again.
+    }
+    const resolved = store.names.get().resolved;
+    const groups: Record<number, string | null> = {};
+    for (const typeID of typeIDs) {
+      groups[typeID] = resolved[nameKey("typeGroup", typeID)] ?? null;
+    }
+    return groups;
+  }
+
   function resolveSalvageModuleIDs(): readonly number[] {
     const fit = store.fitting.get();
     if (fit.slotsError !== null) {
@@ -5831,6 +5893,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   const BAY_MACROS = new Set(["unload-cargo"]);
   const FLEET_MANAGEMENT_MACROS = new Set(["create-fleet", "invite-to-fleet", "join-fleet"]);
   const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
+  // The blocks for which another PLAYER's hull is a target rather than scenery —
+  // the only ones that resolve player ship groups for the priority ladder.
+  const PVP_MACROS = new Set(["attack-player", "hunt-player"]);
   const SCANNER_MACROS = new Set([
     "launch-scan-probes",
     "analyze-signatures",
@@ -6186,6 +6251,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
+        const targetGroupNames = await classifyTargetGroups(snapshot, origin, macro, ship?.itemID ?? null);
         const boardAgentID =
           typeof hint.board["agentID"] === "number" ? (hint.board["agentID"] as number) : null;
         let conversation: ScriptObservation["conversation"] = null;
@@ -6582,6 +6648,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           remoteCapModuleIDs: capabilities.remoteReps.cap,
           inFleet,
           fleetMemberCharacterIDs,
+          targetGroupNames,
           hardenerModuleIDs: capabilities.defense.hardeners,
           weaponModuleIDs: capabilities.defense.weapons,
           maxTargetRangeM: capabilities.maxTargetRangeM,

@@ -1987,3 +1987,62 @@ test("compress-ore / jettison: an UNREADABLE location waits, it does not say 'un
   assert.equal(compress(compressStep, parked, {}, {}).outcome.kind, "blocked");
   assert.equal(jettison(jettisonStep, parked, {}, {}).outcome.kind, "blocked");
 });
+
+// ── target priority (nav/targetPriority.ts) ──────────────────────────────────
+//
+// The ladder decides WHICH hostile is primary; the rest of the engage is
+// unchanged, so these only assert the pick. Group names arrive on the
+// observation the same way drone roles do — resolved, or not resolved at all.
+
+const TACKLE_TYPE = 11176; // an Interceptor hull
+const BRICK_TYPE = 645; // a battleship hull
+const GRID_GROUPS = { [TACKLE_TYPE]: "Interceptor", [BRICK_TYPE]: "Battleship" };
+
+test("fight: the far tackle is primary over the near battleship", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const near = entity({ itemID: 6661, typeID: BRICK_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 2000, y: 0, z: 0 } });
+  const far = entity({ itemID: 6662, typeID: TACKLE_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 40000, y: 0, z: 0 } });
+  const tick = fight(step, obs({ snapshot: snapshot([near, far]), weaponModuleIDs: [500], targetGroupNames: GRID_GROUPS }), {}, {});
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662);
+});
+
+test("fight: with no groups resolved the pick is the old nearest-first", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const near = entity({ itemID: 6661, typeID: BRICK_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 2000, y: 0, z: 0 } });
+  const far = entity({ itemID: 6662, typeID: TACKLE_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 40000, y: 0, z: 0 } });
+  const blind = fight(step, obs({ snapshot: snapshot([near, far]), weaponModuleIDs: [500] }), {}, {});
+  assert.ok(blind.action.kind === "lock" && blind.action.targetID === 6661);
+  // A map that answers null for these types is the same "cannot tell".
+  const unresolved = fight(
+    step,
+    obs({ snapshot: snapshot([near, far]), weaponModuleIDs: [500], targetGroupNames: { [TACKLE_TYPE]: null, [BRICK_TYPE]: null } }),
+    {},
+    {},
+  );
+  assert.ok(unresolved.action.kind === "lock" && unresolved.action.targetID === 6661);
+});
+
+test("fight: the player's own ladder is followed", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = {
+    id: "f",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["other", "tackle"] } },
+  } as const;
+  const near = entity({ itemID: 6661, typeID: BRICK_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 40000, y: 0, z: 0 } });
+  const far = entity({ itemID: 6662, typeID: TACKLE_TYPE, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 2000, y: 0, z: 0 } });
+  const tick = fight(step, obs({ snapshot: snapshot([near, far]), weaponModuleIDs: [500], targetGroupNames: GRID_GROUPS }), {}, {});
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "battleships first, because that is what was asked");
+});
+
+test("attack players: the ladder ranks player hulls too", () => {
+  const attack = SCRIPT_MACROS["attack-player"]!;
+  const step = { id: "a", kind: "macro", macro: "attack-player", args: {} } as const;
+  const brick = entity({ itemID: 7001, typeID: BRICK_TYPE, kind: "ship", characterID: 90000001, position: { x: 3000, y: 0, z: 0 } });
+  const tackle = entity({ itemID: 7002, typeID: TACKLE_TYPE, kind: "ship", characterID: 90000002, position: { x: 50000, y: 0, z: 0 } });
+  const tick = attack(step, obs({ snapshot: snapshot([brick, tackle]), weaponModuleIDs: [500], targetGroupNames: GRID_GROUPS }), {}, {});
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 7002);
+});

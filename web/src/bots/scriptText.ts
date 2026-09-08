@@ -21,6 +21,7 @@ import type {
   MacroID,
   MacroStep,
   Repeat,
+  TargetClassArg,
   WorldRef,
 } from "./botScript.ts";
 
@@ -310,6 +311,33 @@ export function stepSentence(step: MacroStep): string {
   return base;
 }
 
+/** What each target class is CALLED to a player — never the stored token (R9a). */
+const TARGET_CLASS_WORD: Readonly<Record<TargetClassArg, string>> = {
+  tackle: "tacklers",
+  ewar: "jammers",
+  logi: "logistics",
+  other: "everything else",
+};
+
+/** What one target class is called on screen — the picker reads it from here. */
+export function targetClassWord(cls: TargetClassArg): string {
+  return TARGET_CLASS_WORD[cls];
+}
+
+/**
+ * ", tacklers then jammers first" — the same shape the ore priority reads in,
+ * and empty when the step leaves the ladder at its default, so an untouched
+ * combat step still reads as the one plain sentence it always did.
+ */
+function targetPhrase(step: MacroStep): string {
+  const arg = step.args["targets"];
+  const classes = arg !== undefined && arg.kind === "targetList" ? arg.classes : [];
+  if (classes.length === 0) {
+    return "";
+  }
+  return `, ${classes.map((cls) => TARGET_CLASS_WORD[cls]).join(" then ")} first`;
+}
+
 function macroPhrase(step: MacroStep): string {
   switch (step.macro) {
     case "undock":
@@ -400,7 +428,7 @@ function macroPhrase(step: MacroStep): string {
     case "hardeners-on":
       return "Switch every hardener and damage control on";
     case "fight-the-rats":
-      return "Fight the rats until the grid is clear";
+      return `Fight the rats until the grid is clear${targetPhrase(step)}`;
     case "warp-to-anomaly":
       return "Warp to the next pirate den the scanner shows";
     case "refit-ship": {

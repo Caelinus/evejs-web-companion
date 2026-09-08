@@ -242,6 +242,16 @@ export type Arg =
    * Empty or absent = any rock, the shipped behaviour. */
   | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] }
   /**
+   * An ORDERED target priority list for the combat blocks (first = shot first).
+   * Empty or absent = the shipped ladder (tackle, ewar, logi, everything else).
+   *
+   * ⚠ UNLIKE THE ORE LIST, THIS RANKS RATHER THAN FILTERS. The mine block mines
+   * only the ores it names; a combat block that shot only the classes it named
+   * would sit still while the battleship it had no line for killed it. A class
+   * left off ranks last, never unshootable (nav/targetPriority.ts).
+   */
+  | { readonly kind: "targetList"; readonly classes: readonly TargetClassArg[] }
+  /**
    * Bays the block must LEAVE ALONE. Empty or absent = leave nothing alone,
    * which is the shipped behaviour.
    *
@@ -315,6 +325,27 @@ export const ITEM_PLACES: readonly ItemPlace[] = Object.freeze<ItemPlace[]>(["ha
  */
 export type RockPick = "nearest" | "biggest";
 export const ROCK_PICKS: readonly RockPick[] = Object.freeze<RockPick[]>(["nearest", "biggest"]);
+
+/**
+ * Which hostile a combat block shoots FIRST, by the job the hull was built for.
+ *
+ * A closed vocabulary, like the place and rock ones above: these four are all a
+ * grid read can tell apart, and the runtime decides which hull is which from
+ * the game's own ship-group name (nav/targetPriority.ts, which owns the mapping
+ * and the shipped default order). The format only carries the player's
+ * ORDERING of them — never the group names behind it, which are the game's to
+ * change.
+ */
+export type TargetClassArg = "tackle" | "ewar" | "logi" | "other";
+export const TARGET_CLASS_ARGS: readonly TargetClassArg[] = Object.freeze<TargetClassArg[]>([
+  "tackle",
+  "ewar",
+  "logi",
+  "other",
+]);
+
+/** Four classes exist, so a list longer than four is a repeat, not a choice. */
+export const MAX_TARGET_LIST = 4;
 
 // ─── Conditions ──────────────────────────────────────────────────────────────
 

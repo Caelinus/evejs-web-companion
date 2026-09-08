@@ -177,3 +177,32 @@ test("a chosen world slot shows its name, never its id (R7d)", () => {
   assert.doesNotMatch(stepSentence(unnamed), LOOKS_LIKE_ID);
   assert.match(stepSentence(unnamed), /a station you pick/);
 });
+
+test("a combat step with a target priority names it, in order and in play words", () => {
+  const step: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["tackle", "ewar"] } },
+  };
+  assert.match(stepSentence(step), /Fight the rats until the grid is clear, tacklers then jammers first/);
+  const hunt: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "hunt-player",
+    args: { targets: { kind: "targetList", classes: ["logi"] } },
+  };
+  assert.match(stepSentence(hunt), /logistics first/);
+});
+
+test("a combat step at the default ladder says nothing about order", () => {
+  const bare: MacroStep = { id: "s1", kind: "macro", macro: "fight-the-rats", args: {} };
+  assert.doesNotMatch(stepSentence(bare), /first/);
+  const emptied: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "attack-player",
+    args: { targets: { kind: "targetList", classes: [] } },
+  };
+  assert.doesNotMatch(stepSentence(emptied), /first/);
+});
