@@ -15,6 +15,7 @@ import type {
   MacroTick,
   ScriptAction,
 } from "./scriptDecide.ts";
+import type { BotLogDraft, BotLogSink } from "./botLog.ts";
 import {
   MAX_READ_FAILURES,
   SETTLE_TICKS,
@@ -63,6 +64,8 @@ interface Harness {
   registry?: MacroRegistry;
   /** Throw from `issue` — the refusal path. Return null to let the call pass. */
   issueThrows?: (action: ScriptAction) => unknown | null;
+  /** A flight recorder to hand the runner (nav/botLog.ts). */
+  log?: BotLogSink;
 }
 
 function harness(opts: Harness = {}) {
@@ -89,6 +92,7 @@ function harness(opts: Harness = {}) {
     refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
     registry: opts.registry ?? registry,
     travelHome: home,
+    log: opts.log,
   });
   return { runner, issued, progress, setObs: (o: ScriptObservation) => { obs = o; } };
 }
@@ -434,4 +438,84 @@ test("run() drives to a clean finish and stops", async () => {
   await h.runner.run();
   assert.equal(h.runner.getStatus(), "stopped");
   assert.equal(h.progress.at(-1)?.status, "stopped");
+});
+
+// ── The flight recorder ──────────────────────────────────────────────────────
+//
+// The runner is the ONE place an action is performed, so it is the one place
+// the log is written — no macro knows the recorder exists. These pin what
+// reaches it and, above all, that it can never cost a ship.
+
+function recordingSink(): { sink: BotLogSink; lines: BotLogDraft[] } {
+  const lines: BotLogDraft[] = [];
+  return { sink: { write: (draft) => lines.push(draft) }, lines };
+}
+
+test("a run writes its header, then intent BEFORE each action and the result after", async () => {
+  const { sink, lines } = recordingSink();
+  const h = harness({ log: sink });
+  h.setObs(calm({ inSpace: false }));
+  h.runner.start(script([macroStep("u", "undock")]));
+  await h.runner.tick();
+
+  const kinds = lines.map((l) => l.kind);
+  assert.deepEqual(kinds.slice(0, 2), ["start", "decide"], "the run announces itself before anything else");
+  const issued = lines.findIndex((l) => l.kind === "issue");
+  const result = lines.findIndex((l) => l.kind === "result");
+  assert.ok(issued >= 0 && result > issued, "intent must be written before the call, result after");
+  assert.equal(lines[issued]!.says, "undock", "the line says what it was, in words");
+  assert.deepEqual(lines[issued]!.action, { kind: "undock" }, "and carries the action verbatim");
+  assert.equal(lines[result]!.ok, true);
+  assert.ok(lines.every((l) => l.run === lines[0]!.run), "every line of a run shares its id");
+});
+
+test("a refusal is logged as a result that did NOT land, with the server's words", async () => {
+  const { sink, lines } = recordingSink();
+  const h = harness({ log: sink, issueThrows: () => new Error("FakeItemNotFound") });
+  h.setObs(calm({ inSpace: false }));
+  h.runner.start(script([macroStep("u", "undock")]));
+  await h.runner.tick();
+
+  const result = lines.find((l) => l.kind === "result");
+  assert.ok(result !== undefined);
+  assert.equal(result.ok, false);
+  assert.match(result.refusal ?? "", /FakeItemNotFound/);
+});
+
+test("only CHANGES are written — a bot repeating itself does not fill a disk", async () => {
+  const { sink, lines } = recordingSink();
+  const h = harness({ log: sink });
+  h.runner.start(script([macroStep("u", "undock"), macroStep("d", "deliver-ore")]));
+  await h.runner.tick();
+  const afterFirst = lines.filter((l) => l.kind === "decide").length;
+  await h.runner.tick();
+  await h.runner.tick();
+  const afterMore = lines.filter((l) => l.kind === "decide").length;
+  assert.ok(afterMore <= afterFirst + 1, `repeated identical ticks wrote ${afterMore - afterFirst} lines`);
+});
+
+test("the run's end is written, with the reason it ended", async () => {
+  const { sink, lines } = recordingSink();
+  const h = harness({ log: sink });
+  h.runner.start(script([macroStep("u", "undock"), macroStep("d", "deliver-ore")]));
+  await h.runner.tick();
+  await h.runner.tick();
+  const end = lines.find((l) => l.kind === "end");
+  assert.ok(end !== undefined, "a finished run must say so");
+  assert.equal(end.status, "stopped");
+});
+
+test("⚠ RULE 4: a recorder that throws loses its lines, never the ship", async () => {
+  const exploding: BotLogSink = {
+    write: () => {
+      throw new Error("the disk is full and the route is down");
+    },
+  };
+  const h = harness({ log: exploding });
+  h.setObs(calm({ inSpace: false }));
+  h.runner.start(script([macroStep("u", "undock")]));
+  await h.runner.tick();
+
+  assert.deepEqual(h.issued, [{ kind: "undock" }], "the action still went out");
+  assert.equal(h.runner.getStatus(), "running", "and the run is still running");
 });

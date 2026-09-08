@@ -1742,6 +1742,27 @@ export async function callSquadPrimary(
   await postJson("/api/bots/squad-board", { targetID }, options);
 }
 
+/**
+ * Ship a batch of flight-recorder lines to THIS character's log (the BFF keys
+ * on the held session's character, so there is nothing to name here). Fire and
+ * forget by design: the caller drops the batch if this throws.
+ */
+export async function appendBotLog(
+  entries: readonly unknown[],
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/bots/bot-log", { entries }, options);
+}
+
+/** One character's bot log — the current run, or the one before it. */
+export async function readBotLog(
+  which: "current" | "previous" = "current",
+  options: ApiOptions = {},
+): Promise<readonly JsonValue[]> {
+  const data = await getJson(`/api/bots/bot-log?which=${which}`, options);
+  return Array.isArray(data.lines) ? (data.lines as readonly JsonValue[]) : [];
+}
+
 // --- R4 Agents & Missions (agentMgr bridge) --------------------------------
 // The BFF holds the bound agent handle; the browser addresses agents by game ID
 // and decodes the raw retail-shaped conversation/briefing/journal results with

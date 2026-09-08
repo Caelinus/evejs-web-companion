@@ -18,6 +18,7 @@ const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
+const { createBotLogStore } = require("./botLogStore");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -114,6 +115,13 @@ app.locals.beltMemory = beltMemory;
 // browser supplies.
 const squadBoard = options.squadBoard || createSquadBoard();
 app.locals.squadBoard = squadBoard;
+// The bot flight recorder's files (src/botLogStore.js): one log per character,
+// rotated when a run starts, so the current run and the one before it are
+// always readable. Under the web data dir — an operator artifact, never served
+// into the game UI and never committed.
+const botLogStore =
+  options.botLogStore || createBotLogStore({ dir: path.join(config.dataDir, "bot-logs") });
+app.locals.botLogStore = botLogStore;
 fs.mkdirSync(config.iconCacheDir, { recursive: true });
 
 app.disable("x-powered-by");
@@ -18765,6 +18773,51 @@ function requireSessionFleetID(req, res) {
   }
   return held;
 }
+
+// ── The bot flight recorder (goal: per-character bot log) ───────────────────
+// Lines arrive from whichever runner is flying the character — a tab or a
+// server bot, which drives the same stack over loopback — and land in that
+// CHARACTER's log. See src/botLogStore.js for the rotation rule.
+//
+// ⚠ THE CHARACTER IS THE SESSION'S, NEVER THE BODY'S. Same rule as the squad
+// board: a body-supplied characterID would let any signed-in account write
+// lines into another pilot's log (or read one), so both routes take the
+// character from the held session and a session with no character is refused.
+app.post("/api/bots/bot-log", requireAuth, (req, res, next) => {
+  try {
+    const held = requireHeldBridgeSession(req, res);
+    if (!held) {
+      return;
+    }
+    const entries = Array.isArray((req.body || {}).entries) ? req.body.entries : null;
+    if (entries === null) {
+      res.status(400).json({ ok: false, error: "INVALID_ENTRIES", message: "entries must be a list." });
+      return;
+    }
+    const written = botLogStore.append(held.characterID, entries.slice(0, 500));
+    res.json({ ok: true, written });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/bots/bot-log", requireAuth, (req, res, next) => {
+  try {
+    const held = requireHeldBridgeSession(req, res);
+    if (!held) {
+      return;
+    }
+    const which = req.query.which === "previous" ? "previous" : "current";
+    res.json({
+      ok: true,
+      characterID: held.characterID,
+      which,
+      lines: botLogStore.read(held.characterID, which),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get("/api/bots/squad-board", requireAuth, (req, res, next) => {
   try {

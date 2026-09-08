@@ -128,6 +128,7 @@ import type {
   StationStatic,
 } from "../store/types.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
+import type { BotLogDraft, BotLogSink } from "../nav/botLog.ts";
 import {
   buildSystemGraph,
   distancesFrom,
@@ -6112,6 +6113,58 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
+  /**
+   * The flight recorder's sink (nav/botLog.ts): buffer the runner's lines and
+   * ship them to this character's log on the BFF.
+   *
+   * ⚠ IT MUST NEVER COST THE RUN ANYTHING. Nothing here is awaited by the
+   * runner, a failed flush drops its batch rather than retrying forever, and
+   * the buffer is capped — a recorder that cannot reach the BFF must not grow
+   * until the tab dies. A `start` line flushes at once, because it is what
+   * rotates the previous run's log and a run that ends badly must not take its
+   * own header with it.
+   */
+  const BOT_LOG_FLUSH_MS = 3000;
+  const BOT_LOG_MAX_BUFFER = 200;
+  let botLogBuffer: BotLogDraft[] = [];
+  let botLogTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function flushBotLog(): Promise<void> {
+    if (botLogTimer !== null) {
+      clearTimeout(botLogTimer);
+      botLogTimer = null;
+    }
+    if (botLogBuffer.length === 0) {
+      return;
+    }
+    const batch = botLogBuffer;
+    botLogBuffer = [];
+    try {
+      await api.appendBotLog(batch, callOptions);
+    } catch {
+      // The lines are gone. That is the deal: a diary that cannot be written
+      // must not become a queue that grows, or a reason a bot stops.
+    }
+  }
+
+  const botLogSink: BotLogSink = {
+    write(draft) {
+      botLogBuffer.push(draft);
+      if (botLogBuffer.length > BOT_LOG_MAX_BUFFER) {
+        botLogBuffer = botLogBuffer.slice(-BOT_LOG_MAX_BUFFER);
+      }
+      if (draft.kind === "start" || draft.kind === "end") {
+        void flushBotLog();
+        return;
+      }
+      if (botLogTimer === null) {
+        botLogTimer = setTimeout(() => {
+          void flushBotLog();
+        }, BOT_LOG_FLUSH_MS);
+      }
+    },
+  };
+
   function makeScriptRunnerDeps(
     initialCapabilities: ScriptModuleCapabilities,
     startingStationID: number | null,
@@ -7032,6 +7085,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       refusalReason: readRefusalReason,
       registry: SCRIPT_MACROS,
       travelHome: scriptTravelHome,
+      log: botLogSink,
     };
   }
 
