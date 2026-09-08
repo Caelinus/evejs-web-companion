@@ -19,6 +19,7 @@
 //     becomes a wait, never a confident empty.
 
 import type { BotScript } from "../bots/botScript.ts";
+import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
   decideScriptAction,
@@ -331,16 +332,29 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   }
 
   /**
-   * A station this bot knew about while it could still see, best first: its own
-   * configured home, else where the run started, else the last station it was
-   * docked in. Null when it never learned one.
+   * The station to send a blind ship to, best first.
+   *
+   * The script's OWN configured home comes first and needs no reads at all: it
+   * is a setting the player pinned, resolved here exactly the way flow.ts
+   * resolves it every tick (a fixed id, "where the ship started", or a station an
+   * earlier block published on the board). The observation-derived ids are only
+   * fallbacks for a home that resolves to nothing.
+   *
+   * ⚠ IT WILL NOT MOVE A SHIP IT HAS NEVER SEEN. With no observation at all
+   * there is no evidence the ship is even in space, and undocking a safe ship to
+   * fly it somewhere blind is a worse outcome than stopping and saying so. Same
+   * for one last seen docked: it is already where this would send it.
    */
-  function lastKnownStationID(): number | null {
+  function stationToSendTo(): number | null {
     const seen = lastObs;
     if (seen === null || seen.flightStatus?.docked === true) {
-      return null; // never saw anything, or it is already in a station
+      return null;
     }
-    return seen.homeStationID ?? seen.startingStationID ?? seen.flightStatus?.stationID ?? null;
+    const configured =
+      script === null
+        ? null
+        : resolveStationRef(script.home, seen.startingStationID ?? null, memory?.board ?? {});
+    return configured ?? seen.homeStationID ?? seen.startingStationID ?? seen.flightStatus?.stationID ?? null;
   }
 
   /**
@@ -362,7 +376,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    * fighting free (nav/scriptMacros `fightTheWayOut` needs a grid to read).
    */
   async function sendToStationThenStop(): Promise<void> {
-    const stationID = lastKnownStationID();
+    const stationID = stationToSendTo();
     if (stationID === null) {
       pauseWith(READ_GAVE_UP);
       return;

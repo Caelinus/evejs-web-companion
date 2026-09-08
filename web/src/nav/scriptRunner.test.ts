@@ -356,10 +356,10 @@ test("repeated read failures give up with a plain reason", async () => {
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
 });
 
-test("reads that give up send the ship to the last station it knew about", async () => {
-  // Blind, nothing can be DECIDED -- but the autopilot runs on its own reads, so
-  // a station id this bot saw seconds ago still gets the ship moving instead of
-  // leaving it floating where it went blind.
+test("reads that give up send the ship to the station the bot is configured to dock at", async () => {
+  // Blind, nothing can be DECIDED -- but the autopilot runs on its own reads, and
+  // the dock station is a SETTING on the script, not something read from the
+  // world. So the ship gets moving instead of floating where it went blind.
   let reads = 0;
   const issued: ScriptAction[] = [];
   const progress: ScriptRunnerSnapshot[] = [];
@@ -369,7 +369,7 @@ test("reads that give up send the ship to the last station it knew about", async
       if (reads > 1) {
         throw new Error("read failed"); // not a session loss
       }
-      return calm({ holdEmpty: false, homeStationID: 60000004 });
+      return calm({ holdEmpty: false }); // note: no homeStationID on the read
     },
     issue: async (a) => { issued.push(a); },
     refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
@@ -388,12 +388,17 @@ test("reads that give up send the ship to the last station it knew about", async
 
   assert.equal(runner.getStatus(), "paused");
   const route = issued.find((a) => a.kind === "startRoute");
-  assert.ok(route !== undefined && route.kind === "startRoute" && route.stationID === 60000004, "sent to the home it knew");
+  assert.ok(route !== undefined && route.kind === "startRoute" && route.stationID === 1, "sent to the script's own home");
   assert.match(progress.at(-1)?.pauseReason ?? "", /sent it to a station/i);
 });
 
-test("reads that give up with NO station ever seen say the plain thing", async () => {
-  // It never learned a station, so there is nothing honest to send it to.
+test("reads that give up with NO station to send it to say the plain thing", async () => {
+  // Home is "wherever the ship started", the run started in space, and nothing
+  // was observed to fall back on -- so there is no honest destination.
+  const homeless: BotScript = {
+    ...script([macroStep("a", "deliver-ore")]),
+    home: { entity: "station", id: null, name: null, systemName: null, starting: true },
+  };
   let reads = 0;
   const issued: ScriptAction[] = [];
   const progress: ScriptRunnerSnapshot[] = [];
@@ -413,9 +418,7 @@ test("reads that give up with NO station ever seen say the plain thing", async (
     registry,
     travelHome: home,
   });
-  runner.start(script([macroStep("a", "deliver-ore")]));
-  // Generous: the one good read issues an action, and the settle between actions
-  // costs ticks before the failures even start counting.
+  runner.start(homeless);
   for (let i = 0; i < 30 && runner.getStatus() === "running"; i += 1) {
     await runner.tick();
   }
