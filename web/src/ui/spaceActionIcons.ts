@@ -61,6 +61,10 @@ export const SPACE_ACTION_GLYPHS: Readonly<Record<RowActionID, SpaceActionGlyph>
   unlock: ["M4 9V4h5", "M20 9V4h-5", "M4 15v5h5", "M20 15v5h-5", "M5 19L19 5"],
   // Mine: a laser reaching out to a rock.
   mine: ["M3 21l6-6", "M8 16l4-4", "M13 4l7 7-3.5 3.5-7-7z"],
+  // Take everything: a crate with its contents coming OUT. The same crate the
+  // haul glyph draws with its arrow reversed, because the two verbs are the two
+  // directions of one idea; the captions ("Loot" / "Haul to …") say which.
+  loot: ["M4 11h16v9H4z", "M4 11l2-4h12l2 4", "M12 7V1", "M9 4l3-3 3 3"],
   // Haul: a crate, and where it is going.
   haul: ["M4 9h16v11H4z", "M4 9l2-5h12l2 5", "M12 12v5", "M9.5 14.5L12 17l2.5-2.5"],
 };
@@ -85,4 +89,5 @@ export const RANGED_ACTIONS: ReadonlySet<RowActionID> = new Set<RowActionID>([
  */
 export const SHORT_ACTION_CAPTION: Partial<Readonly<Record<RowActionID, string>>> = {
   keepAtRange: "Keep",
+  loot: "Loot",
 };

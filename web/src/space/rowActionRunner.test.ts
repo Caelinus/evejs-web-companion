@@ -93,9 +93,9 @@ test("jump with no far side calls NOTHING rather than sending a guess", async ()
 });
 
 test("a multi-step verb is refused, not silently ignored", async () => {
-  // `mine` and `haul` run loops with their own per-step reporting and live in
-  // the overview. A caller that forgot to filter them must find out.
-  for (const id of ["mine", "haul"] as const) {
+  // `mine`, `haul` and `loot` run loops with their own per-step reporting and
+  // live in the overview. A caller that forgot to filter them must find out.
+  for (const id of ["mine", "haul", "loot"] as const) {
     const { flow, calls } = recordingFlow();
     const ran = await dispatchRowAction(flow, id, NO_GATE, RANGES);
     assert.equal(ran, false, `${id} must report that it did not run`);
@@ -107,7 +107,11 @@ test("the multi-step set and the predicate agree", () => {
   assert.equal(isSingleCallAction("warp"), true);
   assert.equal(isSingleCallAction("mine"), false);
   assert.equal(isSingleCallAction("haul"), false);
-  assert.deepEqual([...MULTI_STEP_ACTIONS].sort(), ["haul", "mine"]);
+  // "Take everything" opens a container and then issues one transfer per bay
+  // that will take something, reporting how much of it landed — reporting this
+  // module deliberately does not own.
+  assert.equal(isSingleCallAction("loot"), false);
+  assert.deepEqual([...MULTI_STEP_ACTIONS].sort(), ["haul", "loot", "mine"]);
 });
 
 test("a failing call propagates rather than being swallowed", async () => {
