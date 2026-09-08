@@ -13,14 +13,8 @@
   import CharacterCreate from "./CharacterCreate.svelte";
   import KnownCharacterPicker from "./KnownCharacterPicker.svelte";
   import { BridgeCallError } from "../bridge/callMethod.ts";
-  import {
-    listActiveServerBots,
-    listServerBots,
-    login as apiLogin,
-    logout as apiLogout,
-    stopServerBot,
-    type ActiveServerBot,
-  } from "../app/api.ts";
+  import { listActiveServerBots, type ActiveServerBot } from "../app/api.ts";
+  import { stopServerBotFor } from "../app/stopBotFor.ts";
   import {
     loadKnownCharacters,
     rememberCharacters,
@@ -139,35 +133,16 @@
 
   // Stop a server bot FROM THE LANDING PAGE. Without this, a roster where
   // every pilot is bot-flown locks the player out of their own bots (nothing
-  // clickable leads to a Stop). Stopping needs auth, and the row already
-  // names its account — on a server whose login takes any password, that IS
-  // the credential: sign in on a THROWAWAY per-session token ({token: ...}
-  // keeps the tab's global storage untouched), stop the bot, sign the token
-  // out again. No character is ever selected, so no hull moves.
+  // clickable leads to a Stop). The sign-in/stop/sign-out itself lives in
+  // app/stopBotFor.ts, shared with the Pilot Hangar, which needs the same
+  // button for the same reason.
   let stoppingID = $state<number | null>(null);
   async function stopBotFor(pick: KnownCharacter): Promise<void> {
     if (stoppingID !== null) return;
     stoppingID = pick.characterID;
     error = "";
     try {
-      const result = await apiLogin(pick.accountName, "", { token: null });
-      if (result.sessionToken === null) {
-        throw new Error("The server did not return a session token.");
-      }
-      const asOwner = { token: result.sessionToken };
-      try {
-        const bots = await listServerBots(asOwner);
-        const bot = bots.find(
-          (row) =>
-            row.characterID === pick.characterID &&
-            (row.status === "running" || row.status === "paused" || row.status === "starting"),
-        );
-        if (bot) {
-          await stopServerBot(bot.botID, asOwner);
-        }
-      } finally {
-        await apiLogout(asOwner).catch(() => {});
-      }
+      await stopServerBotFor(pick.accountName, pick.characterID);
       await refreshBotFlown();
     } catch (cause) {
       error =

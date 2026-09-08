@@ -21,7 +21,7 @@
 // encodes this by taking the server bot as an explicit, checked-first input
 // rather than leaving callers to reconcile the two themselves.
 
-import type { ServerBot } from "../app/api.ts";
+import type { ActiveBotVitals, ActiveServerBot, ServerBot } from "../app/api.ts";
 import { BOTS } from "../nav/botRegistry.ts";
 import { BOT_RISK_LABELS } from "./runPolicy.ts";
 import type { BotsState, CustomBotState } from "../store/types.ts";
@@ -407,4 +407,68 @@ function ageWordsFor(ageMs: number): string {
   }
   const hours = Math.round(minutes / 60);
   return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+}
+
+// --- the landing screens' readout (region D) ---------------------------------
+//
+// `/api/bots/active` is a DIFFERENT projection of the same running bot from
+// `listServerBots()`: unauthenticated, so the screens that exist BEFORE a
+// sign-in can mark a bot-flown pilot, with no script name or revision on it but
+// carrying the host's ~15s ship-vitals sample instead.
+//
+// Two screens print it — the Pilot Hangar row and the onboarding pilot picker —
+// and a third (the Bot Manager) prints the authenticated projection of the same
+// fact. That is exactly the drift this module exists to prevent, so the words
+// live here with every other bot phrase rather than inline in whichever
+// component happened to need them first.
+
+/** What the bot is doing right now: its phase, and why it last acted. */
+export function activeBotCommandWords(bot: ActiveServerBot): string {
+  const phase = bot.phase ?? (bot.status === "paused" ? "Paused" : "Running");
+  return bot.why ? `${phase} — ${bot.why}` : phase;
+}
+
+/**
+ * "Shield 92% · Armor 100% · Hull 100%", or "Docked" where the bars do not
+ * apply. Empty when the sample answered with none of them — a bot whose first
+ * sample has not landed yet must not print three bare percent signs.
+ */
+export function activeBotHealthWords(vitals: ActiveBotVitals): string {
+  if (vitals.docked === true) {
+    return "Docked";
+  }
+  const parts: string[] = [];
+  if (vitals.shield !== null) parts.push(`Shield ${Math.round(vitals.shield * 100)}%`);
+  if (vitals.armor !== null) parts.push(`Armor ${Math.round(vitals.armor * 100)}%`);
+  if (vitals.hull !== null) parts.push(`Hull ${Math.round(vitals.hull * 100)}%`);
+  return parts.join(" · ");
+}
+
+/**
+ * "Cargo hold 12% · Ore hold 75%" — as percentages, and only for the holds that
+ * actually answered. A hold with no capacity is skipped rather than divided by
+ * zero, which is what a bay the ship does not have reads as.
+ */
+export function activeBotHoldWords(vitals: ActiveBotVitals): string {
+  return vitals.holds
+    .filter((hold) => hold.used !== null && hold.capacity !== null && hold.capacity > 0)
+    .map((hold) => `${hold.label} ${Math.round((hold.used! / hold.capacity!) * 100)}%`)
+    .join(" · ");
+}
+
+/**
+ * The whole vitals line — health and holds, joined — or "" when there is
+ * nothing to say. Callers render the line only when this is non-empty, so an
+ * unsampled bot costs no row height at all.
+ */
+export function activeBotVitalsWords(vitals: ActiveBotVitals | null): string {
+  if (vitals === null) {
+    return "";
+  }
+  const health = activeBotHealthWords(vitals);
+  const holds = activeBotHoldWords(vitals);
+  if (health && holds) {
+    return `${health} · ${holds}`;
+  }
+  return health || holds;
 }

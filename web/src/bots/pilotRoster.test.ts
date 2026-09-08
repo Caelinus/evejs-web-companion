@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  activeBotCommandWords,
+  activeBotHealthWords,
+  activeBotHoldWords,
+  activeBotVitalsWords,
   endedRuns,
   lastAlertPhrase,
   mergeServerRosters,
@@ -16,7 +20,7 @@ import {
   serverRunState,
   tabRunState,
 } from "./pilotRoster.ts";
-import type { ServerBot } from "../app/api.ts";
+import type { ActiveBotVitals, ActiveServerBot, ServerBot } from "../app/api.ts";
 import type { BotsState, CustomBotState } from "../store/types.ts";
 
 // Synthetic identities only — no real EVE character name or id (per repo
@@ -447,4 +451,85 @@ test("mergeServerRosters keeps what it could read and counts what it could not",
   ]);
   assert.deepEqual(merged.bots.map((b) => b.botID), ["bot-b"]);
   assert.equal(merged.failed, 1, "a partial read is not an empty roster, and not a total failure");
+});
+
+// ─── the landing screens' readout (region D) ─────────────────────────────────
+//
+// These words are printed by two screens that exist BEFORE any sign-in — the
+// Pilot Hangar row and the onboarding pilot picker — from the unauthenticated
+// /api/bots/active projection. They were inline in one component until the
+// hangar needed the same sentences; the point of moving them here is that two
+// readouts of one running bot cannot drift apart.
+
+function activeBot(over: Partial<ActiveServerBot> = {}): ActiveServerBot {
+  return {
+    characterID: PILOT_ONE_ID,
+    status: "running",
+    phase: null,
+    why: null,
+    note: null,
+    vitals: null,
+    ...over,
+  };
+}
+
+function vitals(over: Partial<ActiveBotVitals> = {}): ActiveBotVitals {
+  return {
+    sampledAt: "2026-09-02T13:00:00.000Z",
+    docked: false,
+    shield: null,
+    armor: null,
+    hull: null,
+    holds: [],
+    ...over,
+  };
+}
+
+test("activeBotCommandWords prefers the bot's own phase and reason", () => {
+  assert.equal(
+    activeBotCommandWords(activeBot({ phase: "Mining", why: "belt is not dry yet" })),
+    "Mining — belt is not dry yet",
+  );
+  assert.equal(activeBotCommandWords(activeBot({ phase: "Hauling" })), "Hauling");
+});
+
+test("activeBotCommandWords never prints a raw status token", () => {
+  // A bot with no phase yet still has to say something a player can read; a
+  // paused one must not read as "Running".
+  assert.equal(activeBotCommandWords(activeBot({ status: "running" })), "Running");
+  assert.equal(activeBotCommandWords(activeBot({ status: "paused" })), "Paused");
+});
+
+test("activeBotHealthWords says Docked instead of bars that do not apply", () => {
+  assert.equal(activeBotHealthWords(vitals({ docked: true, shield: 1, armor: 1, hull: 1 })), "Docked");
+});
+
+test("activeBotHealthWords prints only the bars the sample answered with", () => {
+  assert.equal(activeBotHealthWords(vitals({ shield: 0.923, hull: 1 })), "Shield 92% · Hull 100%");
+  assert.equal(activeBotHealthWords(vitals()), "", "an unsampled ship says nothing, not '%'");
+});
+
+test("activeBotHoldWords skips a hold the ship does not have", () => {
+  // capacity 0 is what a bay this hull lacks reads as — dividing by it would
+  // print NaN% on the landing screen.
+  const line = activeBotHoldWords(
+    vitals({
+      holds: [
+        { label: "Cargo hold", used: 30, capacity: 400 },
+        { label: "Ore hold", used: 0, capacity: 0 },
+        { label: "Drone bay", used: null, capacity: 25 },
+      ],
+    }),
+  );
+  assert.equal(line, "Cargo hold 8%");
+});
+
+test("activeBotVitalsWords joins health and holds, and is empty when there is nothing to say", () => {
+  assert.equal(activeBotVitalsWords(null), "");
+  assert.equal(activeBotVitalsWords(vitals()), "");
+  assert.equal(
+    activeBotVitalsWords(vitals({ shield: 1, holds: [{ label: "Ore hold", used: 3, capacity: 4 }] })),
+    "Shield 100% · Ore hold 75%",
+  );
+  assert.equal(activeBotVitalsWords(vitals({ docked: true })), "Docked");
 });

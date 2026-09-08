@@ -821,7 +821,11 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       res.status(409).json({
         ok: false,
         error: "CHARACTER_IN_USE_BY_BOT",
-        message: "A server bot is flying this character. Stop the bot first (Bots tab).",
+        // No screen named here on purpose: every roster screen that can show
+        // this pilot now carries its own Stop (the Pilot Hangar row, the
+        // onboarding picker, the Bot Manager), so naming one of them would be
+        // wrong on the other two.
+        message: "A server bot is flying this character. Stop the bot first.",
       });
       return;
     }

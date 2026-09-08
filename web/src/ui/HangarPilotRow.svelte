@@ -11,7 +11,10 @@
   // menu, which is passed in so only one menu is open across the whole screen.
   import type { HangarPilot } from "../app/hangar.ts";
   import type { Squad } from "../app/hangarPrefs.ts";
+  import type { ActiveServerBot } from "../app/api.ts";
   import { formatIskCompact, formatSpCompact } from "../app/hangar.ts";
+  // One vocabulary for every bot readout in the client — see bots/pilotRoster.ts.
+  import { activeBotCommandWords, activeBotVitalsWords } from "../bots/pilotRoster.ts";
 
   let {
     pilot,
@@ -19,12 +22,16 @@
     manage,
     /** Below 760px a tap SELECTS instead of launching — mis-tap protection. */
     tapSelects,
+    bot = null,
+    stopping = false,
+    stopBusy = false,
     squads,
     squadMenuOpen,
     onActivate,
     onToggleSelect,
     onTogglePin,
     onRemove,
+    onStopBot,
     onToggleSquadMenu,
     onToggleSquad,
   }: {
@@ -32,6 +39,16 @@
     selected: boolean;
     manage: boolean;
     tapSelects: boolean;
+    /**
+     * The server bot flying this pilot right now, or null. Not part of
+     * `HangarPilot`: the roster is a local snapshot of who exists, and this is a
+     * live server fact polled on its own clock.
+     */
+    bot?: ActiveServerBot | null;
+    /** A stop is in flight for THIS pilot. */
+    stopping?: boolean;
+    /** A stop is in flight for SOME pilot — one at a time across the screen. */
+    stopBusy?: boolean;
     /** Every squad, for the manage-mode checklist. */
     squads: readonly Squad[];
     squadMenuOpen: boolean;
@@ -39,6 +56,7 @@
     onToggleSelect: () => void;
     onTogglePin: () => void;
     onRemove: () => void;
+    onStopBot?: () => void;
     onToggleSquadMenu: () => void;
     onToggleSquad: (squadID: string) => void;
   } = $props();
@@ -112,6 +130,9 @@
       {#if pilot.training === null}
         <span class="hangar-badge is-idle" title="No skill in training">IDLE</span>
       {/if}
+      {#if bot}
+        <span class="hangar-badge is-bot" title="A server bot is flying this pilot">BOT</span>
+      {/if}
     </div>
 
     <div class="hangar-meta">
@@ -127,6 +148,35 @@
         {pilot.training ?? "not training"}
       </span>
     </div>
+
+    {#if bot}
+      <!-- THE STOP LIVES ON THE ROW, and in manage mode too. It is the one
+           control here that is not about arranging the list, and a player whose
+           hull is out mining unattended must not have to leave a mode to reach
+           it. It is a real button inside a clickable row, so it stops the click
+           from also trying to launch a pilot the server would refuse anyway. -->
+      {@const vitals = activeBotVitalsWords(bot.vitals)}
+      <div class="hangar-botline">
+        <div class="hangar-botwords">
+          <span class="hangar-botphase">{activeBotCommandWords(bot)}</span>
+          {#if vitals}
+            <span class="hangar-botvitals">{vitals}</span>
+          {/if}
+        </div>
+        {#if onStopBot}
+          <button
+            type="button"
+            class="hangar-stopbot"
+            title={`Stop the server bot flying ${pilot.name}`}
+            disabled={stopBusy}
+            onclick={(event) => {
+              event.stopPropagation();
+              onStopBot();
+            }}
+          >{stopping ? "Stopping…" : "Stop bot"}</button>
+        {/if}
+      </div>
+    {/if}
 
     {#if manage}
       <!-- A checklist rather than a row of chips: at eleven squads a flat chip
