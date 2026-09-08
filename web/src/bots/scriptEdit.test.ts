@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import type { BotScript, BranchBlock, InterruptRow, LoopBlock, MacroStep, ProgramNode } from "./botScript.ts";
 import {
   addInterrupt,
+  countingIdGen,
   duplicateNode,
   insertIntoLoop,
   insertNode,
@@ -19,6 +20,7 @@ import {
   newMacroStep,
   removeFromLoop,
   moveInterrupt,
+  programIDs,
   removeInterrupt,
   removeNode,
   setInterruptFraction,
@@ -340,4 +342,67 @@ test("moveInterrupt reorders by id, and is a no-op at the edges and on a strange
   assert.deepEqual(moveInterrupt(rows, "nobody", -1).map((r) => r.id), ["a", "b", "c"]);
   // Immutable, like every other operation here.
   assert.deepEqual(rows.map((r) => r.id), ["a", "b", "c"], "the input was mutated");
+});
+
+
+// ─── Ids the editor hands out cannot collide with ids it was HANDED ──────────
+//
+// The builder opens documents it did not write. A bot saved in an earlier
+// session comes back carrying the very ids that session's counter produced, so
+// a counter starting from zero again would hand the next added step an id a
+// loaded step already owns — and the plan, keyed by node id, would refuse to
+// render at all (`each_key_duplicate`) rather than merely look wrong.
+
+test("programIDs collects every id, including a loop body's and a branch's two sides", () => {
+  const branch: BranchBlock = {
+    id: "br",
+    kind: "branch",
+    when: { kind: "shield-below", fraction: 0.3 },
+    then: [{ id: "t1", kind: "macro", macro: "repair-ship", args: {} }],
+    else: [{ id: "e1", kind: "macro", macro: "wait", args: {} }],
+  };
+  const loop: LoopBlock = {
+    id: "lo",
+    kind: "loop",
+    repeat: { kind: "times", count: 2 },
+    body: [{ id: "b1", kind: "macro", macro: "undock", args: {} }, branch],
+  };
+  const loose: MacroStep = { id: "s1", kind: "macro", macro: "wait", args: {} };
+
+  assert.deepEqual(
+    [...programIDs([loop, loose] as readonly ProgramNode[])].sort(),
+    ["b1", "br", "e1", "lo", "s1", "t1"],
+  );
+});
+
+test("countingIdGen skips every id the document already uses", () => {
+  const used = new Set(["n1", "n2", "n4"]);
+  const make = countingIdGen(() => used);
+  assert.equal(make(), "n3");
+  assert.equal(make(), "n5");
+  assert.equal(make(), "n6");
+});
+
+test("countingIdGen re-reads the document, so ids added since are skipped too", () => {
+  const doc: MacroStep[] = [];
+  const make = countingIdGen(() => programIDs(doc as readonly ProgramNode[]));
+  doc.push({ id: make(), kind: "macro", macro: "undock", args: {} });
+  doc.push({ id: make(), kind: "macro", macro: "wait", args: {} });
+  assert.deepEqual(doc.map((s) => s.id), ["n1", "n2"]);
+});
+
+test("reopening a saved bot and adding a step cannot repeat one of its ids", () => {
+  // The shape of the bug: a bot built and saved in one session (its added steps
+  // are `n1`/`n2`), opened in a fresh one, then added to.
+  const reopened: MacroStep[] = [
+    { id: "s-undock", kind: "macro", macro: "undock", args: {} },
+    { id: "n1", kind: "macro", macro: "wait", args: {} },
+    { id: "n2", kind: "macro", macro: "dock-at-nearest", args: {} },
+  ];
+  const make = countingIdGen(() => programIDs(reopened as readonly ProgramNode[]));
+  reopened.push(newMacroStep("travel-to-belt", make));
+
+  const ids = reopened.map((s) => s.id);
+  assert.equal(new Set(ids).size, ids.length, "two rows would share one key");
+  assert.equal(ids.at(-1), "n3");
 });

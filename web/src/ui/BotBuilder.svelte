@@ -69,6 +69,7 @@
     problemsForPath,
   } from "../bots/editorView.ts";
   import {
+    countingIdGen,
     duplicateNode,
     insertNode,
     insertSavedBotSteps,
@@ -76,6 +77,7 @@
     moveNode,
     removeInterrupt,
     removeNode,
+    programIDs,
     type FlatProgramNode,
   } from "../bots/scriptEdit.ts";
   import { EXAMPLE_BOTS, type ExampleBot } from "../bots/exampleBots.ts";
@@ -113,9 +115,6 @@
   // svelte-ignore state_referenced_locally
   const finder = store.finder;
 
-  let idSeed = 0;
-  const makeId = (): string => `n${(idSeed += 1)}`;
-
   // ── The document being edited ───────────────────────────────────────────────
   // The list the player sees is what a LOOP BODY may hold (steps and branches),
   // plus sub-bot nodes, which are legal only at the top level — so one list
@@ -146,6 +145,22 @@
   let loopID = $state<string | null>(initial.loopID);
   let loopUntil = $state<Condition | undefined>(initial.loopUntil);
   const readOnlyPlan = $derived(advancedProgram !== null);
+
+  // Ids are handed out by a generator that reads the document first, so an id a
+  // LOADED bot already carries is skipped rather than handed out twice (see
+  // `countingIdGen`). `idsInUse` is that reading: every id the editor's own
+  // lookups can land on - the plan (whichever of the two shapes is live), the
+  // watches, and the loop wrapper - because they all share one namespace.
+  const idsInUse = (): ReadonlySet<string> => {
+    const used = programIDs(steps as readonly ProgramNode[]);
+    if (advancedProgram !== null) {
+      for (const id of programIDs(advancedProgram)) used.add(id);
+    }
+    for (const row of watches) used.add(row.id);
+    if (loopID !== null) used.add(loopID);
+    return used;
+  };
+  const makeId = countingIdGen(idsInUse);
 
   // ── What is selected, and what is open ──────────────────────────────────────
   // ONE selection drives the inspector, and it can be a plan row OR a watch
@@ -546,7 +561,7 @@
     if (spot === null || spot.scope !== "top") return;
     const branch = steps[spot.index];
     if (branch === undefined || branch.kind !== "branch") return;
-    const step = newStepFor(macro);
+    const step = newStepFor(macro, makeId);
     withSide(spot.index, side, insertNode(side === "then" ? branch.then : branch.else, step));
     selection = { kind: "step", id: step.id };
   }
@@ -692,7 +707,6 @@
     selection = null;
     menuFor = null;
     saveConflict = null;
-    idSeed += 1000;
   }
 
   // ── The saved-bot library (platform-wide, on the web server) ────────────────
