@@ -107,19 +107,55 @@ test("a mining step with no until is flagged — blocking, since mine-at-belt de
   assert.equal(MACRO_SPECS["mine-at-belt"].untilRequired, true, "the blocking classification tracks this flag");
 });
 
-test("a chosen belt with no id asks the player to pick, but nearest does not", () => {
-  const draft = ready();
+// ⚠ A PINNED BELT IS IDENTIFIED BY ITS NAME, NOT ITS ID, and the validator has
+// to ask for the same thing the runtime uses. Belt entity ids are grid-local,
+// so `beltTarget` re-matches the NAME against the grid the bot arrives at — and
+// a belt the player names by hand has no id at all. This used to demand an id,
+// which would have blocked every typed belt.
+
+function withBelt(draft: BotScript, belt: unknown): BotScript {
   const loop = draft.program[0];
   assert.ok(loop && loop.kind === "loop");
   const mine = loop.body[0] as MacroStep;
-  const unbound: MacroStep = {
-    ...mine,
-    args: { ...mine.args, belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: null, systemName: null } } } },
-  };
-  const draft2: BotScript = { ...draft, program: [{ ...loop, body: [unbound, loop.body[1] as MacroStep] }] };
-  const problem = validateScript(draft2).find((p) => p.path === "m" && /pick a belt/i.test(p.sentence));
+  const step: MacroStep = { ...mine, args: { ...mine.args, belt: belt as MacroStep["args"][string] } };
+  return { ...draft, program: [{ ...loop, body: [step, loop.body[1] as MacroStep] }] };
+}
+
+function beltProblem(draft: BotScript) {
+  return validateScript(draft).find((p) => p.path === "m" && /belt/i.test(p.sentence) && p.severity === "blocking");
+}
+
+test("a belt pinned with no name asks for one, but nearest does not", () => {
+  const unnamed = withBelt(ready(), {
+    kind: "belt",
+    belt: { mode: "chosen", ref: { entity: "belt", id: null, name: null, systemName: null } },
+  });
+  const problem = beltProblem(unnamed);
   assert.ok(problem);
   assert.equal(problem.severity, "blocking");
+
+  // Blank and whitespace-only are the same thing to a player, so they are the
+  // same thing here: neither could ever match a belt on the grid.
+  assert.ok(beltProblem(withBelt(ready(), {
+    kind: "belt",
+    belt: { mode: "chosen", ref: { entity: "belt", id: null, name: "   ", systemName: null } },
+  })));
+
+  assert.equal(beltProblem(ready()), undefined, "the nearest belt needs nothing picked");
+});
+
+test("a belt named by hand is complete, with no id and no system", () => {
+  // What the editor writes when a player types a belt name: the name alone.
+  // Nothing else is knowable while configuring a bot for a system the pilot is
+  // not in, and nothing else is used when it gets there.
+  const typed = withBelt(ready(), {
+    kind: "belt",
+    belt: {
+      mode: "chosen",
+      ref: { entity: "belt", id: null, name: "Test System VI - Asteroid Belt 1", systemName: null },
+    },
+  });
+  assert.equal(beltProblem(typed), undefined);
 });
 
 test("an out-of-range threshold is flagged", () => {

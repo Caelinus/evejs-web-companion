@@ -40,7 +40,6 @@ function visibleText(body: string): string {
  * needs to name a real character, item or station. */
 const OPTIONS = {
   currentStation: { id: 60000001, name: "Test Station" },
-  belts: [{ itemID: 40000001, name: "Asteroid Belt I" }],
   equipment: [{ groupID: 54, label: "Test Mining Laser" }],
   items: [{ typeID: 34, name: "Test Mineral" }],
   pilots: [{ characterID: 90000001, characterName: "Test Pilot One" }],
@@ -220,6 +219,58 @@ test("no ore group id reaches the screen (R7d)", () => {
   });
   const text = visibleText(html);
   assert.doesNotMatch(text, /450001/, "an ore group id was rendered as text");
+});
+
+// ── Which belt ──────────────────────────────────────────────────────────────
+//
+// A belt is TYPED, not picked from a list: a player configuring a mining bot is
+// almost never in the system whose belts it will work, so a list of the belts
+// the editor can see is a list of the wrong belts. The name is what the runtime
+// matches on anyway — belt ids are grid-local — so nothing is lost by typing it.
+
+test("a belt step offers the nearest belt, and naming one, and nothing else", () => {
+  const html = renderInspector({ kind: "step", step: step("mine-at-belt") });
+  const text = visibleText(html);
+  assert.match(text, /the nearest belt/);
+  assert.match(text, /a belt I name/);
+  // Taking the nearest belt needs nothing typed, so no field is in the way.
+  assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
+});
+
+test("naming a belt opens a field carrying the name, and says the name must be exact", () => {
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: {
+          kind: "belt",
+          belt: {
+            mode: "chosen",
+            ref: { entity: "belt", id: null, name: "Test System VI - Asteroid Belt 1", systemName: null },
+          },
+        },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/, "no field to type the belt name in");
+  assert.ok(html.includes('value="Test System VI - Asteroid Belt 1"'), "the typed name did not come back");
+  const text = visibleText(html);
+  assert.match(text, /exactly as the overview shows it/, "nothing warned that the name has to match");
+});
+
+test("a belt named but left blank still opens its field, rather than snapping back", () => {
+  // The moment after switching to "a belt I name": the argument is set, the
+  // name is not. The validator is what asks for it; the field has to be there
+  // to answer in.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: "", systemName: null } } },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/);
 });
 
 // ── The "stop when" control ─────────────────────────────────────────────────
