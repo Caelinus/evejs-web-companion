@@ -356,12 +356,6 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Waits for a fleet invitation and accepts it, so your other pilots can pull this one into their fleet. Finishes once you are in a fleet. The server asks before it goes through.",
     null,
   ),
-  "attack-player": entry(
-    "attack-player",
-    "combat",
-    "Camps the spot you parked it at and attacks any player ship that shows up — or one pilot alone, if you pick one. Locks them, holds them still with a warp disruptor or scrambler if you have one fitted, webs them, then sets the drones on them and runs the guns. Keeps watching for as long as it is left on; a watch or your own hand stops it.",
-    "Being in space, with guns fitted or combat drones in the bay",
-  ),
   "set-destination": entry(
     "set-destination",
     "movement",

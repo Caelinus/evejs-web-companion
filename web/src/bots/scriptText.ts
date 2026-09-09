@@ -134,8 +134,6 @@ export function macroName(macro: MacroID): string {
       return "Invite a pilot to your fleet";
     case "join-fleet":
       return "Join a fleet";
-    case "attack-player":
-      return "Attack players here";
     case "set-destination":
       return "Set the destination and fly";
     case "dock-at-nearest":
@@ -443,14 +441,6 @@ function macroPhrase(step: MacroStep): string {
     }
     case "join-fleet":
       return "Accept a fleet invitation when one arrives";
-    case "attack-player": {
-      const only = step.args["only"];
-      const name =
-        only !== undefined && only.kind === "character" && only.name !== null && only.name.length > 0
-          ? only.name
-          : null;
-      return name !== null ? `Attack ${name} if they appear here` : "Attack any player who appears here";
-    }
     case "set-destination": {
       const dest = step.args["destination"];
       const where =

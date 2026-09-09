@@ -88,7 +88,7 @@ const KNOWN_MACROS = new Set<string>(Object.keys(MACRO_SPECS));
 // These were valid v1 script constructs while the browser owned chat. Preserve
 // their names only to refuse old saved/imported documents plainly; never add
 // them back to the authoring schema.
-const RETIRED_WEB_COMPANION_CHAT_MACROS = new Set(["hunt-player", "send-chat"]);
+const RETIRED_WEB_COMPANION_MACROS = new Set(["attack-player", "hunt-player", "send-chat"]);
 const RETIRED_WEB_COMPANION_CHAT_CONDITIONS = new Set(["players-in-system-above"]);
 // Derived from the format's own list, so a new response can never be forgotten here.
 const KNOWN_RESPONSES = new Set<InterruptResponse>(INTERRUPT_RESPONSES);
@@ -121,10 +121,10 @@ const SAY = {
     safe.length > 0
       ? `This script uses an action this app does not have: "${safe}".`
       : "This script uses an action this app does not have.",
-  retiredWebCompanionChatFeature: (safe: string): string =>
+  retiredWebCompanionFeature: (safe: string): string =>
     safe.length > 0
-      ? `This script uses "${safe}", which needs the retired web-companion chat feature.`
-      : "This script needs the retired web-companion chat feature.",
+      ? `This script uses "${safe}", which is no longer available in the web companion.`
+      : "This script uses a feature that is no longer available in the web companion.",
   unknownCondition: "This script uses a check this app does not have.",
   conditionOffSite:
     "This script checks for something out in space at a point where the ship may not be there yet.",
@@ -394,8 +394,8 @@ function readBranchSide(raw: unknown, ctx: Ctx): readonly MacroStep[] {
 
 function readMacroStep(obj: Readonly<Record<string, unknown>>, ctx: Ctx): MacroStep {
   const macro = obj["macro"];
-  if (typeof macro === "string" && RETIRED_WEB_COMPANION_CHAT_MACROS.has(macro)) {
-    refuse(SAY.retiredWebCompanionChatFeature(safeToken(macro)));
+  if (typeof macro === "string" && RETIRED_WEB_COMPANION_MACROS.has(macro)) {
+    refuse(SAY.retiredWebCompanionFeature(safeToken(macro)));
   }
   if (typeof macro !== "string" || !KNOWN_MACROS.has(macro)) {
     refuse(SAY.unknownMacro(safeToken(macro)));
@@ -673,7 +673,7 @@ function readCondition(raw: unknown, site: ConditionSite, ctx: Ctx): Condition {
 
 function buildCondition(obj: Readonly<Record<string, unknown>>, kind: unknown, ctx: Ctx): Condition {
   if (typeof kind === "string" && RETIRED_WEB_COMPANION_CHAT_CONDITIONS.has(kind)) {
-    refuse(SAY.retiredWebCompanionChatFeature(safeToken(kind)));
+    refuse(SAY.retiredWebCompanionFeature(safeToken(kind)));
   }
   switch (kind) {
     case "hold-empty":

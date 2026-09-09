@@ -126,7 +126,6 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "create-fleet": policy(["fleet"]),
   "invite-to-fleet": policy(["fleet"], false),
   "join-fleet": policy(["fleet"]),
-  "attack-player": policy(["combat", "destructive"], false),
   "set-destination": SAFE,
   "dock-at-nearest": SAFE,
   "remote-cap": policy(["fleet"]),

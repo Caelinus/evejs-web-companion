@@ -108,14 +108,6 @@ export interface ScriptObservation {
   readonly hardenerModuleIDs?: readonly number[];
   /** Fitted WEAPONS (turrets/launchers), resolved once at start (the fight block runs these). */
   readonly weaponModuleIDs?: readonly number[];
-  /**
-   * Fitted TACKLE, resolved once at start — the PvP blocks switch these on before
-   * the guns so the target cannot simply warp off. `tackleModuleIDs` is the point
-   * (SDE group 52 holds both Warp Disruptors and Warp Scramblers);
-   * `webModuleIDs` is the webifiers (group 65), which slow the target down.
-   */
-  readonly tackleModuleIDs?: readonly number[];
-  readonly webModuleIDs?: readonly number[];
   /** Who "you" are — the loot block only ever touches YOUR wrecks (no can flipping). */
   readonly myCharacterID?: number | null;
   readonly myCorporationID?: number | null;

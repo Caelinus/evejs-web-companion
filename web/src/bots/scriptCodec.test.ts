@@ -243,13 +243,13 @@ test("encode then decode round-trips EVERY arg kind losslessly", () => {
   assert.deepStrictEqual([...warnings], []);
 });
 
-test("legacy web-companion chat constructs are refused rather than stripped", () => {
-  for (const macro of ["hunt-player", "send-chat"]) {
+test("retired web-companion constructs are refused rather than stripped", () => {
+  for (const macro of ["attack-player", "hunt-player", "send-chat"]) {
     const legacy = clone();
     legacy.program = [{ id: `legacy-${macro}`, kind: "macro", macro, args: {} }];
     assert.equal(
       mustRefuse(decodeScriptValue(legacy)),
-      `This script uses "${macro}", which needs the retired web-companion chat feature.`,
+      `This script uses "${macro}", which is no longer available in the web companion.`,
     );
   }
 
@@ -261,7 +261,7 @@ test("legacy web-companion chat constructs are refused rather than stripped", ()
   });
   assert.equal(
     mustRefuse(decodeScriptValue(legacyCondition)),
-    "This script uses \"players-in-system-above\", which needs the retired web-companion chat feature.",
+    "This script uses \"players-in-system-above\", which is no longer available in the web companion.",
   );
 });
 

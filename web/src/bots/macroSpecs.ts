@@ -168,12 +168,6 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     untilRequired: false,
   },
   "join-fleet": { args: [], untilRequired: false },
-  // ── The PvP set (in space). `only` is OPTIONAL by design: left unset, any
-  // player ship is a target; set, the block hunts that one pilot alone.
-  "attack-player": {
-    args: [{ key: "only", kind: "character", required: false }],
-    untilRequired: false,
-  },
   // ── Movement extras.
   // set-destination points the autopilot at a station OR a whole system and is
   // done once the trip is under way — it does not wait for the arrival, so a

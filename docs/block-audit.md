@@ -30,7 +30,7 @@ planets · fleet · flow`).
 |---|---|
 | movement | undock · travel-to-station · warp-to-bookmark · **set-destination** · **dock-at-nearest** |
 | mining | mine-at-belt (+ nearest / biggest rock order) · **compress-ore** |
-| combat | defend-with-drones · hardeners-on · fight-the-rats · warp-to-anomaly · **attack-player** · **hunt-player** |
+| combat | defend-with-drones · hardeners-on · fight-the-rats · warp-to-anomaly |
 | hauling | deliver-ore · unload-cargo · salvage-wrecks · loot-wrecks · move-items · **jettison-cargo** · **tidy-hangar** |
 | industry | refine-ore |
 | market | buy-item · sell-item |
@@ -89,25 +89,6 @@ without a roster read.
 | fleet **broadcast / kick / make-leader** | `boundFleetWrites` | 🔌 | *Educated-guess, never fired live*; low bot value — deprioritised. |
 
 ⚠ create/invite/join WRITES are fast-mode decoders never fired live — the `bound-fleet` READ that gates/confirms them IS verified live (FleetNotFound → a real "not in a fleet"). Owed one live QA pass, which the multibox alts make testable.
-
-### pvp — hunting other players — ✅ SHIPPED 2026-07-24
-Both ride the verified ratting calls (`lock`/`activate`/`engageDrones`/`warp`) —
-only the target pick (a player's hull) and the SEARCH are new. Key findings that
-made hunt buildable:
-- `ConeScan` (the R104 bound scan write, `/api/bridge/scan/cone-scan`) returns
-  `{id, typeID, groupID}` for every entity in range SYSTEM-WIDE — real itemIDs.
-- the server's `warpToEntity` only requires the target to exist in the system
-  scene, NOT on the caller's grid — so a d-scanned ship id is directly warpable
-  (dungeon-scoped targets refuse, which the chase bound absorbs).
-- `startRoute` already accepts a SYSTEM id (`resolveDestination` kind "system",
-  plan with no final dock) — the roam rides the shared autopilot unchanged.
-| Block | Backing | Status | Notes |
-|---|---|---|---|
-| **attack-player** (camp the grid, engage matching players) | snapshot filter + engage core | ✅ | Optional `only` pilot filter; sustained like orbit-and-boost. |
-| **hunt-player** (roam ≤N jumps from home, local-chat watch, d-scan sweep, warp down hits, engage) | local roster read + ConeScan + graph + engage core | ✅ | Home = start system (board); ConeScan fired per-tick while hunting — first LIVE use of an R104 scan write, owed a QA pass. |
-| richer target filters (corp/alliance/standings, ignore-list) | snapshot fields exist | 🛠️ | The snapshot already carries corp/alliance per ship; needs Arg shapes + pickers. |
-| probe-scan localization (combat probes, real scan-down) | R104 probe writes (never fired live) | ❓ | The d-scan+warp loop makes it unnecessary here; probes would only add docked/deep-safe coverage. |
-| tackle awareness (point/scram the target before guns) | `activate` on a fitted disruptor | ✅ | Module-group regex on "warp disruptor/scrambler", activate first in the engage order. Point AND web fired live 2026-07-25 — see §3. |
 
 ### social — talking — send-chat ✅ SHIPPED 2026-07-24
 | Block | Backing | Status | Notes |
@@ -427,13 +408,6 @@ live: point cycling, web idle, at a range of **230 metres**.
 Fixed twice over: the limit is now a disruptor's own 20 km optimal, and each half
 carries its own attempt count. One module's bad luck can no longer disarm the
 other.
-
-**`hunt-player` re-issued the burn every tick.** The hunt block hand-copies the
-combat keys into `engagePrey`, and `approached` was not on the list — so the
-latch reset every tick. With one action per tick, that starves the entire ladder:
-burn toward the target forever, never shoot it. The comment above that object
-warned about exactly this for the attempt counter; a key was added without
-reading it. Both counters and the latch are carried now, and a test pins it.
 
 **Clean run afterwards**, from 25 km: point on at **19.85 km** (first attempt,
 inside its own optimal), web on by **5.4 km** with the target's max velocity

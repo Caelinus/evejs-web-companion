@@ -686,34 +686,6 @@
       j,
     );
   }
-  // The PvP blocks' OPTIONAL pilot filter: a picked pilot narrows the hunt to
-  // them; clearing the pick (the "any player" choice) removes the arg entirely.
-  function onlyArgID(step: MacroStep): number | null {
-    const arg = step.args["only"];
-    return arg !== undefined && arg.kind === "character" ? arg.charID : null;
-  }
-  function setStepOnly(i: number, raw: string, side: Side | null = null, j = -1): void {
-    if (raw === "") {
-      updateStep(
-        i,
-        (s) => {
-          const { only: _dropped, ...rest } = s.args;
-          return { ...s, args: rest };
-        },
-        side,
-        j,
-      );
-      return;
-    }
-    const match = knownPilots.find((p) => p.characterID === Number(raw));
-    if (match === undefined) return;
-    updateStep(
-      i,
-      (s) => ({ ...s, args: { ...s.args, only: { kind: "character", charID: match.characterID, name: match.characterName } } }),
-      side,
-      j,
-    );
-  }
   function setStepFitting(i: number, fittingID: number, side: Side | null = null, j = -1): void {
     const match = savedFittings.find((f) => f.fittingID === fittingID);
     if (match === undefined) return;
@@ -1234,15 +1206,6 @@
                   {#each knownPilots as p (p.characterID)}<option value={p.characterID}>{p.characterName}</option>{/each}
                 </select>
               {/if}
-            </span>
-          {/if}
-          {#if step.macro === "attack-player"}
-            <span class="inline-edit">
-              target
-              <select value={onlyArgID(step) ?? ""} onchange={(e) => setStepOnly(i, e.currentTarget.value, side, j)}>
-                <option value="">any player</option>
-                {#each knownPilots as p (p.characterID)}<option value={p.characterID}>{p.characterName}</option>{/each}
-              </select>
             </span>
           {/if}
           {#if step.macro === "set-destination"}

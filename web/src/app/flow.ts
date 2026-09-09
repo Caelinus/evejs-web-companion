@@ -5484,8 +5484,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     readonly hull: readonly number[];
     readonly hardeners: readonly number[];
     readonly weapons: readonly number[];
-    readonly tackle: readonly number[];
-    readonly webs: readonly number[];
   } {
     const fit = store.fitting.get();
     const shield: number[] = [];
@@ -5493,8 +5491,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const hull: number[] = [];
     const hardeners: number[] = [];
     const weapons: number[] = [];
-    const tackle: number[] = [];
-    const webs: number[] = [];
     if (fit.slotsError === null) {
       const resolved = store.names.get().resolved;
       for (const slot of fit.slots) {
@@ -5513,22 +5509,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           hull.push(slot.module.itemID);
         } else if (/hardener|damage control|resistance/i.test(group)) {
           hardeners.push(slot.module.itemID);
-        } else if (/^warp scrambler$/i.test(group)) {
-          // ⚠ ANCHORED ON PURPOSE, and verified against the SDE
-          // (`_local/sde/.../groups.jsonl`): group 52 is named "Warp Scrambler"
-          // and holds EVERY Warp Disruptor **and** Warp Scrambler (63 types), so
-          // one group covers both point and scram. The anchors matter — a loose
-          // /warp/i would also catch "Warp Core Stabilizer" (a low-slot module
-          // that stops nobody) and "Structure Warp Scrambler", and the
-          // Remote-Shield-Booster-read-as-a-local-rep bug two branches up is
-          // exactly what an unanchored group regex costs.
-          tackle.push(slot.module.itemID);
-        } else if (/^stasis web$/i.test(group)) {
-          // Group 65 "Stasis Web" — the webifiers (22 types). Deliberately NOT
-          // group 899 "Warp Disrupt Field Generator": that is an AREA bubble, not
-          // a module you activate on one target, so it does not belong in a
-          // lock-then-activate ladder.
-          webs.push(slot.module.itemID);
         } else if (slot.family === "high" && /weapon|launcher|turret/i.test(group)) {
           // "Projectile Weapon", "Hybrid Weapon", "Energy Weapon", "Missile
           // Launcher …" — the game's own turret/launcher groups, high slots only.
@@ -5536,7 +5516,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
       }
     }
-    return { shield, armor, hull, hardeners, weapons, tackle, webs };
+    return { shield, armor, hull, hardeners, weapons };
   }
 
   /**
@@ -5627,10 +5607,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     readonly hull: readonly number[];
     readonly hardeners: readonly number[];
     readonly weapons: readonly number[];
-    /** Warp disruptors + scramblers (SDE group 52) — the PvP blocks' point. */
-    readonly tackle: readonly number[];
-    /** Stasis webifiers (SDE group 65). */
-    readonly webs: readonly number[];
   }
   interface RemoteRepModuleIDs {
     readonly shield: readonly number[];
@@ -6211,8 +6187,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           fleetMemberCharacterIDs,
           hardenerModuleIDs: capabilities.defense.hardeners,
           weaponModuleIDs: capabilities.defense.weapons,
-          tackleModuleIDs: capabilities.defense.tackle,
-          webModuleIDs: capabilities.defense.webs,
           capacitorRatio: ship?.capacitorRatio ?? null,
           walletBalance,
           startingStationID,
