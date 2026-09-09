@@ -63,6 +63,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "createFleet" },
   { kind: "inviteToFleet", charID: 90000001 },
   { kind: "acceptFleetInvite" },
+  { kind: "applyToJoinFleet", fleetID: 91000001 },
   { kind: "alert", message: "your bot noticed something" },
 ];
 

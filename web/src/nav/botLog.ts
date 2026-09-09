@@ -204,6 +204,8 @@ export function describeAction(action: ScriptAction): string {
       return `invite ${action.charID} to the fleet`;
     case "acceptFleetInvite":
       return "accept the fleet invitation";
+    case "applyToJoinFleet":
+      return `apply to join advertised fleet ${action.fleetID}`;
     case "alert":
       return `tell the player: "${action.message}"`;
   }

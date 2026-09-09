@@ -363,6 +363,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Waits for a fleet invitation and accepts it, so your other pilots can pull this one into their fleet. Finishes once you are in a fleet. The server asks before it goes through.",
     null,
   ),
+  "join-advertised-fleet": entry(
+    "join-advertised-fleet",
+    "fleet",
+    "Joins the fleet with the name you type, if somebody has it listed in the fleet finder. Does nothing at all when you are already in a fleet, or when no fleet by that name is listed - it simply finishes and the next block runs - so it is safe at the top of a loop that should carry on alone while nobody has formed up yet. The server asks before it goes through.",
+    null,
+  ),
   "set-destination": entry(
     "set-destination",
     "movement",

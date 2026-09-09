@@ -46,6 +46,18 @@ export interface DryBelt {
   readonly families: readonly number[];
 }
 
+/**
+ * One row of the fleet finder, as a block sees it. Deliberately NOT the bridge's
+ * full `FleetAdvert`: a decider needs the name to match on, the id to apply with,
+ * and the size to break a tie between two fleets sharing a name - and nothing
+ * else here should depend on the wire shape.
+ */
+export interface FleetAdRow {
+  readonly fleetID: number;
+  readonly fleetName: string;
+  readonly numMembers: number;
+}
+
 export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
@@ -153,6 +165,16 @@ export interface ScriptObservation {
   readonly remoteCapModuleIDs?: readonly number[];
   /** Whether the character is in a fleet — read for the fleet-management blocks. true/false/null=unreadable. */
   readonly inFleet?: boolean | null;
+  /**
+   * The fleet-finder listing as this session may see it - one row per advert,
+   * trimmed to the three fields a block can act on. `null` means the listing was
+   * unreadable; `[]` means it was read and NOBODY is advertising, which is a real
+   * answer the join-by-name block is allowed to act on (it finishes).
+   *
+   * ⚠ The server filters this listing per session (`isAdvertOpenToSession`), so a
+   * fleet missing from it is one this pilot could not have joined anyway.
+   */
+  readonly fleetAds?: readonly FleetAdRow[] | null;
   /**
    * Character IDs from a fresh, authoritative bound-fleet roster. `null` means
    * the roster was unavailable; `[]` means the service authoritatively says the

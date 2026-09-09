@@ -59,6 +59,7 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   who: "a pilot to invite",
   channel: "a channel to talk in",
   message: "a message to send",
+  fleetName: "a fleet name to look for",
   destination: "somewhere to go",
   system: "a solar system to go to",
   fitting: "a fitting to switch to",
@@ -198,6 +199,10 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
             : "Pick the pilot to invite.",
         ),
       );
+    }
+    if (arg.kind === "text" && arg.text.trim().length === 0) {
+      // The fleet-finder step's fleet name is its whole argument.
+      problems.push(blocking(step.id, "Type the name of the fleet to look for in the fleet finder."));
     }
     if (arg.kind === "destination" && arg.ref.id === null) {
       problems.push(blocking(step.id, "Pick where this step sets the destination to."));

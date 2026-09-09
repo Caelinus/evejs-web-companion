@@ -1237,6 +1237,29 @@ export async function acceptFleetInvite(
   );
 }
 
+/**
+ * The fleet-finder reads: the listing of adverts open to THIS session, plus the
+ * session's own advert. Decode with bridge/fleetAds.
+ *
+ * The listing is filtered server-side (`isAdvertOpenToSession`), so it can only
+ * ever show fleets this character was eligible to join in the first place.
+ */
+export async function loadFleetAds(options: ApiOptions = {}): Promise<Record<string, JsonValue>> {
+  return getJson("/api/bridge/fleet-ads", options);
+}
+
+/**
+ * APPLY to an advertised fleet found in the finder. Confirm-gated.
+ *
+ * `autoAccept` asks to be put straight in rather than left as a pending
+ * application, which is the only useful answer for an unattended ship; a fleet
+ * whose advert demands the boss approve overrides it server-side, and the caller
+ * proves the join by re-reading /bound-fleet either way.
+ */
+export async function applyToJoinFleet(fleetID: number, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/fleet/apply", { fleetID, autoAccept: true, confirm: true }, options);
+}
+
 /** LEAVE the session character's current fleet. Confirm-gated. */
 export async function leaveFleet(options: ApiOptions = {}): Promise<void> {
   await postJson("/api/bridge/fleet/leave", { confirm: true }, options);

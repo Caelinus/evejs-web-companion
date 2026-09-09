@@ -238,6 +238,7 @@ test("a fresh step's seeded arguments are exactly these, for every macro", () =>
     "buy-item": { args: ["item", "price", "quantity"], until: null },
     "sell-item": { args: ["item", "price"], until: null },
     "invite-to-fleet": { args: ["who"], until: null },
+    "join-advertised-fleet": { args: ["fleetName"], until: null },
     "set-destination": { args: ["destination"], until: null },
   });
 });

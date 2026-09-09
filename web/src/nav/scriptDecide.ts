@@ -152,6 +152,12 @@ export type ScriptAction =
   | { readonly kind: "inviteToFleet"; readonly charID: number }
   /** Accept a pending fleet invite (server confirm-gated). */
   | { readonly kind: "acceptFleetInvite" }
+  /**
+   * Apply to an ADVERTISED fleet found in the fleet finder (server confirm-gated).
+   * The id comes from the listing this same tick and is never saved in a script:
+   * a fleet is minted fresh every time somebody forms up.
+   */
+  | { readonly kind: "applyToJoinFleet"; readonly fleetID: number }
   /** Hand the SHARED autopilot a system-only route (arrives in space, no dock). */
   | { readonly kind: "startSystemRoute"; readonly systemID: number }
   /**

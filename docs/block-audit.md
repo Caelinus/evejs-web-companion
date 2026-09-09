@@ -37,7 +37,7 @@ planets · fleet · flow`).
 | missions | find-distribution-agent · request-mission · accept-mission · load-mission-cargo · travel-to-dropoff · turn-in-mission · return-to-agent · find-combat-agent · fly-to-mission-site |
 | ship | refit-ship · repair-ship |
 | planets | restart-extractors |
-| fleet | remote-rep · orbit-and-boost · **remote-cap** · create-fleet · invite-to-fleet · join-fleet |
+| fleet | remote-rep · orbit-and-boost · **remote-cap** · create-fleet · invite-to-fleet · join-fleet · **join-advertised-fleet** |
 | social | **send-chat** |
 | flow | wait (+ branch / sub-bot / board-slot program nodes) |
 
@@ -85,6 +85,7 @@ without a roster read.
 | **create-fleet** (form up, become boss) | `fleet/create` + `bound-fleet` read | ✅ | Argless; done once `inFleet` reads true. |
 | **invite-to-fleet** (invite a known pilot) | `fleet/invite` (inviteeCharID) | ✅ | Picks from the local known-pilots roster; requires being in a fleet. |
 | **join-fleet** (accept a pending invite) | `fleet/invite/accept` + `bound-fleet` read | ✅ | Reactive — keeps accepting until `inFleet` true (bounded). The multibox alt-fleeting loop: char 1 create+invite, alts join. |
+| **join-advertised-fleet** (join a named fleet from the finder) | `fleet-ads` read + `fleet/apply` + `bound-fleet` read | 🔌 | The pull twin of join-fleet: no invite needed, the alt finds the boss's advert by NAME. **Opportunistic** — already fleeted, or nobody advertising that name, both finish `done` so a mining loop carries on alone; only an apply that never lands blocks. Name match is trimmed + case-insensitive but never a substring; ties go to the bigger fleet. ⚠ `ApplyToJoinFleet` is a fast-mode decoder never fired live — owed the same QA pass the create/invite/join set got on 2026-07-25. |
 | **warp to a fleet member** | fleet-warp / warp-to-member | ❓ | Deferred — the write is unconfirmed. |
 | fleet **broadcast / kick / make-leader** | `boundFleetWrites` | 🔌 | *Educated-guess, never fired live*; low bot value — deprioritised. |
 

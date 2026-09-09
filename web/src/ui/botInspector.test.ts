@@ -96,6 +96,14 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   { macro: "move-items", key: "from", expect: /station hangar/, why: "place-select" },
   { macro: "buy-item", key: "item", expect: /Test Mineral/, why: "item-type-picker" },
   { macro: "invite-to-fleet", key: "who", expect: /Test Pilot One/, why: "character-picker" },
+  // The second text box. Same widget, and that is the point: it must not invite
+  // the player to write a chat message into a fleet name.
+  {
+    macro: "join-advertised-fleet",
+    key: "fleetName",
+    expect: /placeholder="the fleet's name, as it appears in the fleet finder"/,
+    why: "text-input asking for a fleet name, not a message",
+  },
   // The two world-ref widgets delegate to StationPicker, and the ONLY visible
   // difference between them is whether it will also match a solar system —
   // which is exactly the bug a shared widget could hide, so it is what these

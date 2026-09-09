@@ -177,6 +177,12 @@ function everyArgKind(): BotScript {
         args: { system: { kind: "system", ref: { entity: "system", id: 30000144, name: "Far Away", systemName: null } } },
       },
       {
+        id: "a13",
+        kind: "macro",
+        macro: "join-advertised-fleet",
+        args: { fleetName: { kind: "text", text: "Mining Op" } },
+      },
+      {
         id: "a11",
         kind: "macro",
         macro: "mine-at-belt",
@@ -231,6 +237,35 @@ test("a travel-to-system slot takes SYSTEMS ONLY — a station in it is refused"
     node["args"] = { system: { kind: "system", ref: { entity, id: 60000004, name: "Somewhere", systemName: null } } };
     edited["program"] = program;
     assert.equal(decodeScriptValue(edited).ok, false, `a ${entity} is not a solar system`);
+  }
+});
+
+test("a fleet name round-trips verbatim, and never carries a newline through", () => {
+  // The name is matched against a live advert at run time, so every character of
+  // it matters: a codec that quietly trimmed or case-folded here would make the
+  // saved script and the block disagree about what it is looking for.
+  const doc = everyArgKind();
+  const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+  const join = round.program.find((n) => n.kind === "macro" && n.macro === "join-advertised-fleet");
+  assert.ok(join !== undefined && join.kind === "macro");
+  const arg = join.args["fleetName"];
+  assert.ok(arg !== undefined && arg.kind === "text");
+  assert.equal(arg.text, "Mining Op");
+
+  // A hand-edited file cannot smuggle a line break into a fleet name.
+  const edited = JSON.parse(encodeScriptDoc(doc)) as Record<string, unknown>;
+  const program = structuredClone(edited["program"]) as Record<string, unknown>[];
+  const node = program.find((n) => n["macro"] === "join-advertised-fleet") as Record<string, unknown>;
+  const NEWLINE = String.fromCharCode(10);
+  node["args"] = { fleetName: { kind: "text", text: `Mining${NEWLINE}Op` } };
+  edited["program"] = program;
+  const decoded = decodeScriptValue(edited);
+  if (decoded.ok) {
+    const step = decoded.doc.program.find((n) => n.kind === "macro" && n.macro === "join-advertised-fleet");
+    assert.ok(step !== undefined && step.kind === "macro");
+    const cleaned = step.args["fleetName"];
+    assert.ok(cleaned !== undefined && cleaned.kind === "text");
+    assert.ok(!cleaned.text.includes(NEWLINE), "a newline must not survive into a fleet name");
   }
 });
 

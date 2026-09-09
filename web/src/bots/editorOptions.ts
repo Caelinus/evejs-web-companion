@@ -67,7 +67,8 @@ export type WidgetKind =
   | "target-list-picker"
   | "squad-role-select"
   | "bay-list-picker"
-  | "item-list-picker";
+  | "item-list-picker"
+  | "text-input";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
@@ -92,6 +93,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   squadRole: "squad-role-select",
   bayList: "bay-list-picker",
   itemList: "item-list-picker",
+  text: "text-input",
 };
 
 /** A plain-language name for an argument KIND — used when no per-macro label fits. */
@@ -117,6 +119,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   squadRole: "Fleet fire",
   bayList: "Leave alone",
   itemList: "Keep aboard",
+  text: "Text",
 };
 
 /**
@@ -150,8 +153,23 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   range: "Scanner reach (AU)",
   destination: "Destination",
   system: "Solar system",
+  fleetName: "Fleet name",
   pick: "Which rock first",
 };
+
+/**
+ * What an empty TEXT box invites the player to type, keyed by argument. The
+ * key, not the kind, decides - same reason `ARG_KEY_LABEL` exists above - so a
+ * second text argument gets its own invitation instead of borrowing this one.
+ */
+const TEXT_ARG_PLACEHOLDER: Readonly<Record<string, string>> = {
+  fleetName: "the fleet's name, as it appears in the fleet finder",
+};
+
+/** The invitation for one text box; a plain one for a key with no entry. */
+export function textPlaceholder(key: string): string {
+  return TEXT_ARG_PLACEHOLDER[key] ?? "type it here";
+}
 
 function argLabel(arg: MacroArgSpec): string {
   return ARG_KEY_LABEL[arg.key] ?? ARG_KIND_LABEL[arg.kind];
@@ -197,7 +215,7 @@ export interface MacroArgDescriptors {
    * The FORMAT allows an `until` on any step (`scriptCodec.ts` reads one
    * wherever a step is read), so this is a UI judgement, not a format fact:
    * offering "Leave the station until your wallet rises above 10m ISK" on all
-   * 50 macros would put a control nobody wants on almost every step. It is
+   * 51 macros would put a control nobody wants on almost every step. It is
    * offered where the macro cannot end on its own (`untilRequired`) and on
    * `wait`, whose own spec names "wait until shields are back above X" as the
    * intended combination. A step that ALREADY carries an `until` — from an

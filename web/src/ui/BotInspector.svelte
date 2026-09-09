@@ -30,6 +30,7 @@
     type SubBotNode,
     type WorldRef,
     MAX_ISK_ARG,
+    MAX_TEXT_ARG_LEN,
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
@@ -50,6 +51,7 @@
     CONDITION_FRACTION_BOUNDS,
     CONDITION_NOUN_LABEL,
     CONDITION_UNTIL_LABEL,
+    textPlaceholder,
     PLACE_OPTIONS,
     RESPONSE_OPTIONS,
     UNTIL_CONDITION_KINDS,
@@ -128,6 +130,10 @@
     const arg = argOf(step, key);
     if (arg === undefined) return "";
     return arg.kind === "count" || arg.kind === "isk" || arg.kind === "qty" ? arg.value : "";
+  }
+  function textValue(step: MacroStep, key: string): string {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "text" ? arg.text : "";
   }
   function itemTypeValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -860,6 +866,15 @@
           placeholder="any corporation"
           value={corpValue(step, arg.key)}
           oninput={(e) => setCorp(arg.key, e.currentTarget.value)}
+        />
+      {:else if arg.widget === "text-input"}
+        <input
+          id={fieldId}
+          type="text"
+          maxlength={MAX_TEXT_ARG_LEN}
+          placeholder={textPlaceholder(arg.key)}
+          value={textValue(step, arg.key)}
+          oninput={(e) => onArg(arg.key, { kind: "text", text: e.currentTarget.value.slice(0, MAX_TEXT_ARG_LEN) })}
         />
       {:else}
         <!-- count / isk / qty. The range is SHOWN, not merely enforced: a bound

@@ -211,7 +211,7 @@ editor" separation the codebase already asserts, in both directions.
    **What must survive**: the *unconditional* acute override at `scriptConditions.ts:352` — hostile on
    grid with unreadable health pauses the ship regardless of any floor row. That is the real safety net
    and it never depended on `builtIn`.
-3. **13 categories for 50 macros, four of them singletons** (Flow, Industry, Planets, Chat & Social).
+3. **13 categories for 51 macros, four of them singletons** (Flow, Industry, Planets, Chat & Social).
    The literature gives no defensible category count, so this is a judgement call, not an evidence call.
    With search present, singletons cost little; merging them into a "Other" or folding Industry into
    Mining would trade discoverability for tidiness. **Recommend leaving as-is** and letting search carry

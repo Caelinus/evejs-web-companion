@@ -1638,6 +1638,90 @@ test("join-fleet: not in a fleet -> keep accepting; in a fleet -> done", () => {
   assert.equal(joinF(joinStep, obs({ inFleet: true }), {}, {}).outcome.kind, "done");
 });
 
+
+// ── join-advertised-fleet ────────────────────────────────────────────────────
+// The opportunistic twin of join-fleet. The tests that matter most are the ones
+// proving it does NOT stop the run when the fleet simply is not there, and that
+// it will not join a fleet whose name merely resembles the one asked for.
+
+const joinAdv = SCRIPT_MACROS["join-advertised-fleet"]!;
+const joinAdvStep: MacroStep = {
+  id: "jaf", kind: "macro", macro: "join-advertised-fleet",
+  args: { fleetName: { kind: "text", text: "Mining Op" } },
+};
+/** One fleet-finder row. */
+const ad = (fleetID: number, fleetName: string, numMembers = 1) => ({ fleetID, fleetName, numMembers });
+
+test("join-advertised-fleet: already in a fleet -> done without reading the finder", () => {
+  const done = joinAdv(joinAdvStep, obs({ inFleet: true }), {}, {});
+  assert.equal(done.outcome.kind, "done");
+  assert.equal(done.action.kind, "wait");
+});
+
+test("join-advertised-fleet: the named fleet is advertised -> apply to it", () => {
+  const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(42, "Other Op"), ad(77, "Mining Op")] }), {}, {});
+  assert.ok(t.action.kind === "applyToJoinFleet" && t.action.fleetID === 77);
+  assert.equal(t.outcome.kind, "acting");
+});
+
+test("join-advertised-fleet: the name matches past case and padding, but never as a substring", () => {
+  const loose = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(88, "  mining op ")] }), {}, {});
+  assert.ok(loose.action.kind === "applyToJoinFleet" && loose.action.fleetID === 88);
+  // "Sunday Mining Op" CONTAINS the typed name; an unattended ship must not join it.
+  const substring = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(99, "Sunday Mining Op")] }), {}, {});
+  assert.equal(substring.outcome.kind, "done");
+  assert.equal(substring.action.kind, "wait");
+});
+
+test("join-advertised-fleet: nobody advertising that name -> DONE, so the loop carries on", () => {
+  // The whole point of the block: an empty or non-matching finder is a real
+  // answer, not a failure, and must never stop a bot that mines on alone.
+  for (const ads of [[], [ad(42, "Other Op")]]) {
+    const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads }), {}, {});
+    assert.equal(t.outcome.kind, "done");
+    assert.equal(t.action.kind, "wait");
+  }
+});
+
+test("join-advertised-fleet: two fleets share the name -> the bigger one, stably", () => {
+  const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(5, "Mining Op", 2), ad(6, "Mining Op", 9)] }), {}, {});
+  assert.ok(t.action.kind === "applyToJoinFleet" && t.action.fleetID === 6);
+  // Equal sizes must not flap between ticks: the lower id wins, both orderings.
+  const tie = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(6, "Mining Op", 4), ad(5, "Mining Op", 4)] }), {}, {});
+  assert.ok(tie.action.kind === "applyToJoinFleet" && tie.action.fleetID === 5);
+});
+
+test("join-advertised-fleet: an unreadable finder or fleet status waits, never guesses", () => {
+  const noAds = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: null }), {}, {});
+  assert.equal(noAds.outcome.kind, "acting");
+  assert.equal(noAds.action.kind, "wait");
+  const noFleet = joinAdv(joinAdvStep, obs({ inFleet: null }), {}, {});
+  assert.equal(noFleet.outcome.kind, "acting");
+  assert.equal(noFleet.action.kind, "wait");
+});
+
+test("join-advertised-fleet: applied once, it waits for membership, then gives up with a reason", () => {
+  const applied = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), {}, {});
+  assert.equal(applied.action.kind, "applyToJoinFleet");
+  // It does not apply twice while waiting to be let in.
+  const waiting = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), applied.nextMem, {});
+  assert.equal(waiting.action.kind, "wait");
+  assert.equal(waiting.outcome.kind, "acting");
+  // Getting in ends the block.
+  assert.equal(joinAdv(joinAdvStep, obs({ inFleet: true }), applied.nextMem, {}).outcome.kind, "done");
+  // A join that never lands is a real failure, unlike an absent fleet.
+  const overdue = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), { applied: true, waited: 10_000 }, {});
+  assert.equal(overdue.outcome.kind, "blocked");
+});
+
+test("join-advertised-fleet: no name typed -> blocked before anything is read", () => {
+  const blank: MacroStep = {
+    id: "jaf0", kind: "macro", macro: "join-advertised-fleet",
+    args: { fleetName: { kind: "text", text: "   " } },
+  };
+  assert.equal(joinAdv(blank, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), {}, {}).outcome.kind, "blocked");
+});
+
 // ── Movement extras, cargo extras, cap chain ─────────────────────────────────
 
 const setDest = SCRIPT_MACROS["set-destination"]!;

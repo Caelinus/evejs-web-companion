@@ -199,6 +199,7 @@ import {
   decodeFleetCenter,
   decodeFleetInviteNotification,
 } from "../bridge/fleetCenter.ts";
+import { decodeAvailableFleetAds } from "../bridge/fleetAds.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -5907,7 +5908,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
   const BAY_MACROS = new Set(["unload-cargo"]);
-  const FLEET_MANAGEMENT_MACROS = new Set(["create-fleet", "invite-to-fleet", "join-fleet"]);
+  const FLEET_MANAGEMENT_MACROS = new Set([
+    "create-fleet",
+    "invite-to-fleet",
+    "join-fleet",
+    "join-advertised-fleet",
+  ]);
+  // Only the join-by-name block reads the finder, and only it pays for that read.
+  const FLEET_FINDER_MACROS = new Set(["join-advertised-fleet"]);
   const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
   const SCANNER_MACROS = new Set([
     "launch-scan-probes",
@@ -6576,6 +6584,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             fleetMemberCharacterIDs = null;
           }
         }
+        // The fleet finder, for the one block that joins by name. Read only when
+        // that block is the active step, and only while this pilot is NOT already
+        // fleeted — a fleeted pilot's block is already done, so the listing would
+        // be paid for and thrown away. A failed read stays null (the block waits
+        // for a clean one); an EMPTY listing is a real "nobody is advertising".
+        let fleetAds: ScriptObservation["fleetAds"] = null;
+        if (macro !== null && FLEET_FINDER_MACROS.has(macro) && inFleet === false) {
+          try {
+            fleetAds = decodeAvailableFleetAds(
+              (await api.loadFleetAds(callOptions)).availableFleetAds ?? null,
+            )
+              .filter((ad) => ad.fleetID !== null && ad.fleetID > 0)
+              .map((ad) => ({
+                fleetID: ad.fleetID as number,
+                fleetName: ad.fleetName,
+                numMembers: ad.numMembers,
+              }));
+          } catch {
+            fleetAds = null;
+          }
+        }
         if (macro !== null && (MISSION_MACROS.has(macro) || CARGO_MACROS.has(macro))) {
           if (MISSION_MACROS.has(macro)) {
             try {
@@ -6767,6 +6796,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           remoteHullRepairerIDs: capabilities.remoteReps.hull,
           remoteCapModuleIDs: capabilities.remoteReps.cap,
           inFleet,
+          fleetAds,
           fleetMemberCharacterIDs,
           targetGroupNames,
           squadPrimaryTargetID,
@@ -7070,6 +7100,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               }
               await api.acceptFleetInvite(fleetID, callOptions);
             }
+            return;
+          case "applyToJoinFleet":
+            // Confirmed the same way create/accept are: the next bound-fleet read
+            // flips inFleet true. A refusal (approval needed, fleet full, the
+            // advert pulled between the read and this call) is swallowed by the
+            // runner, and the block's own bounded wait is what ends the attempt.
+            await api.applyToJoinFleet(action.fleetID, callOptions);
             return;
           case "startSystemRoute":
             // The SHARED autopilot again — resolveDestination answers a system id

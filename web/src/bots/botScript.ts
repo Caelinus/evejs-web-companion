@@ -199,6 +199,13 @@ export const MAX_ISK_ARG = 100_000_000_000;
 export const MIN_QTY_ARG = 1;
 export const MAX_QTY_ARG = 10_000_000;
 
+/**
+ * A short free-text argument a player writes (a fleet name). One line, capped
+ * well under the document byte ceiling; the codec strips control characters the
+ * same way it does for names.
+ */
+export const MAX_TEXT_ARG_LEN = 200;
+
 export type Arg =
   | { readonly kind: "belt"; readonly belt: BeltArg }
   | { readonly kind: "station"; readonly ref: WorldRef }
@@ -247,6 +254,9 @@ export type Arg =
   | { readonly kind: "system"; readonly ref: WorldRef }
   /** Which rock a mining step reaches for first. */
   | { readonly kind: "rockPick"; readonly pick: RockPick }
+  /** A short line of text the player writes (a fleet name). Never empty at run
+   * time — the validator flags a blank one before the bot can start. */
+  | { readonly kind: "text"; readonly text: string }
   /** An ORDERED ore priority list for the mine block (first = most wanted).
    * Empty or absent = any rock, the shipped behaviour. */
   | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] }
@@ -625,6 +635,7 @@ export type MacroID =
   | "create-fleet"
   | "invite-to-fleet"
   | "join-fleet"
+  | "join-advertised-fleet"
   // ── Movement extras. Point the autopilot somewhere; run for the nearest dock.
   | "set-destination"
   | "dock-at-nearest"
@@ -680,6 +691,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "create-fleet",
   "invite-to-fleet",
   "join-fleet",
+  "join-advertised-fleet",
   "set-destination",
   "dock-at-nearest",
   "remote-cap",
