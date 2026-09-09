@@ -101,10 +101,12 @@ test("a populated hangar groups by account and prints every pilot column", () =>
   setHangarPrefsStorage(storage());
   const body = renderHangar();
 
-  // Accounts are the grouping, in roster order.
+  // Accounts are the grouping, BY NAME — the roster's own order is `lastSeen`
+  // descending and the hangar's refresh rewrites that account by account, so
+  // ordering by it shuffled the sections on every open of the screen.
   assert.match(body, /Test Account/);
   assert.match(body, /Other Account/);
-  assert.ok(body.indexOf("Test Account") < body.indexOf("Other Account"));
+  assert.ok(body.indexOf("Other Account") < body.indexOf("Test Account"));
 
   // Every column the screen exists to show.
   assert.match(body, /Ore Farmer/);

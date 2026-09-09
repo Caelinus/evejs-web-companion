@@ -165,10 +165,26 @@ export function visiblePilots(
 }
 
 /**
- * Group the visible pilots into account sections, accounts in roster order and
- * pilots pinned-first then by skill points descending — so the pilot a player
- * pinned is where they left it and, failing that, the most developed pilot in an
- * account leads.
+ * Group the visible pilots into account sections: accounts BY NAME, pilots
+ * pinned-first then by skill points descending — so the pilot a player pinned is
+ * where they left it and, failing that, the most developed pilot in an account
+ * leads.
+ *
+ * ⚠ ACCOUNTS ARE SORTED, NOT LEFT IN ROSTER ORDER. Roster order is `lastSeen`
+ * descending (app/knownCharacters.ts), and the hangar's own refresh REWRITES
+ * `lastSeen` account by account as each sign-in lands — so the account that
+ * refreshed last led the screen, the next open refreshed them in that new order,
+ * and the sections shuffled every single time the hangar was opened. Nothing on
+ * this screen is helped by that: a player looking for one account among a dozen
+ * wants it in the same place it was last time, and the only order that is the
+ * same every time is the account's own name.
+ *
+ * Case-insensitively, and `numeric` so "alt10" sorts after "alt9" rather than
+ * between "alt1" and "alt2".
+ *
+ * Pilots inside an account get the same treatment at the end: name is the
+ * tiebreak under pinned/SP, so two pilots with identical SP cannot swap places
+ * between two paints of the same list.
  *
  * Empty slots are padded ONLY on the unfiltered view: an account showing two of
  * its three pilots because of a search has not got a free slot to offer, and a
@@ -178,21 +194,18 @@ export function groupByAccount(
   visible: readonly HangarPilot[],
   { padSlots }: { padSlots: boolean },
 ): HangarAccount[] {
-  const order: string[] = [];
   const byAccount = new Map<string, HangarPilot[]>();
   for (const pilot of visible) {
-    let bucket = byAccount.get(pilot.accountName);
-    if (!bucket) {
-      bucket = [];
-      byAccount.set(pilot.accountName, bucket);
-      order.push(pilot.accountName);
-    }
-    bucket.push(pilot);
+    const bucket = byAccount.get(pilot.accountName);
+    if (bucket) bucket.push(pilot);
+    else byAccount.set(pilot.accountName, [pilot]);
   }
-  return order.map((name) => {
+  return [...byAccount.keys()].sort(compareNames).map((name) => {
     const pilots = [...(byAccount.get(name) ?? [])].sort(
       (a, b) =>
-        Number(b.pinned) - Number(a.pinned) || (b.skillPoints ?? 0) - (a.skillPoints ?? 0),
+        Number(b.pinned) - Number(a.pinned) ||
+        (b.skillPoints ?? 0) - (a.skillPoints ?? 0) ||
+        compareNames(a.name, b.name),
     );
     return {
       name,
@@ -200,6 +213,18 @@ export function groupByAccount(
       emptySlots: padSlots ? Math.max(0, MAX_SLOTS - pilots.length) : 0,
     };
   });
+}
+
+/**
+ * The one name comparison this screen uses. Case-insensitive and numeric-aware,
+ * with a plain codepoint fallback so two names that differ only by case still
+ * order deterministically instead of by whichever arrived first.
+ */
+function compareNames(left: string, right: string): number {
+  return (
+    left.localeCompare(right, undefined, { sensitivity: "base", numeric: true }) ||
+    (left < right ? -1 : left > right ? 1 : 0)
+  );
 }
 
 // --- the strings the screen prints -----------------------------------------

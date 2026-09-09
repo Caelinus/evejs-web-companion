@@ -80,6 +80,13 @@ sign-ins and the next click of any kind queues behind them.
 The results land in `knownCharacters.ts`, which grew four optional columns (`locationName`,
 `trainingSkillName`, `trainingToLevel`, `trainingEndsAtMs`) plus the two IDs those names came from.
 
+Accounts are shown **in name order**, not in roster order. Roster order is `lastSeen` descending, and
+the refresh above rewrites `lastSeen` account by account as each sign-in lands — so the account that
+happened to refresh last led the screen, the next open refreshed them in that new order, and the
+sections reshuffled every single time the hangar was opened. Sorting is case-insensitive and
+`numeric`, so `alt10` follows `alt9`; pilots inside an account keep the pinned-then-SP rule with the
+pilot name as the tiebreak, so equal-SP pilots cannot swap places between two paints either.
+
 > **The carry-over rule, and why it exists.** Only a caller holding a token can resolve a place or a
 > skill name, and an ordinary sign-in through the character-select screen has one but does not do the
 > lookup. It still calls `rememberCharacters`, which replaces the account's rows wholesale — so
@@ -188,12 +195,19 @@ path for it to take.
 
 ## Verification
 
-- `web/src/app/hangar.test.ts` — 18 tests: the stale-training rule, scope × search composition, the
-  pinned-then-SP sort, slot padding, and every formatted string.
+- `web/src/app/hangar.test.ts` — the stale-training rule (including a nameless queue that has not
+  ended yet, which is training and not IDLE), scope × search composition, the pinned-then-SP sort,
+  the name-order grouping and its stability whatever order the roster arrives in, slot padding, and
+  every formatted string.
+- `test/rosterTraining.test.js` — `GET /api/roster/training`: the queue head named and dated, an
+  empty queue answered *as* empty, a pilot the read could not answer for omitted rather than reported
+  idle, id cleanup, the per-request cap, and the auth gate.
 - `web/src/app/hangarPrefs.test.ts` — 12 tests: round-trip, junk and half-written storage, the two
   cascade deletes (a squad takes its membership and pin; a forgotten pilot leaves every squad), and
   `addSquadMembers` as a union that ignores an unknown squad.
-- `web/src/app/knownCharacters.test.ts` — the carry-over rule and the FILETIME conversion.
+- `web/src/app/knownCharacters.test.ts` — the carry-over rule, the FILETIME conversion, and the
+  three-tier training precedence (live queue, then the selection tuple, then what the row already
+  had).
 - `web/src/ui/pilotHangar.test.ts` — SSR renders: first run, a populated hangar, a roster row written
   before the hangar existed, empty slots, squads (pinned and not), a collapsed account, manage mode,
   the squad picker (open, closed and empty — every row offering the editor), and "Save as squad" with
