@@ -40,10 +40,32 @@ between them is the character bar, not this screen.
 ## Where the data comes from
 
 Per pilot the screen shows: name, ship, location, wallet, skill points, what it is training, and
-whether it is already in the client. All of it except the last comes from
+whether it is already in the client. Name, ship, location, wallet and skill points come from
 `charUnboundMgr.GetCharacterSelectionData` — the same call the character-select screen has always
-used, which already carries `stationID` / `solarSystemID` / `skillTypeID` / `toLevel` /
-`trainingEndTime`. "In client" is live from App's session list, never from storage.
+used, which already carries `stationID` / `solarSystemID`. "In client" is live from App's session
+list, never from storage.
+
+**Training does NOT come from that call, and the reason is worth writing down.** The tuple carries
+`skillTypeID` / `toLevel` / `trainingEndTime` per character and the hangar used to believe them.
+Measured against a live server on 2026-09-09: **all three are null for every pilot on every
+account**, including pilots whose stored queue was active with fifty-odd skills on it —
+`charService.Handle_GetCharacterSelectionData` fills them from `buildTrainingSelectionInfo`, which
+answers off a runtime snapshot the selection path does not have warm. The hangar rendered that null
+as IDLE, so the training column was not *stale*, it was structurally always wrong.
+
+The authority that does answer is the gateway's own `GET /skills`
+(`skillQueueRuntime.getQueueSnapshot`), which needs no bridge session for the same reason the skill
+panel's read does not: reading what a character is training is not an act of piloting. `GET
+/api/roster/training?characterIDs=…` is the BFF route over it — the skill's **name** and the
+completion instant arrive already resolved, so the roster needs no `/api/names` lookup for the skill.
+Ownership is the gateway's: every id is passed with the *caller's* accountID and
+`validateOwnedCharacter` refuses the rest.
+
+⚠ **A missing row is not an idle row.** A pilot the read could not answer for is left OUT of the
+response and keeps whatever the roster already had; only a row that comes back with `skillTypeID:
+null` — the positive finding "this queue is empty" — turns a pilot IDLE. The same rule runs one layer
+down in `rememberCharacters`, where an ordinary character-select sign-in (which cannot ask about the
+queue at all) leaves the training columns exactly as it found them.
 
 That call needs a signed-in session and this is the screen you see *before* you sign in. So
 `rosterRefresh.ts` does what Onboarding's stop-a-bot button already did: signs in on a **throwaway

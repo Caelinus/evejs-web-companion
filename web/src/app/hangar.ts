@@ -102,6 +102,12 @@ export function toHangarPilots(
  * without us, so treating a stale entry as live would tell the player a pilot is
  * busy when it has been idle for a day. Null is the honest answer, and the IDLE
  * badge that follows from it is the one the player can act on.
+ *
+ * ⚠ A NAMELESS QUEUE IS STILL A QUEUE. An end time in the future is the roster
+ * saying "this pilot is training"; the skill's NAME is a separate lookup that
+ * can come back empty on its own. Losing the name must cost the row its words,
+ * not its badge — printing IDLE there would be a claim about the queue that
+ * nothing observed.
  */
 export function trainingLabel(
   skillName: string | null,
@@ -109,18 +115,20 @@ export function trainingLabel(
   endsAtMs: number | null,
   now: number = Date.now(),
 ): string | null {
-  if (skillName === null || skillName.length === 0) {
-    return null;
-  }
-  const level = toLevel === null ? "" : romanLevel(toLevel);
-  const named = level ? `${skillName} ${level}` : skillName;
+  const named =
+    skillName === null || skillName.length === 0
+      ? null
+      : toLevel === null
+        ? skillName
+        : `${skillName} ${romanLevel(toLevel)}`;
   if (endsAtMs === null) {
     return named;
   }
   if (endsAtMs <= now) {
     return null;
   }
-  return `${named} · ${formatDuration(endsAtMs - now)}`;
+  const remaining = formatDuration(endsAtMs - now);
+  return named === null ? `Training · ${remaining}` : `${named} · ${remaining}`;
 }
 
 /** Does this pilot match the search box? Name, account, ship and system. */

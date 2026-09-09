@@ -19,9 +19,18 @@
 // and the next refresh tries again. A landing screen must never be a dead end
 // because a read failed.
 
-import { login as apiLogin, logout as apiLogout, resolveNames } from "./api.ts";
+import {
+  login as apiLogin,
+  logout as apiLogout,
+  loadRosterTraining,
+  resolveNames,
+} from "./api.ts";
 import { getCharacterSelectionData } from "../bridge/characterSelection.ts";
-import { rememberCharacters, type ResolvedRosterNames } from "./knownCharacters.ts";
+import {
+  rememberCharacters,
+  type ResolvedRosterNames,
+  type RosterTraining,
+} from "./knownCharacters.ts";
 import type { CharacterSummary } from "../store/types.ts";
 import type { NameRef } from "../store/names.ts";
 
@@ -48,6 +57,50 @@ function nameRefsFor(row: CharacterSummary): NameRef[] {
     refs.push({ kind: "type", id: row.skillTypeID });
   }
   return refs;
+}
+
+/**
+ * What each of these pilots is training, from the LIVE queue.
+ *
+ * ⚠ WHY THIS IS A SECOND CALL. The selection tuple this module already reads
+ * carries `skillTypeID`, `toLevel` and `trainingEndTime` per character, and the
+ * hangar used to take them at face value. Measured against a live server on
+ * 2026-09-09: they are null for EVERY pilot on EVERY account, including pilots
+ * whose stored queue was active with fifty-odd skills on it — charService fills
+ * them from a runtime snapshot the selection path does not have warm. So the
+ * hangar's training column was not stale, it was structurally always "IDLE".
+ *
+ * GET /api/roster/training answers off `skillQueueRuntime.getQueueSnapshot`
+ * instead, with the skill name and the completion instant already resolved.
+ * Best-effort like everything else here: a pilot the read could not answer for
+ * is simply left out, and keeps the row it had.
+ */
+async function readTraining(
+  characters: readonly CharacterSummary[],
+  token: string,
+): Promise<Map<number, RosterTraining>> {
+  const live = new Map<number, RosterTraining>();
+  if (characters.length === 0) {
+    return live;
+  }
+  let rows: Awaited<ReturnType<typeof loadRosterTraining>> = [];
+  try {
+    rows = await loadRosterTraining(
+      characters.map((row) => row.characterID),
+      { token, priority: "poll" },
+    );
+  } catch {
+    return live;
+  }
+  for (const row of rows) {
+    live.set(row.characterID, {
+      skillTypeID: row.skillTypeID,
+      skillName: row.skillName,
+      toLevel: row.toLevel,
+      endsAtMs: row.endsAtMs,
+    });
+  }
+  return live;
 }
 
 /**
@@ -127,8 +180,25 @@ async function readAccountInto(
     }
     const asOwner = { token, priority: "poll" as const };
     const selection = await getCharacterSelectionData(asOwner);
-    const resolved = await resolveRosterNames(selection.characters, token);
-    rememberCharacters(accountName, selection.characters, resolved);
+    const [resolved, live] = await Promise.all([
+      resolveRosterNames(selection.characters, token),
+      readTraining(selection.characters, token),
+    ]);
+    // One side channel, two questions. `training` is only SET for a pilot the
+    // live read actually answered for — leaving the key off is what tells
+    // rememberCharacters to fall back to the selection tuple rather than
+    // recording an empty queue nobody observed.
+    const merged = new Map<number, ResolvedRosterNames>();
+    for (const row of selection.characters) {
+      const names = resolved.get(row.characterID) ?? null;
+      const training = live.get(row.characterID);
+      merged.set(row.characterID, {
+        locationName: names?.locationName ?? null,
+        trainingSkillName: names?.trainingSkillName ?? null,
+        ...(training === undefined ? {} : { training }),
+      });
+    }
+    rememberCharacters(accountName, selection.characters, merged);
     return selection.characters;
   } finally {
     if (token !== null) {

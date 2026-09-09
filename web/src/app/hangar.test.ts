@@ -84,6 +84,14 @@ test("trainingLabel keeps the skill when there is no end time to count down", ()
   assert.equal(trainingLabel("Drones", 4, null, NOW), "Drones IV");
 });
 
+test("trainingLabel keeps a nameless queue that has not ended yet", () => {
+  // The end time is the roster saying "this pilot IS training"; the skill's name
+  // is a separate lookup that can come back empty on its own. Losing the name
+  // must cost the row its words, never its badge.
+  assert.equal(trainingLabel(null, null, NOW + 3_600_000, NOW), "Training · 1h 0m");
+  assert.equal(trainingLabel("", 4, NOW + 3_600_000, NOW), "Training · 1h 0m");
+});
+
 test("trainingLabel is null for an empty queue", () => {
   assert.equal(trainingLabel(null, null, null, NOW), null);
   assert.equal(trainingLabel("", 3, null, NOW), null);
