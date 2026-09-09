@@ -284,14 +284,34 @@
     }
     onArg(arg.key, { kind: arg.kind, value: Math.min(bounds.max, Math.max(bounds.min, parsed)) } as Arg);
   }
+  /**
+   * The belt name a player last typed, per step and per slot.
+   *
+   * ⚠ IT CANNOT LIVE IN THE DOCUMENT. "The nearest belt" is a belt argument
+   * with NO ref on it at all, so the instant a player flips away from a name
+   * there is nowhere in the script left to keep one — and writing the name into
+   * the saved bot anyway would be recording a belt the bot is not going to use.
+   * So it is throwaway editor state, like `oreQuery` and `keepQuery` above:
+   * flipping to the nearest belt and back within a sitting keeps the name,
+   * reloading the builder does not, and losing it costs a retype.
+   *
+   * Keyed by step AND slot, so a bot with two belt steps in it cannot have one
+   * of them hand its name to the other.
+   */
+  let typedBeltNames = $state<Record<string, string>>({});
+  function beltSlotKey(step: MacroStep, key: string): string {
+    return `${step.id}::${key}`;
+  }
   /** Switch between "the nearest belt" and one the player names, keeping any
    * name already typed so flipping back and forth does not lose it. */
   function setBeltMode(step: MacroStep, key: string, mode: string): void {
     if (mode !== "named") {
+      // Catch the name on the way out — this is the last moment it exists.
+      typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
       onArg(key, { kind: "belt", belt: { mode: "nearest" } });
       return;
     }
-    setBeltName(key, beltName(step, key));
+    setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
   }
   /**
    * The typed belt name.
