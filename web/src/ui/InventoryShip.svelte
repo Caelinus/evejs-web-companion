@@ -76,6 +76,8 @@
   import { resolvedName, nameKey, type NameKind, type NameRef } from "../store/names.ts";
   import { deriveDocked } from "./tabs.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
+  import { repairQuoteTotal, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
+  import { formatIsk } from "./isk.ts";
 
   let {
     store,
@@ -110,6 +112,10 @@
   const station = store.station;
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
+  // The repair shop quotes the ACTIVE HULL and everything fitted to it, so a
+  // quoted module's type comes from the fit (the hull's from its hangar row).
+  // svelte-ignore state_referenced_locally
+  const fitting = store.fitting;
 
   let busy = $state(false);
   let error = $state("");
@@ -292,6 +298,84 @@
     } finally {
       busy = false;
     }
+  }
+
+  // --- The station repair shop (R2 station services) ------------------------
+  //
+  // Unlike the two ship swaps beside it, a repair COSTS ISK, so it is two
+  // presses: "Repair ship" only asks the shop for a quote, and the charge waits
+  // for a second press that names the price. The shop decides what is damaged —
+  // this panel never judges a hitpoint total — and only the items it quoted can
+  // be paid for.
+  //
+  // `repairQuote` is null until the shop has been asked; `repairNote` carries
+  // the answers that are not a list of damage.
+  let repairQuote = $state<readonly RepairQuoteRow[] | null>(null);
+  let repairNote = $state("");
+  /** The hull the standing quote was raised against — see the effect below. */
+  let quotedShipID = $state<number | null>(null);
+
+  // A quote names ITEM IDS on one hull. Board another ship (or leave into the
+  // capsule) and those ids are no longer what is in front of the player, so the
+  // standing quote is dropped rather than left there to be paid for.
+  $effect(() => {
+    if (repairQuote !== null && $inventory.activeShipID !== quotedShipID) {
+      repairQuote = null;
+      repairNote = "";
+    }
+  });
+
+  const repairTotal = $derived(repairQuote === null ? null : repairQuoteTotal(repairQuote));
+
+  /** A quoted item's typeID: a fitted module from the fit, the hull from its row. */
+  function quotedTypeID(itemID: number): number | null {
+    for (const slot of $fitting.slots) {
+      if (slot.module !== null && slot.module.itemID === itemID) {
+        return slot.module.typeID;
+      }
+    }
+    const row =
+      $inventory.hangar.rows.find((r) => r.itemID === itemID) ??
+      $inventory.cargo.rows.find((r) => r.itemID === itemID);
+    return row ? row.typeID : null;
+  }
+
+  // R7d — a quoted item renders as its type NAME; its item id is never shown.
+  $effect(() => {
+    const refs: NameRef[] = [];
+    for (const row of repairQuote ?? []) {
+      const typeID = quotedTypeID(row.itemID);
+      if (typeID !== null) {
+        refs.push({ kind: "type", id: typeID });
+      }
+    }
+    if (refs.length > 0) {
+      flow.requestNames(refs);
+    }
+  });
+
+  function quotedName(itemID: number): string {
+    const typeID = quotedTypeID(itemID);
+    return typeID === null ? "Something on your ship" : nameOnly(typeID, "type");
+  }
+
+  /** Ask the shop what is damaged. Null = there is no hull to quote yet. */
+  async function askRepairQuote(): Promise<void> {
+    const rows = await flow.quoteShipRepair();
+    quotedShipID = store.inventory.get().activeShipID;
+    repairQuote = rows;
+    repairNote =
+      rows === null
+        ? "There is no ship to repair — board one first."
+        : rows.length === 0
+          ? "The repair shop finds nothing damaged."
+          : "";
+  }
+
+  /** Pay for exactly the quoted items, then re-ask so the answer is the shop's. */
+  async function payRepairQuote(rows: readonly RepairQuoteRow[]): Promise<void> {
+    await flow.repairShip(rows.map((row) => row.itemID));
+    await askRepairQuote();
   }
 
   function qtyArg(): number | null {
@@ -1231,6 +1315,57 @@
           Refresh guests
         </button>
       </p>
+      <!-- The repair shop. This press only ASKS for the quote; the wallet is
+           charged by the priced press that appears with the answer. -->
+      <p class="controls">
+        <button type="button" class="minor" disabled={busy} onclick={() => run(askRepairQuote)}>
+          Repair ship
+        </button>
+      </p>
+      {#if repairQuote !== null && repairQuote.length > 0}
+        <div class="table-wrap overflow-x-auto">
+          <table class="reflow">
+            <thead>
+              <tr><th>Damaged</th><th>Cost</th></tr>
+            </thead>
+            <tbody>
+              {#each repairQuote as row (row.itemID)}
+                <tr>
+                  <td data-label="Damaged">{quotedName(row.itemID)}</td>
+                  <td data-label="Cost">{row.cost === null ? "—" : formatIsk(row.cost.toFixed(2))}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          {#if repairTotal === null}
+            The shop did not quote a price; repairing still charges your wallet.
+          {:else}
+            The station will charge {formatIsk(repairTotal.toFixed(2))}.
+          {/if}
+        </p>
+        <p class="controls">
+          <button
+            type="button"
+            class="primary"
+            disabled={busy}
+            onclick={() => run(() => payRepairQuote(repairQuote ?? []))}
+          >
+            Repair {repairQuote.length === 1 ? "it" : `all ${repairQuote.length}`} and pay
+          </button>
+          <button
+            type="button"
+            class="minor"
+            disabled={busy}
+            onclick={() => { repairQuote = null; repairNote = ""; }}
+          >
+            Cancel
+          </button>
+        </p>
+      {:else if repairNote}
+        <p class="note">{repairNote}</p>
+      {/if}
       <!-- The session controls moved here with the rest of the old Station
            panel — this tab is the only docked home they had. -->
       <p class="controls">

@@ -95,6 +95,7 @@ import {
 } from "../bridge/drones.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
+import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
 import type { RequestPriority } from "./transport.ts";
 import type { FlightStepResult } from "./api.ts";
@@ -344,6 +345,17 @@ export interface AppFlow {
    * capsule, the ship stays in the hangar — then refresh.
    */
   leaveShip(): Promise<void>;
+  /**
+   * Ask the station's repair shop what damage it finds on the active hull and
+   * everything fitted to it. Null when there is no hull to quote (no active
+   * ship yet); an empty list is the shop saying nothing is damaged.
+   */
+  quoteShipRepair(): Promise<readonly RepairQuoteRow[] | null>;
+  /**
+   * Pay the station to repair exactly these items — the ids the caller just
+   * quoted, never a broader "everything". The wallet charge is the server's.
+   */
+  repairShip(itemIDs: readonly number[]): Promise<void>;
   // --- R14 inventory depth ---
   /** Tick or untick a row for a bulk move / trash. */
   toggleSelection(itemID: number): void;
@@ -1522,6 +1534,35 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * something else asks. Deleting it degrades the experience; deleting the store
    * half reintroduces the bug.
    */
+  /**
+   * Quote the ACTIVE HULL and everything fitted to it at the station's repair
+   * shop (goal R2 station services; the `repair-ship` bot block asks the same
+   * question). The shop itself decides what counts as damaged — the browser
+   * never judges a hitpoint total — and only the ids we named can come back.
+   *
+   * Null means the shop was NOT asked because there is no hull to quote yet;
+   * an empty list is the shop's own "nothing is damaged". The fit is loaded
+   * first when the fitting slice is still empty, so a quote raised from the
+   * station panel covers the modules and not just the hull.
+   */
+  async function quoteShipRepair(): Promise<readonly RepairQuoteRow[] | null> {
+    if (store.get().fitting.slots.length === 0) {
+      // Best-effort: a fitting read that fails costs the modules from the
+      // quote, never the hull's own repair.
+      await loadFitting().catch(() => {});
+    }
+    const state = store.get();
+    const shipID = state.inventory.activeShipID;
+    const fitted = state.fitting.slots
+      .filter((slot) => slot.module !== null)
+      .map((slot) => slot.module!.itemID);
+    const targets = [...(shipID !== null ? [shipID] : []), ...fitted];
+    if (targets.length === 0) {
+      return null;
+    }
+    return decodeRepairQuotes(await api.getRepairQuotes(targets, callOptions));
+  }
+
   async function refreshActiveShipViews(): Promise<void> {
     // Read the hull AFTER the mutation's own reload, so this is the ship the
     // server ended up putting us in — never the one we asked for. A refused
@@ -5844,30 +5885,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
         if (macro === "repair-ship" && status.docked) {
           try {
-            // Quote the ACTIVE SHIP and everything fitted to it; the ids with a
-            // non-empty quote row list are what the shop calls damaged.
-            const shipID = store.inventory.get().activeShipID;
-            const fitted = store.fitting
-              .get()
-              .slots.filter((slot) => slot.module !== null)
-              .map((slot) => slot.module!.itemID);
-            const targets = [...(shipID !== null ? [shipID] : []), ...fitted];
-            if (targets.length > 0) {
-              const raw = await api.getRepairQuotes(targets, callOptions);
-              const dict =
-                raw !== null && typeof raw === "object" && !Array.isArray(raw) && (raw as { type?: unknown }).type === "dict"
-                  ? ((raw as { entries?: unknown }).entries as readonly [unknown, unknown][] | undefined) ?? []
-                  : [];
-              damagedItemIDs = dict
-                .filter(([, rows]) => {
-                  const list = rows as { items?: unknown } | null;
-                  return Array.isArray(list?.items) && list.items.length > 0;
-                })
-                .map(([id]) => Number(id))
-                .filter((id) => Number.isSafeInteger(id) && id > 0);
-            } else {
-              damagedItemIDs = null;
-            }
+            // The shop's own quote decides what is damaged — the same read the
+            // station panel's repair button raises. Null (nothing to quote, or
+            // the read failed) stays "we cannot say", never "nothing is damaged".
+            const quotes = await quoteShipRepair();
+            damagedItemIDs = quotes === null ? null : quotes.map((quote) => quote.itemID);
           } catch {
             damagedItemIDs = null;
           }
@@ -7082,6 +7104,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     async boardCorvette() {
       await runMutation(() => api.boardCorvette(callOptions));
+      await refreshActiveShipViews();
+    },
+
+    quoteShipRepair,
+
+    async repairShip(itemIDs) {
+      await runMutation(() => api.repairItems(itemIDs, callOptions));
       await refreshActiveShipViews();
     },
 
