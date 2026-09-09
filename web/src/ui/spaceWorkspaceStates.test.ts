@@ -312,6 +312,24 @@ test("⚠ the overview claims the space feed", () => {
   assert.match(panel, /flow\.loadTargets\(\)/, "the locks decide a row's ⌖ and Release lock");
 });
 
+test("⚠ THE PERSISTENT HUD CLAIMS THE FEED TOO — it is not a passenger", () => {
+  // FOUND LIVE: a module that had finished its cycle stayed lit on the rack.
+  //
+  // The HUD reads the space snapshot for all three of its instruments — the
+  // gauges, the module rack and the cargo bays — and claimed nothing. Every
+  // holder of a claim is a CLOSABLE window (Overview, Flight, Travel, Mining),
+  // so collapsing the Overview dock left nobody asking for a snapshot: the
+  // poller disarms itself on the next beat and the HUD freezes on its last
+  // reading. The rack was still right about what it had been told.
+  //
+  // This is the surface that is ALWAYS on screen while flying, so it is the one
+  // claim that must not depend on which window happens to be open.
+  const hud = source("HudBar.svelte");
+  assert.match(hud, /flow\.startSpacePolling\(\)/, "the HUD must claim the feed");
+  assert.match(hud, /return \(\) => flow\.stopSpacePolling\(\)/, "and hand it back");
+  assert.match(hud, /flow\.loadSpaceSnapshot\(\)/, "and ask for one immediately");
+});
+
 test("⚠ every verb the model returns is drawn, including the blocked ones", () => {
   // `actionsForRow` returns an action that cannot be used right now WITH the
   // sentence that says why, and the bar renders it disabled wearing that

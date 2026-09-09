@@ -22,6 +22,7 @@
   import ModuleRack from "./ModuleRack.svelte";
   import ShipHud from "./ShipHud.svelte";
   import CargoBays from "./CargoBays.svelte";
+  import { onMount } from "svelte";
   import { shipIsStopped, shipStateSentenceFor } from "./shipHud.ts";
   import { distanceMeters, formatDistance } from "../space/overview.ts";
   import { resolvedName } from "../store/names.ts";
@@ -41,6 +42,27 @@
   // it once here. Fire-and-forget; $effect never runs under SSR.
   $effect(() => {
     if (!$fitting.loaded) void flow.loadFitting().catch(() => {});
+  });
+
+  // R30 slice B — CLAIM THE SPACE FEED. This is the PERSISTENT hud: the
+  // gauges, the module rack and the cargo bays all read the space snapshot,
+  // and every one of them was riding on some OTHER panel having claimed the
+  // feed. The claim is a count, and the panels that hold one are all closable:
+  // collapse the Overview dock, and nothing was asking for a snapshot any
+  // more. The poller then disarms itself and the whole HUD FREEZES on its last
+  // reading — gauges pinned, and a module that has since finished its cycle
+  // still lit, because `activeModuleIDs` stopped being re-read.
+  //
+  // FOUND LIVE: a module stuck showing as running after it stopped. The rack
+  // was right about what it had been told; nobody was telling it any more.
+  //
+  // The rule flow.ts states is that every component showing live space data
+  // claims on mount and releases on unmount. This one shows more of it than
+  // any window does, and it is the one surface that is always on screen.
+  onMount(() => {
+    void flow.loadSpaceSnapshot().catch(() => {});
+    flow.startSpacePolling();
+    return () => flow.stopSpacePolling();
   });
 
   const ship = $derived($space.snapshot?.ship ?? null);

@@ -287,6 +287,39 @@ test("⚠ AN ACTIVE MODULE LIGHTS THE RING, NOT THE WHOLE SQUARE", () => {
   );
 });
 
+test("⚠ THE CYCLE SWEEP CANNOT OUTLIVE THE CYCLE — it follows the snapshot", () => {
+  // FOUND LIVE: a module that had finished stayed marked as running.
+  //
+  // The sweep is drawn from `targeting.moduleCycles`, and that record only ends
+  // on an `OnGodmaShipEffect` frame with isStart=0. Miss one — a feed reconnect,
+  // a cycle the server ends without saying — and `startedAtMs` stays set; a
+  // non-repeating cycle then CLAMPS at 100% (moduleRack.test.ts pins that, and
+  // it is right: the question "where in the cycle" has no other answer). So the
+  // tile kept a full accent disc over its icon on an idle module.
+  //
+  // The fix is not to make the arithmetic lie — it is to ask the same authority
+  // the glow asks. `active` is the snapshot's own activeModuleIDs.
+  assert.match(
+    RACK_SOURCE,
+    /\{#if slot\.module\.active && cycleOf\(slot\.module\.itemID\) !== null\}/,
+    "the sweep is drawn from the cycle record alone again",
+  );
+});
+
+test("⚠ the 10Hz redraw is for modules that are RUNNING, not ones we have a duration for", () => {
+  // `moduleCycles` also holds BASE durations (attribute 73), learnt from the fit
+  // and never removed. Keyed off that, the rack re-rendered ten times a second
+  // for the rest of the session — docked, drifting, everything off — which is
+  // exactly the idle cost its own comment warns about.
+  assert.match(RACK_SOURCE, /const anyCycling = \$derived\(/);
+  assert.match(RACK_SOURCE, /slot\.module\?\.active === true/, "the tick lost the snapshot");
+  assert.doesNotMatch(
+    RACK_SOURCE,
+    /const anyCycling = \$derived\(Object\.keys/,
+    "the tick is keyed off the cycle record again",
+  );
+});
+
 // --- rack heat: a stub that admits it ----------------------------------------
 
 test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
