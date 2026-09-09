@@ -5277,6 +5277,21 @@
    * block — scattered across the tile's rules is how the square and the circle
    * came to disagree in the first place. */
   button.module-slot:hover:not(:disabled) .slot-ring-track { stroke: var(--color-accent-dim); }
+  /* ⚠ AND THE TILE STAYS UNPAINTED WHILE IT IS ACTIVE. `button.active` is
+   * this app's nav-tab chrome — an accent gradient across the whole box — and
+   * a filled slot is a real <button>, so it took that chrome and beat the
+   * tile's own `background: none` on specificity. Every cycling module lit up
+   * as a filled SQUARE with the ring lost inside it: precisely the box the rack
+   * removed, coming back on the one state where the circle matters most. The
+   * colour, weight and box are all cancelled, not just the fill — `button.active`
+   * sets all four, and the fallback abbreviation reads in the tile's own ink.
+   * FOUND BY EYE, on a rack with three guns up. */
+  button.module-slot.active {
+    background: none;
+    border: none;
+    color: var(--color-muted);
+    font-weight: 700;
+  }
   /* A cycling module glows in the accent. The bloom is what makes a rack of
    * them read as "the guns are up" from the corner of the eye, which is the
    * only way a pilot looks at the rack while actually flying — it was an outer

@@ -260,6 +260,33 @@ test("the slot ring is a drawn CIRCLE, not a rounded corner (R53)", () => {
   assert.match(slotRule, /background: none;/, "the tile got its fill back");
 });
 
+test("⚠ AN ACTIVE MODULE LIGHTS THE RING, NOT THE WHOLE SQUARE", () => {
+  // FOUND BY EYE, on a rack with three guns up: every cycling module was a
+  // filled accent-blue SQUARE with its ring lost inside it.
+  //
+  // The tile is a real <button> and it carries `class:active`, which is also
+  // this app's GLOBAL nav-tab selected state — an accent gradient across the
+  // whole box. `button.active` (0,1,1) beats `.module-slot`'s own
+  // `background: none` (0,1,0), so the square the rack deliberately took off
+  // came back on the one state where the circle is the instrument.
+  //
+  // The cancellation has to name the button, or it loses the same way.
+  const at = CSS_SOURCE.indexOf("  button.module-slot.active {");
+  assert.ok(at > 0, "the active tile no longer cancels the global button chrome");
+  const rule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
+  assert.match(rule, /background: none;/, "an active slot paints its box again");
+  assert.match(rule, /border: none;/, "an active slot got its border back");
+  // `button.active` sets colour and weight too, and the fallback abbreviation
+  // renders in them — cancelling only the fill leaves the ink wrong.
+  assert.match(rule, /color: var\(--color-muted\);/);
+  assert.match(rule, /font-weight: 700;/);
+  // And it must still come AFTER the global rule, or specificity is moot.
+  assert.ok(
+    at > CSS_SOURCE.indexOf("  button.active {"),
+    "the cancellation is above the rule it cancels",
+  );
+});
+
 // --- rack heat: a stub that admits it ----------------------------------------
 
 test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
