@@ -12,6 +12,7 @@ import {
   type Condition,
   type ConditionKind,
   type MacroStep,
+  type RockPick,
 } from "./botScript.ts";
 import {
   conditionSentence,
@@ -107,6 +108,21 @@ test("a mining step reads with its belt and its until", () => {
   const sentence = stepSentence(step);
   assert.match(sentence, /Mine at the nearest belt/);
   assert.match(sentence, /until the ore hold is 90% full/);
+});
+
+test("each rock order says which one it is, in the player's own words", () => {
+  const mine = (pick: RockPick): string =>
+    stepSentence({
+      id: "s1",
+      kind: "macro",
+      macro: "mine-at-belt",
+      args: { belt: { kind: "belt", belt: { mode: "nearest" } }, pick: { kind: "rockPick", pick } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 },
+    });
+  assert.match(mine("biggest"), /Mine at the nearest belt, biggest rocks first/);
+  assert.match(mine("valuable"), /Mine at the nearest belt, most valuable ore first/);
+  // The default says nothing extra: it is what the block always did.
+  assert.match(mine("nearest"), /Mine at the nearest belt until/);
 });
 
 test("a mining step with an ore priority list names it, in order", () => {

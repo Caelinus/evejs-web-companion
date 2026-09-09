@@ -16916,12 +16916,20 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
   }
 });
 
-// The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level) of the
-// rock's ore type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. Stamped onto
-// each ROCK row of a space snapshot from static data before it reaches the
-// browser, because the gateway's own row carries the ore's typeID but not its
-// grade. Non-rock rows pass through untouched; a non-numeric attribute (or a
-// rock whose ore has none) reads as null, never 0 — see SpaceEntity.oreGrade.
+// Two things about a rock that live in STATIC DATA rather than in the scene, and
+// so are stamped onto each ROCK row of a space snapshot before it reaches the
+// browser. Non-rock rows pass through untouched, and both fields read null —
+// never 0 — when the data cannot answer, because a zero here is a claim.
+//
+//   • ORE GRADE — dogma attribute 2699 (asteroid meta level) of the rock's ore
+//     type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. The gateway's own row
+//     carries the ore's typeID but not its grade. See SpaceEntity.oreGrade.
+//   • ORE VALUE — ISK per m³, the number behind the retail client's Mining
+//     Surveyor "Ore Value" gradient. The client computes it in its own UI from
+//     the same static inputs (see staticData.getOreValuePerM3), so this is not a
+//     new fact about the world, it is the same arithmetic done once here instead
+//     of per rock per tick in the browser. Per m³ and not per unit, because a
+//     hold is a volume: it ranks two rocks by what one trip is worth.
 const ASTEROID_META_LEVEL_ATTRIBUTE = 2699;
 
 function isRockSpaceEntityRow(row) {
@@ -16932,7 +16940,7 @@ function isRockSpaceEntityRow(row) {
   );
 }
 
-function withOreGrades(space) {
+function withOreStaticFields(space) {
   if (!space || typeof space !== "object" || !Array.isArray(space.entities)) {
     return space;
   }
@@ -16943,9 +16951,24 @@ function withOreGrades(space) {
         return row;
       }
       const grade = staticData.getTypeDogmaAttribute(row.typeID, ASTEROID_META_LEVEL_ATTRIBUTE, null);
+      // The ore the LASER yields where the row names it, falling back to the
+      // rock's own type: an asteroid row already resolves name/typeID to the ore
+      // it holds, and the two agree for every ordinary rock.
+      //
+      // ⚠ GUARDED, ON PURPOSE — the same rule readStaticTable learned the hard
+      // way: a static-data gap must not be fatal to the one read every ship in
+      // space depends on. An injected staticData that predates this field (a
+      // test double, an older deployment) leaves the value UNKNOWN instead of
+      // throwing the whole snapshot route into a 500.
+      const oreTypeID = Number(row.miningYieldTypeID) || Number(row.typeID) || 0;
+      const value =
+        oreTypeID > 0 && typeof staticData.getOreValuePerM3 === "function"
+          ? staticData.getOreValuePerM3(oreTypeID)
+          : null;
       return {
         ...row,
         oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+        oreValuePerM3: typeof value === "number" && Number.isFinite(value) ? value : null,
       };
     }),
   };
@@ -16970,7 +16993,7 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
     });
     res.json({
       ok: true,
-      space: withOreGrades(outcome.space),
+      space: withOreStaticFields(outcome.space),
       notifications: outcome.notifications,
     });
   } catch (error) {

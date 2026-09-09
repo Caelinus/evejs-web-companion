@@ -19,7 +19,8 @@ function entity(over: Partial<SpaceEntity> & { itemID: number }): SpaceEntity {
     radius: 10, position: ORIGIN, velocity: ORIGIN, isSelf: false,
     shieldRatio: null, armorRatio: null, hullRatio: null, characterID: null, corporationID: null,
     allianceID: null, securityStatus: null, maxVelocity: null, mode: null, capacitorRatio: null,
-    remainingQuantity: null, miningYieldTypeID: null, beltID: null, oreGrade: null, isNpc: false, npcEntityType: null,
+    remainingQuantity: null, miningYieldTypeID: null, beltID: null, oreGrade: null,
+    oreValuePerM3: null, isNpc: false, npcEntityType: null,
     controllerID: null, droneActivity: null, targetEntityID: null,
     ...over,
   };
@@ -370,7 +371,8 @@ test("mine: an ore-priority list only mines the listed family, ignoring closer n
 test("mine: within a family, the highest ore grade wins over distance; an unknown grade sorts last", () => {
   const plain = entity({ itemID: 50001, name: "Veldspar", groupID: 462, miningYieldTypeID: 1230, oreGrade: 0, position: { x: 2000, y: 0, z: 0 } });
   const graded = entity({ itemID: 50002, name: "Concentrated Veldspar", groupID: 462, miningYieldTypeID: 1231, oreGrade: 2, position: { x: 9000, y: 0, z: 0 } });
-  const unknown = entity({ itemID: 50003, name: "Veldspar", groupID: 462, miningYieldTypeID: 1230, oreGrade: null, position: { x: 500, y: 0, z: 0 } });
+  const unknown = entity({ itemID: 50003, name: "Veldspar", groupID: 462, miningYieldTypeID: 1230, oreGrade: null,
+    oreValuePerM3: null, position: { x: 500, y: 0, z: 0 } });
   const t = mine(oreListStep([VELDSPAR]), obs({ snapshot: snapshot([plain, graded, unknown]) }), NM, {});
   assert.ok(t.action.kind === "orbit" && t.action.targetID === 50002, "grade II beats both a closer plain rock and an unknown-grade one");
 });
@@ -2073,6 +2075,85 @@ test("mine: the biggest-rock order prefers the most ore left; the default stays 
 
   const near = mine(mineStep, obs({ snapshot: snapshot([small, big, unknown]) }), NM, {});
   assert.ok(near.action.kind === "orbit" && near.action.targetID === 50003, "default still picks the nearest");
+});
+
+test("mine: the most-valuable order prefers ISK per m³, and breaks ties by distance", () => {
+  // Two ores in the belt. The cheap one is nearer and holds more; the valuable
+  // one is what a hold-sized trip is actually worth, which is the whole point.
+  const cheapNear = entity({ itemID: 50101, name: "Veldspar", miningYieldTypeID: 1230, remainingQuantity: 9000, oreValuePerM3: 52.8, position: { x: 1000, y: 0, z: 0 } });
+  const cheapFar = entity({ itemID: 50102, name: "Veldspar", miningYieldTypeID: 1230, remainingQuantity: 9000, oreValuePerM3: 52.8, position: { x: 4000, y: 0, z: 0 } });
+  const richFar = entity({ itemID: 50103, name: "Kernite", miningYieldTypeID: 1228, remainingQuantity: 500, oreValuePerM3: 120.5, position: { x: 9000, y: 0, z: 0 } });
+  const valuableStep: MacroStep = {
+    ...mineStep, id: "mv",
+    args: { ...mineStep.args, pick: { kind: "rockPick", pick: "valuable" } },
+  };
+  const rich = mine(valuableStep, obs({ snapshot: snapshot([cheapNear, cheapFar, richFar]) }), NM, {});
+  assert.ok(rich.action.kind === "orbit" && rich.action.targetID === 50103, "the richer ore, though it is furthest and smaller");
+
+  // ⚠ THE TIE IS THE COMMON CASE: a belt of one ore prices every rock the same.
+  // Without a distance tie-break this pick would be "whichever rock came first".
+  const tied = mine(valuableStep, obs({ snapshot: snapshot([cheapFar, cheapNear]) }), NM, {});
+  assert.ok(tied.action.kind === "orbit" && tied.action.targetID === 50101, "same ore, so the nearest of them");
+});
+
+test("mine: an unpriced rock sorts last, and a belt nobody could price falls back to nearest", () => {
+  const priced = entity({ itemID: 50201, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: 52.8, position: { x: 9000, y: 0, z: 0 } });
+  const unpriced = entity({ itemID: 50202, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: null, position: { x: 1000, y: 0, z: 0 } });
+  const valuableStep: MacroStep = {
+    ...mineStep, id: "mv2",
+    args: { ...mineStep.args, pick: { kind: "rockPick", pick: "valuable" } },
+  };
+  const known = mine(valuableStep, obs({ snapshot: snapshot([priced, unpriced]) }), NM, {});
+  assert.ok(known.action.kind === "orbit" && known.action.targetID === 50201, "a null price is not a cheap rock");
+
+  // Nothing priced at all: the pick has no opinion, so it stops inventing one.
+  const blind = mine(valuableStep, obs({ snapshot: snapshot([unpriced, priced2()]) }), NM, {});
+  assert.ok(blind.action.kind === "orbit" && blind.action.targetID === 50202, "back to the nearest rock");
+});
+
+/** A second unpriced rock, further out — for the "nothing is priced" case. */
+function priced2() {
+  return entity({ itemID: 50203, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: null, position: { x: 7000, y: 0, z: 0 } });
+}
+
+// ── the ore priority nobody typed ────────────────────────────────────────────
+
+test("mine: with NO ore list the block works the richest ore on the belt, not the nearest rock", () => {
+  // The default pick is "nearest" — and it still is, WITHIN the ore worth most.
+  // This is the whole of the automatic ordering: which ore comes first is a
+  // different question from which of that ore's rocks to fly to.
+  const cheapNear = entity({ itemID: 50301, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: 52.8, position: { x: 1000, y: 0, z: 0 } });
+  const richFar = entity({ itemID: 50302, name: "Kernite", miningYieldTypeID: 1228, oreValuePerM3: 95.04, position: { x: 8000, y: 0, z: 0 } });
+  const richFarther = entity({ itemID: 50303, name: "Kernite", miningYieldTypeID: 1228, oreValuePerM3: 95.04, position: { x: 12000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([cheapNear, richFar, richFarther]) }), NM, {});
+  assert.ok(t.action.kind === "orbit" && t.action.targetID === 50302, "the Kernite, and the nearer of the two");
+});
+
+test("mine: a rock already being WORKED is not dropped when a richer one drifts into view", () => {
+  // Half a cycle into a Veldspar rock is not the moment to fly off: the ore
+  // priority restricts what to pick NEXT, it does not re-open a rock in hand.
+  const working = entity({ itemID: 50311, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: 52.8, position: { x: 1000, y: 0, z: 0 } });
+  const richer = entity({ itemID: 50312, name: "Kernite", miningYieldTypeID: 1228, oreValuePerM3: 95.04, position: { x: 2000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([working, richer]) }), { rockID: 50311 }, {});
+  assert.ok(t.action.kind === "lock" && t.action.targetID === 50311, "it carries on with the rock it was working");
+});
+
+test("mine: with nothing priced the block picks exactly as it always did", () => {
+  // An older BFF (or ore nobody could price) leaves every value null. That must
+  // read as "no opinion", not as "every rock is worthless".
+  const near = entity({ itemID: 50321, name: "Veldspar", miningYieldTypeID: 1230, oreValuePerM3: null, position: { x: 1000, y: 0, z: 0 } });
+  const far = entity({ itemID: 50322, name: "Kernite", miningYieldTypeID: 1228, oreValuePerM3: null, position: { x: 9000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([far, near]) }), NM, {});
+  assert.ok(t.action.kind === "orbit" && t.action.targetID === 50321, "the nearest rock, as before");
+});
+
+test("mine: a HAND-WRITTEN ore list outranks the value ordering, because it answers a different question", () => {
+  // A player who typed "Veldspar" is not asking what the belt is worth — they
+  // want Veldspar, and a richer rock sitting next to it changes nothing.
+  const veld = entity({ itemID: 50331, name: "Veldspar", groupID: VELDSPAR.groupID, miningYieldTypeID: 1230, oreValuePerM3: 52.8, position: { x: 9000, y: 0, z: 0 } });
+  const kern = entity({ itemID: 50332, name: "Kernite", groupID: KERNITE.groupID, miningYieldTypeID: 1228, oreValuePerM3: 95.04, position: { x: 1000, y: 0, z: 0 } });
+  const t = mine(oreListStep([VELDSPAR]), obs({ snapshot: snapshot([veld, kern]) }), NM, {});
+  assert.ok(t.action.kind === "orbit" && t.action.targetID === 50331, "the ore on the list, though the other is nearer AND richer");
 });
 
 // ── compress-ore (the fleet mechanic) ────────────────────────────────────────

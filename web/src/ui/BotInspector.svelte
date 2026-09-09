@@ -34,6 +34,7 @@
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
+    ROCK_PICKS,
     TARGET_CLASS_ARGS,
     type TargetClassArg,
     type SquadRoleArg,
@@ -356,9 +357,12 @@
     onArg(key, trimmed.length === 0 ? undefined : { kind: "corp", id: null, name: trimmed });
   }
   function setRockPick(key: string, raw: string): void {
-    // Back to the default: drop the argument rather than storing "nearest",
-    // so an untouched step exports exactly as it was imported.
-    onArg(key, raw === "biggest" ? { kind: "rockPick", pick: "biggest" } : undefined);
+    // Back to the default: drop the argument rather than storing "nearest", so
+    // an untouched step exports exactly as it was imported. Anything that is not
+    // one of the picks the codec accepts is treated as that default too, rather
+    // than stored and refused on the next import.
+    const pick = ROCK_PICKS.find((candidate) => candidate === raw && candidate !== "nearest");
+    onArg(key, pick === undefined ? undefined : { kind: "rockPick", pick });
   }
   // ── A fight-back WATCH fights like a block, so it edits like one ───────────
   function addWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
@@ -721,6 +725,8 @@
       {/if}
       <span class="inspector-suffix">
         First is mined first. Every grade of an ore counts; richer grades are mined before poorer ones.
+        Leave this empty and the bot mines whatever is worth most per cubic metre on the belt — name an
+        ore here only when you want that ore in particular.
       </span>
     </div>
   {:else if arg.widget === "target-list-picker"}
@@ -852,6 +858,7 @@
         <select id={fieldId} value={rockPickValue(step, arg.key)} onchange={(e) => setRockPick(arg.key, e.currentTarget.value)}>
           <option value="nearest">the nearest rock first</option>
           <option value="biggest">the biggest rock first</option>
+          <option value="valuable">the most valuable ore first</option>
         </select>
       {:else if arg.widget === "squad-role-select"}
         <select id={fieldId} value={squadRoleValue(step, arg.key)} onchange={(e) => setSquadRole(arg.key, e.currentTarget.value)}>

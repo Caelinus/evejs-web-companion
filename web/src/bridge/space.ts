@@ -114,6 +114,10 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     // An ABSENT oreGrade decodes to null ("unknown"), never 0: 0-Grade ore is a
     // real, meaningful grade and must not collide with "we don't know".
     oreGrade: countOrNull(raw.oreGrade),
+    // ISK per m³ for the rock's ore, stamped by the BFF from static data. A
+    // FLOAT read (it is a price, not a count) and absent decodes to null: an
+    // unpriceable ore is unknown, never worthless.
+    oreValuePerM3: floatOrNull(raw.oreValuePerM3),
     // R25 slice B — ship rows only. An ABSENT isNpc decodes to FALSE, which is
     // the safe direction: a row we cannot classify is treated as a person, so
     // the panel never invents a threat. npcEntityType stays null.

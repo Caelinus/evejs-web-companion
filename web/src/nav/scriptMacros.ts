@@ -389,15 +389,24 @@ function beltTarget(
 }
 
 /**
- * Which rock to work next. Default (and the shipped behaviour) is the NEAREST;
- * "biggest" reaches for the most ore left instead, which means fewer rock changes
- * per hold for a strip miner.
+ * Which rock to work next.
  *
- * ⚠ `remainingQuantity` IS NULL FOR UNKNOWN, NEVER ZERO (the snapshot is explicit
- * about this because a zero reads as a mined-out rock and would send a miner past
- * a full belt). So an unknown-amount rock is not treated as empty: it sorts after
- * every known one, and if NOTHING is known the pick falls back to nearest rather
- * than picking arbitrarily.
+ *   • "nearest" (the default, and the shipped behaviour) — least flying.
+ *   • "biggest" — the most ore left, so fewer rock changes per hold.
+ *   • "valuable" — the richest ore per cubic metre, because the hold that ends
+ *     the block is a VOLUME: between two rocks in reach, the one worth more per
+ *     m³ is worth more per trip.
+ *
+ * ⚠ THE READING IS NULL FOR UNKNOWN, NEVER ZERO — `remainingQuantity` because a
+ * zero reads as a mined-out rock, `oreValuePerM3` because a zero reads as
+ * worthless ore. So a rock nobody could measure or price is not treated as the
+ * worst one: it sorts after every known rock, and when NOTHING is known the pick
+ * falls back to nearest rather than choosing arbitrarily.
+ *
+ * ⚠ TIES BREAK BY DISTANCE, and that is what makes "valuable" usable at all: a
+ * belt's rocks of one ore all carry the SAME value per m³, so without this the
+ * pick would be "whichever rock the snapshot happened to list first" — a bot
+ * flying past three Veldspar rocks to reach a fourth.
  */
 function pickRock(
   step: MacroStep,
@@ -405,19 +414,28 @@ function pickRock(
   measurement: SpaceMeasurement | null,
 ): SpaceEntity | null {
   const arg = step.args["pick"];
-  if (arg === undefined || arg.kind !== "rockPick" || arg.pick !== "biggest") {
+  const pick = arg !== undefined && arg.kind === "rockPick" ? arg.pick : "nearest";
+  if (pick === "nearest") {
     return nearest(rocks, measurement);
   }
-  let best: SpaceEntity | null = null;
-  let bestLeft = -1;
+  const reading =
+    pick === "biggest"
+      ? (rock: SpaceEntity) => rock.remainingQuantity
+      : (rock: SpaceEntity) => rock.oreValuePerM3;
+  let bestReading: number | null = null;
   for (const rock of rocks) {
-    const left = rock.remainingQuantity;
-    if (left !== null && left > bestLeft) {
-      best = rock;
-      bestLeft = left;
+    const value = reading(rock);
+    if (value !== null && (bestReading === null || value > bestReading)) {
+      bestReading = value;
     }
   }
-  return best ?? nearest(rocks, measurement);
+  if (bestReading === null) {
+    return nearest(rocks, measurement);
+  }
+  return nearest(
+    rocks.filter((rock) => reading(rock) === bestReading),
+    measurement,
+  );
 }
 
 /**
@@ -500,6 +518,20 @@ const travelToBelt: MacroDecider = (step, obs) => {
 //     action) — it holds none of that state itself. A CHOSEN (pinned) belt
 //     never rotates: it keeps the original "pause when dry" behaviour, pinned
 //     to the one belt.
+//   • VALUE PRIORITY, when the player wrote NO ore list: the block works the
+//     richest ore on the grid first — the rocks whose `oreValuePerM3` is the
+//     highest one present — and only falls through to the next ore once those
+//     are gone. A hand-written list is left exactly as written, because a player
+//     who typed one is saying "I need THIS ore", which is a different question
+//     from "what is this belt worth". Nothing is priced → no restriction, which
+//     is the behaviour this block always had.
+//
+//     ⚠ IT RESTRICTS, IT DOES NOT ROTATE. The candidate set only ever shrinks
+//     within the rocks already on this grid, so "the belt is dry" still means
+//     what it always meant — no rocks at all — and a bot cannot start touring
+//     belts because the Veldspar here is not the Kernite it saw somewhere else.
+//     The rock currently being WORKED also stays a candidate: a richer rock
+//     drifting into view must not make a half-mined one get dropped.
 //   • ORE PRIORITY (the step's optional `ores` tier list): only rocks whose
 //     groupID matches the CURRENT tier's family are mineable. A belt with none
 //     of that ore counts as dry for the tier exactly like an all-out belt does
@@ -547,8 +579,50 @@ const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   if (allRocks.length === 0) {
     return mineNoTargetRocks(step, obs, snapshot, measurement, board, pinned, null, [], 0);
   }
-  return mineWithRocks(step, obs, mem, snapshot, allRocks, measurement);
+  return mineWithRocks(
+    step,
+    obs,
+    mem,
+    snapshot,
+    richestRocks(allRocks, num(mem, "rockID")),
+    measurement,
+  );
 };
+
+/**
+ * The ore priority NOBODY TYPED: the rocks on this grid worth the most per cubic
+ * metre, which is the same ordering a player would write by hand if they were
+ * ranking ore by what a hold of it is worth.
+ *
+ * It is a RESTRICTION on this grid's rocks and never a reason to fly anywhere:
+ * the set is non-empty whenever `rocks` is, so "this belt is dry" keeps meaning
+ * what it always meant. `workingRockID` — the rock the block is part-way through
+ * — is kept in the set whatever it is worth, because a richer rock drifting into
+ * view is not a reason to abandon a rock the lasers are already cycling on.
+ *
+ * ⚠ UNPRICED ORE IS NOT CHEAP ORE. When nothing on the grid has a value, every
+ * rock stays a candidate (the behaviour before there was a price at all); when
+ * only some do, the unpriced ones simply sort behind, the same rule the pick and
+ * the survey both hold for a null.
+ */
+function richestRocks(
+  rocks: readonly SpaceEntity[],
+  workingRockID: number | null,
+): readonly SpaceEntity[] {
+  let best: number | null = null;
+  for (const rock of rocks) {
+    const value = rock.oreValuePerM3;
+    if (value !== null && (best === null || value > best)) {
+      best = value;
+    }
+  }
+  if (best === null) {
+    return rocks;
+  }
+  return rocks.filter(
+    (rock) => rock.oreValuePerM3 === best || rock.itemID === workingRockID,
+  );
+}
 
 /**
  * No mineable (or no tier-matching) rocks on grid. If we are already sitting

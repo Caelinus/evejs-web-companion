@@ -11,7 +11,14 @@ import {
   decodeScriptValue,
   encodeScriptDoc,
 } from "./scriptCodec.ts";
-import { MAX_DOC_BYTES, MAX_ORE_LIST, SCRIPT_FORMAT, SCRIPT_VERSION, type BotScript } from "./botScript.ts";
+import {
+  MAX_DOC_BYTES,
+  MAX_ORE_LIST,
+  ROCK_PICKS,
+  SCRIPT_FORMAT,
+  SCRIPT_VERSION,
+  type BotScript,
+} from "./botScript.ts";
 
 // A clean, warning-free document — the design's "Belt runner". Each test that
 // needs a malformed one clones this and breaks exactly one thing.
@@ -196,6 +203,39 @@ function everyArgKind(): BotScript {
     ],
   };
 }
+
+test("every rock order the editor can offer survives a round trip", () => {
+  // The codec validates the pick against ROCK_PICKS, so this is what stops a new
+  // order being offered in the editor and then REFUSED on the next import.
+  for (const pick of ROCK_PICKS) {
+    const doc: BotScript = {
+      format: "evejs-bot-script",
+      version: 1,
+      name: "t",
+      notes: "",
+      home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+      interrupts: [],
+      program: [
+        {
+          id: "m1",
+          kind: "macro",
+          macro: "mine-at-belt",
+          args: {
+            belt: { kind: "belt", belt: { mode: "nearest" } },
+            pick: { kind: "rockPick", pick },
+          },
+          until: { kind: "ore-hold-at-least", fraction: 0.9 },
+        },
+      ],
+    };
+    const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+    const step = round.program[0];
+    assert.ok(step !== undefined && step.kind === "macro");
+    const arg = step.args["pick"];
+    assert.ok(arg !== undefined && arg.kind === "rockPick", `the ${pick} order was dropped`);
+    assert.equal(arg.pick, pick);
+  }
+});
 
 test("a SYSTEM destination keeps its own entity; a belt in that slot is refused", () => {
   const doc = everyArgKind();

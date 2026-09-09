@@ -64,6 +64,10 @@ function fakeStore() {
 
 // typeID -> dogma attribute 2699 (asteroid meta level), for the ore-grade tests.
 const ORE_GRADES = { 1230: 1, 17470: 2 };
+// ISK per m³, as staticData computes it from reprocessed material value. The
+// II-Grade rock is worth more per trip than the plain one, which is the ordering
+// the "most valuable ore first" pick is built on.
+const ORE_VALUES_PER_M3 = { 1230: 52.8, 17470: 55.44 };
 
 function fakeStaticData() {
   return {
@@ -76,6 +80,11 @@ function fakeStaticData() {
       return Object.prototype.hasOwnProperty.call(ORE_GRADES, typeID)
         ? ORE_GRADES[typeID]
         : fallback;
+    },
+    getOreValuePerM3(typeID) {
+      return Object.prototype.hasOwnProperty.call(ORE_VALUES_PER_M3, typeID)
+        ? ORE_VALUES_PER_M3[typeID]
+        : null;
     },
   };
 }
@@ -311,6 +320,17 @@ test("the space snapshot route stamps oreGrade onto rock rows from static data",
   assert.equal(byId(40000003).oreGrade, null, "an unresolvable attribute reads as null, not 0");
   // Non-rock rows are untouched — they must not gain the field at all.
   assert.equal(Object.prototype.hasOwnProperty.call(byId(GATE_ID), "oreGrade"), false);
+
+  // The same stamping carries the ore's VALUE per m³ — what the client's own
+  // Ore Value gradient shows, and what the bot's "most valuable ore first" pick
+  // ranks on. Unpriceable ore reads null (unknown), never 0 (worthless).
+  assert.equal(byId(40000001).oreValuePerM3, 52.8);
+  assert.ok(
+    byId(40000002).oreValuePerM3 > byId(40000001).oreValuePerM3,
+    "the richer grade is worth more per cubic metre",
+  );
+  assert.equal(byId(40000003).oreValuePerM3, null);
+  assert.equal(Object.prototype.hasOwnProperty.call(byId(GATE_ID), "oreValuePerM3"), false);
 });
 
 test("the space snapshot route requires a login and a held session", async () => {

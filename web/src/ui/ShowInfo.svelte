@@ -215,6 +215,13 @@
             <dt>Ore left</dt>
             <dd>{entity.remainingQuantity.toLocaleString("en-US")}</dd>
           {/if}
+          {#if entity.oreValuePerM3 != null}
+            <!-- What the retail client's Mining Surveyor shows as a colour: the
+                 ore's reprocessed value per cubic metre. Absent when it could
+                 not be priced — never a 0, which would read as worthless. -->
+            <dt>Ore value</dt>
+            <dd>{Math.round(entity.oreValuePerM3).toLocaleString("en-US")} ISK/m³</dd>
+          {/if}
         </dl>
 
         {#if condition.length > 0}

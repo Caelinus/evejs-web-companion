@@ -22,6 +22,7 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const BotInspector = (await import("./BotInspector.svelte")).default;
 const { MACRO_ARG_DESCRIPTORS } = await import("../bots/editorOptions.ts");
+const { ROCK_PICKS } = await import("../bots/botScript.ts");
 
 function fakeFlow(): unknown {
   return new Proxy({}, { get: () => async () => {} });
@@ -165,6 +166,20 @@ test("an optional argument the player has ALREADY set stays visible", () => {
   const summaryAt = html.indexOf("More options");
   assert.ok(summaryAt > 0, "the disclosure vanished entirely");
   assert.ok(html.indexOf("arg-step-under-test-pick") < summaryAt, "a set optional argument was hidden away");
+});
+
+test("the rock-order select offers every order the codec accepts", () => {
+  // ⚠ THE POINT OF THIS TEST is the gap it closes: a pick the codec accepts but
+  // the editor never offers is a feature nobody can reach, and one the editor
+  // offers but the codec refuses is a script that will not import.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", { args: { pick: { kind: "rockPick", pick: "valuable" } } }),
+  });
+  for (const pick of ROCK_PICKS) {
+    assert.ok(html.includes(`value="${pick}"`), `the ${pick} order is not offered`);
+  }
+  assert.match(html, /most valuable ore first/);
 });
 
 // ── The ore priority list ────────────────────────────────────────────────────

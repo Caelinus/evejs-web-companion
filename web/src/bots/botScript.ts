@@ -343,9 +343,19 @@ export const ITEM_PLACES: readonly ItemPlace[] = Object.freeze<ItemPlace[]>(["ha
  *     reports per rock (`remainingQuantity`). Fewer rock changes per hold, which
  *     is what a strip miner wants. Rocks whose amount is UNKNOWN sort last rather
  *     than being treated as empty — a null is not a zero.
+ *   • "valuable" — the richest ore per cubic metre first (`oreValuePerM3`, the
+ *     number behind the client's own Ore Value gradient). A hold is a VOLUME, so
+ *     when two rocks are both in reach the one worth more per m³ is worth more
+ *     per trip — this is the pick that makes a bot mine the Kernite instead of
+ *     the nearer Veldspar. Unpriced ore sorts last, the same way an unknown
+ *     amount does.
  */
-export type RockPick = "nearest" | "biggest";
-export const ROCK_PICKS: readonly RockPick[] = Object.freeze<RockPick[]>(["nearest", "biggest"]);
+export type RockPick = "nearest" | "biggest" | "valuable";
+export const ROCK_PICKS: readonly RockPick[] = Object.freeze<RockPick[]>([
+  "nearest",
+  "biggest",
+  "valuable",
+]);
 
 /**
  * Which hostile a combat block shoots FIRST, by the job the hull was built for.
