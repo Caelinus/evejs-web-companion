@@ -1700,17 +1700,89 @@ test("join-advertised-fleet: an unreadable finder or fleet status waits, never g
   assert.equal(noFleet.action.kind, "wait");
 });
 
-test("join-advertised-fleet: applied once, it waits for membership, then gives up with a reason", () => {
-  const applied = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), {}, {});
-  assert.equal(applied.action.kind, "applyToJoinFleet");
-  // It does not apply twice while waiting to be let in.
-  const waiting = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), applied.nextMem, {});
-  assert.equal(waiting.action.kind, "wait");
-  assert.equal(waiting.outcome.kind, "acting");
-  // Getting in ends the block.
-  assert.equal(joinAdv(joinAdvStep, obs({ inFleet: true }), applied.nextMem, {}).outcome.kind, "done");
-  // A join that never lands is a real failure, unlike an absent fleet.
-  const overdue = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), { applied: true, waited: 10_000 }, {});
+// ⚠ THE REGRESSION THIS SECTION EXISTS FOR. The first version of this block
+// applied and then waited for membership to appear, which it never does: an
+// apply mints an INVITE and the client has to accept it. Every test below the
+// apply is about the half that was missing, because the original tests all
+// stopped at "emits an applyToJoinFleet action" and passed while the block hung
+// on a live fleet.
+
+/** The state after this block has applied to fleet 77 this activation. */
+const APPLIED = { waited: 1, appliedTo: 77 };
+const ads77 = [ad(77, "Mining Op")];
+
+test("join-advertised-fleet: an apply is followed by ACCEPTING the invite it minted", () => {
+  const applied = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads77 }), {}, {});
+  assert.ok(applied.action.kind === "applyToJoinFleet" && applied.action.fleetID === 77);
+
+  // The server minted an invite. Accept it, naming the fleet applied to rather
+  // than depending on the notification having reached the store.
+  const accepting = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "invited" } }),
+    applied.nextMem,
+    {},
+  );
+  assert.ok(accepting.action.kind === "acceptFleetInvite" && accepting.action.fleetID === 77);
+  // And it does not apply a second time.
+  assert.notEqual(accepting.action.kind, "applyToJoinFleet");
+
+  // Membership ends the block.
+  assert.equal(joinAdv(joinAdvStep, obs({ inFleet: true }), accepting.nextMem, {}).outcome.kind, "done");
+});
+
+test("join-advertised-fleet: an approval-gated fleet stops at once, it does not sit out the bound", () => {
+  // No invite exists and none is coming -- only the boss can act. Saying so
+  // beats timing out and blaming the fleet several minutes later.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "needs-approval" } }),
+    APPLIED,
+    {},
+  );
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /approve/i);
+});
+
+test("join-advertised-fleet: an answer it does not recognise still tries the accept", () => {
+  // "unknown" is the honest third state. The invite half is the common one, and
+  // a wasted accept costs one swallowed call where refusing to accept would
+  // strand a bot that had an invite waiting.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "unknown" } }),
+    APPLIED,
+    {},
+  );
+  assert.ok(t.action.kind === "acceptFleetInvite" && t.action.fleetID === 77);
+});
+
+test("join-advertised-fleet: an answer about a DIFFERENT fleet is not this application", () => {
+  // The observation outlives a lap; step memory does not. A previous lap's
+  // answer must not decide this one -- the fleet id is what keeps them apart.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 42, outcome: "needs-approval" } }),
+    APPLIED,
+    {},
+  );
+  assert.equal(t.outcome.kind, "acting");
+  assert.equal(t.action.kind, "wait");
+});
+
+test("join-advertised-fleet: no answer yet waits; accepted but never landed gives up", () => {
+  // The apply is in flight, or it threw and the runner swallowed it.
+  const inFlight = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads77 }), APPLIED, {});
+  assert.equal(inFlight.outcome.kind, "acting");
+  assert.equal(inFlight.action.kind, "wait");
+
+  // A join applied for AND accepted that still never lands is a real failure.
+  const overdue = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "invited" } }),
+    { waited: 10_000, appliedTo: 77 },
+    {},
+  );
   assert.equal(overdue.outcome.kind, "blocked");
 });
 

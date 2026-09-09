@@ -2976,7 +2976,7 @@ const joinFleet: MacroDecider = (_step, obs, mem) => {
       reason: "No fleet invitation arrived in time, so the bot stopped.",
     });
   }
-  return tick({ kind: "acceptFleetInvite" }, "Waiting for a fleet invite to accept.", "Joining a fleet", ACTING, false, { ...mem, waited });
+  return tick({ kind: "acceptFleetInvite", fleetID: null }, "Waiting for a fleet invite to accept.", "Joining a fleet", ACTING, false, { ...mem, waited });
 };
 
 
@@ -2991,13 +2991,24 @@ const joinFleet: MacroDecider = (_step, obs, mem) => {
 //     all day: the moment the boss advertises "Mining Op" the alt joins it, and
 //     every other lap it finds nothing, finishes, and carries on mining alone. A
 //     block that stopped the run here would make that loop unusable.
-//   * advertised -> apply, then wait (bounded) to actually be in the fleet.
+//   * advertised -> apply, ACCEPT the invite that produces, then confirm.
 //
-// The BOUNDED wait after applying is not the same judgement. An apply that was
-// sent and never landed is a real failure the player wants told about -- the
-// fleet may need approval, or be full -- and silence there is the
-// silently-refused-forever trap this file keeps guarding against. So: absent
-// fleet finishes quietly, a join that will not complete stops with a reason.
+// That last line is the whole round trip and all three steps are ours. An apply
+// does NOT join you: the server mints a fleet invite addressed to this pilot and
+// notifies it, and membership happens only when the client accepts. This block
+// is the client. The first version stopped after applying and waited for
+// membership to arrive on its own, and hung forever on a perfectly healthy
+// fleet -- fixed 2026-09-09.
+//
+// An approval-gated advert is the other half: it stores a request only the boss
+// can act on, so there is no invite to accept and no amount of waiting helps.
+// The block says so and stops, rather than timing out and blaming the fleet.
+//
+// The BOUNDED wait is not the same judgement as the absent-fleet one. A join
+// that was applied for AND accepted and still did not land is a real failure the
+// player wants told about, and silence there is the silently-refused-forever
+// trap this file keeps guarding against. So: absent fleet finishes quietly, a
+// join that will not complete stops with a reason.
 //
 // Matching is trimmed and case-insensitive but otherwise EXACT. Not a substring:
 // an unattended ship must not end up in a stranger's fleet because their name
@@ -3047,17 +3058,50 @@ const joinAdvertisedFleet: MacroDecider = (step, obs, mem) => {
   }
   const waited = (num(mem, "waited") ?? 0) + 1;
   const overdue = waited > JOIN_ADVERTISED_MAX_WAIT_TICKS;
-  if (flag(mem, "applied")) {
-    if (overdue) {
-      return tick(WAIT, "The fleet never took the application.", "Joining a fleet", {
+  const appliedTo = num(mem, "appliedTo");
+  if (appliedTo !== null) {
+    // ⚠ APPLYING IS NOT JOINING. The apply minted an INVITE addressed to this
+    // pilot and told nobody else to do anything; accepting it is the client's
+    // half of the round trip, and this block is the client. Waiting here for
+    // membership to appear on its own is what the first version of this block
+    // did, and it hung forever.
+    //
+    // The application is read from the OBSERVATION rather than remembered as a
+    // flag, because only the runner sees what the server answered. It is trusted
+    // only when it names the fleet THIS activation applied to: the observation
+    // outlives a lap, step memory does not, so the fleet id is what keeps a
+    // stale answer from a previous lap out of this one.
+    const application = obs.fleetApplication ?? null;
+    const answered = application !== null && application.fleetID === appliedTo ? application : null;
+    if (answered !== null && answered.outcome === "needs-approval") {
+      // No invite exists and none is coming: only the boss can act now. Say so
+      // plainly rather than sitting out the bound and blaming a timeout.
+      return tick(WAIT, `"${typed}" has to approve the application.`, "Joining a fleet", {
         kind: "blocked",
-        reason: `Applied to join "${typed}" but never got into the fleet, so the bot stopped. It may need the boss to approve, or be full.`,
+        reason: `Applied to join "${typed}", but that fleet approves its own members, so the bot cannot join it by itself.`,
       });
     }
-    return tick(WAIT, `Waiting to be let into "${typed}".`, "Joining a fleet", ACTING, false, {
-      ...mem,
-      waited,
-    });
+    if (overdue) {
+      return tick(WAIT, "Never got into the fleet.", "Joining a fleet", {
+        kind: "blocked",
+        reason: `Applied to join "${typed}" and accepted the invitation, but never got into the fleet, so the bot stopped. It may be full.`,
+      });
+    }
+    if (answered === null) {
+      // The apply is still in flight, or it threw and the runner swallowed it.
+      return tick(WAIT, `Applying to "${typed}".`, "Joining a fleet", ACTING, false, { ...mem, waited });
+    }
+    // "invited", and "unknown" too: an unexpected answer is treated as an invite
+    // because that is the common half, and a wasted accept costs one swallowed
+    // call where a refused one would strand a bot with an invite waiting.
+    return tick(
+      { kind: "acceptFleetInvite", fleetID: appliedTo },
+      `Accepting the invitation to "${typed}".`,
+      "Joining a fleet",
+      ACTING,
+      false,
+      { ...mem, waited },
+    );
   }
   if (inFleet === null) {
     // Unreadable is never an answer: neither "join" nor "carry on" is safe to
@@ -3094,7 +3138,7 @@ const joinAdvertisedFleet: MacroDecider = (step, obs, mem) => {
     "Joining a fleet",
     ACTING,
     false,
-    { ...mem, waited, applied: true },
+    { ...mem, waited, appliedTo: match.fleetID },
   );
 };
 

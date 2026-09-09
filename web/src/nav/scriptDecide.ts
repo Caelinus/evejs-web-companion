@@ -150,8 +150,13 @@ export type ScriptAction =
   | { readonly kind: "createFleet" }
   /** Invite a character into the session's own fleet (server confirm-gated). */
   | { readonly kind: "inviteToFleet"; readonly charID: number }
-  /** Accept a pending fleet invite (server confirm-gated). */
-  | { readonly kind: "acceptFleetInvite" }
+  /**
+   * Accept a pending fleet invite (server confirm-gated). `fleetID` null means
+   * "whatever invite arrived" -- the invite-waiting block, which has no other
+   * way to know. A block that MINTED the invite by applying names the fleet
+   * instead, so it does not have to race the notification into the store.
+   */
+  | { readonly kind: "acceptFleetInvite"; readonly fleetID: number | null }
   /**
    * Apply to an ADVERTISED fleet found in the fleet finder (server confirm-gated).
    * The id comes from the listing this same tick and is never saved in a script:

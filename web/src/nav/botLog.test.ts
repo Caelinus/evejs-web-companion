@@ -62,7 +62,8 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "startSystemRoute", systemID: 30000142 },
   { kind: "createFleet" },
   { kind: "inviteToFleet", charID: 90000001 },
-  { kind: "acceptFleetInvite" },
+  { kind: "acceptFleetInvite", fleetID: null },
+  { kind: "acceptFleetInvite", fleetID: 91000001 },
   { kind: "applyToJoinFleet", fleetID: 91000001 },
   { kind: "alert", message: "your bot noticed something" },
 ];

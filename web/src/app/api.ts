@@ -10,6 +10,7 @@ import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
+import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
 import {
   decodeCharCreationTables,
   type CharCreationTables,
@@ -1251,13 +1252,26 @@ export async function loadFleetAds(options: ApiOptions = {}): Promise<Record<str
 /**
  * APPLY to an advertised fleet found in the finder. Confirm-gated.
  *
- * `autoAccept` asks to be put straight in rather than left as a pending
- * application, which is the only useful answer for an unattended ship; a fleet
- * whose advert demands the boss approve overrides it server-side, and the caller
- * proves the join by re-reading /bound-fleet either way.
+ * ⚠ AN APPLY DOES NOT JOIN YOU. On an open advert the server mints a fleet
+ * INVITE and notifies you; membership happens only when the client accepts it.
+ * That is the designed round trip, and the returned outcome says which half you
+ * are in — so callers MUST act on it rather than waiting for membership that
+ * will never arrive on its own.
+ *
+ * `autoAccept` is an instruction carried on the minted invite ("accept without
+ * prompting the player"), which a client is expected to honour; it is not a
+ * server-side auto-join, and passing it does not remove the accept step.
  */
-export async function applyToJoinFleet(fleetID: number, options: ApiOptions = {}): Promise<void> {
-  await postJson("/api/bridge/fleet/apply", { fleetID, autoAccept: true, confirm: true }, options);
+export async function applyToJoinFleet(
+  fleetID: number,
+  options: ApiOptions = {},
+): Promise<FleetApplyOutcome> {
+  const ack = await postJson(
+    "/api/bridge/fleet/apply",
+    { fleetID, autoAccept: true, confirm: true },
+    options,
+  );
+  return decodeFleetApplyOutcome(ack);
 }
 
 /** LEAVE the session character's current fleet. Confirm-gated. */

@@ -58,6 +58,23 @@ export interface FleetAdRow {
   readonly numMembers: number;
 }
 
+/**
+ * The answer the last fleet-finder apply gave, carried back to the block that
+ * asked for it.
+ *
+ * An apply does not join you: on an open advert the server mints an INVITE and
+ * the client must accept it, and on an approval-gated one it stores a request
+ * only the boss can act on. Those two need different behaviour from the block,
+ * and the server's own answer at the moment of the call is the authority on
+ * which happened -- better than the advert's `joinNeedsApproval`, which was read
+ * earlier and may since have changed.
+ */
+export interface FleetApplication {
+  readonly fleetID: number;
+  /** "unknown" means try the accept anyway -- see FleetApplyOutcome. */
+  readonly outcome: "needs-approval" | "invited" | "unknown";
+}
+
 export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
@@ -175,6 +192,8 @@ export interface ScriptObservation {
    * fleet missing from it is one this pilot could not have joined anyway.
    */
   readonly fleetAds?: readonly FleetAdRow[] | null;
+  /** What the last apply this run answered, or null if none has been made. */
+  readonly fleetApplication?: FleetApplication | null;
   /**
    * Character IDs from a fresh, authoritative bound-fleet roster. `null` means
    * the roster was unavailable; `[]` means the service authoritatively says the

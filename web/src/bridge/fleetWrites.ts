@@ -85,6 +85,39 @@ export function decodeFleetAdvertWriteAck(response: JsonValue): FleetAdvertWrite
   return { ...decodeFleetWriteAck(response), advertPresent: isDictPayload(ackResult(response)) };
 }
 
+/**
+ * Which half of the fleet-finder round trip an apply took.
+ *
+ * ⚠ THIS CORRECTS AN R94 FAST-MODE GUESS. ApplyToJoinFleet was recorded as
+ * "returns null/ack" because it was never fired live; it in fact returns a
+ * BOOLEAN, and that boolean is the whole protocol:
+ *
+ *   • `true`  — the advert needs the boss's approval, so a join REQUEST was
+ *               stored and no invite exists. Retail turns exactly this into
+ *               FleetApplicationReceived.
+ *   • `false` — an INVITE was minted and notified. The client must now accept
+ *               it; nothing else will.
+ *
+ * "unknown" is the honest third state for a result that is neither (an older
+ * server, a shape we did not expect). Callers must treat it as "probably an
+ * invite" and try the accept: the common path is the invite one, and a failed
+ * accept costs one swallowed call, whereas refusing to accept strands a bot that
+ * had an invite waiting for it.
+ */
+export type FleetApplyOutcome = "needs-approval" | "invited" | "unknown";
+
+/** Read an ApplyToJoinFleet ack. See FleetApplyOutcome for why "unknown" tries. */
+export function decodeFleetApplyOutcome(response: JsonValue): FleetApplyOutcome {
+  const result = ackResult(response);
+  if (result === true || result === 1) {
+    return "needs-approval";
+  }
+  if (result === false || result === 0) {
+    return "invited";
+  }
+  return "unknown";
+}
+
 // Re-export the advert type so a later panel can pair a write ack with the
 // GetMyFleetFinderAdvert re-read without importing two modules.
 export type { FleetAdvert };
