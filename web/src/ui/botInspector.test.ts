@@ -258,6 +258,38 @@ test("naming a belt opens a field carrying the name, and says the name must be e
   assert.match(text, /exactly as the overview shows it/, "nothing warned that the name has to match");
 });
 
+test("a belt saved by the OLD editor shows its name, dead id and all", () => {
+  // A bot from before the picker became a text field: the ref carries a
+  // grid-local entity id and the system it was read in. The inspector reads the
+  // NAME and nothing else, so the field has to fill in exactly as it would for
+  // one typed today — an old bot that opened blank would look like it had lost
+  // its belt, and a player would retype what was already there.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: {
+          kind: "belt",
+          belt: {
+            mode: "chosen",
+            ref: {
+              entity: "belt",
+              id: 40000001,
+              name: "Test System VI - Asteroid Belt 1",
+              systemName: "Test System",
+            },
+          },
+        },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/, "no field to type the belt name in");
+  assert.ok(
+    html.includes('value="Test System VI - Asteroid Belt 1"'),
+    "an old bot's belt name did not reach the field",
+  );
+});
+
 test("a belt named but left blank still opens its field, rather than snapping back", () => {
   // The moment after switching to "a belt I name": the argument is set, the
   // name is not. The validator is what asks for it; the field has to be there
