@@ -10,9 +10,11 @@ import assert from "node:assert/strict";
 import type { BotScript, BranchBlock, Condition, InterruptRow, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import {
+  MAX_RECOVER_TRIPS,
   MAX_STEP_TICKS,
   decideScriptAction,
   initialMemory,
+  activeMacroID,
   activeSquadRole,
   watchSquadRole,
   type HomeTravelDecider,
@@ -858,4 +860,115 @@ test("watchSquadRole reads the document's watches, and following wins", () => {
   // A setting on a watch that does not fight is not a fleet role.
   const paused: InterruptRow = { id: "p", when: { kind: "hostile-on-grid" }, respond: "dock-and-pause", squad: "follow" };
   assert.equal(watchSquadRole(script([step], [floor, paused])), "off");
+});
+
+// ─── dock-and-repair ─────────────────────────────────────────────────────────
+//
+// The one response that flies the ship home WITHOUT ending the run. Like
+// fight-back it borrows a block out of the registry (Repair-ship), so these
+// stand in a fake shop and check the four properties that matter: the trip
+// happens in order (home, shop, back out), the run never pauses on a good trip,
+// a shop that refuses does not strand the bot, and a trip that never helps is
+// capped instead of commuting forever.
+
+/** A fake repair shop: quote, pay, then report nothing left — the real ladder's shape. */
+const shop: MacroDecider = (_s, o) => {
+  const damaged = o.damagedItemIDs ?? null;
+  if (damaged === null) {
+    return tick({ kind: "wait" }, { kind: "acting" });
+  }
+  return damaged.length === 0
+    ? tick({ kind: "wait" }, { kind: "done" })
+    : tick({ kind: "repairItems", itemIDs: damaged }, { kind: "acting" });
+};
+
+const shieldTrip: InterruptRow = {
+  id: "trip",
+  when: { kind: "shield-below", fraction: 0.3 }, respond: "dock-and-repair",
+};
+
+/** The trip's registry: the program's blocks plus the shop it borrows. */
+const withShop = { ...registry, "repair-ship": shop };
+
+function tripScript(): BotScript {
+  return script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [shieldTrip]);
+}
+
+test("dock-and-repair flies home, pays the shop, undocks, and carries on where it left off", () => {
+  const s = tripScript();
+  const { results } = run(s, [
+    // Shields gone in space: the watch fires and the ship heads home.
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, damagedItemIDs: [7] }),
+    // Docked: the borrowed shop is paid.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7] }),
+    // Nothing left to fix: back out.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [] }),
+    // In space with the shields the dock gave back: the STEP runs again.
+    obs({ shieldRatio: 1, inSpace: true, docked: false }),
+  ], withShop);
+  assert.equal(results[0]?.action.kind, "warp", "heading home");
+  assert.equal(results[0]?.interruptID, "trip");
+  assert.equal(results[1]?.action.kind, "repairItems", "the shop is paid at the station");
+  assert.equal(results[2]?.action.kind, "undock", "patched up, so back out");
+  assert.equal(results[3]?.action.kind, "activate", "the mining step picks up where it left off");
+  assert.equal(results[3]?.stepPath, "m");
+  assert.deepEqual(results.map((r) => r.status), ["running", "running", "running", "running"],
+    "a repair trip never pauses the run — that is the whole difference from dock-and-pause");
+});
+
+test("the trip asks for the repair quote — the observer gates it on the active block", () => {
+  const s = tripScript();
+  const flying = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: false }), initialMemory(s), withShop, home);
+  assert.equal(activeMacroID(s, flying.memory), "repair-ship",
+    "a latched trip still names the block it is about to run, or nobody fetches the quote");
+});
+
+test("a shop that will not fix it does not strand the bot at the station", () => {
+  const broke: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "no money" });
+  const s = tripScript();
+  const r = decideScriptAction(
+    s,
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true }),
+    initialMemory(s),
+    { ...registry, "repair-ship": broke },
+    home,
+  );
+  // It fired while DOCKED, so there is nothing to undock for: it just carries on.
+  assert.equal(r.status, "running");
+  assert.equal(r.action.kind, "activate", "the step runs — a refused quote is not a reason to stop");
+});
+
+test("a trip that fired in station leaves the ship docked", () => {
+  const s = tripScript();
+  const r = decideScriptAction(
+    s,
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [] }),
+    initialMemory(s),
+    withShop,
+    home,
+  );
+  assert.notEqual(r.action.kind, "undock", "undocking a bot that was working in the hangar would break it");
+});
+
+test("a repair trip that never helps is capped, and then stops from the station", () => {
+  const s = tripScript();
+  // Docked with the shields still reading low every tick: the trip completes,
+  // the reading does not improve, and the row goes round again.
+  const hurt = obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [] });
+  const { results } = run(s, [hurt, hurt, hurt, hurt], withShop);
+  assert.deepEqual(results.slice(0, MAX_RECOVER_TRIPS).map((r) => r.status),
+    Array(MAX_RECOVER_TRIPS).fill("running"), "it is allowed its trips");
+  assert.equal(results[MAX_RECOVER_TRIPS]?.status, "paused", "the fourth trip is a pattern, not a bad pull");
+  assert.match(String(results[MAX_RECOVER_TRIPS]?.pauseReason), /went home to repair/);
+  assert.equal(results[MAX_RECOVER_TRIPS]?.interruptID, "trip");
+});
+
+test("a trip that DOES help puts the whole cap back", () => {
+  const s = tripScript();
+  const hurt = obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [] });
+  const well = obs({ shieldRatio: 1, inSpace: false, docked: true });
+  // Two trips, a tick where the shields read fine, then three more trips: the
+  // recovery cleared the tally, so the cap is nowhere near.
+  const { results } = run(s, [hurt, hurt, well, hurt, hurt, hurt], withShop);
+  assert.deepEqual(results.map((r) => r.status), Array(6).fill("running"));
 });

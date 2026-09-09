@@ -282,6 +282,8 @@ export type HomeTravelDecider = (obs: ScriptObservation, mem: MacroMemory) => Ma
 export const MAX_STEP_TICKS = 1800; // ~1h at the 2s cadence — the R39 backstop
 
 const HOME_MEM_KEY = "__home__";
+/** Where a repair trip's borrowed Repair-ship block keeps its own memory. */
+const REPAIR_MEM_KEY = "__repair__";
 
 type Position =
   | { readonly kind: "step"; readonly node: number }
@@ -305,6 +307,20 @@ type Position =
     }
   | { readonly kind: "done" };
 
+/**
+ * A "dock at home and repair" trip in progress — the one latch that ENDS IN THE
+ * PROGRAM rather than in a stop, so it has to remember how to get back.
+ *
+ * `undock` is the whole of "get back": true when the watch fired out in space,
+ * which is the only case where carrying on means leaving the station again. A
+ * watch that fired while already docked leaves the ship docked — undocking a bot
+ * whose next step is a station step (unload, refine, sell) would break a program
+ * that was working perfectly well.
+ */
+interface Recovery {
+  readonly undock: boolean;
+}
+
 interface Latched {
   /**
    * The watch row that sent the ship home, or NULL when a fault did — the
@@ -313,6 +329,12 @@ interface Latched {
    */
   readonly interruptID: string | null;
   readonly reason: string;
+  /**
+   * Present only on a "dock at home and repair" latch. Its absence is what makes
+   * every OTHER latch a stop: `reason` is then the sentence the run pauses with,
+   * and here it is only what the readout says while the trip is under way.
+   */
+  readonly recover?: Recovery;
 }
 
 export interface ScriptMemory {
@@ -421,6 +443,12 @@ export function watchSquadRole(script: BotScript): SquadRoleArg {
 }
 
 export function activeMacroID(script: BotScript, mem: ScriptMemory): string | null {
+  // A repair trip IS running a block — the Repair-ship one, borrowed — and the
+  // observer gates the shop's quote on exactly this answer, so a latch that said
+  // "no block" would leave the trip asking a question nobody was fetching.
+  if (mem.latched?.recover !== undefined) {
+    return "repair-ship";
+  }
   if (
     mem.position.kind === "done" ||
     mem.position.kind === "branch-enter" ||
@@ -462,6 +490,11 @@ function stoppedBecause(clause: string): string {
   return `Stopped because ${clause}.`;
 }
 
+/** Why a repair trip gave up: it went home and came back, and nothing changed. */
+function sayRepairDidNotHold(when: Condition): string {
+  return `The bot went home to repair ${MAX_RECOVER_TRIPS} times and ${conditionSentence(when)} each time, so it stopped.`;
+}
+
 // ─── The tick ────────────────────────────────────────────────────────────────
 
 export function decideScriptAction(
@@ -475,15 +508,21 @@ export function decideScriptAction(
     return done(mem);
   }
 
-  // 1. A latched "dock and stop" is flying the ship home.
+  // 1. A latched "dock and stop" is flying the ship home — or a latched "dock
+  // and repair" is making its round trip, which is the same flight with an
+  // ending that goes back to work instead of stopping.
   if (mem.latched !== null) {
-    return continueHeadingHome(obs, mem, travelHome);
+    return mem.latched.recover === undefined
+      ? continueHeadingHome(obs, mem, travelHome)
+      : continueRecovering(script, obs, mem, registry, travelHome);
   }
 
   // 2. Interrupts. First release any "alert me" row whose condition has passed,
-  // so a fresh episode can speak again; then scan, skipping rows still spent.
+  // so a fresh episode can speak again, and the trip tally of any repair row
+  // that has actually recovered; then scan, skipping rows still spent.
   const spentAlerts = releaseSpentAlerts(script.interrupts, obs, mem.spentAlerts ?? []);
-  const scanMem = spentAlerts === (mem.spentAlerts ?? []) ? mem : { ...mem, spentAlerts };
+  const released = releaseRecoverTrips(script, obs, mem);
+  const scanMem = spentAlerts === (mem.spentAlerts ?? []) ? released : { ...released, spentAlerts };
   const res = resolveInterrupt(script.interrupts, obs, spentAlerts);
   if (res.kind === "safety-override") {
     // No interrupt row caused this — it is the sealed acute rule firing on its
@@ -629,6 +668,56 @@ function standDownRecord(mem: ScriptMemory, rowID: string): StandDownRecord {
   };
 }
 
+// ─── The repair trip ─────────────────────────────────────────────────────────
+
+/**
+ * How many round trips a "dock at home and repair" row may make before it stops
+ * instead.
+ *
+ * ⚠ THIS IS THE ONLY RESPONSE THAT COMES BACK, so it is the only one that can
+ * commute. The trip is worth making because docking restores the shields and the
+ * capacitor and the shop fixes the armor and hull — but if the reading that fired
+ * the watch is still bad when the ship gets back out, the trip did not help, and
+ * a bot that answers "still hurt" with "go home again" is a bot flying laps
+ * between a belt and a station until the player notices. Three trips is enough
+ * to ride out a bad pull and few enough that the fourth is plainly a pattern; at
+ * that point it stops from the station like every other watch, saying so.
+ */
+export const MAX_RECOVER_TRIPS = 3;
+
+/** Where the trip tally lives — the row's own key, kept out of the step namespace. */
+function recoverKey(rowID: string): string {
+  return `${rowID}:recover`;
+}
+
+/** Trips this row has already made without its condition reading not-met since. */
+function recoverTrips(mem: ScriptMemory, rowID: string): number {
+  const raw = mem.macroMem[recoverKey(rowID)]?.["trips"];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+
+/**
+ * Forget the tally of every repair row whose condition now reads NOT-MET: the
+ * trip worked, so the next bad pull starts from a full three again.
+ *
+ * Only not-met clears it. A cannot-tell must not — an unreadable ship is exactly
+ * the state a docked bot is in (a docked session reports no ship at all), so
+ * treating blind as recovered would reset the counter on every single trip and
+ * hand the commuting bot an unbounded loop, which is the one thing the cap is
+ * for.
+ */
+function releaseRecoverTrips(script: BotScript, obs: ScriptObservation, mem: ScriptMemory): ScriptMemory {
+  let macroMem = mem.macroMem;
+  for (const row of script.interrupts) {
+    const key = recoverKey(row.id);
+    if (!(key in macroMem) || evaluateCondition(row.when, obs) !== "not-met") {
+      continue;
+    }
+    macroMem = omit(macroMem, key);
+  }
+  return macroMem === mem.macroMem ? mem : { ...mem, macroMem };
+}
+
 /**
  * The next fitted hardener a fight-back watch should light, or null when there
  * is nothing to do.
@@ -752,6 +841,40 @@ function fireInterrupt(
     case "dock-and-pause": {
       const latched: Latched = { interruptID: row.id, reason: stoppedBecause(conditionSentence(row.when)) };
       return continueHeadingHome(obs, { ...mem, latched }, travelHome);
+    }
+    case "dock-and-repair": {
+      // THE TRIP CAP IS READ BEFORE THE TRIP IS MADE, not after it — a row that
+      // has already been home three times without the reading getting better is
+      // not sent home a fourth time, it stops (from the station, like everything
+      // else here).
+      const trips = recoverTrips(mem, row.id) + 1;
+      if (trips > MAX_RECOVER_TRIPS) {
+        return stopSafely(sayRepairDidNotHold(row.when), mem, row.id, obs, travelHome);
+      }
+      // The trip is counted on the way OUT, and written before the flight starts:
+      // a trip that never comes back — a bot stopped or lost mid-flight — is
+      // still a trip that was made, and the tally lives in the very memory the
+      // flight home is about to keep rewriting.
+      const latched: Latched = {
+        interruptID: row.id,
+        reason: stoppedBecause(conditionSentence(row.when)),
+        // ONLY a ship KNOWN to be flying is sent back out. An unreadable one is
+        // left docked: the program's next step then says what it needs (a space
+        // step waits for space, a station step gets on with it), which is a
+        // better answer than undocking a bot that was working in the hangar.
+        recover: { undock: obs.inSpace === true },
+      };
+      return continueRecovering(
+        script,
+        obs,
+        {
+          ...mem,
+          latched,
+          macroMem: { ...mem.macroMem, [recoverKey(row.id)]: { trips } },
+        },
+        registry,
+        travelHome,
+      );
     }
     case "launch-drones": {
       // The COMBAT drones, by role (nav/droneRoles.ts) — never the whole bay.
@@ -988,6 +1111,118 @@ function continueHeadingHome(
     pauseReason: null,
     memory: { ...mem, macroMem },
   };
+}
+
+/**
+ * The "dock at home and repair" trip, tick by tick: home, the repair shop, back
+ * out, and then the program picks up at the step it was interrupted on.
+ *
+ * ⚠ IT IS A LATCH AND NOT A RESPONSE PER TICK. Every other watch is consulted
+ * afresh while its condition holds, which is exactly wrong for a trip that ends
+ * at a station: docking makes the ship unreadable (a docked session reports no
+ * ship, `docs/bridge-wire-contract.md` — no shields, no armor, no hull), so a
+ * per-tick response would lose its condition the moment it arrived and abandon
+ * the ship in the station with the program stalled. Latching means the trip owns
+ * the ship from the moment it fires until the ship is back out and working.
+ *
+ * THE STATION STAY IS THE REPAIR, and that is why there is no "wait for the
+ * shields" rung: docking restores the shields and the capacitor by itself, so
+ * what is left to do is the two layers that do NOT come back on their own —
+ * armor and hull — which is precisely what the shop sells and what the
+ * Repair-ship block already knows how to buy. The trip cap
+ * (`MAX_RECOVER_TRIPS`) is what catches a ship that comes back out still hurt,
+ * so nothing here has to be able to read a shield through a station wall.
+ */
+function continueRecovering(
+  script: BotScript,
+  obs: ScriptObservation,
+  mem: ScriptMemory,
+  registry: MacroRegistry,
+  travelHome: HomeTravelDecider,
+): ScriptTickResult {
+  const latched = mem.latched;
+  if (latched === null || latched.recover === undefined) {
+    // Not a repair trip at all — the ordinary "fly home and stop" latch.
+    return continueHeadingHome(obs, mem, travelHome);
+  }
+  const rowID = latched.interruptID;
+
+  // 1. HOME FIRST — the same flight every fired watch makes, drone recall and
+  // fight-your-way-out included. `done` means docked (anywhere: a station in
+  // reach beats a commute), which is the only place the rest of this can happen.
+  const homeMem = mem.macroMem[HOME_MEM_KEY] ?? {};
+  const trip = travelHome(obs, homeMem);
+  const macroMem = { ...mem.macroMem, [HOME_MEM_KEY]: trip.nextMem };
+  if (trip.outcome.kind === "blocked") {
+    // No home to fly to, or no way to reach it. A trip that cannot start is a
+    // stop, exactly as it is for dock-and-pause.
+    return paused(trip.outcome.reason, { ...mem, macroMem, latched: null }, rowID);
+  }
+  if (trip.outcome.kind !== "done") {
+    return {
+      action: trip.action,
+      why: trip.why,
+      phase: trip.phase,
+      stepPath: rowID,
+      interruptID: rowID,
+      status: "running",
+      pauseReason: null,
+      memory: { ...mem, macroMem },
+    };
+  }
+
+  // 2. THE REPAIR SHOP — borrowed, not copied. The Repair-ship block already
+  // quotes the shop, pays it and re-quotes until nothing is left, and it is
+  // reached the one way this file is allowed to reach a macro: through the
+  // injected registry (the same rule fight-back borrows the ratting ladder by).
+  // A fix to the block is a fix to the trip.
+  const repair = registry["repair-ship"];
+  const repairMem = mem.macroMem[REPAIR_MEM_KEY] ?? {};
+  if (repair !== undefined) {
+    const step: MacroStep = { id: rowID ?? REPAIR_MEM_KEY, kind: "macro", macro: "repair-ship", args: {} };
+    const shop = repair(step, obs, repairMem, mem.board);
+    if (shop.outcome.kind === "acting") {
+      return {
+        action: shop.action,
+        why: shop.why,
+        phase: shop.phase,
+        stepPath: rowID,
+        interruptID: rowID,
+        status: "running",
+        pauseReason: null,
+        memory: { ...mem, macroMem: { ...macroMem, [REPAIR_MEM_KEY]: shop.nextMem } },
+      };
+    }
+    // ⚠ "BLOCKED" IS NOT A STOP HERE, unlike the same outcome from the block.
+    // The shop refuses for one practical reason — the wallet will not cover it —
+    // and stranding a working bot in a station because it cannot afford to fix a
+    // scratch is a worse answer than sending it back out with the shields and
+    // capacitor the dock just gave it. If the damage genuinely matters, the
+    // watch fires again on the next lap and the trip cap ends the run properly.
+  }
+
+  // 3. BACK OUT, and the program carries on from the step it was interrupted
+  // on. The latch is dropped on this same tick, which re-arms every watch: the
+  // ship is whole (or as whole as the shop could make it), so the row that fired
+  // should be free to fire again on the next real reading.
+  const settled: ScriptMemory = {
+    ...mem,
+    latched: null,
+    macroMem: omit(omit(macroMem, HOME_MEM_KEY), REPAIR_MEM_KEY),
+  };
+  if (latched.recover.undock && obs.docked === true) {
+    return {
+      action: { kind: "undock" },
+      why: "Patched up, so the bot leaves the station and picks up where it left off.",
+      phase: "Leaving the station",
+      stepPath: rowID,
+      interruptID: rowID,
+      status: "running",
+      pauseReason: null,
+      memory: settled,
+    };
+  }
+  return runProgram(script, obs, settled, registry, travelHome);
 }
 
 // ─── The forward scan ────────────────────────────────────────────────────────

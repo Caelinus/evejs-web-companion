@@ -197,7 +197,9 @@
     return out;
   });
   const currentStation = $derived<{ id: number; name: string } | null>(stations[0] ?? null);
-  const someWatchDocks = $derived(watches.some((w) => w.respond === "dock-and-pause"));
+  const someWatchDocks = $derived(
+    watches.some((w) => w.respond === "dock-and-pause" || w.respond === "dock-and-repair"),
+  );
   const hasSubBot = $derived(planHasSubBot(steps));
 
   const builtDoc = $derived<BotScript>(buildScript());

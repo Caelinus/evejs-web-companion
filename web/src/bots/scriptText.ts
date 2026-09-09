@@ -285,6 +285,8 @@ export function responseSentence(response: InterruptResponse): string {
       return "get to a station and stop";
     case "dock-and-pause":
       return "dock at home and stop";
+    case "dock-and-repair":
+      return "dock at home, repair, and carry on";
     case "launch-drones":
       return "send out drones and keep going";
     case "fight-back":

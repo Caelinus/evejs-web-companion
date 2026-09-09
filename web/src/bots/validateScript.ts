@@ -75,7 +75,9 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   if (script.name.trim().length === 0) {
     problems.push(blocking("name", "Give your bot a name."));
   }
-  const someWatchDocks = script.interrupts.some((row) => row.respond === "dock-and-pause");
+  const someWatchDocks = script.interrupts.some(
+    (row) => row.respond === "dock-and-pause" || row.respond === "dock-and-repair",
+  );
   if (
     someWatchDocks &&
     script.home.id === null &&

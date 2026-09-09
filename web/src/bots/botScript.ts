@@ -490,6 +490,26 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *                        "dock-and-pause"; docked, it stops on the spot.
  *   • "dock-and-pause" — break off, dock at home, pause (the safety-floor
  *                        response, and the hostile "run for the station" pick).
+ *   • "dock-and-repair"— break off, dock at home, PATCH THE SHIP UP, and then
+ *                        CARRY ON from where the program left off. The one
+ *                        response that flies the ship home without ending the
+ *                        run: it is "go and lick your wounds", not "stop".
+ *
+ *                        The stay is the repair. Docking restores the shields
+ *                        and the capacitor, and the station's repair shop fixes
+ *                        the two layers that do NOT come back on their own
+ *                        (armor and hull) — the same shop, through the same
+ *                        block, that a Repair-ship step uses. Then it undocks
+ *                        (only if the watch fired out in space; a watch that
+ *                        fired in station leaves it docked) and the program
+ *                        resumes at the very step it was interrupted on.
+ *
+ *                        ⚠ IT IS TRIP-CAPPED. A response that goes home and
+ *                        comes back is a loop, and a loop whose condition the
+ *                        trip never fixes is a bot flying laps: after a few
+ *                        round trips with the watched reading still bad, it
+ *                        stops from the station like any other watch instead of
+ *                        commuting forever (nav/scriptDecide `MAX_RECOVER_TRIPS`).
  *   • "launch-drones"  — put drones out and KEEP WORKING (the hostile "use
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
@@ -544,6 +564,7 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
 export type InterruptResponse =
   | "pause"
   | "dock-and-pause"
+  | "dock-and-repair"
   | "launch-drones"
   | "fight-back"
   | "repair"
@@ -553,6 +574,7 @@ export type InterruptResponse =
 export const INTERRUPT_RESPONSES: readonly InterruptResponse[] = Object.freeze<InterruptResponse[]>([
   "pause",
   "dock-and-pause",
+  "dock-and-repair",
   "launch-drones",
   "fight-back",
   "repair",
@@ -799,7 +821,8 @@ export type ProgramNode = MacroStep | LoopBlock | BranchBlock | SubBotNode;
  * A whole player bot, as saved / imported / exported.
  *
  * `home` is required — every bot names the station it docks at when a
- * dock-and-pause response fires, so the safety floor always has somewhere to go.
+ * dock-and-pause (or dock-and-repair) response fires, so the safety floor always
+ * has somewhere to go.
  * `interrupts` is ordered and first-match-wins each tick, before any step. The
  * program runs once top to bottom; "go again" is an explicit outer loop block.
  */

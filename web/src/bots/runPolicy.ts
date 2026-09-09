@@ -151,6 +151,11 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
 export const INTERRUPT_RUN_POLICY: Readonly<Record<InterruptResponse, MacroRunPolicy>> = Object.freeze({
   pause: SAFE,
   "dock-and-pause": SAFE,
+  // Going home is safe; PAYING THE REPAIR SHOP is not — this response spends the
+  // player's ISK without them in the loop, so it carries the Repair-ship block's
+  // own authority, and for the same reason it is not restart-safe: a bot resumed
+  // after a process restart must be started by hand before it can buy repairs.
+  "dock-and-repair": policy(["financial", "inventory"], false),
   // An always-armed combat response can act before the resumed main program
   // reaches any checkpoint. Require a fresh player start after process restart.
   "launch-drones": policy(["combat"], false),

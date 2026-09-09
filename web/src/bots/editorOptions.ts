@@ -480,6 +480,10 @@ export function conditionUsesIsk(kind: ConditionKind): boolean {
  */
 export const RESPONSE_LABEL: Readonly<Record<InterruptResponse, string>> = {
   "dock-and-pause": "Dock at home and stop",
+  // The one response that goes home WITHOUT ending the run: the station stay is
+  // the repair (docking brings the shields and capacitor back, the shop fixes
+  // the armor and hull), and then the bot undocks and picks its program back up.
+  "dock-and-repair": "Dock at home, repair, then carry on",
   // A bot never comes to rest in space, so this stops FROM A STATION: in space
   // it flies home first and then stops, and docked it stops on the spot.
   pause: "Stop and wait, from a station",

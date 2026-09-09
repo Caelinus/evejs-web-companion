@@ -44,10 +44,11 @@ planets · fleet · flow`).
 **Watches (interrupts):** shield / armor / hull / health / capacitor-below ·
 hostile-on-grid · wallet-below/above · **cargo-full** · **players-in-system-above**
 · **targeted-by-player** · **drone-health-below**.
-**Responses:** pause · dock-and-pause · launch-drones · repair · **alert**.
+**Responses:** pause · dock-and-pause · **dock-and-repair** · launch-drones · fight-back · repair · **alert**.
 
 Plus the **watches** (interrupts): shield/armor/hull/health/capacitor-below,
-hostile-on-grid, with responses pause / dock-and-pause / launch-drones / repair.
+hostile-on-grid, with responses pause / dock-and-pause / dock-and-repair /
+launch-drones / fight-back / repair.
 
 ---
 
