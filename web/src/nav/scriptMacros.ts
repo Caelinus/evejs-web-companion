@@ -842,6 +842,52 @@ const travelToStation: MacroDecider = (step, obs, mem, board) => {
   return tick(WAIT, "Docked.", "Arrived", { kind: "done" });
 };
 
+// ── travel-to-system ─────────────────────────────────────────────────────────
+// Fly to a SOLAR SYSTEM and stop there — the arrival-waiting twin of
+// set-destination. Same shared autopilot, same route solver; the only
+// difference, and the whole reason the block exists, is WHEN it finishes.
+//
+// ⚠ set-destination is done the moment the trip is under way, on purpose, so a
+// player can put their own checks after it. That makes it the wrong block to
+// put in front of one that works on something in ANOTHER system: the next block
+// becomes the active step while the ship is still two gates out, reads the grid
+// it happens to be on, and stops the run for want of a belt/station/anomaly that
+// was never going to be there yet. Caught live, 2026-09-08: a mining bot pinned
+// to a belt in the next system over mined one lap (started in-system), then
+// stopped every lap after with "the belt this step is pinned to is not on this
+// grid" the moment it undocked at home.
+//
+// Arrival is measured on the SYSTEM ID and nothing else — docked or in space,
+// being there is being there. The autopilot's own system plan lands in space and
+// counts a dock in the destination system as arrived (`isAtDestination`), so a
+// stricter "in space too" rule would hang forever on a pilot who started the
+// block docked in the target system. A program that needs to be undocked says so
+// with an `undock` block, exactly as it does after travel-to-station.
+const travelToSystem: MacroDecider = (step, obs, mem) => {
+  const arg = step.args["system"];
+  if (arg === undefined || arg.kind !== "system" || arg.ref.id === null) {
+    return tick(WAIT, "No system picked.", "Travelling", {
+      kind: "blocked",
+      reason: "This step needs a solar system to go to.",
+    });
+  }
+  const target = arg.ref.id;
+  if (obs.flightStatus?.solarSystemID === target) {
+    return tick(WAIT, "Arrived.", "Arrived", { kind: "done" });
+  }
+  // Never warp off with drones still out. There is no grid target to align to
+  // — the destination is a whole system — so the recall just holds.
+  const recall = recallBeforeLeaving(obs, mem, "Travelling", null);
+  if (recall !== null) {
+    return recall;
+  }
+  const ride = rideAutopilotToSystem(obs, target, "Travelling");
+  if (ride !== null) {
+    return ride;
+  }
+  return tick(WAIT, "Arrived.", "Arrived", { kind: "done" });
+};
+
 // ── defend-with-drones ───────────────────────────────────────────────────────
 // Launch combat drones, set them on the nearest pirate, and finish once the
 // pirates are gone.
@@ -971,6 +1017,31 @@ function rideAutopilotTo(obs: ScriptObservation, stationID: number, phase: strin
     return tick(WAIT, "Flying there — the autopilot has the ship.", phase, ACTING, false);
   }
   return tick({ kind: "startRoute", stationID }, "Setting the destination and heading out.", phase, ACTING, false);
+}
+
+/**
+ * Riding the shared autopilot to a SYSTEM, multi-system. Null once the ship is
+ * in it. The station twin above keyed on `destinationStationID`; a system route
+ * carries no station, so this one keys on `destinationSystemID` — reading the
+ * wrong field would make every tick re-issue the route.
+ */
+function rideAutopilotToSystem(obs: ScriptObservation, systemID: number, phase: string): MacroTick | null {
+  if (obs.flightStatus?.solarSystemID === systemID) {
+    return null; // arrived
+  }
+  const travel = obs.travel ?? null;
+  // Only a failure on THIS destination blocks — a stale reason left over from an
+  // earlier route (or an abort the bot itself issued at start) must not.
+  if (travel !== null && travel.failureReason !== null && travel.destinationSystemID === systemID) {
+    return tick(WAIT, travel.failureReason, phase, {
+      kind: "blocked",
+      reason: `The trip could not be finished: ${travel.failureReason}`,
+    });
+  }
+  if (travel !== null && travel.status === "running" && travel.destinationSystemID === systemID) {
+    return tick(WAIT, "Flying there — the autopilot has the ship.", phase, ACTING, false);
+  }
+  return tick({ kind: "startSystemRoute", systemID }, "Setting the destination and heading out.", phase, ACTING, false);
 }
 
 // ── find-*-agent ─────────────────────────────────────────────────────────────
@@ -3424,6 +3495,7 @@ const recoverScanProbes: MacroDecider = (_step, obs) => {
 export const SCRIPT_MACROS: CompleteMacroRegistry = {
   undock,
   "travel-to-belt": travelToBelt,
+  "travel-to-system": travelToSystem,
   "mine-at-belt": mineAtBelt,
   "deliver-ore": deliverOre,
   "travel-to-station": travelToStation,

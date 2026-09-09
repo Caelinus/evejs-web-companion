@@ -616,6 +616,13 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     const ref = readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label), ["station", "system"]);
     return { kind: "destination", ref };
   }
+  if (expected === "system") {
+    // Systems ONLY — no widened set, so a station in this slot is refused rather
+    // than kept as a station the block could not fly to (see the `system` arg
+    // in botScript.ts).
+    const ref = readWorldRef(obj["ref"], "system", ctx, SAY.badArg(label));
+    return { kind: "system", ref };
+  }
   if (expected === "rockPick") {
     const pick = obj["pick"];
     if (typeof pick !== "string" || !ROCK_PICKS.includes(pick as RockPick)) {
@@ -1273,6 +1280,8 @@ function orderArg(arg: Arg): unknown {
       return { kind: "character", charID: arg.charID, name: arg.name };
     case "destination":
       return { kind: "destination", ref: orderRef(arg.ref) };
+    case "system":
+      return { kind: "system", ref: orderRef(arg.ref) };
     case "rockPick":
       return { kind: "rockPick", pick: arg.pick };
     case "oreList":

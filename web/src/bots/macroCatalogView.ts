@@ -150,6 +150,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Flies to a station, through gates if it needs to, and docks.",
     "A station to go to",
   ),
+  "travel-to-system": entry(
+    "travel-to-system",
+    "movement",
+    "Flies to a solar system, through gates if it needs to, and only finishes once you have arrived. Put this before any block that works on something in another system: Set the destination and fly hands the ship to the autopilot and then finishes straight away, so whatever comes next starts while you are still on your way there.",
+    "A solar system to go to",
+  ),
   "travel-to-belt": entry(
     "travel-to-belt",
     "movement",

@@ -61,6 +61,7 @@ export type WidgetKind =
   | "qty-input"
   | "character-picker"
   | "destination-picker"
+  | "system-picker"
   | "rock-pick-select"
   | "ore-list-picker"
   | "target-list-picker"
@@ -84,6 +85,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   qty: "qty-input",
   character: "character-picker",
   destination: "destination-picker",
+  system: "system-picker",
   rockPick: "rock-pick-select",
   oreList: "ore-list-picker",
   targetList: "target-list-picker",
@@ -108,6 +110,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   qty: "Quantity",
   character: "Pilot",
   destination: "Destination",
+  system: "Solar system",
   rockPick: "Which rock first",
   oreList: "Ore priority",
   targetList: "Target priority",
@@ -146,6 +149,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   who: "Pilot",
   range: "Scanner reach (AU)",
   destination: "Destination",
+  system: "Solar system",
   pick: "Which rock first",
 };
 
@@ -193,7 +197,7 @@ export interface MacroArgDescriptors {
    * The FORMAT allows an `until` on any step (`scriptCodec.ts` reads one
    * wherever a step is read), so this is a UI judgement, not a format fact:
    * offering "Leave the station until your wallet rises above 10m ISK" on all
-   * 49 macros would put a control nobody wants on almost every step. It is
+   * 50 macros would put a control nobody wants on almost every step. It is
    * offered where the macro cannot end on its own (`untilRequired`) and on
    * `wait`, whose own spec names "wait until shields are back above X" as the
    * intended combination. A step that ALREADY carries an `until` — from an

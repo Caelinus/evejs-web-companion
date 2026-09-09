@@ -31,6 +31,15 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [{ key: "belt", kind: "belt", required: true }],
     untilRequired: false,
   },
+  // The arrival-waiting twin of set-destination: the same shared autopilot, but
+  // the block does not finish until the ship IS in the system. Its argument is
+  // its own `system` kind rather than `destination` so a station can never end
+  // up in the slot — this block has no way to dock, and a station sitting here
+  // would read as a trip it silently could not make.
+  "travel-to-system": {
+    args: [{ key: "system", kind: "system", required: true }],
+    untilRequired: false,
+  },
   "mine-at-belt": {
     args: [
       { key: "belt", kind: "belt", required: true },

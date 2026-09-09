@@ -236,6 +236,15 @@ export type Arg =
    * must never be swapped by a hand-edited file.
    */
   | { readonly kind: "destination"; readonly ref: WorldRef }
+  /**
+   * A SOLAR SYSTEM and nothing else — where `travel-to-system` goes. Kept apart
+   * from `destination` (which is a station OR a system) because a block that
+   * only ever means a system must not be able to hold a station: the picker for
+   * this kind searches systems alone, and the codec refuses any other entity, so
+   * "fly to a system" cannot quietly become "fly to a station and dock" through
+   * a hand-edited file.
+   */
+  | { readonly kind: "system"; readonly ref: WorldRef }
   /** Which rock a mining step reaches for first. */
   | { readonly kind: "rockPick"; readonly pick: RockPick }
   /** An ORDERED ore priority list for the mine block (first = most wanted).
@@ -578,6 +587,7 @@ export interface InterruptRow {
 export type MacroID =
   | "undock"
   | "travel-to-station"
+  | "travel-to-system"
   | "travel-to-belt"
   | "mine-at-belt"
   | "deliver-ore"
@@ -635,6 +645,7 @@ export type MacroID =
 export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "undock",
   "travel-to-station",
+  "travel-to-system",
   "travel-to-belt",
   "mine-at-belt",
   "deliver-ore",

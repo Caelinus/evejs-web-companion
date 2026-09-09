@@ -68,6 +68,8 @@ export function macroName(macro: MacroID): string {
       return "Leave the station";
     case "travel-to-station":
       return "Fly to a station and dock";
+    case "travel-to-system":
+      return "Fly to a solar system";
     case "travel-to-belt":
       return "Fly to a belt";
     case "mine-at-belt":
@@ -397,6 +399,14 @@ function macroPhrase(step: MacroStep): string {
           ? worldRefPhrase(station.ref, "station")
           : "a station you pick";
       return `Fly to ${where} and dock`;
+    }
+    case "travel-to-system": {
+      const system = step.args["system"];
+      const where =
+        system !== undefined && system.kind === "system"
+          ? worldRefPhrase(system.ref, "system")
+          : "a system you pick";
+      return `Fly to ${where} and wait until you are there`;
     }
     case "travel-to-belt": {
       const belt = step.args["belt"];

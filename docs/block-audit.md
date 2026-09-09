@@ -28,7 +28,7 @@ planets · fleet · flow`).
 
 | Category | Blocks |
 |---|---|
-| movement | undock · travel-to-station · warp-to-bookmark · **set-destination** · **dock-at-nearest** |
+| movement | undock · travel-to-station · travel-to-belt · warp-to-bookmark · **set-destination** · **dock-at-nearest** · **travel-to-system** |
 | mining | mine-at-belt (+ nearest / biggest rock order) · **compress-ore** |
 | combat | defend-with-drones · hardeners-on · fight-the-rats · warp-to-anomaly |
 | hauling | deliver-ore · unload-cargo · salvage-wrecks · loot-wrecks · move-items · **jettison-cargo** · **tidy-hangar** |
@@ -168,6 +168,7 @@ for directly. All live-verified in the app; full suite 2884/2884.
 | **jettison + tidy hangar** ✅ | `jettison-cargo` (whole hold or one item type; confirm-gated `ship/Jettison`, confirmed by the hold emptying) and `tidy-hangar` (`inventory/stack` StackAll, one shot). |
 | **biggest rocks first** ✅ | An OPTIONAL `pick` arg on mine-at-belt using the snapshot's existing `remainingQuantity` — no survey read needed, and the default stays `nearest` so proven behaviour is untouched. Unknown amounts sort last (a null is not a zero). |
 | **set destination + autopilot** ✅ (operator ask) | `set-destination` points the shared autopilot at a station **or a whole system** and finishes once the trip is under way, rather than waiting for arrival. New `destination` Arg kind (entity station|system, closed set) and a `allowSystems` mode on StationPicker. |
+| **fly to a system and WAIT** ✅ (operator ask) | `travel-to-system` — the arrival-waiting twin of `set-destination`, on the same shared autopilot (`startSystemRoute`). Exists because set-destination finishing early is a trap in front of any grid-reading block: caught live 2026-09-08, a mining bot pinned to a belt one system over mined a single lap (it was started in-system) and then stopped every lap after with *"the belt this step is pinned to is not on this grid"*, because `mine-at-belt` became the active step while the ship was still leaving home. Arrival is judged on the SYSTEM ID alone — docked counts, because the autopilot's own system plan treats a dock in the destination system as arrived and will not undock for it. New `system` Arg kind (systems ONLY, so a station cannot sit in a slot the block could never fly to) and a `scope` prop on StationPicker replacing the old `allowSystems` boolean (`"station"` / `"any"` / `"system"`). |
 | **compress ore on grid** ✅ (operator ask) | `compress-ore` — the FLEET mechanic. A mining support ship on grid running an Industrial Core plus a compression module is a facility (`resolveCompressionFacilityTypelistsForEntity`), and `inSpaceCompressionMgr.CompressItemInSpace(itemID, facilityBallID)` swaps an ore stack in your own hull for its compressed type at the same quantity — ~100× less volume in this build (Veldspar 0.1 m³ → Compressed Veldspar 0.001 m³, checked in the SDE). The block finds the facility from a READING, closes to its range on the shared ladder, then works the hold one stack per tick. ⚠ **needs the server-side half** — see below. |
 
 ### compress-ore: PROVEN LIVE (2026-07-25)

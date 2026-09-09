@@ -60,6 +60,7 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   channel: "a channel to talk in",
   message: "a message to send",
   destination: "somewhere to go",
+  system: "a solar system to go to",
   fitting: "a fitting to switch to",
   bookmark: "a saved bookmark to warp to",
   from: "where to move items from",
@@ -200,6 +201,9 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     }
     if (arg.kind === "destination" && arg.ref.id === null) {
       problems.push(blocking(step.id, "Pick where this step sets the destination to."));
+    }
+    if (arg.kind === "system" && arg.ref.id === null) {
+      problems.push(blocking(step.id, "Pick the solar system for this step."));
     }
   }
 

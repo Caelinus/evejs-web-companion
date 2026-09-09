@@ -592,6 +592,97 @@ test("travel-to-station: rides the shared autopilot (multi-system) and is done o
   assert.ok(staleFailure.action.kind === "startRoute", "a failure on ANOTHER destination is ignored");
 });
 
+// ── travel-to-system ─────────────────────────────────────────────────────────
+//
+// The block exists because set-destination does NOT wait, and a bot whose next
+// step reads the grid stops the run when it starts two gates early. These tests
+// pin the one property that difference lives in: arrival, and only arrival,
+// finishes it.
+
+const HOME_SYSTEM = 30000142;
+const FAR_SYSTEM = 30000144;
+const flyToSystem = SCRIPT_MACROS["travel-to-system"]!;
+const systemStep: MacroStep = {
+  id: "ts",
+  kind: "macro",
+  macro: "travel-to-system",
+  args: { system: { kind: "system", ref: { entity: "system", id: FAR_SYSTEM, name: "Far", systemName: "Far" } } },
+};
+
+test("travel-to-system: rides the shared autopilot and is done ONLY once the ship is in the system", () => {
+  // Elsewhere -> hand the trip to the autopilot's system plan (no final dock).
+  const go = flyToSystem(systemStep, obs({ snapshot: snapshot([]) }), {}, {});
+  assert.ok(go.action.kind === "startSystemRoute" && go.action.systemID === FAR_SYSTEM);
+  assert.notEqual(go.outcome.kind, "done");
+
+  // Under way -> wait, never re-issue the route every tick.
+  const riding = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "running", destinationSystemID: FAR_SYSTEM, destinationStationID: null, remainingJumps: 2, failureReason: null } }),
+    {},
+    {},
+  );
+  assert.equal(riding.action.kind, "wait");
+  assert.notEqual(riding.outcome.kind, "done");
+
+  // ⚠ THE WHOLE POINT. Mid-route, one gate short, is NOT arrived — this is the
+  // tick where set-destination would already have handed the next block a grid
+  // in the wrong system.
+  const oneGateShort = flyToSystem(systemStep, obs({ flightStatus: flight({ solarSystemID: 30000148 }), snapshot: snapshot([]) }), {}, {});
+  assert.notEqual(oneGateShort.outcome.kind, "done");
+
+  // There -> done.
+  const arrived = flyToSystem(systemStep, obs({ flightStatus: flight({ solarSystemID: FAR_SYSTEM }), snapshot: snapshot([]) }), {}, {});
+  assert.equal(arrived.outcome.kind, "done");
+});
+
+test("travel-to-system: DOCKED in the destination system counts as arrived", () => {
+  // The autopilot's own system plan treats a dock in the destination system as
+  // arrival and will not undock for it, so a stricter rule here would hang
+  // forever. A program that needs to be in space says so with an undock block.
+  const dockedThere = flyToSystem(
+    systemStep,
+    obs({ flightStatus: flight({ docked: true, inSpace: false, solarSystemID: FAR_SYSTEM, stationID: 60000007 }), snapshot: null }),
+    {},
+    {},
+  );
+  assert.equal(dockedThere.outcome.kind, "done");
+});
+
+test("travel-to-system: a failure on THIS trip blocks; a stale one from another does not", () => {
+  const failed = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "idle", destinationSystemID: FAR_SYSTEM, destinationStationID: null, remainingJumps: 0, failureReason: "Off route" } }),
+    {},
+    {},
+  );
+  assert.equal(failed.outcome.kind, "blocked");
+
+  const stale = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "idle", destinationSystemID: HOME_SYSTEM, destinationStationID: null, remainingJumps: 0, failureReason: "old news" } }),
+    {},
+    {},
+  );
+  assert.ok(stale.action.kind === "startSystemRoute", "a failure on ANOTHER destination is ignored");
+});
+
+test("travel-to-system: drones out come home before the ship warps off", () => {
+  const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const t = flyToSystem(systemStep, obs({ snapshot: snapshot([drone]), dronesOut: true }), {}, {});
+  assert.ok(t.action.kind === "recallDrones" && t.action.droneIDs.includes(111));
+});
+
+test("travel-to-system: an unpicked system blocks instead of flying somewhere arbitrary", () => {
+  const unbound: MacroStep = {
+    id: "ts",
+    kind: "macro",
+    macro: "travel-to-system",
+    args: { system: { kind: "system", ref: { entity: "system", id: null, name: null, systemName: null } } },
+  };
+  assert.equal(flyToSystem(unbound, obs({ snapshot: snapshot([]) }), {}, {}).outcome.kind, "blocked");
+});
+
 test("salvage: wrecks + drones out -> set them salvaging (auto-pick); grid clean -> recall, then done", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;

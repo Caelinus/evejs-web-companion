@@ -171,7 +171,13 @@ function everyArgKind(): BotScript {
         args: { destination: { kind: "destination", ref: { entity: "system", id: 30000142, name: "Jita", systemName: null } } },
       },
       {
-        id: "a9",
+        id: "a12",
+        kind: "macro",
+        macro: "travel-to-system",
+        args: { system: { kind: "system", ref: { entity: "system", id: 30000144, name: "Far Away", systemName: null } } },
+      },
+      {
+        id: "a11",
         kind: "macro",
         macro: "mine-at-belt",
         args: {
@@ -203,6 +209,29 @@ test("a SYSTEM destination keeps its own entity; a belt in that slot is refused"
   withBelt["program"] = program;
   const refused = decodeScriptValue(withBelt);
   assert.equal(refused.ok, false, "a belt is not somewhere the autopilot can be sent");
+});
+
+test("a travel-to-system slot takes SYSTEMS ONLY — a station in it is refused", () => {
+  // The narrower twin of the destination slot above. This block has no way to
+  // dock, so a station here would be a trip it could never make; the codec is
+  // where that is settled, because only the codec sees a hand-edited file.
+  const doc = everyArgKind();
+  const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+  const trip = round.program.find((n) => n.kind === "macro" && n.macro === "travel-to-system");
+  assert.ok(trip !== undefined && trip.kind === "macro");
+  const arg = trip.args["system"];
+  assert.ok(arg !== undefined && arg.kind === "system");
+  assert.equal(arg.ref.entity, "system");
+  assert.equal(arg.ref.id, 30000144);
+
+  for (const entity of ["station", "belt", "agent"] as const) {
+    const edited = JSON.parse(encodeScriptDoc(doc)) as Record<string, unknown>;
+    const program = structuredClone(edited["program"]) as Record<string, unknown>[];
+    const node = program.find((n) => n["macro"] === "travel-to-system") as Record<string, unknown>;
+    node["args"] = { system: { kind: "system", ref: { entity, id: 60000004, name: "Somewhere", systemName: null } } };
+    edited["program"] = program;
+    assert.equal(decodeScriptValue(edited).ok, false, `a ${entity} is not a solar system`);
+  }
 });
 
 test("the current watch kinds round-trip", () => {

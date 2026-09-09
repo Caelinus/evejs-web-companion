@@ -232,6 +232,7 @@ test("a fresh step's seeded arguments are exactly these, for every macro", () =>
     "mine-at-belt": { args: ["belt"], until: "ore-hold-at-least" },
     "travel-to-belt": { args: ["belt"], until: null },
     "travel-to-station": { args: ["station"], until: null },
+    "travel-to-system": { args: ["system"], until: null },
     "deliver-ore": { args: ["station"], until: null },
     "move-items": { args: ["from", "to"], until: null },
     "buy-item": { args: ["item", "price", "quantity"], until: null },
