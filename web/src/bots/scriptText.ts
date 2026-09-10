@@ -110,6 +110,8 @@ export function macroName(macro: MacroID): string {
       return "Fight the rats";
     case "warp-to-anomaly":
       return "Fly to a pirate den";
+    case "warp-to-ore-anomaly":
+      return "Fly to an ore site";
     case "refit-ship":
       return "Refit from a saved fitting";
     case "move-items":
@@ -490,6 +492,8 @@ function macroPhrase(step: MacroStep): string {
       return `Fight the rats until the grid is clear${targetPhrase(step)}${squadPhrase(step)}`;
     case "warp-to-anomaly":
       return "Warp to the next pirate den the scanner shows";
+    case "warp-to-ore-anomaly":
+      return "Warp to the next ore site the scanner shows";
     case "refit-ship": {
       const fit = step.args["fitting"];
       const name =

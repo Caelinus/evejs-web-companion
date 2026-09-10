@@ -562,22 +562,25 @@ test("capacitor-below condition: tri-state over the cap reading", async () => {
   assert.equal(evaluateCondition({ kind: "capacitor-below", fraction: 0.3 }, obs({ capacitorRatio: null } as never)), "cannot-tell");
 });
 
+const den = (label: string) => ({ label, kind: "combat" as const });
+const rocks = (label: string) => ({ label, kind: "ore" as const });
+
 test("warp-to-anomaly: walks the scanner's dens one by one, never repeating one this run", () => {
   const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
   const s = step("warp-to-anomaly" as never);
   const inSpace = flight({ docked: false, inSpace: true, stationID: null });
 
   // First pick: the first unvisited den, remembered on the board.
-  const go = anom(s, obs({ flightStatus: inSpace, anomalies: ["QEE-288", "ABC-123"] }), {}, NB);
+  const go = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), {}, NB);
   assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
   assert.equal(go.boardPatch?.["anomsVisited"], "QEE-288");
 
   // Already visited QEE-288 -> the NEXT den.
-  const next = anom(s, obs({ flightStatus: inSpace, anomalies: ["QEE-288", "ABC-123"] }), {}, { anomsVisited: "QEE-288" });
+  const next = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), {}, { anomsVisited: "QEE-288" });
   assert.ok(next.action.kind === "warpScan" && next.action.target === "ABC-123");
 
   // All visited -> blocked with a plain reason.
-  const dry = anom(s, obs({ flightStatus: inSpace, anomalies: ["QEE-288"] }), {}, { anomsVisited: "QEE-288" });
+  const dry = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), {}, { anomsVisited: "QEE-288" });
   assert.equal(dry.outcome.kind, "blocked");
 
   // Warp lifecycle: issued -> in warp -> landed = done.
@@ -589,6 +592,47 @@ test("warp-to-anomaly: walks the scanner's dens one by one, never repeating one 
   // Docked -> blocked (undock first).
   const docked = anom(s, obs({}), {}, NB);
   assert.equal(docked.outcome.kind, "blocked");
+});
+
+test("warp-to-anomaly: an ore site is not a den — the ratting block skips it", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const s = step("warp-to-anomaly" as never);
+  const inSpace = flight({ docked: false, inSpace: true, stationID: null });
+
+  // Rocks first on the scanner, one den behind them: the den is what it flies to.
+  const go = anom(s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111"), den("QEE-288")] }), {}, NB);
+  assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
+
+  // Nothing but rocks (and a site whose kind could not be read) -> blocked, not
+  // a hopeful warp into an asteroid field.
+  const onlyRocks = anom(
+    s,
+    obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111"), { label: "XXX-999", kind: "unknown" as const }] }),
+    {},
+    NB,
+  );
+  assert.equal(onlyRocks.outcome.kind, "blocked");
+});
+
+test("warp-to-ore-anomaly: flies to ore sites only, on its own visited list", () => {
+  const ore = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const s = step("warp-to-ore-anomaly" as never);
+  const inSpace = flight({ docked: false, inSpace: true, stationID: null });
+  const sites = [den("QEE-288"), rocks("ORE-111"), rocks("ORE-222")];
+
+  // The den is skipped even though it is first on the scanner.
+  const go = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, NB);
+  assert.ok(go.action.kind === "warpScan" && go.action.target === "ORE-111");
+  assert.equal(go.boardPatch?.["oreAnomsVisited"], "ORE-111");
+
+  // Its visited list is its OWN slot: a ratting tour of this system does not
+  // make the mining block think it has been everywhere.
+  const next = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111", anomsVisited: "ORE-222" });
+  assert.ok(next.action.kind === "warpScan" && next.action.target === "ORE-222");
+
+  // Every ore site visited -> blocked, with the den still standing there.
+  const dry = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111,ORE-222" });
+  assert.equal(dry.outcome.kind, "blocked");
 });
 
 test("refit-ship: boards the right hull when needed, applies by NAME, done after apply", () => {

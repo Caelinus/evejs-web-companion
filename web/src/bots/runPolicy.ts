@@ -113,6 +113,9 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "hardeners-on": policy(["combat"]),
   "fight-the-rats": policy(["combat"]),
   "warp-to-anomaly": policy(["combat"]),
+  // Flying to a rock field arms nothing — the ore block is as safe as any other
+  // trip, which is exactly why it should not have been riding the combat one.
+  "warp-to-ore-anomaly": SAFE,
   "refit-ship": policy(["inventory"]),
   "move-items": policy(["inventory"]),
   "warp-to-bookmark": SAFE,

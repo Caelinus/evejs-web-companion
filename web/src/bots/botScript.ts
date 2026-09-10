@@ -650,6 +650,10 @@ export type MacroID =
   | "hardeners-on"
   | "fight-the-rats"
   | "warp-to-anomaly"
+  // The mining twin of warp-to-anomaly: the same scanner list, filtered to ore
+  // sites instead of dens. Two blocks rather than one with a switch, because
+  // "fly to a pirate den" and "fly to an ore site" are two different intentions.
+  | "warp-to-ore-anomaly"
   | "refit-ship"
   | "move-items"
   | "warp-to-bookmark"
@@ -709,6 +713,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "hardeners-on",
   "fight-the-rats",
   "warp-to-anomaly",
+  "warp-to-ore-anomaly",
   "refit-ship",
   "move-items",
   "warp-to-bookmark",
