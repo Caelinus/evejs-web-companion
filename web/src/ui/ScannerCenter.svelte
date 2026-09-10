@@ -191,6 +191,7 @@
                 <thead>
                   <tr>
                     <th>Signal</th>
+                    <th>Group</th>
                     <th>Name</th>
                     <th>Reported detail</th>
                   </tr>
@@ -203,6 +204,13 @@
                           <span class="signal-code">{site.signalLabel}</span>
                         {:else}
                           <span class="muted">No signal label</span>
+                        {/if}
+                      </td>
+                      <td data-label="Group">
+                        {#if site.groupLabel}
+                          <span>{site.groupLabel}</span>
+                        {:else}
+                          <span class="muted">Not reported</span>
                         {/if}
                       </td>
                       <td data-label="Name">

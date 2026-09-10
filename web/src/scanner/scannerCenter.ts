@@ -14,6 +14,7 @@ import type {
 } from "../bridge/boundSmallServices.ts";
 import type { FormationsResult } from "../bridge/formations.ts";
 import type { JsonValue } from "../bridge/wire.ts";
+import { SITE_KIND_LABELS, siteKind } from "./siteKind.ts";
 
 export type ScannerDataState<T> =
   | { readonly status: "loading" }
@@ -70,6 +71,13 @@ export interface ScannerSiteView {
   readonly name: string;
   /** The player-visible signal label (for example QEE-288), when reported. */
   readonly signalLabel: string | null;
+  /**
+   * The client's own Group column — "Ore site", "Combat site" — computed from
+   * the row's scan-strength attribute exactly as the bot's block computes it
+   * (siteKind.ts). Null when the row is not one this reading applies to; see
+   * `siteGroupLabel`.
+   */
+  readonly groupLabel: string | null;
   /** A resolved type name when the read carried a type and the caller supplied its name. */
   readonly typeName: string | null;
   /** Internal icon/action datum only; the panel never renders this number as text. */
@@ -182,6 +190,30 @@ function catalogName(
   return cleanText(catalog[id]);
 }
 
+/**
+ * ⚠ AN ANOMALY ALWAYS SHOWS A GROUP, INCLUDING "Unknown site". That is not
+ * noise — it is the one fact a player needs when a mining bot refuses to fly
+ * to a rock field they can see: the ore/combat blocks skip a site whose kind
+ * the server did not report, so a column full of "Unknown site" is the answer
+ * to "why is my bot saying there is nothing here", and hiding it would hide
+ * exactly the case worth seeing.
+ *
+ * The other three slots do not carry a scan-strength attribute at all (only
+ * anomaly rows do — bridge/boundSmallServices.ts), so an unreadable one there
+ * means "this row was never going to say", not "the server dropped a field".
+ * Those show nothing rather than labelling every signature Unknown.
+ */
+function siteGroupLabel(
+  fields: Readonly<Record<string, ScanFieldValue>>,
+  kind: ScannerSiteKind,
+): string | null {
+  const group = siteKind(fields["scanStrengthAttribute"], fields["archetypeID"]);
+  if (group === "unknown" && kind !== "anomaly") {
+    return null;
+  }
+  return SITE_KIND_LABELS[group];
+}
+
 function siteView(
   site: ScanSite,
   definition: GroupDefinition,
@@ -211,6 +243,7 @@ function siteView(
     kindLabel: definition.label,
     name,
     signalLabel: cleanText(site.targetID),
+    groupLabel: siteGroupLabel(fields, definition.kind),
     typeName,
     typeID,
     difficulty: numberField(fields, "difficulty"),

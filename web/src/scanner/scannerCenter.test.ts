@@ -70,6 +70,36 @@ test("bound-read failures become unavailable, while a successful empty tuple sta
   assert.equal(scannerStateFromBoundRead(succeeded).status, "ready");
 });
 
+// The Group column is what tells a player the bot and the panel are reading the
+// same thing: an ore-site row here is a row `warp-to-ore-anomaly` will fly to,
+// and an "Unknown site" row is one it will deliberately skip.
+test("anomaly rows carry the client's Group column, unreadable ones included", () => {
+  const view = buildScannerSitesView({
+    status: "ready",
+    value: fullState({
+      anomalies: [
+        scanSite(1, "AAA-111", { scanStrengthAttribute: 211 }),
+        scanSite(2, "BBB-222", { scanStrengthAttribute: 1136 }),
+        // No attribute at all: the case both bot blocks refuse to guess at, so
+        // the panel says so rather than leaving the cell blank.
+        scanSite(3, "CCC-333", { scanStrengthAttribute: null }),
+        // Attribute gone, archetype still there -> the row is rescued.
+        scanSite(4, "DDD-444", { scanStrengthAttribute: null, archetypeID: 27 }),
+      ],
+      // A signature row never carries a scan-strength attribute, so it reports
+      // no group rather than being labelled Unknown.
+      signatures: [scanSite(5, "EEE-555", { difficulty: 3 })],
+    }),
+  });
+  assert.equal(view.status, "ready");
+  if (view.status !== "ready") {
+    return;
+  }
+  const groups = view.groups.find((group) => group.kind === "anomaly")?.sites.map((site) => site.groupLabel);
+  assert.deepEqual(groups, ["Ore site", "Combat site", "Unknown site", "Ore site"]);
+  assert.equal(view.groups.find((group) => group.kind === "signature")?.sites[0]?.groupLabel, null);
+});
+
 test("site rows use supplied dungeon/type names and never promote numeric ids to labels", () => {
   const view = buildScannerSitesView(
     {
