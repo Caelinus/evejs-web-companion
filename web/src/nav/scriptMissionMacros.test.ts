@@ -563,6 +563,9 @@ test("capacitor-below condition: tri-state over the cap reading", async () => {
 });
 
 const den = (label: string) => ({ label, kind: "combat" as const });
+// One short of the block's own EMPTY_SCAN_CONFIRM_READS, so the next empty read
+// is the one that is believed.
+const EMPTY_READS_DONE = 2;
 const rocks = (label: string) => ({ label, kind: "ore" as const });
 
 test("warp-to-anomaly: walks the scanner's dens one by one, never repeating one this run", () => {
@@ -579,9 +582,10 @@ test("warp-to-anomaly: walks the scanner's dens one by one, never repeating one 
   const next = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), {}, { anomsVisited: "QEE-288" });
   assert.ok(next.action.kind === "warpScan" && next.action.target === "ABC-123");
 
-  // All visited -> blocked with a plain reason.
-  const dry = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), {}, { anomsVisited: "QEE-288" });
-  assert.equal(dry.outcome.kind, "blocked");
+  // All visited -> another lap over the same dens, not a stop.
+  const lap = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), {}, { anomsVisited: "QEE-288" });
+  assert.ok(lap.action.kind === "warpScan" && lap.action.target === "QEE-288");
+  assert.equal(lap.outcome.kind, "acting");
 
   // Warp lifecycle: issued -> in warp -> landed = done.
   const riding = anom(s, obs({ flightStatus: inSpace, inWarp: true }), { issued: true }, NB);
@@ -630,10 +634,46 @@ test("warp-to-ore-anomaly: flies to ore sites only, on its own visited list", ()
   const next = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111", anomsVisited: "ORE-222" });
   assert.ok(next.action.kind === "warpScan" && next.action.target === "ORE-222");
 
-  // Every ore site visited -> blocked, with the den still standing there.
-  const dry = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111,ORE-222" });
-  assert.equal(dry.outcome.kind, "blocked");
-  assert.ok(dry.outcome.kind === "blocked" && dry.outcome.reason === "Every ore site in this system has been visited this run.");
+  // Every ore site visited -> the lap starts again at the first one, and the
+  // visited list is REPLACED rather than appended to, so the new lap is a lap
+  // and not an immediate second restart. One miner does not empty a cluster in
+  // one hold; the run should end at Mine-at-a-belt when the rock is gone, not
+  // here because the ship has been here before.
+  const lap = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111,ORE-222" });
+  assert.ok(lap.action.kind === "warpScan" && lap.action.target === "ORE-111");
+  assert.equal(lap.outcome.kind, "acting");
+  assert.equal(lap.boardPatch?.["oreAnomsVisited"], "ORE-111");
+
+  // The den is still not on the mining block's lap.
+  const lapAgain = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111" });
+  assert.ok(lapAgain.action.kind === "warpScan" && lapAgain.action.target === "ORE-222");
+});
+
+// The server answers a session whose system it cannot resolve with an EMPTY
+// full state, not an error — indistinguishable from a system that holds
+// nothing. One of those must not end a run.
+test("warp-to-ore-anomaly: an empty scanner is re-read before it is believed", () => {
+  const ore = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const s = step("warp-to-ore-anomaly" as never);
+  const inSpace = flight({ docked: false, inSpace: true, stationID: null });
+  const empty = () => obs({ flightStatus: inSpace, anomalies: [] });
+
+  const first = ore(s, empty(), {}, NB);
+  assert.equal(first.outcome.kind, "acting");
+  assert.equal(first.nextMem["emptyReads"], 1);
+
+  const second = ore(s, empty(), first.nextMem, NB);
+  assert.equal(second.outcome.kind, "acting");
+  assert.equal(second.nextMem["emptyReads"], 2);
+
+  // Third agreeing read: now it is believed.
+  const third = ore(s, empty(), second.nextMem, NB);
+  assert.equal(third.outcome.kind, "blocked");
+  assert.ok(third.outcome.kind === "blocked" && third.outcome.reason.includes("lists no cosmic anomaly"));
+
+  // A read that ARRIVES full on the second look is flown, not stopped on.
+  const recovered = ore(s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111")] }), first.nextMem, NB);
+  assert.ok(recovered.action.kind === "warpScan" && recovered.action.target === "ORE-111");
 });
 
 // A pilot parked in a field of rock reads "the scanner shows no ore site" as the
@@ -647,7 +687,7 @@ test("warp-to-ore-anomaly: the dead end says WHICH dead end it is", () => {
 
   // Nothing on the scanner at all: name the panel, because the rocks the pilot
   // can see are on the other one.
-  const empty = ore(s, obs({ flightStatus: inSpace, anomalies: [] }), {}, NB);
+  const empty = ore(s, obs({ flightStatus: inSpace, anomalies: [] }), { emptyReads: EMPTY_READS_DONE }, NB);
   assert.equal(empty.outcome.kind, "blocked");
   assert.ok(reasonOf(empty).includes("lists no cosmic anomaly"));
   assert.ok(reasonOf(empty).includes("asteroid belt is not a scanner site"));
@@ -677,7 +717,7 @@ test("warp-to-ore-anomaly: the dead end says WHICH dead end it is", () => {
 
   // The ratting block gets the same three answers in its own words.
   const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const noDens = anom(step("warp-to-anomaly" as never), obs({ flightStatus: inSpace, anomalies: [] }), {}, NB);
+  const noDens = anom(step("warp-to-anomaly" as never), obs({ flightStatus: inSpace, anomalies: [] }), { emptyReads: EMPTY_READS_DONE }, NB);
   assert.ok(noDens.outcome.kind === "blocked" && noDens.outcome.reason.includes("no den to fly to"));
   const allUnreadable = anom(
     step("warp-to-anomaly" as never),

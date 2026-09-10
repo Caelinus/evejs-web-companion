@@ -2224,6 +2224,16 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
 // being flown to on the chance it is the right one: an unreadable row is not a
 // den, and warping a mining barge into one on a guess is how a hull is lost.
 const WARP_START_WAIT_TICKS = 10; // ~20s for a warp to actually begin
+// ⚠ AN EMPTY SCANNER IS READ THREE TIMES BEFORE IT IS BELIEVED. The server does
+// not answer an unresolvable session with an error — it answers with an EMPTY
+// full state (scanMgrService.js, `systemID <= 0` -> buildEmptySignalTrackerFullState),
+// which is indistinguishable on the wire from a system that genuinely holds
+// nothing. Believing the first one ends the run over a moment the next tick
+// would have contradicted, and a re-read costs one call on a block that is
+// paying for the scanner every tick anyway. A read that FAILS is already
+// handled elsewhere (null -> keep waiting); this is the read that succeeds and
+// lies.
+const EMPTY_SCAN_CONFIRM_READS = 3; // ~6s of agreeing before "this system is empty"
 
 /** The words each variant uses about its own sites — the only thing that differs. */
 interface AnomalyFlavour {
@@ -2276,8 +2286,8 @@ const ORE_FLAVOUR: AnomalyFlavour = {
 //     problem from "this system has no ore in it" and must not wear the same
 //     words — the first is a server that is not filling the field in, and no
 //     amount of flying around will fix it.
-//   • EVERY SITE OF THIS KIND IS VISITED. The tour is over, which is the one
-//     state the old sentence actually described.
+//   • EVERY SITE OF THIS KIND IS VISITED. Which is no longer a dead end at all
+//     — see the lap note on `warpToAnomalyOfKind`.
 function noSiteReason(flavour: AnomalyFlavour, total: number, unreadable: number): string {
   if (total === 0) {
     return `The scanner lists no cosmic anomaly in this system, so there is no ${flavour.noun} to fly to. ${flavour.emptyScannerHint}`;
@@ -2329,34 +2339,57 @@ function warpToAnomalyOfKind(
     if (anomalies === null) {
       return tick(WAIT, "Reading the scanner.", "Scanning", ACTING, false, mem);
     }
+    if (anomalies.length === 0) {
+      const emptyReads = (num(mem, "emptyReads") ?? 0) + 1;
+      if (emptyReads < EMPTY_SCAN_CONFIRM_READS) {
+        return tick(WAIT, "The scanner came back empty — reading it again.", "Scanning", ACTING, false, {
+          ...mem,
+          emptyReads,
+        });
+      }
+      return tick(WAIT, "The scanner lists nothing in this system.", "Scanning", {
+        kind: "blocked",
+        reason: noSiteReason(flavour, 0, 0),
+      });
+    }
     const visited = String(board[flavour.boardKey] ?? "")
       .split(",")
       .filter((label) => label.length > 0);
     const ofKind = anomalies.filter((site) => site.kind === wanted);
-    const next = ofKind.find((site) => !visited.includes(site.label));
+    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
+    // situations and the old code answered both by stopping: there is no site of
+    // this kind here (a real dead end), or every one of them has been flown to
+    // once (not a dead end at all). A site is not finished because the ship has
+    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
+    // in a system holding a single ore site the visited list retired it after one
+    // trip and stopped a bot that had barely scratched it. So a completed lap
+    // wipes the list and starts the next one, and the run now ends where it
+    // should: at Mine-at-a-belt, which is the block that can actually see there
+    // is no rock left and says so.
+    const fresh = ofKind.find((site) => !visited.includes(site.label));
+    const next = fresh ?? ofKind[0];
     if (next === undefined) {
-      if (ofKind.length > 0) {
-        return tick(WAIT, `Every ${flavour.noun} here has been visited this run.`, "Scanning", {
-          kind: "blocked",
-          reason: `Every ${flavour.noun} in this system has been visited this run.`,
-        });
-      }
       const unreadable = anomalies.filter((site) => site.kind === "unknown").length;
-      const said =
-        anomalies.length === 0
-          ? "The scanner lists nothing in this system."
-          : `Nothing on the scanner is ${flavour.oneNoun}.`;
-      return tick(WAIT, said, "Scanning", {
+      return tick(WAIT, `Nothing on the scanner is ${flavour.oneNoun}.`, "Scanning", {
         kind: "blocked",
         reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
+    const lapRestart = fresh === undefined;
     return {
-      ...tick({ kind: "warpScan", target: next.label }, `Warping to the next ${flavour.noun}.`, flavour.flying, ACTING, false, {
-        issued: true,
-        waited: 0,
-      }),
-      boardPatch: { [flavour.boardKey]: [...visited, next.label].join(",") },
+      ...tick(
+        { kind: "warpScan", target: next.label },
+        lapRestart
+          ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
+          : `Warping to the next ${flavour.noun}.`,
+        flavour.flying,
+        ACTING,
+        false,
+        { issued: true, waited: 0 },
+      ),
+      boardPatch: {
+        [flavour.boardKey]: (lapRestart ? [next.label] : [...visited, next.label]).join(","),
+      },
     };
   };
 }
