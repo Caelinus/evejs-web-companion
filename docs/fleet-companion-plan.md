@@ -1,0 +1,621 @@
+# The fleet companion — a plan
+
+Design doc. **Nothing here is implemented yet.** It exists because the feature
+sounds like a rewrite and is not one: the bot stack already has the hands, the
+BFF already has the routes, and the one part that looked hardest — hearing what
+the FC says — is already arriving in the browser and being thrown away.
+
+The goal: you fly the real client, the companion flies one or more pilots
+alongside you in the same fleet, and it obeys you the way a competent
+fleet-mate does — through fleet warp, fleet broadcasts, target tags and fleet
+chat — while keeping itself alive without being told to.
+
+## The one-line version
+
+Three of the four command channels need **no gateway work at all**, because
+eve.js already pushes them to a browser-backed session and
+`applyPushedNotification` simply does not look at them. The fourth (fleet chat)
+needs one small patch in `evejs-server`. Everything downstream of that is
+blocks, and the block runtime is finished.
+
+## What is already built
+
+Worth stating plainly, because it narrows the work to about a third of what the
+feature description implies.
+
+| Capability | Where | State |
+| --- | --- | --- |
+| Action vocabulary: undock, warp, approach, align, orbit, dock, gate jump, lock/unlock, activate/deactivate module, drones | `web/src/app/flow.ts:7089` | done |
+| Fit classification into hardeners / shield / armor / hull repairers / remote reps / tackle / webs / weapons | `web/src/app/flow.ts:5834` | done |
+| Self-targeted module activation (`targetID 0`) | `web/src/app/flow.ts:7121` | done |
+| Interrupts: `shield-below`, `armor-below`, `hull-below`, `capacitor-below`, `hostile-on-grid`, `drone-health-below`, `targeted-by-player` | `web/src/bots/botScript.ts:434` | done |
+| Drone recall, and the align-out-and-recall move | `web/src/app/flow.ts:4467`, `:7703` | done |
+| Fleet-mates on grid, resolved from the roster | `web/src/nav/scriptMacros.ts:2912` | done |
+| Squad board: shared primary-target calling, `call` / `follow` roles, 30 s TTL | `src/squadBoard.js` | done |
+| Join fleet, join advertised fleet, accept invite, invite | `web/src/bots/botScript.ts`, `docs/join-advertised-fleet-handoff.md` | done |
+| Route solving, autopilot, `set-destination`, `travel-to-system` | `web/src/nav/routeSolver.ts`, `autopilotLoop.ts` | done |
+| `salvage-wrecks`, `loot-wrecks`, `undock`, `dock-and-repair` | `web/src/bots/botScript.ts:669` | done |
+| Headless bot host — a bot is just another session, tab may be closed | `src/botHost.js` | done |
+| Multibox: several isolated per-character sessions live at once | R107, `docs/pilot-hangar.md` | done |
+
+**BFF routes that exist but have no browser caller yet.** These are already
+allowlisted in `src/bridgeCallPolicy.js` and routed in `src/server.js`; only the
+`api.ts` wrapper, the flow action and the block are missing.
+
+| Route | Retail method | Buys us |
+| --- | --- | --- |
+| `/api/bridge/flight/keep-at-range` (`src/server.js:15738`) | `beyonce.CmdFollowBall(targetID, range)` | "follow me at X km" — wrapper and manual UI already exist; only the bot block is missing |
+| `/api/bridge/flight/orbit` | `beyonce.CmdOrbit` | "orbit me at X km" |
+| `/api/bridge/flight/fleet-tag-target` (`src/server.js:16018`) | `beyonce.CmdFleetTagTarget(itemID, tag)` | tagging targets with letters |
+| `/api/bridge/flight/jump-through-fleet` (`src/server.js:16030`) | `beyonce.CmdJumpThroughFleet(otherCharID, otherShipID, beaconID, solarSystemID)` | "jump to me" through a cyno bridge |
+
+## The finding that makes this cheap
+
+**Fleet broadcasts and target tags already reach the browser today.**
+
+`fleetRuntime.sendBroadcast` ends at:
+
+```
+notifySession(targetSession, "OnFleetBroadcast", [
+  name, scope, senderCharID, senderSolarSystemID, itemID, typeID
+], "fleetid");
+```
+
+and target tags push `OnFleetStateChange` carrying a `targetTags` KeyVal dict of
+`itemID -> tag` (`fleetPayloads.js:207`, `fleetRuntime.js:899`). Both go through
+`session.sendNotification`, which the gateway's browser-session stub captures
+and publishes onto the SSE stream
+(`evejsWebGatewayRuntime.js`, `materializePersistentBrowserSession`).
+
+`applyPushedNotification` (`web/src/app/flow.ts:1300`) acts only on
+`fleetSnapshotNotifications` and `scannerSnapshotNotifications`. Everything else
+lands in the bounded `live` slice and is discarded. **The bytes are already
+there.**
+
+> ⚠ This makes the note in `src/squadBoard.js:18` out of date. It says the
+> in-game tag equivalent is blocked because "nothing in the client can READ a
+> tag back yet". The read path is the push channel, and it works. Fix that
+> comment when the tag decoder lands.
+
+### The fifteen broadcast names
+
+`fleetConstants.js:58` — the server refuses anything else with `Illegal
+broadcast`, so this list is the complete command surface, and it maps onto the
+requirement almost exactly:
+
+```
+EnemySpotted  NeedBackup  HoldPosition  InPosition  TravelTo
+JumpBeacon    Location    Target        HealTarget  HealArmor
+HealShield    HealCapacitor            WarpTo      AlignTo     JumpTo
+```
+
+`itemID` on a broadcast is the entity or location it is about — the same kind of
+id `lock`, `activate`, `orbit` and `warp` already take.
+
+Rate limiting is server-side (`MIN_BROADCAST_TIME_SEC`, one third of that for
+some names), so a spamming FC cannot wedge a follower. That is a real
+protection, and it means the follower does **not** need its own rate limiter.
+
+### Fleet warp costs nothing
+
+`collectFleetWarpFollowers` warps the members server-side, honouring each
+member's `acceptsFleetWarp` opt-out. When you press Warp Fleet in the real
+client, the companion's ship warps whether or not the companion notices.
+
+The work is therefore the opposite of what it looks like: **make the bot not
+fight it.** A bot that issues an approach or an orbit while the server is
+warping it produces refusals and a confused loop. The runner already carries
+`inWarp` in the observation; the follower mode must yield to it.
+
+## The gaps, by requirement
+
+### 1. Fleet commands (align, warp to, target priorities, need shield/armor)
+
+| Command | Mechanism | Work |
+| --- | --- | --- |
+| Warp to / align to | server-side fleet warp | yield to `inWarp`; nothing else |
+| `AlignTo` broadcast | `OnFleetBroadcast` | decode + `align` action |
+| `Target` broadcast | `OnFleetBroadcast` | decode + feed the existing `follow` squad role |
+| Target priorities 1-9 | `OnFleetStateChange.targetTags` | decode + rank in `targetPriority.ts` |
+| `HealShield` / `HealArmor` / `HealCapacitor` | `OnFleetBroadcast`, `senderCharID` | decode + the existing remote-rep blocks already know how to rep a fleet-mate on grid |
+| `NeedBackup` / `EnemySpotted` | `OnFleetBroadcast` | optional; useful later |
+
+New work: a decoder in `web/src/bridge/fleetBroadcasts.ts`, a store slice, and a
+condition/action pair per behaviour.
+
+**Broadcasts go stale exactly like a squad-board call.** Reuse the 30 s TTL and
+the reasoning already written down in `src/squadBoard.js` — a follower whose
+call has lapsed falls back to its own ladder, which is a working bot, not a
+stopped one. Do not invent a second staleness policy.
+
+**Prefer a real broadcast or tag over the squad board.** The board was always
+the stand-in for the in-game mechanism. Once tags decode, `squad: follow` should
+read: in-game tag first, then broadcast, then board, then own ladder.
+
+### 2. Chat commands
+
+This is the only piece needing work outside this repo.
+
+**Why it is not already there.** Chat deliberately bypasses notification capture
+(`evejsWebGatewayRuntime.js`, the `onChatChannelMessage` subscription). The
+gateway subscribes to `chatRuntime`'s `channel-message` event and maps
+`roomName` to `"local"` or `"corp"` and nothing else. Fleet chat exists as
+`fleet_<fleetID>` (`fleetRuntime.js:1827`, `:2212`) and
+`getFleetRoomNameForSession` is already written
+(`xmppStubServer.js:278`) — it is simply not consulted.
+
+**The patch is bigger than the push path.** An earlier draft of this doc said it
+was "genuinely small — add the fleet room to that map and widen the allowlist".
+Investigated 2026-09-10: that is true of the **push** half only. The **read and
+send** half needs new code, because the gateway's chat service is written as a
+two-channel binary throughout.
+
+`gatewayServices/webChatGatewayService.js` is the real gate — the BFF's
+`CHAT_CHANNELS` merely mirrors it:
+
+| What exists | What fleet needs |
+| --- | --- |
+| `CHAT_CHANNELS = ["local", "corp"]` (`:49`) — the single true allowlist for both read and send | a third entry |
+| `readChannel` (`:252`) — a ternary between `readLocal` and `readCorp` | a `readFleet`, mirroring `readCorp` (`:236`) |
+| `sendChannel` (`:287`) — a ternary between `broadcastLocalMessage` and `broadcastCorpMessage` | a `broadcastFleetMessage`, mirroring `:266` |
+| `getCorpSessions` / `getCorpRoster` (`:126`, `:152`) | fleet equivalents |
+| `syncPresence` (`:165`) tracks corp membership transitions | fleet membership transitions too |
+
+Plus the push half, which really is small: `roomNamesForEntry`
+(`evejsWebGatewayRuntime.js:5927`) gains the fleet room from the already-written
+`getFleetRoomNameForSession` (`xmppStubServer.js:256`), and
+`onChatChannelMessage` (`:5942`) gains a third branch in its ternary.
+
+**The chat engine underneath is already fleet-ready** and needs nothing:
+`chatRuntime` has `ensureFleetChannel` (`:1053`), a `fleet_mismatch` access
+check (`:837`), and already includes the fleet room in
+`getChannelsForStaticAccess` (`:1779`). The gap is entirely the web-bridge
+layer. That is good news for correctness and bad news for the size estimate: it
+is mechanical, mirrorable work, but it is not two lines.
+
+**On this side of the wire** the change is mechanical but wide — 22 call sites
+where `local | corp` is written as a closed pair, spanning `src/server.js`, the
+store types and initial state, the chat decoder, the live-push narrowing in
+`flow.ts:1209` (which today mislabels a fleet message as local), `Chat.svelte`'s
+tab list and its two-channel ternaries, and the bot DSL's own `ChatChannelArg`.
+Most widen for free once the type widens; the ones that do not are the hardcoded
+ternaries and the `<select>` in `BotInspector.svelte`.
+
+⚠ `web/src/bridge/social.ts:26` defines an unrelated `ChatChannel` interface — an
+`LSC.GetChannels` row. Same name, different concept. Do not conflate them when
+searching.
+
+Then the command layer, which is a parser dispatching onto blocks that mostly
+exist:
+
+| Command | Dispatches to | State |
+| --- | --- | --- |
+| `undock` | `undock` block | exists |
+| `destination: <link>` | `set-destination` + `travel-to-system` | exists; **link decode unknown** |
+| `jump` | `jump` action + `routeSolver` nearest gate | exists |
+| `salvage` | `salvage-wrecks` | exists |
+| `follow me at <N> km` | `/api/bridge/flight/keep-at-range` | route exists, no client |
+| `orbit me at <N> km` | `/api/bridge/flight/orbit` | route exists, no block for a fleet-mate target |
+| `jump to me` | `/api/bridge/flight/jump-through-fleet` | route exists, no client |
+
+`follow me` and `orbit me` both resolve "me" through the existing
+`fleetMatesOnGrid` helper — the sender's character id from the chat entry, then
+their ship entity on this pilot's grid. If they are not on grid, the honest
+answer is to say so in chat, not to guess.
+
+> ⚠ **Conduit jumps are a different thing from "jump to me".** A conduit jump is
+> server-driven and passive: `conduitJumpRuntime.js:382` checks the member's own
+> `acceptsConduitJumps` and moves them. `CmdJumpThroughFleet` is the
+> member-initiated bridge jump. The chat command should mean the second.
+
+**"Jump to me" does not need the chat command to carry the beacon.** When a
+bridge goes up, `setBridgeMode` (`fleetRuntime.js:1376`) pushes
+`OnBridgeModeChange [shipID, solarsystemID, itemID, active]` to the whole fleet
+— which is exactly the `(otherShipID, solarSystemID, beaconID)` triple
+`CmdJumpThroughFleet` wants, minus the character id, which the roster supplies.
+So the follower can track the active bridge passively on the same push channel
+as everything else, and `jump to me` becomes "use the bridge you already know
+about". If no bridge is up, say so rather than guessing.
+
+### 3. Situational awareness
+
+**Harden up and self-repair — nearly free.** Every ingredient exists: the fit is
+already classified into hardeners and shield/armor/hull repairers, `activate`
+with `targetID 0` is the self-targeted path, and `shield-below` / `armor-below`
+/ `capacitor-below` are already interrupt conditions. This is one new block that
+bundles them, with a cap-aware rule so a permanently-running booster does not
+flatten the capacitor.
+
+**Flee at a configurable threshold, then come back.** New, and the most delicate
+of the four.
+
+- The **leave** half is largely written — but **not** by `panicRecallAndDock`
+  (`web/src/app/flow.ts:7661`), which an earlier draft of this doc cited. That
+  is the manual "Recall drones & dock" button: imperative, async, driven by
+  direct `api.*` calls, and living in a different runner from the pure
+  per-tick decide chain a script runs on. It cannot be called from
+  `decideScriptAction`.
+
+  The machinery that *is* reusable, and is already wired into every script run,
+  is `scriptTravelHome` (`scriptMacros.ts:4572`) driven tick by tick by
+  `continueHeadingHome` (`scriptDecide.ts:1085`). It already does dock-check,
+  resolve home, ride the autopilot, `fightTheWayOut` when blocked, and
+  `recallBeforeLeaving` (`scriptMacros.ts:280`) — the generalised align-out-and-
+  recall. Wiring `shield-below` to `dock-and-pause` today already produces
+  "recall, fight out if tackled, fly home, dock" with no new code.
+- The **come back** half is new. It needs a remembered return point, a hold-off
+  before returning, and a bounded number of attempts so a bot cannot yo-yo into
+  a camp forever.
+
+  **A bookmark is a viable return point.** `beyonce.BookmarkLocation` — bookmark
+  where the ship is standing — is allowlisted and routed
+  (`src/server.js:16069`), as is `BookmarkStaticLocation` (`:5698`). Only the
+  browser wrapper is missing, which puts it in the same category as the four
+  phase-4 routes rather than in "needs new bridge work". The cheaper option, and
+  the recommended default, is to remember the grid directly: the site or belt
+  entity the step was working, falling back to the ship's raw coordinates.
+
+  ⚠ **A docked ship cannot read its own armour or hull.** Docking restores
+  shields and capacitor but not armour, and a docked session carries no ship to
+  read at all. So a flee triggered by `armor-below` **cannot be confirmed healed
+  while docked** — the bot must undock and re-read to find out, and a still-met
+  condition on that fresh read is what spends an attempt. Design the return
+  around that, not around a health check that cannot happen.
+
+  There is also **no way to know the original grid is safe without flying to
+  it.** That is precisely what the attempt cap is for. Do not invent a
+  "grid clear" read; none exists.
+- Thresholds must be **per-pilot configurable** — a logi's flee point is not a
+  battleship's — so they belong on the script, alongside the existing
+  0.05..0.95 threshold range. The threshold itself already is: `shield-below`
+  and friends carry a per-row `fraction`, so nothing new is needed for it.
+
+> **DECIDED: fleet warp wins.** If the FC fleet-warps while the bot is running
+> its own escape, the FC's movement stands and the bot's flee does not fire — a
+> fleet that is already leaving does not need the bot's opinion. This is the
+> movement rule everywhere, not just here; see Precedence below.
+
+**If tackled, tag targets with letters.** Three parts. One is solved, one has a
+constraint that decides *which* pilot can do it at all, and one is unsolved.
+
+- *The write* is plumbed: `CmdFleetTagTarget` is allowlisted and routed.
+
+- ⚠ *Only a fleet commander may tag.* `setFleetTargetTag`
+  (`fleetRuntime.js:1310`) returns `false` — silently, no error — unless the
+  caller holds `FLEET_JOB_CREATOR` or a role in `FLEET_CMDR_ROLES` (`[1, 2, 3]`
+  = leader, wing commander, squad commander). A rank-and-file companion pilot
+  **cannot tag**, and gets no refusal telling it so. This is not a detail to
+  discover at runtime: it decides which pilot in the squad is the tagger, and it
+  means the player must give that pilot a commander role, or the squad must
+  create the fleet with it.
+
+- ⚠ *A tag is unique across the fleet.* `setFleetTargetTag:1343` walks the
+  existing tags and **deletes any other item holding the same letter** before
+  setting it. Two targets cannot both be `A`; assigning `A` to a second rat
+  silently steals it from the first. So a bot tagging three rats must use three
+  letters, and it needs the current `targetTags` dict in hand to know which are
+  free. That dict is the same one arriving on `OnFleetStateChange`, so the
+  decoder from Phase 1 is a prerequisite for tagging, not just for following.
+
+- *Already-tagged targets are left alone.* If an entity is in `targetTags`, do
+  not re-tag it. This is the rule that keeps the fleet's letters stable — a rat
+  that is `B` stays `B` for as long as it lives — and it also happens to be what
+  makes the uniqueness rule harmless in practice, because the bot then only ever
+  assigns letters that nothing holds.
+
+- *Knowing you are tackled* is **SOLVED — a positive read exists.** Investigated
+  2026-09-10; this reverses the earlier assumption in this doc that only the
+  reactive warp refusal was available.
+
+  The server pushes **`OnJamStart`** to the **victim's own session** the moment a
+  hostile module cycle lands, and `OnJamEnd` when it drops
+  (`space/runtime.js:13215`, sent from `:36080`). Payload:
+
+  ```
+  [sourceBallID, moduleID, targetBallID, jammingType, fileTime, durationMs]
+  ```
+
+  `jammingType` is `"warpScramblerMWD"` for a scram and `"warpScrambler"` for a
+  disruptor (`hostileModuleRuntime.js:1197`). It carries the aggressor's entity
+  id in `sourceBallID` — so the thing holding you names itself, which is exactly
+  what wants tagging.
+
+  **It already reaches the browser.** The browser-session notification stub
+  suppresses exactly one method, `DoDestinyUpdate`, and captures every other
+  `sendNotification` onto the push stream. `OnJamStart` is not suppressed, so it
+  arrives on the same SSE channel as the fleet notifications and needs **no BFF
+  route and no gateway change** — only a decoder in `applyPushedNotification`,
+  the same shape as everything else in phase 1.
+
+  The `isReadyForDestiny(session)` gate on the send site is satisfied for a
+  companion pilot in space: the suppression comment records destiny frames
+  arriving for these sessions at 10 Hz, which only happens once
+  `_space.initialStateSent` is true.
+
+  The reactive path stays as the backstop, and is worth keeping: the refusal is
+  `{error: "CALL_REFUSED", message: "You cannot warp because you are warp
+  scrambled."}`, from `errorMsg "WARP_SCRAMBLED"` at `runtime.js:47349`.
+  `fightTheWayOut` already responds to it.
+
+  The tagging behaviour is unchanged either way: rank the hostiles with the
+  existing `targetPriority.ts` ladder, tag with A, B, C, and leave an
+  already-tagged entity alone.
+
+**Drone damage: recall, then redeploy to break the lock.** `drone-health-below`
+already exists as an interrupt condition and `recallDrones` as an action, so the
+missing piece is only the **timed redeploy**.
+
+The mechanic being exploited is that an NPC drops target lock on a drone that
+leaves space, and re-acquires from scratch on the new launch. That means the
+hold-off duration is the whole design, and it is not something to guess: it
+depends on eve.js's own NPC re-target cadence. Make it a script argument with a
+sane default, and measure the default live rather than reasoning about it.
+
+> ⚠ A recalled drone stays visibly in space while it flies home
+> (`web/src/app/flow.ts:4474`). The redeploy timer must start when the drone is
+> **gone**, not when the recall is accepted, or the relaunch will fire while the
+> drone is still in the NPC's lock.
+
+### 4. Multiple pilots
+
+The foundation is done and this is mostly an orchestration layer, not new
+mechanism.
+
+- The bot host already runs one bot per character with a hard one-hull-one-driver
+  claim (`src/botHost.js:418`), and the roster survives a BFF restart.
+- The squad board is already keyed by fleet id as an exact decimal string, and
+  is shared in-process across every bot — so N companion pilots in one fleet
+  already have a coordination channel that costs nothing.
+- R107 multibox already runs several isolated per-character sessions in one tab.
+
+What is missing is the **squad as a unit**:
+
+- Start / stop N pilots as one group, with one script or one script per role.
+- **Roles.** A three-pilot squad is not three copies of one bot: logi, tackle
+  and DPS want different flee thresholds, different broadcast subscriptions
+  (`HealArmor` matters to logi and to nobody else) and different tag behaviour.
+  Only one pilot in a squad should be tagging, or they will fight over letters.
+- A squad readout: who is alive, who is in warp, who fled, who is out of drones.
+- **Ordering on the fleet-join lap.** The existing multibox alt-fleeting loop
+  (char 1 creates and invites, alts join —`docs/block-audit.md:88`) is the
+  pattern; a squad start should drive it rather than making the player do it.
+
+> **The tagger needs no election.** An earlier draft of this doc proposed one on
+> the squad board. It is unnecessary: the server already answers the question,
+> because only a fleet creator or commander can tag at all
+> (`setFleetTargetTag:1319`). The tagger is whichever companion pilot holds a
+> commander role, and if none does, nobody tags. Read the role off the roster —
+> `GetInitState` already carries `role` and `job` per member and
+> `boundFleet.ts` already decodes them — and let a pilot without one skip the
+> behaviour silently rather than firing writes the server drops on the floor.
+
+## How the player says which pilots these are
+
+The instinct is a checkbox or a "fleet companion" button. **Do not add either.**
+The selection mechanism already exists, is already tested, and is already the
+thing players use to group pilots for an operation: the **squad**, in the Pilot
+Hangar (`docs/pilot-hangar.md`).
+
+A squad is cross-account, named, coloured, pinnable, edited through a per-pilot
+checklist popover (`HangarPilotRow.svelte`), reachable as a chip on the header
+row, and launchable as a unit (`HangarSquadPicker.svelte`). Every one of those
+affordances is what a fleet op needs. A second grouping control — "tick the
+pilots that are fleet companions" — would be a competing answer to a question
+the hangar already answers, and the hangar doc records what happened last time
+grouping was flat: at fifty pilots it is a wall of identical rows.
+
+**So: the squad says WHICH pilots. What is missing is WHAT EACH ONE DOES.**
+
+That is a role, and a role is a script. Scripts are already account-wide rather
+than per-character (`botScriptStore.js:12`), and a run is already the pair
+`(character, script)`. So the addition is small and sits in one place: **a squad
+remembers a script per member**, and launching the squad starts each pilot on
+its own script instead of starting them all bare.
+
+| Concern | Answer | Where |
+| --- | --- | --- |
+| Which pilots are in this op | the squad | exists |
+| What this pilot does in it | its script | exists |
+| Pairing the two | new: per-member script on the squad | `hangarPrefs.ts`, `hangarLaunch.ts` |
+| Who tags | the fleet role, not the UI | server-decided, see above |
+| Whether it is working | new: a follower badge per pilot | Bot Manager |
+
+Concretely: `Squad` today is `{id, name, color}` plus a membership map of
+character ids (`web/src/app/hangarPrefs.ts:18`). The membership map becomes
+`characterID -> scriptID`, and `HangarPilotRow`'s existing checklist popover
+gains a script picker next to each ticked squad. No new screen, no new mode, no
+new selection concept.
+
+> ⚠ **Squads are cross-account; scripts are per-account.** `hangarPrefs` squads
+> deliberately span accounts, but `botScriptStore` keys scripts by `accountID`.
+> A squad with pilots on two accounts therefore cannot name one shared script
+> id. Decide before building: either resolve the script per member against that
+> member's own account (allowing two accounts to hold same-named scripts that
+> differ), or refuse to attach scripts across an account boundary and say so.
+> The first is friendlier and the second is honest; do not discover this at
+> launch time by having half a squad start bare.
+
+> ⚠ **Squads live in `localStorage`** (`docs/pilot-hangar.md:101`) and a server
+> bot outlives the tab. A squad whose roles exist only in one browser cannot be
+> resumed by the BFF after a restart, which the bot host otherwise does
+> (`botHost.js`, the durable roster). If squad roles are to survive, they belong
+> next to the run, not next to the pilot list.
+
+**Where the running state shows.** Not the hangar — the hangar is the landing
+screen, and "in client" there is already live from App's session list. The
+follower state belongs in the Bot Manager, which is the existing single view of
+runs across pilots, as a per-run badge: in fleet, following whom, last order
+heard, and whether this pilot can tag. That last one matters because a pilot
+silently unable to tag looks identical to one that has nothing to tag.
+
+## Decisions to make before writing code
+
+**1. Who may command.** Broadcasts and tags are naturally bounded — fleet
+membership is required, the server rate-limits, and the server has already
+filtered on scope and range before a session sees a broadcast at all. Chat is
+not bounded. A chat-command channel with no sender gate means anyone in the
+fleet can undock and fly your ships. Gate on fleet boss / wing commander role
+from the roster read, or on an explicit list of character ids on the script.
+Default to the narrowest thing that works.
+
+**The gate is safe to build on.** A chat entry's `characterID` is derived
+server-side from the authenticated session (`chatRuntime.js:87` —
+`session.characterID || session.charid || session.userid`), never from anything
+in the message text, so it cannot be spoofed by crafting a message. The
+companion's decoder already reads it (`web/src/bridge/chat.ts:49`). Gate on that
+field and nothing else — never on `characterName`, which is display text.
+
+One thing the decoder does **not** read: the server also attaches a richer
+`sender` summary object to every entry that the client currently throws away. If
+the gate ever needs corp or alliance context rather than a character id, that is
+where it comes from, and it means decoding one more field rather than a new
+call.
+
+**2. A follower is a mode, not a step list.** The existing script model is a
+linear program with always-armed interrupts. A fleet follower is the inverse:
+the fleet's orders *are* the program, and the script only says how to behave
+between orders. The interrupt system is close to the right shape, but bolting
+fifteen broadcast handlers onto a linear step list will not read well. Consider
+a `follow-the-fleet` block that owns the ship and delegates, the way the combat
+blocks already own it.
+
+**3. Precedence — DECIDED.** The order in which the authorities win, once, for
+every ambiguous case:
+
+```
+server fleet warp  >  FC broadcast  >  chat command  >  own flee rule  >  own ladder
+```
+
+The consequence worth stating out loud, because it is the one that will look
+like a bug: **a bot being fleet-warped does not flee, does not re-target, and
+does not answer a chat command until the warp lands.** That is correct. A pilot
+who breaks formation to save themselves mid-warp is not a fleet-mate.
+
+## Work breakdown
+
+Ordered by value per unit of work. Phases 1-3 need no gateway change.
+
+| # | Phase | Depends on | Size |
+| --- | --- | --- | --- |
+| 1 | `OnFleetBroadcast` + `OnFleetStateChange` decoders, store slice with TTL, `follow-the-fleet` block covering Target / AlignTo / HealShield / HealArmor | — | largest single chunk, entirely in-repo |
+| 2 | Yield to `inWarp`; precedence rules | 1 | small |
+| 3 | Tank-up block (hardeners + repairers, cap-aware) | — | small, independent |
+| 4 | `api.ts` + flow actions + blocks for keep-at-range, fleet tag, jump-through-fleet | — | small, independent, routes exist |
+| 5 | Drone recall-and-redeploy, with a measured hold-off | — | small |
+| 6 | Flee-and-return with configurable thresholds | 2 | medium; the return half is the new part |
+| 7 | Tackle detection, then tagging | 1 (for the live `targetTags` dict), 4, and the Unknowns below | medium, gated on a live check |
+| 8 | Gateway fleet-chat patch, then the command parser and the sender gate | patch in `/d/evet` | medium, cross-repo |
+| 9 | Squad roles: per-member script on the squad, launch pairs them, follower badge in the Bot Manager | 1-8 | medium |
+
+Phases 3, 4 and 5 are genuinely independent and make good filler work; 1 is the
+one to start with, because everything interesting depends on it and it touches
+nothing outside this repo.
+
+## Unknowns that need a live capture
+
+Each of these is a fact about the running world, not a design choice. Settle
+them with a real session before building on a guess — the
+`join-advertised-fleet` handoff is on record as the cost of guessing one.
+
+1. **The wire shape of a pasted destination link** in a chat backlog entry.
+   **Still open, and now known to be unanswerable from source.** Investigated
+   2026-09-10: eve.js never parses, strips, generates or special-cases EVE link
+   markup anywhere in the chat path. Fleet chat arrives over XMPP;
+   `extractBody` (`xmppStubServer.js:115`) is a `<body>` regex, `decodeXml`
+   (`:81`) undoes exactly the five standard XML entities and nothing else, and
+   `normalizeString` in `chatRuntime` is a bare passthrough. The message reaches
+   the backlog as whatever literal bytes the retail client put in the stanza.
+
+   That encoding is a property of the closed-source client, not of this server,
+   so **only a capture settles it**: join a fleet with a real client, paste a
+   station or system link into fleet chat, and read `entry.message` back — either
+   by tapping `extractBody`'s input, or through
+   `chatRuntime.getChannelBacklog(roomName)` directly, which needs no fleet
+   support to exist yet. What to look for: whether it is an anchor, a bracketed
+   `<url=…>` token, or something else, and **whether it contains literal spaces**
+   — which is what would break a naive space-splitting command parser.
+
+   Until then, `destination: <name>` taking a plain system name is the buildable
+   version, and does not block phase 8.
+
+   ⚠ The `/`-prefixed and `.`-prefixed chat commands in `chatCommands.js` are a
+   **server-admin GM console**, not related to this feature. Do not build the
+   fleet command parser on that mechanism or name commands so they collide with
+   it.
+
+2. ~~Whether a positive "scrambled" read exists.~~ **ANSWERED 2026-09-10: yes.**
+   `OnJamStart` / `OnJamEnd`, pushed to the victim, already on the SSE stream.
+   See the tackle section above. The space *snapshot* carries nothing — the
+   answer was a notification, not a field, which is why looking only at
+   `space.ts` said no.
+
+3. **The NPC re-target cadence** after a drone leaves and re-enters space.
+   Determines the drone redeploy hold-off default. **Still open** — needs a
+   measurement, not a code read.
+
+4. ~~Whether the two fleet notifications arrive wrapped in `__MultiEvent`.~~
+   **ANSWERED 2026-09-10: no, never.** `notifyFleetMultiEvent`
+   (`fleetRuntime.js:786`) has exactly one call site in the whole server
+   (`:859`), it fires only when two or more member changes land at once, and the
+   only name it ever wraps is `OnFleetMemberChanged`. Both of our notifications
+   go through direct `notifySession` / `notifyFleet` calls. The decoder may
+   assume unwrapped delivery.
+
+   > ⚠ **This turned up a live bug, unrelated to this feature but in the code
+   > phase 1 rewrites.** `applyPushedNotification` matches on the raw `method`
+   > string, and `"__MultiEvent"` appears **zero** times in
+   > `web/src/app/flow.ts`. So when the server batches two or more member
+   > changes, the wire `method` is `"__MultiEvent"`, `fleetSnapshotNotifications
+   > .has(method)` misses, and **the whole batch is silently dropped** — no
+   > `scheduleFleetRefresh`. Fix it in phase 1: it is the same unwrap-then-
+   > dispatch step the new decoders need, and the payload is a bare array of
+   > `[name, args]` pairs.
+
+5. ~~What `scope` and `rangeMode` look like in practice.~~ **ANSWERED
+   2026-09-10: the client can trust every broadcast it receives.** `sendBroadcast`
+   filters twice before any session is notified — range in
+   `collectBroadcastRecipientSessions` (bubble / system / universe) and scope in
+   `shouldReceiveBroadcast` (the recipient's role against the sender's). A
+   session only ever receives a broadcast it already passed both filters for.
+   `scope` still arrives as arg[1], but for labelling, not for filtering.
+
+### One decoder subtlety, found while answering 4 and 5
+
+`OnFleetBroadcast`'s `senderCharID` and `senderSolarSystemID` are normalised
+server-side and arrive as plain safe numbers. **`itemID` and `typeID` are not.**
+They are passed through from the original client call untouched
+(`fleetRuntime.js:2538` — `itemID ?? null`, no `toInteger`), so if the caller
+marshalled a 64-bit id, it reaches the gateway as a native `bigint` — and
+`encodeJsonSafeCallValue` stringifies a bigint to a **bare decimal string**, not
+a `{type:"long"}` wrapper.
+
+So the decoder must tolerate `itemID` arriving as a number, as `null`, **or as a
+bare numeric string**. Use the `positiveSafeID` idiom from `fleetCenter.ts:94`
+(`unwrapLong` first, then a `/^\d+$/` fallback) rather than a bare `unwrapLong`,
+which would return null for the string case and silently drop the broadcast's
+target.
+
+Fleet target tags do **not** have this problem: `buildTargetTagsPayload` runs
+every key through `toInteger` server-side, so tag keys are plain JSON numbers.
+
+### The tag alphabet is ours to choose
+
+Raised while specifying phase 1, and settled the same day: there is **no tag
+vocabulary anywhere on the server**. `normalizeFleetTag` (`fleetRuntime.js:267`)
+trims and accepts any non-empty string, and no constant, allowlist or ordering
+exists in `fleetConstants.js` or elsewhere.
+
+So "target priorities 1-9" and "tag with letters" are not two different server
+mechanisms — they are the same free-text field with two different human
+conventions written into it. Two consequences for the code:
+
+- **Our writer picks its own letters.** A, B, C in kill order is a decision, not
+  a discovery, and needs no live capture to make.
+- **Our reader must tolerate anything.** A human FC in the real client can type
+  whatever they like into that field. Rank an unrecognised tag last rather than
+  dropping the row — a tagged ship the bot cannot rank is still a ship the fleet
+  has singled out.
+
+When capturing any of these, record the protocol and not the payload: field
+order, byte counts, which fields are omitted. Character ids and names from the
+capture session do not belong in the fixtures.
