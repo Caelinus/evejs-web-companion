@@ -265,6 +265,36 @@ world, not a design choice, and each is currently out with an investigation:
 Answers get written into the plan doc's Unknowns section — not here — so there
 stays exactly one place where a fact about the world is recorded.
 
+## ⚠ Architecture change: the companion is not a bot script
+
+Settled after the specs below were written. **The fleet companion is a sibling
+decide-loop — the next instance of the `autopilotLoop` / `miningBotLoop` /
+`missionBotLoop` pattern — not a bot script.** See "The shape of the thing" in
+the plan doc for the reasoning and the full consequences.
+
+Every spec below was written assuming new blocks, so each has a packaging half
+that no longer applies. **The mechanism half of each is unaffected and still
+correct** — the decoders, store slices, push wire-up, observation fields,
+target ranking, cap rule, state machines and every file:line finding stand.
+
+Strike from each spec as you implement it:
+
+- new `MacroID`s, `Condition` kinds and `InterruptResponse` values
+- the whole editor fan-out: `scriptCodec.ts`, `scriptText.ts`,
+  `editorOptions.ts`, `validateScript.ts`, `runPolicy.ts`, `BotInspector.svelte`
+- the "atomic across five files" constraint on phase 1's commit 5, and the
+  identical `Readonly<Record<InterruptResponse, …>>` build-breakers flagged in
+  phases 5 and 6. All of those disappear.
+
+What replaces them: **one typed request object per companion run**, shaped like
+`MiningBotRequest`, set in the UI rather than composed as text.
+
+⚠ **Add to every phase: headless execution.** `src/botHost.js` drives exactly
+one entry point, `flow.startCustomBot(doc)`. The sibling loops are browser-only
+by design. A `flow.startFleetCompanion(request)` beside it is the whole change
+needed to let the companion survive a closed tab — treat it as part of this
+work, not a follow-up.
+
 ## Phase 1 — the spec
 
 Seven commits. Steps 1-3 are independent of 4-6; 5 and 6 both need 4 but not

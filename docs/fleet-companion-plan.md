@@ -18,6 +18,74 @@ eve.js already pushes them to a browser-backed session and
 needs one small patch in `evejs-server`. Everything downstream of that is
 blocks, and the block runtime is finished.
 
+## The shape of the thing — DECIDED
+
+**The fleet companion is not a bot script.** It is a sibling decide-loop that
+*uses the methods the bots use*. This was settled after the first draft of this
+doc, and it changes what the phases below build, so read it before the specs.
+
+The reasoning: the block DSL exists so a player can compose behaviour as text in
+the Bot Builder. A fleet companion is bigger than that and worse suited to it —
+fifteen broadcast names, target tags, jam events, chat commands and a flee
+policy do not read as a step list, and exposing them as one asks the player to
+hand-assemble something that should simply have settings.
+
+**The codebase already has this pattern three times over.** `autopilotLoop.ts`,
+`miningBotLoop.ts` and `missionBotLoop.ts` are browser-side decide-loops that
+are *not* the script bot: each reads authoritative state per tick, issues at
+most one atomic call, never simulates, bounds every branch, and pauses with a
+reason. `miningBotLoop.ts`'s own header opens by calling itself "THE FOURTH
+INSTANCE OF ONE PATTERN, not a new one". The fleet companion is the next
+instance. They run 1,300-1,900 lines each, which is also an honest measure of
+the size of this.
+
+Configuration follows the same precedent: `startMiningBot(request)` takes a
+**typed request object**, not a script document. So does this.
+
+### What that keeps, and what it deletes
+
+Reused unchanged — this is most of the value in the phases below:
+
+- the per-tick observation build in `flow.ts`, and every field it already carries
+- the `issue:` action switch — warp, align, orbit, lock, activate, drones, jump
+- the pure helpers: `targetPriority.ts`, `fleetMatesOnGrid`, `hostilesInReach`,
+  `recallBeforeLeaving`, `fightTheWayOut`, `scriptTravelHome`
+- every decoder and store slice this feature adds (`bridge/`, `store/`)
+- the squad board
+
+**Deleted from the earlier specs**, which assumed new blocks:
+
+- new `MacroID`s, `Condition` kinds and `InterruptResponse` values
+- the whole editor fan-out — `scriptCodec.ts`, `scriptText.ts`,
+  `editorOptions.ts`, `validateScript.ts`, `runPolicy.ts`, `BotInspector.svelte`
+- the "one atomic commit across five files" constraint that came with adding a
+  `ConditionKind`, which disappears entirely
+
+That is a substantial simplification. The mechanism research in those specs
+still stands; only the packaging changes.
+
+⚠ **THE ONE REAL COST: headless execution.** `src/botHost.js` drives exactly one
+entry point — `flow.startCustomBot(doc)`, the *script* bot. The three sibling
+loops are browser-only by design, and `miningBotLoop.ts` says so plainly:
+"It runs in the BROWSER. Closing the tab is closing the client... The BFF never
+drives a mining loop with no client attached." A script bot survives a closed
+tab; a sibling loop does not.
+
+For a companion meant to fly beside you while you play the real client, that
+matters. Two ways out, and the second is recommended:
+
+1. Accept browser-only — the web companion is open anyway, and R107 multibox
+   already runs several pilots in one tab.
+2. **Extend `botHost` to drive the companion loop too.** This looks genuinely
+   small: the host already imports the whole stack, mints its own session,
+   holds the one-hull-one-driver claim, mirrors a durable roster and resumes
+   after a restart — all of it behaviour-agnostic. What is bot-script-specific
+   is a single line calling `startCustomBot`. A `flow.startFleetCompanion(
+   request)` beside it is the whole change.
+
+Treat option 2 as part of the work, not a follow-up, or the feature ships in a
+shape that cannot be left running.
+
 ## What is already built
 
 Worth stating plainly, because it narrows the work to about a third of what the
@@ -406,40 +474,43 @@ grouping was flat: at fifty pilots it is a wall of identical rows.
 
 **So: the squad says WHICH pilots. What is missing is WHAT EACH ONE DOES.**
 
-That is a role, and a role is a script. Scripts are already account-wide rather
-than per-character (`botScriptStore.js:12`), and a run is already the pair
-`(character, script)`. So the addition is small and sits in one place: **a squad
-remembers a script per member**, and launching the squad starts each pilot on
-its own script instead of starting them all bare.
+That is a **role**, and a role is a **setting on the companion request** — not a
+script. An earlier draft of this doc said "a role is a script" and proposed
+storing a script id per squad member. That is wrong under the decided
+architecture: there is no script. What a squad member carries is the typed
+config the companion loop starts with, the way `startMiningBot` takes a
+`MiningBotRequest`.
 
 | Concern | Answer | Where |
 | --- | --- | --- |
 | Which pilots are in this op | the squad | exists |
-| What this pilot does in it | its script | exists |
-| Pairing the two | new: per-member script on the squad | `hangarPrefs.ts`, `hangarLaunch.ts` |
+| What this pilot does in it | its companion role + settings | new, typed |
+| Pairing the two | per-member role on the squad | `hangarPrefs.ts`, `hangarLaunch.ts` |
 | Who tags | the fleet role, not the UI | server-decided, see above |
-| Whether it is working | new: a follower badge per pilot | Bot Manager |
+| Whether it is working | a companion badge per pilot | Bot Manager |
 
 Concretely: `Squad` today is `{id, name, color}` plus a membership map of
-character ids (`web/src/app/hangarPrefs.ts:18`). The membership map becomes
-`characterID -> scriptID`, and `HangarPilotRow`'s existing checklist popover
-gains a script picker next to each ticked squad. No new screen, no new mode, no
-new selection concept.
+character ids (`web/src/app/hangarPrefs.ts:18`). The membership map's value
+becomes the per-pilot companion config, and `HangarPilotRow`'s existing
+checklist popover gains a role picker next to each ticked squad. No new screen,
+no new mode, no new selection concept.
 
-> ⚠ **Squads are cross-account; scripts are per-account.** `hangarPrefs` squads
-> deliberately span accounts, but `botScriptStore` keys scripts by `accountID`.
-> A squad with pilots on two accounts therefore cannot name one shared script
-> id. Decide before building: either resolve the script per member against that
-> member's own account (allowing two accounts to hold same-named scripts that
-> differ), or refuse to attach scripts across an account boundary and say so.
-> The first is friendlier and the second is honest; do not discover this at
-> launch time by having half a squad start bare.
+**The account boundary stops being a problem, and that is a real gain.** The
+earlier draft had a genuine fork here: squads span accounts but `botScriptStore`
+keys scripts by `accountID`, so a mixed squad could not name one shared script
+id. Since squads here **routinely** mix accounts, that fork mattered. Typed
+config removes it — a role is a value on the squad, not a reference into an
+account-scoped library, so a mixed squad carries one shared definition and every
+pilot in it means the same thing by "logi".
 
-> ⚠ **Squads live in `localStorage`** (`docs/pilot-hangar.md:101`) and a server
-> bot outlives the tab. A squad whose roles exist only in one browser cannot be
-> resumed by the BFF after a restart, which the bot host otherwise does
-> (`botHost.js`, the durable roster). If squad roles are to survive, they belong
-> next to the run, not next to the pilot list.
+> ⚠ **Squads live in `localStorage`** (`docs/pilot-hangar.md:101`) and a
+> headless run outlives the tab. A squad whose roles exist only in one browser
+> cannot be resumed by the BFF after a restart, which the bot host otherwise
+> does (`botHost.js`, the durable roster). If roles are to survive, the config a
+> run was started with belongs **next to the run**, mirrored the way `botHost`
+> already mirrors its roster — not only next to the pilot list. This is the same
+> durability question as the headless-execution cost above, and it wants the
+> same answer.
 
 **Where the running state shows.** Not the hangar — the hangar is the landing
 screen, and "in client" there is already live from App's session list. The
@@ -471,13 +542,9 @@ the gate ever needs corp or alliance context rather than a character id, that is
 where it comes from, and it means decoding one more field rather than a new
 call.
 
-**2. A follower is a mode, not a step list.** The existing script model is a
-linear program with always-armed interrupts. A fleet follower is the inverse:
-the fleet's orders *are* the program, and the script only says how to behave
-between orders. The interrupt system is close to the right shape, but bolting
-fifteen broadcast handlers onto a linear step list will not read well. Consider
-a `follow-the-fleet` block that owns the ship and delegates, the way the combat
-blocks already own it.
+**2. A follower is a mode, not a step list — DECIDED, and it is not a bot
+script at all.** See "The shape of the thing" above. This was previously left
+open as "consider a `follow-the-fleet` block"; it is now settled the other way.
 
 **3. Precedence — DECIDED.** The order in which the authorities win, once, for
 every ambiguous case:
