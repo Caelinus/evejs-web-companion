@@ -174,6 +174,7 @@ import {
   type MiningBotReads,
   type MissionBotReads,
 } from "../nav/botRegistry.ts";
+import type { FleetCompanionController } from "../nav/fleetCompanionLoop.ts";
 import { highSlotMiningModules, isDockableKind, ungroupedHighSlotModules } from "../space/rowActions.ts";
 import {
   DEFAULT_MAX_JUMPS,
@@ -5561,9 +5562,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     autopilot?.abort();
   }
 
+  function stopCompanionController(): void {
+    fleetCompanion?.stop();
+    // The companion's movement rungs ride the same shared autopilot the mission
+    // and custom loops use, so stopping the outer loop alone would leave that
+    // inner controller flying after another bot takes the ship.
+    autopilot?.abort();
+  }
+
   const claimShip = createShipClaim({
     mining: stopMiningController,
     mission: stopMissionController,
+    companion: stopCompanionController,
     custom: stopCustomController,
   });
 
@@ -5788,6 +5798,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // The fourth decide-loop. It composes the SAME calls the mining/mission bots
   // fire; the player's blocks choose which, in which order.
   let scriptRunner: ScriptRunnerController | null = null;
+  let fleetCompanion: FleetCompanionController | null = null;
   // Bumped on every start/stop/panic. `startCustomBot` awaits a fitting read
   // before it creates the runner; without this a second Start (or a Stop) during
   // that gap would leave the FIRST run() loop orphaned and unstoppable — two

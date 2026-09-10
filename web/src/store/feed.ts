@@ -95,6 +95,7 @@ import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
+import type { FleetCompanionRole, FleetCompanionRunState } from "../nav/fleetCompanionLoop.ts";
 
 export type FeedStatus = "idle" | "connecting" | "connected" | "disconnected";
 
@@ -845,6 +846,34 @@ export type FeedEvent =
     }
   | { readonly type: "mission-bot/start-error"; readonly message: string | null }
   | { readonly type: "mission-bot/cleared" }
+  // The fleet companion's readout (fleet-companion phase 0). Same construction
+  // as the two bots above: the loop pushes, this slice records.
+  | {
+      readonly type: "companion/started";
+      readonly role: FleetCompanionRole;
+      readonly startedAt: number;
+    }
+  | {
+      readonly type: "companion/progress";
+      readonly status: FleetCompanionRunState;
+      readonly phase: string | null;
+      readonly action: string | null;
+      readonly why: string | null;
+      readonly role: FleetCompanionRole | null;
+      readonly inFleet: boolean | null;
+      readonly followingOrderFrom:
+        | "broadcast"
+        | "tag"
+        | "chat"
+        | "squad-board"
+        | "own-ladder"
+        | null;
+      readonly lastOrderHeard: string | null;
+      readonly canTag: boolean | null;
+      readonly failureReason: string | null;
+    }
+  | { readonly type: "companion/start-error"; readonly message: string | null }
+  | { readonly type: "companion/cleared" }
   // The player Bot Builder runner's readout (pushed each tick; survives the shell switch).
   | { readonly type: "custom-bot/started"; readonly name: string }
   | {

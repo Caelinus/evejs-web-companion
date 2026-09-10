@@ -341,19 +341,42 @@ test("createShipClaim stops every OTHER bot and never the one claiming", () => {
   const claim = createShipClaim({
     mining: () => stopped.push("mining"),
     mission: () => stopped.push("mission"),
+    companion: () => stopped.push("companion"),
     custom: () => stopped.push("custom"),
   });
 
   claim("mining");
-  assert.deepEqual(stopped, ["mission", "custom"], "claiming for mining stops every other controller");
+  assert.deepEqual(
+    stopped,
+    ["mission", "companion", "custom"],
+    "claiming for mining stops every other controller",
+  );
 
   stopped.length = 0;
   claim("mission");
-  assert.deepEqual(stopped, ["mining", "custom"], "and the reverse — the property is symmetric by construction");
+  assert.deepEqual(
+    stopped,
+    ["mining", "companion", "custom"],
+    "and the reverse — the property is symmetric by construction",
+  );
 
   stopped.length = 0;
   claim("custom");
-  assert.deepEqual(stopped, ["mining", "mission"], "a player-authored bot owns the same exclusive ship claim");
+  assert.deepEqual(
+    stopped,
+    ["mining", "mission", "companion"],
+    "a player-authored bot owns the same exclusive ship claim",
+  );
+
+  // The fleet companion is a peer, not a special case: it stops the others and
+  // they stop it, and neither side needed a line written for the pairing.
+  stopped.length = 0;
+  claim("companion");
+  assert.deepEqual(
+    stopped,
+    ["mining", "mission", "custom"],
+    "the companion owns the same exclusive ship claim as every other loop",
+  );
 });
 
 test("the claim walks the REGISTRY, so a bot added to it is stopped without touching the claim", () => {

@@ -18,6 +18,7 @@ import type {
 import type { GateLink } from "../space/gateLinks.ts";
 import type { BotID, ShipControllerID } from "../nav/botRegistry.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
+import type { FleetCompanionRole, FleetCompanionRunState } from "../nav/fleetCompanionLoop.ts";
 
 export type { GateLink };
 export type { BotID };
@@ -2245,6 +2246,47 @@ export interface MiningBotState {
  * which no client can tell apart). Reporting that as success would be a lie;
  * reporting it as a failure would be wrong too.
  */
+/**
+ * The fleet companion's panel state (fleet-companion phase 0).
+ *
+ * The companion is a sibling decide-loop, not a bot script, so this slice is
+ * shaped like `MiningBotState`/`MissionBotState` and for the same reason: the
+ * loop lives in the browser and pushes its readout here, and this slice records
+ * it without deciding anything.
+ *
+ * The last four fields are the Bot Manager badge the plan doc asks for — in
+ * fleet, following whom, last order heard, and whether this pilot can tag.
+ *
+ * ⚠ `canTag` IS THREE-STATE, and the third state matters. `null` means the fleet
+ * roster could not be read; `false` means this pilot genuinely holds no
+ * commander role. A pilot silently unable to tag looks identical to one with
+ * nothing to tag, which is exactly why the readout carries it.
+ */
+export interface FleetCompanionState {
+  readonly status: FleetCompanionRunState;
+  /** Where in the ladder it is ("In warp", "Standing by"). */
+  readonly phase: string | null;
+  /** What it last did. */
+  readonly action: string | null;
+  /** WHY it did that — always present while running. */
+  readonly why: string | null;
+  readonly role: FleetCompanionRole | null;
+  readonly inFleet: boolean | null;
+  /** Which authority the last decision came from, for the readout. */
+  readonly followingOrderFrom:
+    | "broadcast"
+    | "tag"
+    | "chat"
+    | "squad-board"
+    | "own-ladder"
+    | null;
+  readonly lastOrderHeard: string | null;
+  readonly canTag: boolean | null;
+  readonly startedAt: number | null;
+  readonly startError: string | null;
+  readonly failureReason: string | null;
+}
+
 export interface MissionBotState {
   readonly status: MiningBotRunState;
   /** Where in the loop it is ("Flying", "Loading", "Handing it in"). */
