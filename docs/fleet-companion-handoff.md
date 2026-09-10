@@ -13,9 +13,10 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | --- | --- |
 | Branch | `feat/fleet-companion`, cut from `tokeiito` |
 | Base | `tokeiito` at `7488415` (three docs commits) |
-| Branch commits | `d844988`, `6ca4c49`, `0f2e9ca` |
+| Branch commits | `d844988`, `6ca4c49`, `0f2e9ca`, then the decisions and phase 0's completion |
 | Working tree | clean |
-| Phase 0 | ~70% — the loop lives, starts, stops and holds the ship |
+| Phase 0 | **COMPLETE** — grant derivation, headless runs, and a start control |
+| Phase 0b | specced and decided (plan decision 5), not started — the next thing |
 | Everything else | not started |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
@@ -35,28 +36,60 @@ full suite identical to baseline (17 locale failures, no new names).
   row.
 - The `companion` store slice, its four events, and its reset wiring.
 
-## What is left in phase 0
+## Phase 0 is COMPLETE, 2026-09-11
 
-1. **`src/botHost.js` — headless.** The one substantial piece. It drives exactly
-   one entry point, `flow.startCustomBot(doc)` at `botHost.js:506`. A companion
-   needs `flow.startFleetCompanion(request)` beside it, plus a `record.kind`
-   branch through `persistRoster()`, `resume()`, `applySnapshot()` and
-   `publicBot()`, and the request persisted and hashed the way a script's
-   revision already is. Session minting, the one-hull-one-driver claim, the
-   durable roster and the ended-run ring are all behaviour-agnostic and need
-   nothing.
+| Piece | Where |
+| --- | --- |
+| The grant's risk derivation, and the codec door for a persisted request | `web/src/bots/companionRunPolicy.ts` |
+| Headless runs: `record.kind`, the persisted request, the route branch | `src/botHost.js`, `src/server.js`, `web/src/app/api.ts` |
+| The browser start control | `web/src/ui/FleetCompanion.svelte`, wired in `Bots.svelte` |
 
-   ⚠ **The launch grant is DECIDED** — see "Answered by the operator" below and
-   decision 4 in the plan. Keep the grant struct, derive `riskClasses` from the
-   request, no review dialog, cap editable on the start control.
+Gates: `tsc` clean, `docker build --target web-build` clean, whole suite 4860 tests
+with `ℹ fail 17` and the failing-NAME set byte-identical to the baseline measured
+before the work began. The grant is machinery with no dialog, exactly as decided.
 
-2. **A start control**, so live QA has something to click. Smallest viable, not
-   the squad launcher.
+⚠ **The sentinel lives in the shared layer, not the host.** A companion grant's
+`scriptRev` is `COMPANION_GRANT_SCRIPT_REV` in `companionRunPolicy.ts`, and the
+host reads it off the loaded stack. It was briefly a constant private to
+`botHost.js` whose comment told future callers to send "this exact value" — two
+copies of a bare `1` in two languages with nothing to fail if one drifted, and a
+drift would have surfaced to a player as "this bot changed after its run was
+approved" with nothing changed. A fake stack in a test must carry it too.
 
-Two commits the spec listed are **deliberately not done**: lifting the `issue:`
-switch out of `makeScriptRunnerDeps`, and exporting the private helpers. Phase 0
-issues nothing, so both would be speculative. They land when a behaviour needs
-them.
+### Two bugs the work uncovered, both fixed
+
+- **`Bots.svelte` showed the MISSION bot's checklist and status for the
+  companion.** `rowsFor` and `statusOf` were two-way ternaries keyed on
+  `"mining"`, so the already-registered `"companion"` `BotID` fell through to the
+  mission branch. It would have looked, in live QA, like a companion bug.
+- **`stop()` and `finalize()` could not stop a companion.** Both called
+  `flow.stopCustomBot()` unconditionally, and `stopCustomController`
+  (`flow.ts:5678`) reaches the script runner and the shared autopilot but NEVER
+  `fleetCompanion` — `stopCompanionController` right beneath it is the real
+  switch. So a stopped or time-expired headless companion kept flying while
+  `finalize()` logged its bridge session out from under it. Both sites now branch
+  on `record.kind`.
+
+⚠ **Both of those are the `BotID`-union tripwire's BLIND SPOT, and it is worth
+knowing.** The union breaks a `Record<BotID, …>` and an exhaustive `switch`, which
+is why the handoff calls it a feature. It cannot see a two-way ternary, and it
+cannot see a call to the wrong same-shaped function. Adding a `BotID` member does
+not flush those out; only reading the call sites does.
+
+### What is next
+
+1. **Phase 0b — the supervision gate and the abandonment protocol** (plan doc,
+   decision 5). This is now the most load-bearing unbuilt thing, and the 30-minute
+   clock needs persisting in the roster row that phase 0 just built.
+2. **The headless launch UI is NOT phase 0's, and was deliberately not built.** A
+   per-pilot request is a value on a Pilot Hangar squad, which makes the launch UI
+   part of phase 9's squad launcher. The plumbing is finished and waiting:
+   `api.startServerCompanion` exists, and the script path it mirrors runs through
+   `web/src/bots/startRun.ts` into `BotManagerPilotRow.svelte` — including the
+   ordering subtlety that the run must start BEFORE the session is released.
+3. The `issue:` switch lift and the private-helper exports are still speculative,
+   EXCEPT that 0b needs `continueHeadingHome` to dock. That is the behaviour the
+   handoff said would come and claim them.
 
 ## Decided, so do not re-litigate
 

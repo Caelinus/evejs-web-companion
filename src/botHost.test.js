@@ -74,6 +74,11 @@ function makeFakeStack(log) {
     // The companion's own risk-derivation and codec door — a plain fake of
     // companionRunPolicy.ts, not the real module (that module is proven live
     // on its own; these tests pin the HOST's obligations around it).
+    //
+    // The sentinel is part of that module's contract too, so the fake carries
+    // it the way the real stack does: the host reads the revision off the stack
+    // rather than holding a second copy of a bare 1 of its own.
+    COMPANION_GRANT_SCRIPT_REV: 1,
     analyzeCompanionRunPolicy: (request) => ({
       riskClasses:
         request && (request.useDrones === true || (request.defenseModuleIDs || []).length > 0)

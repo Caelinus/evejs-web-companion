@@ -58,20 +58,11 @@ const BOT_HEADER = "x-evejs-bot-claim";
 // name the same five states, so one set serves either kind's subscription.
 const ENDED_STATUSES = new Set(["stopped", "error", "idle"]);
 
-// A companion request has no revision SERIES: there is no library, no "rev 3
-// of this companion setup", just the one request the operator wrote. The
-// canonical hash (hashScript(request), below) is that request's real
-// identity. This sentinel exists ONLY to fill the `scriptRev` slot
-// `validateBotLaunchGrant` (web/src/bots/runPolicy.ts) already compares a
-// grant against, so a companion's grant stays the exact shape a script's is,
-// unchanged, rather than growing a second field for a version that does not
-// exist. See docs/fleet-companion-handoff.md, "3. Extend botHost", "One
-// divergence to make deliberately".
-//
-// Any caller that builds a companion's launch grant (today, nothing does —
-// the start control is a later commit) must send this exact value as
-// `grant.scriptRev`; there is no second "correct" revision to invent.
-const COMPANION_GRANT_SCRIPT_REV = 1;
+// The companion grant's `scriptRev` sentinel is NOT defined here. It lives in
+// web/src/bots/companionRunPolicy.ts, the layer this host and the browser both
+// import, because the browser sends it and this host compares it — see that
+// constant's comment for why two copies of a bare 1 would be a bug waiting to
+// surface as a bogus "this bot changed after its run was approved".
 
 // The companion's roster-row `scriptName` — the slot a player reads in the
 // Server Bots list — derived from the request's role rather than authored,
@@ -138,6 +129,7 @@ function defaultLoadStack() {
         // shape, same validateBotLaunchGrant, per companionRunPolicy.ts's header.
         analyzeCompanionRunPolicy: companionRunPolicy.analyzeCompanionRunPolicy,
         decodeFleetCompanionRequestValue: companionRunPolicy.decodeFleetCompanionRequestValue,
+        COMPANION_GRANT_SCRIPT_REV: companionRunPolicy.COMPANION_GRANT_SCRIPT_REV,
       };
     })();
     stackPromise.catch(() => {
@@ -463,11 +455,11 @@ function createBotHost(options) {
         return { ok: false, code: "BOTCOMPANION_INVALID", message: decoded.refusal };
       }
       decodedRequest = decoded.request;
-      // See COMPANION_GRANT_SCRIPT_REV's comment: a companion request has no
+      // See COMPANION_GRANT_SCRIPT_REV in companionRunPolicy.ts: a request has no
       // revision series, so this sentinel — never a real version — fills the
       // slot validateBotLaunchGrant already compares. The canonical hash is
       // the request's actual identity.
-      normalizedRev = COMPANION_GRANT_SCRIPT_REV;
+      normalizedRev = stack.COMPANION_GRANT_SCRIPT_REV;
       normalizedHash = hashScript(decodedRequest);
       if (
         expectedScriptRev !== null &&
@@ -969,4 +961,4 @@ function createBotHost(options) {
   };
 }
 
-module.exports = { createBotHost, BOT_HEADER, MAX_ENDED_RUNS, COMPANION_GRANT_SCRIPT_REV };
+module.exports = { createBotHost, BOT_HEADER, MAX_ENDED_RUNS };

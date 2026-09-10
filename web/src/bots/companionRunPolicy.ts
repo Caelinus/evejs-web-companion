@@ -75,6 +75,27 @@ import {
 
 const NO_MACRO_IDS: readonly MacroID[] = Object.freeze([]);
 
+/**
+ * The value a companion's launch grant carries in its `scriptRev` slot.
+ *
+ * A companion request has no revision SERIES: there is no library, no "rev 3 of
+ * this companion setup", just the one request the operator wrote. The canonical
+ * hash of that request is its real identity. This sentinel exists ONLY to fill
+ * the slot `validateBotLaunchGrant` (`runPolicy.ts`) already compares a grant
+ * against, so a companion's grant stays the exact shape a script's is rather
+ * than growing a second field for a version that does not exist. See
+ * docs/fleet-companion-handoff.md, "3. Extend botHost".
+ *
+ * ⚠ IT LIVES HERE, IN THE LAYER BOTH SIDES IMPORT, FOR A REASON. The BFF's bot
+ * host compares it and the browser's grant-builder sends it. It was originally
+ * a constant private to `src/botHost.js` whose comment instructed future callers
+ * to send "this exact value" — two copies of a bare `1`, in two languages, with
+ * nothing to fail if one ever changed. A grant whose revision does not match is
+ * refused as stale, so a drift between those copies would read to a player as
+ * "this bot changed after its run was approved" with nothing actually changed.
+ */
+export const COMPANION_GRANT_SCRIPT_REV = 1;
+
 /** Build the same `BotRunPolicy` shape a script produces, from a companion request. */
 export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRunPolicy {
   const risks = new Set<BotRiskClass>(["fleet", "social"]);
