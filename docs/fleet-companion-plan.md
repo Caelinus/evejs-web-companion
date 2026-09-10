@@ -49,7 +49,9 @@ Reused unchanged — this is most of the value in the phases below:
 - the per-tick observation build in `flow.ts`, and every field it already carries
 - the `issue:` action switch — warp, align, orbit, lock, activate, drones, jump
 - the pure helpers: `targetPriority.ts`, `fleetMatesOnGrid`, `hostilesInReach`,
-  `recallBeforeLeaving`, `fightTheWayOut`, `scriptTravelHome`
+  `recallBeforeLeaving`, `fightTheWayOut`, `scriptTravelHome` — but see the
+  implementation doc: all but `scriptTravelHome` are PRIVATE to their modules
+  today and must be exported first. Pure, but not yet importable.
 - every decoder and store slice this feature adds (`bridge/`, `store/`)
 - the squad board
 
@@ -159,6 +161,43 @@ HealShield    HealCapacitor            WarpTo      AlignTo     JumpTo
 
 `itemID` on a broadcast is the entity or location it is about — the same kind of
 id `lock`, `activate`, `orbit` and `warp` already take.
+
+### What each one actually carries — from the client, not guessed
+
+The server passes `itemID` through untouched, so its meaning is decided entirely
+by the sending client. Read out of the decompiled client at
+`ClientCodeGrabber/3396210/…/parklife/fleetSvc.py:1010-1130`. **This settles four
+questions that were previously marked "needs a live capture".**
+
+| Broadcast | `itemID` is | Range | Act on it? |
+| --- | --- | --- | --- |
+| `HealShield` / `HealArmor` / `HealCapacitor` | **the sender's own ship** (`session.shipid`) | bubble | **yes** — remote-rep that entity |
+| `HealTarget` (`BROADCAST_REP_TARGET`) | a **third party's ship**, chosen from the watch list | bubble | **yes** — rep that entity |
+| `Target` | the tactical target | system | **yes** — primary |
+| `AlignTo` | an object, gated by `CanAlignOrWarpToTypeID` | system | **yes** — align |
+| `WarpTo` | an object, same gate | system | no — the server warps the fleet itself |
+| `JumpTo` | **a stargate** — gated to `groupStargate` | system | **yes** — a real jump, not just an align |
+| `TravelTo` | **a solar system id** (`session.solarsystemid2`) | global | **yes** — route to it |
+| `JumpBeacon` | an **active beacon** the sender holds | global | prefer `OnBridgeModeChange` |
+| `EnemySpotted` / `NeedBackup` / `HoldPosition` / `InPosition` | the sender's **nearest object** (`GetNearestBall`) | global | log only |
+| `Location` | the sender's system, plus their nearest object | global | log only |
+
+Three things fall out of this that no amount of reasoning would have produced:
+
+- **The Heal broadcasts name the patient in `itemID` directly.** A companion does
+  not need to resolve `senderCharID` to a ship entity — the ship id is right
+  there. Simpler and exact.
+- **`TravelTo` is a system id, and `JumpTo` is a stargate.** Both were going to be
+  deferred as ambiguous. Both are directly actionable, and `JumpTo` meaning a
+  gate is what makes an actual jump safe rather than a guess.
+- **The four "nearest ball" broadcasts are announcements, not orders.** Their
+  `itemID` is whatever happened to be closest to the sender, which is why acting
+  on them would be meaningless. Log them; do not act.
+
+The three range modes are the sender's choice too: `SendGlobalBroadcast`,
+`SendBubbleBroadcast` and `SendSystemBroadcast` are separate call paths, which is
+where `rangeMode` comes from. The Heal family is bubble-scoped — deliberately,
+since a rep request only makes sense to someone in range to answer it.
 
 Rate limiting is server-side (`MIN_BROADCAST_TIME_SEC`, one third of that for
 some names), so a spamming FC cannot wedge a follower. That is a real

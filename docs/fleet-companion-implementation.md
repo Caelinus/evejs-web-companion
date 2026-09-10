@@ -295,6 +295,201 @@ by design. A `flow.startFleetCompanion(request)` beside it is the whole change
 needed to let the companion survive a closed tab — treat it as part of this
 work, not a follow-up.
 
+## Phase 0 — the loop skeleton
+
+Everything else plugs into this. Nine commits, ending at "the loop runs, decides
+`wait` forever, and starts both in-tab and headless".
+
+### Mutual exclusion is free, and the type system enforces it
+
+`web/src/nav/botRegistry.ts:73` declares `BotID = "mining" | "mission"` as a
+closed union, and its header states the mechanism outright: "ADDING A MEMBER
+HERE IS THE ONLY STEP... the build fails until the new bot is wired into each."
+`createShipClaim` walks `SHIP_CONTROLLER_IDS` rather than naming peers, so it
+"never changes when a bot is added, and the new bot is stopped by every existing
+one on the day it lands".
+
+So adding `"companion"` to `BotID` and `SHIP_CONTROLLER_IDS` is commit 1, and it
+forces — by compile error, deliberately — a stopper entry in `flow.ts`'s
+`createShipClaim` call and a status reader in `clientStore.ts`'s `botStatus`
+record. A pilot cannot run a mining bot and a companion at once, and nobody has
+to remember to write that rule.
+
+⚠ Use `stop()`, not `abort()`. Mining and mission expose `stop()`; the autopilot
+exposes `abort()` because it is a shared utility other loops drive on top of,
+not a catalogued bot. The companion is catalogued.
+
+### ⚠ The helpers we planned to reuse are almost all private
+
+This corrects both docs. `web/src/nav/scriptMacros.ts` is over 4,600 lines and
+exports exactly **three** things:
+
+| Helper | Where | Exported? |
+| --- | --- | --- |
+| `scriptTravelHome` | `scriptMacros.ts:4572` | **yes** |
+| `resolveStationRef` | `scriptMacros.ts:339` | yes |
+| `SCRIPT_MACROS` | `scriptMacros.ts:4430` | yes (the DSL registry — not ours) |
+| `recallBeforeLeaving` | `scriptMacros.ts:284` | **no** |
+| `hostilesInReach` | `scriptMacros.ts:2070` | **no** |
+| `fleetMatesOnGrid` | `scriptMacros.ts:2912` | **no** |
+| `fightTheWayOut` | `scriptMacros.ts:4518` | **no** |
+| `continueHeadingHome` | `scriptDecide.ts:1085` | **no** |
+
+Earlier text in these docs called these "pure helpers the new loop can call".
+They are pure, but they are not importable. Exporting them is trivial, and they
+take plain data (`ScriptObservation`, `MacroMemory = Readonly<Record<string,
+unknown>>`) rather than DSL types — but it must be a planned commit, and it
+means the companion work touches `scriptMacros.ts` and `scriptDecide.ts`, which
+slightly qualifies the clean-separation story. Say so rather than discovering it.
+
+`continueHeadingHome` is the awkward one: private *and* typed over the full
+`ScriptMemory`, which carries a DSL step `position` field the companion has no
+use for. Either generalise the ~20-line latch/travel/arrive pattern around
+`scriptDecide.ts:1085` into something `ScriptMemory`-free, or reimplement it in
+the companion. Decide in the flee spec, not here.
+
+### The observation builder cannot be reused — the decoders can
+
+`makeScriptRunnerDeps`'s `observe(hint)` is gated on `hint.activeMacro`
+throughout: surveys on `SURVEY_MACROS`, scanner ops on `SCANNER_MACROS`, the
+squad-primary read on `hint.squadRole`, and the fleet roster on
+`FLEET_SUPPORT_MACROS` (`flow.ts:6835`). The companion has no active macro, so
+every gate would read nothing — or would need a fake macro id threaded through,
+coupling the companion to the DSL it is explicitly not part of.
+
+Build `makeFleetCompanionDeps()` beside `makeMiningBotDeps`/
+`makeMissionBotDeps`, fetching unconditionally every tick, and **reuse the
+individual decoders** (`decodeSpaceSnapshot`, `decodeFleetCenter`,
+`authoritativeFleetMemberCharacterIDs`, `classifyDroneRoles`, `hostileRows`,
+`decodeTargetIDs`, `decodeDroneBay`) rather than the builder around them. That
+is the part of "reuse the observation" that is literally true.
+
+`CompanionObservation extends ScriptObservation` — the interface body carries no
+DSL types, so the private helpers accept it by structural subtyping with zero
+adapter code once exported.
+
+### The `issue:` switch lifts cleanly
+
+Verified: the switch at `flow.ts:7089` references none of
+`makeScriptRunnerDeps`'s own parameters. Lifting it to a closure-level
+`issueScriptAction(action)` shared by both deps builders is a pure move, not a
+behaviour refactor.
+
+### Headless: what generalises in `botHost.js`
+
+Behaviour-agnostic and reused as-is: session minting, the one-hull-one-driver
+claim, the durable roster mirror, `resume()`, vitals sampling, the ended-run
+ring. Script-specific and needing a `record.kind` branch: the script decode, the
+`scriptRev`/`scriptHash` pinning (the companion pins its **request**, hashed the
+same way), the `startCustomBot`/`stopCustomBot` calls, the `state.customBot`
+subscription, and `publicBot`'s readout.
+
+> **Open, and deliberately not decided here: does a headless companion need a
+> launch grant?** The existing `BotLaunchGrant` exists because a *player-composed*
+> script can call arbitrary risky macros, so the player approves the risk classes
+> a specific revision contains. The companion's capability surface is fixed at
+> build time, which argues for reusing only the `maxRuntimeMinutes` deadline and
+> skipping the risk-class round trip. But its fixed surface still includes a tag
+> write, a chat send and yielding the ship to fleet warp. If the security posture
+> wants those consented to up front, a smaller `FleetCompanionLaunchGrant` should
+> exist instead. Raise this before building commit 8.
+
+### Commits
+
+1. `BotID` / `SHIP_CONTROLLER_IDS` gain `"companion"` (compile errors guide the rest)
+2. `FleetCompanionRequest` + `FleetCompanionRole` types, no behaviour
+3. `web/src/nav/fleetCompanionLoop.ts` skeleton + test harness — decides `wait`
+4. lift the `issue:` switch out of `makeScriptRunnerDeps`
+5. export the private helpers listed above
+6. `makeFleetCompanionDeps()` — the unconditional observation builder
+7. `start`/`pause`/`resume`/`stopFleetCompanion` + claim wiring + preflight
+8. store slice: `companion` signal, reducer cases, `botStatus` entry, reset wiring
+9. `botHost.js` generalisation + a minimal single-pilot start button for live QA
+
+### The request shape
+
+Flat, serialisable, UI-editable — the point being that it stores as the *value*
+in the squad's membership map without any account-scoped reference. Fields:
+role, defence module ids, flee floor, return point, return hold-off, max flee
+attempts, drones on/off, drone redeploy hold-off, whether this pilot attempts
+tagging, which order sources it obeys, and the chat-command sender allowlist.
+
+⚠ `attemptsTagging` says only "try". The server still silently no-ops it unless
+the roster says commander, and only one pilot per squad should set it, because a
+tag is unique fleet-wide and two taggers fight over letters.
+
+## The rung ladder — behaviours, and their order
+
+The companion's tick is a ladder:
+
+```
+1. yield to warp         server fleet warp wins, unconditionally
+   (flee continuation)   an ACTIVE flee latch resumes here, before the rest
+2. tank up               cheapest reflex, never moves the ship
+3. tackle -> tag         a fleet write, still no movement
+4. drone recall/redeploy
+5. flee (new trigger)    most disruptive, so checked last
+```
+
+Rungs 2-4 are the "own ladder" tier, ordered cheapest-first: none moves the ship,
+so a tick that could do several does the least costly. Rung 5 is checked last
+because committing to a flee abandons position, drones and the fight. But once a
+flee is **latched**, its continuation runs immediately after rung 1 — mirroring
+`decideScriptAction`, where the `mem.latched` check is step 1 and the interrupt
+scan is step 2.
+
+### Rung 2 — tank up: half exists, half is new
+
+| Wanted | State |
+| --- | --- |
+| hardeners on | **exists** — `hardenersOn` (`scriptMacros.ts:2021`), a complete ON-only ladder, bounded, self-target idiom already right |
+| hardeners off when the fight ends | **new** — `standDownAfterFight` (`scriptDecide.ts:771`) is the only OFF-half anywhere and is keyed on script interrupt rows. Copy its *shape*, not its code |
+| shield/armour/hull booster cycling | **entirely new** — nothing in the codebase self-reps. `remote-rep` and friends rep *other* ships |
+| capacitor awareness | **entirely new** — `hardenersOn` has none |
+
+⚠ **The cap rule is not "when am I in danger" — it is "can I still afford to warp
+out".** A flattened capacitor means the ship cannot leave, turning a survivable
+fight into a loss. So the floor protects the escape, not the tank: stop boosting
+at the floor **even while a layer is still hurt**. That inversion is the point.
+
+The exact floor is a per-hull property this client cannot read, so it ships as a
+per-role config field with a conservative default (0.20-0.30, reasoned from
+`CAP_HUNGRY = 0.9`'s inverse) marked **unverified pending a live capacitor-drain
+capture** — the same treatment as the drone hold-off.
+
+⚠ The hardener classifier (`flow.ts:5871`) cannot tell a free Damage Control from
+a cap-hungry active hardener. Apply the cap gate to both; delaying a free cycle
+by one tick is the safer error.
+
+### Rung 3 — tackle to tag
+
+**Allowlist the two tackle jam types** (`warpScramblerMWD`, `warpScrambler`) and
+treat every other `jammingType` as non-tackle. A blacklist would silently start
+tagging on some future ewar type; an allowlist fails safe.
+
+Rank with `hostileRows` + `pickPrimary`, **not** `hostilesInReach`. Tagging is a
+fleet-wide call, not a shot this pilot is taking, so this pilot's own lock range
+must not suppress a tag a ship further out could use.
+
+`canTag` is three-state: `null` (roster unreadable) and `false` (not a commander)
+both mean "do not write", but only `false` is permanent. Never guess "no".
+Confirm a tag landed by seeing it in the next `targetTags` — never by the write's
+own 200, which lies for non-commanders.
+
+### Rungs 4 and 5 — two additions
+
+Mechanism carried forward from the earlier verified specs. Two things worth
+keeping from this pass:
+
+- **Nest tank-up and tagging inside the flee continuation.** Otherwise the flee
+  claims the action slot every tick and the ship stops hardening exactly when it
+  is taking the most damage. `fightTheWayOut` already nests `hardenersOn` this
+  way — follow it.
+- **An armour-triggered flee must repair before it rechecks.** Docking restores
+  shield and capacitor but not armour, so without running `repair-ship` while
+  docked the recheck always fails and the bot burns its whole attempt budget
+  going home over and over.
+
 ## Phase 1 — the spec
 
 Seven commits. Steps 1-3 are independent of 4-6; 5 and 6 both need 4 but not
