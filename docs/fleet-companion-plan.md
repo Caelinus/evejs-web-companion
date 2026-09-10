@@ -695,12 +695,123 @@ like a bug: **a bot being fleet-warped does not flee, does not re-target, and
 does not answer a chat command until the warp lands.** That is correct. A pilot
 who breaks formation to save themselves mid-warp is not a fleet-mate.
 
+**4. The headless launch grant — DECIDED: keep the machinery, drop the dialog.**
+
+A bot script's grant (`web/src/bots/runPolicy.ts:57`) is three fields: the exact
+stored revision, exactly the risk classes derived from that revision, and a hard
+minute cap. The BFF re-derives all of it and refuses anything broader or stale,
+because browser-supplied policy is never trusted as fact.
+
+The **consent** half does not earn its place here. It exists because a
+player-composed script can call arbitrary risky macros and the player should see
+which ones before it flies. A companion's surface is fixed at build time, the
+operator wrote the request, and a companion only ever flies in a fleet with a
+human in it (decision 5). So there is **no review step: the start control
+launches.**
+
+The **deadline** half is not about supervision at all, and it is the half that
+bites. `maxRuntimeMinutes` is the only thing that ends an unattended run:
+`botHost.js:405` derives `expiresAt` from it and nothing else, the timer at
+`botHost.js:512` is the sole unattended stop, and `resume()` (`botHost.js:734`)
+refuses any persisted row whose `expiresAt` has already passed — which is also
+what stops a restarted BFF from reviving yesterday's companion into a fleet that
+no longer exists.
+
+So the shape is:
+
+- `analyzeCompanionRunPolicy(request)`, mirroring `analyzeBotRunPolicy(script)`:
+  `combat` from `useDrones` / `defenseModuleIDs`, `fleet` from `attemptsTagging`
+  and the warp yield, `social` from the chat send.
+- `validateBotLaunchGrant` **unchanged** — the request's revision and canonical
+  hash fill the `scriptRev` slot a script's revision fills today.
+- The cap defaults to `DEFAULT_SERVER_BOT_RUNTIME_MINUTES` and **is editable on
+  the start control**, so live QA can set a short one and watch it expire.
+
+⚠ **Do not pass an empty `riskClasses` to save the derivation.**
+`pilotRoster.ts:229` renders an empty list as the sentence "No consequential
+permissions", and the comment above it says that is deliberate — "an empty list
+is a sentence, not a blank". A pilot that writes fleet tags and sends chat must
+not describe itself that way in the Bot Manager.
+
+**5. A human in the fleet is a CONTINUOUS condition — DECIDED, with a protocol.**
+
+The rule the operator stated: a companion does no unsupervised work. That is not
+a preflight. `FLEET_COMPANION_REQUIREMENTS` today (`botRegistry.ts:442`) only
+asks whether the fleet **read** succeeded (`availability === "ready"`), so a
+companion alone in a fleet of one passes it, and passing it once says nothing
+about the next six hours.
+
+**The check.** At least one fleet member that **this host is not driving** —
+subtracting the tab's own claims and the BFF's bot roster (`claims`, already in
+`botHost.js`). Re-evaluated every tick, above every order source in the
+precedence list, because it is a liveness gate and not an order.
+
+⚠ Counting members does **not** work. Four companions plus the operator is four
+members after the operator logs off.
+
+⚠ Honest limit: another account's companion in the fleet reads as human, because
+we can only subtract the bots we know about. Accepted.
+
+**Why the naive version fails, read out of the server** (2026-09-10,
+`/d/evet/server/src/services/fleets/fleetRuntime.js`):
+
+- A disconnect **removes** the character from the fleet
+  (`handleSessionDisconnected`, :1861). So a logged-off human cannot satisfy the
+  check, and `inFleet` is not hollow. Good.
+- But the fleet **survives with one member**. That size test is `<= 1` *before*
+  the removal, so a human leaving a two-member fleet leaves the companion in a
+  fleet of one — and `assignBossToAnyRemainingMember` (:1838) **promotes it to
+  boss**. The failure mode is therefore not merely "keeps flying unsupervised";
+  it is "is promoted to commander, and its tag writes start succeeding", in a
+  fleet nobody is in. Only a drop to zero members destroys the fleet.
+
+**The protocol, when the check fails.** Get safe, then disband, then wait.
+
+1. **Get safe.** Dock, reusing the travel-and-dock machinery `travel-to-station`
+   already has (`continueHeadingHome` — one of the private helpers the handoff
+   lists). The scene reports stations directly: `station` is one of its own
+   entity kinds, and `api.dock(stationID)` is `api.ts:2409`.
+2. **Drop fleet.** `api.leaveFleet()` (`api.ts:1278`), per pilot. Each companion
+   decides for itself, so "all pilots drop fleet" is the emergent effect of one
+   rung — never a broadcast, and never one pilot acting for another.
+3. **Wait, bounded: 30 minutes.** Then stop and release the hull.
+4. **Rejoin only the human who left.** `OnFleetInvite` carries the inviter's
+   character id (`fleetCenter.ts:111`) and `api.acceptFleetInvite(fleetID)`
+   (`api.ts:1231`) accepts it. Accept **only** from a character id that was a
+   non-bot fleet-mate at the moment of abandonment, remembered on the record.
+   ⚠ Without that gate, an idle docked companion can be fleet-invited by a
+   stranger and handed a ship.
+
+⚠ **Order is load-bearing.** Safe first, *then* leave. Leaving first gives up the
+fleet-warp channel while the ship is still in space.
+
+⚠ **The 30-minute clock must be persisted.** The roster row survives a BFF
+restart (`persistRoster`), so an abandonment timestamp held only in memory hands
+the companion a fresh 30 minutes on every restart — an unbounded wait assembled
+out of bounded ones.
+
+**One step cannot be built as asked: "a safe spot (the sun) if no station
+exists".** There is no sun to warp to. The scene's entity kinds are `ship`,
+`structure`, `drone`, `asteroid`, `stargate`, `station`, `sentryGun`,
+`container`, `cynoField` and `signatureSite` — no sun, no planet, no celestial —
+and there is no celestial read anywhere in `api.ts` or on the BFF, whose map
+routes are static-data station and system lookups. Checked 2026-09-10.
+
+What exists instead, and is better: **a bookmark.** `api.loadBookmarks` and
+`api.warpToBookmark` (`api.ts:3823`, `:3830`) are both already there, so the safe
+spot is one optional field on the request — `safeSpotBookmarkID` — and the
+operator picks somewhere they have actually checked, rather than the celestial
+every other pilot in the system also warps to. A system with no station **and**
+no bookmark is the one case with nothing to do: the companion stops where it is
+and says why, because a fabricated safe spot is worse than an honest stop.
+
 ## Work breakdown
 
 Ordered by value per unit of work. Phases 1-3 need no gateway change.
 
 | # | Phase | Depends on | Size |
 | --- | --- | --- | --- |
+| 0b | Supervision gate + abandonment protocol (decision 5): the non-bot-member check as a top rung, dock, drop fleet, bounded wait, invite-gated rejoin | botHost persistence for the clock | medium; the rejoin gate is the careful part |
 | 1 | `OnFleetBroadcast` + `OnFleetStateChange` decoders, store slice with TTL, `follow-the-fleet` block covering Target / AlignTo / HealShield / HealArmor | — | largest single chunk, entirely in-repo |
 | 2 | Yield to `inWarp`; precedence rules | 1 | small |
 | 3 | Tank-up block (hardeners + repairers, cap-aware) | — | small, independent |

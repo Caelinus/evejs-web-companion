@@ -46,12 +46,9 @@ full suite identical to baseline (17 locale failures, no new names).
    durable roster and the ended-run ring are all behaviour-agnostic and need
    nothing.
 
-   ⚠ **Open, and deliberately not decided:** does a headless companion need a
-   launch grant? The existing one exists because a player-composed script can
-   call arbitrary risky macros. The companion's surface is fixed at build time,
-   which argues for reusing only `maxRuntimeMinutes` — but that fixed surface
-   still includes a tag write, a chat send, and yielding the ship to a fleet
-   warp. Decide before building it.
+   ⚠ **The launch grant is DECIDED** — see "Answered by the operator" below and
+   decision 4 in the plan. Keep the grant struct, derive `riskClasses` from the
+   request, no review dialog, cap editable on the start control.
 
 2. **A start control**, so live QA has something to click. Smallest viable, not
    the squad launcher.
@@ -128,12 +125,44 @@ doc for the full write-up.
   relaunch trigger must be an observable condition, never a timer. Worth
   confirming the operator still wants it on those terms.
 
-## Open questions for the operator
+## Answered by the operator, 2026-09-10
 
-1. The headless launch grant (above).
-2. Whether drone recall/redeploy is still wanted given it cannot break lock.
-3. Whether to accept browser-only execution instead of extending `botHost` —
-   the plan assumes extending it.
+All three are now decided; the plan doc carries the reasoning as decisions 4 and
+5. Recorded here because this file is the one the next session reads first.
+
+1. **The headless launch grant: machinery, no dialog.** Derive `riskClasses` from
+   the request, default the cap to `DEFAULT_SERVER_BOT_RUNTIME_MINUTES`, make the
+   cap editable on the start control, and show the player nothing to approve. The
+   operator's objection was to a consent step and it was right — what the grant is
+   actually carrying here is the deadline, which is the only thing that ends an
+   unattended run.
+
+2. **Drone recall/redeploy: keep it, relaunch condition-gated.** The recall still
+   gets a damaged drone out of danger, which was always the half that worked.
+   `droneRedeployHoldOffSeconds` stays a FLOOR on the wait and never the thing
+   that makes the relaunch safe; the trigger is another entity holding the rat's
+   aggro. Exactly as the request field already documents it.
+
+3. **Extend `botHost`.** Browser-only was rejected: a closed tab dropping the
+   squad defeats the feature. The script-shaped fields are concentrated in six
+   places — `persistRoster`, `publicBot`, `readRosterRow`, `start()`, `resume()`
+   and the single `flow.startCustomBot` call at `botHost.js:506`.
+
+   ⚠ **One divergence to make deliberately.** A script doc is NOT persisted
+   (`botHost.js:177`), because the library is the authority and `loadScript` is
+   injected at `server.js:85` so a restart re-binds to the exact stored revision.
+   A companion request has no library. **The roster row must BE the authority:**
+   persist the flat request and hash it, rather than inventing a
+   `loadCompanionRequest` injection for a store that does not exist.
+
+**And a fourth thing the operator added, which is now the most important
+constraint in the feature:** a companion does no unsupervised work, continuously
+and not merely at launch. See decision 5 in the plan — the check is "at least one
+fleet member this host is not driving", and failing it runs a dock / drop fleet /
+bounded 30-minute wait / invite-gated rejoin protocol. Two things there will
+surprise you: a human leaving a two-member fleet leaves the companion in a fleet
+of one and **promotes it to boss**, and **the sun cannot be warped to** — there is
+no celestial in the scene or in any read, so the safe spot is a bookmark.
 
 ## The method that kept paying
 
