@@ -171,10 +171,18 @@ import {
   MISSION_BOT_REQUIREMENTS,
   createShipClaim,
   evaluateRequirements,
+  FLEET_COMPANION_REQUIREMENTS,
+  type FleetCompanionReads,
   type MiningBotReads,
   type MissionBotReads,
 } from "../nav/botRegistry.ts";
-import type { FleetCompanionController } from "../nav/fleetCompanionLoop.ts";
+import {
+  createFleetCompanion,
+  type FleetCompanionController,
+  type FleetCompanionDeps,
+  type FleetCompanionObservation,
+  type FleetCompanionRequest,
+} from "../nav/fleetCompanionLoop.ts";
 import { highSlotMiningModules, isDockableKind, ungroupedHighSlotModules } from "../space/rowActions.ts";
 import {
   DEFAULT_MAX_JUMPS,
@@ -959,6 +967,11 @@ export interface AppFlow {
    * equipment the PLAYER picked. Surfaces a start problem through the bot
    * slice rather than throwing.
    */
+  /** Start the fleet companion — a pilot that takes its orders from the fleet. */
+  startFleetCompanion(request: FleetCompanionRequest): Promise<void>;
+  pauseFleetCompanion(): void;
+  resumeFleetCompanion(): void;
+  stopFleetCompanion(): void;
   startMiningBot(request: MiningBotRequest): Promise<void>;
   /** Pause the bot (it stops issuing; the ship finishes its last move). */
   pauseMiningBot(): void;
@@ -5227,6 +5240,112 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // so it goes straight to the api layer, like makeAutopilotDeps does.
   let miningBot: MiningBotController | null = null;
 
+  /**
+   * The companion's own per-tick world read.
+   *
+   * ⚠ THIS IS NOT THE SCRIPT RUNNER'S `observe(hint)`, AND IT CANNOT BE. That
+   * builder gates almost every read on which MACRO is active — surveys on
+   * `SURVEY_MACROS`, scanner ops on `SCANNER_MACROS`, the squad primary on
+   * `hint.squadRole`, the fleet roster on `FLEET_SUPPORT_MACROS`. The companion
+   * has no active macro, so every one of those gates would read nothing, and
+   * threading a fake macro id through to trip them would couple the companion to
+   * the DSL it is deliberately not part of.
+   *
+   * So the reads are UNCONDITIONAL here, and what is reused is the layer that
+   * actually generalises: the decoders. Same `decodeFlightStatus`,
+   * `decodeSpaceSnapshot`, `decodeFleetCenter`, `hostileRows`, `lowestHealth`
+   * the script runner uses — just called without a macro deciding whether to.
+   */
+  function makeFleetCompanionDeps(): FleetCompanionDeps {
+    return {
+      observe: async (): Promise<FleetCompanionObservation> => {
+        const [statusStep, spaceResult] = await Promise.all([
+          api.getFlightStatus(callOptions),
+          api.getSpaceSnapshot(callOptions),
+        ]);
+        const status = decodeFlightStatus(statusStep.flight);
+        void observeFlightStatus(status);
+        const snapshot = decodeSpaceSnapshot(spaceResult.space);
+        // Keep the Overview live while the companion flies, exactly as the
+        // mining bot does — the panel's own poll may not be running.
+        store.apply({
+          type: "space/snapshot",
+          snapshot,
+          gateLinks: gateLinksForSnapshot(snapshot),
+        });
+
+        const ship = snapshot?.ship ?? null;
+        const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
+
+        // The roster is read EVERY tick and not gated, because a companion with
+        // no fleet has nothing to obey — this is its most load-bearing read, not
+        // an optional extra. A failure lands as null (unreadable), never as
+        // "not in a fleet".
+        let inFleet: boolean | null = null;
+        let fleetMemberCharacterIDs: readonly number[] | null = null;
+        try {
+          const fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
+          inFleet = fleetSnapshot.availability === "ready";
+          fleetMemberCharacterIDs = authoritativeFleetMemberCharacterIDs(fleetSnapshot);
+        } catch {
+          inFleet = null;
+          fleetMemberCharacterIDs = null;
+        }
+        return {
+          inSpace: status.inSpace,
+          docked: status.docked,
+          inWarp: status.shipMode === null ? null : /warp/i.test(status.shipMode),
+          shieldRatio: ship?.shieldRatio ?? null,
+          armorRatio: ship?.armorRatio ?? null,
+          hullRatio: ship?.hullRatio ?? null,
+          health: lowestHealth(snapshot),
+          capacitorRatio: ship?.capacitorRatio ?? null,
+          // The companion does not mine. `null` is the honest answer for a hold
+          // nobody read, and it is what every threshold treats as cannot-tell.
+          oreHoldFraction: null,
+          holdEmpty: null,
+          hostileOnGrid: snapshot === null ? null : hostileRows(snapshot, origin).length > 0,
+          dronesOut:
+            snapshot === null
+              ? null
+              : snapshot.entities.some((entity) =>
+                  canMyShipOrderDrone(entity, ship?.itemID ?? null),
+                ),
+          flightStatus: status,
+          snapshot,
+          inFleet,
+          fleetMemberCharacterIDs,
+          myCharacterID: store.station.get().online?.characterID ?? null,
+          // Phase 1 fills the tags; phase 7 fills the tagging verdict. Until
+          // then they are honestly unknown rather than falsely empty.
+          fleetTargetTags: null,
+          canTag: null,
+        };
+      },
+      issue: async () => {
+        // Phase 0 decides `wait` and nothing else, so nothing is ever issued.
+        // Later phases dispatch here the way `makeMiningBotDeps` does: straight
+        // to the `api.*` wrapper, never through the script runner's own switch.
+      },
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      onProgress: (progress) => {
+        store.apply({
+          type: "companion/progress",
+          status: progress.status,
+          phase: progress.phase,
+          action: progress.action,
+          why: progress.why,
+          role: progress.role,
+          inFleet: progress.inFleet,
+          followingOrderFrom: progress.followingOrderFrom,
+          lastOrderHeard: progress.lastOrderHeard,
+          canTag: progress.canTag,
+          failureReason: progress.failureReason,
+        });
+      },
+    };
+  }
+
   function makeMiningBotDeps(): MiningBotDeps {
     return {
       getStatus: async () => {
@@ -5792,6 +5911,68 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
     miningBot.start(plan);
     void miningBot.run();
+  }
+
+  // --- Fleet companion ------------------------------------------------------
+  // The fifth decide-loop, and the first one whose orders come from OUTSIDE the
+  // client: the fleet. It composes the SAME calls the other loops fire.
+
+  /** The preflight reads. Both are best-effort; a failure is null, never "no". */
+  async function fleetCompanionReads(): Promise<FleetCompanionReads> {
+    let inFleet: boolean | null = null;
+    let docked: boolean | null = null;
+    try {
+      const fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
+      inFleet = fleetSnapshot.availability === "ready";
+    } catch {
+      inFleet = null;
+    }
+    try {
+      const step = await api.getFlightStatus(callOptions);
+      docked = decodeFlightStatus(step.flight).docked;
+    } catch {
+      docked = null;
+    }
+    return { inFleet, docked };
+  }
+
+  async function startFleetCompanion(request: FleetCompanionRequest): Promise<void> {
+    store.apply({ type: "companion/start-error", message: null });
+
+    // Taking the ship is the first semantic act of every start, even one whose
+    // own preflight later refuses — the player has said which loop they want.
+    autopilot?.abort();
+    claimShip("companion");
+
+    const preflight = evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, await fleetCompanionReads());
+    if (!preflight.canStart) {
+      store.apply({ type: "companion/start-error", message: preflight.blockedBy });
+      return;
+    }
+
+    store.apply({ type: "companion/started", role: request.role, startedAt: Date.now() });
+
+    if (!fleetCompanion) {
+      fleetCompanion = createFleetCompanion(makeFleetCompanionDeps());
+    }
+    fleetCompanion.start(request);
+    void fleetCompanion.run();
+  }
+
+  function pauseFleetCompanion(): void {
+    fleetCompanion?.pause();
+  }
+
+  function resumeFleetCompanion(): void {
+    if (!fleetCompanion) {
+      return;
+    }
+    fleetCompanion.resume();
+    void fleetCompanion.run();
+  }
+
+  function stopFleetCompanion(): void {
+    stopCompanionController();
   }
 
   // --- Player Bot Builder runner --------------------------------------------
@@ -8447,6 +8628,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     searchDestinations,
 
+    startFleetCompanion,
+    pauseFleetCompanion,
+    resumeFleetCompanion,
+    stopFleetCompanion,
     startMiningBot,
 
     pauseMiningBot() {

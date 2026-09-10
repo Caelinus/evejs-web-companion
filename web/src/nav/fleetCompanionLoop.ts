@@ -184,6 +184,16 @@ export interface FleetCompanionDeps {
   observe(): Promise<FleetCompanionObservation>;
   issue(action: FleetCompanionAction): Promise<void>;
   sleep(ms: number): Promise<void>;
+  /**
+   * Push the readout after EVERY state change — including `stop()`.
+   *
+   * ⚠ NOT OPTIONAL, and not merely for the panel. The store's `botStatus`
+   * record reads this loop's status to decide who is holding the ship. A loop
+   * that stops without reporting leaves the store believing it still holds the
+   * hull, so the next bot's claim looks like it stopped nothing and the readout
+   * never clears.
+   */
+  onProgress?(progress: FleetCompanionProgress): void;
 }
 
 /** What one tick decided to do. Phase 0 only ever waits. */
@@ -195,6 +205,23 @@ export interface FleetCompanionProgress {
   readonly action: string | null;
   readonly why: string | null;
   readonly role: FleetCompanionRole | null;
+  /** Whether this pilot is in a fleet at all. Null while the roster is unread. */
+  readonly inFleet: boolean | null;
+  /** Which authority the last decision came from, for the readout. */
+  readonly followingOrderFrom:
+    | "broadcast"
+    | "tag"
+    | "chat"
+    | "squad-board"
+    | "own-ladder"
+    | null;
+  readonly lastOrderHeard: string | null;
+  /**
+   * Whether this pilot's tag write would land. Three states, and the third is
+   * the point: a pilot silently unable to tag looks exactly like one with
+   * nothing to tag unless the readout can tell them apart.
+   */
+  readonly canTag: boolean | null;
   readonly failureReason: string | null;
 }
 
@@ -260,6 +287,10 @@ interface CompanionMemory {
   action: string | null;
   why: string | null;
   role: FleetCompanionRole | null;
+  inFleet: boolean | null;
+  followingOrderFrom: FleetCompanionProgress["followingOrderFrom"];
+  lastOrderHeard: string | null;
+  canTag: boolean | null;
   failureReason: string | null;
 }
 
@@ -270,6 +301,10 @@ function freshMemory(): CompanionMemory {
     action: null,
     why: null,
     role: null,
+    inFleet: null,
+    followingOrderFrom: null,
+    lastOrderHeard: null,
+    canTag: null,
     failureReason: null,
   };
 }
@@ -284,6 +319,10 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
    */
   let runToken = 0;
 
+  function report(): void {
+    deps.onProgress?.(snapshot());
+  }
+
   function snapshot(): FleetCompanionProgress {
     return {
       status: mem.status,
@@ -291,6 +330,10 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       action: mem.action,
       why: mem.why,
       role: mem.role,
+      inFleet: mem.inFleet,
+      followingOrderFrom: mem.followingOrderFrom,
+      lastOrderHeard: mem.lastOrderHeard,
+      canTag: mem.canTag,
       failureReason: mem.failureReason,
     };
   }
@@ -309,11 +352,16 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       mem.status = "error";
       mem.failureReason = error instanceof Error ? error.message : String(error);
       mem.why = "Could not read the ship.";
+      report();
       return { kind: "wait" };
     }
     if (token !== runToken || mem.status !== "running") {
       return { kind: "wait" };
     }
+    // The readout fields the observation already answers. Cheap, and it keeps
+    // the badge honest without a second read.
+    mem.inFleet = obs.inFleet ?? null;
+    mem.canTag = obs.canTag;
     const decision = decideCompanionAction(obs);
     mem.phase = decision.phase;
     mem.why = decision.why;
@@ -321,6 +369,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     if (decision.action.kind !== "wait") {
       await deps.issue(decision.action);
     }
+    report();
     return decision.action;
   }
 
@@ -331,15 +380,18 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       mem.role = next.role;
       mem.phase = "Standing by";
       runToken += 1;
+      report();
     },
     pause(): void {
       if (mem.status === "running") {
         mem.status = "paused";
+        report();
       }
     },
     resume(): void {
       if (mem.status === "paused") {
         mem.status = "running";
+        report();
       }
     },
     stop(): void {
@@ -349,6 +401,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       mem.phase = null;
       mem.action = null;
       mem.why = null;
+      report();
     },
     tick,
     async run(): Promise<void> {
