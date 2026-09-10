@@ -110,6 +110,8 @@ test("a confirmed solar-system change clears old scanner rows synchronously", ()
       stationID: null,
       structureID: null,
       shipID: 9001,
+      shipTypeID: null,
+      shipIsCapsule: null,
       shipMode: "STOP",
       shipSpeedFraction: 0,
     },

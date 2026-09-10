@@ -316,6 +316,8 @@ function onlineStore(over: Partial<Record<string, unknown>>): unknown {
       stationID: null,
       structureID: null,
       shipID: null,
+      shipTypeID: null,
+      shipIsCapsule: null,
       shipMode: null,
       shipSpeedFraction: null,
       ...over,

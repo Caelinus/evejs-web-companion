@@ -14694,6 +14694,59 @@ function parkBindSpec(solarSystemID) {
   };
 }
 
+/**
+ * Re-park beyonce the moment a session change lands, for the system we ARRIVED
+ * in — eagerly, instead of waiting for whatever flight command happens next.
+ *
+ * ⚠ WHY THIS EXISTS: THREE SHIPS. On stargate arrival EveJS clears the
+ * session's `beyonceBound` and then waits for the CLIENT to re-bind before it
+ * will send the ship any destiny (movement) state — a 480 x 25 ms wait, so
+ * about twelve seconds, after which it force-runs a ballpark bootstrap. Nothing
+ * server-side ever sets that flag; only an inbound `beyonce` bind or `Cmd*`
+ * does. Until one arrives the hull is INERT: it holds the spot it was spawned
+ * on and will not answer a movement order.
+ *
+ * The trap is that nothing else is affected. Lock, launch drones, engage — all
+ * are acknowledged with `ok: true` from a session that cannot move, and
+ * `/space/snapshot` and `/session/flight-status` read live SCENE truth, so they
+ * come back byte-identical to a healthy arrival. A bot has no way to notice. On
+ * 2026-09-09/10 three ships arrived on a gate, fought a spawn from a standstill
+ * believing they were fine, and only healed the bind at the moment they finally
+ * tried to flee — which is the same moment they died. Every one of the three
+ * binds landed within a second of the ship's first movement order.
+ *
+ * Binding is not a movement order and has no effect the player can see; it only
+ * restores what the jump took away. `awaitRouteTransition` has just emptied
+ * `boundHandles`, so this mints a fresh park for the NEW system rather than
+ * reusing the origin's stale OID.
+ *
+ * ⚠ NEVER LOAD-BEARING. A jump that arrived has arrived. If the re-park fails
+ * we are exactly where we were before this function existed — the next flight
+ * command binds lazily — so the failure is logged and swallowed, never returned.
+ */
+async function reparkAfterArrival(held, solarSystemID) {
+  const system = Number(solarSystemID);
+  if (!Number.isSafeInteger(system) || system <= 0 || !held.boundHandles) {
+    return;
+  }
+  const spec = parkBindSpec(system);
+  const bindPromise = gateway
+    .bindObject(spec.service, spec.method, spec.args, spec.kwargs, { userid: held.accountID }, held.bridgeSessionID)
+    .then((bound) => bound.boundHandle)
+    .catch((error) => {
+      if (held.boundHandles.get(spec.key) === bindPromise) {
+        held.boundHandles.delete(spec.key);
+      }
+      throw error;
+    });
+  held.boundHandles.set(spec.key, bindPromise);
+  try {
+    await bindPromise;
+  } catch (error) {
+    console.warn(`[repark] could not re-park beyonce in ${system} after arrival:`, error && error.message);
+  }
+}
+
 // Read the held session's current flight status (location + ship movement
 // state). A lost persistent session drops the held session (the page returns to
 // character select), as with every held call.
@@ -15261,6 +15314,11 @@ app.post("/api/bridge/flight/jump", requireAuth, async (req, res, next) => {
       sendTransitionTimeout(res, after, outcome.notifications);
       return;
     }
+    // Arrived. Re-park beyonce for the system we landed in BEFORE answering, so
+    // the ship can move the instant the caller acts on this response. See
+    // `reparkAfterArrival` — the barrier reports ready while the hull is still
+    // inert, and that gap is what killed three ships.
+    await reparkAfterArrival(held, after.flight && after.flight.solarSystemID);
     res.json({
       ok: true,
       result: outcome.result,

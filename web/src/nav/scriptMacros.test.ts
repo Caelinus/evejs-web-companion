@@ -40,7 +40,7 @@ function snapshot(entities: SpaceEntity[], shipOver: Partial<SpaceShipStatus> = 
 }
 
 function flight(over: Partial<FlightStatus> = {}): FlightStatus {
-  return { inSpace: true, docked: false, solarSystemID: 30000142, stationID: null, structureID: null, shipID: 9001, shipMode: null, shipSpeedFraction: null, ...over };
+  return { inSpace: true, docked: false, solarSystemID: 30000142, stationID: null, structureID: null, shipID: 9001, shipTypeID: null, shipIsCapsule: null, shipMode: null, shipSpeedFraction: null, ...over };
 }
 
 function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {

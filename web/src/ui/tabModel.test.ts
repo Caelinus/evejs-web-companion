@@ -23,6 +23,8 @@ function flightStatus(over: Partial<FlightStatus>): FlightStatus {
     stationID: null,
     structureID: null,
     shipID: null,
+    shipTypeID: null,
+    shipIsCapsule: null,
     shipMode: null,
     shipSpeedFraction: null,
     ...over,

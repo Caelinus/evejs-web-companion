@@ -64,7 +64,7 @@ function inSpaceBotStore(): ReturnType<typeof createClientStore> {
   });
   store.apply({
     type: "flight/status",
-    status: { inSpace: true, docked: false, solarSystemID: 30000142, stationID: null, structureID: null, shipID: 9001, shipMode: "orbit", shipSpeedFraction: 0.5 },
+    status: { inSpace: true, docked: false, solarSystemID: 30000142, stationID: null, structureID: null, shipID: 9001, shipTypeID: null, shipIsCapsule: null, shipMode: "orbit", shipSpeedFraction: 0.5 },
   });
   store.apply({ type: "space/snapshot", snapshot: SNAPSHOT as never, gateLinks: [] });
   store.apply({ type: "targeting/targets", targetIDs: [50001, 6660] });

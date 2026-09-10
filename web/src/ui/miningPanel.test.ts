@@ -65,6 +65,8 @@ function renderLoaded(options: {
       stationID: STATION_ID,
       structureID: null,
       shipID: SHIP_ID,
+      shipTypeID: null,
+      shipIsCapsule: null,
       shipMode: null,
       shipSpeedFraction: null,
     },

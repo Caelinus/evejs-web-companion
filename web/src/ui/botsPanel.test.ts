@@ -75,6 +75,8 @@ function procurerStore(options: { readonly minersOffline?: boolean } = {}) {
       stationID: STATION_ID,
       structureID: null,
       shipID: SHIP_ID,
+      shipTypeID: null,
+      shipIsCapsule: null,
       shipMode: null,
       shipSpeedFraction: null,
     },

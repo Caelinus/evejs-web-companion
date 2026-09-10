@@ -25,7 +25,7 @@ const DROPOFF = 60000007;
 const CARGO_TYPE = 3814;
 
 function flight(over: Partial<FlightStatus> = {}): FlightStatus {
-  return { inSpace: false, docked: true, solarSystemID: 30000142, stationID: AGENT_STATION, structureID: null, shipID: 9001, shipMode: null, shipSpeedFraction: null, ...over };
+  return { inSpace: false, docked: true, solarSystemID: 30000142, stationID: AGENT_STATION, structureID: null, shipID: 9001, shipTypeID: null, shipIsCapsule: null, shipMode: null, shipSpeedFraction: null, ...over };
 }
 
 function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
