@@ -15,6 +15,7 @@ import {
   actionsForRow,
   isDockableKind,
   isLootableKind,
+  isMineableCategory,
   isMiningGroup,
   MINING_GROUP_NAMES,
   SELECTION_GONE,
@@ -28,6 +29,8 @@ const A_ROCK: RowActionContext = {
   locked: false,
   acquiring: false,
   gateLink: null,
+  // Retail's Asteroid category — what the server stamps on ore, ice and gas.
+  categoryID: 25,
   minerCount: 2,
 };
 
@@ -143,15 +146,51 @@ test("no action is ever returned with an empty-string reason — null means usab
 
 // --- R30 slice E: Mine this --------------------------------------------------
 
-test("Mine this is offered on ANYTHING — what can be mined is the server's call", () => {
-  // A browser that pre-filtered on `kind === "asteroid"` would refuse ice and
-  // gas it has never been told about. The server owns that answer.
-  for (const kind of ["asteroid", "ship", "station", "cargo", null]) {
-    assert.ok(
-      ids({ ...A_ROCK, kind, locked: true }).includes("mine"),
-      `a ${kind ?? "kind-less"} row must still offer Mine this`,
+test("Mine this is NOT offered on a stargate — or on anything else filed as not-a-rock", () => {
+  // FOUND LIVE: a gate's panel carried a greyed-out "Mine this" reading "No
+  // mining equipment is switched on". Both halves were wrong to show together —
+  // the sentence blames your fitting for something no fitting could ever fix.
+  const gate: RowActionContext = {
+    ...A_ROCK,
+    kind: "celestial",
+    categoryID: 2, // Celestial: gates, planets, wrecks, cans
+    gateLink: GOOD_GATE,
+    locked: true,
+  };
+  assert.equal(ids(gate).includes("mine"), false, "a stargate is not something to mine");
+  assert.ok(ids(gate).includes("jump"), "and it still offers the verb that DOES apply");
+
+  // ⚠ THE KIND COULD NOT HAVE DECIDED THIS. A rock and a stargate are both
+  // `kind: "celestial"` — the gate above and the rock below differ only in the
+  // category the server stamped on them.
+  assert.ok(
+    ids({ ...A_ROCK, kind: "celestial", categoryID: 25, locked: true }).includes("mine"),
+    "a celestial in the Asteroid category is a rock, and keeps the verb",
+  );
+
+  for (const [what, categoryID] of [["a station", 3], ["another ship", 6], ["a drone", 18]] as const) {
+    assert.equal(
+      ids({ ...A_ROCK, categoryID, locked: true }).includes("mine"),
+      false,
+      `${what} must not offer Mine this`,
     );
   }
+});
+
+test("ice and gas keep Mine this — the reason it was left unfiltered is answered, not ignored", () => {
+  // Category 25 is the Asteroid category, and ore, ice and harvestable gas all
+  // live in it (`bridge/bayRouting.ts`, checked against the live static data).
+  // So filtering costs nothing a laser or a harvester can work.
+  assert.equal(isMineableCategory(25), true);
+  // And "we could not read the category" is never a refusal — that would be the
+  // client inventing a rule out of a fact it does not have.
+  assert.equal(isMineableCategory(null), true);
+  assert.equal(isMineableCategory(undefined), true);
+  assert.equal(isMineableCategory(2), false);
+  assert.ok(
+    ids({ ...A_ROCK, categoryID: null, locked: true }).includes("mine"),
+    "an unreadable category still offers the verb",
+  );
 });
 
 test("Mine this states WHICH rule is stopping it, and they are the server's own", () => {

@@ -411,6 +411,10 @@
       locked: $targeting.lockedTargetIDs.includes(picked),
       acquiring: $targeting.acquiringTargetIDs.includes(picked),
       gateLink: gateLinkFor($space.gateLinks, picked),
+      // Passed even though the multi-step filter below drops "Mine this"
+      // anyway: the ring and the bar must hand the SAME context to the same
+      // decider, or they will one day disagree about a verb neither filters.
+      categoryID: row.categoryID,
     }).filter((action) => isSingleCallAction(action.id));
   });
 
