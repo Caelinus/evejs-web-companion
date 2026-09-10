@@ -19023,12 +19023,14 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
 
 // ── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies: it keeps running when the tab that started it goes
-// away. Start names a saved Bot Builder script; the host runs it on a session
-// of its own. Everything is account-scoped through requireAuth, same as the
+// away. Start names a saved Bot Builder script, OR (kind: "companion") carries
+// a fleet companion's own typed request — the host runs either on a session of
+// its own. Everything is account-scoped through requireAuth, same as the
 // script library above.
 const BOT_START_STATUS = {
   BOTSCRIPT_INVALID: 400,
   BOTSCRIPT_REVISION_REQUIRED: 400,
+  BOTCOMPANION_INVALID: 400,
   BOT_GRANT_REQUIRED: 400,
   BOT_GRANT_INVALID: 400,
   BOT_GRANT_STALE: 409,
@@ -19235,22 +19237,36 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
   try {
     const body = req.body || {};
     const characterID = Number(body.characterID || 0);
-    const scriptID = String(body.scriptID || "");
+    // Absent = "script", matching botHost's own default for an unmarked
+    // request — the same compatibility rule a persisted roster row with no
+    // `kind` field gets on resume.
+    const kind = body.kind === "companion" ? "companion" : "script";
     if (!Number.isSafeInteger(characterID) || characterID <= 0) {
       res.status(400).json({ ok: false, error: "INVALID_CHARACTER", message: "A positive characterID is required." });
       return;
     }
     // The character must be the caller's — the same ownership read select does.
+    // Identical for both kinds: owning the character is the one gate that
+    // never differs by what is about to fly it.
     const character = await store.getCharacterForAccount(req.account.accountID, characterID);
     if (!character) {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
-    const record = botScripts.get(scriptID);
-    if (!record) {
-      res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
-      return;
+
+    let record = null;
+    if (kind === "script") {
+      const scriptID = String(body.scriptID || "");
+      record = botScripts.get(scriptID);
+      if (!record) {
+        res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
+        return;
+      }
     }
+    // A companion has no library entry to look up here — its "record" is the
+    // request in the body, and botHost.start() is the one place that decodes
+    // and trusts it (decodeFleetCompanionRequestValue).
+
     // THE HANDOVER IS SERVER-SIDE AND ATOMIC: when the caller's OWN session is
     // the one flying this character, release it here — then the bot exists the
     // moment this request answers. The old shape (tab releases itself, THEN
@@ -19258,20 +19274,31 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
     // login screen while no bot was registered yet, so its bot-flying marks
     // polled empty until the next tick. Only the caller's own hull moves:
     // any OTHER session flying the character is still refused by the host's
-    // CHARACTER_IN_USE check below.
+    // CHARACTER_IN_USE check below. Identical for a script or a companion —
+    // this is a hull handover, not a behaviour choice.
     const callerHeld = bridgeSessions.get(req.webSessionID);
     if (callerHeld && Number(callerHeld.characterID) === characterID) {
       await releaseHeldBridgeSession(req.webSessionID);
     }
-    const outcome = await botHost.start({
-      account: req.account,
-      characterID,
-      scriptID: record.scriptID,
-      scriptName: record.name,
-      scriptRev: record.rev,
-      doc: record.doc,
-      grant: body.grant,
-    });
+    const outcome =
+      kind === "companion"
+        ? await botHost.start({
+            account: req.account,
+            characterID,
+            kind: "companion",
+            request: body.request,
+            grant: body.grant,
+          })
+        : await botHost.start({
+            account: req.account,
+            characterID,
+            kind: "script",
+            scriptID: record.scriptID,
+            scriptName: record.name,
+            scriptRev: record.rev,
+            doc: record.doc,
+            grant: body.grant,
+          });
     if (!outcome.ok) {
       res.status(BOT_START_STATUS[outcome.code] || 500).json({
         ok: false,

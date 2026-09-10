@@ -23,6 +23,24 @@ const IDLE_SLICE = Object.freeze({
   startError: null,
 });
 
+// FleetCompanionState's shape (web/src/store/clientStore.ts) — deliberately
+// missing stepPath/pauseReason/note/lastAlert, which IDLE_SLICE above has and
+// the companion slice never will. See applySnapshot()'s comment in botHost.js.
+const IDLE_COMPANION_SLICE = Object.freeze({
+  status: "idle",
+  phase: null,
+  action: null,
+  why: null,
+  role: null,
+  inFleet: null,
+  followingOrderFrom: null,
+  lastOrderHeard: null,
+  canTag: null,
+  startedAt: null,
+  startError: null,
+  failureReason: null,
+});
+
 function makeFakeStack(log) {
   return async () => ({
     decodeScriptValue: (doc) =>
@@ -53,11 +71,29 @@ function makeFakeStack(log) {
         },
       };
     },
+    // The companion's own risk-derivation and codec door — a plain fake of
+    // companionRunPolicy.ts, not the real module (that module is proven live
+    // on its own; these tests pin the HOST's obligations around it).
+    analyzeCompanionRunPolicy: (request) => ({
+      riskClasses:
+        request && (request.useDrones === true || (request.defenseModuleIDs || []).length > 0)
+          ? ["fleet", "social", "combat"]
+          : ["fleet", "social"],
+      restartSafe: true,
+    }),
+    decodeFleetCompanionRequestValue: (value) => {
+      const KNOWN_ROLES = ["dps", "logi", "tackle", "support"];
+      if (!value || typeof value !== "object" || !KNOWN_ROLES.includes(value.role)) {
+        return { ok: false, refusal: "That companion setup could not be read." };
+      }
+      return { ok: true, request: value };
+    },
     createClientStore: () => {
       const listeners = new Set();
       const state = {
         station: { online: null },
         customBot: { ...IDLE_SLICE },
+        companion: { ...IDLE_COMPANION_SLICE },
         flight: { status: null },
         space: { snapshot: null },
         mining: { holds: [] },
@@ -71,6 +107,7 @@ function makeFakeStack(log) {
         },
         station: { get: () => state.station },
         customBot: { get: () => state.customBot },
+        companion: { get: () => state.companion },
         flight: { get: () => state.flight },
         space: { get: () => state.space },
         mining: { get: () => state.mining },
@@ -95,6 +132,15 @@ function makeFakeStack(log) {
         },
         stopCustomBot() {
           log.push(["stopCustomBot"]);
+        },
+        async startFleetCompanion(request) {
+          log.push(["startFleetCompanion", request]);
+          store._set({
+            companion: { ...IDLE_COMPANION_SLICE, status: "running", phase: "Flying", role: request.role },
+          });
+        },
+        stopFleetCompanion() {
+          log.push(["stopFleetCompanion"]);
         },
         async logout() {
           log.push(["logout"]);
@@ -144,6 +190,28 @@ const START = {
   scriptRev: 1,
   doc: { valid: true },
   grant: { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 720 },
+};
+
+// A companion request has no revision series (see COMPANION_GRANT_SCRIPT_REV's
+// comment in botHost.js) — its grant's `scriptRev` is always the sentinel `1`.
+const COMPANION_REQUEST = Object.freeze({
+  role: "dps",
+  defenseModuleIDs: [],
+  fleeHealthFloor: 0.3,
+  capacitorFloor: 0.2,
+  maxFleeAttempts: 3,
+  useDrones: false,
+  droneRedeployHoldOffSeconds: 10,
+  attemptsTagging: false,
+  obeys: ["broadcast", "tag"],
+  chatCommandSenders: [],
+});
+const COMPANION_START = {
+  account: ACCOUNT,
+  characterID: 140000002,
+  kind: "companion",
+  request: COMPANION_REQUEST,
+  grant: { scriptRev: 1, riskClasses: ["fleet", "social"], maxRuntimeMinutes: 720 },
 };
 
 function settle() {
@@ -343,6 +411,7 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
   const persisted = readRosterFile(rosterPath);
   assert.equal(persisted.length, 1);
   assert.deepEqual(persisted[0], {
+    kind: "script",
     accountID: 7,
     username: "test",
     characterID: 140000001,
@@ -484,6 +553,35 @@ test("legacy unpinned roster rows require a manual start", async () => {
   assert.equal(row.status, "error");
   assert.match(String(row.why), /no pinned script revision/i);
   assert.equal(host.claimedBy(140000001), null);
+});
+
+test("an on-disk roster row with no `kind` field resumes exactly as a script always has", async () => {
+  // A real pre-existing roster file, written by a version of this module that
+  // had no `kind` field at all — the compatibility requirement decision 3
+  // (docs/fleet-companion-handoff.md) names explicitly: an old row must still
+  // resume exactly as it does today, not be refused for the field it lacks.
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(START);
+  const raw = JSON.parse(fs.readFileSync(rosterPath, "utf8"));
+  for (const row of raw.bots) {
+    delete row.kind;
+  }
+  fs.writeFileSync(rosterPath, JSON.stringify(raw), "utf8");
+
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async () => ({ ...ACCOUNT }),
+    loadScript: (scriptID) =>
+      scriptID === "s1" ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } } : null,
+  });
+  await after.resume();
+  const listed = after.list(7);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].kind, "script");
+  assert.equal(listed[0].status, "running");
+  assert.notEqual(listed[0].resumedAt, null);
+  assert.equal(after.claimedBy(140000001), listed[0].botID);
 });
 
 test("vitals sampling projects ship health, hold fill and the bot's words", async () => {
@@ -692,4 +790,177 @@ test("list(accountID) stays account-filtered, ended runs included", async () => 
   const otherRows = host.list(8);
   assert.equal(otherRows.length, 1);
   assert.equal(otherRows[0].botID, ownedByOther.bot.botID);
+});
+
+// ── Fleet companion (kind: "companion") ──────────────────────────────────────
+// A companion has no saved-script library entry: its request travels with the
+// start call, or (on resume) IS the persisted roster row itself — see
+// persistRoster's comment in botHost.js. These pin the kind branch through
+// start(), persistRoster(), resume(), applySnapshot(), and the two-switch stop
+// distinction (stopFleetCompanion vs stopCustomBot) in stop()/finalize().
+
+test("a companion flies on its own session, through startFleetCompanion, never startCustomBot", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  const outcome = await host.start(COMPANION_START);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.bot.kind, "companion");
+  assert.equal(outcome.bot.status, "running");
+  // Reused roster slots (docs/fleet-companion-handoff.md, "3. Extend
+  // botHost"): a fixed scriptID literal (no library entry exists to name),
+  // and a scriptName derived from the request's role.
+  assert.equal(outcome.bot.scriptID, "companion");
+  assert.equal(outcome.bot.scriptName, "Fleet companion (DPS)");
+  assert.ok(log.some((row) => row[0] === "startFleetCompanion"));
+  assert.equal(log.some((row) => row[0] === "startCustomBot"), false);
+});
+
+test("stopping a companion calls stopFleetCompanion, never stopCustomBot", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  const started = await host.start(COMPANION_START);
+  const stopped = await host.stop(started.bot.botID, 7);
+  assert.equal(stopped.ok, true);
+  assert.ok(log.some((row) => row[0] === "stopFleetCompanion"), "the companion's own stop switch must fire");
+  assert.equal(log.some((row) => row[0] === "stopCustomBot"), false, "the wrong switch is a silent no-op");
+  assert.equal(host.claimedBy(140000002), null);
+});
+
+test("a companion that ends on its own (the companion slice, not customBot) releases the character", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  await host.start(COMPANION_START);
+  const store = lastStore(log);
+  store._set({ companion: { ...IDLE_COMPANION_SLICE, status: "stopped", why: "Fleet gone." } });
+  await settle();
+  assert.equal(host.claimedBy(140000002), null);
+  assert.ok(log.some((row) => row[0] === "logout"));
+  const after = host.list(7)[0];
+  assert.equal(after.status, "stopped");
+  assert.equal(after.why, "Fleet gone.");
+});
+
+test("a companion's progress maps status/phase/why honestly, and leaves script-shaped fields null", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  await host.start(COMPANION_START);
+  const store = lastStore(log);
+  store._set({
+    companion: {
+      ...IDLE_COMPANION_SLICE,
+      status: "running",
+      phase: "Escorting",
+      action: "wait",
+      why: "Waiting on the fleet.",
+      role: "dps",
+    },
+  });
+  await settle();
+  const row = host.list(7)[0];
+  assert.equal(row.status, "running");
+  assert.equal(row.phase, "Escorting");
+  assert.equal(row.why, "Waiting on the fleet.");
+  // FleetCompanionState (web/src/store/clientStore.ts) has no stepPath,
+  // pauseReason, or note — applySnapshot() must leave these at their initial
+  // null rather than inventing a value for a column the companion has no
+  // honest answer to.
+  assert.equal(row.stepPath, null);
+  assert.equal(row.pauseReason, null);
+  assert.equal(row.note, null);
+});
+
+test("the persisted roster row for a companion carries kind, the flat request, and its hash — not a script doc", async () => {
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ persistPath: rosterPath });
+  const started = await host.start(COMPANION_START);
+  const persisted = readRosterFile(rosterPath);
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].kind, "companion");
+  assert.equal(persisted[0].scriptID, "companion");
+  assert.equal(persisted[0].scriptName, "Fleet companion (DPS)");
+  // A companion request has no revision series — this is the sentinel
+  // COMPANION_GRANT_SCRIPT_REV, never a real revision (see its comment).
+  assert.equal(persisted[0].scriptRev, 1);
+  assert.deepEqual(persisted[0].request, COMPANION_REQUEST);
+  assert.match(persisted[0].scriptHash, /^[a-f0-9]{64}$/);
+  assert.equal(persisted[0].scriptHash, started.bot.scriptHash);
+  assert.deepEqual(persisted[0].riskClasses, ["fleet", "social"]);
+});
+
+test("resume rebuilds a companion from its persisted request alone — no library lookup", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(COMPANION_START);
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
+    // A companion resume must never consult the saved-script library — there
+    // is nothing there for it to find.
+    loadScript: () => {
+      throw new Error("a companion resume must not look up a saved script");
+    },
+  });
+  await after.resume();
+  const listed = after.list(7);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].kind, "companion");
+  assert.equal(listed[0].status, "running");
+  assert.notEqual(listed[0].resumedAt, null);
+  assert.equal(after.claimedBy(140000002), listed[0].botID);
+});
+
+test("resume refuses a persisted companion request that no longer decodes", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(COMPANION_START);
+  const raw = JSON.parse(fs.readFileSync(rosterPath, "utf8"));
+  raw.bots[0].request = { role: "not-a-real-role" };
+  fs.writeFileSync(rosterPath, JSON.stringify(raw), "utf8");
+
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async () => ({ ...ACCOUNT }),
+  });
+  await after.resume();
+  const [row] = after.list(7);
+  assert.equal(row.status, "error");
+  assert.match(String(row.why), /restarted/);
+  assert.equal(after.claimedBy(140000002), null);
+  // The failure is dropped from the roster file — it must not retry forever.
+  assert.equal(readRosterFile(rosterPath).length, 0);
+});
+
+test("an undecodable companion request is refused before any session exists", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  const outcome = await host.start({ ...COMPANION_START, request: { role: "not-a-real-role" } });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, "BOTCOMPANION_INVALID");
+  assert.equal(log.some((row) => row[0] === "selectCharacter"), false);
+});
+
+test("a companion whose persisted request re-derives DIFFERENT risk classes than its grant is refused on resume", async () => {
+  // The check decision 4 says must still earn its place: re-derive risk
+  // classes from the persisted request (never trust the stored riskClasses
+  // column) and compare against what the grant carries via
+  // validateBotLaunchGrant — unchanged.
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(COMPANION_START);
+  const raw = JSON.parse(fs.readFileSync(rosterPath, "utf8"));
+  // The request on disk now asks for drones — analyzeCompanionRunPolicy would
+  // add "combat" — but the persisted grant's riskClasses were pinned to the
+  // ORIGINAL (drone-less) request and were never updated to match.
+  raw.bots[0].request = { ...COMPANION_REQUEST, useDrones: true };
+  fs.writeFileSync(rosterPath, JSON.stringify(raw), "utf8");
+
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async () => ({ ...ACCOUNT }),
+  });
+  await after.resume();
+  const [row] = after.list(7);
+  assert.equal(row.status, "error");
+  assert.match(String(row.why), /restarted/);
+  assert.equal(after.claimedBy(140000002), null);
 });

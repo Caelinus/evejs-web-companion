@@ -39,6 +39,7 @@ import type {
 } from "../store/types.ts";
 import type { NameRef } from "../store/names.ts";
 import type { BotLaunchGrant, BotRiskClass } from "../bots/runPolicy.ts";
+import type { FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
 import type {
   ScannerOperationsSnapshot,
   ScannerProbeOperation,
@@ -3100,6 +3101,33 @@ export async function startServerBot(
   const data = await postJson(
     "/api/bots/start",
     { characterID, scriptID, grant: grant as unknown as JsonValue },
+    options,
+  );
+  return asServerBot(data.bot ?? null);
+}
+
+/**
+ * The companion sibling of `startServerBot` — same route, same shape, same
+ * grant handling; only what is being launched differs. A companion request
+ * has no script library entry to name by id, so this carries the flat
+ * request itself in place of a `scriptID`, and `kind: "companion"` tells
+ * `/api/bots/start` (src/server.js) which branch to take. `botHost.start()`
+ * (src/botHost.js) is the one place that decodes and trusts it.
+ */
+export async function startServerCompanion(
+  characterID: number,
+  request: FleetCompanionRequest,
+  grant: BotLaunchGrant,
+  options: ApiOptions = {},
+): Promise<ServerBot> {
+  const data = await postJson(
+    "/api/bots/start",
+    {
+      characterID,
+      kind: "companion",
+      request: request as unknown as JsonValue,
+      grant: grant as unknown as JsonValue,
+    },
     options,
   );
   return asServerBot(data.bot ?? null);

@@ -53,8 +53,43 @@ const { pathToFileURL } = require("url");
 // using one as authority would let an ordinary browser impersonate the host.
 const BOT_HEADER = "x-evejs-bot-claim";
 
-// Terminal customBot-slice statuses: the runner has let go of the ship.
+// Terminal statuses: the runner has let go of the ship. Shared verbatim by
+// the customBot slice and the companion slice (FleetCompanionRunState) — both
+// name the same five states, so one set serves either kind's subscription.
 const ENDED_STATUSES = new Set(["stopped", "error", "idle"]);
+
+// A companion request has no revision SERIES: there is no library, no "rev 3
+// of this companion setup", just the one request the operator wrote. The
+// canonical hash (hashScript(request), below) is that request's real
+// identity. This sentinel exists ONLY to fill the `scriptRev` slot
+// `validateBotLaunchGrant` (web/src/bots/runPolicy.ts) already compares a
+// grant against, so a companion's grant stays the exact shape a script's is,
+// unchanged, rather than growing a second field for a version that does not
+// exist. See docs/fleet-companion-handoff.md, "3. Extend botHost", "One
+// divergence to make deliberately".
+//
+// Any caller that builds a companion's launch grant (today, nothing does —
+// the start control is a later commit) must send this exact value as
+// `grant.scriptRev`; there is no second "correct" revision to invent.
+const COMPANION_GRANT_SCRIPT_REV = 1;
+
+// The companion's roster-row `scriptName` — the slot a player reads in the
+// Server Bots list — derived from the request's role rather than authored,
+// because a companion request has no name field of its own (unlike a saved
+// script). Not exhaustive by construction on purpose: an unrecognised role
+// cannot reach here at all, since decodeFleetCompanionRequestValue refuses
+// any value outside FLEET_COMPANION_ROLES before start() ever calls this.
+const COMPANION_ROLE_LABELS = Object.freeze({
+  dps: "DPS",
+  logi: "Logistics",
+  tackle: "Tackle",
+  support: "Support",
+});
+
+function companionScriptName(role) {
+  const label = COMPANION_ROLE_LABELS[role] || "companion";
+  return `Fleet companion (${label})`;
+}
 
 // How often each running bot's ship vitals are sampled for the landing-page
 // readout. Plain reads through the bot's own flow — the same polls an open
@@ -81,12 +116,13 @@ function defaultLoadStack() {
     const webSrc = path.resolve(__dirname, "..", "web", "src");
     const webUrl = (rel) => pathToFileURL(path.join(webSrc, rel)).href;
     stackPromise = (async () => {
-      const [sessionToken, clientStore, flow, codec, runPolicy] = await Promise.all([
+      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy] = await Promise.all([
         import(webUrl("app/sessionToken.ts")),
         import(webUrl("store/clientStore.ts")),
         import(webUrl("app/flow.ts")),
         import(webUrl("bots/scriptCodec.ts")),
         import(webUrl("bots/runPolicy.ts")),
+        import(webUrl("bots/companionRunPolicy.ts")),
       ]);
       // The server has no sessionStorage; force the in-memory fallback. Bots
       // never use the global token anyway (perSessionToken), but the module
@@ -98,6 +134,10 @@ function defaultLoadStack() {
         decodeScriptValue: codec.decodeScriptValue,
         analyzeBotRunPolicy: runPolicy.analyzeBotRunPolicy,
         validateBotLaunchGrant: runPolicy.validateBotLaunchGrant,
+        // The companion's own risk-derivation and codec door — same BotRunPolicy
+        // shape, same validateBotLaunchGrant, per companionRunPolicy.ts's header.
+        analyzeCompanionRunPolicy: companionRunPolicy.analyzeCompanionRunPolicy,
+        decodeFleetCompanionRequestValue: companionRunPolicy.decodeFleetCompanionRequestValue,
       };
     })();
     stackPromise.catch(() => {
@@ -184,7 +224,8 @@ function createBotHost(options) {
       const bots = [];
       for (const record of records.values()) {
         if (!record.finalized) {
-          bots.push({
+          const row = {
+            kind: record.kind === "companion" ? "companion" : "script",
             accountID: record.accountID,
             username: record.username,
             characterID: record.characterID,
@@ -197,7 +238,18 @@ function createBotHost(options) {
             maxRuntimeMinutes: record.maxRuntimeMinutes,
             expiresAt: record.expiresAt,
             startedAt: record.startedAt,
-          });
+          };
+          if (record.kind === "companion") {
+            // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
+            // "3. Extend botHost"): a script doc is NOT persisted, because the
+            // saved-script library is the authority and loadScript re-binds a
+            // restart to the exact stored revision (see the comment on the
+            // `doc` branch in start(), below). A companion request has no
+            // library — the roster row IS the authority, so the flat request
+            // is persisted right alongside its hash rather than a reference.
+            row.request = record.companionRequest;
+          }
+          bots.push(row);
         }
       }
       fs.mkdirSync(path.dirname(persistPath), { recursive: true });
@@ -230,6 +282,9 @@ function createBotHost(options) {
       accountID: record.accountID,
       characterID: record.characterID,
       characterName: record.characterName,
+      // "script" when absent, matching the same default the roster row and
+      // resume() give an on-disk record with no `kind` field at all.
+      kind: record.kind === "companion" ? "companion" : "script",
       resumedAt: record.resumedAt,
       vitals: record.vitals,
       scriptID: record.scriptID,
@@ -265,10 +320,26 @@ function createBotHost(options) {
     record.status = snapshot.status;
     record.phase = snapshot.phase;
     record.why = snapshot.why;
+    record.startError = snapshot.startError ?? null;
+    if (record.kind === "companion") {
+      // The companion slice (FleetCompanionState, web/src/store/clientStore.ts)
+      // has no stepPath, pauseReason, note, or lastAlert — those are
+      // script-runner-shaped fields FleetCompanionProgress simply does not
+      // carry (fleetCompanionLoop.ts). Leaving the record's own fields
+      // untouched keeps them at their initial `null` rather than inventing a
+      // value for a column the companion has no honest answer to.
+      //
+      // The companion's OWN distinguishing fields — action, role, inFleet,
+      // followingOrderFrom, lastOrderHeard, canTag, failureReason — are read
+      // by the store subscription below but have no slot on this record or on
+      // publicBot()'s wire shape yet: that shape is `ServerBot`
+      // (web/src/app/api.ts) and web/src/ui/**, both out of scope for this
+      // change. Nothing here fabricates a place for them either.
+      return;
+    }
     record.stepPath = snapshot.stepPath;
     record.pauseReason = snapshot.pauseReason;
     record.note = snapshot.note;
-    record.startError = snapshot.startError ?? null;
     if (snapshot.lastAlert) {
       record.lastAlert = { message: String(snapshot.lastAlert.message), atMs: Number(snapshot.lastAlert.atMs) };
     }
@@ -330,7 +401,15 @@ function createBotHost(options) {
     record.store = null;
     if (flow) {
       try {
-        flow.stopCustomBot();
+        // Two different stop switches on the SAME flow object — stopCustomBot
+        // only reaches the scriptRunner, stopFleetCompanion only the companion
+        // controller. Calling the wrong one for this record's kind is a no-op
+        // that leaves the actual loop running, unstoppable, past this point.
+        if (record.kind === "companion") {
+          flow.stopFleetCompanion();
+        } else {
+          flow.stopCustomBot();
+        }
       } catch {}
       try {
         // Releases the bridge session — the character goes offline and the
@@ -345,16 +424,19 @@ function createBotHost(options) {
   async function start({
     account,
     characterID,
+    kind = "script",
     scriptID,
     scriptName,
     scriptRev,
     doc,
+    request,
     grant,
     resumed = false,
     expectedScriptRev = null,
     expectedScriptHash = null,
     expectedExpiresAt = null,
   }) {
+    const isCompanion = kind === "companion";
     let stack;
     try {
       stack = await loadStack();
@@ -363,34 +445,87 @@ function createBotHost(options) {
       return { ok: false, code: "BOT_STACK_UNAVAILABLE", message: "The server could not load the bot engine." };
     }
 
-    // A stored bot doc is untrusted bytes like any other; the codec is the door.
-    const decoded = stack.decodeScriptValue(doc);
-    if (!decoded.ok) {
-      return { ok: false, code: "BOTSCRIPT_INVALID", message: decoded.refusal };
+    let normalizedRev;
+    let normalizedHash;
+    let runPolicy;
+    let decodedDoc = null;
+    let decodedRequest = null;
+    let recordScriptID;
+    let recordScriptName;
+
+    if (isCompanion) {
+      // The persisted (or freshly submitted) request is untrusted bytes like
+      // any other — decodeFleetCompanionRequestValue is its ONE gate, mirroring
+      // decodeScriptValue below. Not a single field of it is trusted before
+      // this call returns ok.
+      const decoded = stack.decodeFleetCompanionRequestValue(request);
+      if (!decoded.ok) {
+        return { ok: false, code: "BOTCOMPANION_INVALID", message: decoded.refusal };
+      }
+      decodedRequest = decoded.request;
+      // See COMPANION_GRANT_SCRIPT_REV's comment: a companion request has no
+      // revision series, so this sentinel — never a real version — fills the
+      // slot validateBotLaunchGrant already compares. The canonical hash is
+      // the request's actual identity.
+      normalizedRev = COMPANION_GRANT_SCRIPT_REV;
+      normalizedHash = hashScript(decodedRequest);
+      if (
+        expectedScriptRev !== null &&
+        (normalizedRev !== Number(expectedScriptRev) || normalizedHash !== String(expectedScriptHash || ""))
+      ) {
+        return {
+          ok: false,
+          code: "BOT_SCRIPT_CHANGED",
+          message:
+            "The saved companion setup changed after this run was authorized. Start it again to review the new version.",
+        };
+      }
+      // Re-derived from the decoded request every time — on a fresh start AND
+      // on resume — never trusted off the persisted row. This is the check
+      // decision 4 says must still earn its place: the persisted request must
+      // re-derive to EXACTLY the risk classes the grant carries.
+      runPolicy = stack.analyzeCompanionRunPolicy(decodedRequest);
+      // Reuse the script's roster slots (docs/fleet-companion-handoff.md,
+      // "3. Extend botHost") rather than inventing companion-shaped fields:
+      // scriptID is a fixed literal (there is no library entry to look up),
+      // scriptName is derived from the request's role so a player reads a
+      // sensible pilot name in the roster instead of a blank column.
+      recordScriptID = "companion";
+      recordScriptName = companionScriptName(decodedRequest.role);
+    } else {
+      // A stored bot doc is untrusted bytes like any other; the codec is the door.
+      const decoded = stack.decodeScriptValue(doc);
+      if (!decoded.ok) {
+        return { ok: false, code: "BOTSCRIPT_INVALID", message: decoded.refusal };
+      }
+      decodedDoc = decoded.doc;
+      normalizedRev = Number(scriptRev);
+      if (!Number.isSafeInteger(normalizedRev) || normalizedRev <= 0) {
+        return { ok: false, code: "BOTSCRIPT_REVISION_REQUIRED", message: "The saved bot revision is missing." };
+      }
+      normalizedHash = hashScript(decodedDoc);
+      if (
+        expectedScriptRev !== null &&
+        (normalizedRev !== Number(expectedScriptRev) || normalizedHash !== String(expectedScriptHash || ""))
+      ) {
+        return {
+          ok: false,
+          code: "BOT_SCRIPT_CHANGED",
+          message: "The saved bot changed after this run was authorized. Start it again to review the new version.",
+        };
+      }
+      runPolicy = stack.analyzeBotRunPolicy(decodedDoc);
+      if (runPolicy.containsSubBots) {
+        return {
+          ok: false,
+          code: "BOT_SUBBOT_GRANT_UNAVAILABLE",
+          message: "A server bot cannot yet grant permissions to included saved bots. Inline them before starting this run.",
+        };
+      }
+      recordScriptID = scriptID;
+      recordScriptName = scriptName;
     }
-    const normalizedRev = Number(scriptRev);
-    if (!Number.isSafeInteger(normalizedRev) || normalizedRev <= 0) {
-      return { ok: false, code: "BOTSCRIPT_REVISION_REQUIRED", message: "The saved bot revision is missing." };
-    }
-    const normalizedHash = hashScript(decoded.doc);
-    if (
-      expectedScriptRev !== null &&
-      (normalizedRev !== Number(expectedScriptRev) || normalizedHash !== String(expectedScriptHash || ""))
-    ) {
-      return {
-        ok: false,
-        code: "BOT_SCRIPT_CHANGED",
-        message: "The saved bot changed after this run was authorized. Start it again to review the new version.",
-      };
-    }
-    const runPolicy = stack.analyzeBotRunPolicy(decoded.doc);
-    if (runPolicy.containsSubBots) {
-      return {
-        ok: false,
-        code: "BOT_SUBBOT_GRANT_UNAVAILABLE",
-        message: "A server bot cannot yet grant permissions to included saved bots. Inline them before starting this run.",
-      };
-    }
+
     const grantVerdict = stack.validateBotLaunchGrant(grant, normalizedRev, runPolicy);
     if (!grantVerdict.ok) {
       return { ok: false, code: grantVerdict.code, message: grantVerdict.message };
@@ -433,8 +568,9 @@ function createBotHost(options) {
       username: String(account.username || ""),
       characterID,
       characterName: null,
-      scriptID,
-      scriptName,
+      kind: isCompanion ? "companion" : "script",
+      scriptID: recordScriptID,
+      scriptName: recordScriptName,
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
       restartSafe: runPolicy.restartSafe === true,
@@ -459,6 +595,9 @@ function createBotHost(options) {
       unsubscribe: null,
       claimSecret: createClaimSecret(),
       deadlineTimer: null,
+      // The roster row's authority for a companion (see persistRoster's
+      // comment) — null for a script, which is authored by the library instead.
+      companionRequest: isCompanion ? decodedRequest : null,
     };
     // Claim BEFORE the first await — two concurrent starts must not both win,
     // and the select guard must already know this bot when its select arrives.
@@ -490,21 +629,27 @@ function createBotHost(options) {
       record.characterName = online ? online.characterName : null;
 
       // The readout is store-driven exactly like the in-tab panel: project the
-      // customBot slice onto the record, and treat the runner letting go of
-      // the ship as the end of the bot.
+      // customBot (or companion) slice onto the record, and treat the loop
+      // letting go of the ship as the end of the bot.
       let sawRunning = false;
       record.unsubscribe = store.subscribe((state) => {
-        applySnapshot(record, state.customBot);
-        if (state.customBot.status === "running" || state.customBot.status === "paused") {
+        const snapshot = isCompanion ? state.companion : state.customBot;
+        applySnapshot(record, snapshot);
+        if (snapshot.status === "running" || snapshot.status === "paused") {
           sawRunning = true;
         }
-        if (sawRunning && ENDED_STATUSES.has(state.customBot.status)) {
+        if (sawRunning && ENDED_STATUSES.has(snapshot.status)) {
           void finalize(record);
         }
       });
 
-      await flow.startCustomBot(decoded.doc);
-      applySnapshot(record, store.customBot.get());
+      if (isCompanion) {
+        await flow.startFleetCompanion(decodedRequest);
+        applySnapshot(record, store.companion.get());
+      } else {
+        await flow.startCustomBot(decodedDoc);
+        applySnapshot(record, store.customBot.get());
+      }
       if (record.startError !== null) {
         await finalize(record);
         return { ok: false, code: "BOT_START_FAILED", message: record.startError };
@@ -543,7 +688,14 @@ function createBotHost(options) {
     if (!record.finalized) {
       if (record.flow) {
         try {
-          record.flow.stopCustomBot();
+          // Same two-switch distinction as finalize() below — stop the
+          // controller this record actually holds, not the script runner by
+          // default.
+          if (record.kind === "companion") {
+            record.flow.stopFleetCompanion();
+          } else {
+            record.flow.stopCustomBot();
+          }
         } catch {}
       }
       record.status = "stopped";
@@ -673,6 +825,7 @@ function createBotHost(options) {
       username: String(row.username || ""),
       characterID: Number(row.characterID),
       characterName: null,
+      kind: row.kind === "companion" ? "companion" : "script",
       scriptID: String(row.scriptID || ""),
       scriptName: String(row.scriptName || "Untitled bot"),
       scriptRev: Number(row.scriptRev || 0),
@@ -712,19 +865,31 @@ function createBotHost(options) {
     const rows = readRoster();
     for (const row of rows) {
       const characterID = Number(row.characterID);
+      const kind = row.kind === "companion" ? "companion" : "script";
       try {
         const account = await loadAccount(String(row.username || ""));
         if (!account || account.banned) {
           recordResumeFailure(row, "the account is gone or banned.");
           continue;
         }
-        const script = loadScript(String(row.scriptID || ""));
-        if (!script) {
-          recordResumeFailure(row, "the saved bot no longer exists.");
-          continue;
+        let script = null;
+        if (kind === "script") {
+          script = loadScript(String(row.scriptID || ""));
+          if (!script) {
+            recordResumeFailure(row, "the saved bot no longer exists.");
+            continue;
+          }
         }
+        // scriptHash is the canonical identity either way — a real script
+        // hash for a script row, hashScript(request) for a companion row
+        // (see persistRoster's comment) — so this check is unchanged by kind.
         if (!Number.isSafeInteger(Number(row.scriptRev)) || !/^[a-f0-9]{64}$/.test(String(row.scriptHash || ""))) {
-          recordResumeFailure(row, "its older restart record has no pinned script revision. Start it again manually.");
+          recordResumeFailure(
+            row,
+            kind === "companion"
+              ? "its older restart record has no pinned request hash. Start it again manually."
+              : "its older restart record has no pinned script revision. Start it again manually.",
+          );
           continue;
         }
         if (row.restartSafe !== true) {
@@ -735,23 +900,42 @@ function createBotHost(options) {
           recordResumeFailure(row, "its approved run time has ended. Start it again manually.");
           continue;
         }
-        const outcome = await start({
-          account,
-          characterID,
-          scriptID: script.scriptID,
-          scriptName: script.name,
-          scriptRev: script.rev,
-          doc: script.doc,
-          grant: {
-            scriptRev: row.scriptRev,
-            riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses : [],
-            maxRuntimeMinutes: row.maxRuntimeMinutes,
-          },
-          resumed: true,
-          expectedScriptRev: row.scriptRev,
-          expectedScriptHash: row.scriptHash,
-          expectedExpiresAt: row.expiresAt,
-        });
+        const grant = {
+          scriptRev: row.scriptRev,
+          riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses : [],
+          maxRuntimeMinutes: row.maxRuntimeMinutes,
+        };
+        const outcome =
+          kind === "companion"
+            ? await start({
+                account,
+                characterID,
+                kind: "companion",
+                // No library entry to re-bind to — the persisted row's own
+                // `request` field IS the authority (persistRoster's comment).
+                // It goes through decodeFleetCompanionRequestValue again
+                // inside start(), exactly like a fresh start's request.
+                request: row.request,
+                grant,
+                resumed: true,
+                expectedScriptRev: row.scriptRev,
+                expectedScriptHash: row.scriptHash,
+                expectedExpiresAt: row.expiresAt,
+              })
+            : await start({
+                account,
+                characterID,
+                kind: "script",
+                scriptID: script.scriptID,
+                scriptName: script.name,
+                scriptRev: script.rev,
+                doc: script.doc,
+                grant,
+                resumed: true,
+                expectedScriptRev: row.scriptRev,
+                expectedScriptHash: row.scriptHash,
+                expectedExpiresAt: row.expiresAt,
+              });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
         }
@@ -785,4 +969,4 @@ function createBotHost(options) {
   };
 }
 
-module.exports = { createBotHost, BOT_HEADER, MAX_ENDED_RUNS };
+module.exports = { createBotHost, BOT_HEADER, MAX_ENDED_RUNS, COMPANION_GRANT_SCRIPT_REV };

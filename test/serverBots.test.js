@@ -76,7 +76,9 @@ function fakeGateway(log) {
 function fakeBotHost(log) {
   return {
     async start(input) {
-      log.push(["start", input.characterID]);
+      // The full input, not just the characterID — the companion tests below
+      // need to see which branch of /api/bots/start actually built it.
+      log.push(["start", input]);
       return {
         ok: true,
         bot: { botID: "bot-1", characterID: input.characterID, status: "running", startedAt: "now" },
@@ -240,4 +242,73 @@ test("a public bot ID cannot bypass the claimed-character select guard", async (
     body: { characterID: 7001 },
   });
   assert.equal(authorized.response.status, 200);
+});
+
+// ── kind: "companion" — the SAME route, branched by the body ────────────────
+// docs/fleet-companion-handoff.md, "3. Extend botHost": no second route, so
+// these pin that /api/bots/start's companion branch reaches botHost.start
+// with the request instead of a script lookup, while the ownership check and
+// the same-session hull handover stay identical either way.
+
+const COMPANION_REQUEST = { role: "dps", useDrones: false };
+const COMPANION_GRANT = { scriptRev: 1, riskClasses: ["fleet", "social"], maxRuntimeMinutes: 720 };
+
+test("kind: \"companion\" reaches botHost.start with the request, never a script lookup", async () => {
+  const log = [];
+  // A botScriptStore whose get() throws proves the companion branch never
+  // touches the script library at all.
+  const scriptLookups = [];
+  const app = createApp({
+    eveStore: fakeStore(),
+    eveGatewayClient: fakeGateway(log),
+    webAuth,
+    botHost: fakeBotHost(log),
+    botScriptStore: {
+      get: (scriptID) => {
+        scriptLookups.push(scriptID);
+        return null;
+      },
+      list: () => [],
+    },
+    errorLogger() {},
+  });
+  const server = app.listen(0, "127.0.0.1");
+  activeServers.add(server);
+  await once(server, "listening");
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const token = await signInAndSelect(baseUrl, 7001);
+  const { response, payload } = await request(baseUrl, "/api/bots/start", {
+    method: "POST",
+    token,
+    body: { characterID: 7001, kind: "companion", request: COMPANION_REQUEST, grant: COMPANION_GRANT },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.bot.characterID, 7001);
+  assert.equal(scriptLookups.length, 0, "the companion branch must never look up a saved script");
+
+  const startCall = log.find((row) => row[0] === "start");
+  assert.ok(startCall, "botHost.start must have been called");
+  assert.equal(startCall[1].kind, "companion");
+  assert.deepEqual(startCall[1].request, COMPANION_REQUEST);
+  assert.deepEqual(startCall[1].grant, COMPANION_GRANT);
+  // The same handover this route already proves for a script: the caller's
+  // own held hull is released before the bot starts.
+  assert.equal(app.locals.bridgeSessions.size, 0);
+});
+
+test("kind absent defaults to \"script\" — an old caller's request body still starts a script", async () => {
+  const log = [];
+  const { baseUrl } = await startTestServer(log);
+  const token = await signInAndSelect(baseUrl, 7001);
+  const { response, payload } = await request(baseUrl, "/api/bots/start", {
+    method: "POST",
+    token,
+    body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.bot.characterID, 7001);
+  const startCall = log.find((row) => row[0] === "start");
+  assert.equal(startCall[1].kind, "script");
+  assert.equal(startCall[1].scriptID, "s1");
 });
