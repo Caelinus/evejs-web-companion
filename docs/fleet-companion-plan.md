@@ -558,6 +558,104 @@ runs across pilots, as a per-run badge: in fleet, following whom, last order
 heard, and whether this pilot can tag. That last one matters because a pilot
 silently unable to tag looks identical to one that has nothing to tag.
 
+## Two things the server does not do, found by reading it
+
+Both were on the "needs a live capture" list. Neither needed one, and both
+overturn something this doc previously asserted.
+
+### Warp costs no capacitor here, so a "cap floor to protect the escape" is fiction
+
+Retail charges capacitor to warp (`warpCapacitorNeed`, dogma attribute 153) and
+that is why a flattened capacitor is fatal there. **eve.js does not implement
+it.** There is no reference to capacitor anywhere under `space/destiny/` — not
+in `warp.js`, `warpState.js`, `warpContract.js`, `warpBuilders.js` or
+`warpCommands.js`. A ship on this server warps fine at zero capacitor.
+
+So the framing this doc used — "the floor protects the escape, not the tank" —
+is wrong here, and the inverted rule it justified ("stop boosting while still
+hurt") loses its reason.
+
+**The floor that does earn its place already exists in this codebase.**
+`REPAIR_CAP_FLOOR = 0.2` (`scriptDecide.ts:1062`), shipped, not a placeholder,
+with the reasoning "an empty capacitor repairs nothing" — and already used to
+switch a running repairer off below it. The companion reuses that constant
+rather than inventing a second answer to the same question.
+
+If a per-fit number is ever wanted, both inputs are already on the wire:
+per-module activation cost is dogma attribute 6 (`moduleAttributes.ts`) and
+capacitor capacity is 482 (`shipStats.ts`), both flowing through
+`GET /api/bridge/bound-dogma`. That is a formula over readable quantities, not a
+measurement.
+
+### Recall-and-redeploy does not break an NPC's lock
+
+⚠ **This one means a requested behaviour cannot be built as described.**
+
+The ask was: when a drone starts taking damage, recall it and relaunch a bit
+later so the NPC loses lock. On this server there is **no target-loss memory and
+no drone cooldown of any kind**:
+
+- A recalled drone leaves the scene immediately (`droneRuntime.js:4305`).
+- On the NPC's next think tick — `thinkIntervalMs`, 100-500 ms, median ~185 ms
+  (`npcBehaviorLoop.js:4305`) — the target is simply gone and it re-scores every
+  candidate by distance (`findNearestCombatTarget:1814`).
+- The only stickiness is generic: profiles that set `allowTargetSwitching` hold
+  a target for `NPC_TARGET_SWITCH_INTERVAL_MS` (60 s; 10 s on a couple of dozen
+  burner profiles). **Roughly 40% of profiles set it at all**, so the rest can
+  relock the relaunched drone on the very next tick.
+- Nothing anywhere scores drones specially. There is no grudge, no memory, no
+  re-acquire delay to wait out.
+
+**What to build instead.** The recall itself is still worth having — it takes a
+damaged drone out of danger, and that half works perfectly. What changes is the
+relaunch trigger: it is not a timer, because no duration is safe. It is an
+**observable condition** — relaunch when something else is holding the rat's
+aggro (which the majority-profile 60 s stickiness does give you, once your ship
+has absorbed it), or when the drone is simply no longer being shot.
+
+So `droneRedeployHoldOffSeconds` survives as a floor on the wait, never as the
+thing that makes it safe. Do not describe this feature to a player as breaking
+lock; it does not.
+
+### The chat link format, read out of the client
+
+The third "unanswerable from source" item. It was answerable — from the client,
+which is the thing that produces the markup. What the eve.js server does not
+know, `ClientCodeGrabber` does.
+
+At Enter-press the chat window serialises with `GetValue(html=0)`
+(`chat/client/window.py:381`), which emits the **unquoted** form:
+
+```
+<url=showinfo:TYPEID//ITEMID>Display text</url>
+```
+
+`showinfo:{type_id}//{item_id}` comes from `format_show_info_url`
+(`evelink/format/show_info.py:8`). A solar system is `typeSolarSystem = 5`, so a
+system link is `<url=showinfo:5//30000142>Jita</url>`. The client's own decoder
+is `split(":")` then `split("//")` (`show_info/parse.py:22`) — mirror that.
+
+Accept the `<a href="showinfo:…">` form too: other client surfaces (mail,
+notifications) emit it, and being liberal costs nothing.
+
+⚠ **LINKS CONTAIN SPACES, AND THIS DECIDES THE GRAMMAR.** The URL half never
+does — it is a scheme word and decimal digits joined by `//`. But the display
+half is the object's name, and station and bookmark names routinely contain
+spaces ("Jita IV - Moon 4 - Caldari Navy Assembly Plant"). So a parser must
+**never whitespace-split a message before extracting the link**: split once on
+the literal `destination:` prefix, then run a tag regex over the remainder.
+
+Two smaller facts worth keeping:
+
+- `<`, `>` and `&` inside the display text are always entity-escaped
+  (`editPlainText.py:320`), so a station name can never spoof a closing `</url>`.
+- A message is hard-truncated at 2048 characters with a trailing `" ..."`
+  (`chat/client/util.py:51`), which can cut a link mid-tag. Tolerate a mangled
+  trailing link rather than rejecting the whole message.
+
+**The numeric id is authoritative — take `item_id`, ignore the display text.**
+That sidesteps name lookup and localisation entirely.
+
 ## Decisions to make before writing code
 
 **1. Who may command.** Broadcasts and tags are naturally bounded — fleet
@@ -641,8 +739,10 @@ them with a real session before building on a guess — the
    `<url=…>` token, or something else, and **whether it contains literal spaces**
    — which is what would break a naive space-splitting command parser.
 
-   Until then, `destination: <name>` taking a plain system name is the buildable
-   version, and does not block phase 8.
+   **ANSWERED 2026-09-10 from the client** — see "The chat link format" above.
+   The format is `<url=showinfo:5//ITEMID>Name</url>`, the numeric id is
+   authoritative, and links contain spaces. `destination: <name>` remains a fine
+   fallback, but the link form is now buildable.
 
    ⚠ The `/`-prefixed and `.`-prefixed chat commands in `chatCommands.js` are a
    **server-admin GM console**, not related to this feature. Do not build the
@@ -655,9 +755,10 @@ them with a real session before building on a guess — the
    answer was a notification, not a field, which is why looking only at
    `space.ts` said no.
 
-3. **The NPC re-target cadence** after a drone leaves and re-enters space.
-   Determines the drone redeploy hold-off default. **Still open** — needs a
-   measurement, not a code read.
+3. ~~The NPC re-target cadence.~~ **ANSWERED 2026-09-10, and it kills the
+   mechanic.** There is no target-loss memory and no drone cooldown; the AI
+   re-scores by distance every 100-500 ms. See "Two things the server does not
+   do" above. No measurement was needed — the AI is in the server source.
 
 4. ~~Whether the two fleet notifications arrive wrapped in `__MultiEvent`.~~
    **ANSWERED 2026-09-10: no, never.** `notifyFleetMultiEvent`

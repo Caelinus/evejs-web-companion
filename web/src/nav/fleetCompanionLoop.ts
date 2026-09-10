@@ -29,6 +29,7 @@
 // adds rungs to `decideCompanionAction` without touching the plumbing below.
 
 import type { ScriptObservation } from "./scriptConditions.ts";
+import { REPAIR_CAP_FLOOR } from "./scriptDecide.ts";
 
 /** The run states, mirroring the other loops exactly (`MiningBotRunState`). */
 export type FleetCompanionRunState = "idle" | "running" | "paused" | "stopped" | "error";
@@ -83,16 +84,39 @@ export interface FleetCompanionRequest {
    * Capacitor fraction below which no repairer may be STARTED, and a running
    * one is stopped even while a layer is still hurt.
    *
-   * ⚠ THIS PROTECTS THE ESCAPE, NOT THE TANK. A flattened capacitor is a ship
-   * that cannot warp out, which turns a survivable fight into a loss. That is
-   * why the rule reads "stop boosting while still hurt" rather than the other
-   * way round.
+   * ⚠ AN EARLIER DRAFT SAID THIS "PROTECTS THE ESCAPE". IT DOES NOT, ON THIS
+   * SERVER. Retail charges capacitor to warp (`warpCapacitorNeed`, dogma
+   * attribute 153), so a flattened capacitor there means a ship that cannot
+   * leave. eve.js does not implement that: there is no reference to capacitor
+   * anywhere under `space/destiny/` — not in `warp.js`, `warpState.js`,
+   * `warpContract.js`, `warpBuilders.js` or `warpCommands.js` — so a ship here
+   * warps fine at zero capacitor. Checked 2026-09-10.
+   *
+   * The floor that DOES earn its place is the one this codebase already
+   * shipped: an empty capacitor repairs nothing, so a repairer running below it
+   * is burning cycles that heal nothing and cost everything. Hence the default
+   * is `REPAIR_CAP_FLOOR`, not a number invented for this file.
    */
   readonly capacitorFloor: number;
   /** Bound on flee round trips before the pilot stays home. */
   readonly maxFleeAttempts: number;
   readonly useDrones: boolean;
-  /** Seconds to hold drones in the bay before relaunching, to break NPC lock. */
+  /**
+   * Seconds to hold drones in the bay before relaunching them.
+   *
+   * ⚠ THIS DOES NOT "BREAK THE NPC'S LOCK", WHICH IS WHAT IT WAS ASKED FOR.
+   * eve.js has no target-loss memory and no drone-specific cooldown: a recalled
+   * drone leaves the scene instantly, and on the NPC's next think tick
+   * (`thinkIntervalMs`, 100-500 ms, ~185 ms median) it simply re-scores every
+   * candidate by distance. Roughly 40% of behaviour profiles set no
+   * `allowTargetSwitching` at all, so they can relock the relaunched drone on
+   * the very next tick. Checked against the live profile table, 2026-09-10.
+   *
+   * What the recall DOES do is get a damaged drone out of danger, which is
+   * worth having on its own. The safe moment to relaunch is when something else
+   * is holding the rat's aggro — an OBSERVABLE condition, not a timer — so this
+   * value is a floor on the wait, never the thing that makes it safe.
+   */
   readonly droneRedeployHoldOffSeconds: number;
   /**
    * Whether this pilot ATTEMPTS to tag. Only "try": the server silently drops a
@@ -135,12 +159,13 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   role: "dps",
   defenseModuleIDs: Object.freeze([]),
   fleeHealthFloor: 0.3,
-  /** ⚠ UNVERIFIED — needs a live capacitor-drain capture. Reasoned only from
-   *  `CAP_HUNGRY = 0.9`'s inverse and "leave enough for an align plus a warp". */
-  capacitorFloor: 0.25,
+  // Not a guess and not a placeholder: the constant the script runner already
+  // uses to switch a repairer off, with the same reasoning ("an empty capacitor
+  // repairs nothing"). Reusing it means one answer to this question, not two.
+  capacitorFloor: REPAIR_CAP_FLOOR,
   maxFleeAttempts: 3,
   useDrones: false,
-  /** ⚠ UNVERIFIED — needs a live measurement of the NPC re-target cadence. */
+  // A floor on the wait, not a safety guarantee — see the field's own comment.
   droneRedeployHoldOffSeconds: 10,
   attemptsTagging: false,
   obeys: Object.freeze<FleetCompanionOrderSource[]>(["broadcast", "tag"]),
