@@ -633,6 +633,59 @@ test("warp-to-ore-anomaly: flies to ore sites only, on its own visited list", ()
   // Every ore site visited -> blocked, with the den still standing there.
   const dry = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111,ORE-222" });
   assert.equal(dry.outcome.kind, "blocked");
+  assert.ok(dry.outcome.kind === "blocked" && dry.outcome.reason === "Every ore site in this system has been visited this run.");
+});
+
+// A pilot parked in a field of rock reads "the scanner shows no ore site" as the
+// bot being blind, because the panel they are looking at is the OVERVIEW. The
+// three dead ends are three different problems and say so.
+test("warp-to-ore-anomaly: the dead end says WHICH dead end it is", () => {
+  const ore = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const s = step("warp-to-ore-anomaly" as never);
+  const inSpace = flight({ docked: false, inSpace: true, stationID: null });
+  const reasonOf = (t: ReturnType<typeof ore>) => (t.outcome.kind === "blocked" ? t.outcome.reason : "");
+
+  // Nothing on the scanner at all: name the panel, because the rocks the pilot
+  // can see are on the other one.
+  const empty = ore(s, obs({ flightStatus: inSpace, anomalies: [] }), {}, NB);
+  assert.equal(empty.outcome.kind, "blocked");
+  assert.ok(reasonOf(empty).includes("lists no cosmic anomaly"));
+  assert.ok(reasonOf(empty).includes("asteroid belt is not a scanner site"));
+
+  // Sites are there, none of them ore, and one of them unreadable: the count of
+  // unreadable rows is the whole diagnosis, so it is in the sentence.
+  const noOre = ore(
+    s,
+    obs({
+      flightStatus: inSpace,
+      anomalies: [den("QEE-288"), den("ABC-123"), { label: "XXX-999", kind: "unknown" as const }],
+    }),
+    {},
+    NB,
+  );
+  assert.equal(
+    reasonOf(noOre),
+    "The scanner lists 3 cosmic anomalies in this system, and not one of them is an ore site. One of them did not say what kind of site it is, and this block will not warp on a guess.",
+  );
+
+  // Nothing unreadable -> no second sentence to explain away.
+  const cleanRead = ore(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), {}, NB);
+  assert.equal(
+    reasonOf(cleanRead),
+    "The scanner lists 1 cosmic anomaly in this system, and not one of them is an ore site.",
+  );
+
+  // The ratting block gets the same three answers in its own words.
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const noDens = anom(step("warp-to-anomaly" as never), obs({ flightStatus: inSpace, anomalies: [] }), {}, NB);
+  assert.ok(noDens.outcome.kind === "blocked" && noDens.outcome.reason.includes("no den to fly to"));
+  const allUnreadable = anom(
+    step("warp-to-anomaly" as never),
+    obs({ flightStatus: inSpace, anomalies: [{ label: "XXX-999", kind: "unknown" as const }] }),
+    {},
+    NB,
+  );
+  assert.ok(allUnreadable.outcome.kind === "blocked" && allUnreadable.outcome.reason.includes("It did not say what kind of site it is"));
 });
 
 test("refit-ship: boards the right hull when needed, applies by NAME, done after apply", () => {

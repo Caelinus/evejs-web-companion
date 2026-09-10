@@ -2232,25 +2232,71 @@ interface AnomalyFlavour {
   readonly boardKey: string;
   /** "den" / "ore site" — reads inside a sentence. */
   readonly noun: string;
+  /** The same noun carrying its article ("a den" / "an ore site"). */
+  readonly oneNoun: string;
   /** The step label the pilot sees while flying. */
   readonly flying: string;
-  /** What to say when the system has none left. */
-  readonly exhausted: string;
+  /** Appended when the scanner listed NOTHING AT ALL — the thing a player of
+   *  THIS block reliably mistakes for one of its sites. See the note below. */
+  readonly emptyScannerHint: string;
 }
 
 const COMBAT_FLAVOUR: AnomalyFlavour = {
   boardKey: "anomsVisited",
   noun: "den",
+  oneNoun: "a den",
   flying: "Flying to the den",
-  exhausted: "The scanner shows no pirate den left to visit in this system.",
+  emptyScannerHint:
+    "Rats on a belt or a gate are not a den: a den is a site the scanner lists.",
 };
 
 const ORE_FLAVOUR: AnomalyFlavour = {
   boardKey: "oreAnomsVisited",
   noun: "ore site",
+  oneNoun: "an ore site",
   flying: "Flying to the ore site",
-  exhausted: "The scanner shows no ore site left to visit in this system.",
+  emptyScannerHint:
+    "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
 };
+
+// ── Why the dead end is THREE sentences and not one ──────────────────────────
+// The block used to answer every dead end with "The scanner shows no <site>
+// left to visit in this system", and that sentence is wrong in two of the three
+// states it was used for — wrong enough that a pilot parked in a field of rock
+// reads it as the bot failing to see what is plainly on the screen. The three:
+//
+//   • THE SCANNER LISTED NOTHING. The likeliest reason the pilot disagrees is
+//     that they are reading the OVERVIEW, which lists what is on THIS GRID —
+//     belt asteroids, rats, wrecks — and never lists a scanner site at all. So
+//     the sentence says which of the two panels the block reads.
+//   • IT LISTED SITES, NONE OF THIS KIND. Then the count is the useful fact and
+//     the number of UNREADABLE rows is the most useful of all: a site whose
+//     kind the server did not report is deliberately skipped (siteKind.ts), so
+//     "three sites here and none of them says what it is" is a different
+//     problem from "this system has no ore in it" and must not wear the same
+//     words — the first is a server that is not filling the field in, and no
+//     amount of flying around will fix it.
+//   • EVERY SITE OF THIS KIND IS VISITED. The tour is over, which is the one
+//     state the old sentence actually described.
+function noSiteReason(flavour: AnomalyFlavour, total: number, unreadable: number): string {
+  if (total === 0) {
+    return `The scanner lists no cosmic anomaly in this system, so there is no ${flavour.noun} to fly to. ${flavour.emptyScannerHint}`;
+  }
+  const listed = total === 1 ? "1 cosmic anomaly" : `${total} cosmic anomalies`;
+  const head = `The scanner lists ${listed} in this system, and not one of them is ${flavour.oneNoun}.`;
+  if (unreadable === 0) {
+    return head;
+  }
+  const which =
+    unreadable === total
+      ? total === 1
+        ? "It did not say"
+        : "None of them said"
+      : unreadable === 1
+        ? "One of them did not say"
+        : `${unreadable} of them did not say`;
+  return `${head} ${which} what kind of site it is, and this block will not warp on a guess.`;
+}
 
 function warpToAnomalyOfKind(
   wanted: ExplorationSiteKind,
@@ -2286,11 +2332,23 @@ function warpToAnomalyOfKind(
     const visited = String(board[flavour.boardKey] ?? "")
       .split(",")
       .filter((label) => label.length > 0);
-    const next = anomalies.find((site) => site.kind === wanted && !visited.includes(site.label));
+    const ofKind = anomalies.filter((site) => site.kind === wanted);
+    const next = ofKind.find((site) => !visited.includes(site.label));
     if (next === undefined) {
-      return tick(WAIT, `Every ${flavour.noun} here has been visited this run.`, "Scanning", {
+      if (ofKind.length > 0) {
+        return tick(WAIT, `Every ${flavour.noun} here has been visited this run.`, "Scanning", {
+          kind: "blocked",
+          reason: `Every ${flavour.noun} in this system has been visited this run.`,
+        });
+      }
+      const unreadable = anomalies.filter((site) => site.kind === "unknown").length;
+      const said =
+        anomalies.length === 0
+          ? "The scanner lists nothing in this system."
+          : `Nothing on the scanner is ${flavour.oneNoun}.`;
+      return tick(WAIT, said, "Scanning", {
         kind: "blocked",
-        reason: flavour.exhausted,
+        reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
     return {
