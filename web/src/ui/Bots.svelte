@@ -2,9 +2,9 @@
   // THE BUILT-IN BOTS PANEL (goal R43).
   //
   // One place a player goes to say "run something the client already ships
-  // with". It answers "what can I run?" and "is anything running?" for the
-  // two built-in bots — mining and mission — with the same checklist and
-  // running-status treatment either way.
+  // with". It answers "what can I run?" and "is anything running?" for every
+  // built-in bot — mining, mission and the fleet companion — with the same
+  // checklist and running-status treatment either way.
   //
   // What USED to live here has moved to the Bot Manager: the saved-bot
   // library (any account's saved scripts, run here or handed to the server),
@@ -12,21 +12,24 @@
   // than only the one active in this tab. This panel could never reach those
   // other pilots; the Bot Manager can, so it owns that surface now.
   //
-  // ⚠ IT EMBEDS THE REAL COMPONENTS AND FORKS NOTHING. `MiningBot.svelte` and
-  // `MissionBot.svelte` are rendered here exactly as they are rendered where
-  // they already live: same props, same controls, same readout. A second copy of
-  // a readout drifts, and a drifted readout does not go quiet — it keeps
-  // rendering, confidently, about a bot that is doing something else. Everything
-  // this panel adds is ABOUT the bots (which exist, which is running, what each
-  // needs) and nothing it adds is a re-statement of what one is DOING.
+  // ⚠ IT EMBEDS THE REAL COMPONENTS AND FORKS NOTHING. `MiningBot.svelte`,
+  // `MissionBot.svelte` and `FleetCompanion.svelte` are rendered here exactly as
+  // they are rendered where they already live: same props, same controls, same
+  // readout. A second copy of a readout drifts, and a drifted readout does not
+  // go quiet — it keeps rendering, confidently, about a bot that is doing
+  // something else. Everything this panel adds is ABOUT the bots (which exist,
+  // which is running, what each needs) and nothing it adds is a re-statement of
+  // what one is DOING.
   //
   // ⚠ AND IT IS A LAUNCHER, NOT AN EDITOR. Visual/node-based bot authoring is
   // under separate discovery; nothing here should pre-empt those decisions.
   import { onMount } from "svelte";
   import MiningBot from "./MiningBot.svelte";
   import MissionBot from "./MissionBot.svelte";
+  import FleetCompanion from "./FleetCompanion.svelte";
   import {
     BOTS,
+    FLEET_COMPANION_REQUIREMENTS,
     MINING_BOT_REQUIREMENTS,
     MISSION_BOT_REQUIREMENTS,
     evaluateRequirements,
@@ -48,6 +51,10 @@
   const bot = store.bot;
   // svelte-ignore state_referenced_locally
   const missionBot = store.missionBot;
+  // svelte-ignore state_referenced_locally
+  const companion = store.companion;
+  // svelte-ignore state_referenced_locally
+  const fleet = store.fleet;
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
   // svelte-ignore state_referenced_locally
@@ -138,13 +145,31 @@
     }).rows.filter((row) => row.source === "ship"),
   );
 
+  /**
+   * The companion's own "ship" reads: whether this pilot is in a fleet, from
+   * the SAME availability read Fleet Center uses, never a second idea of it.
+   */
+  const inFleet = $derived(
+    $fleet.availability === "ready" ? true : $fleet.availability === "not-in-fleet" ? false : null,
+  );
+  const companionRows = $derived(
+    evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, {
+      inFleet,
+      docked: shipIsDocked,
+    }).rows.filter((row) => row.source === "ship"),
+  );
+
   function rowsFor(id: BotID): readonly RequirementRow[] {
-    return id === "mining" ? miningRows : missionRows;
+    if (id === "mining") return miningRows;
+    if (id === "mission") return missionRows;
+    return companionRows;
   }
 
   /** The bot's own run state, straight from its slice. */
   function statusOf(id: BotID): string {
-    return id === "mining" ? $bot.status : $missionBot.status;
+    if (id === "mining") return $bot.status;
+    if (id === "mission") return $missionBot.status;
+    return $companion.status;
   }
 
   /** What the badge says. Plain language, never the raw state word (R9a). */
@@ -193,6 +218,7 @@
   onMount(() => {
     void Promise.resolve(flow.loadFitting()).catch(() => {});
     void Promise.resolve(flow.loadMiningHolds()).catch(() => {});
+    void Promise.resolve(flow.loadFleet()).catch(() => {});
   });
 
   // Names AND groups for whatever is fitted, so "is that a Strip Miner?" is
@@ -228,8 +254,8 @@
        walked. What is worth saying instead is what this panel is FOR, since the
        Manager is where they came from and where everything else lives. -->
   <p class="note">
-    These two bots ship with the client, so they are set up here against your
-    ship rather than picked from the saved library. Saved bots, every pilot's
+    These bots ship with the client, so they are set up here against your ship
+    rather than picked from the saved library. Saved bots, every pilot's
     current run, and starting one on a pilot you are not sitting in right now
     all live in the Bot Manager.
   </p>
@@ -302,6 +328,8 @@
   <MiningBot {store} {flow} />
 {:else if opened === "mission"}
   <MissionBot {store} {flow} />
+{:else if opened === "companion"}
+  <FleetCompanion {store} {flow} />
 {/if}
 
 <style>
