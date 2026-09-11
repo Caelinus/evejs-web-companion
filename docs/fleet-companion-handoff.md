@@ -23,10 +23,11 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
 | Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
 | Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
-| Everything else | phases 5 (drone recall) and 6 (flee) not started and independent of each other; 8 waits on the `/d/evet` gateway patch; 9 waits on the rest |
+| Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
+| Everything else | phase 6 (flee) not started — and it is the first rung to sit BENEATH the fleet rung, which is now safe; 8 waits on the `/d/evet` gateway patch; 9 waits on the rest |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite 5,141 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
+full suite 5,174 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
 the pre-work baseline, which was 4,860 tests with the same 17.
 
 ⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
@@ -40,10 +41,10 @@ fresh worktree reports 22 because `public/dist` is absent). Check both.
 - `web/src/nav/fleetCompanionLoop.ts` — the loop. Types, the typed request, the
   controller, and the ladder. ⚠ This bullet described the phase-0 skeleton and
   was left behind by every phase since; the rungs as they now stand are: 1 warp
-  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 obeying the
-  fleet. Phases 5 and 6 add theirs beneath, and must read rung 5’s header
-  about parking the tick before choosing where.
-- `web/src/nav/fleetCompanionLoop.test.ts` — 72 tests, the ladder, the
+  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 drones,
+  6 obeying the fleet. Phase 6's flee is the first
+  rung to go BENEATH the fleet rung, which phase 5's parking fix made safe.
+- `web/src/nav/fleetCompanionLoop.test.ts` — 162 tests, the ladder, the
   supervision gate, the abandonment protocol, the fleet-order rung, and the
   lifecycle.
 - `web/src/bots/companionRunPolicy.test.ts` — 31 tests, the risk derivation and
@@ -721,6 +722,144 @@ type shipped.
   added.
 - **`fleet-tag-target`, the DSL block, is untouched** — including its
   `hostileRows` limitation above.
+
+## Phase 5 is COMPLETE, 2026-09-11
+
+**Drone recall and redeploy**, plus the parking fix the operator asked for
+alongside it. Six commits.
+
+`useDrones` and `droneRedeployHoldOffSeconds` stop being dead config. Before
+this, `useDrones` had exactly one reader in the whole repo — the risk classifier
+that labels a run before it launches — and `droneRedeployHoldOffSeconds` had
+none at all. `dronesOut` was computed for the companion on every tick and read
+by no rung.
+
+### The parking fix — DECIDED BY THE OPERATOR, do not re-litigate
+
+The fleet-order rung's "already locked" branch returned an ordinary `wait`,
+which ENDED the ladder: while a target call stood, every rung beneath it was
+starved. The operator's instruction was "put the rung above the fleet rung and
+fix the parking", so both were done.
+
+The branch now returns a decision MARKED `standing`. `decideCompanionAction`
+holds it aside, runs every rung beneath it, and falls back to it only if none of
+them acted — so the readout still says "Obeying fleet" while the guns run, which
+is the reason it was parked in the first place and was worth keeping.
+
+⚠ **A standing decision's action must be `wait`.** It is only ever a readout;
+holding a real call aside and then not issuing it would silently drop it. There
+is a test.
+
+⚠ **The fix is preparation and the tests say so.** Nothing sits beneath the
+fleet rung yet — the drone rung went ABOVE it, per the same instruction — so what
+is proved here is the mechanism. **Phase 6's flee is the first real beneficiary,
+and the test that matters ("a pilot obeying a standing target call still flees
+when it drops through its floor") can only be written once that rung exists.**
+
+### ⚠ Two things the docs had WRONG about recall, both settled from the server
+
+- **The plan doc said "a recalled drone leaves the scene immediately
+  (`droneRuntime.js:4305`)". It does not.** That line is inside
+  `recallDronesToShipBay`, which is the COMMIT — reached only once the drone has
+  flown to within 2500 m of the ship. `CmdReturnBay` just sets it moving at full
+  speed. `api.ts`'s own comment was the correct one all along: they stay visibly
+  "coming home" for the length of the trip. **Gone-from-the-grid is therefore a
+  reliable confirmation that the recall committed**, and the rung uses it.
+- **The spec said "a recall can merge into an existing stack and the original
+  ids may never resurface". It cannot.** `buildDroneRecoveryItemPatch` forces
+  `singleton: 1, quantity: 1`, so a recalled drone is always its own row and
+  keeps its itemID. The only id churn is on the FIRST launch out of a genuine
+  multi-quantity stack, which mints a new one. Relaunching from the current bay
+  listing is still right — but for simplicity and because a drone may have died,
+  not because ids move.
+
+### ⚠ What a recall actually buys on this server, which nobody had written down
+
+**A free, full shield repair.** `buildDroneRecoveryItemPatch`
+(`droneRuntime.js:4060`) stamps `charge: 1, shieldCharge: 1` onto the item as it
+enters the bay, with the server's own comment: shields and capacitor recharge on
+their own, and **only armour and hull damage survives being stowed**.
+
+So a drone pulled while it is still losing shields comes back whole; one chewed
+into armour comes back with full shields and the same armour hole. That is the
+real justification for the feature, and it is a different one from the original
+ask.
+
+It is **not** a lock-break — the plan doc is right that this server has no
+target-loss memory and no drone cooldown, and nothing here should be described
+to a player as shaking anything off. `droneHealthFloor` defaults to 0.5 of the
+worst layer precisely because in a fight that layer is the shield, and a recall
+at a half shield gives everything back where waiting for armour damage does not.
+
+### Five things worth knowing
+
+- **The trigger extinguishes itself, so the rung is driven by a RECORD.** The
+  instant the recall lands the drones are not in space, `lowestDroneHealth` reads
+  `null`, and the condition that fired is no longer true. A rung that re-derived
+  its state each tick would fire once and forget it was ever in a cycle. This is
+  `standDownAfterFight`'s shape, for the reason its own header gives.
+- **Holding off issues nothing and returns nothing**, so the rungs below keep
+  their turn. A pilot that went quiet for ten seconds every time a drone got shot
+  would be worse than one with no drones at all. Tested.
+- **Drones are watched PER RECORDED ID**, never off the coarse `dronesOut` flag:
+  this ship may launch others mid-cycle, and a flag would call the recall
+  finished the moment one unrelated drone came home.
+- **`myDroneIDs` is `canMyShipOrderDrone === true`, never `isMyDrone`.** An
+  ABANDONED drone still belongs to this character and still shows on grid, but no
+  hull controls it — a recall aimed at one answers 200 and the drone does not
+  move, observed live. Counting it would make the rung wait for a recall that can
+  never land.
+- **The bay read is gated on `useDrones`**, with the same three tests the chat
+  read has, including the stale-capture pair. It is a whole extra round trip per
+  tick and the snapshot already carries everything else for free.
+
+### Two bounds, both for failures the server does not report
+
+- **A recall that never completes is given up on after 15 ticks.** A drone that
+  reaches scoop range to find a FULL BAY is refused by `recallDronesToShipBay`,
+  and the tick-driven path throws that refusal away (`droneRuntime.js:7570`) —
+  nothing reaches the client. The drone circles at 2500 m for ever, still on
+  grid, with no error anywhere. Re-issuing cannot fix a bay with no room in it.
+- **Three cycles per run.** Armour damage survives a recall, so once the damage
+  is in armour every later cycle returns the same hurt drone, re-trips the floor
+  at once, and spends two calls and a hold-off achieving nothing.
+
+The hold-off is counted in TICKS, not against a wall clock: the loop sleeps at
+least its cadence, so N ticks is always a lower bound on elapsed time, and
+undershooting is the only failure mode that matters for a hold-off.
+
+### Getting safe no longer gives the drones away
+
+The gap `getSafe` has carried a comment about since phase 0b is closed, and it
+was worse than the comment said.
+
+⚠ **`handleControllerLost` (`droneRuntime.js:5735`) only attempts a bay recovery
+when the lifecycle reason is a disconnect or a logoff.** A normal warp, jump or
+dock passes neither, so the recovery branch is skipped outright however close the
+drones are. `abandonDroneInSpace` then leaves them in space with `controllerID`
+cleared, and `scoopDrone` checks only that a drone is uncontrolled — **not who
+owns it**. So leaving without a recall hands this pilot's drones to whoever is
+still on the grid.
+
+Bounded at eight ticks and then the pilot leaves regardless — shorter than rung
+5's own wait, because that one is a pilot spending time on its drones during a
+fight it is still in, and this one is a pilot with nobody left to fly with.
+Drones are worth a few seconds and are not worth the ship.
+
+Only the two WARP branches are gated; docking and approaching are not departures.
+
+### What phase 5 deliberately did NOT do
+
+- **No `engageDrones`.** Launched drones auto-engage whatever shoots the ship
+  they came from — the server's own behaviour, on by default, and `api.ts` says
+  so. Picking a victim is a separate decision and no rung asked for it.
+- **No scoop call.** The server flies them home and scoops them itself inside
+  2500 m; a scoop would only duplicate what it is already doing.
+- **No salvage or mining drone roles.** The DSL splits drones by role; the
+  companion launches the bay and lets the server sort it out.
+- **Nothing reads `dronesOut` even now.** `myDroneIDs` supersedes it for this
+  loop — it answers the same question and names the drones — and the coarse flag
+  was left alone rather than removed, because the DSL still reads it.
 
 ## Decided, so do not re-litigate
 

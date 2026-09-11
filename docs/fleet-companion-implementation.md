@@ -246,7 +246,7 @@ not exist is worse than no spec, because it reads as authority.
 | --- | --- | --- |
 | 1 | broadcast + tag decode, store slice, observation, script surface | **below, verified** |
 | 4 | keep-at-range / orbit-a-mate / fleet tag / jump-through-fleet | **below, verified** |
-| 5 | drone recall-and-redeploy | **below, verified** |
+| 5 | drone recall-and-redeploy | **BUILT** — see the handoff doc. ⚠ two claims in the spec below are WRONG and the handoff says why: a recalled drone does NOT leave the scene immediately, and a recall does NOT merge it into a stack |
 | 6 | flee and return | **below, verified** |
 | 2 | one inWarp guard | **below, verified** |
 | 3 | tank-up: port the DSL thermostat into the companion | **below, verified** |
