@@ -129,6 +129,7 @@ function defaultLoadStack() {
         // shape, same validateBotLaunchGrant, per companionRunPolicy.ts's header.
         analyzeCompanionRunPolicy: companionRunPolicy.analyzeCompanionRunPolicy,
         decodeFleetCompanionRequestValue: companionRunPolicy.decodeFleetCompanionRequestValue,
+        decodeCompanionAbandonmentValue: companionRunPolicy.decodeCompanionAbandonmentValue,
         COMPANION_GRANT_SCRIPT_REV: companionRunPolicy.COMPANION_GRANT_SCRIPT_REV,
       };
     })();
@@ -240,6 +241,14 @@ function createBotHost(options) {
             // library — the roster row IS the authority, so the flat request
             // is persisted right alongside its hash rather than a reference.
             row.request = record.companionRequest;
+            // DECISION 5'S THIRTY-MINUTE CLOCK, and the whole reason it is a
+            // bound rather than a suggestion. An abandoned companion (nobody
+            // in its fleet this host is not flying) gets safe, drops fleet and
+            // waits exactly this long before releasing the hull. Held only in
+            // the loop's memory, that wait would restart every time this
+            // process did — an unbounded wait assembled out of bounded ones.
+            // Null whenever supervision is fine, which is almost always.
+            row.abandonment = record.companionAbandonment;
           }
           bots.push(row);
         }
@@ -308,6 +317,39 @@ function createBotHost(options) {
   // only route to the player is the record → /api/bots → the Server Bots readout.
   // It is never cleared here — an alert a player has not seen yet must not be
   // erased by the next progress tick.
+  /**
+   * The persisted half of the companion slice's abandonment, or null.
+   *
+   * Deliberately narrow: the loop's own `safeSpotWarpIssued`/`safeSpotWarpSeen`
+   * describe a warp that is over the moment this process dies, and writing them
+   * down would let a resumed run believe it had already reached safety. The
+   * clock and the rejoin allowlist are the only two facts worth keeping — see
+   * CompanionAbandonmentRecord in web/src/nav/fleetCompanionLoop.ts.
+   */
+  function companionAbandonmentOf(snapshot) {
+    const running = snapshot && snapshot.abandonment;
+    if (!running || !Number.isSafeInteger(Number(running.abandonedAtMs))) {
+      return null;
+    }
+    return {
+      abandonedAtMs: Number(running.abandonedAtMs),
+      supervisorCharacterIDs: Array.isArray(running.supervisorCharacterIDs)
+        ? running.supervisorCharacterIDs.map(Number)
+        : [],
+    };
+  }
+
+  function sameAbandonment(left, right) {
+    if (left === null || right === null) {
+      return left === right;
+    }
+    return (
+      left.abandonedAtMs === right.abandonedAtMs &&
+      left.supervisorCharacterIDs.length === right.supervisorCharacterIDs.length &&
+      left.supervisorCharacterIDs.every((id, index) => id === right.supervisorCharacterIDs[index])
+    );
+  }
+
   function applySnapshot(record, snapshot) {
     record.status = snapshot.status;
     record.phase = snapshot.phase;
@@ -327,6 +369,17 @@ function createBotHost(options) {
       // publicBot()'s wire shape yet: that shape is `ServerBot`
       // (web/src/app/api.ts) and web/src/ui/**, both out of scope for this
       // change. Nothing here fabricates a place for them either.
+      //
+      // `abandonment` is the ONE exception, and it is not a readout: it is
+      // durable state this host owns (see persistRoster). Written through to
+      // disk ONLY when it actually changes — this runs on every store push,
+      // roughly once every two seconds per bot, and an abandonment changes at
+      // most twice in a run.
+      const next = companionAbandonmentOf(snapshot);
+      if (!sameAbandonment(record.companionAbandonment, next)) {
+        record.companionAbandonment = next;
+        persistRoster();
+      }
       return;
     }
     record.stepPath = snapshot.stepPath;
@@ -422,6 +475,7 @@ function createBotHost(options) {
     scriptRev,
     doc,
     request,
+    abandonment = null,
     grant,
     resumed = false,
     expectedScriptRev = null,
@@ -429,6 +483,7 @@ function createBotHost(options) {
     expectedExpiresAt = null,
   }) {
     const isCompanion = kind === "companion";
+    let resumingAbandonment = null;
     let stack;
     try {
       stack = await loadStack();
@@ -455,6 +510,15 @@ function createBotHost(options) {
         return { ok: false, code: "BOTCOMPANION_INVALID", message: decoded.refusal };
       }
       decodedRequest = decoded.request;
+      // A persisted abandonment is untrusted bytes exactly like the request
+      // beside it, and gets the same one gate. A row that fails to decode is
+      // DROPPED rather than refused: the companion simply starts a fresh
+      // thirty minutes, which is still bounded and still safe — whereas
+      // refusing the whole start would leave a pilot flying with no host.
+      if (abandonment !== null && abandonment !== undefined) {
+        const decodedAbandonment = stack.decodeCompanionAbandonmentValue(abandonment, now());
+        resumingAbandonment = decodedAbandonment.ok ? decodedAbandonment.abandonment : null;
+      }
       // See COMPANION_GRANT_SCRIPT_REV in companionRunPolicy.ts: a request has no
       // revision series, so this sentinel — never a real version — fills the
       // slot validateBotLaunchGrant already compares. The canonical hash is
@@ -590,6 +654,9 @@ function createBotHost(options) {
       // The roster row's authority for a companion (see persistRoster's
       // comment) — null for a script, which is authored by the library instead.
       companionRequest: isCompanion ? decodedRequest : null,
+      // Seeded from the persisted row on a resume, then owned by
+      // applySnapshot. Null for a script and for a fresh companion start.
+      companionAbandonment: isCompanion ? resumingAbandonment : null,
     };
     // Claim BEFORE the first await — two concurrent starts must not both win,
     // and the select guard must already know this bot when its select arrives.
@@ -636,7 +703,7 @@ function createBotHost(options) {
       });
 
       if (isCompanion) {
-        await flow.startFleetCompanion(decodedRequest);
+        await flow.startFleetCompanion(decodedRequest, resumingAbandonment);
         applySnapshot(record, store.companion.get());
       } else {
         await flow.startCustomBot(decodedDoc);
@@ -908,6 +975,10 @@ function createBotHost(options) {
                 // It goes through decodeFleetCompanionRequestValue again
                 // inside start(), exactly like a fresh start's request.
                 request: row.request,
+                // The clock this companion was already waiting on. Keeping it
+                // is what makes decision 5's thirty minutes a bound rather
+                // than a fresh thirty minutes per restart.
+                abandonment: row.abandonment ?? null,
                 grant,
                 resumed: true,
                 expectedScriptRev: row.scriptRev,

@@ -95,7 +95,11 @@ import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
-import type { FleetCompanionRole, FleetCompanionRunState } from "../nav/fleetCompanionLoop.ts";
+import type {
+  CompanionAbandonmentRecord,
+  FleetCompanionRole,
+  FleetCompanionRunState,
+} from "../nav/fleetCompanionLoop.ts";
 
 export type FeedStatus = "idle" | "connecting" | "connected" | "disconnected";
 
@@ -870,6 +874,13 @@ export type FeedEvent =
         | null;
       readonly lastOrderHeard: string | null;
       readonly canTag: boolean | null;
+      /**
+       * Decision 5's abandonment, or null. Carried through the slice rather
+       * than kept in the loop because the BFF's bot host reads it off the
+       * store to persist the thirty-minute clock — see
+       * FLEET_COMPANION_ABANDONMENT_WAIT_MS.
+       */
+      readonly abandonment: CompanionAbandonmentRecord | null;
       readonly failureReason: string | null;
     }
   | { readonly type: "companion/start-error"; readonly message: string | null }

@@ -811,7 +811,7 @@ Ordered by value per unit of work. Phases 1-3 need no gateway change.
 
 | # | Phase | Depends on | Size |
 | --- | --- | --- | --- |
-| 0b | Supervision gate + abandonment protocol (decision 5): the non-bot-member check as a top rung, dock, drop fleet, bounded wait, invite-gated rejoin | botHost persistence for the clock | medium; the rejoin gate is the careful part |
+| 0b | **DONE 2026-09-11.** Supervision gate + abandonment protocol (decision 5): the non-bot-member check as a top rung, dock, drop fleet, bounded wait, invite-gated rejoin | botHost persistence for the clock | medium; the rejoin gate is the careful part |
 | 1 | `OnFleetBroadcast` + `OnFleetStateChange` decoders, store slice with TTL, `follow-the-fleet` block covering Target / AlignTo / HealShield / HealArmor | — | largest single chunk, entirely in-repo |
 | 2 | Yield to `inWarp`; precedence rules | 1 | small |
 | 3 | Tank-up block (hardeners + repairers, cap-aware) | — | small, independent |

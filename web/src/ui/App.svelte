@@ -67,7 +67,7 @@
   // taken, server down) is skipped rather than blocking the rest.
   async function restoreSessions(saved: PersistedSessions): Promise<void> {
     for (const pilot of saved.pilots) {
-      const session = createSession();
+      const session = createSession({ botDrivenCharacterIDs });
       try {
         await session.flow.login(pilot.accountName, "");
         await session.flow.selectCharacter(pilot.characterID);
@@ -100,6 +100,33 @@
     if (hasRetained) void restoreSessions(retained);
   });
 
+  /**
+   * The pilots THIS TAB is flying with a bot, for the fleet companion's
+   * supervision gate (docs/fleet-companion-plan.md, decision 5). The companion
+   * subtracts these from its fleet roster; whatever is left is a human, and a
+   * companion with no human left in its fleet gets safe and drops fleet.
+   *
+   * ⚠ ONLY THIS COMPONENT CAN ANSWER IT. A human's pilot and a companion's
+   * pilot both reach the BFF as an ordinary held bridge session, so nothing on
+   * the server can tell them apart — only the roster owner knows which of its
+   * sessions has a loop driving it. The flow unions this with the BFF's own
+   * running-bot list, which covers the headless ones.
+   *
+   * ⚠ A PILOT FLOWN BY HAND IS NOT SUBTRACTED, deliberately. A person at the
+   * keyboard is exactly the supervision the gate is looking for, so only a
+   * session whose ship a loop is actually holding counts as bot-driven.
+   */
+  function botDrivenCharacterIDs(): readonly number[] {
+    const driven: number[] = [];
+    for (const session of sessions) {
+      const state = session.store.get();
+      if (state.bots.runningBotID !== null && state.station.online) {
+        driven.push(state.station.online.characterID);
+      }
+    }
+    return driven;
+  }
+
   // A pilot finished login+select: promote it from onboarding into the online
   // roster and make it the active cockpit (matches "Add character makes it
   // active", and is the natural landing for the first pilot too).
@@ -115,7 +142,7 @@
   // session in an overlay. One add at a time.
   function addCharacter(): void {
     if (onboarding) return;
-    onboarding = createSession();
+    onboarding = createSession({ botDrivenCharacterIDs });
   }
 
   // Abandon an in-progress add: tear the pending session down (best-effort, so a
@@ -159,7 +186,7 @@
   ): Promise<void> {
     for (const target of targets) {
       onProgress(target.characterID, "connecting");
-      const session = createSession();
+      const session = createSession({ botDrivenCharacterIDs });
       try {
         await session.flow.login(target.accountName, "");
         await session.flow.selectCharacter(target.characterID);

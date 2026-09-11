@@ -26,6 +26,7 @@
     DEFAULT_FLEET_COMPANION_REQUEST,
     FLEET_COMPANION_ORDER_SOURCES,
     FLEET_COMPANION_ROLES,
+    FLEET_COMPANION_ABANDONMENT_WAIT_MS,
     MAX_CAPACITOR_FLOOR,
     MAX_DRONE_HOLD_OFF_SECONDS,
     MAX_FLEE_ATTEMPTS,
@@ -80,6 +81,36 @@
   let attemptsTagging = $state(DEFAULT_FLEET_COMPANION_REQUEST.attemptsTagging);
   let obeys = $state<FleetCompanionOrderSource[]>([...DEFAULT_FLEET_COMPANION_REQUEST.obeys]);
   let chatCommandSendersText = $state("");
+  /**
+   * Where this pilot runs to if it is ever left alone somewhere with no station
+   * on grid. Empty means "nowhere named", which is a real answer: the pilot
+   * then stops where it is and says so rather than inventing a hiding place.
+   *
+   * ⚠ IT IS A BOOKMARK, NOT A CELESTIAL. There is no sun in this game's scene
+   * to warp to — no celestial appears among its entity kinds and no read
+   * exposes one — so the safe spot is somewhere the player has actually been
+   * and saved.
+   */
+  let safeSpotBookmarkID = $state<number | null>(null);
+  let safeSpots = $state<readonly { bookmarkID: number; name: string }[]>([]);
+
+  // Best-effort, and deliberately quiet: a bookmark list that will not load
+  // leaves the picker empty and the setting at "nowhere", which is exactly what
+  // a player who never set one gets anyway.
+  $effect(() => {
+    let live = true;
+    void flow
+      .listBookmarks()
+      .then((rows) => {
+        if (live) {
+          safeSpots = rows;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  });
 
   const running = $derived($companion.status === "running");
   const paused = $derived($companion.status === "paused");
@@ -190,6 +221,29 @@
     }
   }
 
+  /**
+   * Roughly how long an abandoned pilot has left, in whole minutes.
+   *
+   * Rounded UP and described as "about" on purpose: the authority on when the
+   * wait ends is the loop itself, which re-decides every couple of seconds, and
+   * a countdown that claimed to be exact would be a second wrong answer to a
+   * question the panel does not own.
+   */
+  function abandonmentMinutesLeft(
+    abandonment: NonNullable<FleetCompanionState["abandonment"]>,
+  ): number {
+    const left = FLEET_COMPANION_ABANDONMENT_WAIT_MS - (Date.now() - abandonment.abandonedAtMs);
+    return Math.max(0, Math.ceil(left / 60_000));
+  }
+
+  // The rejoin allowlist is character ids; the player should read names.
+  $effect(() => {
+    const ids = $companion.abandonment?.supervisorCharacterIDs ?? [];
+    if (ids.length > 0) {
+      flow.requestNames(ids.map((id) => ({ kind: "character", id }) as NameRef));
+    }
+  });
+
   function canTagWords(value: boolean | null): string {
     if (value === null) {
       return "not known";
@@ -266,6 +320,7 @@
         attemptsTagging,
         obeys,
         chatCommandSenders: chatCommandSenderIDs,
+        safeSpotBookmarkID,
       }),
     );
   }
@@ -348,6 +403,23 @@
         </tbody>
       </table>
     </div>
+    {#if $companion.abandonment}
+      <p class="note warn">
+        Nobody is left in this fleet that this computer is not flying, so this
+        pilot has got itself safe and dropped fleet. It will wait about
+        {abandonmentMinutesLeft($companion.abandonment)} more minute(s) for
+        someone to invite it back, then release the ship.
+        {#if $companion.abandonment.supervisorCharacterIDs.length > 0}
+          It will only accept an invite from
+          {$companion.abandonment.supervisorCharacterIDs
+            .map((id) => resolvedName($names.resolved, "character", id, "(name pending)"))
+            .join(", ")}.
+        {:else}
+          It has nobody to accept an invite from, so it will simply wait out the
+          time.
+        {/if}
+      </p>
+    {/if}
     {#if paused}
       <p class="note">
         Paused. Your ship keeps doing whatever it was last told to - press Carry
@@ -525,6 +597,36 @@
         </p>
       {/if}
     {/if}
+
+    <h3>If it ends up alone</h3>
+    <p class="note">
+      This pilot only ever works while somebody in the fleet is not being flown
+      by this computer. The moment that stops being true it docks at the nearest
+      station, leaves the fleet, and waits half an hour for one of the pilots
+      who WAS in the fleet to invite it back - then it releases the ship. An
+      invite from anybody else is ignored.
+    </p>
+    <p class="field">
+      <label for="companion-safe-spot">If there is no station in sight, warp to</label>
+      <select
+        id="companion-safe-spot"
+        value={safeSpotBookmarkID === null ? "" : String(safeSpotBookmarkID)}
+        onchange={(event) => {
+          const picked = (event.currentTarget as HTMLSelectElement).value;
+          safeSpotBookmarkID = picked === "" ? null : Number(picked);
+        }}
+      >
+        <option value="">nowhere - stop and say so</option>
+        {#each safeSpots as spot (spot.bookmarkID)}
+          <option value={String(spot.bookmarkID)}>{spot.name}</option>
+        {/each}
+      </select>
+    </p>
+    <p class="note">
+      Pick a bookmark you have actually checked. Leaving this at "nowhere" is a
+      real answer - the pilot stops where it is and tells you, rather than
+      warping somewhere neither of you has looked at.
+    </p>
 
     {#if $companion.failureReason}
       <h3>Last time it stopped</h3>

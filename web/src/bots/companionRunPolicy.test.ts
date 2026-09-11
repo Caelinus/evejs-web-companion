@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { validateBotLaunchGrant, createBotLaunchGrant } from "./runPolicy.ts";
-import { analyzeCompanionRunPolicy, decodeFleetCompanionRequestValue } from "./companionRunPolicy.ts";
+import {
+  analyzeCompanionRunPolicy,
+  decodeCompanionAbandonmentValue,
+  decodeFleetCompanionRequestValue,
+} from "./companionRunPolicy.ts";
 import {
   DEFAULT_FLEET_COMPANION_REQUEST,
   MAX_CAPACITOR_FLOOR,
@@ -125,6 +129,10 @@ test("a well-formed request round-trips", () => {
       attemptsTagging: false,
       obeys: ["broadcast", "tag"],
       chatCommandSenders: [SYNTHETIC_CHARACTER_ID],
+      // Absent in the payload, and null is the right answer for it: "no safe
+      // spot has been named" is what most requests mean, and the ladder acts
+      // on it (it stops rather than inventing somewhere to hide).
+      safeSpotBookmarkID: null,
     });
   }
 });
@@ -137,11 +145,105 @@ test("null, an array, and a primitive are all refused, not thrown", () => {
 });
 
 test("an unknown extra key refuses the whole request", () => {
+  // A stored key this codec does not recognise is a field a later version
+  // wrote and this one cannot honour; running the request anyway would run a
+  // request that is not the one that was saved.
   const result = decodeFleetCompanionRequestValue({
     ...validPayload(),
-    safeSpotBookmarkID: 12345,
+    anchorToFleetCommander: true,
   });
   assert.equal(result.ok, false);
+});
+
+test("safeSpotBookmarkID takes a positive id, null, or nothing at all", () => {
+  // ⚠ THIS KEY USED TO BE REFUSED, and that was correct at the time — the
+  // codec's whole contract is that an unrecognised key means a request this
+  // version cannot honour. Phase 0b gave the request the field, so the codec
+  // learned it the same day (decision 5: there is no sun to warp to, so the
+  // safe spot is a bookmark).
+  const withID = decodeFleetCompanionRequestValue({ ...validPayload(), safeSpotBookmarkID: 4242 });
+  assert.equal(withID.ok, true);
+  if (withID.ok) {
+    assert.equal(withID.request.safeSpotBookmarkID, 4242);
+  }
+  // Explicit null and absent mean the same thing, so a request written before
+  // the field existed still reads.
+  const explicitNull = decodeFleetCompanionRequestValue({
+    ...validPayload(),
+    safeSpotBookmarkID: null,
+  });
+  assert.equal(explicitNull.ok, true);
+  if (explicitNull.ok) {
+    assert.equal(explicitNull.request.safeSpotBookmarkID, null);
+  }
+});
+
+test("safeSpotBookmarkID refuses a zero, a fraction, or a string", () => {
+  for (const bad of [0, -1, 1.5, "4242", {}]) {
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), safeSpotBookmarkID: bad }).ok,
+      false,
+      `expected ${JSON.stringify(bad)} to be refused`,
+    );
+  }
+});
+
+// --- the persisted abandonment (decision 5's clock) --------------------------
+
+test("a well-formed abandonment round-trips", () => {
+  const result = decodeCompanionAbandonmentValue(
+    { abandonedAtMs: 1_000, supervisorCharacterIDs: [SYNTHETIC_CHARACTER_ID] },
+    2_000,
+  );
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.abandonment.abandonedAtMs, 1_000);
+    assert.deepEqual(result.abandonment.supervisorCharacterIDs, [SYNTHETIC_CHARACTER_ID]);
+  }
+});
+
+test("an EMPTY supervisor list is valid, and means 'accept nobody'", () => {
+  // It is what a companion abandoned before it ever saw a human legitimately
+  // has. It must not be confused with a missing field, which is refused.
+  const empty = decodeCompanionAbandonmentValue(
+    { abandonedAtMs: 1_000, supervisorCharacterIDs: [] },
+    2_000,
+  );
+  assert.equal(empty.ok, true);
+  assert.equal(
+    decodeCompanionAbandonmentValue({ abandonedAtMs: 1_000 }, 2_000).ok,
+    false,
+  );
+});
+
+test("a clock in the FUTURE is refused — it would never expire", () => {
+  // ⚠ The failure it would cause is the whole point of persisting it: an
+  // abandonment dated an hour from now never runs out, which is exactly the
+  // unbounded wait the persistence exists to prevent. A refused row starts a
+  // fresh thirty minutes, which is bounded and safe.
+  assert.equal(
+    decodeCompanionAbandonmentValue({ abandonedAtMs: 9_000, supervisorCharacterIDs: [] }, 2_000).ok,
+    false,
+  );
+});
+
+test("an abandonment refuses junk rather than throwing", () => {
+  for (const bad of [
+    null,
+    [],
+    "now",
+    { abandonedAtMs: 0, supervisorCharacterIDs: [] },
+    { abandonedAtMs: 1.5, supervisorCharacterIDs: [] },
+    { abandonedAtMs: 1_000, supervisorCharacterIDs: [0] },
+    { abandonedAtMs: 1_000, supervisorCharacterIDs: "nobody" },
+    { abandonedAtMs: 1_000, supervisorCharacterIDs: [], safeSpotWarpIssued: true },
+  ]) {
+    assert.equal(
+      decodeCompanionAbandonmentValue(bad, 2_000).ok,
+      false,
+      `expected ${JSON.stringify(bad)} to be refused`,
+    );
+  }
 });
 
 test("an unknown role refuses", () => {

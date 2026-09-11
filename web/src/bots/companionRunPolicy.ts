@@ -27,11 +27,25 @@
 // will not find that lever here, because there is nothing left for it to
 // switch.
 //
-// "social" is UNCONDITIONAL too. The companion's fixed surface includes a
-// fleet-chat send (decision 5's rejoin protocol, and any later chat-command
-// acknowledgement), and nothing on `FleetCompanionRequest` gates whether that
-// send may happen — `chatCommandSenders` only narrows whose ORDERS are heard,
-// never whether the companion may itself speak. If a later phase adds a field
+// "social" is UNCONDITIONAL too, and this is the one class whose justification
+// is FORWARD-LOOKING rather than already-exercised. Phase 8 gives the companion
+// a fleet-chat surface (the command parser, the sender gate, and the
+// acknowledgement a heard order needs), and nothing on `FleetCompanionRequest`
+// gates whether it may speak — `chatCommandSenders` only narrows whose ORDERS
+// are heard, never whether the companion itself may send.
+//
+// ⚠ THAT IS DELIBERATE, NOT PREMATURE. A grant describes the authority a run is
+// given, not what it has already done, and the alternative is worse in a way
+// pilotRoster.ts:229 spells out: it renders an empty list as the sentence "No
+// consequential permissions", because "an empty list is a sentence, not a
+// blank". A pilot that will write fleet tags and speak in fleet chat must not
+// describe itself that way in the Bot Manager, and a class that appeared
+// mid-feature would make every already-approved grant read as stale.
+//
+// ⚠ WHAT IT IS NOT JUSTIFIED BY, since an earlier draft of this comment said so
+// and was wrong: decision 5's abandonment protocol sends NO chat. It docks,
+// leaves the fleet, waits, and accepts a gated invite — see
+// `decideAbandonment` in fleetCompanionLoop.ts. If a later phase adds a field
 // that actually withholds the chat send, this class stops being unconditional
 // and this comment (and the one above the function) must change with it.
 //
@@ -68,6 +82,7 @@ import {
   MIN_DRONE_HOLD_OFF_SECONDS,
   MIN_FLEE_ATTEMPTS,
   MIN_FLEE_HEALTH_FLOOR,
+  type CompanionAbandonmentRecord,
   type FleetCompanionOrderSource,
   type FleetCompanionRequest,
   type FleetCompanionRole,
@@ -133,10 +148,10 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
 // `readDocument` makes for a script document (scriptCodec.ts's `unknownKey`),
 // and for the same reason: a stored key this codec does not recognise is a
 // field a later version wrote and this version cannot honour, and silently
-// dropping it would run a request that is not the one that was saved. A
-// `safeSpotBookmarkID` field is coming in a later phase and is deliberately
-// OUT OF SCOPE here — this codec will need a matching update the day that
-// field exists, exactly as intended.
+// dropping it would run a request that is not the one that was saved. That is
+// also why `safeSpotBookmarkID` had to be added to `REQUEST_KEYS` below on the
+// day phase 0b gave the request that field: until then this codec REFUSED any
+// request carrying it, exactly as designed.
 //
 // The document is flat, so — unlike the script codec's nested tree — a plain
 // sequence of early returns is the clearest control flow here; there is no
@@ -154,6 +169,7 @@ const REQUEST_KEYS = new Set<string>([
   "attemptsTagging",
   "obeys",
   "chatCommandSenders",
+  "safeSpotBookmarkID",
 ]);
 
 /**
@@ -170,6 +186,13 @@ const MAX_DEFENSE_MODULE_IDS = 24;
  */
 const MAX_CHAT_COMMAND_SENDERS = 64;
 
+/**
+ * The rejoin allowlist is the fleet-mates seen on one tick, and a fleet does not
+ * run into the low hundreds of pilots — the same reasoning, and the same
+ * number, as `MAX_CHAT_COMMAND_SENDERS` above.
+ */
+const MAX_SUPERVISOR_IDS = 64;
+
 const SAY = {
   notObject: "This companion setup is not a valid request.",
   unknownKey: "This companion setup has settings this app does not recognise.",
@@ -183,6 +206,8 @@ const SAY = {
   badAttemptsTagging: "This companion setup's tagging setting is not valid.",
   badObeys: "This companion setup does not say which orders the pilot listens to.",
   badChatCommandSenders: "This companion setup's list of chat commanders is not valid.",
+  badSafeSpotBookmarkID: "This companion setup's safe-spot bookmark is not valid.",
+  badAbandonment: "This pilot's saved supervision state is not valid.",
 } as const;
 
 // Not exported: this module's public surface is exactly the two functions
@@ -280,6 +305,21 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     return { ok: false, refusal: SAY.badChatCommandSenders };
   }
 
+  // `null` is a REAL value here, not an absent one — "no safe spot has been
+  // named" is the answer for most requests, and the ladder acts on it (it stops
+  // rather than inventing somewhere to hide). Absent decodes to null so a
+  // request written before this field existed still reads, which costs nothing:
+  // the two mean the same thing.
+  const safeSpotRaw = obj["safeSpotBookmarkID"];
+  if (
+    safeSpotRaw !== undefined &&
+    safeSpotRaw !== null &&
+    !(typeof safeSpotRaw === "number" && Number.isSafeInteger(safeSpotRaw) && safeSpotRaw > 0)
+  ) {
+    return { ok: false, refusal: SAY.badSafeSpotBookmarkID };
+  }
+  const safeSpotBookmarkID = typeof safeSpotRaw === "number" ? safeSpotRaw : null;
+
   const request: FleetCompanionRequest = {
     role: role as FleetCompanionRole,
     defenseModuleIDs: Object.freeze([...defenseModuleIDs]),
@@ -291,6 +331,69 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     attemptsTagging,
     obeys: Object.freeze([...(obeys as FleetCompanionOrderSource[])]),
     chatCommandSenders: Object.freeze([...chatCommandSenders]),
+    safeSpotBookmarkID,
   };
   return { ok: true, request: Object.freeze(request) };
+}
+
+// ─── The codec door for a persisted ABANDONMENT ──────────────────────────────
+//
+// Decision 5's thirty-minute wait is only a bound if its clock outlives a BFF
+// restart, so the roster row carries it — and a value read back off disk is
+// untrusted bytes for exactly the same reason the request beside it is. This is
+// its one gate, in the same verdict shape.
+//
+// ⚠ THE CLOCK IS REFUSED IF IT IS IN THE FUTURE. `abandonedAtMs` is only ever
+// written from this host's own clock, so a timestamp ahead of now is either a
+// corrupted row or an edited one — and the failure it would cause is the whole
+// point of persisting it: an abandonment dated an hour from now never expires,
+// which is the unbounded wait the persistence exists to prevent. A row that
+// cannot be trusted is refused, and a refused row starts a FRESH thirty
+// minutes, which is bounded and safe.
+//
+// ⚠ AN EMPTY `supervisorCharacterIDs` IS VALID AND MEANS SOMETHING. It is what
+// a companion abandoned before it ever saw a human legitimately has, and it
+// reads as "accept no invite from anyone" — the safe direction. It must not be
+// confused with a missing field, which is refused.
+
+const ABANDONMENT_KEYS = new Set<string>(["abandonedAtMs", "supervisorCharacterIDs"]);
+
+type CompanionAbandonmentVerdict =
+  | { readonly ok: true; readonly abandonment: CompanionAbandonmentRecord }
+  | { readonly ok: false; readonly refusal: string };
+
+/** Decode an already-parsed, UNTRUSTED value into a `CompanionAbandonmentRecord`. */
+export function decodeCompanionAbandonmentValue(
+  value: unknown,
+  nowMs: number = Date.now(),
+): CompanionAbandonmentVerdict {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, refusal: SAY.badAbandonment };
+  }
+  const obj = value as Readonly<Record<string, unknown>>;
+  for (const key of Object.keys(obj)) {
+    if (!ABANDONMENT_KEYS.has(key)) {
+      return { ok: false, refusal: SAY.badAbandonment };
+    }
+  }
+  const abandonedAtMs = obj["abandonedAtMs"];
+  if (
+    typeof abandonedAtMs !== "number" ||
+    !Number.isSafeInteger(abandonedAtMs) ||
+    abandonedAtMs <= 0 ||
+    abandonedAtMs > nowMs
+  ) {
+    return { ok: false, refusal: SAY.badAbandonment };
+  }
+  const supervisorCharacterIDs = obj["supervisorCharacterIDs"];
+  if (!isPositiveSafeIntegerArray(supervisorCharacterIDs, MAX_SUPERVISOR_IDS)) {
+    return { ok: false, refusal: SAY.badAbandonment };
+  }
+  return {
+    ok: true,
+    abandonment: Object.freeze({
+      abandonedAtMs,
+      supervisorCharacterIDs: Object.freeze([...supervisorCharacterIDs]),
+    }),
+  };
 }

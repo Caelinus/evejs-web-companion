@@ -314,6 +314,7 @@ function startedStore(): ReturnType<typeof createClientStore> {
     followingOrderFrom: "broadcast",
     lastOrderHeard: "Orbit the fleet commander",
     canTag: false,
+    abandonment: null,
     failureReason: null,
   });
   return store;
@@ -346,6 +347,7 @@ test("canTag is three-state: null reads as 'not known', never as a settled no", 
     followingOrderFrom: null,
     lastOrderHeard: null,
     canTag: null,
+    abandonment: null,
     failureReason: null,
   });
   const text = visibleText(renderPanel(store));
@@ -373,6 +375,7 @@ test("a PAUSED companion still reads as holding the ship, with the standard paus
     followingOrderFrom: null,
     lastOrderHeard: null,
     canTag: null,
+    abandonment: null,
     failureReason: null,
   });
   const text = visibleText(renderPanel(store));
@@ -394,6 +397,7 @@ test("a failure reason is shown while running", () => {
     followingOrderFrom: null,
     lastOrderHeard: null,
     canTag: null,
+    abandonment: null,
     failureReason: "The fleet roster could not be read.",
   });
   // status "error" is not active, so this renders the SET-UP view's own

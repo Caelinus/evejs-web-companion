@@ -182,6 +182,7 @@ import {
   type FleetCompanionDeps,
   type FleetCompanionObservation,
   type FleetCompanionRequest,
+  type CompanionAbandonmentRecord,
 } from "../nav/fleetCompanionLoop.ts";
 import { highSlotMiningModules, isDockableKind, ungroupedHighSlotModules } from "../space/rowActions.ts";
 import {
@@ -304,6 +305,28 @@ export interface AppFlowOptions {
    * connections for its whole life. See AppFlow.setLivePush.
    */
   readonly livePush?: boolean;
+  /**
+   * Character IDs THIS HOST is flying with a bot of its own — the fleet
+   * companion's supervision gate (decision 5) subtracts them from the fleet
+   * roster, and whatever is left is a human.
+   *
+   * ⚠ IT HAS TO BE INJECTED, BECAUSE NOTHING ON THE SERVER CAN ANSWER IT. A
+   * human's pilot and a companion's pilot both reach the BFF as an ordinary
+   * held bridge session; `isCharacterHeld` cannot tell them apart, and neither
+   * can the fleet roster. Only the process doing the driving knows.
+   *
+   * What each host supplies, and why it is the right answer there:
+   *
+   *   • The BFF's bot host passes its live claim map, which is exact — every
+   *     headless companion is in it by construction.
+   *   • `App.svelte` passes the pilots its own multibox roster is flying with a
+   *     bot, which is what "this tab is driving it" means in a browser.
+   *
+   * Omitted, the flow falls back to this session alone (see
+   * `makeFleetCompanionDeps`). Whatever comes back is UNIONED with the BFF's
+   * own running-bot list, never used instead of it.
+   */
+  readonly botDrivenCharacterIDs?: () => readonly number[] | null;
 }
 
 /**
@@ -968,7 +991,10 @@ export interface AppFlow {
    * slice rather than throwing.
    */
   /** Start the fleet companion — a pilot that takes its orders from the fleet. */
-  startFleetCompanion(request: FleetCompanionRequest): Promise<void>;
+  startFleetCompanion(
+    request: FleetCompanionRequest,
+    resuming?: CompanionAbandonmentRecord | null,
+  ): Promise<void>;
   pauseFleetCompanion(): void;
   resumeFleetCompanion(): void;
   stopFleetCompanion(): void;
@@ -5259,9 +5285,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   function makeFleetCompanionDeps(): FleetCompanionDeps {
     return {
       observe: async (): Promise<FleetCompanionObservation> => {
-        const [statusStep, spaceResult] = await Promise.all([
+        // The supervision read rides along with the other two rather than
+        // queueing behind them: it is independent of both, and a companion
+        // decides on a two-second cadence.
+        const [statusStep, spaceResult, botDriven] = await Promise.all([
           api.getFlightStatus(callOptions),
           api.getSpaceSnapshot(callOptions),
+          botDrivenCharacterIDs(),
         ]);
         const status = decodeFlightStatus(statusStep.flight);
         void observeFlightStatus(status);
@@ -5320,12 +5350,44 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // then they are honestly unknown rather than falsely empty.
           fleetTargetTags: null,
           canTag: null,
+          botDrivenCharacterIDs: botDriven,
+          // The invite the notification drain already parked in the fleet slice.
+          // Read rather than re-fetched: every bridge response on this tick
+          // carried its own drain, so the slice is as fresh as anything else
+          // here, and a companion polls no extra route for it.
+          pendingFleetInvite: companionPendingInvite(),
         };
       },
-      issue: async () => {
-        // Phase 0 decides `wait` and nothing else, so nothing is ever issued.
-        // Later phases dispatch here the way `makeMiningBotDeps` does: straight
-        // to the `api.*` wrapper, never through the script runner's own switch.
+      issue: async (action) => {
+        // Straight to the `api.*` wrapper, the way `makeMiningBotDeps` does —
+        // never through the script runner's own switch, which belongs to the
+        // DSL. Every one of these is an abandonment-protocol call (decision 5);
+        // the companion's ordinary work still issues nothing.
+        switch (action.kind) {
+          case "wait":
+            return;
+          case "warp":
+            await api.warpTo(action.targetID, null, callOptions);
+            return;
+          case "approach":
+            await api.approach(action.targetID, null, callOptions);
+            return;
+          case "dock":
+            await api.dock(action.stationID, callOptions);
+            return;
+          case "warpToBookmark":
+            // Zero minimum range: the point is to be somewhere else, and a
+            // landing offset would only be a tactical choice this pilot has no
+            // basis to make.
+            await api.warpToBookmark(action.bookmarkID, 0, callOptions);
+            return;
+          case "leaveFleet":
+            await api.leaveFleet(callOptions);
+            return;
+          case "acceptFleetInvite":
+            await api.acceptFleetInvite(action.fleetID, callOptions);
+            return;
+        }
       },
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
       onProgress: (progress) => {
@@ -5340,10 +5402,64 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           followingOrderFrom: progress.followingOrderFrom,
           lastOrderHeard: progress.lastOrderHeard,
           canTag: progress.canTag,
+          abandonment: progress.abandonment,
           failureReason: progress.failureReason,
         });
       },
     };
+  }
+
+  /**
+   * Who this host is flying with a bot — the union of the BFF's OWN running-bot
+   * roster and whatever this host says it drives itself.
+   *
+   * The union is the point, because neither half alone is enough:
+   *
+   *   • `/api/bots/active` is the BFF's live claim map, so a headless companion
+   *     reading it over loopback gets an EXACT answer covering every other
+   *     headless companion — including ones this tab never started. It is
+   *     unauthenticated by design (the login screen marks bot-flown pilots), so
+   *     there is no token question here.
+   *   • It cannot see a companion running in a BROWSER, which holds an ordinary
+   *     bridge session like any human. That is what the injected half covers.
+   *
+   * A failed read returns `null`, never `[]`. An empty list would read as
+   * "nobody is bot-driven", which makes every companion in the fleet look like a
+   * human and disables the gate silently — the loudest possible failure being
+   * the quiet one. `null` leaves the gate undecidable, which is the honest
+   * answer and the one `decideCompanionAction` fails open on.
+   */
+  async function botDrivenCharacterIDs(): Promise<readonly number[] | null> {
+    let serverBots: readonly number[];
+    try {
+      serverBots = (await api.listActiveServerBots(callOptions)).map((bot) => bot.characterID);
+    } catch {
+      return null;
+    }
+    const mine = options.botDrivenCharacterIDs?.() ?? ownDrivenCharacterIDs();
+    if (mine === null) {
+      return null;
+    }
+    return [...new Set([...serverBots, ...mine])];
+  }
+
+  /**
+   * The fallback for a host that injected nothing: this session alone, and only
+   * while a bot is actually holding its ship.
+   *
+   * It is deliberately narrow. A pilot this session is flying BY HAND is not
+   * something to subtract — a human at the keyboard is exactly the supervision
+   * the gate is looking for.
+   */
+  function ownDrivenCharacterIDs(): readonly number[] {
+    const me = store.station.get().online?.characterID ?? null;
+    return me !== null && store.bots.get().runningBotID !== null ? [me] : [];
+  }
+
+  /** The pending fleet invite, narrowed to the two ids the rejoin gate reads. */
+  function companionPendingInvite(): { readonly fleetID: number; readonly inviterID: number | null } | null {
+    const invite = store.fleet.get().pendingInvite;
+    return invite === null ? null : { fleetID: invite.fleetID, inviterID: invite.inviterID };
   }
 
   function makeMiningBotDeps(): MiningBotDeps {
@@ -5936,7 +6052,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return { inFleet, docked };
   }
 
-  async function startFleetCompanion(request: FleetCompanionRequest): Promise<void> {
+  /**
+   * `resuming` re-seats an abandonment that was already under way when the BFF
+   * went down, so its thirty-minute clock continues instead of restarting.
+   * Only the bot host ever passes it; a player pressing Start never does.
+   */
+  async function startFleetCompanion(
+    request: FleetCompanionRequest,
+    resuming: CompanionAbandonmentRecord | null = null,
+  ): Promise<void> {
     store.apply({ type: "companion/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -5955,7 +6079,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (!fleetCompanion) {
       fleetCompanion = createFleetCompanion(makeFleetCompanionDeps());
     }
-    fleetCompanion.start(request);
+    fleetCompanion.start(request, resuming);
     void fleetCompanion.run();
   }
 

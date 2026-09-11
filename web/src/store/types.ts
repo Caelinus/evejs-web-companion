@@ -18,7 +18,11 @@ import type {
 import type { GateLink } from "../space/gateLinks.ts";
 import type { BotID, ShipControllerID } from "../nav/botRegistry.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
-import type { FleetCompanionRole, FleetCompanionRunState } from "../nav/fleetCompanionLoop.ts";
+import type {
+  CompanionAbandonmentRecord,
+  FleetCompanionRole,
+  FleetCompanionRunState,
+} from "../nav/fleetCompanionLoop.ts";
 
 export type { GateLink };
 export type { BotID };
@@ -2282,6 +2286,16 @@ export interface FleetCompanionState {
     | null;
   readonly lastOrderHeard: string | null;
   readonly canTag: boolean | null;
+  /**
+   * Non-null while decision 5's abandonment protocol is running: nobody in the
+   * fleet this host is not flying, so the pilot got safe, dropped fleet, and is
+   * waiting out a bounded thirty minutes for a human to invite it back.
+   *
+   * ⚠ IT IS HERE SO IT CAN BE PERSISTED. The BFF's bot host projects this slice
+   * onto its durable roster row; without the clock on the row, a restart hands
+   * the companion a fresh thirty minutes and the bound stops being one.
+   */
+  readonly abandonment: CompanionAbandonmentRecord | null;
   readonly startedAt: number | null;
   readonly startError: string | null;
   readonly failureReason: string | null;

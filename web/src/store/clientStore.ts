@@ -626,6 +626,7 @@ const INITIAL_FLEET_COMPANION: FleetCompanionState = Object.freeze({
   followingOrderFrom: null,
   lastOrderHeard: null,
   canTag: null,
+  abandonment: null,
   startedAt: null,
   startError: null,
   failureReason: null,
@@ -2290,6 +2291,7 @@ export function createClientStore(): ClientStore {
           followingOrderFrom: event.followingOrderFrom,
           lastOrderHeard: event.lastOrderHeard,
           canTag: event.canTag,
+          abandonment: event.abandonment,
           failureReason: event.failureReason,
         });
         break;

@@ -36,6 +36,7 @@ const IDLE_COMPANION_SLICE = Object.freeze({
   followingOrderFrom: null,
   lastOrderHeard: null,
   canTag: null,
+  abandonment: null,
   startedAt: null,
   startError: null,
   failureReason: null,
@@ -93,6 +94,21 @@ function makeFakeStack(log) {
       }
       return { ok: true, request: value };
     },
+    // Decision 5's persisted clock gets the same treatment as the request: a
+    // plain fake of the real codec door, refusing anything without a usable
+    // timestamp so the host's own DROP-don't-refuse behaviour can be pinned.
+    decodeCompanionAbandonmentValue: (value) =>
+      value && typeof value === "object" && Number.isSafeInteger(value.abandonedAtMs)
+        ? {
+            ok: true,
+            abandonment: {
+              abandonedAtMs: value.abandonedAtMs,
+              supervisorCharacterIDs: Array.isArray(value.supervisorCharacterIDs)
+                ? value.supervisorCharacterIDs
+                : [],
+            },
+          }
+        : { ok: false, refusal: "That saved supervision state could not be read." },
     createClientStore: () => {
       const listeners = new Set();
       const state = {
@@ -138,8 +154,8 @@ function makeFakeStack(log) {
         stopCustomBot() {
           log.push(["stopCustomBot"]);
         },
-        async startFleetCompanion(request) {
-          log.push(["startFleetCompanion", request]);
+        async startFleetCompanion(request, resuming = null) {
+          log.push(["startFleetCompanion", request, resuming]);
           store._set({
             companion: { ...IDLE_COMPANION_SLICE, status: "running", phase: "Flying", role: request.role },
           });
@@ -968,4 +984,115 @@ test("a companion whose persisted request re-derives DIFFERENT risk classes than
   assert.equal(row.status, "error");
   assert.match(String(row.why), /restarted/);
   assert.equal(after.claimedBy(140000002), null);
+});
+
+// ── Decision 5: the abandonment clock is durable ────────────────────────────
+//
+// A companion with nobody in its fleet this host is not flying gets safe, drops
+// fleet and waits a bounded thirty minutes before releasing the hull. The bound
+// is only a bound if its start time outlives a restart — otherwise every
+// restart hands it a fresh thirty minutes, which is an unbounded wait assembled
+// out of bounded ones.
+
+const ABANDONED = Object.freeze({ abandonedAtMs: 1_700_000_000_000, supervisorCharacterIDs: [90000001] });
+
+test("an abandonment pushed by the companion loop is written into the roster row", async () => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ log, persistPath: rosterPath });
+  await host.start(COMPANION_START);
+  assert.equal(readRosterFile(rosterPath)[0].abandonment, null);
+  lastStore(log)._set({
+    companion: {
+      ...IDLE_COMPANION_SLICE,
+      status: "running",
+      phase: "Abandoned",
+      abandonment: ABANDONED,
+    },
+  });
+  assert.deepEqual(readRosterFile(rosterPath)[0].abandonment, ABANDONED);
+});
+
+test("the roster is NOT rewritten on every tick — only when the abandonment changes", async () => {
+  // applySnapshot runs on every store push, roughly once every two seconds per
+  // bot. An abandonment changes at most twice in a run, so the write is gated
+  // on a real change rather than on the push.
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ log, persistPath: rosterPath });
+  await host.start(COMPANION_START);
+  const store = lastStore(log);
+  const running = { ...IDLE_COMPANION_SLICE, status: "running", phase: "Abandoned", abandonment: ABANDONED };
+  store._set({ companion: running });
+  const afterFirst = fs.statSync(rosterPath).mtimeMs;
+  for (let tick = 0; tick < 5; tick += 1) {
+    store._set({ companion: { ...running, why: `tick ${tick}` } });
+  }
+  assert.equal(fs.statSync(rosterPath).mtimeMs, afterFirst);
+});
+
+test("supervision returning clears the persisted clock too", async () => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ log, persistPath: rosterPath });
+  await host.start(COMPANION_START);
+  const store = lastStore(log);
+  store._set({
+    companion: { ...IDLE_COMPANION_SLICE, status: "running", abandonment: ABANDONED },
+  });
+  assert.notEqual(readRosterFile(rosterPath)[0].abandonment, null);
+  store._set({ companion: { ...IDLE_COMPANION_SLICE, status: "running", abandonment: null } });
+  assert.equal(readRosterFile(rosterPath)[0].abandonment, null);
+});
+
+test("resume hands the ORIGINAL clock back to the loop, not a fresh one", async () => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ log, persistPath: rosterPath });
+  await before.start(COMPANION_START);
+  lastStore(log)._set({
+    companion: { ...IDLE_COMPANION_SLICE, status: "running", abandonment: ABANDONED },
+  });
+
+  const resumeLog = [];
+  const after = makeHost({
+    log: resumeLog,
+    persistPath: rosterPath,
+    loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
+  });
+  await after.resume();
+  const call = resumeLog.find((row) => row[0] === "startFleetCompanion");
+  assert.notEqual(call, undefined);
+  assert.deepEqual(call[2], ABANDONED, "the resumed run must continue the same thirty minutes");
+});
+
+test("an undecodable persisted clock is DROPPED, never fatal to the start", async () => {
+  // A row that cannot be trusted starts a fresh thirty minutes, which is still
+  // bounded and still safe. Refusing the whole start would instead leave a
+  // pilot flying with no host to stop it.
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(COMPANION_START);
+  const raw = JSON.parse(fs.readFileSync(rosterPath, "utf8"));
+  raw.bots[0].abandonment = { abandonedAtMs: "the other day" };
+  fs.writeFileSync(rosterPath, JSON.stringify(raw), "utf8");
+
+  const resumeLog = [];
+  const after = makeHost({
+    log: resumeLog,
+    persistPath: rosterPath,
+    loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
+  });
+  await after.resume();
+  assert.equal(after.list(7).length, 1, "the companion must still come back");
+  const call = resumeLog.find((row) => row[0] === "startFleetCompanion");
+  assert.equal(call[2], null);
+});
+
+test("a script row never grows an abandonment field", async () => {
+  // It is companion-shaped state; a script has no supervision gate at all.
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ persistPath: rosterPath });
+  await host.start(START);
+  assert.equal("abandonment" in readRosterFile(rosterPath)[0], false);
 });

@@ -16,18 +16,23 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Branch commits | `d844988`, `6ca4c49`, `0f2e9ca`, then the decisions and phase 0's completion |
 | Working tree | clean |
 | Phase 0 | **COMPLETE** — grant derivation, headless runs, and a start control |
-| Phase 0b | specced and decided (plan decision 5), not started — the next thing |
-| Everything else | not started |
+| Phase 0b | **COMPLETE** — the supervision gate and the abandonment protocol |
+| Everything else | not started; phase 1 is the one to start with |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite identical to baseline (17 locale failures, no new names).
+full suite 4,899 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
+the pre-work baseline, which was 4,860 tests with the same 17.
 
 ## What exists
 
 - `web/src/nav/fleetCompanionLoop.ts` — the loop. Types, the typed request, the
-  controller, and a ladder whose only rung is the warp yield. It decides `wait`
-  and issues nothing, on purpose.
-- `web/src/nav/fleetCompanionLoop.test.ts` — 13 tests, the ladder and lifecycle.
+  controller, and a ladder with two rungs: the warp yield and the supervision
+  gate. Its ORDINARY work still decides `wait` and issues nothing, on purpose —
+  every call it can make belongs to the abandonment protocol.
+- `web/src/nav/fleetCompanionLoop.test.ts` — 40 tests, the ladder, the
+  supervision gate, the abandonment protocol, and the lifecycle.
+- `web/src/bots/companionRunPolicy.test.ts` — 28 tests, the risk derivation and
+  both codec doors.
 - `web/src/app/companionFlow.test.ts` — 8 tests, the flow over a faked BFF:
   preflight, and the exclusion pairs.
 - `flow.ts` — `makeFleetCompanionDeps()`, `startFleetCompanion` and the
@@ -76,11 +81,70 @@ is why the handoff calls it a feature. It cannot see a two-way ternary, and it
 cannot see a call to the wrong same-shaped function. Adding a `BotID` member does
 not flush those out; only reading the call sites does.
 
+## Phase 0b is COMPLETE, 2026-09-11
+
+Decision 5, built: a companion does no unsupervised work, checked every tick.
+
+| Piece | Where |
+| --- | --- |
+| The check — fleet members this host is NOT flying | `supervisorsInFleet`, `fleetCompanionLoop.ts` |
+| The protocol — get safe, drop fleet, bounded wait, gated rejoin | `decideAbandonment` / `getSafe`, same file |
+| Who this host drives | `AppFlowOptions.botDrivenCharacterIDs`, injected by `App.svelte` and unioned with `/api/bots/active` |
+| The persisted 30-minute clock | `CompanionAbandonmentRecord` → the companion slice → `botHost.js`'s roster row |
+| Its codec door | `decodeCompanionAbandonmentValue`, `companionRunPolicy.ts` |
+| The safe spot | `FleetCompanionRequest.safeSpotBookmarkID`, picked in `FleetCompanion.svelte` |
+
+**The ladder now takes the request and threads memory**:
+`decideCompanionAction(request, obs, memory, nowMs)` returns `{action, phase,
+why, memory, stop?}`. Later phases add rungs the same way; the memory is pure in
+and pure out, and `tick()` stores it BEFORE anything else can return.
+
+### Six things worth knowing
+
+- **The gate SUBTRACTS, it never counts.** Four companions plus an operator is
+  still four members after the operator logs off. `supervisorsInFleet` removes
+  the host's bots and this pilot, and what is left is the human.
+- **`null` and `[]` are different answers and the whole gate rests on it.** `[]`
+  is "looked, nobody there" and starts the protocol; `null` is "could not look"
+  and FAILS OPEN, because a transient roster failure must not dock a live fleet
+  op. What bounds a read that stays broken is `maxRuntimeMinutes`, which is
+  still the only thing that ends an unattended run.
+- **Nothing on the server can tell a companion's session from a human's.** Both
+  are ordinary held bridge sessions; `isCharacterHeld` cannot separate them.
+  That is why the driven set is INJECTED. The BFF host's claim map is exact;
+  `App.svelte` answers for the tab; `/api/bots/active` is unioned in so a
+  browser companion can see the headless ones. A companion on ANOTHER account
+  still reads as human — decision 5 accepts that.
+- **Safety is confirmed by a READING, never a timer.** "Issued the warp" is not
+  "left the grid" — the POST returns before `shipMode` flips — so
+  `safeSpotWarpSeen` is set only by a tick that actually observed `inWarp`, and
+  rung 1 is the only place that can observe it. Dropping fleet on the issue
+  alone would leave the ship in space with no fleet, which is the one ordering
+  mistake decision 5 calls out.
+- **The persisted clock deliberately does NOT carry the get-safe flags.** They
+  describe a warp that is over the moment the process dies; persisting them
+  would let a resumed run believe it had already reached safety.
+- **An undecodable persisted clock is DROPPED, not fatal.** A fresh thirty
+  minutes is still bounded; refusing the start would leave a pilot flying with
+  no host to stop it. A clock dated in the FUTURE is refused for the same
+  reason — it would never expire.
+
+### What 0b did NOT do, on purpose
+
+- **No fleet-chat announcement before leaving.** It is not in decision 5, and
+  `companionRunPolicy.ts`'s header previously justified the unconditional
+  "social" class by claiming the rejoin protocol sends chat. It does not; that
+  comment is corrected, and the class is now justified forward-looking on phase
+  8 instead. Worth asking the operator whether they want the announcement.
+- **No drone recall in the get-safe warp.** Nothing in the companion launches a
+  drone yet, so there is nothing to abandon — `getSafe` says so in a ⚠, and
+  **phase 5 must add one** or that warp starts costing drones.
+
 ### What is next
 
-1. **Phase 0b — the supervision gate and the abandonment protocol** (plan doc,
-   decision 5). This is now the most load-bearing unbuilt thing, and the 30-minute
-   clock needs persisting in the roster row that phase 0 just built.
+1. **Phase 1** — the broadcast decoders, the store slice with TTL, and the
+   `follow-the-fleet` behaviour. The largest single chunk, entirely in-repo, and
+   everything interesting depends on it.
 2. **The headless launch UI is NOT phase 0's, and was deliberately not built.** A
    per-pilot request is a value on a Pilot Hangar squad, which makes the launch UI
    part of phase 9's squad launcher. The plumbing is finished and waiting:
@@ -129,8 +193,12 @@ lines and exports three things. `fleetMatesOnGrid`, `hostilesInReach`,
 module-local. Exporting them is trivial but it is a commit, and it means
 touching the two files the DSL owns.
 
-**`onProgress` is not decoration.** The store's `botStatus` record reads the
-loop's status to decide who holds the hull. A loop that stops without reporting
+**`onProgress` is not decoration, and 0b gave it a second job.** The store's
+`botStatus` record reads the loop's status to decide who holds the hull — AND
+the abandonment clock reaches the BFF's durable roster row along the same
+channel (`FleetCompanionProgress.abandonment` → the companion slice →
+`applySnapshot`). A readout that dropped it would hand the companion a fresh
+thirty minutes on every restart. A loop that stops without reporting
 leaves the store believing it still holds the ship, so the next bot's claim
 looks like it stopped nothing. This was a real bug, caught by
 `companionFlow.test.ts`; the test says so in a comment. Do not weaken it.
