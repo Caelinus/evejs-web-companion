@@ -3628,11 +3628,23 @@ function droneCycleHoldTicks(request: FleetCompanionRequest): number {
  * This rung used to ask `measureSpace`, whose distances are SURFACE distances:
  * centres minus BOTH radii. So a pilot 2,400 m from the hull of a can was
  * 2,400 + its own radius + the can's radius away from the centre the server
- * measures to, and reached in from outside the gate while still flying. Observed
- * live 2026-09-11: three `GetInventoryFromId` calls answered `FakeItemNotFound`
- * over four seconds, and the fourth -- a few hundred metres later -- bound the
- * container and listed it. By then the attempt bound in `companionLootFrom` had
- * already set the can aside, so the pilot parked next to a can it never opened.
+ * measures to, and reached in from outside the gate while still flying. By the
+ * time it had closed the rest of the way, the attempt bound in
+ * `companionLootFrom` had set the can aside, so the pilot parked next to a can
+ * it never opened -- which is the symptom as the operator reported it.
+ *
+ * ⚠ WHAT THE 2026-09-11 SERVER LOG DOES AND DOES NOT SHOW, stated exactly,
+ * because a first reading of it overstated the case. It shows three
+ * `GetInventoryFromId` calls answered `FakeItemNotFound` over four seconds and a
+ * fourth, a few hundred metres later, binding the container and listing it --
+ * so the gate is real, it is a DISTANCE gate, and the refusal it hands back is
+ * indistinguishable from an unknown id. But those calls arrived over a game
+ * client's own socket: the web gateway invokes service handlers directly and its
+ * traffic never appears in that log as a call at all (1,835 gateway requests to
+ * zero logged calls over three minutes, checked). So the log is evidence about
+ * the SERVER'S RULE, and the companion's own failure follows from that rule plus
+ * the surface-versus-centre mismatch above -- not from a logged refusal of its
+ * own. The fix was confirmed live by the operator.
  *
  * ⚠ THE MARGIN IS FREE, SO IT IS GENEROUS. The approach below hugs the object
  * (no range), so a pilot that is going to loot at all is on its way to ~50 m --

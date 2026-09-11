@@ -3919,10 +3919,13 @@ test("a can whose HULL is near but whose CENTRE is not is closed on, never reach
   // centres minus both radii. Here that is 2,800 - 200 - 300 = 2,300 m, inside
   // the old 2,400 m test, while the server was measuring 2,800 and refusing.
   //
-  // The server log of the incident shows exactly that: three refusals over four
-  // seconds while the ship was still closing, then a fourth call -- a few
-  // hundred metres later -- binding the container and listing it. By then
-  // `companionLootFrom`'s attempt bound had set the can aside for good.
+  // The server log of that day shows the gate biting: three refusals over four
+  // seconds, then a fourth call -- a few hundred metres later -- binding the
+  // container and listing it. ⚠ Those calls came over a GAME CLIENT's socket,
+  // not the companion's: the web gateway calls service handlers directly and
+  // never appears in that log. So they pin the server's RULE, and the
+  // companion's own failure follows from that rule plus the mismatch above.
+  // `companionLootFrom`'s attempt bound is what turned it permanent.
   const stillTooFar = obs({
     snapshot: lootGrid({
       containerDistance: 2_800,
