@@ -42,6 +42,10 @@ import {
   STATION_DOCKING_RADIUS_M,
   type SpaceMeasurement,
 } from "./autopilotLoop.ts";
+// The kill-order authority (rung 3, "obeying the fleet"). Imported rather than
+// re-derived for the same reason the get-safe helpers above are: one answer to
+// "where does this tag rank", shared with the combat priority list.
+import { fleetTagRank } from "./targetPriority.ts";
 import type { SpaceEntity } from "../store/types.ts";
 
 /** The run states, mirroring the other loops exactly (`MiningBotRunState`). */
@@ -293,10 +297,14 @@ export interface FleetCompanionDeps {
 /**
  * What one tick decided to do.
  *
- * Everything below `wait` belongs to ONE behaviour — the abandonment protocol
- * (decision 5). The companion's ordinary work still decides `wait` and issues
- * nothing; these exist because a companion left without a human has somewhere
- * to be, and getting there is the one thing it may do unsupervised.
+ * `wait` is what most ticks decide — nothing new to do. Below it sit two
+ * unrelated groups, each belonging to its own rung:
+ *
+ *   • the abandonment protocol (decision 5, rung 2) — warp / approach / dock /
+ *     warpToBookmark / leaveFleet / acceptFleetInvite — the one thing a
+ *     companion left without a human may do unsupervised.
+ *   • obeying the fleet (rung 3) — lock / align — answering a fleet tag or
+ *     broadcast while a human IS supervising. See `decideFleetOrders`.
  */
 export type FleetCompanionAction =
   | { readonly kind: "wait" }
@@ -307,7 +315,15 @@ export type FleetCompanionAction =
   /** The fallback when no station is on grid: the operator's own safe spot. */
   | { readonly kind: "warpToBookmark"; readonly bookmarkID: number }
   | { readonly kind: "leaveFleet" }
-  | { readonly kind: "acceptFleetInvite"; readonly fleetID: number };
+  | { readonly kind: "acceptFleetInvite"; readonly fleetID: number }
+  /**
+   * Obeying the fleet (rung 3): a tag or a `Target` broadcast, locked. Locking
+   * is the whole of what this rung does with a target — there is no weapons
+   * rung yet, so this is never a stand-in for shooting.
+   */
+  | { readonly kind: "lock"; readonly targetID: number }
+  /** Obeying the fleet (rung 3): an `AlignTo` broadcast. */
+  | { readonly kind: "align"; readonly targetID: number };
 
 export interface FleetCompanionProgress {
   readonly status: FleetCompanionRunState;
@@ -431,10 +447,17 @@ export interface CompanionLadderMemory {
   readonly abandonment: CompanionAbandonment | null;
   /** The target of an approach this loop started, for `decideCloseIn`. */
   readonly closingOn: number | null;
+  /**
+   * The target rung 3 last issued a `lock` call for — the fallback for
+   * `isAlreadyLocked` when `obs.lockedTargetIDs` itself is unreadable. See
+   * that function's own comment for why the authoritative read still wins
+   * whenever it is available.
+   */
+  readonly lastLockIssuedFor: number | null;
 }
 
 export function freshLadderMemory(): CompanionLadderMemory {
-  return { lastSupervisorIDs: [], abandonment: null, closingOn: null };
+  return { lastSupervisorIDs: [], abandonment: null, closingOn: null, lastLockIssuedFor: null };
 }
 
 export interface CompanionDecision {
@@ -454,6 +477,16 @@ export interface CompanionDecision {
    * pilot is flyable from a tab again. A pause would hold the ship forever.
    */
   readonly stop?: string;
+  /**
+   * Which authority this decision came from, for the readout. Omitted (never
+   * `null` here — `tick()` supplies the default) by every rung except rung 3;
+   * the controller reads that omission as `"own-ladder"`, which is the honest
+   * answer for the warp yield, the supervision gate, the abandonment protocol
+   * and "Standing by" alike — none of them are obeying an external order.
+   */
+  readonly followingOrderFrom?: "tag" | "broadcast";
+  /** Short plain words for the panel — never the broadcast's wire name. */
+  readonly lastOrderHeard?: string;
 }
 
 /**
@@ -538,6 +571,11 @@ function nearestOf(
  *     companion to boss. So what this catches is not merely "kept flying
  *     unsupervised"; it is "was made fleet commander, and its tag writes
  *     started landing", in a fleet nobody is in.
+ *
+ * ⚠ RUNG 3 IS OBEYING THE FLEET, BELOW THE SUPERVISION GATE AND ABOVE
+ * "Standing by". Unlike rung 2 it IS an order source (see
+ * `decideFleetOrders`'s own header for the tag-over-broadcast reasoning and
+ * why an off-grid call is not an order for this pilot at all).
  */
 export function decideCompanionAction(
   request: FleetCompanionRequest,
@@ -586,11 +624,21 @@ export function decideCompanionAction(
     lastSupervisorIDs: [...supervisors],
     abandonment: null,
     closingOn: memory.closingOn,
+    lastLockIssuedFor: memory.lastLockIssuedFor,
   };
 
-  // Phases 2-8 add their rungs here, in the order documented in
+  const obeying = decideFleetOrders(request, obs, supervised);
+  if (obeying !== null) {
+    return obeying;
+  }
+
+  // Phases 4-8 add further rungs here, in the order documented in
   // docs/fleet-companion-implementation.md, "The rung ladder".
-  return waiting("Standing by", "No companion behaviour is built yet.", supervised);
+  return waiting(
+    "Standing by",
+    "No fleet order to obey right now, and no further companion behaviour is built yet.",
+    supervised,
+  );
 }
 
 /**
@@ -769,6 +817,190 @@ function getSafe(
   return waiting("Getting safe", "Waiting for the warp to the safe spot to start.", mem);
 }
 
+/** An entity present on THIS grid, or null when the snapshot does not carry it. */
+function entityOnGrid(itemID: number, entities: readonly SpaceEntity[]): SpaceEntity | null {
+  return entities.find((entity) => entity.itemID === itemID) ?? null;
+}
+
+/**
+ * The best-ranked TAGGED entity on grid, by `fleetTagRank` — nearest breaks a
+ * tie between two entities carrying tags of equal rank (an unrecognised tag,
+ * or two hand-typed tags that happen to collide; see `fleetTagRank`'s own
+ * comment on why an unrecognised tag still gets a finite rank rather than
+ * being dropped).
+ */
+function bestTaggedEntity(
+  tags: ReadonlyMap<number, string>,
+  entities: readonly SpaceEntity[],
+  measurement: SpaceMeasurement | null,
+): SpaceEntity | null {
+  let bestRank = Number.POSITIVE_INFINITY;
+  let candidates: SpaceEntity[] = [];
+  for (const entity of entities) {
+    const tag = tags.get(entity.itemID);
+    if (tag === undefined) {
+      continue;
+    }
+    const rank = fleetTagRank(tag);
+    if (rank < bestRank) {
+      bestRank = rank;
+      candidates = [entity];
+    } else if (rank === bestRank) {
+      candidates.push(entity);
+    }
+  }
+  return candidates.length === 0 ? null : nearestOf(candidates, measurement);
+}
+
+/**
+ * Whether `targetID` is already locked.
+ *
+ * ⚠ THE AUTHORITATIVE READ WINS WHENEVER IT IS READABLE AT ALL. `obs.lockedTargetIDs`
+ * comes straight off the server's own lock list, the same authority
+ * `miningBotLoop.ts`'s `getLockedTargetIDs` trusts over its own memory — an
+ * EMPTY array is a real "nothing locked" answer, not a failed read, so it is
+ * trusted exactly like a non-empty one. Only `null`/`undefined` (unreadable,
+ * or simply not wired up by this host's `observe()` yet) falls back to the
+ * ladder's own memory of the last target IT issued a `lock` call for — the
+ * same "compare and stamp" `closingOn` already uses, so a target whose lock is
+ * merely in flight is not re-issued every tick just because this tick's
+ * authoritative read did not arrive.
+ */
+function isAlreadyLocked(
+  targetID: number,
+  lockedTargetIDs: readonly number[] | null | undefined,
+  memory: CompanionLadderMemory,
+): boolean {
+  if (lockedTargetIDs !== null && lockedTargetIDs !== undefined) {
+    return lockedTargetIDs.includes(targetID);
+  }
+  return memory.lastLockIssuedFor === targetID;
+}
+
+/** One rung-3 decision: lock `targetID`, or hold if it is already locked. */
+function lockOrHold(
+  targetID: number,
+  source: "tag" | "broadcast",
+  heard: string,
+  why: string,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDecision {
+  if (isAlreadyLocked(targetID, obs.lockedTargetIDs, memory)) {
+    return {
+      action: WAIT,
+      phase: "Obeying fleet",
+      why: why + " Already locked.",
+      memory,
+      followingOrderFrom: source,
+      lastOrderHeard: heard,
+    };
+  }
+  return {
+    action: { kind: "lock", targetID },
+    phase: "Obeying fleet",
+    why: why + " Locking it.",
+    memory: { ...memory, lastLockIssuedFor: targetID },
+    followingOrderFrom: source,
+    lastOrderHeard: heard,
+  };
+}
+
+/**
+ * Rung 3: obeying the fleet. Below the supervision gate (only reached while a
+ * human is here) and above "Standing by". Returns `null` when there is
+ * nothing to obey, which is how the caller falls through to standing by.
+ *
+ * Checked in this order — tag, then a `Target` broadcast, then an `AlignTo`
+ * broadcast — and the order is fixed for one reason each:
+ *
+ * ⚠ A TAG OUTRANKS A BROADCAST, WHICH LOOKS BACKWARDS: a broadcast is the
+ * FRESHER, more deliberate act, so a later reader will want to swap these.
+ * Don't — the reason is AUTHORITY, and it is in the server, not in freshness.
+ * `setFleetTargetTag` refuses any writer who is not a fleet commander, so a
+ * tag that EXISTS is provably a commander's. `sendBroadcast` checks fleet
+ * MEMBERSHIP and nothing else — any member may broadcast `Target` — and
+ * receiving one says nothing at all about who sent it. When the two disagree,
+ * the tag is the one that can only be the FC's.
+ *
+ * ⚠ A CALL FOR SOMETHING NOT ON THIS GRID IS NOT AN ORDER FOR THIS PILOT. A
+ * tagged or called item absent from `obs.snapshot` is skipped — falling
+ * through to the next source, and ultimately to "Standing by" — rather than
+ * waited on. That is what keeps a follower flying its own ladder while the FC
+ * is off doing something two systems away.
+ *
+ * ⚠ LOCKING IS THE WHOLE OF WHAT THIS RUNG DOES WITH A TARGET, AND THAT IS
+ * HONEST, NOT HALF-DONE. There is no weapons rung yet and no weapon-module
+ * field on `FleetCompanionRequest` — shooting is a later phase. A lock is the
+ * real, complete first half of answering a primary; the readout says exactly
+ * that rather than implying this pilot is shooting.
+ */
+function decideFleetOrders(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDecision | null {
+  const snapshot = obs.snapshot ?? null;
+  if (snapshot === null) {
+    return null;
+  }
+  const entities = snapshot.entities;
+  const measurement = measureSpace(snapshot);
+
+  // a. The fleet's target tags — a commander's call, checked first for that
+  //    reason alone (see the header above).
+  if (
+    request.obeys.includes("tag") &&
+    obs.fleetTargetTags !== null &&
+    obs.fleetTargetTags !== undefined
+  ) {
+    const tagged = bestTaggedEntity(obs.fleetTargetTags, entities, measurement);
+    if (tagged !== null) {
+      return lockOrHold(
+        tagged.itemID,
+        "tag",
+        "the fleet's tagged target",
+        "The fleet has tagged a target on this grid.",
+        obs,
+        memory,
+      );
+    }
+  }
+
+  // b. A `Target` broadcast — any member may send one, so it is only reached
+  //    once the tag above has found nothing to obey.
+  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "Target") {
+    const itemID = obs.fleetBroadcast.itemID;
+    if (itemID !== null && entityOnGrid(itemID, entities) !== null) {
+      return lockOrHold(
+        itemID,
+        "broadcast",
+        "the fleet's target call",
+        "The fleet broadcast a target on this grid.",
+        obs,
+        memory,
+      );
+    }
+  }
+
+  // c. An `AlignTo` broadcast.
+  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "AlignTo") {
+    const itemID = obs.fleetBroadcast.itemID;
+    if (itemID !== null && entityOnGrid(itemID, entities) !== null) {
+      return {
+        action: { kind: "align", targetID: itemID },
+        phase: "Obeying fleet",
+        why: "The fleet broadcast an align point on this grid — aligning to it.",
+        memory,
+        followingOrderFrom: "broadcast",
+        lastOrderHeard: "the fleet's align call",
+      };
+    }
+  }
+
+  return null;
+}
+
 interface CompanionMemory {
   status: FleetCompanionRunState;
   phase: string | null;
@@ -880,6 +1112,13 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     mem.phase = decision.phase;
     mem.why = decision.why;
     mem.action = decision.action.kind;
+    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 3
+    // (obeying the fleet) leaves these two fields unset on its decision, and
+    // that omission means "this pilot is not obeying an external order" —
+    // the warp yield, the supervision gate, the abandonment protocol and
+    // "Standing by" are all the companion's own ladder, not a fleet order.
+    mem.followingOrderFrom = decision.followingOrderFrom ?? "own-ladder";
+    mem.lastOrderHeard = decision.lastOrderHeard ?? null;
     if (decision.stop !== undefined) {
       // The ladder has decided the run is over. Not `stop()`: that clears the
       // readout, and the whole value of these two endings is the sentence that
@@ -921,6 +1160,10 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
             safeSpotWarpSeen: false,
           },
           closingOn: null,
+          // A resumed run has locked nothing yet either — same reasoning as
+          // the get-safe flags just above: this run has not issued the call,
+          // so it must not assume one already landed.
+          lastLockIssuedFor: null,
         };
       }
       runToken += 1;

@@ -5392,21 +5392,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // The supervision read rides along with the other two rather than
         // queueing behind them: it is independent of both, and a companion
         // decides on a two-second cadence.
-        const [statusStep, spaceResult, botDriven] = await Promise.all([
+        const [statusStep, spaceResult, targetsResult, botDriven] = await Promise.all([
           api.getFlightStatus(callOptions),
           api.getSpaceSnapshot(callOptions),
+          // ⚠ THE LOCK LIST IS AUTHORITATIVE AND THE LADDER NEEDS IT, rather
+          // than its own memory of what it last asked for. A lock the server
+          // REFUSED still looks issued from in here, so a rung that stamped
+          // "I locked that" and trusted the stamp would never retry —
+          // permanently and silently, for the rest of the run. Reading the real
+          // list every tick is what makes the fleet-order rung's already-locked
+          // check honest rather than hopeful.
+          api.getTargets(callOptions),
           botDrivenCharacterIDs(),
         ]);
-        // ⚠ BEFORE ANYTHING IS DECODED. These two reads are the companion's
-        // only regular traffic, so on the bot host they are the ONLY chance a
-        // pushed notification gets to be seen at all — the live channel there
-        // is a stub. Draining them here is what makes a fleet broadcast reach
-        // a headless companion; see `applyDrainedNotifications`.
+        // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
+        // regular traffic, so on the bot host they are the ONLY chance a pushed
+        // notification gets to be seen at all — the live channel there is a
+        // stub. Draining them here is what makes a fleet broadcast reach a
+        // headless companion; see `applyDrainedNotifications`.
         //
         // The other loops do not do this yet, and that is a real gap rather
         // than a decision — they simply have no push-only input to miss today.
         // A loop that grows one must drain here too.
-        applyDrainedNotifications([...statusStep.notifications, ...spaceResult.notifications]);
+        applyDrainedNotifications([
+          ...statusStep.notifications,
+          ...spaceResult.notifications,
+          ...targetsResult.notifications,
+        ]);
+        // The same authority the Targeting panel reads, kept live while the
+        // companion flies so the panel never shows a stale lock list.
+        const lockedTargetIDs = decodeTargetIDs(targetsResult.targetIDs);
+        store.apply({ type: "targeting/targets", targetIDs: lockedTargetIDs });
         const status = decodeFlightStatus(statusStep.flight);
         void observeFlightStatus(status);
         const snapshot = decodeSpaceSnapshot(spaceResult.space);
@@ -5480,6 +5496,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           myCharacterID: store.station.get().online?.characterID ?? null,
           fleetTargetTags,
           fleetBroadcast,
+          lockedTargetIDs,
           // Phase 7 fills the tagging verdict; that is a roster-role question,
           // not a store read, so it stays honestly unknown until then.
           canTag: null,
@@ -5519,6 +5536,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "acceptFleetInvite":
             await api.acceptFleetInvite(action.fleetID, callOptions);
+            return;
+          // Rung 3, "obeying the fleet" (fleetCompanionLoop.ts): a tag or a
+          // `Target` broadcast, locked; an `AlignTo` broadcast, aligned to.
+          // Straight to the api layer for the same reason every case above
+          // is — the companion has to see a refusal to decide on it, not have
+          // it swallowed the way the flow's own lockTarget()/alignTo() do.
+          case "align":
+            await api.alignTo(action.targetID, callOptions);
+            return;
+          case "lock":
+            await api.lockTarget(action.targetID, callOptions);
             return;
         }
       },
