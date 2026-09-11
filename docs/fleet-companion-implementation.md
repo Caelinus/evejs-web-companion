@@ -712,6 +712,22 @@ The ladder, in order, one action per tick:
 1. **Hardeners up while a fight is on.** Trigger on `obs.hostileOnGrid` (and
    `targetedByPlayer` if it is readable — both already exist on the
    observation). One per tick, self-targeted, skipping any already cycling.
+
+   > ⚠ **"Both already exist on the observation" was true of the TYPE and
+   > false of the VALUE, and that cost the rung half its trigger.**
+   > `FleetCompanionObservation` inherits `targetedByPlayer` from
+   > `ScriptObservation`, so this compiled and the ladder's unit tests —
+   > which build their observations by hand — passed. But
+   > `makeFleetCompanionDeps()`'s `observe()` never filled it, so the field
+   > was permanently `undefined` on a live companion and the trigger was
+   > `hostileOnGrid` alone. `hostileOnGrid` is `hostileRows`, which filters
+   > on `isHostile` — NPC-or-not — so a PLAYER engagement lit neither half
+   > and the hardeners stayed dark. Fixed by wiring `observe()` to
+   > `space/overview.ts`'s `isTargetedByPlayer` (the same function the
+   > script runner uses); `targetGroupNames` was unfilled for the same
+   > reason and got the same treatment. Both are proved at the FLOW level
+   > in `web/src/app/companionFlow.test.ts`, because no test that
+   > constructs an observation directly can see this class of bug.
 2. **A hurt layer cycles its own repairer.** Per layer against
    `request.fleeHealthFloor`'s sibling — a hurt threshold, not the flee floor —
    shield from the shield list, armour from the armour list, hull from the hull

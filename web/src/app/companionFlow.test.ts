@@ -1156,3 +1156,344 @@ test("useDrones OFF then ON, on the SAME companion, reads the bay on the second 
   );
   flow.stopFleetCompanion();
 });
+
+// --- the two grid reads observe() owes the ladder ----------------------------
+//
+// ⚠ THIS SECTION EXISTS BECAUSE THE LADDER'S OWN UNIT TESTS CANNOT SEE THIS
+// BUG. `fleetCompanionLoop.test.ts` builds its observations by hand, so it sets
+// `targetedByPlayer` and `targetGroupNames` itself and passes just as happily
+// against a `makeFleetCompanionDeps()` whose `observe()` populated neither.
+// Both fields really were declared and never filled, and both rungs that read
+// them degraded in silence. Only a test that drives the REAL `observe()` over a
+// faked BFF can catch that.
+//
+// ⚠ AND BOTH ASSERT ON A DECISION, NEVER ON THE READ THAT FEEDS IT. A test
+// that only checked "the group lookup was requested" would still pass against
+// an `observe()` that computed the answer and then dropped it on the floor on
+// its way out -- which is a mistake exactly one line away from the one being
+// fixed here. What is asserted is which module was switched on and which ship
+// was lettered, because those are false unless the value reached the ladder.
+
+// Rival capsuleers, synthetic ids throughout. The hull type ids are this
+// file's own and are answered by this file's own /api/names stub.
+const RIVAL_CHARACTER_ID = 90000012;
+const RIVAL_SHIP_ITEM_ID = 90000013;
+const RIVAL_HULL_TYPE_ID = 90000014;
+/** A hardener on this pilot's own fit, for the tank rung to switch on. */
+const HARDENER_ITEM_ID = 7101;
+
+// The two tacklers of the ranking test. The NEARER one is the bigger hull, so
+// nearest-first and class-first disagree about which to letter -- which is the
+// only arrangement that can tell them apart.
+const NEAR_BRICK_ITEM_ID = 90000020;
+const NEAR_BRICK_TYPE_ID = 90000021;
+const FAR_CEPTOR_ITEM_ID = 90000022;
+const FAR_CEPTOR_TYPE_ID = 90000023;
+
+/**
+ * The SDE's own ship-group names, exactly as `targetPriority.ts` matches them
+ * (trimmed, lowercased, never a substring test). "Interceptor" is the `tackle`
+ * class, the top of the shipped priority order; "Battleship" is not in any
+ * class list and ranks with `other`, at the bottom.
+ */
+const HULL_GROUPS: Readonly<Record<number, string>> = Object.freeze({
+  [NEAR_BRICK_TYPE_ID]: "Battleship",
+  [FAR_CEPTOR_TYPE_ID]: "Interceptor",
+});
+
+/** One ship row, as the space bridge marshals a PLAYER hull on grid. */
+function rivalShip(options: {
+  readonly itemID: number;
+  readonly typeID: number;
+  readonly characterID: number;
+  readonly distance: number;
+  /** Set when this one is holding a lock on THIS pilot. */
+  readonly locking?: boolean;
+}): unknown {
+  return {
+    itemID: options.itemID,
+    kind: "ship",
+    typeID: options.typeID,
+    radius: 30,
+    position: { x: options.distance, y: 0, z: 0 },
+    velocity: { x: 0, y: 0, z: 0 },
+    shieldRatio: 1,
+    armorRatio: 1,
+    hullRatio: 1,
+    // A person, not a rat -- the whole point of this section. `isHostile` says
+    // no to this row, so `hostileRows` never returns it and `hostileOnGrid`
+    // stays a flat `false` however many of these are on the grid.
+    isNpc: false,
+    isSelf: false,
+    characterID: options.characterID,
+    targetEntityID: options.locking === true ? SHIP_ID : null,
+  };
+}
+
+/** One recorded request: the path asked, and the body it was asked with. */
+interface RecordedCall {
+  readonly path: string;
+  readonly body: Record<string, unknown>;
+}
+
+/**
+ * `POST /api/names` answering GROUP names for this section's own hull types,
+ * and nothing else -- a type it has no entry for comes back unresolved, which
+ * is how `targetPriority.ts`'s "cannot tell ranks with other" arm gets reached
+ * rather than stubbed past.
+ */
+function hullGroupNamesBody(body: Record<string, unknown>): unknown {
+  const items = Array.isArray(body.items) ? (body.items as { kind?: string; id?: number }[]) : [];
+  const names: Record<string, string> = {};
+  for (const item of items) {
+    const group = item.kind === "typeGroup" && item.id !== undefined ? HULL_GROUPS[item.id] : undefined;
+    if (group !== undefined) {
+      names[`typeGroup:${item.id}`] = group;
+    }
+  }
+  return { ok: true, source: "static-data", count: Object.keys(names).length, names, unresolved: [] };
+}
+
+/**
+ * A harness whose grid is the caller's, recording each request's BODY as well
+ * as its path -- `/api/names` is one endpoint asked many different questions,
+ * so "was it called" says nothing and only the items asked for do.
+ *
+ * A human is always seated in the roster, because every rung reached here sits
+ * below the supervision gate. `commander` additionally gives THIS pilot the
+ * leader role, which rung 4 needs before it will write anything.
+ */
+function gridHarness(options: {
+  readonly entities: readonly unknown[];
+  readonly commander?: boolean;
+}) {
+  const calls: RecordedCall[] = [];
+
+  function spaceBodyWithGrid(): unknown {
+    return {
+      ok: true,
+      space: {
+        inSpace: true,
+        solarSystemID: SOLAR_SYSTEM_ID,
+        shipID: SHIP_ID,
+        sampledAtMs: 0,
+        ship: {
+          itemID: SHIP_ID,
+          typeID: 17480,
+          mode: "STOP",
+          radius: 60,
+          position: { x: 0, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+          shieldRatio: 1,
+          armorRatio: 1,
+          hullRatio: 1,
+          capacitorRatio: 1,
+          // Nothing running, so the tank rung's `active` set is a real empty:
+          // a hardener it leaves dark was left dark by the fight test itself.
+          activeModuleIDs: [],
+        },
+        entities: [...options.entities],
+      },
+      notifications: [],
+    };
+  }
+
+  const fakeFetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
+    const path = String(input);
+    const parsed =
+      init && typeof init.body === "string"
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : {};
+    calls.push({ path, body: parsed });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        if (path === "/api/bridge/flight/status") return flightBody(false);
+        if (path === "/api/bridge/space/snapshot") return spaceBodyWithGrid();
+        if (path === "/api/names") return hullGroupNamesBody(parsed);
+        if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+        if (path === "/api/bridge/bound-fleet") {
+          return readyFleet({
+            members: [
+              // FLEET_ROLE_LEADER when asked for, otherwise no row for this
+              // pilot at all -- which is the ordinary case for the tank rung.
+              ...(options.commander === true ? [{ charID: OWN_CHARACTER_ID, role: 1 }] : []),
+              // A human, so the supervision gate passes and the ladder runs at
+              // all rather than getting safe.
+              { charID: HUMAN_FLEET_MEMBER },
+            ],
+          });
+        }
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const store = createClientStore();
+  return { store, flow: createAppFlow(store, { fetch: fakeFetch }), calls };
+}
+
+/** Did anything ask `/api/names` for THIS type id's group name? */
+function askedForGroupOf(calls: readonly RecordedCall[], typeID: number): boolean {
+  return calls.some((call) => {
+    if (call.path !== "/api/names") {
+      return false;
+    }
+    const items = Array.isArray(call.body.items)
+      ? (call.body.items as { kind?: string; id?: number }[])
+      : [];
+    return items.some((item) => item.kind === "typeGroup" && item.id === typeID);
+  });
+}
+
+test("a PLAYER lock alone lights a hardener, through the real observe()", async () => {
+  // ⚠ THE REGRESSION THIS SECTION IS FOR. `decideTankUp`'s fight test is
+  // `hostileOnGrid === true || targetedByPlayer === true`, and on this grid the
+  // first half is a read that came back `false`: there is not one NPC out
+  // there. An `observe()` that stops filling `targetedByPlayer` leaves BOTH
+  // halves false, and this pilot then sits in a player gatecamp with its
+  // hardeners dark -- which is the state the companion shipped in until now.
+  const { store, flow, calls } = gridHarness({
+    entities: [
+      rivalShip({
+        itemID: RIVAL_SHIP_ITEM_ID,
+        typeID: RIVAL_HULL_TYPE_ID,
+        characterID: RIVAL_CHARACTER_ID,
+        distance: 9000,
+        locking: true,
+      }),
+    ],
+  });
+
+  await flow.startFleetCompanion({
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    defenseModuleIDs: [HARDENER_ITEM_ID],
+  });
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(
+    store.get().companion.phase,
+    "Tanking up",
+    "a player holding a lock on this hull is a fight, and a fight means hardeners",
+  );
+  const activated = calls.filter((call) => call.path === "/api/bridge/modules/activate");
+  assert.equal(activated.length, 1, "exactly the one idle hardener");
+  assert.equal(activated[0]?.body.itemID, HARDENER_ITEM_ID);
+  flow.stopFleetCompanion();
+});
+
+test("the same grid with NOBODY locking leaves the hardener alone", async () => {
+  // The other half of the pair: with the lock gone this is the same player on
+  // the same grid, and `hostileOnGrid` reads `false` for it just as before. A
+  // rung that lit up here would be firing on the mere presence of a stranger,
+  // which would make the test above prove nothing.
+  const { store, flow, calls } = gridHarness({
+    entities: [
+      rivalShip({
+        itemID: RIVAL_SHIP_ITEM_ID,
+        typeID: RIVAL_HULL_TYPE_ID,
+        characterID: RIVAL_CHARACTER_ID,
+        distance: 9000,
+      }),
+    ],
+  });
+
+  await flow.startFleetCompanion({
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    defenseModuleIDs: [HARDENER_ITEM_ID],
+  });
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(store.get().companion.phase, "Standing by");
+  assert.equal(
+    calls.filter((call) => call.path === "/api/bridge/modules/activate").length,
+    0,
+    "nobody is shooting at this pilot, so nothing should be burning capacitor",
+  );
+  flow.stopFleetCompanion();
+});
+
+/** The scram push for one named ship, as the wire delivers it. */
+function scrambledBy(store: ReturnType<typeof createClientStore>, tacklerItemID: number): void {
+  const event = decodeJamNotification(
+    "OnJamStart",
+    [tacklerItemID, 7777, SHIP_ID, "warpScramblerMWD", 0, 5000],
+    Date.now(),
+  );
+  assert.notEqual(event, null, "the fixture must decode, or this test proves nothing");
+  store.apply({ type: "space/jam", event: event! });
+}
+
+/** Both tacklers of the ranking test, on one grid. */
+const TWO_TACKLERS: readonly unknown[] = [
+  rivalShip({
+    itemID: NEAR_BRICK_ITEM_ID,
+    typeID: NEAR_BRICK_TYPE_ID,
+    characterID: RIVAL_CHARACTER_ID,
+    distance: 5_000,
+    locking: true,
+  }),
+  rivalShip({
+    itemID: FAR_CEPTOR_ITEM_ID,
+    typeID: FAR_CEPTOR_TYPE_ID,
+    characterID: RIVAL_CHARACTER_ID + 1,
+    distance: 40_000,
+    locking: true,
+  }),
+];
+
+test("the fleet's letter goes to the INTERCEPTOR four times further out, not the nearest hull", async () => {
+  // ⚠ THE TEST THAT MAKES `targetGroupNames` LOAD-BEARING. `pickPrimary` ranks
+  // by CLASS first and distance only within a class, so with the groups in hand
+  // the interceptor wins outright. Without them every candidate ranks `other`
+  // and the tie breaks on distance -- so an `observe()` that stops filling this
+  // field letters the battleship sitting on top of this pilot, and does it with
+  // no error anywhere. That is the degradation, and this is what catches it.
+  //
+  // Both ships are PLAYERS, which is the other half of what is being proved:
+  // `hostileRows` cannot see either of them, so the group names can only have
+  // come from the player-hull half of `classifyTargetGroups`.
+  const { store, flow, calls } = gridHarness({ entities: TWO_TACKLERS, commander: true });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  // A real, empty answer -- which is what lets the rung know every letter is free.
+  store.apply({ type: "fleet/target-tags", tags: new Map() });
+  scrambledBy(store, NEAR_BRICK_ITEM_ID);
+  scrambledBy(store, FAR_CEPTOR_ITEM_ID);
+
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await waitFor(() => tagWrites(calls).length > 0, "a tag write to reach the BFF");
+
+  const write = tagWrites(calls)[0];
+  assert.equal(
+    write?.body.itemID,
+    FAR_CEPTOR_ITEM_ID,
+    "tackle outranks everything, and the interceptor is the tackle here",
+  );
+  assert.equal(write?.body.tag, "A");
+  flow.stopFleetCompanion();
+});
+
+test("the tagging cost gate: with tagging OFF, no hull's group name is resolved at all", async () => {
+  // Same rule the chat read and the drone bay are under. `decideTackleTag` is
+  // the only reader of `targetGroupNames` in this ladder and it returns before
+  // it ever looks when `attemptsTagging` is false -- so the lookup this costs
+  // on every NEW hull type, on a two-second tick and per companion, would be
+  // buying an answer nothing reads.
+  const { store, flow, calls } = gridHarness({ entities: TWO_TACKLERS, commander: true });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  store.apply({ type: "fleet/target-tags", tags: new Map() });
+  scrambledBy(store, NEAR_BRICK_ITEM_ID);
+  scrambledBy(store, FAR_CEPTOR_ITEM_ID);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  // Wait until the gate itself has answered YES, so the only thing that can
+  // still be holding the lookup back is the setting.
+  await waitFor(() => store.get().companion.canTag === true, "the tagging gate to answer");
+
+  assert.ok(
+    !askedForGroupOf(calls, FAR_CEPTOR_TYPE_ID) && !askedForGroupOf(calls, NEAR_BRICK_TYPE_ID),
+    "tagging is off in the shipped default -- nothing should be classifying hulls",
+  );
+  flow.stopFleetCompanion();
+});

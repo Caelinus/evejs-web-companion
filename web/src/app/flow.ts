@@ -163,7 +163,7 @@ import {
   type MiningBotDeps,
   type MiningPlan,
 } from "../nav/miningBotLoop.ts";
-import { canMyShipOrderDrone, hostileRows } from "../space/overview.ts";
+import { canMyShipOrderDrone, hostileRows, isTargetedByPlayer } from "../space/overview.ts";
 // R43 — one declaration of which bots exist, what each needs before it can
 // start, and who is allowed to hold the ship.
 import {
@@ -5517,6 +5517,45 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
 
+        // ── The two grid reads the ladder shares with the DSL's own bots.
+        //
+        // ⚠ `targetedByPlayer` IS FREE AND SO IT IS NEVER GATED. It is a pass
+        // over the snapshot already decoded above and makes no call at all, so
+        // there is no cost to weigh against it the way there is for the chat
+        // read or the drone bay.
+        //
+        // It is also the only evidence this client has of a PURE PLAYER
+        // engagement. `hostileOnGrid` below is `hostileRows`, and `hostileRows`
+        // filters on `isHostile`, which is NPC-or-not — so a fleet being shot
+        // by another fleet lights up neither half of the tank rung's `fightOn`
+        // test unless this field is set — which is how this shipped: the field
+        // was declared, never filled, and a companion in a player gatecamp had
+        // no reason to switch a hardener on.
+        const targetedByPlayer = isTargetedByPlayer(snapshot, ship?.itemID ?? null);
+        // ⚠ THIS ONE IS GATED, because unlike the line above it can cost a
+        // round trip. `classifyTargetGroups` resolves a GROUP NAME per ship
+        // type on grid: nothing on an empty grid, nothing on a repeat tick
+        // (`requestNames` skips ids already cached or in flight), but one
+        // batched lookup each time a NEW hull type shows up — and on a busy
+        // grid that is a real, if bounded, cost on a two-second tick.
+        //
+        // The gate is `attemptsTagging` because `decideTackleTag` is the whole
+        // readership: it is the one rung that ranks ships, and with tagging off
+        // it returns before it ever looks. Same rule the chat read and the
+        // drone bay are under — a companion must not pay for an answer no rung
+        // will read.
+        //
+        // Player hulls ARE asked for (the `true`), which is the opposite of
+        // what a script bot gets by default. The ships this rung ranks are its
+        // TACKLERS, and a ship running a scrambler on a fleet-mate is almost
+        // always a player — resolving only the NPC rows would hand `pickPrimary`
+        // a null class for exactly the targets that matter and collapse it to
+        // nearest-first, which is the degradation this field exists to avoid.
+        const targetGroupNames =
+          liveCompanionRequest?.attemptsTagging === true
+            ? await classifyTargetGroups(snapshot, origin, true, ship?.itemID ?? null)
+            : null;
+
         // ── The drone reads (rung 6). Two of the three are free: they come off
         // the snapshot already in hand. Only the bay costs a call, and it is
         // gated above.
@@ -5611,6 +5650,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           oreHoldFraction: null,
           holdEmpty: null,
           hostileOnGrid: snapshot === null ? null : hostileRows(snapshot, origin).length > 0,
+          targetedByPlayer,
+          targetGroupNames,
           dronesOut:
             snapshot === null
               ? null
@@ -6721,7 +6762,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * fight-back watch runs over whatever step is active — a mining step, a
    * hauling step — so gating this on the active macro would leave the watch
    * picking its primary blind, which is the one moment prioritising matters
-   * most. Only NPC hostiles are resolved: no script block targets a player.
+   * most. Player hulls are the exception: they are only prey to a caller that
+   * says so, which is what `includePlayerHulls` asks.
+   *
+   * ⚠ THE FLAG IS A BOOLEAN, NOT A MACRO NAME, because the fleet companion has
+   * no macros at all — it runs a ladder, not a script — and would otherwise
+   * have to invent a fake step name to be told about the hulls it exists to
+   * rank. The script runner never asks (no script block targets a player); the
+   * companion asks whether its operator wants tagging.
    *
    * Cheap after the first look: `requestNames` skips ids already cached or in
    * flight, so this costs one round trip per NEW ship type, not one per tick,
@@ -6730,6 +6778,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   async function classifyTargetGroups(
     snapshot: ReturnType<typeof decodeSpaceSnapshot>,
     origin: SpaceVector,
+    includePlayerHulls: boolean,
+    shipID: number | null,
   ): Promise<Readonly<Record<number, string | null>> | null> {
     if (snapshot === null) {
       return null;
@@ -6738,6 +6788,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     for (const row of hostileRows(snapshot, origin)) {
       if (row.typeID !== null) {
         typeIDs.add(row.typeID);
+      }
+    }
+    if (includePlayerHulls) {
+      for (const entity of snapshot.entities) {
+        if (
+          entity.kind === "ship" &&
+          entity.isNpc === false &&
+          entity.isSelf === false &&
+          entity.itemID !== shipID &&
+          entity.characterID !== null &&
+          entity.typeID !== null
+        ) {
+          typeIDs.add(entity.typeID);
+        }
       }
     }
     if (typeIDs.size === 0) {
@@ -7282,7 +7346,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
-        const targetGroupNames = await classifyTargetGroups(snapshot, origin);
+        const targetGroupNames = await classifyTargetGroups(
+          snapshot,
+          origin,
+          // No script block targets another player's hull; only the fleet
+          // companion ranks player hulls.
+          false,
+          ship?.itemID ?? null,
+        );
         // The fleet's called primary, for a block that asked to follow one. Every
         // failure — no fleet, no call, a stale call, a refused read — lands as
         // null, which reads as "pick for yourself" rather than as a fault: a
@@ -7415,22 +7486,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           }
         }
         // ── Grid awareness, computed from the snapshot already in hand — no extra
-        // call, so these are always available. `targetedByPlayer` reads every
+        // call, so these are always available. `isTargetedByPlayer` reads every
         // PLAYER ship's own lock target: one pointing at this hull means trouble.
+        // It lives in space/overview.ts beside `isHostile` so the fleet
+        // companion answers this question with the SAME code rather than a
+        // second copy that could drift.
         // `lowestDroneHealth` is null with no drones out (nothing to judge).
         const myShipID = snapshot?.ship?.itemID ?? null;
-        const targetedByPlayer =
-          snapshot === null
-            ? null
-            : snapshot.entities.some(
-                (e) =>
-                  e.kind === "ship" &&
-                  e.isNpc === false &&
-                  e.isSelf === false &&
-                  e.characterID !== null &&
-                  myShipID !== null &&
-                  e.targetEntityID === myShipID,
-              );
+        const targetedByPlayer = isTargetedByPlayer(snapshot, myShipID);
         let lowestDroneHealth: number | null = null;
         if (snapshot !== null) {
           for (const entity of snapshot.entities) {
