@@ -208,6 +208,11 @@ test("a well-formed request round-trips", () => {
       // never shown the choice, so it cannot be read as consent to spend ISK.
       // Leaving it out of validPayload() is what keeps that path tested.
       repairsAtStation: false,
+      // Absent too, and false for the same shape of reason as both above: a row
+      // written before this field existed carries eight module lists an
+      // operator actually picked, so reading its absence as "go and read the
+      // fit instead" would override those picks on every restart.
+      deriveModulesFromFit: false,
     });
   }
 });
@@ -667,4 +672,47 @@ test("droneHealthFloor refuses NaN, Infinity, a string and an absent key", () =>
     false,
     "a missing threshold is refused, never defaulted -- a silent default here would fly a pilot on a number nobody chose",
   );
+});
+
+
+test("deriving from the fit is COMBAT risk even with every module list empty", () => {
+  // ⚠ THE HOLE THIS CLOSES. Every module list on a deriving request is empty,
+  // so without a rule of its own such a run would be granted "fleet, social"
+  // and then bolt on whatever weapons the hull turned out to carry. botHost
+  // re-derives this policy and checks it matches the grant exactly -- the same
+  // lie on both sides passes that check, which is precisely why the lie has to
+  // be prevented here rather than caught there.
+  const bare = { ...DEFAULT_FLEET_COMPANION_REQUEST, deriveModulesFromFit: true };
+  assert.deepEqual([...analyzeCompanionRunPolicy(bare).riskClasses].sort(), [
+    "combat",
+    "fleet",
+    "social",
+  ]);
+
+  const notDeriving = { ...DEFAULT_FLEET_COMPANION_REQUEST, deriveModulesFromFit: false };
+  assert.ok(
+    !analyzeCompanionRunPolicy(notDeriving).riskClasses.includes("combat"),
+    "an empty, non-deriving request is not combat",
+  );
+});
+
+test("a non-boolean deriveModulesFromFit is refused rather than coerced", () => {
+  for (const bad of ["yes", 1, null, {}]) {
+    const result = decodeFleetCompanionRequestValue({
+      ...validPayload(),
+      deriveModulesFromFit: bad,
+    });
+    assert.equal(result.ok, false, `${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("deriveModulesFromFit round-trips when the key IS present", () => {
+  const result = decodeFleetCompanionRequestValue({
+    ...validPayload(),
+    deriveModulesFromFit: true,
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.request.deriveModulesFromFit, true);
+  }
 });

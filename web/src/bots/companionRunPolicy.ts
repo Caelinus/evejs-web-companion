@@ -133,7 +133,16 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
     request.remoteArmorModuleIDs.length > 0 ||
     request.remoteCapacitorModuleIDs.length > 0 ||
     // A fitted weapon is combat risk with no ambiguity to argue about.
-    request.weaponModuleIDs.length > 0
+    request.weaponModuleIDs.length > 0 ||
+    // ⚠ READING THE FIT IS COMBAT RISK BY ITSELF, AND THIS IS NOT CAUTION FOR
+    // ITS OWN SAKE. The eight lists above are EMPTY on a request that derives,
+    // so without this line such a run would be granted "fleet, social" and
+    // nothing else -- and would then bolt on whatever weapons and repairers the
+    // hull turned out to carry and fly them under that grant. `botHost`
+    // re-derives this policy from the persisted request and checks it matches
+    // the grant EXACTLY, so the lie would pass that check too: it is the same
+    // lie on both sides. A fit nobody has read yet may hold anything.
+    request.deriveModulesFromFit
   ) {
     risks.add("combat");
   }
@@ -196,6 +205,7 @@ const REQUEST_KEYS = new Set<string>([
   "remoteArmorModuleIDs",
   "remoteCapacitorModuleIDs",
   "weaponModuleIDs",
+  "deriveModulesFromFit",
   "fleeHealthFloor",
   "droneHealthFloor",
   "capacitorFloor",
@@ -250,6 +260,7 @@ const SAY = {
   badUseDrones: "This companion setup's drone setting is not valid.",
   badDroneRedeployHoldOffSeconds: "This companion setup's drone hold-off time is not a valid number.",
   badAttemptsTagging: "This companion setup's tagging setting is not valid.",
+  badDeriveModulesFromFit: "This companion setup's read-the-fit setting is not valid.",
   badObeys: "This companion setup does not say which orders the pilot listens to.",
   badChatCommandSenders: "This companion setup's list of chat commanders is not valid.",
   badSafeSpotBookmarkID: "This companion setup's safe-spot bookmark is not valid.",
@@ -398,6 +409,17 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     return { ok: false, refusal: SAY.badRepairsAtStation };
   }
 
+  // ABSENT DECODES TO FALSE, on the same grounds as `repairsAtStation` above:
+  // botHost re-decodes a persisted roster row on every BFF restart, and a
+  // strictly-required new field would refuse every row written before it
+  // existed -- stranding every companion that was running when it shipped.
+  // False is what such a row already meant: use the lists it carries.
+  const deriveRaw = obj["deriveModulesFromFit"];
+  const deriveModulesFromFit = deriveRaw === undefined ? false : deriveRaw;
+  if (typeof deriveModulesFromFit !== "boolean") {
+    return { ok: false, refusal: SAY.badDeriveModulesFromFit };
+  }
+
   const useDrones = obj["useDrones"];
   if (typeof useDrones !== "boolean") {
     return { ok: false, refusal: SAY.badUseDrones };
@@ -459,6 +481,7 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     capacitorFloor,
     maxFleeAttempts,
     repairsAtStation,
+    deriveModulesFromFit,
     useDrones,
     droneRedeployHoldOffSeconds,
     attemptsTagging,
