@@ -22,6 +22,7 @@ import type { BotID, ShipControllerID } from "../nav/botRegistry.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
 import type {
   CompanionAbandonmentRecord,
+  CompanionOrderAuthority,
   FleetCompanionRole,
   FleetCompanionRunState,
 } from "../nav/fleetCompanionLoop.ts";
@@ -2335,13 +2336,7 @@ export interface FleetCompanionState {
   readonly role: FleetCompanionRole | null;
   readonly inFleet: boolean | null;
   /** Which authority the last decision came from, for the readout. */
-  readonly followingOrderFrom:
-    | "broadcast"
-    | "tag"
-    | "chat"
-    | "squad-board"
-    | "own-ladder"
-    | null;
+  readonly followingOrderFrom: CompanionOrderAuthority | null;
   readonly lastOrderHeard: string | null;
   readonly canTag: boolean | null;
   /**

@@ -311,6 +311,13 @@ function createBotHost(options) {
       startError: record.startError,
       startedAt: record.startedAt,
       endedAt: record.endedAt,
+      // The companion badge's five facts, or null for a script and for a
+      // companion that has not pushed progress yet. Nested rather than spread
+      // flat so a reader can tell "this is not a companion" from "this
+      // companion has not reported": `kind` above answers the first, this
+      // answers the second, and flattening would merge the two into one row of
+      // nulls that means either.
+      companion: record.companionReadout ?? null,
     };
   }
 
@@ -368,12 +375,31 @@ function createBotHost(options) {
       // untouched keeps them at their initial `null` rather than inventing a
       // value for a column the companion has no honest answer to.
       //
-      // The companion's OWN distinguishing fields — action, role, inFleet,
-      // followingOrderFrom, lastOrderHeard, canTag, failureReason — are read
-      // by the store subscription below but have no slot on this record or on
-      // publicBot()'s wire shape yet: that shape is `ServerBot`
-      // (web/src/app/api.ts) and web/src/ui/**, both out of scope for this
-      // change. Nothing here fabricates a place for them either.
+      // The companion's OWN distinguishing fields NOW HAVE A SLOT, which they
+      // did not when this comment first said they had none: phase 9 carried
+      // five of them through to `publicBot()` and on to the Bot Manager badge,
+      // because a HEADLESS companion had no other way to say what it was doing
+      // (a server-only row has no session and so no store to read).
+      //
+      // ⚠ FIVE, NOT SEVEN. `action` and `failureReason` are still left out.
+      // `why` already carries the sentence a player reads, and `failureReason`
+      // duplicates what `startError` and the ended-run outcome already say --
+      // adding either would put a second, drifting answer on the wire for a
+      // question the row can already answer.
+      //
+      // ⚠ THIS RUNS ON EVERY STORE PUSH, roughly every two seconds per bot, and
+      // it must stay a plain assignment. It deliberately does NOT persistRoster:
+      // see the record's own `companionReadout` comment for why a readout has no
+      // business on disk.
+      record.companionReadout = {
+        role: typeof snapshot.role === "string" ? snapshot.role : null,
+        inFleet: typeof snapshot.inFleet === "boolean" ? snapshot.inFleet : null,
+        followingOrderFrom:
+          typeof snapshot.followingOrderFrom === "string" ? snapshot.followingOrderFrom : null,
+        lastOrderHeard:
+          typeof snapshot.lastOrderHeard === "string" ? snapshot.lastOrderHeard : null,
+        canTag: typeof snapshot.canTag === "boolean" ? snapshot.canTag : null,
+      };
       //
       // `abandonment` is the ONE exception, and it is not a readout: it is
       // durable state this host owns (see persistRoster). Written through to
@@ -662,6 +688,17 @@ function createBotHost(options) {
       // Seeded from the persisted row on a resume, then owned by
       // applySnapshot. Null for a script and for a fresh companion start.
       companionAbandonment: isCompanion ? resumingAbandonment : null,
+      // The companion's live READOUT -- the five facts the Bot Manager badge
+      // shows. Null until the loop's first progress push, which is honest: a
+      // run that has not decided anything yet has not heard an order either.
+      //
+      // ⚠ NOT DURABLE, AND DELIBERATELY ABSENT FROM persistRoster's ROW.
+      // These describe what a pilot is doing this second; a resumed run
+      // re-derives all five on its first tick from a fresh fleet read. Writing
+      // them to disk would let a restart hand the player a confident readout
+      // of a fleet the pilot may no longer be in. `companionAbandonment` above
+      // is the ONE companion field that is durable, and its comment says why.
+      companionReadout: null,
     };
     // Claim BEFORE the first await — two concurrent starts must not both win,
     // and the select guard must already know this bot when its select arrives.

@@ -20,6 +20,7 @@
 // about the run, so it is testable without a DOM.
 
 import type {
+  CompanionOrderAuthority,
   FleetCompanionOrderSource,
   FleetCompanionRole,
 } from "../nav/fleetCompanionLoop.ts";
@@ -74,15 +75,7 @@ export function inFleetWords(value: boolean | null): string {
  * `senderCharID` is on the fleet slice if a future readout wants the name, but
  * nothing here invents one out of the channel.
  */
-export function orderFromWords(
-  value:
-    | "broadcast"
-    | "tag"
-    | "chat"
-    | "squad-board"
-    | "own-ladder"
-    | null,
-): string {
+export function orderFromWords(value: CompanionOrderAuthority | null): string {
   switch (value) {
     case "broadcast":
       return "a fleet broadcast";

@@ -86,6 +86,23 @@ export const FLEET_COMPANION_ORDER_SOURCES: readonly FleetCompanionOrderSource[]
   Object.freeze<FleetCompanionOrderSource[]>(["broadcast", "tag", "chat", "squad-board"]);
 
 /**
+ * Which authority a decision actually came from, for the readout.
+ *
+ * ⚠ NOT THE SAME AS `FleetCompanionOrderSource` ABOVE, AND THE DIFFERENCE IS
+ * `own-ladder`. That one is a setting: the channels an operator may switch on
+ * and off. This one is an OBSERVATION, and it has a fifth member no operator
+ * can tick, because "nobody told it, it decided for itself" is a real answer to
+ * "who is this pilot following" and is not a channel.
+ *
+ * Named here because it had been written out inline in four places -- this
+ * file, the store's types, the store's feed, and the readout words -- and phase
+ * 9's wire shape would have been a fifth. Four copies of a five-member union
+ * with nothing to fail if one drifted is the same shape of bug as two copies of
+ * a bare 1; see COMPANION_GRANT_SCRIPT_REV.
+ */
+export type CompanionOrderAuthority = FleetCompanionOrderSource | "own-ladder";
+
+/**
  * One companion run's whole configuration. Flat, serialisable, UI-editable.
  *
  * ⚠ FLATNESS IS LOAD-BEARING. This is stored as the VALUE against a pilot in a
@@ -660,13 +677,7 @@ export interface FleetCompanionProgress {
   /** Whether this pilot is in a fleet at all. Null while the roster is unread. */
   readonly inFleet: boolean | null;
   /** Which authority the last decision came from, for the readout. */
-  readonly followingOrderFrom:
-    | "broadcast"
-    | "tag"
-    | "chat"
-    | "squad-board"
-    | "own-ladder"
-    | null;
+  readonly followingOrderFrom: CompanionOrderAuthority | null;
   readonly lastOrderHeard: string | null;
   /**
    * Whether this pilot's tag write would land. Three states, and the third is

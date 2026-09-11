@@ -40,7 +40,12 @@ import type {
 } from "../store/types.ts";
 import type { NameRef } from "../store/names.ts";
 import type { BotLaunchGrant, BotRiskClass } from "../bots/runPolicy.ts";
-import type { FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+import {
+  FLEET_COMPANION_ROLES,
+  type CompanionOrderAuthority,
+  type FleetCompanionRequest,
+  type FleetCompanionRole,
+} from "../nav/fleetCompanionLoop.ts";
 import type {
   ScannerOperationsSnapshot,
   ScannerProbeOperation,
@@ -2994,6 +2999,36 @@ export async function deleteBotScript(scriptID: string, options: ApiOptions = {}
 // script on a character, watch its readout, stop it. Account-scoped like the
 // script library above.
 
+/**
+ * What a running fleet companion is DOING, as the Bot Manager badge shows it.
+ *
+ * ⚠ THIS EXISTS BECAUSE A HEADLESS COMPANION HAS NO STORE TO READ. A companion
+ * running in a tab reports through that tab's `companion` slice; one running on
+ * the bot host has no session here at all, so without these five fields its row
+ * can say only "running" and the player cannot tell a pilot obeying its fleet
+ * from one sitting in an empty one.
+ *
+ * Null on this type means "not reported", NEVER "no" -- see `canTag`.
+ */
+export interface ServerBotCompanion {
+  readonly role: FleetCompanionRole | null;
+  /** Whether the pilot is in a fleet at all. Null while the roster is unread. */
+  readonly inFleet: boolean | null;
+  /** Which authority its last decision came from. Null before it decided one. */
+  readonly followingOrderFrom: CompanionOrderAuthority | null;
+  readonly lastOrderHeard: string | null;
+  /**
+   * Whether this pilot's tag write would land.
+   *
+   * ⚠ THREE STATES, AND FLATTENING THEM IS THE BUG. The server drops a
+   * non-commander's tag write while answering ok, so `false` (the write would
+   * be dropped) and `null` (the roster has not been read) are different facts,
+   * and a row that showed both as "no" would state a confident falsehood on
+   * every tick before the first roster read.
+   */
+  readonly canTag: boolean | null;
+}
+
 export interface ServerBot {
   readonly botID: string;
   readonly characterID: number;
@@ -3021,6 +3056,25 @@ export interface ServerBot {
    * no browser to notify, so this readout IS the alert's delivery.
    */
   readonly lastAlert: { readonly message: string; readonly atMs: number } | null;
+  /**
+   * What this run IS, as against what it is doing.
+   *
+   * ⚠ THE HOST HAS ALWAYS SENT THIS AND THIS TYPE ALWAYS DROPPED IT.
+   * `publicBot()` in src/botHost.js has carried `kind` since the companion
+   * first ran headless; `asServerBot` never decoded it, so the browser could
+   * not tell a companion run from a script run except by the convention that
+   * `scriptID` happens to be the literal "companion".
+   */
+  readonly kind: "companion" | "script";
+  /**
+   * The companion badge's facts, or null.
+   *
+   * ⚠ NULL MEANS TWO DIFFERENT THINGS AND `kind` SEPARATES THEM: on a script
+   * run it means "not a companion at all"; on a companion run it means "this
+   * companion has not pushed progress yet". Reading this alone would merge the
+   * two.
+   */
+  readonly companion: ServerBotCompanion | null;
 }
 
 function asServerBot(value: JsonValue): ServerBot {
@@ -3049,7 +3103,58 @@ function asServerBot(value: JsonValue): ServerBot {
     endedAt: typeof row.endedAt === "string" ? row.endedAt : null,
     resumedAt: typeof row.resumedAt === "string" ? row.resumedAt : null,
     lastAlert: asLastAlert(row.lastAlert),
+    // Anything that is not the companion literal is a script, matching the
+    // host's own default for a roster row written before `kind` existed.
+    kind: row.kind === "companion" ? "companion" : "script",
+    companion: asServerBotCompanion(row.companion),
   };
+}
+
+/**
+ * One companion's badge facts off the wire.
+ *
+ * ⚠ EVERY FIELD FAILS TO NULL, NEVER TO A CONFIDENT VALUE. A field this decoder
+ * cannot read is one the badge must report as "not known" -- the alternative is
+ * a row that says "not in a fleet" because a key was missing.
+ */
+function asServerBotCompanion(value: JsonValue | undefined): ServerBotCompanion | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const row = value as Record<string, JsonValue>;
+  return {
+    role: asFleetCompanionRole(row.role),
+    inFleet: typeof row.inFleet === "boolean" ? row.inFleet : null,
+    followingOrderFrom: asCompanionOrderAuthority(row.followingOrderFrom),
+    lastOrderHeard: typeof row.lastOrderHeard === "string" ? row.lastOrderHeard : null,
+    canTag: typeof row.canTag === "boolean" ? row.canTag : null,
+  };
+}
+
+/** A role we actually know, or null. An unrecognised one is not invented into a real one. */
+function asFleetCompanionRole(value: JsonValue | undefined): FleetCompanionRole | null {
+  return typeof value === "string" && FLEET_COMPANION_ROLES.includes(value as FleetCompanionRole)
+    ? (value as FleetCompanionRole)
+    : null;
+}
+
+/**
+ * An authority we actually know, or null.
+ *
+ * ⚠ CHECKED AGAINST A LIST, NOT `typeof === "string"`. The readout turns this
+ * into a phrase with a `switch`, and an unrecognised value would fall through
+ * that switch to "nothing yet" -- reporting a pilot as taking no orders at the
+ * precise moment it started taking them from something this build cannot name.
+ * Null says the same thing honestly and does it here, once.
+ */
+function asCompanionOrderAuthority(value: JsonValue | undefined): CompanionOrderAuthority | null {
+  return value === "broadcast" ||
+    value === "tag" ||
+    value === "chat" ||
+    value === "squad-board" ||
+    value === "own-ladder"
+    ? value
+    : null;
 }
 
 /** Decode a bot's last alert; a malformed or absent one reads as no alert. */
