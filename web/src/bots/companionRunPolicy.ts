@@ -137,6 +137,14 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
   ) {
     risks.add("combat");
   }
+  // Paying a station to fix the ship is spending ISK and modifying an item,
+  // which is exactly what the DSL's own `repair-ship` and `dock-and-repair`
+  // claim (`runPolicy.ts`: policy(["financial", "inventory"])). Matched rather
+  // than re-argued, so there is one answer to this question and not two.
+  if (request.repairsAtStation) {
+    risks.add("financial");
+    risks.add("inventory");
+  }
   return Object.freeze({
     macroIDs: NO_MACRO_IDS,
     riskClasses: Object.freeze(BOT_RISK_CLASSES.filter((risk) => risks.has(risk))),
@@ -192,6 +200,7 @@ const REQUEST_KEYS = new Set<string>([
   "droneHealthFloor",
   "capacitorFloor",
   "maxFleeAttempts",
+  "repairsAtStation",
   "useDrones",
   "droneRedeployHoldOffSeconds",
   "attemptsTagging",
@@ -237,6 +246,7 @@ const SAY = {
   badDroneHealthFloor: "This companion setup's drone-health threshold is not a valid number.",
   badCapacitorFloor: "This companion setup's capacitor threshold is not a valid number.",
   badMaxFleeAttempts: "This companion setup's flee-attempt limit is not a valid number.",
+  badRepairsAtStation: "This companion setup's station-repair setting is not valid.",
   badUseDrones: "This companion setup's drone setting is not valid.",
   badDroneRedeployHoldOffSeconds: "This companion setup's drone hold-off time is not a valid number.",
   badAttemptsTagging: "This companion setup's tagging setting is not valid.",
@@ -375,6 +385,19 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     return { ok: false, refusal: SAY.badMaxFleeAttempts };
   }
 
+  // ABSENT DECODES TO FALSE, the same rule as the module lists above and for
+  // the same reason: `src/botHost.js` re-decodes a persisted roster row on
+  // every BFF restart, and this field did not exist when the rows now on disk
+  // were written. Refusing absence would strand every companion that was
+  // running when it shipped. False is also the honest reading of such a row --
+  // it was saved by an operator who was never offered the choice, so it cannot
+  // have been consent to spend ISK.
+  const repairsAtStationRaw = obj["repairsAtStation"];
+  const repairsAtStation = repairsAtStationRaw === undefined ? false : repairsAtStationRaw;
+  if (typeof repairsAtStation !== "boolean") {
+    return { ok: false, refusal: SAY.badRepairsAtStation };
+  }
+
   const useDrones = obj["useDrones"];
   if (typeof useDrones !== "boolean") {
     return { ok: false, refusal: SAY.badUseDrones };
@@ -435,6 +458,7 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     droneHealthFloor,
     capacitorFloor,
     maxFleeAttempts,
+    repairsAtStation,
     useDrones,
     droneRedeployHoldOffSeconds,
     attemptsTagging,

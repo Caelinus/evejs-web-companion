@@ -210,6 +210,26 @@ export interface FleetCompanionRequest {
   readonly capacitorFloor: number;
   /** Bound on flee round trips before the pilot stays home. */
   readonly maxFleeAttempts: number;
+  /**
+   * Whether a pilot that flees hurt pays the station to fix it.
+   *
+   * ⚠ THIS EXISTS BECAUSE DOCKING DOES NOT REPAIR ARMOUR, which is a fact
+   * about the server and not a balance choice:
+   * `topOffShipShieldAndCapacitorForDockingTransition`
+   * (`space/transitions.js:242`) writes `charge: 1.0` and `shieldCharge: 1.0`
+   * and leaves `damage` and `armorDamage` exactly as they were. So a shield
+   * flee heals itself by arriving, and an ARMOUR flee does not: without a
+   * repair the recheck can never pass, and the pilot that fled would sit in
+   * the station for the rest of the run.
+   *
+   * ⚠ AND IT SPENDS THE OPERATOR'S ISK, which is the whole reason it is a
+   * setting rather than something the flee rung just does. `repairRuntime.js`
+   * debits the wallet. Off by default: a pilot that stays docked is a pilot
+   * that cost nothing, and an operator who wants the round trip can say so.
+   * It earns `financial` and `inventory` in the risk derivation, matching
+   * what the DSL's own `repair-ship` and `dock-and-repair` already claim.
+   */
+  readonly repairsAtStation: boolean;
   readonly useDrones: boolean;
   /**
    * Seconds to hold drones in the bay before relaunching them.
@@ -323,6 +343,8 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   // this number comes from rather than being picked for this file. A fourth
   // trip into the same camp is a bot commuting, not a bot recovering.
   maxFleeAttempts: 3,
+  // Off: nothing this loop does spends money unless an operator asks it to.
+  repairsAtStation: false,
   useDrones: false,
   // A floor on the wait, not a safety guarantee — see the field's own comment.
   droneRedeployHoldOffSeconds: 10,

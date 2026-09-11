@@ -203,8 +203,48 @@ test("a well-formed request round-trips", () => {
       // spot has been named" is what most requests mean, and the ladder acts
       // on it (it stops rather than inventing somewhere to hide).
       safeSpotBookmarkID: null,
+      // Also absent, and false for a stronger reason than convenience: a row
+      // written before this field existed was saved by an operator who was
+      // never shown the choice, so it cannot be read as consent to spend ISK.
+      // Leaving it out of validPayload() is what keeps that path tested.
+      repairsAtStation: false,
     });
   }
+});
+
+// ─── repairsAtStation ────────────────────────────────────────────────────────
+
+test("repairsAtStation round-trips both ways when the key IS present", () => {
+  for (const value of [true, false]) {
+    const result = decodeFleetCompanionRequestValue({ ...validPayload(), repairsAtStation: value });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.request.repairsAtStation, value);
+    }
+  }
+});
+
+test("a non-boolean repairsAtStation is refused rather than coerced", () => {
+  // ⚠ INCLUDING THE TRUTHY ONES. "true" and 1 are exactly what a hand-edited
+  // or half-migrated row would carry, and coercing either would turn a row
+  // that never consented to spending ISK into one that does.
+  for (const bad of ["true", 1, 0, null, {}, []]) {
+    const result = decodeFleetCompanionRequestValue({ ...validPayload(), repairsAtStation: bad });
+    assert.equal(result.ok, false, `${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("repairsAtStation earns financial and inventory, and nothing else does", () => {
+  // The claim is two-sided: the flag turns them on, and no OTHER field in the
+  // request can. If something else ever earns financial, this test says so
+  // rather than letting the flag quietly stop being the reason.
+  const off = analyzeCompanionRunPolicy(request({ repairsAtStation: false }));
+  assert.equal(off.riskClasses.includes("financial"), false);
+  assert.equal(off.riskClasses.includes("inventory"), false);
+
+  const on = analyzeCompanionRunPolicy(request({ repairsAtStation: true }));
+  assert.equal(on.riskClasses.includes("financial"), true);
+  assert.equal(on.riskClasses.includes("inventory"), true);
 });
 
 test("null, an array, and a primitive are all refused, not thrown", () => {

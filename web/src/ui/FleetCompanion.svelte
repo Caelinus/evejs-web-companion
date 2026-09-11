@@ -109,6 +109,13 @@
   let droneHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.droneHealthFloor * 100));
   let capacitorFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.capacitorFloor * 100));
   let maxFleeAttempts = $state(DEFAULT_FLEET_COMPANION_REQUEST.maxFleeAttempts);
+  /**
+   * Docking gives the shield and the capacitor back but NOT the armour, so a
+   * pilot that fled on armour damage cannot get back above its floor by
+   * arriving. Ticking this lets it pay the station to fix the difference;
+   * leaving it off means such a pilot stays docked and says so.
+   */
+  let repairsAtStation = $state(DEFAULT_FLEET_COMPANION_REQUEST.repairsAtStation);
   let useDrones = $state(DEFAULT_FLEET_COMPANION_REQUEST.useDrones);
   let droneHoldOffSeconds = $state(DEFAULT_FLEET_COMPANION_REQUEST.droneRedeployHoldOffSeconds);
   /**
@@ -463,6 +470,7 @@
           clamp(droneHealthFloorPercent, MIN_DRONE_HEALTH_FLOOR * 100, MAX_DRONE_HEALTH_FLOOR * 100) / 100,
         capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
         maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
+        repairsAtStation,
         useDrones,
         droneRedeployHoldOffSeconds: clamp(
           droneHoldOffSeconds,
@@ -847,6 +855,14 @@
         bind:value={maxFleeAttempts}
       />
       <span class="note">flee round trips</span>
+    </p>
+    <label class="check">
+      <input type="checkbox" bind:checked={repairsAtStation} />
+      Pay for repairs when it docks hurt
+    </label>
+    <p class="note">
+      Docking gives back shield and capacitor for free, but not armour. Without this
+      a pilot that fled on armour damage stays docked instead of coming back.
     </p>
     <label class="check">
       <input type="checkbox" bind:checked={useDrones} />
