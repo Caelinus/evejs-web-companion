@@ -262,6 +262,22 @@
   const orderIsFresh = $derived(
     lastOrder === null ? false : isFleetBroadcastFresh(lastOrder, Date.now()),
   );
+  /**
+   * ⚠ THIS READS THE SETUP FORM, NOT THE RUNNING PILOT'S REQUEST, and it is
+   * only correct because of something that is not obvious.
+   *
+   * `$companion` is THIS TAB's own store slice, so this readout can only ever
+   * be showing a companion this tab started — a headless one's state lives in
+   * the BFF's store, not here — and the form is the only way to start one, so
+   * `obeys` still holds exactly what was sent. A reload would desynchronise
+   * them, but a reload also empties the slice, so `active` goes false and this
+   * block does not render at all.
+   *
+   * The day this panel learns to display a HEADLESS companion, that argument
+   * collapses and this warning starts lying — telling a player to go and fix a
+   * setting that is already correct, which is worse than saying nothing. Carry
+   * `obeys` on the companion readout before that happens.
+   */
   const obeysBroadcasts = $derived(obeys.includes("broadcast"));
 
   // The broadcaster is a character id; the player should read a name. Same
