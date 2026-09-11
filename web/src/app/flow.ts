@@ -5494,7 +5494,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
 
-        // ── The drone reads (rung 5). Two of the three are free: they come off
+        // ── The drone reads (rung 6). Two of the three are free: they come off
         // the snapshot already in hand. Only the bay costs a call, and it is
         // gated above.
         //
@@ -5713,6 +5713,29 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // returning cleanly.
           case "setFleetTargetTag":
             await api.setFleetTargetTag(action.targetID, action.tag, callOptions);
+            return;
+          // Rung 5. `launchDrones` takes BAY STACK ids and `recallDrones` takes
+          // the ENTITY ids of drones in space -- two different id spaces, which
+          // is why the two action kinds carry differently named fields rather
+          // than sharing one.
+          //
+          // ⚠ NEITHER RETURN VALUE IS READ, AND api.ts SAYS WHY: the server's
+          // launch handler answers 200 with an empty dict when it REFUSES, and
+          // the entity orders answer an empty dict on success. The wrappers
+          // report what the BFF re-read out of space afterwards, and the rung
+          // does not consult even that -- it watches the grid on the next tick,
+          // which is the only authority either way.
+          case "launchDrones":
+            await api.launchDrones(
+              action.droneItemIDs.map((itemID) => ({ itemID })),
+              callOptions,
+            );
+            return;
+          // ⚠ NO SCOOP FOLLOWS THIS. The server flies them home at full speed
+          // and scoops them itself inside 2500 m; a scoop call would only ever
+          // duplicate what it is already doing.
+          case "recallDrones":
+            await api.recallDrones(action.droneIDs, callOptions);
             return;
           default: {
             // ⚠ EXHAUSTIVE ON PURPOSE. Every FleetCompanionAction kind MUST be
