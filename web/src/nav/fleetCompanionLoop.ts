@@ -398,6 +398,14 @@ export interface CompanionFlee {
    * a destination for is one it does not attempt, never one it guesses at.
    */
   readonly fromSolarSystemID: number | null;
+  /**
+   * How many times the repair shop has been asked on this trip.
+   *
+   * Bounded for the reason the DSL's own `repair-ship` block is bounded: a shop
+   * that keeps answering without fixing anything is most likely a wallet that
+   * cannot pay, and asking it for ever is not a plan.
+   */
+  readonly repairAttempts: number;
 
   // ── the `SafetyRun` contract ────────────────────────────────────────
   readonly safeSpotWarpIssued: boolean;
@@ -623,7 +631,25 @@ export type FleetCompanionAction =
    * inside 2500 m. They stay visibly on grid for the whole trip home, so a
    * caller must not read "still on grid" as "the recall was refused".
    */
-  | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] };
+  | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
+  /**
+   * Rung 5: pay the station to put the armour back.
+   *
+   * ⚠ `itemIDs` COMES FROM THE SHOP'S OWN QUOTE, never from a guess at what is
+   * damaged -- the same authority the DSL's `repair-ship` block uses. The
+   * route behind it carries `confirm: true` in the body, which is how this
+   * server makes a caller state intent; it is not a dialog and there is no UI
+   * to raise.
+   */
+  | { readonly kind: "repairItems"; readonly itemIDs: readonly number[] }
+  /**
+   * Rung 5: leave the station a flee ended at.
+   *
+   * The companion's first undock, and the only call it makes that puts the
+   * ship deliberately back into danger -- which is why everything above it in
+   * `recoverAndReturn` is about being sure first.
+   */
+  | { readonly kind: "undock" };
 
 export interface FleetCompanionProgress {
   readonly status: FleetCompanionRunState;
@@ -861,6 +887,16 @@ export interface CompanionLadderMemory {
    * the return leg that earns a reset does not exist yet.
    */
   readonly fleeTripsSpent: number;
+  /**
+   * Consecutive ticks since a flee ended with nothing wrong, against
+   * `FLEE_RECOVERY_HOLD_TICKS`. Reaching it puts the budget back to full.
+   *
+   * ⚠ THIS IS WHAT MAKES "A RETURN THAT HOLDS" CHECKABLE. A pilot that comes
+   * back and drops through its floor again before the count runs out never
+   * reaches the reset, so its trips keep accumulating and it eventually stays
+   * home -- which is the entire purpose of bounding them.
+   */
+  readonly fleeRecoveryTicks: number;
 }
 
 /** One recall-and-relaunch cycle in flight. */
@@ -900,6 +936,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     droneCyclesSpent: 0,
     flee: null,
     fleeTripsSpent: 0,
+    fleeRecoveryTicks: 0,
   };
 }
 
@@ -1128,6 +1165,7 @@ export function decideCompanionAction(
     // hurt pilot sitting on the grid it was leaving.
     flee: memory.flee,
     fleeTripsSpent: memory.fleeTripsSpent,
+    fleeRecoveryTicks: memory.fleeRecoveryTicks,
   };
 
   // Rung 3: tank up. Threaded even when it has nothing to do this tick —
@@ -2602,6 +2640,36 @@ function decideTackleTag(
 // moment they have nothing to issue -- which rung 3 only started reliably doing
 // once its unreadable-module-map spin was fixed, in the commit before this one.
 
+/**
+ * Count a quiet tick towards putting the flee budget back.
+ *
+ * Runs only on ticks where the pilot is NOT fleeing and NOT below its floor,
+ * which is what "a return that holds" means in practice. A pilot that never
+ * fled counts too and nothing happens, because resetting a budget of zero is
+ * the same as leaving it alone.
+ */
+function countTowardsRecovery(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionLadderMemory {
+  if (memory.fleeTripsSpent === 0) {
+    return memory;
+  }
+  // ⚠ THE HARDER THRESHOLD, not the floor. A pilot limping along just above the
+  // number that would send it running has not recovered from anything, and
+  // letting that count would hand the budget back to the pilot least able to
+  // spend it well.
+  if (!wellEnoughToReturn(request, obs)) {
+    return memory.fleeRecoveryTicks === 0 ? memory : { ...memory, fleeRecoveryTicks: 0 };
+  }
+  const held = memory.fleeRecoveryTicks + 1;
+  if (held < FLEE_RECOVERY_HOLD_TICKS) {
+    return { ...memory, fleeRecoveryTicks: held };
+  }
+  return { ...memory, fleeRecoveryTicks: 0, fleeTripsSpent: 0 };
+}
+
 /** What rung 5 hands back: a decision when it has one, and always its memory. */
 interface FleeStep {
   readonly decision: CompanionDecision | null;
@@ -2636,8 +2704,11 @@ function decideFlee(
   // decide nothing this tick and look again in two seconds.
   const health = obs.health ?? null;
   if (health === null || health >= request.fleeHealthFloor) {
-    return { decision: null, memory };
+    return { decision: null, memory: countTowardsRecovery(request, obs, memory) };
   }
+
+  // Dropped through the floor, so whatever recovery was being counted is over.
+  const hurt: CompanionLadderMemory = { ...memory, fleeRecoveryTicks: 0 };
 
   // ⚠ THE BUDGET IS CHECKED BEFORE THE LATCH, NOT INSIDE THE LEG. A pilot that
   // has spent its round trips is a pilot the operator told to stay home
@@ -2645,19 +2716,20 @@ function decideFlee(
   // staying home has to mean not starting a new trip rather than starting one
   // and stopping partway.
   if (memory.fleeTripsSpent >= request.maxFleeAttempts) {
-    return { decision: null, memory };
+    return { decision: null, memory: hurt };
   }
 
   const latched: CompanionFlee = {
     triggeredAtMs: nowMs,
     triggeredAtHealth: health,
     fromSolarSystemID: obs.flightStatus?.solarSystemID ?? null,
+    repairAttempts: 0,
     safeSpotWarpIssued: false,
     safeSpotWarpSeen: false,
     droneRecallWaited: null,
   };
   const started: CompanionLadderMemory = {
-    ...memory,
+    ...hurt,
     flee: latched,
     fleeTripsSpent: memory.fleeTripsSpent + 1,
     // ⚠ THE DRONE CYCLE DIES HERE, and the phase 6 spec asked for exactly this:
@@ -2674,6 +2746,199 @@ function decideFlee(
 }
 
 /**
+ * How far ABOVE its floor a ship has to be before it goes back.
+ *
+ * ⚠ WITHOUT A MARGIN A RETURN IS A COMMUTE. Coming back at exactly the floor
+ * means the very next tick reads the same number and flees again, spending the
+ * whole budget on one fight without ever firing a shot. The margin is capped at
+ * 1 so a jumpy floor (0.8, say) asks for a whole ship rather than an impossible
+ * 1.0-plus.
+ *
+ * It rarely binds, and that is by design rather than by luck: docking gives the
+ * shield and the capacitor back in full, so a shield-triggered flee is already
+ * whole on arrival, and a repaired armour flee is too. What it catches is the
+ * case in between -- a pilot that cannot repair, healing slowly on its own.
+ */
+const FLEE_RETURN_MARGIN = 0.2;
+
+/**
+ * How many ticks back on station with nothing wrong before a round trip counts
+ * as having WORKED and the budget goes back to full.
+ *
+ * The spec's rule, in its words: "an attempt is spent when the same condition
+ * re-fires shortly after a return; a return that holds resets the budget."
+ * Counting ticks is how "holds" is made checkable -- a pilot that comes back
+ * and immediately drops through its floor again never reaches this, so its
+ * trips keep accumulating and it eventually stays home, which is the whole
+ * point of the bound.
+ */
+const FLEE_RECOVERY_HOLD_TICKS = 15;
+
+/**
+ * How many times the shop is asked before a hurt pilot gives up on repairing.
+ *
+ * The DSL's `repair-ship` block keeps the same bound for the same reason, and
+ * its comment names the likeliest cause: the shop quietly not fixing things
+ * because there is not enough money. A pilot that cannot pay must stop asking
+ * rather than ask for ever.
+ */
+const MAX_FLEE_REPAIR_ATTEMPTS = 3;
+
+/**
+ * Whether a ship is well enough to go back to the fight it left.
+ *
+ * ⚠ A DIFFERENT QUESTION FROM THE ONE THAT STARTED THE FLEE, and deliberately a
+ * harder one to answer yes to. See `FLEE_RETURN_MARGIN`.
+ */
+function wellEnoughToReturn(request: FleetCompanionRequest, obs: FleetCompanionObservation): boolean {
+  const health = obs.health ?? null;
+  if (health === null) {
+    // Unreadable is not "well". A pilot that undocked on a dropped poll would
+    // be flying back into a fight on no information at all.
+    return false;
+  }
+  return health >= Math.min(1, request.fleeHealthFloor + FLEE_RETURN_MARGIN);
+}
+
+/**
+ * What a pilot does once it has got clear: get whole, then go back.
+ *
+ * ⚠ DOCKING IS NOT A REPAIR, and that fact is what this whole branch is shaped
+ * around. `topOffShipShieldAndCapacitorForDockingTransition`
+ * (`space/transitions.js:242`) sets `charge` and `shieldCharge` to 1 and leaves
+ * `damage` and `armorDamage` exactly as they were. So a shield flee is whole
+ * the moment it arrives and an ARMOUR flee is not -- and without paying the
+ * shop it never will be, which is why an operator who has not opted in gets a
+ * pilot that says it is staying put rather than one that silently commutes.
+ */
+function recoverAndReturn(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  mem: CompanionLadderMemory,
+  running: CompanionFlee,
+): FleeStep {
+  const hurtAt = Math.round(running.triggeredAtHealth * 100);
+
+  if (!wellEnoughToReturn(request, obs)) {
+    // Not docked: the safe-spot case. There is no shop out here, so the only
+    // thing to do is hold and let the layers come back on their own.
+    if (obs.docked !== true) {
+      return {
+        decision: waiting("Safe", `Left the fight at ${hurtAt}% and is waiting out here to recover.`, mem),
+        memory: mem,
+      };
+    }
+    if (!request.repairsAtStation) {
+      return {
+        decision: waiting(
+          "Safe",
+          `Left the fight at ${hurtAt}%. Docking gave the shield back but not the armour, and this pilot is not set to pay for repairs, so it is staying put.`,
+          mem,
+        ),
+        memory: mem,
+      };
+    }
+    if (running.repairAttempts >= MAX_FLEE_REPAIR_ATTEMPTS) {
+      return {
+        decision: waiting(
+          "Safe",
+          "The repair shop kept leaving damage unfixed, so this pilot stopped asking and is staying docked.",
+          mem,
+        ),
+        memory: mem,
+      };
+    }
+    // ⚠ THE SHOP'S OWN QUOTE DECIDES WHAT IS DAMAGED, never a guess at the ship
+    // item id -- the same authority the DSL's `repair-ship` uses. Null is "we
+    // could not say", which is a tick spent waiting for the quote and never a
+    // conclusion that nothing is wrong.
+    const damaged = obs.damagedItemIDs ?? null;
+    if (damaged === null) {
+      return { decision: waiting("Safe", "Asking the repair shop for a quote.", mem), memory: mem };
+    }
+    if (damaged.length === 0) {
+      // Nothing the shop will fix, and still below the return mark. Holding is
+      // the honest answer: there is damage no station can take out.
+      return {
+        decision: waiting("Safe", `Left the fight at ${hurtAt}% and the shop has nothing left to fix.`, mem),
+        memory: mem,
+      };
+    }
+    const asked: CompanionLadderMemory = {
+      ...mem,
+      flee: { ...running, repairAttempts: running.repairAttempts + 1 },
+    };
+    return {
+      decision: {
+        action: { kind: "repairItems", itemIDs: damaged },
+        phase: "Repairing",
+        why: "Paying the station to put the armour back, so this pilot can rejoin.",
+        memory: asked,
+      },
+      memory: asked,
+    };
+  }
+
+  // Whole enough. ⚠ THE BUDGET IS CHECKED HERE TOO, not only at the trigger: a
+  // pilot whose LAST trip took it over the limit must stay docked rather than
+  // undock into the fight that keeps sending it home.
+  if (mem.fleeTripsSpent >= request.maxFleeAttempts) {
+    return {
+      decision: waiting(
+        "Safe",
+        `Fixed up, but this pilot has used all ${request.maxFleeAttempts} of its flee round trips, so it is staying home.`,
+        mem,
+      ),
+      memory: mem,
+    };
+  }
+
+  // ⚠ THE LATCH IS DROPPED BEFORE THE MOVE, not after it. Undocking is what
+  // ends the flee; holding the latch across it would leave this rung driving a
+  // pilot that is already back out, and a ship that undocks hurt would then be
+  // steered by a flee that thinks it is still going the other way.
+  const done: CompanionLadderMemory = { ...mem, flee: null, fleeRecoveryTicks: 0 };
+
+  if (obs.docked === true) {
+    return {
+      decision: {
+        action: { kind: "undock" },
+        phase: "Going back",
+        why: "Fixed up, so this pilot is undocking to rejoin the fleet.",
+        memory: done,
+      },
+      memory: done,
+    };
+  }
+
+  // Out at the safe spot rather than in a station, and well again. If the fleet
+  // is somewhere else, route there; otherwise there is nothing to fly and the
+  // rungs below take over on the next tick.
+  //
+  // ⚠ THIS IS AS FAR AS "REMEMBER THE GRID" GOES, AND IT IS OPTION A ON PURPOSE.
+  // A solar system is not a grid: nothing here flies the pilot back to the exact
+  // spot it left, because a return point would need a bookmark written at the
+  // moment of leaving and that is a whole feature rather than a step. There is
+  // also no read anywhere that says whether that grid is clear, so a precise
+  // return would be no safer than this one -- only more code. The attempt budget
+  // is what bounds the blindness, for both.
+  const here = obs.flightStatus?.solarSystemID ?? null;
+  const home = running.fromSolarSystemID;
+  if (home !== null && here !== null && home !== here) {
+    return {
+      decision: {
+        action: { kind: "travelTo", systemID: home },
+        phase: "Going back",
+        why: "Recovered, so this pilot is heading back to the system it left.",
+        memory: done,
+      },
+      memory: done,
+    };
+  }
+  return { decision: null, memory: done };
+}
+
+/**
  * The leg itself, once a flee is latched.
  *
  * Split out so the latching tick and every tick after it fly the same code —
@@ -2687,18 +2952,7 @@ function flyTheFlee(
   running: CompanionFlee,
 ): FleeStep {
   if (reachedSafety(obs, running)) {
-    // Arrived. Getting back out again is the next commit's job; until it
-    // exists, a pilot that fled stays where it is rather than pretending the
-    // trip is over.
-    const hurtAt = Math.round(running.triggeredAtHealth * 100);
-    return {
-      decision: waiting(
-        "Safe",
-        `Left the fight at ${hurtAt}% and is holding here.`,
-        mem,
-      ),
-      memory: mem,
-    };
+    return recoverAndReturn(request, obs, mem, running);
   }
 
   const safe = runToSafety(request, obs, mem, {
@@ -3343,6 +3597,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       // if it still needs to.
       flee: null,
       fleeTripsSpent: 0,
+      fleeRecoveryTicks: 0,
         };
       }
       runToken += 1;

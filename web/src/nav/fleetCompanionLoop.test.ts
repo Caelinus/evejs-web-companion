@@ -2946,6 +2946,7 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
       triggeredAtMs: 1,
       triggeredAtHealth: 0.12,
       fromSolarSystemID: HOME_SYSTEM,
+      repairAttempts: 0,
       safeSpotWarpIssued: false,
       safeSpotWarpSeen: false,
       droneRecallWaited: null,
@@ -2973,6 +2974,166 @@ test("a mid-warp tick records the flee's safe-spot warp, not just the abandonmen
     fleeing({ safeSpotWarpIssued: true }),
   );
   assert.equal(decision.memory.flee?.safeSpotWarpSeen, true);
+});
+
+/** Synthetic item ids for the repair shop's quote. */
+const SHIP_ITEM = 900001;
+const RIG_ITEM = 900002;
+
+// --- rung 5: getting whole, and going back ------------------------------------
+//
+// ⚠ DOCKING IS NOT A REPAIR. `topOffShipShieldAndCapacitorForDockingTransition`
+// (space/transitions.js:242) sets charge and shieldCharge to 1 and leaves
+// `damage` and `armorDamage` alone, so a shield flee is whole on arrival and an
+// armour flee is not. Everything below is shaped around that one server fact.
+
+/** Docked at the station a flee ended at, with a health the test picks. */
+function dockedAfterFleeing(
+  health: number | null,
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return fleeObs({ docked: true, inSpace: false, health, ...overrides });
+}
+
+test("a pilot whole again undocks to rejoin", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Going back");
+});
+
+// ⚠ THE MARGIN, NOT THE FLOOR. Coming back at exactly the number that sends it
+// running means the next tick reads the same number and leaves again: one fight
+// would eat the whole budget without a shot fired.
+test("a pilot only just above its floor stays put rather than commuting", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing(REQUEST.fleeHealthFloor + 0.01),
+    fleeing(),
+  );
+  assert.notEqual(decision.action.kind, "undock");
+  assert.equal(decision.phase, "Safe");
+});
+
+test("an UNREADABLE health never undocks", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(null), fleeing());
+  assert.notEqual(decision.action.kind, "undock");
+});
+
+// --- the armour case, which is the whole reason the opt-in exists -------------
+
+test("without the opt-in, a pilot hurt in the armour says why it is staying", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(0.4), fleeing());
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.match(decision.why, /not set to pay for repairs/i);
+  assert.notEqual(decision.action.kind, "undock");
+});
+
+test("with the opt-in, it pays the shop for exactly what the quote named", () => {
+  const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
+  const decision = decideCompanionAction(
+    paying,
+    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM, RIG_ITEM] }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "repairItems", itemIDs: [SHIP_ITEM, RIG_ITEM] });
+  assert.equal(decision.phase, "Repairing");
+});
+
+// Null is "could not say", never "nothing is damaged" -- the same contract the
+// DSL's repair-ship read keeps. A tick spent waiting for the quote, not a
+// conclusion that the ship is fine.
+test("an unquoted shop is waited on, not read as nothing-to-fix", () => {
+  const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
+  const decision = decideCompanionAction(
+    paying,
+    dockedAfterFleeing(0.4, { damagedItemIDs: null }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.match(decision.why, /quote/i);
+});
+
+test("a shop that keeps not fixing things is given up on, not asked for ever", () => {
+  const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
+  const decision = decideCompanionAction(
+    paying,
+    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM] }),
+    fleeing({ repairAttempts: 3 }),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.match(decision.why, /stopped asking/i);
+});
+
+// --- the budget ---------------------------------------------------------------
+
+test("a pilot that used its last trip stays docked even once it is whole", () => {
+  const spent: CompanionLadderMemory = { ...fleeing(), fleeTripsSpent: REQUEST.maxFleeAttempts };
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), spent);
+  assert.notEqual(decision.action.kind, "undock");
+  assert.match(decision.why, /staying home/i);
+});
+
+// "A return that holds resets the budget", made checkable: a pilot that comes
+// back and stays well for long enough gets its trips back.
+test("a return that HOLDS puts the budget back", () => {
+  let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 15; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory).memory;
+  }
+  assert.equal(memory.fleeTripsSpent, 0);
+});
+
+// ⚠ AND ONE THAT DOES NOT HOLD MUST NOT. This is the half that makes the bound
+// mean anything: a pilot being sent home over and over never reaches the reset,
+// so its trips accumulate and it eventually stays put.
+test("dropping through the floor again restarts the recovery count", () => {
+  let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 14; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory).memory;
+  }
+  assert.notEqual(memory.fleeRecoveryTicks, 0, "the count should be part-way up");
+
+  // One bad tick, and the count starts again rather than carrying on.
+  memory = decideCompanionAction(REQUEST, fleeObs({ health: 0.1 }), memory).memory;
+  assert.equal(memory.fleeRecoveryTicks, 0);
+  assert.equal(memory.fleeTripsSpent, 3, "and it costs another trip");
+});
+
+// A pilot limping along just above the number that would send it running has
+// not recovered from anything, so it must not earn its budget back that way.
+test("limping just above the floor does not count as recovering", () => {
+  let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
+  const limping = fleeObs({ health: REQUEST.fleeHealthFloor + 0.01 });
+  for (let tick = 0; tick < 20; tick += 1) {
+    memory = decideCompanionAction(REQUEST, limping, memory).memory;
+  }
+  assert.equal(memory.fleeTripsSpent, 2, "the budget must not come back to a ship still hurt");
+});
+
+// --- the latch ends with the undock -------------------------------------------
+
+test("undocking ends the flee, so the rung stops driving a pilot already back out", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+  assert.equal(decision.memory.flee, null);
+});
+
+// The safe-spot half of a return: no station to undock from, so a pilot out at
+// a bookmark routes back to the system it left.
+test("a recovered pilot at a safe spot routes back to the system it left", () => {
+  const elsewhere = fleeObs({
+    health: 1,
+    docked: false,
+    flightStatus: { solarSystemID: 30000144 } as FleetCompanionObservation["flightStatus"],
+  });
+  const decision = decideCompanionAction(
+    REQUEST,
+    elsewhere,
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "travelTo", systemID: HOME_SYSTEM });
+  assert.equal(decision.phase, "Going back");
 });
 
 // --- rung 6: drones ----------------------------------------------------------
