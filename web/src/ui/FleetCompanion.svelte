@@ -38,6 +38,10 @@
     type FleetCompanionOrderSource,
     type FleetCompanionRole,
   } from "../nav/fleetCompanionLoop.ts";
+  import {
+    isFleetBroadcastFresh,
+    type FleetBroadcastName,
+  } from "../bridge/fleetBroadcasts.ts";
   import type { FleetCompanionState } from "../store/types.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -244,6 +248,50 @@
     }
   });
 
+  /**
+   * What the fleet has most recently said, in the player's words.
+   *
+   * ⚠ THIS READS THE SLICE DIRECTLY, NOT THE COMPANION'S READOUT, and that is
+   * the point of having it. The store records every broadcast the session
+   * receives whether or not this pilot is configured to obey it, so the panel
+   * can show "your FC broadcast Target and this pilot ignores broadcasts"
+   * — which is a settings problem the player can fix, and is otherwise
+   * indistinguishable from a bot that is simply not working.
+   */
+  const lastOrder = $derived($fleet.lastBroadcast);
+  const orderIsFresh = $derived(
+    lastOrder === null ? false : isFleetBroadcastFresh(lastOrder, Date.now()),
+  );
+  const obeysBroadcasts = $derived(obeys.includes("broadcast"));
+
+  // The broadcaster is a character id; the player should read a name. Same
+  // shape as the chat-commander lookup above.
+  $effect(() => {
+    const sender = $fleet.lastBroadcast?.senderCharID ?? null;
+    if (sender !== null) {
+      flow.requestNames([{ kind: "character", id: sender } as NameRef]);
+    }
+  });
+
+  /** Plain words for a broadcast name. Never the wire name, which is jargon. */
+  const broadcastWords: Record<FleetBroadcastName, string> = {
+    Target: "shoot this",
+    AlignTo: "align to this",
+    WarpTo: "warp to this",
+    JumpTo: "jump through this gate",
+    TravelTo: "travel to this system",
+    JumpBeacon: "jump to this beacon",
+    HealShield: "needs shield reps",
+    HealArmor: "needs armour reps",
+    HealCapacitor: "needs capacitor",
+    HealTarget: "rep this pilot",
+    EnemySpotted: "enemy spotted",
+    NeedBackup: "needs backup",
+    HoldPosition: "hold position",
+    InPosition: "in position",
+    Location: "reporting position",
+  };
+
   function canTagWords(value: boolean | null): string {
     if (value === null) {
       return "not known";
@@ -403,6 +451,48 @@
         </tbody>
       </table>
     </div>
+    <!--
+      WHAT THE FLEET IS SAYING. Deliberately shown even before this pilot can
+      act on any of it: during live QA the first question is always "is the
+      broadcast even arriving", and a panel that only showed what the pilot DID
+      cannot answer it.
+    -->
+    <h3>What the fleet is saying</h3>
+    {#if lastOrder === null}
+      <p class="note">
+        Nothing has come over the fleet yet. Broadcasts and target tags only
+        arrive while someone in the fleet is actually sending them.
+      </p>
+    {:else}
+      <p class="stat-line">
+        <strong>{broadcastWords[lastOrder.name] ?? lastOrder.name}</strong>
+        <span class="note">
+          - from {resolvedName($names.resolved, "character", lastOrder.senderCharID, "someone in the fleet")}
+        </span>
+      </p>
+      {#if !orderIsFresh}
+        <p class="note">
+          That call has lapsed, so this pilot is back on its own judgement. A
+          call only stands for about half a minute.
+        </p>
+      {:else if !obeysBroadcasts}
+        <p class="note warn">
+          This pilot is set NOT to listen to broadcasts, so it is ignoring that.
+          Stop it and tick "Fleet broadcasts" if you want it answered.
+        </p>
+      {/if}
+    {/if}
+    {#if $fleet.targetTags === null}
+      <p class="note">No target tags have been read from this fleet.</p>
+    {:else if $fleet.targetTags.size === 0}
+      <p class="note">The fleet has tagged nothing.</p>
+    {:else}
+      <p class="note">
+        The fleet has tagged {$fleet.targetTags.size} ship(s):
+        {[...$fleet.targetTags.values()].join(", ")}.
+      </p>
+    {/if}
+
     {#if $companion.abandonment}
       <p class="note warn">
         Nobody is left in this fleet that this computer is not flying, so this
