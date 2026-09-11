@@ -285,6 +285,23 @@ test("an empty picker says so rather than showing an empty box", () => {
 
 // --- the row on its own -----------------------------------------------------
 
+/** The same pilot `renderRow` builds by default, for tests that vary it. */
+function basePilot() {
+  return {
+    characterID: 90000001,
+    name: "Ore Farmer",
+    accountName: "Test Account",
+    shipName: "Venture",
+    locationName: "Jita",
+    skillPoints: 134_900_000,
+    balance: 4.82e9,
+    training: "Mining Barge V - 4d 6h",
+    online: false,
+    pinned: false,
+    squads: [] as { id: string; name: string; color: string }[],
+  };
+}
+
 function renderRow(overrides: Record<string, unknown> = {}): string {
   const pilot = {
     characterID: 90000001,
@@ -481,4 +498,66 @@ test("a squad with a configured pilot offers FLY, and says how it differs from A
     /keep flying when this tab closes/,
     "the difference must be stated on the control itself",
   );
+});
+
+
+// --- the per-pilot companion setup, in the squad popover --------------------
+
+test("a ticked squad offers a role picker; an unticked one does not", () => {
+  // ⚠ ONLY THE SQUADS THIS PILOT IS IN GROW A SECOND LINE. Growing EVERY row
+  // was tried before and rejected: at eleven squads it made each row about
+  // 230px tall (docs/pilot-hangar.md). A pilot is typically in one or two.
+  const inOne = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD, { id: "s-other", name: "Scout Net", color: "#6fb4e8" }],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+  });
+  assert.match(inOne, /Flies as/, "the squad it is in offers a setup");
+  assert.match(inOne, /Not set up/);
+  assert.equal((inOne.match(/Flies as/g) ?? []).length, 1, "and only that one does");
+});
+
+test("the tick and the role picker are SEPARATE controls", () => {
+  // ⚠ A CONTROL NESTED IN THE TICK WOULD BE INVALID HTML AND WOULD FIRE THE
+  // MEMBERSHIP TOGGLE ON EVERY CLICK. The row is a <button>; the setup is its
+  // sibling. This asserts the select is not inside the button element.
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+  });
+  const rowStart = body.indexOf('class="hangar-squadmenu-row');
+  assert.ok(rowStart >= 0, "the membership button is there");
+  const rowEnd = body.indexOf("</button>", rowStart);
+  const selectAt = body.indexOf("<select", rowStart);
+  assert.ok(selectAt > rowEnd, "the select must sit AFTER the button closes");
+});
+
+test("a pilot with no setup is not offered a tagging choice", () => {
+  // "Calls targets" only means something once a role is chosen: there is no
+  // setup to put it on otherwise.
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+    companionRoleFor: () => null,
+  });
+  assert.doesNotMatch(body, /Calls targets/);
+});
+
+test("a pilot set up as logi shows that role, and can be told to call targets", () => {
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+    companionRoleFor: () => "logi",
+    companionTagsFor: () => true,
+  });
+  assert.match(body, /Logistics/);
+  assert.match(body, /Calls targets/);
+  assert.match(body, /checked/, "the tagging choice reflects what is stored");
 });

@@ -55,6 +55,8 @@
     togglePinnedPilot,
     togglePinnedSquad,
     companionSquadRoster,
+    companionConfigFor,
+    setCompanionConfig,
     competingTaggers,
     toggleSquadMember,
     updateSquad,
@@ -94,6 +96,12 @@
     type SquadStartEntry,
   } from "../bots/squadStart.ts";
   import { createBotLaunchGrant, DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
+  import {
+    DEFAULT_FLEET_COMPANION_REQUEST,
+    type FleetCompanionRequest,
+    type FleetCompanionRole,
+  } from "../nav/fleetCompanionLoop.ts";
+  import { presetForRole } from "../bots/companionRolePresets.ts";
   import {
     analyzeCompanionRunPolicy,
     COMPANION_GRANT_SCRIPT_REV,
@@ -398,6 +406,39 @@
     } finally {
       squadStarting = false;
     }
+  }
+
+  /**
+   * The setup a pilot gets when a role is picked for it in a squad.
+   *
+   * ⚠ THE ROLE PRESET IS WHAT MAKES A ROLE MEAN ANYTHING HERE. Picking
+   * "Logistics" is the only chance this screen gets to set a flee threshold --
+   * there is nowhere else in the hangar to tune one -- so the preset table is
+   * the whole of the difference between the four roles. See
+   * companionRolePresets.ts for what it does and does not set, and why.
+   *
+   * ⚠ AND THE MODULE LISTS STAY EMPTY, WITH `deriveModulesFromFit` ON. The
+   * hangar cannot pick modules: they are itemIDs of one hull's fitted gear and
+   * this pilot is not mounted. The companion reads the ship it is actually in
+   * when it starts.
+   *
+   * ⚠ CHANGING A ROLE KEEPS WHAT THE ROLE DOES NOT COVER. Re-picking must not
+   * silently clear a tagging choice that is still true of this pilot; only the
+   * fields the preset names are rewritten.
+   */
+  function companionSetupFor(
+    current: HangarPrefs,
+    squadID: string,
+    characterID: number,
+    role: FleetCompanionRole,
+  ): FleetCompanionRequest {
+    const existing = companionConfigFor(current, squadID, characterID);
+    return {
+      ...(existing ?? DEFAULT_FLEET_COMPANION_REQUEST),
+      ...presetForRole(role),
+      role,
+      deriveModulesFromFit: true,
+    };
   }
 
   function pilotNameFor(characterID: number): string {
@@ -841,6 +882,29 @@
                   (squadMenuFor = squadMenuFor === pilot.characterID ? null : pilot.characterID)}
                 onToggleSquad={(squadID) =>
                   commit(toggleSquadMember(prefs, squadID, pilot.characterID))}
+                companionRoleFor={(squadID) =>
+                  companionConfigFor(prefs, squadID, pilot.characterID)?.role ?? null}
+                companionTagsFor={(squadID) =>
+                  companionConfigFor(prefs, squadID, pilot.characterID)?.attemptsTagging ?? false}
+                onSetCompanionRole={(squadID, role) =>
+                  commit(
+                    setCompanionConfig(
+                      prefs,
+                      squadID,
+                      pilot.characterID,
+                      role === null ? null : companionSetupFor(prefs, squadID, pilot.characterID, role),
+                    ),
+                  )}
+                onToggleCompanionTagging={(squadID) => {
+                  const current = companionConfigFor(prefs, squadID, pilot.characterID);
+                  if (current === null) return;
+                  commit(
+                    setCompanionConfig(prefs, squadID, pilot.characterID, {
+                      ...current,
+                      attemptsTagging: !current.attemptsTagging,
+                    }),
+                  );
+                }}
               />
             {/each}
             {#each { length: account.emptySlots } as _, index (index)}

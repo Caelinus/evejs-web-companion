@@ -11,6 +11,11 @@
   // menu, which is passed in so only one menu is open across the whole screen.
   import type { HangarPilot } from "../app/hangar.ts";
   import type { Squad } from "../app/hangarPrefs.ts";
+  import {
+    FLEET_COMPANION_ROLES,
+    type FleetCompanionRole,
+  } from "../nav/fleetCompanionLoop.ts";
+  import { COMPANION_ROLE_LABELS } from "../bots/companionReadout.ts";
   import type { ActiveServerBot } from "../app/api.ts";
   import { formatIskCompact, formatSpCompact } from "../app/hangar.ts";
   // One vocabulary for every bot readout in the client — see bots/pilotRoster.ts.
@@ -34,6 +39,10 @@
     onStopBot,
     onToggleSquadMenu,
     onToggleSquad,
+    companionRoleFor = () => null,
+    companionTagsFor = () => false,
+    onSetCompanionRole = () => {},
+    onToggleCompanionTagging = () => {},
   }: {
     pilot: HangarPilot;
     selected: boolean;
@@ -59,6 +68,20 @@
     onStopBot?: () => void;
     onToggleSquadMenu: () => void;
     onToggleSquad: (squadID: string) => void;
+    /**
+     * What this pilot is set up to do in one squad, or null when it has no
+     * companion setup there.
+     *
+     * ⚠ THE SETUP IS A ROLE AND SETTINGS, NOT A FIT. What a squad member
+     * stores carries no module ids at all: the companion reads the ship it is
+     * actually in when it starts, because a list saved here would be stale the
+     * moment this pilot refits or changes hull. That is why this fits in a
+     * 210px popover when the original plan's whole-request version could not.
+     */
+    companionRoleFor?: (squadID: string) => FleetCompanionRole | null;
+    companionTagsFor?: (squadID: string) => boolean;
+    onSetCompanionRole?: (squadID: string, role: FleetCompanionRole | null) => void;
+    onToggleCompanionTagging?: (squadID: string) => void;
   } = $props();
 
   // Manage mode deliberately makes the row inert: it is the mode where you
@@ -202,6 +225,19 @@
             <div class="hangar-squadmenu-list">
               {#each squads as squad (squad.id)}
                 {@const member = memberOf.has(squad.id)}
+                {@const role = companionRoleFor(squad.id)}
+                <!--
+                  ⚠ THE TICK STAYS ITS OWN BUTTON AND THE SETUP SITS BENEATH IT.
+                  A control nested inside that button would be invalid HTML and
+                  would fire the membership toggle on every click, so the role
+                  picker is a sibling, not a child.
+
+                  ⚠ AND IT APPEARS ONLY FOR A SQUAD THIS PILOT IS IN. Growing
+                  EVERY row was tried before and rejected -- at eleven squads it
+                  made each row about 230px tall (docs/pilot-hangar.md). A pilot
+                  is typically in one or two squads, so this grows the one or
+                  two rows that have something to say.
+                -->
                 <button
                   type="button"
                   class="hangar-squadmenu-row"
@@ -213,6 +249,38 @@
                   <span class="hangar-swatch" style:background={squad.color}></span>
                   <span class="hangar-squadmenu-name">{squad.name}</span>
                 </button>
+                {#if member}
+                  <div class="hangar-squadmenu-setup">
+                    <label class="hangar-squadmenu-setuprow">
+                      <span>Flies as</span>
+                      <select
+                        value={role ?? ""}
+                        onchange={(event) => {
+                          const picked = (event.currentTarget as HTMLSelectElement).value;
+                          onSetCompanionRole(
+                            squad.id,
+                            picked === "" ? null : (picked as FleetCompanionRole),
+                          );
+                        }}
+                      >
+                        <option value="">Not set up</option>
+                        {#each FLEET_COMPANION_ROLES as choice (choice)}
+                          <option value={choice}>{COMPANION_ROLE_LABELS[choice]}</option>
+                        {/each}
+                      </select>
+                    </label>
+                    {#if role !== null}
+                      <label class="hangar-squadmenu-setuprow">
+                        <input
+                          type="checkbox"
+                          checked={companionTagsFor(squad.id)}
+                          onchange={() => onToggleCompanionTagging(squad.id)}
+                        />
+                        <span>Calls targets</span>
+                      </label>
+                    {/if}
+                  </div>
+                {/if}
               {/each}
               {#if squads.length === 0}
                 <div class="hangar-picker-empty">No squads yet.</div>

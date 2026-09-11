@@ -89,27 +89,30 @@ clean while the count had gone 17 → 18. The reverse trap is the known one (a
 fresh worktree reports 22 because `public/dist` is absent). Check both. Comparing
 PER-FILE COUNTS, as the table above allows, catches what either alone misses.
 
-## ⚠ PHASE 9'S ONE REMAINING GAP: NOTHING CAN CREATE A SQUAD CONFIG
+## Phase 9 is COMPLETE, 2026-09-11
 
-`setCompanionConfig` (`web/src/app/hangarPrefs.ts`) is exported, tested and
-has **no UI caller**. So `companionSquadRoster` is always empty, the hangar's
-FLY control never appears, and the squad start cannot be reached by a player.
-Everything underneath it is built and tested; the authoring surface is not.
+Built on `feat/fleet-companion-phase-9`: the shared readout words, role presets,
+the Bot Manager badge, fit derivation and its warnings, the hardener classifier
+fix, squad config storage, the squad group start, and the per-pilot setup picker
+in the hangar popover. Gates at the last commit: `tsc` clean, `docker build
+--target web-build` clean, 5,296 tests with `fail 17` -- the same eight files at
+the same per-file counts as the baseline.
 
-**It is now a SMALL piece, and it was not going to be.** The original plan had
-the hangar popover carrying a whole `FleetCompanionRequest`, which cannot work:
-the request's seven module lists are `itemID`s of one particular hull's fitted
-modules, picked by an operator looking at that ship, and a squad start has no
-mounted pilot to pick from. The operator settled it — the companion reads its
-own fit at start, and nothing about a fit is ever saved — so what a squad member
-stores is now only a role and some settings. That fits the 210px popover the
-plan predicted.
+⚠ **THE SQUAD STORES A ROLE AND SETTINGS, NEVER A FIT.** The operator settled
+this and it reshaped the phase: the companion is in the ship it will fly, so it
+reads the fit at start and works out its own capabilities. A saved module list
+would be stale the moment that pilot refits or changes hull. `resolveDefense
+ModuleIDs` / `resolveRemoteRepModuleIDs` already did the classifying and already
+ran headlessly; they were simply never called for the companion.
 
-⚠ Do NOT put a role `<select>` on each popover row without reading
-`HangarPilotRow.svelte:205-215` first: the row is a single `<button>`, so a
-nested control is invalid HTML and would fire the toggle on every click, and
-`docs/pilot-hangar.md:157-158` records that growing these rows vertically was
-tried and rejected at eleven squads.
+⚠ **A DERIVING REQUEST EARNS `combat` UNCONDITIONALLY**, because its module
+lists are empty and `botHost` re-derives the policy and compares it to the grant
+-- the same lie on both sides would have passed that check.
+
+⚠ **THE NAME CACHE MUST BE WARMED BEFORE CLASSIFYING.** Both classifiers skip a
+module whose typeGroup is not cached, and on the bot host that cache starts
+EMPTY -- so an unwarmed deriving start classifies nothing, flies with no tank
+and no guns, and reports no error, because every list is legitimately empty.
 
 ## What exists
 
