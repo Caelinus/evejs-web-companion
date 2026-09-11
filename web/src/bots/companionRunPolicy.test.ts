@@ -16,6 +16,8 @@ import {
   MIN_CAPACITOR_FLOOR,
   MIN_DRONE_HOLD_OFF_SECONDS,
   MIN_FLEE_ATTEMPTS,
+  MAX_DRONE_HEALTH_FLOOR,
+  MIN_DRONE_HEALTH_FLOOR,
   MIN_FLEE_HEALTH_FLOOR,
   type FleetCompanionRequest,
 } from "../nav/fleetCompanionLoop.ts";
@@ -163,6 +165,7 @@ function validPayload(): Record<string, unknown> {
     remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
     weaponModuleIDs: [WEAPON_MODULE_A],
     fleeHealthFloor: 0.3,
+    droneHealthFloor: 0.5,
     capacitorFloor: 0.2,
     maxFleeAttempts: 3,
     useDrones: false,
@@ -188,6 +191,7 @@ test("a well-formed request round-trips", () => {
       remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
       weaponModuleIDs: [WEAPON_MODULE_A],
       fleeHealthFloor: 0.3,
+      droneHealthFloor: 0.5,
       capacitorFloor: 0.2,
       maxFleeAttempts: 3,
       useDrones: false,
@@ -577,4 +581,50 @@ test("a request decoded from bytes produces the same run policy as one built in 
     // validPayload() fits one defensive module, so combat rides along too.
     assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"]);
   }
+});
+
+// ⚠ THE CLOSED KEY SET IS WHAT MAKES THIS WORTH TESTING. A request that reaches
+// the bot host has crossed a process boundary and been sat in a database; the
+// decoder refuses anything it does not recognise and anything out of domain,
+// which is why adding droneHealthFloor broke every fixture in this file until
+// they carried it. A field with no bounds test is a field that can arrive as
+// 47 and have a rung quietly compare a health ratio against it.
+test("droneHealthFloor is refused outside its real domain bounds", () => {
+  assert.equal(
+    decodeFleetCompanionRequestValue({
+      ...validPayload(),
+      droneHealthFloor: MIN_DRONE_HEALTH_FLOOR - 0.01,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    decodeFleetCompanionRequestValue({
+      ...validPayload(),
+      droneHealthFloor: MAX_DRONE_HEALTH_FLOOR + 0.01,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    decodeFleetCompanionRequestValue({ ...validPayload(), droneHealthFloor: MIN_DRONE_HEALTH_FLOOR })
+      .ok,
+    true,
+    "the bound itself is inside the domain",
+  );
+});
+
+test("droneHealthFloor refuses NaN, Infinity, a string and an absent key", () => {
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "0.5", null]) {
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), droneHealthFloor: bad }).ok,
+      false,
+      String(bad),
+    );
+  }
+  const withoutIt: Record<string, unknown> = { ...validPayload() };
+  delete withoutIt.droneHealthFloor;
+  assert.equal(
+    decodeFleetCompanionRequestValue(withoutIt).ok,
+    false,
+    "a missing threshold is refused, never defaulted -- a silent default here would fly a pilot on a number nobody chose",
+  );
 });

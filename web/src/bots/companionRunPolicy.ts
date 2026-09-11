@@ -86,6 +86,8 @@ import {
   MIN_CAPACITOR_FLOOR,
   MIN_DRONE_HOLD_OFF_SECONDS,
   MIN_FLEE_ATTEMPTS,
+  MAX_DRONE_HEALTH_FLOOR,
+  MIN_DRONE_HEALTH_FLOOR,
   MIN_FLEE_HEALTH_FLOOR,
   type CompanionAbandonmentRecord,
   type FleetCompanionOrderSource,
@@ -187,6 +189,7 @@ const REQUEST_KEYS = new Set<string>([
   "remoteCapacitorModuleIDs",
   "weaponModuleIDs",
   "fleeHealthFloor",
+  "droneHealthFloor",
   "capacitorFloor",
   "maxFleeAttempts",
   "useDrones",
@@ -231,6 +234,7 @@ const SAY = {
   badRemoteCapacitorModuleIDs: "This companion setup's remote capacitor-transfer module list is not valid.",
   badWeaponModuleIDs: "This companion setup's weapon module list is not valid.",
   badFleeHealthFloor: "This companion setup's flee-health threshold is not a valid number.",
+  badDroneHealthFloor: "This companion setup's drone-health threshold is not a valid number.",
   badCapacitorFloor: "This companion setup's capacitor threshold is not a valid number.",
   badMaxFleeAttempts: "This companion setup's flee-attempt limit is not a valid number.",
   badUseDrones: "This companion setup's drone setting is not valid.",
@@ -351,6 +355,11 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     return { ok: false, refusal: SAY.badFleeHealthFloor };
   }
 
+  const droneHealthFloor = obj["droneHealthFloor"];
+  if (!isFiniteNumberInRange(droneHealthFloor, MIN_DRONE_HEALTH_FLOOR, MAX_DRONE_HEALTH_FLOOR)) {
+    return { ok: false, refusal: SAY.badDroneHealthFloor };
+  }
+
   const capacitorFloor = obj["capacitorFloor"];
   if (!isFiniteNumberInRange(capacitorFloor, MIN_CAPACITOR_FLOOR, MAX_CAPACITOR_FLOOR)) {
     return { ok: false, refusal: SAY.badCapacitorFloor };
@@ -423,6 +432,7 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     remoteCapacitorModuleIDs: Object.freeze([...remoteCapacitorModuleIDs]),
     weaponModuleIDs: Object.freeze([...weaponModuleIDs]),
     fleeHealthFloor,
+    droneHealthFloor,
     capacitorFloor,
     maxFleeAttempts,
     useDrones,

@@ -34,7 +34,9 @@
     MIN_CAPACITOR_FLOOR,
     MIN_DRONE_HOLD_OFF_SECONDS,
     MIN_FLEE_ATTEMPTS,
-    MIN_FLEE_HEALTH_FLOOR,
+    MAX_DRONE_HEALTH_FLOOR,
+  MIN_DRONE_HEALTH_FLOOR,
+  MIN_FLEE_HEALTH_FLOOR,
     type FleetCompanionOrderSource,
     type FleetCompanionRole,
   } from "../nav/fleetCompanionLoop.ts";
@@ -104,6 +106,7 @@
    */
   let pickedWeapon = $state<number[]>([]);
   let fleeHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.fleeHealthFloor * 100));
+  let droneHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.droneHealthFloor * 100));
   let capacitorFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.capacitorFloor * 100));
   let maxFleeAttempts = $state(DEFAULT_FLEET_COMPANION_REQUEST.maxFleeAttempts);
   let useDrones = $state(DEFAULT_FLEET_COMPANION_REQUEST.useDrones);
@@ -456,6 +459,8 @@
         remoteCapacitorModuleIDs: pickedRemoteCapacitor,
         weaponModuleIDs: pickedWeapon,
         fleeHealthFloor: clamp(fleeHealthFloorPercent, MIN_FLEE_HEALTH_FLOOR * 100, MAX_FLEE_HEALTH_FLOOR * 100) / 100,
+        droneHealthFloor:
+          clamp(droneHealthFloorPercent, MIN_DRONE_HEALTH_FLOOR * 100, MAX_DRONE_HEALTH_FLOOR * 100) / 100,
         capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
         maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
         useDrones,
@@ -848,6 +853,19 @@
       Use drones to defend itself
     </label>
     <p class="field">
+      <label for="companion-drone-floor">Bring a drone home below</label>
+      <input
+        id="companion-drone-floor"
+        type="number"
+        min={Math.round(MIN_DRONE_HEALTH_FLOOR * 100)}
+        max={Math.round(MAX_DRONE_HEALTH_FLOOR * 100)}
+        step="5"
+        disabled={!useDrones}
+        bind:value={droneHealthFloorPercent}
+      />
+      <span class="note">% of its shield, armour or hull. Coming home refills its shield</span>
+    </p>
+    <p class="field">
       <label for="companion-drone-holdoff">Hold drones in the bay for at least</label>
       <input
         id="companion-drone-holdoff"
@@ -965,6 +983,7 @@
   #companion-flee-floor,
   #companion-cap-floor,
   #companion-flee-attempts,
+  #companion-drone-floor,
   #companion-drone-holdoff {
     width: 5rem;
   }

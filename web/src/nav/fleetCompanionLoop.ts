@@ -167,6 +167,30 @@ export interface FleetCompanionRequest {
   /** Remaining fraction (0-1) of any health layer that starts a flee. */
   readonly fleeHealthFloor: number;
   /**
+   * Bring a drone home when its worst layer drops below this, 0..1.
+   *
+   * ⚠ A RECALL IS A FREE SHIELD REPAIR ON THIS SERVER, and that - not breaking
+   * anything's lock - is why this is worth doing. `buildDroneRecoveryItemPatch`
+   * (`droneRuntime.js:4060`) stamps `charge: 1, shieldCharge: 1` onto the item
+   * as it enters the bay, with the server's own comment saying that shields and
+   * capacitor recharge on their own and ONLY armour and hull damage survives
+   * being stowed. So a drone pulled while it is still losing shields comes back
+   * whole, and one chewed into armour comes back with full shields and the same
+   * armour hole.
+   *
+   * ⚠ IT IS NOT A LOCK-BREAK, WHATEVER THE ORIGINAL ASK SAID. This server has no
+   * target-loss memory and no drone cooldown: a recalled drone leaves the scene
+   * and the NPC simply re-scores every candidate by distance on its next think
+   * tick, 100-500 ms later. Do not describe this to a player as shaking
+   * anything off.
+   *
+   * The floor is on the WORST of the three layers, which in a fight is nearly
+   * always the shield - so a middling floor pulls a drone while the recall can
+   * still give everything back, and a very low one waits until the damage is
+   * the kind that does not.
+   */
+  readonly droneHealthFloor: number;
+  /**
    * Capacitor fraction below which no repairer may be STARTED, and a running
    * one is stopped even while a layer is still hurt.
    *
@@ -248,6 +272,8 @@ export interface FleetCompanionRequest {
 /** Bounds. Stated together rather than scattered, so they can be read at once. */
 export const MIN_FLEE_HEALTH_FLOOR = 0.05;
 export const MAX_FLEE_HEALTH_FLOOR = 0.95;
+export const MIN_DRONE_HEALTH_FLOOR = 0.05;
+export const MAX_DRONE_HEALTH_FLOOR = 0.95;
 export const MIN_CAPACITOR_FLOOR = 0.05;
 export const MAX_CAPACITOR_FLOOR = 0.95;
 export const MIN_FLEE_ATTEMPTS = 1;
@@ -275,6 +301,11 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   // unset weapon list is the right default for a loop that obeys other people.
   weaponModuleIDs: Object.freeze([]),
   fleeHealthFloor: 0.3,
+  // Half of the worst layer. In a fight that layer is the shield, and a recall
+  // gives a shield back whole - so pulling at a half shield costs one round
+  // trip and returns a fresh drone, while waiting for armour damage returns a
+  // drone that is still hurt.
+  droneHealthFloor: 0.5,
   // Not a guess and not a placeholder: the constant the script runner already
   // uses to switch a repairer off, with the same reasoning ("an empty capacitor
   // repairs nothing"). Reusing it means one answer to this question, not two.
