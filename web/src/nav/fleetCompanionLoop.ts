@@ -43,10 +43,10 @@ import {
   STATION_DOCKING_RADIUS_M,
   type SpaceMeasurement,
 } from "./autopilotLoop.ts";
-// The kill-order authority (rung 4, "obeying the fleet"). Imported rather than
+// The kill-order authority (rung 5, "obeying the fleet"). Imported rather than
 // re-derived for the same reason the get-safe helpers above are: one answer to
 // "where does this tag rank", shared with the combat priority list.
-import { fleetTagRank } from "./targetPriority.ts";
+import { fleetTagRank, pickPrimary } from "./targetPriority.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { ChatMessage } from "../store/types.ts";
 import {
@@ -422,7 +422,7 @@ export interface FleetCompanionDeps {
  *   • the abandonment protocol (decision 5, rung 2) — warp / approach / dock /
  *     warpToBookmark / leaveFleet / acceptFleetInvite — the one thing a
  *     companion left without a human may do unsupervised.
- *   • obeying the fleet (rung 4) — lock / align / activate / travelTo —
+ *   • obeying the fleet (rung 5) — lock / align / activate / travelTo —
  *     answering a fleet tag or broadcast while a human IS supervising. See
  *     `decideFleetOrders`.
  */
@@ -437,15 +437,15 @@ export type FleetCompanionAction =
   | { readonly kind: "leaveFleet" }
   | { readonly kind: "acceptFleetInvite"; readonly fleetID: number }
   /**
-   * Obeying the fleet (rung 4): a tag or a `Target` broadcast, locked. Locking
+   * Obeying the fleet (rung 5): a tag or a `Target` broadcast, locked. Locking
    * is the whole of what this rung does with a target — there is no weapons
    * rung yet, so this is never a stand-in for shooting.
    */
   | { readonly kind: "lock"; readonly targetID: number }
-  /** Obeying the fleet (rung 4): an `AlignTo` broadcast. */
+  /** Obeying the fleet (rung 5): an `AlignTo` broadcast. */
   | { readonly kind: "align"; readonly targetID: number }
   /**
-   * Obeying the fleet (rung 4): a Heal broadcast, answered with a fitted
+   * Obeying the fleet (rung 5): a Heal broadcast, answered with a fitted
    * remote-repair module aimed at the ship named. `repeat: -1` (run
    * continuously) is this codebase's own "keep cycling" — see the DSL's
    * `activate` case in flow.ts.
@@ -463,11 +463,23 @@ export type FleetCompanionAction =
    */
   | { readonly kind: "deactivate"; readonly moduleID: number }
   /**
-   * Obeying the fleet (rung 4): a `TravelTo` broadcast — a solar system, not
+   * Obeying the fleet (rung 5): a `TravelTo` broadcast — a solar system, not
    * an on-grid object, so this hands off to the SHARED autopilot
    * (flow.ts's `startRoute`) rather than warping or approaching itself.
    */
-  | { readonly kind: "travelTo"; readonly systemID: number };
+  | { readonly kind: "travelTo"; readonly systemID: number }
+  /**
+   * Rung 4, "tackle → tag": letter a ship that is holding this one down, so the
+   * whole fleet can call it.
+   *
+   * ⚠ THE ONLY WRITE THIS LOOP MAKES THAT NOBODY CAN SEE FAIL. The server
+   * refuses a non-commander SILENTLY (`fleetRuntime.js:1317` returns a bare
+   * `false`, and `beyonceService.js:3320` throws it away and returns null), so
+   * the ack is byte-identical either way. `bridge/fleetCommand.ts` is the gate
+   * that has to answer before the call, and the confirmation is seeing the
+   * letter arrive in a later `fleetTargetTags` — never the write's own 200.
+   */
+  | { readonly kind: "setFleetTargetTag"; readonly targetID: number; readonly tag: string };
 
 export interface FleetCompanionProgress {
   readonly status: FleetCompanionRunState;
@@ -606,14 +618,14 @@ export interface CompanionLadderMemory {
    */
   readonly lastTankUpModuleIDs: readonly number[];
   /**
-   * The target rung 4 last issued a `lock` call for — the fallback for
+   * The target rung 5 last issued a `lock` call for — the fallback for
    * `isAlreadyLocked` when `obs.lockedTargetIDs` itself is unreadable. See
    * that function's own comment for why the authoritative read still wins
    * whenever it is available.
    */
   readonly lastLockIssuedFor: number | null;
   /**
-   * The ship rung 4 last aimed a Heal-family `activate` at, and which fitted
+   * The ship rung 5 last aimed a Heal-family `activate` at, and which fitted
    * modules it has issued for THAT ship. This is the fallback
    * `isHealModuleAlreadyRunning` uses when `activeModuleIDs` cannot say —
    * nothing in a space snapshot exposes a remote-repair module's target, so
@@ -624,11 +636,11 @@ export interface CompanionLadderMemory {
   readonly lastHealTargetID: number | null;
   readonly lastHealModuleIDs: readonly number[];
   /**
-   * The solar system rung 4 last issued a `travelTo` route to, so a standing
+   * The solar system rung 5 last issued a `travelTo` route to, so a standing
    * `TravelTo` broadcast does not restart the shared autopilot every tick.
    */
   /**
-   * The target rung 4 last aimed a WEAPON at, and which fitted weapons it has
+   * The target rung 5 last aimed a WEAPON at, and which fitted weapons it has
    * issued for THAT target. The same pair, for the same reason, as
    * `lastHealTargetID` above: a snapshot says a module is cycling and never
    * says what it is cycling AT, so a gun still chewing on the rat the commander
@@ -639,6 +651,25 @@ export interface CompanionLadderMemory {
   readonly lastFireTargetID: number | null;
   readonly lastFireModuleIDs: readonly number[];
   readonly lastRoutedSystemID: number | null;
+  /**
+   * The ship rung 4 (tackle → tag) last issued a `setFleetTargetTag` for, and
+   * how many writes it has spent on it. The pair exists because the write's own
+   * ack is worthless — see the action kind's comment — so the only confirmation
+   * is the letter appearing in a later `fleetTargetTags`, which takes at least
+   * one more tick to arrive.
+   */
+  readonly lastTagIssuedFor: number | null;
+  readonly lastTagAttempts: number;
+  /**
+   * Ships whose tag budget ran out without the letter ever showing up.
+   *
+   * ⚠ WITHOUT THIS THE RUNG DEADLOCKS ON ITS OWN FIRST CANDIDATE. Give-up has
+   * to be remembered per SHIP, not as a single "stop tagging" flag: the ranking
+   * would hand back the same unconfirmable ship every tick, and a second
+   * tackler that could have been lettered would never be reached. Capped, so a
+   * long fight cannot grow it without bound.
+   */
+  readonly taggingGaveUpOn: readonly number[];
 }
 
 export function freshLadderMemory(): CompanionLadderMemory {
@@ -653,6 +684,9 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastFireTargetID: null,
     lastFireModuleIDs: [],
     lastRoutedSystemID: null,
+    lastTagIssuedFor: null,
+    lastTagAttempts: 0,
+    taggingGaveUpOn: [],
   };
 }
 
@@ -675,7 +709,7 @@ export interface CompanionDecision {
   readonly stop?: string;
   /**
    * Which authority this decision came from, for the readout. Omitted (never
-   * `null` here — `tick()` supplies the default) by every rung except rung 4;
+   * `null` here — `tick()` supplies the default) by every rung except rung 5;
    * the controller reads that omission as `"own-ladder"`, which is the honest
    * answer for the warp yield, the supervision gate, the abandonment protocol
    * and "Standing by" alike — none of them are obeying an external order.
@@ -837,6 +871,9 @@ export function decideCompanionAction(
     lastHealTargetID: memory.lastHealTargetID,
     lastHealModuleIDs: memory.lastHealModuleIDs,
     lastRoutedSystemID: memory.lastRoutedSystemID,
+    lastTagIssuedFor: memory.lastTagIssuedFor,
+    lastTagAttempts: memory.lastTagAttempts,
+    taggingGaveUpOn: memory.taggingGaveUpOn,
   };
 
   // Rung 3: tank up. Threaded even when it has nothing to do this tick —
@@ -848,17 +885,27 @@ export function decideCompanionAction(
     return tankedUp.decision;
   }
 
-  const obeying = decideFleetOrders(request, obs, tankedUp.memory);
+  // Rung 4: tackle → tag. ABOVE obeying the fleet, and that placement is the
+  // whole reason this rung works — see `decideTackleTag`'s own header. Threaded
+  // the way rung 3 is, and for the same reason: the tick that GIVES UP on a
+  // ship issues no action, so a call site that only took the decision would
+  // throw the give-up away and re-pick the same ship for ever.
+  const tagging = decideTackleTag(request, obs, tankedUp.memory);
+  if (tagging.decision !== null) {
+    return tagging.decision;
+  }
+
+  const obeying = decideFleetOrders(request, obs, tagging.memory);
   if (obeying !== null) {
     return obeying;
   }
 
-  // Phases 5-8 add further rungs here, in the order documented in
+  // Phases 5, 6 and 8 add further rungs here, in the order documented in
   // docs/fleet-companion-implementation.md, "The rung ladder".
   return waiting(
     "Standing by",
     "No fleet order to obey right now, and no further companion behaviour is built yet.",
-    tankedUp.memory,
+    tagging.memory,
   );
 }
 
@@ -1182,7 +1229,7 @@ interface TankUpStep {
 
 /**
  * Rung 3: tank up. See the header above `decideCompanionAction` for why this
- * sits above obeying the fleet (rung 4) and below the supervision gate.
+ * sits above obeying the fleet (rung 5) and below the supervision gate.
  *
  * ⚠ HARDENERS ARE NEVER CAP-GATED, UNLIKE THE REPAIRERS BELOW. The
  * implementation doc's earlier rung-2 table said to gate them too, because
@@ -1616,7 +1663,7 @@ function healOrderHeard(name: HealBroadcastName): string {
 }
 
 /**
- * Whether `moduleID` is already cycling on `targetID`, so rung 4 does not
+ * Whether `moduleID` is already cycling on `targetID`, so rung 5 does not
  * re-activate a running repairer every tick.
  *
  * ⚠ THE AUTHORITATIVE READ (`activeModuleIDs`, the ship snapshot's own
@@ -1882,8 +1929,214 @@ function resolveNamedOrder(
   return null;
 }
 
+// ─── Rung 4: tackle → tag ────────────────────────────────────────────────────
+
 /**
- * Rung 4: obeying the fleet. Below the supervision gate and rung 3 (tank up)
+ * The letters the retail client's own tag menu offers, in its own order
+ * (decompiled `menusvc.py:1946` — `for i in 'ABCDEFGHIJXYZ'`). Not the whole
+ * alphabet: K through W are simply not on the menu, and inventing them would
+ * hand the fleet letters no player can type back.
+ *
+ * ⚠ THE NUMBERS ARE DELIBERATELY LEFT ALONE. The same menu also offers 0-9
+ * (`menusvc.py:1945`), and the DSL's own `fleet-tag-target` block writes "1" as
+ * its "shoot this now" primary. Keeping this rung on letters means a squad
+ * running both never fights over the same tag — which matters, because a tag is
+ * unique FLEET-WIDE: `setFleetTargetTag` deletes any other item holding the
+ * same letter before it sets one (`fleetRuntime.js:1343`).
+ */
+const FLEET_TACKLE_TAG_LETTERS = "ABCDEFGHIJXYZ";
+
+/**
+ * Bound on writes for ONE ship, mirroring the DSL block's own
+ * `MAX_FLEET_TAG_ATTEMPTS` and its reasoning: a write whose refusal is
+ * invisible must not be resent for ever.
+ */
+const MAX_COMPANION_TAG_ATTEMPTS = 3;
+
+/** How many given-up ships are remembered. See `taggingGaveUpOn`. */
+const MAX_TAGGING_GIVE_UPS = 32;
+
+/**
+ * The first menu letter no item currently holds, or null when every one is
+ * taken.
+ *
+ * Compared case-insensitively because the server normalizes a tag only by
+ * TRIMMING it (`normalizeFleetTag`, `fleetRuntime.js:267`). A hand-typed "a"
+ * and this rung's "A" are two different keys to the server's own uniqueness
+ * sweep but the same letter to every human reading the overview, so writing the
+ * second one would steal the first one's ship.
+ */
+function firstFreeTagLetter(tags: ReadonlyMap<number, string>): string | null {
+  const taken = new Set<string>();
+  for (const tag of tags.values()) {
+    taken.add(tag.trim().toUpperCase());
+  }
+  for (const letter of FLEET_TACKLE_TAG_LETTERS) {
+    if (!taken.has(letter)) {
+      return letter;
+    }
+  }
+  return null;
+}
+
+/** Remember one more give-up, oldest dropped once the cap is reached. */
+function rememberGiveUp(gaveUpOn: readonly number[], itemID: number): readonly number[] {
+  if (gaveUpOn.includes(itemID)) {
+    return gaveUpOn;
+  }
+  const next = [...gaveUpOn, itemID];
+  return next.length <= MAX_TAGGING_GIVE_UPS
+    ? next
+    : next.slice(next.length - MAX_TAGGING_GIVE_UPS);
+}
+
+/**
+ * Rung 4: letter the ship that is holding this one down, so the whole fleet can
+ * call it. Hands back a decision only on a tick it actually writes — which is
+ * few of them — so everything below it keeps its turn.
+ *
+ * ⚠ IT SITS **ABOVE** OBEYING THE FLEET, AND THAT IS THE WHOLE REASON IT WORKS.
+ * `decideFleetOrders` PARKS THE TICK once a target call stands and is locked
+ * (see its own header). A standing FC primary is precisely the situation a
+ * fleet fight is in while this pilot is being scrambled, so a tag rung placed
+ * beneath it would be starved exactly when it has something to say. Above it,
+ * the cost is bounded and small: at most `MAX_COMPANION_TAG_ATTEMPTS` writes
+ * per tackler and then it falls through for good, so it can delay engaging a
+ * called primary by a few ticks and never by more.
+ *
+ * ⚠ AND IT NEVER RETURNS A `wait`. Other rungs park to keep the readout honest;
+ * this one has no branch that does, because a rung that parks starves the
+ * ladder beneath it and this one has nothing worth starving anything for.
+ * "Nothing to tag" and "cannot tag" both read as falling through.
+ *
+ * ⚠ IT RETURNS ITS MEMORY EVEN WHEN IT DECIDES NOTHING — the same shape
+ * `decideTankUp` has, for the same reason. Giving up on a ship happens on a
+ * tick that issues NO action, so a signature that dropped the memory on `null`
+ * could never record the give-up, and the rung would hand back the same
+ * unconfirmable ship for ever.
+ *
+ * The candidates are the ships the JAM PUSHES NAMED (`obs.tackledBy`), not a
+ * ranking of the grid.
+ *
+ * ⚠ AND THEY ARE RESOLVED AGAINST `snapshot.entities`, NOT AGAINST
+ * `hostileRows`. The phase spec said to rank with `hostileRows` + `pickPrimary`,
+ * its point being that this pilot's own LOCK RANGE must not suppress a tag a
+ * ship further out could use — which stands, and is honoured. But `hostileRows`
+ * filters on `isHostile`, and `isHostile` is `entity.isNpc &&
+ * npcEntityType !== "concord"`: it answers NPC-or-not, so every PLAYER tackler
+ * fails it. Filtering through it would have silently dropped exactly the case
+ * this feature exists for — a fleet fight against players — and would have done
+ * so with no error anywhere. A ship running a scrambler on you has classified
+ * itself; nothing else needs to agree.
+ *
+ * Ranking is `pickPrimary`'s, so a host that populates `targetGroupNames` gets
+ * class priority and one that does not collapses to nearest-first — the same
+ * ordering the rest of this client's combat code uses, never a second one.
+ */
+function decideTackleTag(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const nothing = { decision: null, memory } as const;
+  // The setting the player ticked. Until this rung existed it was read by
+  // nothing at all.
+  if (!request.attemptsTagging) {
+    return nothing;
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null) {
+    return nothing;
+  }
+  // ⚠ THREE STATES, AND ONLY ONE OF THEM WRITES. `null` is "could not read the
+  // roster" and `false` is "read it, and this pilot is not a commander". Both
+  // forbid the write; neither is remembered here, because a `null` cached as
+  // "no" would freeze a transient roster outage into a pilot that never tags
+  // again for the rest of the run.
+  if (obs.canTag !== true) {
+    return nothing;
+  }
+  const tacklers = obs.tackledBy ?? [];
+  if (tacklers.length === 0) {
+    return nothing;
+  }
+  // ⚠ NO TAG DICT, NO WRITE. `null` means this client has never received an
+  // `OnFleetStateChange` (or could not parse one), so it cannot tell which
+  // letters are free — and a tag is unique fleet-wide, so guessing "A" would
+  // silently steal the letter off whatever the FC had already marked. This is
+  // the caller `fleetBroadcasts.ts`'s null-versus-empty contract was written
+  // for: an EMPTY map is a real answer, and it does write.
+  const tags = obs.fleetTargetTags ?? null;
+  if (tags === null) {
+    return nothing;
+  }
+
+  const candidates = tacklers
+    .map((itemID) => entityOnGrid(itemID, snapshot.entities))
+    .filter((entity): entity is SpaceEntity => entity !== null)
+    // Already lettered? Leave it alone. This is the rule that keeps the fleet's
+    // letters STABLE — a ship that is B stays B for as long as it lives — and it
+    // is also what makes the server's uniqueness sweep harmless in practice,
+    // because this rung then only ever assigns letters nothing holds.
+    .filter((entity) => !tags.has(entity.itemID))
+    .filter((entity) => !memory.taggingGaveUpOn.includes(entity.itemID));
+  if (candidates.length === 0) {
+    return nothing;
+  }
+
+  const measurement = measureSpace(snapshot);
+  const groups = obs.targetGroupNames ?? null;
+  const target =
+    pickPrimary(
+      candidates,
+      (entity) => entity.typeID,
+      (entity) => measurement?.distances.get(entity.itemID) ?? null,
+      (typeID) => (groups === null ? null : (groups[typeID] ?? null)),
+    ) ?? candidates[0]!;
+
+  // The budget, spent per SHIP. A fresh candidate re-stamps it; the same one
+  // coming back means the previous write has not shown up in `fleetTargetTags`
+  // yet, which is ordinary for a tick or two and hopeless after three.
+  const attempts = memory.lastTagIssuedFor === target.itemID ? memory.lastTagAttempts : 0;
+  if (attempts >= MAX_COMPANION_TAG_ATTEMPTS) {
+    return {
+      decision: null,
+      memory: {
+        ...memory,
+        lastTagIssuedFor: null,
+        lastTagAttempts: 0,
+        taggingGaveUpOn: rememberGiveUp(memory.taggingGaveUpOn, target.itemID),
+      },
+    };
+  }
+
+  const letter = firstFreeTagLetter(tags);
+  if (letter === null) {
+    // Every menu letter is in use. Writing anyway would delete somebody else's
+    // tag to make room, which is the one thing this rung must never do.
+    return nothing;
+  }
+
+  return {
+    decision: {
+      action: { kind: "setFleetTargetTag", targetID: target.itemID, tag: letter },
+      phase: "Tagging",
+      why:
+        attempts === 0
+          ? `Something has this ship scrambled. Marking it ${letter} for the fleet.`
+          : `Still waiting for the ${letter} tag to show up, and marking it again.`,
+      memory: {
+        ...memory,
+        lastTagIssuedFor: target.itemID,
+        lastTagAttempts: attempts + 1,
+      },
+    },
+    memory,
+  };
+}
+
+/**
+ * Rung 5: obeying the fleet. Below the supervision gate and rung 3 (tank up)
  * and above "Standing by". Returns `null` when there is nothing to obey,
  * which is how the caller falls through to standing by.
  *
@@ -2233,7 +2486,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     mem.phase = decision.phase;
     mem.why = decision.why;
     mem.action = decision.action.kind;
-    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 4
+    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 5
     // (obeying the fleet) leaves these two fields unset on its decision, and
     // that omission means "this pilot is not obeying an external order" —
     // the warp yield, the supervision gate, the abandonment protocol and
@@ -2293,6 +2546,9 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastHealTargetID: null,
           lastHealModuleIDs: [],
           lastRoutedSystemID: null,
+          lastTagIssuedFor: null,
+          lastTagAttempts: 0,
+          taggingGaveUpOn: [],
         };
       }
       runToken += 1;

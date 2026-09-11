@@ -5649,6 +5649,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "travelTo":
             await startRoute(action.systemID);
             return;
+          // Rung 4, "tackle → tag". ⚠ NOTHING IS READ BACK OFF THIS CALL, AND
+          // NOTHING CAN BE. The server refuses a non-commander with a bare
+          // `false` that its own caller discards, so the ack is identical
+          // whether the tag landed or was dropped. The gate ran before the
+          // write (`bridge/fleetCommand.ts`), and the confirmation is the
+          // letter turning up in a later `fleetTargetTags` — which is why the
+          // rung keeps its own attempt budget rather than trusting this
+          // returning cleanly.
+          case "setFleetTargetTag":
+            await api.setFleetTargetTag(action.targetID, action.tag, callOptions);
+            return;
           default: {
             // ⚠ EXHAUSTIVE ON PURPOSE. Every FleetCompanionAction kind MUST be
             // issued here, or a new kind silently no-ops at runtime instead of

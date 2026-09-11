@@ -671,7 +671,7 @@ test("the ladder's memory is threaded, not dropped, between ticks", async () => 
   assert.equal(companion.snapshot().inFleet, true);
 });
 
-// --- rung 4: obeying the fleet ------------------------------------------------
+// --- rung 5: obeying the fleet ------------------------------------------------
 //
 // Below the supervision gate (only reached while a human is here) and above
 // "Standing by". Tag beats broadcast — AUTHORITY, not freshness: a tag can
@@ -868,7 +868,7 @@ test("obeying the fleet is skipped entirely once the supervision gate has failed
   assert.match(decision.stop as string, /no safe spot/i);
 });
 
-// --- rung 4: the Heal family --------------------------------------------------
+// --- rung 5: the Heal family --------------------------------------------------
 //
 // HealShield/HealArmor/HealCapacitor/HealTarget. Checked BEFORE the tag and
 // the Target broadcast (a rep call is time-critical; a tag is standing
@@ -1075,7 +1075,7 @@ test("once the heal is already running, the SAME tick's tag is obeyed — not mu
   assert.equal(decision.followingOrderFrom, "tag");
 });
 
-// --- rung 4: opening fire once a called target is locked ---------------------
+// --- rung 5: opening fire once a called target is locked ---------------------
 //
 // `lockThenEngage` replaced `lockOrHold` (see its own header in
 // fleetCompanionLoop.ts): a called target that is ALREADY locked no longer
@@ -1383,7 +1383,7 @@ test("a satisfied Heal call falls through to the tag; a satisfied rack does not 
   assert.match(decision.why, /firing on it/i);
 });
 
-// --- rung 4: TravelTo ---------------------------------------------------------
+// --- rung 5: TravelTo ---------------------------------------------------------
 
 /** Synthetic solar system ids — no on-grid meaning, just a destination. */
 const SYSTEM_B = 30000001;
@@ -1419,7 +1419,7 @@ test("a TravelTo broadcast naming a NEW system routes again", () => {
   assert.deepEqual(second.action, { kind: "travelTo", systemID: SYSTEM_C });
 });
 
-// --- rung 4: JumpTo (honest partial) ------------------------------------------
+// --- rung 5: JumpTo (honest partial) ------------------------------------------
 //
 // `itemID` is a single stargate; `api.jump` needs the gate on the far side
 // too, which nothing available to this pure, synchronous ladder can supply
@@ -1488,7 +1488,7 @@ test("a JumpTo broadcast for a gate OFF this grid falls through", () => {
   assert.equal(decision.phase, "Standing by");
 });
 
-// --- rung 4: chat commands ----------------------------------------------------
+// --- rung 5: chat commands ----------------------------------------------------
 //
 // A chat order reaches the SAME c-f branches a broadcast does, through
 // `resolveNamedOrder` — see that function's own header and `decideFleetOrders`'s
@@ -1842,7 +1842,7 @@ test("chat orders are ALSO skipped once the supervision gate has failed", () => 
   assert.notEqual(decision.phase, "Obeying fleet");
 });
 
-// --- rung 4: everything above is skipped once abandonment starts -------------
+// --- rung 5: everything above is skipped once abandonment starts -------------
 
 test("Heal and TravelTo are ALSO skipped once the supervision gate has failed", () => {
   const request: FleetCompanionRequest = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
@@ -2218,4 +2218,258 @@ test("nothing this ladder says about a NOT-YET-LOCKED Target call claims the pil
   assert.equal(decision.action.kind, "lock");
   const said = `${decision.why} ${decision.lastOrderHeard ?? ""}`;
   assert.doesNotMatch(said, /shoot|shooting|fir(e|ing)|attack/i, said);
+});
+
+// --- rung 4: tackle -> tag ---------------------------------------------------
+//
+// ABOVE obeying the fleet, because that rung PARKS the tick once a called
+// target is locked and a standing FC primary is exactly the situation this
+// pilot is scrambled in. Reads `attemptsTagging`, which until this rung existed
+// was a panel checkbox nothing consulted. Writes a LETTER, never a digit, so it
+// can never collide with the DSL block that writes "1".
+
+/** A request that tags, with the supervision default left alone. */
+const TAGGING: FleetCompanionRequest = { ...REQUEST, attemptsTagging: true };
+
+/** The commander verdict the gate produces for a real fleet boss. */
+function taggingObs(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithEntities([TACKLE]),
+    canTag: true,
+    fleetTargetTags: new Map(),
+    tackledBy: [TACKLE],
+    ...overrides,
+  });
+}
+
+test("a ship that has this pilot scrambled is lettered for the fleet", () => {
+  const decision = decideCompanionAction(TAGGING, taggingObs());
+  assert.deepEqual(decision.action, {
+    kind: "setFleetTargetTag",
+    targetID: TACKLE,
+    tag: "A",
+  });
+  assert.equal(decision.phase, "Tagging");
+});
+
+// ⚠ THE DEAD-CONFIG TEST. `attemptsTagging` shipped with a panel checkbox and
+// no reader at all; this is the assertion that it is wired to something.
+test("attemptsTagging OFF writes no tag, however tackled the pilot is", () => {
+  const decision = decideCompanionAction(REQUEST, taggingObs());
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+  assert.equal(REQUEST.attemptsTagging, false, "the default must stay off");
+});
+
+// ⚠ THREE STATES. `null` is "could not read the roster", `false` is "read it,
+// and this pilot is not a commander". Both forbid the write, and NEITHER is
+// remembered: the server drops a non-commander's tag silently, so a client that
+// cached a transient `null` as "no" would stop tagging for the rest of the run
+// with nothing anywhere to say why.
+test("canTag null and canTag false both write nothing", () => {
+  for (const canTag of [null, false] as const) {
+    const decision = decideCompanionAction(TAGGING, taggingObs({ canTag }));
+    assert.notEqual(decision.action.kind, "setFleetTargetTag", String(canTag));
+  }
+});
+
+test("a pilot nothing is holding writes nothing", () => {
+  const decision = decideCompanionAction(TAGGING, taggingObs({ tackledBy: [] }));
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// ⚠ A tag is unique FLEET-WIDE: the server deletes any other item holding the
+// same letter before it sets one. Writing without knowing which letters are
+// taken would steal the FC's own mark.
+test("an unreadable tag dict writes nothing, even for a commander that is tackled", () => {
+  const decision = decideCompanionAction(TAGGING, taggingObs({ fleetTargetTags: null }));
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// The other half of that contract: an EMPTY map is a real answer - "the fleet
+// has tagged nothing" - and it is the commonest case at the start of a fight.
+test("an EMPTY tag dict is a real answer and does write", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ fleetTargetTags: new Map() }),
+  );
+  assert.equal(decision.action.kind, "setFleetTargetTag");
+});
+
+test("a tackler that is not on this grid is not lettered", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ snapshot: gridWithEntities([OTHER]), tackledBy: [TACKLE] }),
+  );
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// The rule that keeps the fleet's letters stable: a ship that is B stays B.
+test("a tackler that already carries a tag is left alone", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ fleetTargetTags: new Map([[TACKLE, "B"]]) }),
+  );
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+test("the first FREE menu letter is used, skipping the ones the fleet already holds", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ fleetTargetTags: new Map([[OTHER, "A"], [LOGI, "B"]]) }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "setFleetTargetTag",
+    targetID: TACKLE,
+    tag: "C",
+  });
+});
+
+// ⚠ The server normalizes a tag by TRIMMING it and nothing else, so "a" and "A"
+// are two keys to its uniqueness sweep and one letter to every human reading
+// the overview. Writing "A" over somebody's "a" would steal their ship.
+test("a lower-case tag already in use still blocks its letter", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ fleetTargetTags: new Map([[OTHER, " a "]]) }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "setFleetTargetTag",
+    targetID: TACKLE,
+    tag: "B",
+  });
+});
+
+// ⚠ NEVER A DIGIT. The stock menu offers 0-9 as well, and the DSL's own
+// fleet-tag-target block writes "1". Staying on letters is what stops a squad
+// running both from fighting over one tag.
+test("every letter taken writes nothing rather than stealing one", () => {
+  const taken = new Map<number, string>();
+  for (const [index, letter] of [..."ABCDEFGHIJXYZ"].entries()) {
+    taken.set(500000 + index, letter);
+  }
+  const decision = decideCompanionAction(TAGGING, taggingObs({ fleetTargetTags: taken }));
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// ⚠ THE PLAYER-TACKLER CASE, AND THE WHOLE REASON THIS RUNG DOES NOT FILTER
+// THROUGH `hostileRows`. That helper is `isHostile`, which is NPC-or-not, so a
+// player holding this ship fails it - and a fleet fight against players is
+// precisely what this feature is for. gridWithEntities builds plain ships with
+// no `isNpc` flag at all, which is the shape a player row has.
+test("a PLAYER tackler is lettered, not silently skipped for not being an NPC", () => {
+  const decision = decideCompanionAction(TAGGING, taggingObs());
+  assert.equal(decision.action.kind, "setFleetTargetTag");
+});
+
+test("with two tacklers the nearer is lettered first, then the other", () => {
+  // gridWithEntities puts the first id closest.
+  const first = decideCompanionAction(
+    TAGGING,
+    taggingObs({ snapshot: gridWithEntities([TACKLE, OTHER]), tackledBy: [OTHER, TACKLE] }),
+  );
+  assert.deepEqual(first.action, { kind: "setFleetTargetTag", targetID: TACKLE, tag: "A" });
+
+  // Once the first one carries its letter, the next tick moves to the other.
+  const second = decideCompanionAction(
+    TAGGING,
+    taggingObs({
+      snapshot: gridWithEntities([TACKLE, OTHER]),
+      tackledBy: [OTHER, TACKLE],
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+    }),
+    first.memory,
+  );
+  assert.deepEqual(second.action, { kind: "setFleetTargetTag", targetID: OTHER, tag: "B" });
+});
+
+// ⚠ THE WRITE'S OWN ACK IS WORTHLESS - the server refuses a non-commander with
+// a bare false that its only caller discards - so the rung resends while it
+// waits for the letter to appear, and STOPS after a bounded number of tries.
+test("an unconfirmed tag is retried, then given up on", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const writes: number[] = [];
+  for (let tick = 0; tick < 5; tick += 1) {
+    const decision = decideCompanionAction(TAGGING, taggingObs(), memory);
+    memory = decision.memory;
+    if (decision.action.kind === "setFleetTargetTag") {
+      writes.push(decision.action.targetID);
+    }
+  }
+  assert.equal(writes.length, 3, "three attempts, then it stops resending for ever");
+});
+
+// ⚠ GIVE-UP IS REMEMBERED PER SHIP, and this is why the rung threads its memory
+// back on a tick that issues NOTHING. A single "stop tagging" flag would work
+// here and fail the moment a second tackler arrived.
+test("giving up on one ship does not stop the next tackler being lettered", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const grid = gridWithEntities([TACKLE, OTHER]);
+  // Burn the budget on TACKLE alone.
+  for (let tick = 0; tick < 4; tick += 1) {
+    memory = decideCompanionAction(
+      TAGGING,
+      taggingObs({ snapshot: grid, tackledBy: [TACKLE] }),
+      memory,
+    ).memory;
+  }
+  // Now a second ship joins in. It must still get a letter.
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({ snapshot: grid, tackledBy: [TACKLE, OTHER] }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "setFleetTargetTag", targetID: OTHER, tag: "A" });
+});
+
+// ⚠ PLACEMENT. decideFleetOrders parks the tick once a called target is locked,
+// so a tag rung beneath it would be starved in every fight that has a primary
+// called - which is every fight this rung exists for.
+test("a standing fleet tag order does not starve the tackle rung", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({
+      snapshot: gridWithEntities([LOGI, TACKLE]),
+      // The FC has already called LOGI, so rung 5 has work and would park.
+      fleetTargetTags: new Map([[LOGI, "A"]]),
+      lockedTargetIDs: [LOGI],
+      tackledBy: [TACKLE],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "setFleetTargetTag", targetID: TACKLE, tag: "B" });
+});
+
+// ...and the cost of that placement is bounded: once there is nothing left to
+// tag, the very next tick obeys the fleet again.
+test("with nothing left to tag the pilot goes back to obeying the fleet", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    taggingObs({
+      snapshot: gridWithEntities([LOGI, TACKLE]),
+      fleetTargetTags: new Map([[LOGI, "A"], [TACKLE, "B"]]),
+      tackledBy: [TACKLE],
+    }),
+  );
+  assert.equal(decision.phase, "Obeying fleet");
+});
+
+// Rung 1 outranks everything, this rung included.
+test("nothing is tagged mid-warp", () => {
+  const decision = decideCompanionAction(TAGGING, taggingObs({ inWarp: true }));
+  assert.deepEqual(decision.action, { kind: "wait" });
+});
+
+// Rung 2 too: an unsupervised pilot is getting safe, not fighting.
+test("an unsupervised pilot tags nothing", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    alone({
+      snapshot: gridWithEntities([TACKLE]),
+      canTag: true,
+      fleetTargetTags: new Map(),
+      tackledBy: [TACKLE],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
 });

@@ -19,7 +19,9 @@ import {
   type FleetCompanionRequest,
 } from "../nav/fleetCompanionLoop.ts";
 import { FLEET_BROADCAST_TTL_MS } from "../bridge/fleetBroadcasts.ts";
+import { decodeJamNotification } from "../bridge/jamNotifications.ts";
 import {
+  SHIP_ID,
   SOLAR_SYSTEM_ID,
   STRIP_MINER_ITEM_IDS,
   fittingBody,
@@ -904,6 +906,189 @@ test("the roster settling on NOT-IN-FLEET mid-run (not a failure) answers canTag
     store.get().companion.canTag,
     false,
     "not in a fleet at all is a settled, safe-to-remember 'no', not a could-not-look",
+  );
+  flow.stopFleetCompanion();
+});
+
+// --- rung 4: tackle -> tag, end to end --------------------------------------
+//
+// The rung itself is proven pure beside fleetCompanionLoop.ts. What is NOT
+// proven there is that flow.ts's observe() folds the jam slice into
+// `tackledBy`, that the ladder's write reaches `api.setFleetTargetTag`, and
+// that the exhaustive dispatcher has a case for the new action kind at all --
+// a missing case throws at runtime and compiles fine only until someone
+// widens the union, which is exactly how `deactivate` once landed unwired.
+
+/** A ship on grid for the jam to name, alongside this pilot's own hull. */
+const TACKLER_ITEM_ID = 200001;
+
+function taggingHarness() {
+  const calls: { readonly path: string; readonly body: Record<string, unknown> }[] = [];
+
+  function spaceWithTackler(): unknown {
+    return {
+      ok: true,
+      space: {
+        inSpace: true,
+        solarSystemID: SOLAR_SYSTEM_ID,
+        shipID: SHIP_ID,
+        sampledAtMs: 0,
+        ship: {
+          itemID: SHIP_ID,
+          typeID: 17480,
+          mode: "STOP",
+          radius: 60,
+          position: { x: 0, y: 0, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+          shieldRatio: 1,
+          armorRatio: 1,
+          hullRatio: 1,
+          capacitorRatio: 1,
+          activeModuleIDs: [],
+        },
+        entities: [
+          {
+            itemID: TACKLER_ITEM_ID,
+            kind: "ship",
+            typeID: 587,
+            radius: 30,
+            position: { x: 9000, y: 0, z: 0 },
+            velocity: { x: 0, y: 0, z: 0 },
+          },
+        ],
+      },
+      notifications: [],
+    };
+  }
+
+  const fakeFetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
+    const path = String(input);
+    const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    calls.push({ path, body: body as Record<string, unknown> });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        if (path === "/api/bridge/flight/status") return flightBody(false);
+        if (path === "/api/bridge/space/snapshot") return spaceWithTackler();
+        if (path === "/api/bridge/targets") {
+          return { ok: true, targetIDs: [], notifications: [] };
+        }
+        if (path === "/api/bridge/bound-fleet") {
+          return readyFleet({
+            members: [
+              // THIS pilot, holding FLEET_ROLE_LEADER -- the roster row
+              // canTagInFleet has to find and approve.
+              { charID: OWN_CHARACTER_ID, role: 1 },
+              // A human, so the supervision gate passes and the ladder runs at
+              // all rather than getting safe.
+              { charID: HUMAN_FLEET_MEMBER },
+            ],
+          });
+        }
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const store = createClientStore();
+  return { store, flow: createAppFlow(store, { fetch: fakeFetch }), calls };
+}
+
+/** The scram push, as the wire delivers it, folded onto the space slice. */
+function scramble(store: ReturnType<typeof createClientStore>): void {
+  const event = decodeJamNotification(
+    "OnJamStart",
+    [TACKLER_ITEM_ID, 7777, SHIP_ID, "warpScramblerMWD", 0, 5000],
+    Date.now(),
+  );
+  assert.notEqual(event, null, "the fixture must decode, or this test proves nothing");
+  store.apply({ type: "space/jam", event: event! });
+}
+
+function tagWrites(calls: readonly { readonly path: string; readonly body: Record<string, unknown> }[]) {
+  return calls.filter((call) => call.path === "/api/bridge/flight/fleet-tag-target");
+}
+
+test("a scram push reaches the ladder and the tackler is lettered for the fleet", async () => {
+  const { store, flow, calls } = taggingHarness();
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  // The fleet has tagged nothing yet -- a real, empty answer, which is what
+  // lets the rung know which letters are free.
+  store.apply({ type: "fleet/target-tags", tags: new Map() });
+  scramble(store);
+
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await waitFor(() => tagWrites(calls).length > 0, "a tag write to reach the BFF");
+
+  const write = tagWrites(calls)[0];
+  assert.equal(write?.body.itemID, TACKLER_ITEM_ID, "the ship that named itself is the one tagged");
+  assert.equal(write?.body.tag, "A");
+  assert.equal(write?.body.confirm, true);
+  flow.stopFleetCompanion();
+});
+
+// ⚠ The dead-config check, end to end this time. attemptsTagging shipped as a
+// checkbox with no reader; a regression that unwired it again would leave every
+// unit test above passing.
+test("the same scram writes nothing when the operator left tagging off", async () => {
+  const { store, flow, calls } = taggingHarness();
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  store.apply({ type: "fleet/target-tags", tags: new Map() });
+  scramble(store);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  // Wait until the gate itself has answered YES, so the only thing left that
+  // could be stopping the write is the setting.
+  await waitFor(() => store.get().companion.canTag === true, "the tagging gate to answer");
+
+  assert.equal(tagWrites(calls).length, 0);
+  flow.stopFleetCompanion();
+});
+
+// ⚠ THE NEGATIVE CASE THE PHASE TABLE ASKS FOR. The server drops a
+// non-commander's tag silently, so a test that only ever exercised the happy
+// path could not tell a working gate from one that always says yes.
+test("a plain member writes no tag, however hard it is being scrambled", async () => {
+  const calls: { readonly path: string; readonly body: Record<string, unknown> }[] = [];
+  const fakeFetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
+    const path = String(input);
+    const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    calls.push({ path, body: body as Record<string, unknown> });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        if (path === "/api/bridge/flight/status") return flightBody(false);
+        if (path === "/api/bridge/space/snapshot") return spaceBody();
+        if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+        if (path === "/api/bridge/bound-fleet") {
+          return readyFleet({
+            members: [
+              // FLEET_ROLE_MEMBER, FLEET_JOB_NONE -- looked at, and no.
+              { charID: OWN_CHARACTER_ID, role: 4, job: 0 },
+              { charID: HUMAN_FLEET_MEMBER },
+            ],
+          });
+        }
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch: fakeFetch });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  store.apply({ type: "fleet/target-tags", tags: new Map() });
+  scramble(store);
+
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await waitFor(() => store.get().companion.canTag !== null, "the tagging gate to answer");
+
+  assert.equal(store.get().companion.canTag, false);
+  assert.equal(
+    calls.filter((call) => call.path === "/api/bridge/flight/fleet-tag-target").length,
+    0,
   );
   flow.stopFleetCompanion();
 });
