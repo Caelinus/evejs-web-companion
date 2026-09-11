@@ -142,10 +142,12 @@ and publishes onto the SSE stream
 lands in the bounded `live` slice and is discarded. **The bytes are already
 there.**
 
-> ⚠ This makes the note in `src/squadBoard.js:18` out of date. It says the
-> in-game tag equivalent is blocked because "nothing in the client can READ a
-> tag back yet". The read path is the push channel, and it works. Fix that
-> comment when the tag decoder lands.
+> ⚠ This made the note in `src/squadBoard.js:18` out of date — it said the
+> in-game tag equivalent was blocked because "nothing in the client can READ a
+> tag back yet". **Fixed 2026-09-11 when the decoder landed.** That header now
+> describes the board as the FALLBACK beneath a real tag or broadcast, and says
+> why it must not be deleted: a fleet mechanism is visible to every pilot
+> including the humans, and the board is visible only to bots on one BFF.
 
 ### The fifteen broadcast names
 
@@ -176,11 +178,25 @@ questions that were previously marked "needs a live capture".**
 | `Target` | the tactical target | system | **yes** — primary |
 | `AlignTo` | an object, gated by `CanAlignOrWarpToTypeID` | system | **yes** — align |
 | `WarpTo` | an object, same gate | system | no — the server warps the fleet itself |
-| `JumpTo` | **a stargate** — gated to `groupStargate` | system | **yes** — a real jump, not just an align |
+| `JumpTo` | **a stargate** — gated to `groupStargate` | system | **partly** — see below |
 | `TravelTo` | **a solar system id** (`session.solarsystemid2`) | global | **yes** — route to it |
 | `JumpBeacon` | an **active beacon** the sender holds | global | prefer `OnBridgeModeChange` |
 | `EnemySpotted` / `NeedBackup` / `HoldPosition` / `InPosition` | the sender's **nearest object** (`GetNearestBall`) | global | log only |
 | `Location` | the sender's system, plus their nearest object | global | log only |
+
+⚠ **`JumpTo` COULD NOT BE BUILT AS THIS TABLE SAYS, and the row above is
+corrected to "partly".** Discovered while building it, 2026-09-11: `api.jump`
+needs the gate on BOTH sides of the jump, and the broadcast carries one. The far
+gate exists only in the static route graph, which is loaded asynchronously —
+and the companion's ladder is pure and synchronous and carries no route graph.
+Giving one rung its own copy of the autopilot's route solver is a bigger change
+than the rung earns, and inventing the second id risks flinging an unattended
+ship into the wrong system.
+
+So the companion warps to the called gate, closes on it, and HOLDS at jump
+range, and its readout says why rather than looking like a stuck bot. A later
+phase that threads the route graph into the observation can finish it. The rest
+of this table is unaffected.
 
 Three things fall out of this that no amount of reasoning would have produced:
 
@@ -743,7 +759,8 @@ no longer exists.
 So the shape is:
 
 - `analyzeCompanionRunPolicy(request)`, mirroring `analyzeBotRunPolicy(script)`:
-  `combat` from `useDrones` / `defenseModuleIDs`, `fleet` from `attemptsTagging`
+  `combat` from `useDrones` / `defenseModuleIDs` / **any of the three
+  remote-repair module lists** (widened in phase 1, see below), `fleet` from `attemptsTagging`
   and the warp yield, `social` from the chat send.
 - `validateBotLaunchGrant` **unchanged** — the request's revision and canonical
   hash fill the `scriptRev` slot a script's revision fills today.
@@ -755,6 +772,29 @@ So the shape is:
 permissions", and the comment above it says that is deliberate — "an empty list
 is a sentence, not a blank". A pilot that writes fleet tags and sends chat must
 not describe itself that way in the Bot Manager.
+
+⚠ **TWO SUB-DECISIONS PHASE 1 MADE IN CODE, RECORDED HERE AFTER THE FACT.**
+Both were argued out in a comment and would otherwise be re-derived, or
+re-litigated, by whoever reads the code next.
+
+**(a) `combat` is earned by a remote repairer too.** The derivation above named
+`useDrones` and `defenseModuleIDs` only, because those were the fields that
+existed. Phase 1 added `remoteShieldModuleIDs`, `remoteArmorModuleIDs` and
+`remoteCapacitorModuleIDs` so the companion can answer a rep call, and all three
+now earn `combat` as well. The reasoning is the same one the class already
+rested on — "nothing on the ship can be cycled into a fight" is what withholds
+it, and a fitted remote repairer is exactly such a thing. A logistics pilot with
+a working repairer is a participant in a fight as much as a gunner is.
+
+**(b) A Heal broadcast is answered ABOVE a target tag**, which is a different
+question from the tag-versus-`Target` precedence above and has a different
+answer for a different reason. That one is authority. This one is urgency and
+NON-EXCLUSIVITY: a tag is standing state and is still true next tick, a rep call
+is time-critical, and a logi can hold a lock AND run a repairer — the two
+compete only for one tick's single atomic call. So the heal rung falls THROUGH
+the moment there is nothing new to start, rather than parking the tick. A logi
+whose repairer is already cycling still locks the primary; a pilot with nothing
+fitted is never blocked by a call it cannot answer.
 
 **5. A human in the fleet is a CONTINUOUS condition — DECIDED, with a protocol.**
 

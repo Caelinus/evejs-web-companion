@@ -176,7 +176,7 @@ the role (see the tagging constraint in the plan doc).
 
 | Phase | The scenario | What proves it |
 | --- | --- | --- |
-| 1 | FC broadcasts `Target` on a rat; FC tags a rat `A` | the follower shoots that rat, and the tag ranks above its own ladder |
+| 1 | FC broadcasts `Target` on a rat; FC tags a rat `A` | ⚠ a SCRIPT bot set to `squad: follow` shoots that rat. The COMPANION only LOCKS it — it has no weapons rung and no weapon-module field on its request, so a locked-and-not-shooting pilot is the pass condition, not a failure. Both must rank the tag above their own ladder |
 | 2 | FC fleet-warps while the follower is mid-approach | the follower stops issuing orders and does not produce refusals |
 | 3 | rats aggress a companion pilot | hardeners come on, booster cycles, capacitor does not flatline |
 | 4 | order each of the four new calls by hand | each lands; the tag one is run BOTH as a commander and as a plain member |

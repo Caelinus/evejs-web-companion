@@ -13,15 +13,22 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | --- | --- |
 | Branch | `feat/fleet-companion`, cut from `tokeiito` |
 | Base | `tokeiito` at `7488415` (three docs commits) |
-| Branch commits | `d844988`, `6ca4c49`, `0f2e9ca`, then the decisions and phase 0's completion |
+| Branch commits | phase 0 through `ee5b31b`, then 18 more for phase 1 (see the git log; `git log --oneline ee5b31b..` is the phase 1 set) |
 | Working tree | clean |
 | Phase 0 | **COMPLETE** — grant derivation, headless runs, and a start control |
 | Phase 0b | **COMPLETE** — the supervision gate and the abandonment protocol |
-| Everything else | not started; phase 1 is the one to start with |
+| Phase 1 | **COMPLETE** — broadcasts and target tags, decoded, stored and obeyed |
+| Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite 4,899 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
+full suite 4,976 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
 the pre-work baseline, which was 4,860 tests with the same 17.
+
+⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
+test called "defensive equipment starts with NOTHING ticked" — nothing in that
+name matches a grep for companion/fleet/broadcast/tag, so a name filter said
+clean while the count had gone 17 → 18. The reverse trap is the known one (a
+fresh worktree reports 22 because `public/dist` is absent). Check both.
 
 ## What exists
 
@@ -29,12 +36,15 @@ the pre-work baseline, which was 4,860 tests with the same 17.
   controller, and a ladder with two rungs: the warp yield and the supervision
   gate. Its ORDINARY work still decides `wait` and issues nothing, on purpose —
   every call it can make belongs to the abandonment protocol.
-- `web/src/nav/fleetCompanionLoop.test.ts` — 40 tests, the ladder, the
-  supervision gate, the abandonment protocol, and the lifecycle.
-- `web/src/bots/companionRunPolicy.test.ts` — 28 tests, the risk derivation and
+- `web/src/nav/fleetCompanionLoop.test.ts` — 72 tests, the ladder, the
+  supervision gate, the abandonment protocol, the fleet-order rung, and the
+  lifecycle.
+- `web/src/bots/companionRunPolicy.test.ts` — 31 tests, the risk derivation and
   both codec doors.
-- `web/src/app/companionFlow.test.ts` — 8 tests, the flow over a faked BFF:
-  preflight, and the exclusion pairs.
+- `web/src/app/companionFlow.test.ts` — 10 tests, the flow over a faked BFF:
+  preflight, the exclusion pairs, and the notification drain.
+- `web/src/bridge/fleetBroadcasts.ts` + test — 14 tests. The broadcast and
+  target-tag decoders, the 15 names, and what each one's `itemID` means.
 - `flow.ts` — `makeFleetCompanionDeps()`, `startFleetCompanion` and the
   pause/resume/stop trio, `fleetCompanionReads`, `stopCompanionController`.
 - `botRegistry.ts` — `"companion"` in `BotID`, its requirements, its catalogue
@@ -80,6 +90,69 @@ knowing.** The union breaks a `Record<BotID, …>` and an exhaustive `switch`, w
 is why the handoff calls it a feature. It cannot see a two-way ternary, and it
 cannot see a call to the wrong same-shaped function. Adding a `BotID` member does
 not flush those out; only reading the call sites does.
+
+## Phase 1 is COMPLETE, 2026-09-11
+
+Eighteen commits. The companion hears its fleet and obeys it; so does the older
+bot-script DSL.
+
+| Piece | Where |
+| --- | --- |
+| The decoders, the 15 names, what each `itemID` means, the 30s TTL | `web/src/bridge/fleetBroadcasts.ts` |
+| `lastBroadcast` + `targetTags` on the EXISTING fleet slice | `store/types.ts`, `feed.ts`, `clientStore.ts` |
+| Dispatch, the `__MultiEvent` unwrap, both observation build sites | `app/flow.ts` |
+| Tag ranking, above class and distance | `nav/targetPriority.ts` |
+| The companion's fleet-order rung | `decideFleetOrders`, `fleetCompanionLoop.ts` |
+| The DSL's three-source resolver | `calledOnGrid`, `nav/scriptMacros.ts` |
+| What the fleet is saying, in the panel | `ui/FleetCompanion.svelte` |
+
+### The prerequisite that was not in the spec
+
+⚠ **A HEADLESS COMPANION RECEIVED NO PUSHED NOTIFICATION AT ALL, and phase 1
+would have been dead on the bot host without fixing it.**
+`applyPushedNotification` had exactly one caller — the SSE branch — and
+`botHost.js` hands every headless bot `stubEventSource()`, a channel that is
+never live. The BFF already drains notifications onto every response for exactly
+this case (`server.js`, above `STREAM_RETRY_MS`); nothing on the client side ever
+consumed that drain, so only half the fallback existed.
+
+It went unnoticed because almost every push consumer is an INVALIDATION that
+schedules a re-read, so a missed push costs a little freshness. A broadcast has
+no re-read to fall back on — there is no "what is the current broadcast" route —
+so a push that never arrives is an order lost for good.
+
+### Three findings from the review sweep, all real
+
+- **A gateway blip silently stopped the pilot obeying its commander.** An
+  "unavailable" fleet read carries a null `fleetID`, so comparing ids read a
+  blip as a fleet switch and wiped the tags. ⚠ **The first fix for this was
+  wrong and its test passed anyway:** refusing to clear ON the blip does nothing
+  about the blip having already destroyed the id the NEXT read compares against,
+  so the recovery wiped them one tick later. The basis is now an explicit
+  `authoritativeFleetID` that only an authoritative read may move.
+- **The panel rendered a `Target` call as "shoot this".** The companion has no
+  weapons rung; answering a `Target` means LOCKING. The loop's own comment
+  already warned against that wording and the panel said it anyway.
+- **Eight player-facing strings carried em-dashes**, against the plain-ASCII
+  rule. ⚠ The existing ASCII test could not have caught them: it renders the
+  panel against hand-written fixture stores, so it proves the FIXTURES are clean
+  and never sees a `why` the ladder actually produces. There is now a
+  source-scanning guard in `fleetCompanionLoop.test.ts`, verified to fail when an
+  em-dash is reintroduced.
+
+### Things phase 1 deliberately did NOT do
+
+- **The companion LOCKS a called target; it does not shoot.** No weapons rung,
+  no weapon-module field on the request. A locked-and-not-firing pilot is
+  correct behaviour, and the live-QA table in the implementation doc now says so.
+- **`JumpTo` holds at the gate and never jumps.** `api.jump` needs the gate on
+  both sides and the broadcast carries one; the far gate lives only in the
+  asynchronously-loaded route graph, which this pure synchronous ladder does not
+  carry. Inventing the second id would risk the wrong system.
+- **A known gap, recorded not closed:** `TravelTo` hands off to the shared
+  autopilot, which runs at its own cadence. Rung 1's warp yield covers transit
+  but not the pauses between hops, so a fleet order arriving while the ship sits
+  at a gate can issue a call alongside the autopilot's navigation.
 
 ## Phase 0b is COMPLETE, 2026-09-11
 
@@ -142,10 +215,14 @@ and pure out, and `tick()` stores it BEFORE anything else can return.
 
 ### What is next
 
-1. **Phase 1** — the broadcast decoders, the store slice with TTL, and the
-   `follow-the-fleet` behaviour. The largest single chunk, entirely in-repo, and
-   everything interesting depends on it.
-2. **The headless launch UI is NOT phase 0's, and was deliberately not built.** A
+1. **Phase 3 (tank-up), 4 (keep-at-range / fleet tag / jump-through-fleet) and 5
+   (drone recall)** are all independent of each other and of phase 1, and make
+   good filler work. Phase 2's warp yield is already built as rung 1.
+2. **Phase 7 needs a roster role/job read**, and two other things are waiting on
+   the same read: verifying that a `Target` broadcast came from a commander (see
+   the plan doc's note on why a tag outranks one), and `obs.canTag`, which is
+   hard-coded `null` today. Build them together rather than the read twice.
+3. **The headless launch UI is NOT phase 0's, and was deliberately not built.** A
    per-pilot request is a value on a Pilot Hangar squad, which makes the launch UI
    part of phase 9's squad launcher. The plumbing is finished and waiting:
    `api.startServerCompanion` exists, and the script path it mirrors runs through
