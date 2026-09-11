@@ -717,6 +717,27 @@ export interface CompanionDecision {
   readonly followingOrderFrom?: "tag" | "broadcast" | "chat";
   /** Short plain words for the panel — never the broadcast's wire name. */
   readonly lastOrderHeard?: string;
+  /**
+   * True when this decision is a STANDING one: the pilot is already obeying
+   * this order and has nothing new to issue for it this tick.
+   *
+   * ⚠ THIS EXISTS TO STOP A RUNG PARKING THE TICK, and it replaces the one
+   * place that did. `lockThenEngage`'s last branch used to return an ordinary
+   * `wait` once the called target was locked and the guns were running, which
+   * ended the ladder — so while a target call stood, every rung BELOW the
+   * fleet-order rung was starved, which is exactly when they most want a turn.
+   * A pilot obeying a target call would never have fled.
+   *
+   * The readout is why it was parked rather than dropped, and the readout is
+   * kept: `decideCompanionAction` HOLDS a standing decision aside, runs every
+   * rung beneath it, and falls back to it only if none of them acted. So the
+   * panel still says "Obeying fleet" while the guns run, and a lower rung that
+   * has real work still gets the tick.
+   *
+   * ⚠ A STANDING DECISION'S ACTION MUST BE `wait`. It is only ever a readout;
+   * holding a real call aside and then not issuing it would silently drop it.
+   */
+  readonly standing?: true;
 }
 
 /**
@@ -895,13 +916,29 @@ export function decideCompanionAction(
     return tagging.decision;
   }
 
+  // Rung 6: obeying the fleet.
+  //
+  // ⚠ A STANDING ORDER IS HELD ASIDE, NOT RETURNED. When this rung has a real
+  // call to issue it wins outright, exactly as the precedence says. But when it
+  // is merely CONTINUING to obey -- target locked, guns already running, nothing
+  // new this tick -- it hands back a `standing` decision, and that one is kept
+  // as a READOUT while the ladder goes on. Before this, that case returned an
+  // ordinary wait and ended the tick, so a standing target call starved every
+  // rung beneath it for as long as it stood. See `CompanionDecision.standing`.
   const obeying = decideFleetOrders(request, obs, tagging.memory);
-  if (obeying !== null) {
+  if (obeying !== null && obeying.standing !== true) {
     return obeying;
   }
 
-  // Phases 5, 6 and 8 add further rungs here, in the order documented in
-  // docs/fleet-companion-implementation.md, "The rung ladder".
+  // Phases 6 and 8 add further rungs HERE, beneath the fleet-order rung, which
+  // is where the decided precedence puts them and which is only safe now that a
+  // standing order no longer parks the tick.
+
+  // The standing order, if there was one and nothing beneath it acted. The
+  // pilot IS obeying the fleet, so it says so rather than "Standing by".
+  if (obeying !== null) {
+    return obeying;
+  }
   return waiting(
     "Standing by",
     "No fleet order to obey right now, and no further companion behaviour is built yet.",
@@ -1567,8 +1604,12 @@ function lockThenEngage(
       lastOrderHeard: heard,
     };
   }
+  // ⚠ STANDING, NOT PARKED -- see `CompanionDecision.standing`. Everything
+  // above issues a real call; this branch has nothing left to issue, so it
+  // hands back a readout the ladder uses only if no rung beneath it acts.
   return {
     action: WAIT,
+    standing: true,
     phase: "Obeying fleet",
     // ⚠ THE NO-WEAPON CASE SAYS SO, and that is the whole of its job. An empty
     // weapon list is a setting, not a fault, so it must not read as one -- but

@@ -11,6 +11,7 @@ import {
   decideCompanionAction,
   freshLadderMemory,
   supervisorsInFleet,
+  type CompanionDecision,
   type CompanionLadderMemory,
   type FleetCompanionDeps,
   type FleetCompanionObservation,
@@ -2488,4 +2489,97 @@ test("an unsupervised pilot tags nothing", () => {
     }),
   );
   assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// --- the parking fix: a standing order no longer ends the tick ---------------
+//
+// `lockThenEngage`'s last branch used to return an ordinary wait once the called
+// target was locked and the guns were running. That ended the ladder, so while a
+// target call stood every rung BELOW the fleet-order rung was starved - which is
+// exactly when they most want a turn. A pilot obeying a target call would never
+// have fled.
+//
+// It now hands back a `standing` decision instead: the ladder holds it aside,
+// runs everything beneath it, and falls back to it only if nothing else acted.
+//
+// ⚠ THE FULL PROOF OF THIS ARRIVES WITH PHASE 6. Its flee is the first rung to
+// sit BENEATH the fleet-order rung, and the test that matters - "a pilot obeying
+// a standing target call still flees when it drops through its floor" - can only
+// be written once that rung exists. What is provable here is the mechanism: the
+// decision is marked standing, the readout survives, and the ladder reaches its
+// own end rather than returning from the middle.
+
+/** A pilot with a gun fitted, which is what makes the standing case reachable. */
+const ENGAGING: FleetCompanionRequest = { ...REQUEST, weaponModuleIDs: [GUN_1] };
+
+/** A pilot locked onto, and shooting, the target the fleet called. */
+function standingEngagement(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithEntitiesAndRack([TACKLE], [GUN_1]),
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+    ...overrides,
+  });
+}
+
+/**
+ * The tick AFTER the rack is running. A snapshot says a gun is cycling and
+ * never says what it is cycling AT, so the first tick still has a weapon to
+ * start and only the next one has nothing left to issue -- which is the tick
+ * the standing case is about.
+ */
+function afterTheGunsAreUp(): CompanionDecision {
+  const first = decideCompanionAction(ENGAGING, standingEngagement());
+  assert.equal(first.action.kind, "activate", "the first tick starts the gun");
+  return decideCompanionAction(ENGAGING, standingEngagement(), first.memory);
+}
+
+test("a standing, already-engaged target call is marked standing rather than parking", () => {
+  const decision = afterTheGunsAreUp();
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.equal(
+    decision.standing,
+    true,
+    "the fleet rung has nothing new to issue, so its decision must be held aside, not returned outright",
+  );
+});
+
+// ⚠ THE READOUT IS WHY IT WAS PARKED IN THE FIRST PLACE, so losing it would be
+// trading one bug for another. A pilot whose guns are running must not tell its
+// operator it is standing by.
+test("the standing readout survives the fall-through and still says Obeying fleet", () => {
+  const decision = afterTheGunsAreUp();
+  assert.equal(decision.phase, "Obeying fleet");
+  assert.notEqual(decision.phase, "Standing by");
+  assert.equal(decision.followingOrderFrom, "tag");
+  assert.ok(decision.lastOrderHeard);
+  assert.match(decision.why, /firing/i);
+});
+
+// ⚠ A STANDING DECISION IS A READOUT AND NOTHING ELSE. If one ever carried a
+// real call, holding it aside and then falling back to it a rung later would
+// issue it late - or, if a lower rung acted, drop it silently.
+test("nothing that is marked standing carries a real action", () => {
+  for (const observation of [
+    standingEngagement(),
+    standingEngagement({ fleetTargetTags: null, fleetBroadcast: fleetBroadcast("Target", TACKLE) }),
+  ]) {
+    const decision = decideCompanionAction(ENGAGING, observation);
+    if (decision.standing === true) {
+      assert.deepEqual(decision.action, { kind: "wait" });
+    }
+  }
+});
+
+// The other half: a rung that DOES have something to issue still wins outright,
+// which is what the decided precedence says and what must not regress.
+test("a fleet order with a real call to make still beats everything beneath it", () => {
+  const decision = decideCompanionAction(
+    ENGAGING,
+    standingEngagement({ lockedTargetIDs: [] }),
+  );
+  assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
+  assert.notEqual(decision.standing, true, "a real call is never merely standing");
 });
