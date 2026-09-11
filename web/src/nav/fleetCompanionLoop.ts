@@ -351,6 +351,29 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * out of the layer that knows the operator's answer.
    */
   readonly chatMessages?: readonly ChatMessage[];
+  /**
+   * The entity ids currently TACKLING this ship — scrambled or disrupted, so
+   * this ship cannot warp out. Deduplicated, and ranked no further: which one
+   * to letter first is the rung's own decision.
+   *
+   * Absent or empty means nothing is holding this pilot, which is what a pilot
+   * with no jam pushes on its wire always sees, and what a host that has not
+   * wired this read up sees too.
+   *
+   * ⚠ ALREADY NARROWED AND ALREADY FRESHNESS-FILTERED BY THE BUILDER, the same
+   * way `fleetBroadcast` and `chatMessages` are. The store keeps every jam type
+   * the wire carried — webs, paints, damps, neuts — and keeps them until an
+   * `OnJamEnd` arrives; deciding which of them are TACKLE and which are still
+   * believed happens once, where the clock is, so the whole tick reasons off
+   * one answer.
+   *
+   * ⚠ AN EMPTY LIST IS NOT PROOF THIS SHIP IS FREE. It is the fold of pushes
+   * that were received; a dropped SSE frame reads as "nothing is holding us".
+   * Nothing downstream may invert this into a positive claim — it gates a tag
+   * write and nothing else, so the failure is a tag not written, never a ship
+   * that wrongly believes it can warp.
+   */
+  readonly tackledBy?: readonly number[];
 }
 
 /** A pending fleet invite, narrowed to the two ids the rejoin gate needs. */

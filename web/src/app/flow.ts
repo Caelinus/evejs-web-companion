@@ -236,7 +236,7 @@ import {
   decodeFleetStateChangeNotification,
   isFleetBroadcastFresh,
 } from "../bridge/fleetBroadcasts.ts";
-import { decodeJamNotification } from "../bridge/jamNotifications.ts";
+import { decodeJamNotification, tacklersHolding } from "../bridge/jamNotifications.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -5571,6 +5571,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // here, and a companion polls no extra route for it.
           pendingFleetInvite: companionPendingInvite(),
           chatMessages,
+          // Rung 4, "tackle → tag". Narrowed to the two tackle jam types and
+          // freshness-filtered HERE, at observation build, for the same reason
+          // `fleetBroadcast` is: the slice keeps every jam the wire carried
+          // until its `OnJamEnd` lands, and one clock read per tick gives the
+          // whole ladder one consistent answer. Free — it rides the same
+          // notification drain the fleet slice does and polls nothing.
+          tackledBy: tacklersHolding(store.space.get().jams, Date.now()),
         };
       },
       issue: async (action) => {
