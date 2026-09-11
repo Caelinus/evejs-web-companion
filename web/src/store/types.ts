@@ -4,6 +4,7 @@
 
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type {
   FleetAvailability,
   FleetPendingInvite,
@@ -815,6 +816,14 @@ export type FleetAction = "form" | "invite" | "accept" | "leave";
  * `availability` keeps a real FleetNotFound distinct from a failed read. The
  * pending invite comes from the existing OnFleetInvite live payload because an
  * invitee cannot discover the fleetID through the own-fleet read before joining.
+ *
+ * `lastBroadcast` and `targetTags` (below) live on THIS slice rather than a
+ * new one on purpose: `fleet.set(INITIAL_FLEET)` in clientStore.ts already
+ * fires from every place a fleet resets (logout, character online/offline,
+ * fleet/cleared), so folding these fields into `INITIAL_FLEET` inherits that
+ * reset wiring for free. A dedicated slice would need each of those call
+ * sites updated by hand, and would silently drift the first time one of them
+ * was missed.
  */
 export interface FleetCenterState {
   readonly loaded: boolean;
@@ -826,6 +835,19 @@ export interface FleetCenterState {
   readonly readError: string | null;
   readonly actionError: string | null;
   readonly refreshedAtMs: number | null;
+  /** The most recent OnFleetBroadcast call ("shoot that"). Last-write-wins. */
+  readonly lastBroadcast: FleetBroadcast | null;
+  /**
+   * itemID -> standing target tag, from the last OnFleetStateChange.
+   * ⚠ `null` and an empty map mean different things and must stay distinct:
+   * `null` = never received (or unreadable) this fleet; an empty map =
+   * received, and the fleet has tagged nothing. Same convention
+   * `authoritativeFleetMemberCharacterIDs` uses in bridge/fleetCenter.ts — a
+   * pilot that may WRITE tags reads "received, nothing tagged" as permission
+   * to assign a letter, so collapsing the two would let it collide with a tag
+   * that was really there.
+   */
+  readonly targetTags: ReadonlyMap<number, string> | null;
 }
 
 // --- Scanner / Exploration Center -----------------------------------------

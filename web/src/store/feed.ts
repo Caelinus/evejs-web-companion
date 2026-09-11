@@ -92,6 +92,7 @@ import type {
 } from "./types.ts";
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
@@ -338,6 +339,13 @@ export type FeedEvent =
   | { readonly type: "fleet/action-started"; readonly action: FleetAction }
   | { readonly type: "fleet/action-finished"; readonly error: string | null }
   | { readonly type: "fleet/pending-invite"; readonly invite: FleetPendingInvite }
+  // A one-shot fleet call (OnFleetBroadcast). Pure push-to-store, same shape
+  // as fleet/pending-invite: last-write-wins, no reducer-side interpretation.
+  | { readonly type: "fleet/broadcast"; readonly broadcast: FleetBroadcast }
+  // The standing itemID -> tag dict from OnFleetStateChange. `tags` is
+  // whatever decodeFleetStateChangeNotification produced — an empty map is a
+  // legitimate "received, nothing tagged" answer, not "not received".
+  | { readonly type: "fleet/target-tags"; readonly tags: ReadonlyMap<number, string> }
   | { readonly type: "fleet/cleared" }
   // Scanner / Exploration Center. Both reads are independent; a failed scan is
   // unknown, never a successful empty current system.

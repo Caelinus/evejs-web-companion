@@ -361,6 +361,8 @@ const INITIAL_FLEET: FleetCenterState = Object.freeze({
   readError: null,
   actionError: null,
   refreshedAtMs: null,
+  lastBroadcast: null,
+  targetTags: null,
 });
 
 const INITIAL_SCANNER: ScannerCenterState = Object.freeze({
@@ -1392,6 +1394,33 @@ export function createClientStore(): ClientStore {
         break;
       case "fleet/loaded": {
         const current = fleet.get();
+        // ⚠ Broadcasts and target tags are PER-FLEET: a dict left over from
+        // the previous fleet, read as current in the window before the new
+        // fleet's first OnFleetStateChange arrives, would point the guns at
+        // ships that are not there. Keyed on the fleetID ITSELF changing, not
+        // on availability changing — those are different events, and only a
+        // real fleet swap is the hazard. A "ready" refresh of the SAME fleet
+        // must not wipe out a broadcast or tag map that just arrived.
+        //
+        // ⚠ AND AN UNREADABLE FLEET IS NOT A FLEET SWITCH. "unavailable" is the
+        // arm every read failed on — a gateway timeout, say — and it carries a
+        // null `fleetID`, so comparing ids alone reads a blip as "you left
+        // fleet 1 and joined nothing" and clears both fields.
+        //
+        // That is not a cosmetic wipe. `targetTags` back at `null` means "never
+        // received", and tags only arrive again when the commander CHANGES one
+        // — which may be many minutes into a fight. So a single failed read
+        // would silently switch tag-following off and leave it off, with the
+        // readout showing nothing wrong.
+        //
+        // Could-not-look is never evidence of a change, which is the same rule
+        // `authoritativeFleetMemberCharacterIDs` applies one layer down and the
+        // same one the companion's supervision gate fails open on. Only an
+        // AUTHORITATIVE read ("ready" or "not-in-fleet") gets to say the fleet
+        // changed.
+        const previousFleetID = current.fleet?.fleetID ?? null;
+        const authoritative = event.availability !== "unavailable";
+        const switchedFleet = authoritative && previousFleetID !== event.fleet.fleetID;
         fleet.set({
           ...current,
           loaded: true,
@@ -1401,6 +1430,8 @@ export function createClientStore(): ClientStore {
           // Joining consumes the invite. Keeping it after a later leave would
           // falsely resurrect an already-used popup.
           pendingInvite: event.availability === "ready" ? null : current.pendingInvite,
+          lastBroadcast: switchedFleet ? null : current.lastBroadcast,
+          targetTags: switchedFleet ? null : current.targetTags,
           readError: event.readError,
           refreshedAtMs: event.refreshedAtMs,
         });
@@ -1422,6 +1453,12 @@ export function createClientStore(): ClientStore {
         break;
       case "fleet/pending-invite":
         fleet.set({ ...fleet.get(), pendingInvite: event.invite });
+        break;
+      case "fleet/broadcast":
+        fleet.set({ ...fleet.get(), lastBroadcast: event.broadcast });
+        break;
+      case "fleet/target-tags":
+        fleet.set({ ...fleet.get(), targetTags: event.tags });
         break;
       case "fleet/cleared":
         fleet.set(INITIAL_FLEET);
