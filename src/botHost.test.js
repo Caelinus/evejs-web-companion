@@ -80,6 +80,16 @@ function makeFakeStack(log) {
     // it the way the real stack does: the host reads the revision off the stack
     // rather than holding a second copy of a bare 1 of its own.
     COMPANION_GRANT_SCRIPT_REV: 1,
+    // ⚠ AND THE ROLE LABELS FOR THE SAME REASON. `companionScriptName` reads
+    // them off the stack rather than holding a second copy, so a fake stack
+    // without them makes every companion start throw on `labels[role]` --
+    // which is how this fake was found wanting when the labels moved.
+    COMPANION_ROLE_LABELS: {
+      dps: "DPS",
+      logi: "Logistics",
+      tackle: "Tackle",
+      support: "Support",
+    },
     analyzeCompanionRunPolicy: (request) => ({
       riskClasses:
         request && (request.useDrones === true || (request.defenseModuleIDs || []).length > 0)

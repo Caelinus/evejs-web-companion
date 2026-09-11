@@ -70,15 +70,14 @@ const ENDED_STATUSES = new Set(["stopped", "error", "idle"]);
 // script). Not exhaustive by construction on purpose: an unrecognised role
 // cannot reach here at all, since decodeFleetCompanionRequestValue refuses
 // any value outside FLEET_COMPANION_ROLES before start() ever calls this.
-const COMPANION_ROLE_LABELS = Object.freeze({
-  dps: "DPS",
-  logi: "Logistics",
-  tackle: "Tackle",
-  support: "Support",
-});
-
-function companionScriptName(role) {
-  const label = COMPANION_ROLE_LABELS[role] || "companion";
+//
+// ⚠ THE LABELS THEMSELVES ARE NOT DEFINED HERE, AND USED TO BE. They were a
+// verbatim second copy of `roleLabels` in FleetCompanion.svelte, in a second
+// language, with nothing to fail if one drifted -- exactly the bug the
+// COMPANION_GRANT_SCRIPT_REV comment above exists to prevent. They now come off
+// the loaded stack, the same way that sentinel does.
+function companionScriptName(role, labels) {
+  const label = labels[role] || "companion";
   return `Fleet companion (${label})`;
 }
 
@@ -107,14 +106,16 @@ function defaultLoadStack() {
     const webSrc = path.resolve(__dirname, "..", "web", "src");
     const webUrl = (rel) => pathToFileURL(path.join(webSrc, rel)).href;
     stackPromise = (async () => {
-      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy] = await Promise.all([
-        import(webUrl("app/sessionToken.ts")),
-        import(webUrl("store/clientStore.ts")),
-        import(webUrl("app/flow.ts")),
-        import(webUrl("bots/scriptCodec.ts")),
-        import(webUrl("bots/runPolicy.ts")),
-        import(webUrl("bots/companionRunPolicy.ts")),
-      ]);
+      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy, companionReadout] =
+        await Promise.all([
+          import(webUrl("app/sessionToken.ts")),
+          import(webUrl("store/clientStore.ts")),
+          import(webUrl("app/flow.ts")),
+          import(webUrl("bots/scriptCodec.ts")),
+          import(webUrl("bots/runPolicy.ts")),
+          import(webUrl("bots/companionRunPolicy.ts")),
+          import(webUrl("bots/companionReadout.ts")),
+        ]);
       // The server has no sessionStorage; force the in-memory fallback. Bots
       // never use the global token anyway (perSessionToken), but the module
       // must not touch a browser API on import of anything else.
@@ -131,6 +132,10 @@ function defaultLoadStack() {
         decodeFleetCompanionRequestValue: companionRunPolicy.decodeFleetCompanionRequestValue,
         decodeCompanionAbandonmentValue: companionRunPolicy.decodeCompanionAbandonmentValue,
         COMPANION_GRANT_SCRIPT_REV: companionRunPolicy.COMPANION_GRANT_SCRIPT_REV,
+        // The role LABELS, off the shared layer for the same reason the sentinel
+        // above is: this host and the browser both put them in front of a player
+        // and two copies would drift in silence. See companionReadout.ts.
+        COMPANION_ROLE_LABELS: companionReadout.COMPANION_ROLE_LABELS,
       };
     })();
     stackPromise.catch(() => {
@@ -547,7 +552,7 @@ function createBotHost(options) {
       // scriptName is derived from the request's role so a player reads a
       // sensible pilot name in the roster instead of a blank column.
       recordScriptID = "companion";
-      recordScriptName = companionScriptName(decodedRequest.role);
+      recordScriptName = companionScriptName(decodedRequest.role, stack.COMPANION_ROLE_LABELS);
     } else {
       // A stored bot doc is untrusted bytes like any other; the codec is the door.
       const decoded = stack.decodeScriptValue(doc);

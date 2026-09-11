@@ -40,6 +40,17 @@
     type FleetCompanionOrderSource,
     type FleetCompanionRole,
   } from "../nav/fleetCompanionLoop.ts";
+  // The words this readout uses live in the shared layer, because the Bot
+  // Manager's per-pilot row says the same things about the same run and the two
+  // must not drift. See companionReadout.ts's header.
+  import {
+    COMPANION_ORDER_SOURCE_LABELS,
+    COMPANION_ROLE_LABELS,
+    canTagWords,
+    companionRoleLabel,
+    inFleetWords,
+    orderFromWords,
+  } from "../bots/companionReadout.ts";
   import {
     isFleetBroadcastFresh,
     type FleetBroadcastName,
@@ -276,36 +287,6 @@
     }
   });
 
-  const roleLabels: Record<FleetCompanionRole, string> = {
-    dps: "DPS",
-    logi: "Logistics",
-    tackle: "Tackle",
-    support: "Support",
-  };
-
-  const orderSourceLabels: Record<FleetCompanionOrderSource, string> = {
-    broadcast: "Fleet broadcasts",
-    tag: "Target tags",
-    chat: "Fleet chat commands",
-    "squad-board": "The squad board",
-  };
-
-  function orderFromWords(value: FleetCompanionState["followingOrderFrom"]): string {
-    switch (value) {
-      case "broadcast":
-        return "a fleet broadcast";
-      case "tag":
-        return "a target tag";
-      case "chat":
-        return "a fleet chat command";
-      case "squad-board":
-        return "the squad board";
-      case "own-ladder":
-        return "its own judgement";
-      default:
-        return "nothing yet";
-    }
-  }
 
   /**
    * Roughly how long an abandoned pilot has left, in whole minutes.
@@ -394,19 +375,6 @@
     Location: "reporting position",
   };
 
-  function canTagWords(value: boolean | null): string {
-    if (value === null) {
-      return "not known";
-    }
-    return value ? "yes" : "no - not a fleet commander";
-  }
-
-  function inFleetWords(value: boolean | null): string {
-    if (value === null) {
-      return "not known";
-    }
-    return value ? "yes" : "no";
-  }
 
   function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
@@ -554,7 +522,7 @@
         </thead>
         <tbody>
           <tr>
-            <td data-label="Role">{$companion.role ? roleLabels[$companion.role] : "-"}</td>
+            <td data-label="Role">{companionRoleLabel($companion.role)}</td>
             <td data-label="In fleet">{inFleetWords($companion.inFleet)}</td>
             <td data-label="Following orders from">{orderFromWords($companion.followingOrderFrom)}</td>
             <td data-label="Last order heard">{$companion.lastOrderHeard ?? "-"}</td>
@@ -663,7 +631,7 @@
       <label for="companion-role">This pilot is</label>
       <select id="companion-role" bind:value={role}>
         {#each FLEET_COMPANION_ROLES as choice (choice)}
-          <option value={choice}>{roleLabels[choice]}</option>
+          <option value={choice}>{COMPANION_ROLE_LABELS[choice]}</option>
         {/each}
       </select>
     </p>
@@ -910,8 +878,8 @@
     <h3>What it listens to</h3>
     <p class="note">
       Turning a channel off never changes the order of who wins - the server's
-      own fleet warp always comes first, then a broadcast, then a chat command,
-      then this pilot's own flee rule, then its own judgement.
+      own fleet warp always comes first, then this pilot's own flee rule, then
+      a broadcast, then a chat command, then its own judgement.
     </p>
     {#each FLEET_COMPANION_ORDER_SOURCES as source (source)}
       <label class="check">
@@ -920,7 +888,7 @@
           checked={obeys.includes(source)}
           onchange={() => toggleObeys(source)}
         />
-        {orderSourceLabels[source]}
+        {COMPANION_ORDER_SOURCE_LABELS[source]}
       </label>
     {/each}
     {#if obeys.includes("chat")}
@@ -937,6 +905,10 @@
         Whoever the fleet roster already names a commander is obeyed
         regardless. This is only for anyone else you want heard, by character
         ID - never filled in from chat text itself.
+      </p>
+      <p class="note">
+        Commands are read from LOCAL chat, so everyone in the system can see
+        what you type. Fleet chat is not reachable on this server at all.
       </p>
       {#if chatCommandSenderIDs.length > 0}
         <p class="note">
