@@ -11,6 +11,7 @@ import {
   freshLadderMemory,
   supervisorsInFleet,
   type CompanionDecision,
+  type FleetCompanionAction,
   type CompanionFlee,
   type CompanionLadderMemory,
   type FleetCompanionDeps,
@@ -293,6 +294,94 @@ test("a read that throws pauses with the reason rather than acting on stale stat
   assert.equal(action.kind, "wait");
   assert.equal(controller.snapshot().status, "error");
   assert.equal(controller.snapshot().failureReason, "space read failed");
+});
+
+// --- a refused call ---------------------------------------------------------
+//
+// ⚠ THE BUG THESE PIN, REPORTED LIVE 2026-09-11. A refusal came out of `issue`,
+// out of `tick`, out of `run`, and landed on the `void run()` in flow.ts as an
+// unhandled promise rejection: "TargetNotWithinRangeGeneric", twice, and the
+// page stopped updating. The loop was dead and `status` still said "running".
+
+test("a refused CALL keeps the run alive - the world is unchanged and the next tick re-reads it", async () => {
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () =>
+      obs({
+        snapshot: gridWithEntities([TACKLE]),
+        fleetTargetTags: new Map([[TACKLE, "A"]]),
+        lockedTargetIDs: [],
+      }),
+    issue: async (action) => {
+      attempted.push(action);
+      throw new Error("TargetNotWithinRangeGeneric");
+    },
+    sleep: async () => {},
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+
+  const first = await controller.tick();
+  assert.equal(
+    controller.snapshot().status,
+    "running",
+    "a refused WRITE leaves the world exactly as it was; only a failed READ may stop the pilot",
+  );
+  // ⚠ THE TICK REPORTS `wait`, AND THAT IS THE HONEST ANSWER: the call it chose
+  // did not happen. What it must NOT do is stop choosing.
+  assert.equal(first.kind, "wait");
+
+  await controller.tick();
+  assert.deepEqual(
+    attempted.map((action) => action.kind),
+    ["lock", "lock"],
+    "the lock is re-issued, because the ship may have drifted into range since",
+  );
+});
+
+test("a refusal is SAID, in plain words, and never in the server's own vocabulary", async () => {
+  const controller = createFleetCompanion({
+    observe: async () =>
+      obs({
+        snapshot: gridWithEntities([TACKLE]),
+        fleetTargetTags: new Map([[TACKLE, "A"]]),
+        lockedTargetIDs: [],
+      }),
+    issue: async () => {
+      throw new Error("TargetNotWithinRangeGeneric");
+    },
+    sleep: async () => {},
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  await controller.tick();
+
+  const readout = controller.snapshot();
+  assert.match(readout.why ?? "", /out of reach/i, "it must say what happened");
+  assert.doesNotMatch(
+    readout.why ?? "",
+    /TargetNotWithinRangeGeneric/,
+    "the server's error-class name is raw vocabulary and must never reach a player",
+  );
+  // ...but it is kept where a diagnosis can find it.
+  assert.equal(readout.failureReason, "TargetNotWithinRangeGeneric");
+});
+
+test("run() cannot reject, whatever the ladder does", async () => {
+  // ⚠ EVERY CALL SITE STARTS THIS WITH `void`, so a rejection here is an
+  // unhandled promise rejection in the page. `observe` throwing is already
+  // caught by `tick`; this drives the one thing that is not -- a `sleep` that
+  // throws stands in for any defect inside the loop itself -- and pins that it
+  // surfaces in the readout instead of in the console.
+  const controller = createFleetCompanion({
+    observe: async () => obs(),
+    issue: async () => {},
+    sleep: async () => {
+      throw new Error("the timer exploded");
+    },
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  await controller.run();
+  assert.equal(controller.snapshot().status, "error");
+  assert.equal(controller.snapshot().failureReason, "the timer exploded");
 });
 
 test("a tick from a STOPPED run cannot land after a restart", async () => {

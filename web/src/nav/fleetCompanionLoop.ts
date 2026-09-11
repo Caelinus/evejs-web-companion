@@ -4865,6 +4865,34 @@ function abandonmentRecord(ladder: CompanionLadderMemory): CompanionAbandonmentR
       };
 }
 
+/**
+ * What a refused call means, in words a player reads.
+ *
+ * ⚠ THE INPUT IS THE SERVER'S OWN ERROR-CLASS NAME, AND IT MUST NEVER BE THE
+ * OUTPUT. A refusal reaches this client as the retail class the server threw --
+ * `TargetNotWithinRangeGeneric`, `DeniedTargetOtherWarping` -- which is raw
+ * vocabulary of exactly the kind the panel's own tests forbid reaching a player.
+ * So this matches on it and answers with a sentence; it never echoes it.
+ *
+ * ⚠ AND THE FALLBACK IS DELIBERATELY VAGUE RATHER THAN WRONG. A refusal this
+ * does not recognise is still worth saying happened -- a pilot that looks idle
+ * for a reason it will not name is the thing this whole readout exists to stop --
+ * but guessing WHICH reason would put a confident falsehood on screen.
+ */
+function refusalWords(raw: string): string {
+  const text = String(raw ?? "");
+  if (/NotWithinRange|OutOfRange|TooFar/i.test(text)) {
+    return "The server refused that: it is out of reach from here.";
+  }
+  if (/Warping/i.test(text)) {
+    return "The server refused that: something is in warp.";
+  }
+  if (/NotPresent|NotFound|Cancelled/i.test(text)) {
+    return "The server refused that: it is no longer there.";
+  }
+  return "The server refused that call.";
+}
+
 export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionController {
   let mem = freshMemory();
   /**
@@ -4950,7 +4978,39 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       return { kind: "wait" };
     }
     if (decision.action.kind !== "wait") {
-      await deps.issue(decision.action);
+      try {
+        await deps.issue(decision.action);
+      } catch (error) {
+        // ⚠ A REFUSED CALL IS AN ANSWER, NOT THE END OF THE RUN. This used to
+        // propagate: the rejection came out of `tick`, out of `run`, and landed
+        // on a `void run()` in flow.ts as an UNHANDLED PROMISE REJECTION. The
+        // loop stopped dead while `mem.status` still said "running", so the
+        // panel went on showing a flying pilot that had in fact stopped
+        // ticking. Reported live 2026-09-11 as a script error the page raised:
+        // "TargetNotWithinRangeGeneric", twice, and the page stopped updating.
+        //
+        // ⚠ AND IT MUST NOT PAUSE THE RUN EITHER, which is what makes this
+        // different from the observe() failure above. A read that fails leaves
+        // this loop with no idea what is true, so it must not act. A WRITE that
+        // fails leaves the world exactly as it was and the next tick re-reads it
+        // from the server anyway -- a lock refused for range is a lock that will
+        // land once the ship drifts closer, and a pilot that stopped flying over
+        // it would never get there.
+        //
+        // ⚠ THE SERVER'S OWN WORDS NEVER REACH THE PLAYER. A refusal arrives as
+        // its retail error-class name (`TargetNotWithinRangeGeneric`), which is
+        // raw vocabulary; `refusalWords` says what it means in plain language
+        // instead. The raw text is kept on `failureReason`, which is diagnostic
+        // rather than prose.
+        if (token !== runToken || mem.status !== "running") {
+          return { kind: "wait" };
+        }
+        const raw = error instanceof Error ? error.message : String(error);
+        mem.failureReason = raw;
+        mem.why = `${decision.why} ${refusalWords(raw)}`;
+        report();
+        return { kind: "wait" };
+      }
     }
     report();
     return decision.action;
@@ -5053,14 +5113,37 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       report();
     },
     tick,
+    /**
+     * ⚠ THIS MUST NOT BE ABLE TO REJECT, and it is started with `void` at every
+     * call site, which is exactly why. A rejection out of here reaches the
+     * window as an unhandled promise rejection: the run is over, nothing says
+     * so, and `mem.status` still reads "running" -- which is the shape of the
+     * failure reported live on 2026-09-11. `tick` already swallows the two
+     * things that can realistically throw (a failed read, a refused write), so
+     * anything caught HERE is a defect in this file rather than an answer from
+     * the server. It stops the run, because a ladder that threw cannot be
+     * trusted to keep deciding -- but it stops it VISIBLY, in the readout the
+     * panel is already watching, instead of in the console.
+     */
     async run(): Promise<void> {
       const token = runToken;
-      while (mem.status === "running" && token === runToken) {
-        await tick();
-        if (mem.status !== "running" || token !== runToken) {
-          break;
+      try {
+        while (mem.status === "running" && token === runToken) {
+          await tick();
+          if (mem.status !== "running" || token !== runToken) {
+            break;
+          }
+          await deps.sleep(FLEET_COMPANION_CADENCE_MS);
         }
-        await deps.sleep(FLEET_COMPANION_CADENCE_MS);
+      } catch (error) {
+        if (token !== runToken) {
+          return;
+        }
+        mem.status = "error";
+        mem.failureReason = error instanceof Error ? error.message : String(error);
+        mem.why = "This pilot stopped: something went wrong in its own decisions.";
+        mem.action = null;
+        report();
       }
     },
     snapshot,
