@@ -227,6 +227,8 @@ import {
   decodeFleetCenter,
   decodeFleetInviteNotification,
 } from "../bridge/fleetCenter.ts";
+import { canTagInFleet } from "../bridge/fleetCommand.ts";
+import type { FleetCenterSnapshot } from "../bridge/fleetCenter.ts";
 import { decodeAvailableFleetAds } from "../bridge/fleetAds.ts";
 import {
   FLEET_BROADCAST_TTL_MS,
@@ -5477,14 +5479,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // "not in a fleet".
         let inFleet: boolean | null = null;
         let fleetMemberCharacterIDs: readonly number[] | null = null;
+        // Held past the try so the tagging verdict below can be answered from
+        // the read that ALREADY happened. A second roster read to ask "am I a
+        // commander" would double this loop's most frequent HTTP call to learn
+        // something the first read's own rows already say.
+        let fleetSnapshot: FleetCenterSnapshot | null = null;
         try {
-          const fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
+          fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
           inFleet = fleetSnapshot.availability === "ready";
           fleetMemberCharacterIDs = authoritativeFleetMemberCharacterIDs(fleetSnapshot);
         } catch {
           inFleet = null;
           fleetMemberCharacterIDs = null;
+          fleetSnapshot = null;
         }
+        const ownCharacterID = store.station.get().online?.characterID ?? null;
         // ⚠ FREE, NEVER GATED — unlike the roster read just above (an HTTP
         // call, gated elsewhere behind FLEET_SUPPORT_MACROS), these two ride
         // the fleet slice the notification drain already fills. Gating them
@@ -5527,13 +5536,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           snapshot,
           inFleet,
           fleetMemberCharacterIDs,
-          myCharacterID: store.station.get().online?.characterID ?? null,
+          myCharacterID: ownCharacterID,
           fleetTargetTags,
           fleetBroadcast,
           lockedTargetIDs,
-          // Phase 7 fills the tagging verdict; that is a roster-role question,
-          // not a store read, so it stays honestly unknown until then.
-          canTag: null,
+          // ⚠ THE GATE IS CLIENT-SIDE BECAUSE THE SERVER REFUSES SILENTLY.
+          // `setFleetTargetTag` returns a bare `false` for a non-commander and
+          // its only caller discards that boolean, so the write's own ack says
+          // `ok` either way -- there is no answer to read back. The roster this
+          // tick already fetched is the only place the truth exists. See
+          // `bridge/fleetCommand.ts`.
+          //
+          // Three-state, and the middle state matters: `null` is "could not
+          // look" and `false` is "looked, and no". Both mean do not write; only
+          // `false` may be remembered. An unknown own-character id is `null` for
+          // the same reason -- without it there is no row to find, which is not
+          // evidence of anything.
+          canTag: ownCharacterID === null ? null : canTagInFleet(fleetSnapshot, ownCharacterID),
           botDrivenCharacterIDs: botDriven,
           // The invite the notification drain already parked in the fleet slice.
           // Read rather than re-fetched: every bridge response on this tick
@@ -6650,7 +6669,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * one an earlier lap made (step memory resets per lap; this does not).
    */
   let fleetApplication: ScriptObservation["fleetApplication"] = null;
-  const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
+  const FLEET_SUPPORT_MACROS = new Set([
+    "remote-rep",
+    "orbit-and-boost",
+    "remote-cap",
+    "orbit-fleet-mate",
+    "follow-fleet-mate",
+    // Also needs the bound-fleet read: it is where `canTag` comes from (see the
+    // fleet-read block below), not because it reads `fleetMemberCharacterIDs`.
+    "fleet-tag-target",
+  ]);
   const SCANNER_MACROS = new Set([
     "launch-scan-probes",
     "analyze-signatures",
@@ -7314,12 +7342,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // null so those blocks wait instead of treating every player hull as a mate.
         let inFleet: ScriptObservation["inFleet"] = null;
         let fleetMemberCharacterIDs: ScriptObservation["fleetMemberCharacterIDs"] = null;
+        // Held past the try so fleet-tag-target's canTag verdict below can be
+        // answered from the read that ALREADY happened — same reasoning as
+        // `makeFleetCompanionDeps`'s own `fleetSnapshot`, which this mirrors. A
+        // second roster read to ask "am I a commander" would double this block's
+        // one HTTP call to learn something the first read's own rows already say.
+        let fleetSnapshot: FleetCenterSnapshot | null = null;
         if (
           macro !== null &&
           (FLEET_MANAGEMENT_MACROS.has(macro) || FLEET_SUPPORT_MACROS.has(macro))
         ) {
           try {
-            const fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
+            fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
             inFleet =
               fleetSnapshot.availability === "ready"
                 ? true
@@ -7332,8 +7366,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           } catch {
             inFleet = null;
             fleetMemberCharacterIDs = null;
+            fleetSnapshot = null;
           }
         }
+        // ⚠ THE GATE IS CLIENT-SIDE BECAUSE THE SERVER REFUSES SILENTLY — see
+        // bridge/fleetCommand.ts's header and api.ts's setFleetTargetTag warning.
+        // Three-state: `null` is "could not look" (own character id unknown, or
+        // the roster read above failed/never ran), `false`/`true` are the
+        // settled answer off THIS tick's own roster read.
+        const ownCharacterID = store.station.get().online?.characterID ?? null;
+        const canTag: ScriptObservation["canTag"] =
+          ownCharacterID === null ? null : canTagInFleet(fleetSnapshot, ownCharacterID);
         // Fleet target tags + the most recent broadcast, straight off the
         // STORE rather than a read. ⚠ FREE, AND NEVER GATED like the roster
         // read just above — that one costs an HTTP call per macro, so it is
@@ -7570,6 +7613,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           fleetApplication,
           fleetMemberCharacterIDs,
           fleetTargetTags,
+          canTag,
           fleetBroadcast,
           targetGroupNames,
           squadPrimaryTargetID,
@@ -7602,6 +7646,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "orbit":
             await api.orbit(action.targetID, action.range, callOptions);
+            return;
+          case "keepAtRange":
+            await api.keepAtRange(action.targetID, action.range, callOptions);
+            return;
+          case "setFleetTargetTag":
+            // ⚠ THE ACK IS NOT PROOF (api.ts's own warning on this wrapper). The
+            // decider that emitted this action has already checked `obs.canTag`
+            // before issuing it, and confirms the write landed by reading
+            // `fleetTargetTags` on a LATER tick — never by trusting this call's
+            // own success.
+            await api.setFleetTargetTag(action.targetID, action.tag, callOptions);
             return;
           case "dock":
             await api.dock(action.stationID, callOptions);

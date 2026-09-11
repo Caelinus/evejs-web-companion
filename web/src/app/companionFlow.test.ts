@@ -20,6 +20,7 @@ import {
 } from "../nav/fleetCompanionLoop.ts";
 import { FLEET_BROADCAST_TTL_MS } from "../bridge/fleetBroadcasts.ts";
 import {
+  SOLAR_SYSTEM_ID,
   STRIP_MINER_ITEM_IDS,
   fittingBody,
   flightBody,
@@ -37,6 +38,11 @@ const STATION = 60003760;
 const ALLOWED_CHAT_SENDER = 90000010;
 const HUMAN_FLEET_MEMBER = 90000011;
 
+// The documented ESI example character id itself (esi.evetech.net's own
+// `CharacterID` sample), used here as THIS pilot's own id -- the row
+// `canTagInFleet` has to find among the roster's members to answer for.
+const OWN_CHARACTER_ID = 90000001;
+
 const MINING_REQUEST = {
   beltID: BELT,
   beltName: "Asteroid Belt 1",
@@ -51,19 +57,53 @@ function keyVal(entries: readonly (readonly [string, unknown])[]) {
   return { type: "object", name: "util.KeyVal", args: { type: "dict", entries } };
 }
 
-/** A fleet the companion can legitimately obey. Ids are synthetic on purpose. */
-function readyFleet() {
+/**
+ * One roster row as the server's own `buildMemberPayload` would marshal it
+ * (see boundFleet.ts's `decodeMember`) -- just the three fields the gate
+ * reads. `job` and `role` default to 0 (FLEET_JOB_NONE / a value no
+ * FLEET_CMDR_ROLES entry matches), i.e. "not a commander by either test",
+ * so a fixture that only cares about `charID` stays a plain member.
+ */
+interface RosterMemberFixture {
+  readonly charID: number;
+  readonly job?: number;
+  readonly role?: number;
+}
+
+/**
+ * A fleet the companion can legitimately obey. Ids are synthetic on purpose.
+ * `members` is empty by default (the shape every existing caller here wants
+ * -- enough to pass the preflight, nothing to say about who can tag); pass
+ * rows to also exercise `canTagInFleet` over a roster that has THIS pilot's
+ * own row in it.
+ */
+function readyFleet(options: { readonly members?: readonly RosterMemberFixture[] } = {}) {
   const emptyDict = { type: "dict", entries: [] };
+  const members = options.members ?? [];
+  const membersDict =
+    members.length === 0
+      ? emptyDict
+      : {
+          type: "dict",
+          entries: members.map((member) => [
+            member.charID,
+            keyVal([
+              ["charID", member.charID],
+              ["job", member.job ?? 0],
+              ["role", member.role ?? 0],
+            ]),
+          ]),
+        };
   return {
     ok: true,
-    characterID: 90000001,
+    characterID: OWN_CHARACTER_ID,
     fleetID: null,
     reads: {
       GetInitState: {
         result: keyVal([
           ["motd", "Ready up."],
           ["fleetID", 90000002],
-          ["members", emptyDict],
+          ["members", membersDict],
           ["squads", emptyDict],
           ["wings", emptyDict],
         ]),
@@ -93,7 +133,13 @@ function noFleet() {
   };
 }
 
-function harness(options: { readonly docked?: boolean; readonly inFleet?: boolean } = {}) {
+function harness(
+  options: {
+    readonly docked?: boolean;
+    readonly inFleet?: boolean;
+    readonly members?: readonly RosterMemberFixture[];
+  } = {},
+) {
   const docked = options.docked ?? false;
   const inFleet = options.inFleet ?? true;
 
@@ -116,12 +162,38 @@ function harness(options: { readonly docked?: boolean; readonly inFleet?: boolea
     if (path === "/api/bridge/ship/ore-hold") return holdsBody(0, []);
     if (path === "/api/names") return namesBody(body);
     if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
-    if (path === "/api/bridge/bound-fleet") return inFleet ? readyFleet() : noFleet();
+    if (path === "/api/bridge/bound-fleet") {
+      return inFleet ? readyFleet({ members: options.members }) : noFleet();
+    }
     return { ok: true };
   }
 
   const store = createClientStore();
   return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
+}
+
+/**
+ * Seats a pilot online the way `flow.ts`'s own `selectCharacter` would, but
+ * directly through the store -- same shortcut `lootDispatchFlow.test.ts` and
+ * its siblings already take, since none of this file's tests otherwise drive
+ * login. `canTagInFleet` is asked about `store.station.get().online?.characterID`
+ * (flow.ts's `observe()`), so a test that wants a real `true`/`false` out of
+ * the gate -- rather than the "no own id, so null" answer every other test in
+ * this file has been getting all along -- has to seat one.
+ */
+function seatOnlineCharacter(store: ReturnType<typeof createClientStore>, characterID: number): void {
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID,
+      characterName: "Synthetic Pilot",
+      stationID: null,
+      structureID: null,
+      solarSystemID: SOLAR_SYSTEM_ID,
+      corporationID: 98000001,
+    },
+    station: null,
+  });
 }
 
 /**
@@ -641,6 +713,197 @@ test("a chat order inside FLEET_BROADCAST_TTL_MS reaches the loop and is obeyed"
     store.get().companion.followingOrderFrom,
     "chat",
     "and the readout must attribute it to chat, not the fleet's own ladder",
+  );
+  flow.stopFleetCompanion();
+});
+
+// --- the tagging gate: the flow feeds canTagInFleet the right row, and the --
+// --- verdict reaches the readout ---------------------------------------------
+//
+// `canTagInFleet` itself is proven pure, in isolation, beside `fleetCommand.ts`.
+// What is NOT proven there is that `flow.ts`'s `observe()` actually hands it
+// THIS pilot's own roster row and THIS pilot's own character id, and that the
+// answer survives the trip through `onProgress` into `store.companion.canTag`
+// -- the only place a player (or the ladder's own UI) ever reads it. Every
+// test below asserts on `store.get().companion.canTag`, never on a bare call
+// to the gate function, for exactly that reason: a test that only re-invoked
+// `canTagInFleet` would pass even if `flow.ts` fed it the wrong snapshot, the
+// wrong character id, or never wired the result into `onProgress` at all.
+
+test("this pilot's own row holding a commander ROLE reaches the readout as canTag true", async () => {
+  const { store, flow } = harness({
+    inFleet: true,
+    members: [{ charID: OWN_CHARACTER_ID, role: 2 }], // FLEET_ROLE_WING_COMMANDER
+  });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(store.get().companion.canTag, true);
+  flow.stopFleetCompanion();
+});
+
+test("this pilot's own row as a plain member (role 4, job 0) reaches the readout as canTag false", async () => {
+  const { store, flow } = harness({
+    inFleet: true,
+    members: [{ charID: OWN_CHARACTER_ID, role: 4, job: 0 }], // FLEET_ROLE_MEMBER, FLEET_JOB_NONE
+  });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(store.get().companion.canTag, false);
+  flow.stopFleetCompanion();
+});
+
+test("THE BITMASK TRAP: a plain member (role 4) carrying the CREATOR job bit (job 2) still reaches the readout as canTag true", async () => {
+  // A `member.job === FLEET_JOB_CREATOR` at the call site, or the wrong
+  // constant, would get this row wrong in exactly the way the server's own
+  // silent refusal would then hide from a player forever: the seat sits at
+  // role 4 (a plain member, by role alone) but the fleet creator's job bit is
+  // set -- FLEET_CMDR_ROLES.includes(4) is false, so only the `&` test on
+  // `job` can find this one. A wrong constant (e.g. FLEET_JOB_CREATOR
+  // mistakenly reading 1, the value it shares with FLEET_JOB_SCOUT) would
+  // flip this to false; a `===` in place of `&` would flip it too, since this
+  // row's `job` here is exactly 2 and would still pass a `=== 2` check by
+  // accident -- see the next test for the case that catches THAT mistake.
+  const { store, flow } = harness({
+    inFleet: true,
+    members: [{ charID: OWN_CHARACTER_ID, role: 4, job: 2 }], // member seat, FLEET_JOB_CREATOR bit
+  });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(store.get().companion.canTag, true);
+  flow.stopFleetCompanion();
+});
+
+test("the other half of the trap: a plain member (role 4) carrying only the SCOUT job bit (job 1) reaches the readout as canTag false", async () => {
+  // The bit FLEET_JOB_SCOUT (1) and the role FLEET_ROLE_LEADER (1) share a
+  // number, and FLEET_JOB_CREATOR is 2 -- so a constant that got
+  // "simplified" to FLEET_JOB_CREATOR = 1 would let THIS row (job 1, a mere
+  // scout) through as a commander. Paired with the previous test, these two
+  // rows are identical but for one bit each side of the real cut: this is
+  // what proves the module is testing the CREATOR bit specifically, not just
+  // "job is nonzero".
+  const { store, flow } = harness({
+    inFleet: true,
+    members: [{ charID: OWN_CHARACTER_ID, role: 4, job: 1 }], // member seat, FLEET_JOB_SCOUT bit
+  });
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(store.get().companion.canTag, false);
+  flow.stopFleetCompanion();
+});
+
+/**
+ * A bound-fleet responder that answers `readyFleet(...)` to the FIRST call
+ * (the preflight `startFleetCompanion` makes on its own, before the loop
+ * ever runs a tick) and something else -- an unreadable roster, or a settled
+ * "not in a fleet" -- to every call after that (the running loop's own
+ * per-tick read). Needed because both scenarios below are about the RUNNING
+ * loop's read going bad WHILE the companion is already flying, not about a
+ * preflight that refuses to start in the first place (that path is already
+ * covered above, by "an UNREADABLE fleet refuses the start too" and "a
+ * companion refuses to start outside a fleet").
+ */
+function harnessWithRosterGoingBadMidRun(afterPreflight: () => unknown) {
+  const store = createClientStore();
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  let boundFleetCalls = 0;
+
+  const fakeFetch = (async (input: unknown, init?: { body?: unknown }) => {
+    const path = String(input);
+    const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (path === "/api/bridge/bound-fleet") {
+      boundFleetCalls += 1;
+      if (boundFleetCalls === 1) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return readyFleet({ members: [{ charID: OWN_CHARACTER_ID, role: 1 }] });
+          },
+        };
+      }
+      // Every call after the preflight's own: the RUNNING loop's read, and
+      // the one under test.
+      const answer = afterPreflight();
+      if (answer instanceof Error) {
+        throw answer;
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return answer;
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        if (path === "/api/bridge/flight/status") return flightBody(false);
+        if (path === "/api/bridge/space/snapshot") return spaceBody();
+        if (path === "/api/bridge/fitting") return fittingBody({});
+        if (path === "/api/names") return namesBody(body as Record<string, unknown>);
+        if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
+}
+
+test("a roster read that FAILS mid-run answers canTag null, never false — could-not-look is not a verdict", async () => {
+  // ⚠ THIS IS THE TEST THAT PROVES THE THREE-STATE RETURN SURVIVES THE FLOW.
+  // `canTagInFleet` itself already refuses to guess on an unreadable
+  // snapshot; what this proves is that `flow.ts` actually PASSES it the
+  // failed read as `null` (via the caught exception clearing `fleetSnapshot`)
+  // rather than, say, reusing last tick's snapshot or defaulting to `false`
+  // on a caught error. Either of those bugs would make this test read `false`
+  // or `true` instead of `null`, while every other test in this file kept
+  // passing.
+  const { store, flow } = harnessWithRosterGoingBadMidRun(() => new Error("gateway unreachable"));
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  assert.equal(store.get().companion.status, "running", "the preflight's own read succeeded");
+
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(
+    store.get().companion.canTag,
+    null,
+    "the roster read failed this tick — unreadable is not evidence of anything, least of all 'not a commander'",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("the roster settling on NOT-IN-FLEET mid-run (not a failure) answers canTag false", async () => {
+  // The other settled state: every bound read explicitly refused with
+  // FleetNotFound, which is `canTagInFleet`'s OWN `false` branch, not its
+  // `null` one — proven reached here by feeding the running loop a genuine
+  // `noFleet()` answer on its own tick, after a preflight that found a fleet.
+  const { store, flow } = harnessWithRosterGoingBadMidRun(() => noFleet());
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  assert.equal(store.get().companion.status, "running", "the preflight's own read succeeded");
+
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(
+    store.get().companion.canTag,
+    false,
+    "not in a fleet at all is a settled, safe-to-remember 'no', not a could-not-look",
   );
   flow.stopFleetCompanion();
 });

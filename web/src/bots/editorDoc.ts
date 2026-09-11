@@ -274,7 +274,11 @@ export function newStepFor(macro: MacroID, makeId: IdGen): MacroStep {
       args: { item: { kind: "itemType", typeID: null, name: null }, price: { kind: "isk", value: 1000 } },
     };
   }
-  if (macro === "invite-to-fleet") {
+  if (macro === "invite-to-fleet" || macro === "orbit-fleet-mate" || macro === "follow-fleet-mate") {
+    // All three name a pilot with the same "character" arg and no honest
+    // default — there is no sensible "invite/orbit/follow nobody" — so it
+    // stays unbound and the validator asks the player to pick one before the
+    // bot can start.
     return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
   }
   if (macro === "join-advertised-fleet") {

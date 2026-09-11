@@ -66,6 +66,15 @@ export type ScriptAction =
   | { readonly kind: "approach"; readonly targetID: number }
   | { readonly kind: "align"; readonly targetID: number }
   | { readonly kind: "orbit"; readonly targetID: number; readonly range: number }
+  /** Hold off a target at a set distance (api.keepAtRange) — "stand off", not "circle". */
+  | { readonly kind: "keepAtRange"; readonly targetID: number; readonly range: number }
+  /**
+   * SET a fleet target tag (api.setFleetTargetTag; server confirm-gated, but its
+   * ack proves nothing for a non-commander — see the wrapper's own warning and
+   * bridge/fleetCommand.ts). The decider that emits this has already checked
+   * `ScriptObservation.canTag`; this action carries no gate of its own.
+   */
+  | { readonly kind: "setFleetTargetTag"; readonly targetID: number; readonly tag: string }
   | { readonly kind: "jump"; readonly fromGateID: number; readonly toGateID: number }
   | { readonly kind: "lock"; readonly targetID: number }
   | { readonly kind: "unlock"; readonly targetID: number }

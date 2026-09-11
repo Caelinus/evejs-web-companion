@@ -228,6 +228,17 @@ export interface ScriptObservation {
    */
   readonly fleetTargetTags?: ReadonlyMap<number, string> | null;
   /**
+   * Whether THIS character may set a fleet target tag right now — three states,
+   * not two (see `bridge/fleetCommand.ts`'s header, which this mirrors exactly).
+   * `null` = the roster could not be read (or this character's own row was not
+   * in it) — WAIT, never guess "no". `false` = read cleanly, and this pilot is
+   * not the fleet boss or a wing/squad commander — a settled, safe-to-remember
+   * "no". `true` = go ahead. Populated from the SAME bound-fleet read that fills
+   * `fleetMemberCharacterIDs` (gated the same way, behind the tagging block
+   * being the active step) — not a second roster call.
+   */
+  readonly canTag?: boolean | null;
+  /**
    * The most recent `OnFleetBroadcast` call ("shoot that"), read off the
    * store and ALREADY freshness-filtered against `FLEET_BROADCAST_TTL_MS` at
    * observation build time — never here, and never in the store's reducer.

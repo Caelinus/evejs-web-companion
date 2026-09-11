@@ -134,6 +134,12 @@ export function macroName(macro: MacroID): string {
       return "Remote-repair the fleet";
     case "orbit-and-boost":
       return "Orbit and boost a fleet-mate";
+    case "orbit-fleet-mate":
+      return "Orbit a fleet-mate by name";
+    case "follow-fleet-mate":
+      return "Hold range off a fleet-mate by name";
+    case "fleet-tag-target":
+      return "Tag the top target for the fleet";
     case "create-fleet":
       return "Form a fleet";
     case "invite-to-fleet":
@@ -569,6 +575,24 @@ function macroPhrase(step: MacroStep): string {
       return "Remote-repair the most hurt fleet-mate on grid";
     case "orbit-and-boost":
       return "Orbit a fleet-mate and keep the remote reps running";
+    case "orbit-fleet-mate": {
+      const who = step.args["who"];
+      const name =
+        who !== undefined && who.kind === "character" && who.name !== null && who.name.length > 0
+          ? who.name
+          : "a fleet-mate you pick";
+      return `Orbit ${name}`;
+    }
+    case "follow-fleet-mate": {
+      const who = step.args["who"];
+      const name =
+        who !== undefined && who.kind === "character" && who.name !== null && who.name.length > 0
+          ? who.name
+          : "a fleet-mate you pick";
+      return `Hold range off ${name}`;
+    }
+    case "fleet-tag-target":
+      return "Mark the top-priority hostile with a fleet target tag, while you are the fleet's commander";
     case "create-fleet":
       return "Form a fleet with you as the boss";
     case "invite-to-fleet": {

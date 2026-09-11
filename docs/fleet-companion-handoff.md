@@ -21,6 +21,7 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 2 | **COMPLETE** — no watch and no macro decides into a warp, on any tank |
 | Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
 | Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
+| Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
 | Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
@@ -486,6 +487,110 @@ blind-read guard, and the rung ORDER against the fleet-order rung) was neutered
 in turn on the copy, and each test was confirmed to fail for the right reason
 and pass unmutated. Worth repeating for any rung whose whole value is that it
 does the counter-intuitive thing.
+
+## Phase 4 is COMPLETE, 2026-09-11
+
+The commander gate, two `api.ts` wrappers, and three new bot-script blocks.
+
+| Piece | Where |
+| --- | --- |
+| The commander gate, three-state | `web/src/bridge/fleetCommand.ts` + test |
+| `canTag`, for the companion AND the DSL | `makeFleetCompanionDeps` / `makeScriptRunnerDeps`, `app/flow.ts` |
+| `setFleetTargetTag`, `jumpThroughFleet` | `app/api.ts` + `beyonceWriteApi.test.ts` |
+| `orbit-fleet-mate`, `follow-fleet-mate`, `fleet-tag-target` | `nav/scriptMacros.ts` and the checklist below |
+
+### `canTag` was a pipe with nothing in it
+
+Every consumer was already built and honest: the observation field, the ladder
+memory, the progress event, the store slice, and a panel badge that renders
+"not known" / "yes" / "no - not a fleet commander". It had shown **"not known"
+to every player since phase 0b** because the source was a literal `null`. Phase
+4 did not build that readout; it filled it.
+
+It is answered from the roster read the loop ALREADY makes every tick -- the
+decoded snapshot is now held past its try/catch rather than a second HTTP call
+being made to ask about rows the first read already contains.
+
+### Why the gate is client-side, and why that is not a preference
+
+`setFleetTargetTag` (`fleetRuntime.js:1310-1326`) returns a bare `false` for a
+non-commander, and its ONLY caller (`beyonceService.js:3320`) **discards that
+boolean and returns null unconditionally**. So `{ok: true, applied: true}` comes
+back whether the tag landed or was silently dropped. There is no answer to read.
+The roster is the only place the truth exists.
+
+⚠ **THE CONSTANTS ARE A TRAP AND A PREVIOUS DRAFT FELL IN TWICE.**
+`FLEET_JOB_SCOUT` is `1`, `FLEET_ROLE_LEADER` is ALSO `1`, and
+`FLEET_JOB_CREATOR` is `2` -- two unrelated enums on two unrelated fields that
+both start at 1. `job` is a BITMASK tested with `&`; `role` is a hierarchy seat
+tested against a set. Get it wrong and scouts gain tagging while the fleet
+CREATOR loses it -- and because the refusal is silent, **that bug can never
+surface from the client**. Verified against `fleetConstants.js:1-9`.
+
+⚠ **THREE-STATE, AND ONLY `false` MAY BE REMEMBERED.** `null` is "could not
+look", `false` is "looked, and no". Both mean do not write. A caller that
+collapses this to a boolean and caches it freezes a transient roster outage into
+a permanent "not a commander" -- which is the exact bug class the gate exists to
+prevent. The flow tests pin it: a mutant using `!!canTagInFleet(...)` fails the
+roster-unreadable test and nothing else.
+
+### The build-breaker checklist, CORRECTED
+
+Adding a `MacroID` breaks all of these (the doc's older list was wrong twice):
+
+1. `bots/botScript.ts` -- the `MacroID` union **and** `MACRO_IDS`
+2. `bots/macroSpecs.ts` -- `MACRO_SPECS`
+3. `bots/editorOptions.ts` -- `MACRO_ARG_DESCRIPTORS`
+4. `bots/runPolicy.ts` -- `MACRO_RUN_POLICY`
+5. `bots/macroCatalogView.ts` -- `ENTRIES` (what the palette renders)
+6. `bots/scriptText.ts` -- `macroName` AND `macroPhrase`, two switches
+7. `nav/scriptMacros.ts` -- the decider and `SCRIPT_MACROS`
+8. `bots/editorDoc.ts` `newStepFor` -- not enforced, but `editorDoc.test.ts` has
+   a golden fixture that catches it
+
+⚠ **`MACRO_IDS` IS HAND-MAINTAINED, NOT DERIVED FROM THE TYPE.** It is the only
+entry above that the COMPILER DOES NOT ENFORCE. Miss it and the build stays
+green while the block vanishes from the palette and from every test that
+iterates the list.
+
+⚠ **`validateScript.ts` needs NO edit.** The older doc lists it. It only reads
+`MACRO_SPECS[step.macro]`, so it is downstream of item 2 -- listing it sends
+somebody editing a file that does not need editing.
+
+⚠ **ADDING A `ScriptAction` KIND IS A SEPARATE LIST, and it was missing
+entirely.** Found during this phase: `nav/botLog.ts`'s `describeAction` is a
+second exhaustive switch with no default (the flight recorder), with its own
+golden fixture `EVERY_ACTION` in `botLog.test.ts`. `tsc` catches the switch; the
+fixture catches the entry. Both must be updated alongside the DSL runner's
+`issue:` case in `flow.ts`.
+
+### What the tag block honestly is
+
+⚠ **SINGLE-LETTER, SINGLE-PILOT.** Nothing can tell whether the FC or another
+companion already lettered a ship, so the only thing preventing a re-tag is
+memory of this block's OWN writes. It is safe only when exactly one pilot in a
+squad runs it, and the catalogue entry says so in plain language. Do not call it
+smart tagging anywhere a player reads.
+
+It tags `"1"`, the top-ranked stock tag by `targetPriority.ts`'s own ordering
+(digits outrank letters because a digit reads as an ordinal kill order). It
+confirms by **seeing the tag in the next tick's `targetTags`**, never by the
+write's ack, and gives up after `MAX_FLEET_TAG_ATTEMPTS` rather than re-sending
+forever. Its three states: `null` waits, `false` SKIPS (never blocks -- a
+rank-and-file pilot keeps fighting and looting, it just never fires the write),
+`true` proceeds.
+
+### Deviations the implementer flagged rather than hid
+
+- `orbit-fleet-mate` / `follow-fleet-mate` are pure escorts and carry NO
+  remote-repairer requirement, unlike the logistics-specific `orbit-and-boost`
+  they borrow their shape from. A general-purpose block was judged more useful
+  than a second logi block.
+- `fleet-tag-target` ranks over the NPC hostile pool (`hostileRows`), the same
+  pool `fight-the-rats` uses. No PvP-player pool is wired in, because none
+  exists to reuse.
+- `FLEET_MATE_ESCORT_RANGE_M = 2000` is a NEW constant rather than a reuse of
+  `ORBIT_BOOST_RANGE_M`, which holds the same value for a different reason.
 
 ## Decided, so do not re-litigate
 

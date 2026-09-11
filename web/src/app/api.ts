@@ -10,6 +10,7 @@ import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
+import { decodeBeyonceWriteAck, type BeyonceWriteAck } from "../bridge/boundBeyonceWrites.ts";
 import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
 import {
   decodeCharCreationTables,
@@ -2412,6 +2413,55 @@ export async function dock(
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(await postJson("/api/bridge/flight/dock", { stationID }, options));
+}
+
+/**
+ * SET (or CLEAR, `tag: null`) the fleet target tag on an entity
+ * (beyonce.CmdFleetTagTarget). Confirm-gated at the BFF.
+ *
+ * ⚠ THE ACK IS NOT PROOF. The server silently refuses a non-commander by
+ * returning a plain `false` from CmdFleetTagTarget, and its only caller
+ * (D:\evet\server\src\services\ship\beyonceService.js:3320) discards that
+ * boolean and returns null unconditionally — so `{ok: true, applied: true}`
+ * comes back identically whether the tag landed or was dropped on the floor.
+ * A caller MUST confirm by seeing the tag show up in a later `targetTags`
+ * read; this call's own success tells you nothing.
+ */
+export async function setFleetTargetTag(
+  itemID: number,
+  tag: string | null,
+  options: ApiOptions = {},
+): Promise<BeyonceWriteAck> {
+  const data = await postJson(
+    "/api/bridge/flight/fleet-tag-target",
+    { itemID, tag, confirm: true },
+    options,
+  );
+  return decodeBeyonceWriteAck(data as unknown as JsonValue);
+}
+
+/**
+ * JUMP through a fleet-mate's cyno bridge (beyonce.CmdJumpThroughFleet).
+ * Confirm-gated at the BFF; consumes bridge fuel and transitions the session
+ * to a new system, so it also waits out the route-transition handshake there.
+ *
+ * `otherCharID`/`otherShipID` name the bridge owner's character and ship; the
+ * BFF validates both against the session's own fleet membership server-side,
+ * so a foreign (non-fleet) ship cannot be named here to hijack a bridge.
+ */
+export async function jumpThroughFleet(
+  otherCharID: number,
+  otherShipID: number,
+  beaconID: number,
+  solarSystemID: number,
+  options: ApiOptions = {},
+): Promise<BeyonceWriteAck> {
+  const data = await postJson(
+    "/api/bridge/flight/jump-through-fleet",
+    { otherCharID, otherShipID, beaconID, solarSystemID, confirm: true },
+    options,
+  );
+  return decodeBeyonceWriteAck(data as unknown as JsonValue);
 }
 
 // --- R11 Space overview + ship HUD -----------------------------------------
