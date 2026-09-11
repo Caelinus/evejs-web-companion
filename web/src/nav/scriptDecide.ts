@@ -484,6 +484,7 @@ const SAY = {
   stepTooLong: "A step ran for a very long time without finishing, so the bot stopped.",
   unknownMacro: "This program uses an action the bot does not know, so it stopped.",
   headingHome: "A watched warning was hit, so the bot is heading home to stop.",
+  inWarp: "The ship is in warp, so the bot is waiting until it lands.",
 } as const;
 
 function stoppedBecause(clause: string): string {
@@ -506,6 +507,52 @@ export function decideScriptAction(
 ): ScriptTickResult {
   if (mem.position.kind === "done") {
     return done(mem);
+  }
+
+  // 0.5 IN WARP, NOTHING IS DECIDED. There is no grid to act on: a module, a
+  // drone or a lock call issued mid-flight is either refused outright or lands
+  // against the grid the ship has already left. So the whole tick is a wait.
+  //
+  // ⚠ THIS IS THE ONLY WARP CHECK THE INTERRUPTS HAVE EVER HAD. The macros
+  // carry one each -- seventeen copies of `obs.inWarp === true` in
+  // scriptMacros.ts -- but `fireInterrupt` below has none, so until this guard a
+  // watch could fire in mid-warp and issue against nothing. TANK LAYER IS
+  // IRRELEVANT HERE and that is the point of putting it this high: it covers
+  // `armor-below` on an armour-tanked hull exactly as it covers `shield-below`
+  // on a shield-tanked one, and `hull-below`, `capacitor-below` and
+  // `drone-health-below` with them, because it sits above the scan rather than
+  // inside any one row.
+  //
+  // It also states the decided precedence rule -- a server fleet warp outranks
+  // everything this bot wants -- for every interrupt and every macro at once.
+  // It does NOT distinguish a fleet warp from a self-issued one, because
+  // nothing in this client can: `inWarp` is derived from `shipMode` alone.
+  //
+  // `memory` passes through UNTOUCHED, and that is what makes it safe to sit
+  // above the latch: a latched trip, a released alert, a repair tally and a
+  // drone-redeploy record each resume on the exact tick the warp clears, and
+  // none of them spends the flight.
+  //
+  // `=== true`, never `!== false`: an unreadable `inWarp` fails OPEN, matching
+  // every other tri-state read here. The price of that choice is that a stuck
+  // `true` idles the script until `maxRuntimeMinutes` ends the run -- a bounded
+  // failure, and the right side to err on against issuing into warp forever.
+  //
+  // Placed AFTER the `done` check and not before it, which is a deliberate
+  // divergence from the spec: `done()` issues nothing, so warping cannot make
+  // it unsafe, and going first would keep a finished program reporting
+  // "running" for the length of an unrelated warp.
+  if (obs.inWarp === true) {
+    return {
+      action: WAIT,
+      why: SAY.inWarp,
+      phase: "In warp",
+      stepPath: null,
+      interruptID: null,
+      status: "running",
+      pauseReason: null,
+      memory: mem,
+    };
   }
 
   // 1. A latched "dock and stop" is flying the ship home — or a latched "dock
