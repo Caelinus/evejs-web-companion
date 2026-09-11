@@ -12,6 +12,7 @@ import {
   freshLadderMemory,
   supervisorsInFleet,
   type CompanionDecision,
+  type CompanionFlee,
   type CompanionLadderMemory,
   type FleetCompanionDeps,
   type FleetCompanionObservation,
@@ -2681,6 +2682,297 @@ test("a fleet order with a real call to make still beats everything beneath it",
   );
   assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
   assert.notEqual(decision.standing, true, "a real call is never merely standing");
+});
+
+// --- rung 5: flee ------------------------------------------------------------
+//
+// Above the drone rung and above the fleet rung; below tank-up and tackle-tag.
+// See `decideFlee`'s own header for the operator decision that put it above the
+// fleet rung, and for what that placement buys over the written precedence.
+
+/** The system a fleeing pilot is remembering, so a later return has a name for it. */
+const HOME_SYSTEM = 30000142;
+
+/** A hurt ship on a grid with a station to run to. */
+function fleeObs(overrides: Partial<FleetCompanionObservation> = {}): FleetCompanionObservation {
+  return obs({
+    health: 0.1,
+    snapshot: gridWithStation(200_000),
+    flightStatus: { solarSystemID: HOME_SYSTEM } as FleetCompanionObservation["flightStatus"],
+    ...overrides,
+  });
+}
+
+test("a ship below its floor warps to the nearest station", () => {
+  const decision = decideCompanionAction(REQUEST, fleeObs());
+  assert.deepEqual(decision.action, { kind: "warp", targetID: 60000001 });
+  assert.equal(decision.phase, "Getting clear");
+});
+
+test("a ship ABOVE its floor does not flee, and the rung falls through", () => {
+  const decision = decideCompanionAction(REQUEST, fleeObs({ health: 0.9 }));
+  assert.notEqual(decision.phase, "Getting clear");
+});
+
+// The threshold is the OPERATOR's, not a constant. A pilot set to leave at 80%
+// must leave at 50%, and a default-configured one beside it must not.
+test("the floor that decides is the request's own", () => {
+  const jumpy: FleetCompanionRequest = { ...REQUEST, fleeHealthFloor: 0.8 };
+  assert.equal(decideCompanionAction(jumpy, fleeObs({ health: 0.5 })).phase, "Getting clear");
+  assert.notEqual(decideCompanionAction(REQUEST, fleeObs({ health: 0.5 })).phase, "Getting clear");
+});
+
+// Null is not "healthy" and it is not "dying" -- the same three-state discipline
+// the tank-up rung keeps about a layer ratio. Fleeing on a dropped poll would
+// abandon a fleet over a read that merely failed.
+test("an UNREADABLE health never starts a flee", () => {
+  const decision = decideCompanionAction(REQUEST, fleeObs({ health: null }));
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.deepEqual(decision.action, { kind: "wait" });
+});
+
+// --- THE ACCEPTANCE TEST FOR THIS PHASE ---------------------------------------
+//
+// The handover nominated "a pilot obeying a standing target call still flees
+// when it drops through its floor". It is written below, and it is worth having
+// -- but it is NOT what proves this phase, and that was established by moving
+// the rung rather than by reasoning about it.
+//
+// ⚠ ONLY THE MID-LOCK TEST DISCRIMINATES. With the flee rung moved beneath the
+// fleet rung -- where the written precedence put it -- the standing test still
+// passes, because phase 5's parking fix already holds a standing decision aside
+// and lets the rungs below it run. The case that FAILS there, and the only one,
+// is a pilot with a fresh primary still to lock: the fleet rung has a real call
+// to issue, a real call wins outright, and the hurt pilot locks instead of
+// leaving. That is the case the operator's ordering was chosen for, so that is
+// the acceptance test for this phase.
+//
+// Both are kept. The standing one documents that the combination works; the
+// mid-lock one is the one that would catch someone moving the rung back.
+//
+// ⚠ THE GRID MUST CARRY BOTH THE STATION AND THE CALLED SHIP, and the first
+// draft of these tests did not. `fleeObs`'s default grid has a station and
+// nothing else, so `bestTaggedEntity` found nothing on it and the fleet rung
+// fell through of its own accord -- the tests passed with the flee rung moved
+// BELOW the fleet rung, which is the very thing they exist to forbid. An
+// off-grid call is not an order for this pilot at all (see `decideFleetOrders`),
+// so a test about precedence has to put the called ship where the pilot can see
+// it or it is testing nothing.
+function fleeGridWithCalledShip(gunsUp = false): SpaceSnapshot {
+  return {
+    inSpace: true,
+    ship: {
+      position: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+      activeModuleIDs: gunsUp ? [GUN_1] : [],
+      weaponBanks: {},
+    },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: TACKLE, kind: "ship", isSelf: false, position: { x: 10_000, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: 60000001, kind: "station", isSelf: false, position: { x: 200_000, y: 0, z: 0 }, radius: 0, mode: null },
+    ],
+  } as unknown as SpaceSnapshot;
+}
+
+test("a pilot obeying a STANDING target call still flees when it drops through its floor", () => {
+  const engaging: FleetCompanionRequest = { ...REQUEST, weaponModuleIDs: [GUN_1] };
+  // ⚠ GENUINELY STANDING, which takes a seeded memory to reach. The target is
+  // locked AND the gun is cycling AND this loop is the one that aimed it, so
+  // `decideOpenFire` has nothing left to start and the fleet rung hands back a
+  // readout rather than a call. Without the seed the rung still has an
+  // `activate` to issue and this would be the mid-engagement case below, under
+  // a name that claims more than it tests.
+  const standing: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    lastFireTargetID: TACKLE,
+    lastFireModuleIDs: [GUN_1],
+  };
+  const decision = decideCompanionAction(
+    engaging,
+    fleeObs({
+      snapshot: fleeGridWithCalledShip(true),
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [TACKLE],
+    }),
+    standing,
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The seed above is only honest if it really does produce a standing decision.
+// This pins that: the same memory and grid on a HEALTHY pilot must fall all the
+// way through the ladder and come back marked standing.
+test("the seeded engagement really is standing, not merely mid-engagement", () => {
+  const engaging: FleetCompanionRequest = { ...REQUEST, weaponModuleIDs: [GUN_1] };
+  const decision = decideCompanionAction(
+    engaging,
+    fleeObs({
+      health: 0.9,
+      snapshot: fleeGridWithCalledShip(true),
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [TACKLE],
+    }),
+    { ...freshLadderMemory(), lastFireTargetID: TACKLE, lastFireModuleIDs: [GUN_1] },
+  );
+  assert.equal(decision.standing, true);
+  assert.equal(decision.phase, "Obeying fleet");
+});
+
+test("a pilot MID-LOCK on a fresh primary still flees", () => {
+  // This is the case the ordering was chosen for. Nothing is locked yet, so the
+  // fleet rung has a real `lock` to issue -- and under the written precedence it
+  // would have won outright, then one activate per weapon after it: seven ticks
+  // on a six-gun ship before anything beneath it got a turn.
+  const engaging: FleetCompanionRequest = { ...REQUEST, weaponModuleIDs: [GUN_1] };
+  const decision = decideCompanionAction(
+    engaging,
+    fleeObs({
+      snapshot: fleeGridWithCalledShip(),
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "lock", "a lock must not outrank leaving");
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The other side of the same coin: a HEALTHY pilot on that identical grid must
+// still obey the call. Without this, "flees" could be passing because the fleet
+// rung is broken rather than because it was outranked.
+test("the same pilot, unhurt, obeys the call on the same grid", () => {
+  const engaging: FleetCompanionRequest = { ...REQUEST, weaponModuleIDs: [GUN_1] };
+  const decision = decideCompanionAction(
+    engaging,
+    fleeObs({
+      health: 0.9,
+      snapshot: fleeGridWithCalledShip(),
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
+  assert.equal(decision.phase, "Obeying fleet");
+});
+
+// --- what stays ABOVE the flee ------------------------------------------------
+
+test("rung 1 still outranks the flee: nothing is decided mid-warp", () => {
+  const decision = decideCompanionAction(REQUEST, fleeObs({ inWarp: true }));
+  assert.equal(decision.phase, "In warp");
+  assert.deepEqual(decision.action, { kind: "wait" });
+});
+
+// A ship running away must keep hardening. The phase 6 spec asked for tank-up to
+// be "nested inside the flee continuation"; sitting ABOVE it is the same result
+// with no nesting, and this is the test that says so.
+test("a fleeing ship still lights an idle hardener first", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1] };
+  const decision = decideCompanionAction(
+    request,
+    fleeObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], []) }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_1, targetID: 0 });
+  assert.equal(decision.phase, "Tanking up");
+});
+
+// --- the drones come home, and do not go back out -----------------------------
+
+test("a flee recalls what is in space before it warps", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, useDrones: true };
+  const decision = decideCompanionAction(request, fleeObs({ myDroneIDs: [DRONE_A] }));
+  assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
+});
+
+// "Flee outranks drone redeploy", enforced at RUNTIME as the spec asked and not
+// merely by where the rung happens to be written. A redeploy record left
+// standing would have rung 6 putting drones back out of a ship that is leaving.
+test("latching a flee drops any drone redeploy cycle in flight", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, useDrones: true };
+  const mid: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], waited: 1 },
+  };
+  const decision = decideCompanionAction(request, fleeObs(), mid);
+  assert.equal(decision.memory.droneCycle, null, "a live redeploy must not survive a flee latching");
+});
+
+// --- nowhere to go ------------------------------------------------------------
+//
+// NOT a stop, unlike rung 2's answer to the very same grid: a hurt pilot still
+// has guns, and a fleet that has a use for them.
+
+test("no station and no safe spot does not stop the run, and does not spend a trip", () => {
+  const decision = decideCompanionAction(REQUEST, fleeObs({ snapshot: gridWithStation(null) }));
+  assert.equal(decision.stop, undefined, "being hurt with nowhere to go must not end the run");
+  assert.equal(decision.phase, "Standing by");
+  assert.equal(
+    decision.memory.fleeTripsSpent,
+    0,
+    "a flee that never moved the ship must not cost the operator a round trip",
+  );
+  assert.equal(decision.memory.flee, null, "and it must not leave a latch nothing can clear");
+});
+
+// --- the budget ---------------------------------------------------------------
+
+test("a flee spends one round trip, once, not once per tick", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  for (let tick = 0; tick < 4; tick += 1) {
+    memory = decideCompanionAction(REQUEST, fleeObs(), memory).memory;
+  }
+  assert.equal(memory.fleeTripsSpent, 1);
+});
+
+test("a pilot that has spent its round trips stays home", () => {
+  const spent: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    fleeTripsSpent: REQUEST.maxFleeAttempts,
+  };
+  const decision = decideCompanionAction(REQUEST, fleeObs(), spent);
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.equal(decision.memory.flee, null);
+});
+
+// --- arriving -----------------------------------------------------------------
+
+/** A flee already latched, mid-trip, with whatever overrides a test needs. */
+function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory {
+  return {
+    ...freshLadderMemory(),
+    fleeTripsSpent: 1,
+    flee: {
+      triggeredAtMs: 1,
+      triggeredAtHealth: 0.12,
+      fromSolarSystemID: HOME_SYSTEM,
+      safeSpotWarpIssued: false,
+      safeSpotWarpSeen: false,
+      droneRecallWaited: null,
+      ...overrides,
+    },
+  };
+}
+
+test("a docked pilot holds, and says what it left at", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ docked: true, inSpace: false }),
+    fleeing(),
+  );
+  assert.equal(decision.phase, "Safe");
+  assert.match(decision.why, /12%/);
+});
+
+// The mid-warp tick is the ONLY one that can see a safe-spot warp happen, and
+// before this phase it recorded the abandonment's latch and not the flee's.
+test("a mid-warp tick records the flee's safe-spot warp, not just the abandonment's", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ inWarp: true }),
+    fleeing({ safeSpotWarpIssued: true }),
+  );
+  assert.equal(decision.memory.flee?.safeSpotWarpSeen, true);
 });
 
 // --- rung 6: drones ----------------------------------------------------------

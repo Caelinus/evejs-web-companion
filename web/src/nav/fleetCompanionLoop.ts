@@ -357,6 +357,55 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
 } satisfies FleetCompanionRequest);
 
 /**
+ * A flee in progress — rung 5's latch, null whenever the pilot is not running
+ * from anything.
+ *
+ * ⚠ IT SATISFIES `SafetyRun` STRUCTURALLY, and that is what lets rung 5 fly
+ * the very same ladder rung 2 does instead of growing a second copy of it. The
+ * three flags under the divider ARE that contract — read `SafetyLeg` before
+ * renaming any of them.
+ *
+ * ⚠ RUN-LOCAL, NOT PERSISTED, unlike `CompanionAbandonment`. That one keeps a
+ * thirty-minute clock which only means something if it outlives a BFF restart.
+ * This one keeps no clock anybody waits on: a companion that comes back up
+ * reads its own health on the first tick and flees again within one tick if it
+ * still needs to, so persisting it would buy nothing and would have to answer
+ * what a half-finished flee means to a process that has forgotten where it was.
+ */
+export interface CompanionFlee {
+  /** When the floor was breached. For the readout, and for phase 6's budget. */
+  readonly triggeredAtMs: number;
+  /**
+   * The health reading that started it.
+   *
+   * Kept because the readout is the only place an operator ever sees WHY a
+   * pilot left, and "it was at 12%" is the thing that happened while "below
+   * 30%" is merely the setting they can already look up.
+   */
+  readonly triggeredAtHealth: number;
+  /**
+   * The system the pilot fled FROM, so a return has somewhere to go.
+   *
+   * ⚠ A SYSTEM, NOT A SPOT — option A, "remember the grid", chosen on
+   * simplicity grounds. And the return it feeds is BLIND by construction:
+   * there is no read anywhere that says whether a grid is clear. That was
+   * checked rather than assumed, and it is absent from the server, from the
+   * BFF and from this repo; the nearest thing, `hostileOnGrid`, counts NPCs
+   * only and is scoped to the grid the ship is already on. The attempt budget
+   * is the only thing that bounds a return, which is exactly why it exists.
+   *
+   * Null when the flight status could not say. A return this rung cannot name
+   * a destination for is one it does not attempt, never one it guesses at.
+   */
+  readonly fromSolarSystemID: number | null;
+
+  // ── the `SafetyRun` contract ────────────────────────────────────────
+  readonly safeSpotWarpIssued: boolean;
+  readonly safeSpotWarpSeen: boolean;
+  readonly droneRecallWaited: number | null;
+}
+
+/**
  * What the companion sees each tick.
  *
  * ⚠ IT EXTENDS `ScriptObservation` ON PURPOSE, and not because the companion is
@@ -802,6 +851,16 @@ export interface CompanionLadderMemory {
    * than of any one drone.
    */
   readonly droneCyclesSpent: number;
+  /** Rung 5's flee, or null when the pilot is not running from anything. */
+  readonly flee: CompanionFlee | null;
+  /**
+   * Round trips this run has spent, against `request.maxFleeAttempts`.
+   *
+   * Counted UP rather than down so the readout can say "2 of 3" without
+   * needing the request to hand, and never reset by anything in this commit —
+   * the return leg that earns a reset does not exist yet.
+   */
+  readonly fleeTripsSpent: number;
 }
 
 /** One recall-and-relaunch cycle in flight. */
@@ -839,6 +898,8 @@ export function freshLadderMemory(): CompanionLadderMemory {
     taggingGaveUpOn: [],
     droneCycle: null,
     droneCyclesSpent: 0,
+    flee: null,
+    fleeTripsSpent: 0,
   };
 }
 
@@ -1001,11 +1062,21 @@ export function decideCompanionAction(
     // but this reading is the only confirmation the get-safe step ever gets
     // that its warp actually took — every later tick has left warp by
     // definition, so a tick that discarded it would lose the fact for good.
-    const running = memory.abandonment;
-    const next =
-      running !== null && running.safeSpotWarpIssued && !running.safeSpotWarpSeen
-        ? { ...memory, abandonment: { ...running, safeSpotWarpSeen: true } }
-        : memory;
+    // ⚠ BOTH LATCHES, NOT JUST THE ABANDONMENT'S. Rung 5's flee flies the same
+    // safe-spot ladder and needs the same confirmation, and this is still the
+    // only tick that can give it: every later tick has left warp by definition,
+    // so a mid-warp tick that recorded one latch and not the other would leave
+    // a fleeing pilot waiting for a warp it had already finished.
+    const abandoning = memory.abandonment;
+    const fleeing = memory.flee;
+    const sawIt = (run: SafetyRun): boolean => run.safeSpotWarpIssued && !run.safeSpotWarpSeen;
+    let next = memory;
+    if (abandoning !== null && sawIt(abandoning)) {
+      next = { ...next, abandonment: { ...abandoning, safeSpotWarpSeen: true } };
+    }
+    if (fleeing !== null && sawIt(fleeing)) {
+      next = { ...next, flee: { ...fleeing, safeSpotWarpSeen: true } };
+    }
     return waiting(
       "In warp",
       "The fleet is warping this ship. Nothing is decided until it lands.",
@@ -1049,6 +1120,14 @@ export function decideCompanionAction(
     taggingGaveUpOn: memory.taggingGaveUpOn,
     droneCycle: memory.droneCycle,
     droneCyclesSpent: memory.droneCyclesSpent,
+    // ⚠ CARRIED, NOT CLEARED, and the difference from `abandonment` above is
+    // the whole point. That one is cleared because a human coming back is
+    // exactly the thing it was waiting for. A flee is about the ship's health
+    // and has nothing to do with who is in the fleet -- clearing it here would
+    // mean a supervisor logging back in cancelled a flee mid-warp and left a
+    // hurt pilot sitting on the grid it was leaving.
+    flee: memory.flee,
+    fleeTripsSpent: memory.fleeTripsSpent,
   };
 
   // Rung 3: tank up. Threaded even when it has nothing to do this tick —
@@ -1070,12 +1149,26 @@ export function decideCompanionAction(
     return tagging.decision;
   }
 
+  // Rung 5: flee. Above the drone rung and BELOW tank-up and tackle-tag, so a
+  // ship running away still hardens and still letters what is holding it -- see
+  // this rung's own header for why that placement does the spec's "nest tank-up
+  // inside the flee continuation" without any nesting, and for the operator
+  // decision that put it above the fleet rung at all.
+  //
+  // Threaded like rung 3: the tick that UNWINDS a flee it cannot fly issues no
+  // action, and a call site that took only the decision would throw that away
+  // and re-latch the same doomed flee for ever.
+  const fleeing = decideFlee(request, obs, tagging.memory, nowMs);
+  if (fleeing.decision !== null) {
+    return fleeing.decision;
+  }
+
   // Rung 6: drones. Above the fleet rung, like tank-up and tackle-tag and for
   // the same reason: it moves nothing, costs one call, and a pilot does not
   // stop obeying its commander to keep its drones alive. Threaded like rung 3
   // because most of what it does - waiting out a recall, counting down a
   // hold-off - happens on ticks that issue NO action at all.
-  const drones = decideDrones(request, obs, tagging.memory);
+  const drones = decideDrones(request, obs, fleeing.memory);
   if (drones.decision !== null) {
     return drones.decision;
   }
@@ -1219,7 +1312,7 @@ function decideAbandonment(
  * true — which is what makes "the warp was seen, and it is over" a safe read of
  * having arrived rather than of having merely been issued.
  */
-function reachedSafety(obs: FleetCompanionObservation, running: CompanionAbandonment): boolean {
+function reachedSafety(obs: FleetCompanionObservation, running: SafetyRun): boolean {
   if (obs.docked === true) {
     return true;
   }
@@ -2482,6 +2575,156 @@ function decideTackleTag(
   };
 }
 
+// ─── Rung 5: flee ────────────────────────────────────────────────────────────
+//
+// ⚠ ABOVE THE FLEET RUNG, AND THAT IS A DECISION THE OPERATOR MADE RATHER THAN
+// A DEFAULT ANYBODY INHERITED. The plan doc's decision 3 used to read
+//
+//     server fleet warp > FC broadcast > chat command > own flee rule
+//
+// which put a standing target call above a pilot's own survival. Phase 5's
+// parking fix had already removed the worst of that -- a STANDING call is held
+// aside and no longer ends the tick -- but a call with something real left to
+// issue still wins outright, and `lockThenEngage` issues one lock plus one
+// activate per weapon before it goes quiet. On a fresh primary with six guns
+// that is seven ticks, about fourteen seconds at this loop's cadence, and an FC
+// that keeps re-calling extends it without limit.
+//
+// The operator was asked and chose the flee. Decision 3 in the plan doc was
+// amended to match rather than left contradicting the code.
+//
+// ⚠ WHAT STAYS ABOVE IT: rung 1's warp yield (a fleet already leaving does not
+// need this pilot's opinion, and that half was never in dispute), rung 2's
+// supervision gate, rung 3's tank up and rung 4's tackle-tag. The last two
+// matter for a reason the phase 6 spec called out: a ship running away must
+// keep hardening and must keep lettering whatever is holding it, and rungs that
+// sit ABOVE the flee get that for free with no nesting. Both fall through the
+// moment they have nothing to issue -- which rung 3 only started reliably doing
+// once its unreadable-module-map spin was fixed, in the commit before this one.
+
+/** What rung 5 hands back: a decision when it has one, and always its memory. */
+interface FleeStep {
+  readonly decision: CompanionDecision | null;
+  readonly memory: CompanionLadderMemory;
+}
+
+/**
+ * Rung 5: leave while there is still a ship to leave in.
+ *
+ * ⚠ THE TRIGGER IS `obs.health`, WHICH IS ALREADY THE WORST LAYER. `lowestHealth`
+ * folds shield, armour and hull to their minimum and skips any layer that could
+ * not be read, and `observe()` runs it every tick. That matches what the field
+ * has always promised -- `fleeHealthFloor` is documented as "remaining fraction
+ * of ANY health layer that starts a flee" -- so no new read and no new fold.
+ */
+function decideFlee(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+  nowMs: number,
+): FleeStep {
+  const running = memory.flee;
+  if (running !== null) {
+    return flyTheFlee(request, obs, memory, running);
+  }
+
+  // ⚠ NULL IS NOT "HEALTHY", and this is the same three-state discipline the
+  // tank-up rung keeps about a layer ratio and the stand-down keeps about
+  // `hostileOnGrid`. A health read that could not answer is not evidence the
+  // ship is whole, and it is not evidence the ship is dying either. Fleeing
+  // blind would abandon a fleet on a dropped poll; the honest answer is to
+  // decide nothing this tick and look again in two seconds.
+  const health = obs.health ?? null;
+  if (health === null || health >= request.fleeHealthFloor) {
+    return { decision: null, memory };
+  }
+
+  // ⚠ THE BUDGET IS CHECKED BEFORE THE LATCH, NOT INSIDE THE LEG. A pilot that
+  // has spent its round trips is a pilot the operator told to stay home
+  // ("Stay home after N flee round trips", in the panel's own words), and
+  // staying home has to mean not starting a new trip rather than starting one
+  // and stopping partway.
+  if (memory.fleeTripsSpent >= request.maxFleeAttempts) {
+    return { decision: null, memory };
+  }
+
+  const latched: CompanionFlee = {
+    triggeredAtMs: nowMs,
+    triggeredAtHealth: health,
+    fromSolarSystemID: obs.flightStatus?.solarSystemID ?? null,
+    safeSpotWarpIssued: false,
+    safeSpotWarpSeen: false,
+    droneRecallWaited: null,
+  };
+  const started: CompanionLadderMemory = {
+    ...memory,
+    flee: latched,
+    fleeTripsSpent: memory.fleeTripsSpent + 1,
+    // ⚠ THE DRONE CYCLE DIES HERE, and the phase 6 spec asked for exactly this:
+    // "flee outranks drone redeploy -- enforce it at runtime, not by authoring
+    // order". The rung already sits above the drone rung, so this is the belt
+    // to that braces: a redeploy record left standing would have rung 6 trying
+    // to put drones back out of a ship that is in the middle of leaving.
+    // Nothing is lost by dropping it -- the outbound leg recalls everything
+    // this ship controls before it commits to a warp, whichever rung launched
+    // it.
+    droneCycle: null,
+  };
+  return flyTheFlee(request, obs, started, latched);
+}
+
+/**
+ * The leg itself, once a flee is latched.
+ *
+ * Split out so the latching tick and every tick after it fly the same code —
+ * a flee that behaved differently on its first tick than its second would be a
+ * flee whose first tick is untested by every test that starts from a latch.
+ */
+function flyTheFlee(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  mem: CompanionLadderMemory,
+  running: CompanionFlee,
+): FleeStep {
+  if (reachedSafety(obs, running)) {
+    // Arrived. Getting back out again is the next commit's job; until it
+    // exists, a pilot that fled stays where it is rather than pretending the
+    // trip is over.
+    const hurtAt = Math.round(running.triggeredAtHealth * 100);
+    return {
+      decision: waiting(
+        "Safe",
+        `Left the fight at ${hurtAt}% and is holding here.`,
+        mem,
+      ),
+      memory: mem,
+    };
+  }
+
+  const safe = runToSafety(request, obs, mem, {
+    run: running,
+    phase: "Getting clear",
+    because: "this ship is hurt",
+    write: (m, run) => ({ ...m, flee: { ...running, ...run } }),
+  });
+  if (safe !== null) {
+    return { decision: safe, memory: safe.memory };
+  }
+
+  // ⚠ NOWHERE TO GO IS NOT A STOP, AND IT IS NOT A FLEE EITHER. No station on
+  // this grid and no safe spot named means this pilot cannot leave. Rung 2
+  // answers that by ending the run, because a pilot with nobody to fly with has
+  // nothing else to try. A pilot that is merely HURT does: it still has guns
+  // and a fleet that still has a use for them, so it falls through to the rungs
+  // below and fights on.
+  //
+  // The latch is UNWOUND rather than left standing, budget included. A trip
+  // spent on a flee that never moved the ship is a trip the operator paid for
+  // and got nothing from, and leaving the latch would park this rung on a
+  // condition that cannot change until the ship is somewhere else.
+  return { decision: null, memory: { ...mem, flee: null, fleeTripsSpent: mem.fleeTripsSpent - 1 } };
+}
+
 // ─── Rung 6: drones ──────────────────────────────────────────────────────────
 
 /**
@@ -3094,6 +3337,12 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           // undo - so the honest state is "no cycle", not a half-remembered one.
           droneCycle: null,
           droneCyclesSpent: 0,
+      // Run-local, both of them. See `CompanionFlee`'s header for why a flee is
+      // not persisted the way an abandonment is: a companion coming back up
+      // reads its own health on the first tick and leaves again within one tick
+      // if it still needs to.
+      flee: null,
+      fleeTripsSpent: 0,
         };
       }
       runToken += 1;
