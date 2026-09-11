@@ -25,7 +25,8 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
 | Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
-| Everything else | 8 waits on the `/d/evet` gateway patch, which nobody has written; 9 waits on 8. **Every other in-repo phase is done.** |
+| Phase 8 | **DONE** — chat commands, on LOCAL chat. The fleet-channel gateway patch is CANCELLED, not pending |
+| Phase 9 | squad roles + Bot Manager badge — **unblocked**, and the only phase left |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
 full suite 5,174 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
@@ -885,8 +886,16 @@ outright, and the hurt pilot locks instead of leaving.
 
 ⚠ **So the standing mechanism now has no behavioural consumer.** It was built in
 phase 5 so a flee could sit below the fleet rung; the flee went above instead.
-Keep it: the readout it protects is still correct, and phase 8's chat rung is the
-next candidate for that slot.
+Keep it: the readout it protects is still correct -- a pilot whose guns are
+running must not report "Standing by".
+
+⚠ **AND NOTHING IS EVER LIKELY TO SIT THERE NOW.** That sentence used to name
+phase 8's chat rung as the next candidate. There is no such rung: chat commands
+feed the fleet rung itself, and the operator has closed the fleet-chat channel
+work for good (see "Fleet chat is not happening" below). Phase 9 is roles and a
+badge, not a rung. So the hold-aside half of the mechanism has no consumer and
+probably never will -- but the fallback readout at the end of the ladder is live
+on every standing tick, which is why this is a note and not a deletion.
 
 ### Two prerequisites that were not in the spec
 
@@ -996,15 +1005,37 @@ something the runtime does not deliver:
 Neither is in phase 6's scope. Both are worth a look before phase 9 claims the
 ladder is finished.
 
+## Fleet chat is not happening -- DECIDED BY THE OPERATOR, 2026-09-11
+
+**We do not modify upstream, and we work with what we have.** The `/d/evet`
+gateway patch that would have published fleet chat to a browser session is
+CANCELLED, along with the upstream PR the implementation doc proposed alongside
+it. Do not re-open it, do not "just add the room to `roomNamesForEntry`", and do
+not treat the procedure still written in the implementation doc as a plan -- it
+is kept only as a record of what was investigated.
+
+**Phase 8 is therefore FINISHED AS SHIPPED, not blocked.** Its parser was always
+channel-agnostic and its commands ride LOCAL chat, which works today. The
+gateway patch was the only outstanding item, so closing it closes the phase.
+
+**What that costs, stated plainly so nobody rediscovers it as a bug:** an
+operator's chat commands go out on Local, where everyone in the system can read
+them. That is the accepted trade, not an oversight.
+
+**Phase 9 is unblocked** -- it was waiting on 8 and has nothing left to wait for.
+
 ## Decided, so do not re-litigate
 
 - **The companion is a sibling decide-loop, not a bot script.** It is the next
   instance of the `autopilotLoop` / `miningBotLoop` / `missionBotLoop` pattern.
   Nothing touches `MacroID`, `Condition`, `InterruptResponse`, or the editor
   files. Configuration is a typed request, never text.
-- **Precedence:** server fleet warp > FC broadcast > chat command > own flee
-  rule > own ladder. A bot being fleet-warped does not flee, re-target, or
-  answer chat until it lands.
+- **Precedence, AMENDED 2026-09-11:** server fleet warp > own flee rule > FC
+  broadcast > chat command > own ladder. A bot being fleet-warped does not flee,
+  re-target, or answer chat until it lands -- that half was never in dispute.
+  What changed is the flee, which the operator moved ABOVE the FC broadcast when
+  phase 6 was built; see decision 3 in the plan doc for the old order, why it
+  could not stand, and which of the two acceptance tests actually proves it.
 - **Only a fleet commander can tag**, and the server drops a non-commander's
   write *silently while answering ok*. The gate is client-side, off the roster.
   The check is `(job & 2) !== 0 || [1,2,3].includes(role)` — `FLEET_JOB_CREATOR`

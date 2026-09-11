@@ -1121,14 +1121,21 @@ function nearestOf(
  * for the tag-over-broadcast reasoning and why an off-grid call is not an
  * order for this pilot at all).
  *
- * ⚠ NOTHING SITS BENEATH IT ANY MORE, and that is worth saying out loud
- * because `CompanionDecision.standing` exists for something that sits there.
- * The parking fix was built so phase 6's flee could live below this rung; the
- * operator's decision put the flee above it instead, so the standing mechanism
- * currently has no behavioural consumer. It is kept because the readout it
- * protects is still correct — a pilot whose guns are running must not report
- * "Standing by" — and because phase 8's chat rung is the next candidate for
- * that slot. Do not remove it on the grounds that nothing needs it.
+ * ⚠ NOTHING SITS BENEATH IT, AND PROBABLY NOTHING EVER WILL. That matters
+ * because `CompanionDecision.standing` exists for something that sits there:
+ * phase 5's parking fix was built so phase 6's flee could live below this rung,
+ * and the operator's decision put the flee above it instead.
+ *
+ * There is no rung left to fill the slot either. Chat commands feed THIS rung
+ * rather than a rung of their own, the fleet-chat channel work is cancelled for
+ * good, and phase 9 is roles and a badge. So the hold-aside half of the
+ * mechanism has no consumer.
+ *
+ * ⚠ IT IS STILL NOT DEAD CODE. The fallback at the end of this ladder returns
+ * the standing decision on every tick where a call stands and nothing else
+ * acted, which is what stops a pilot whose guns are running from reporting
+ * "Standing by". Do not delete it on the grounds that nothing needs it; the
+ * readout does.
  */
 export function decideCompanionAction(
   request: FleetCompanionRequest,

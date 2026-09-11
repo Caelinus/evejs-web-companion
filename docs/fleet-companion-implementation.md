@@ -29,11 +29,14 @@ enough that a single commit would be unreviewable, and small enough that a
 long-lived branch is unnecessary. Within a phase, one commit per step of that
 phase's spec.
 
-The gateway patch (phase 8) does **not** live here. It lands in `/d/evet`, and
-this repo's phase 8 branch depends on it being applied to the running container
-first. Sequence that deliberately: a companion branch that cannot run because
-the gateway underneath it has not been patched is a branch nobody can review.
-The procedure is below.
+⚠ **THE GATEWAY PATCH BELOW IS CANCELLED, 2026-09-11.** The operator decided we
+do not modify upstream and work with what we have, so fleet chat is not
+happening and neither is the PR this section proposed. Phase 8 is finished as
+shipped -- its parser is channel-agnostic and its commands ride LOCAL chat.
+
+The section is kept because it records what was investigated about the gateway's
+chat layer, which is worth having if the question ever returns. **It is not a
+plan.** See "Fleet chat is not happening" in the handoff doc.
 
 ### The phase 8 gateway patch, in `/d/evet`
 
@@ -251,8 +254,8 @@ not exist is worse than no spec, because it reads as authority.
 | 2 | one inWarp guard | **below, verified** |
 | 3 | tank-up: port the DSL thermostat into the companion | **below, verified** |
 | 7 | tackle -> tag | **BUILT** — see the handoff doc's phase 7 section. ⚠ the read did not exist and had to be built (decoder, slice, push, observation); the rung went ABOVE obeying the fleet, not below |
-| 8 | chat commands: the PARSER is built and tested; only the fleet CHANNEL is blocked | **parser done, channel blocked** |
-| 9 | blocked on 1-8 | blocked |
+| 8 | chat commands, on LOCAL chat | **DONE** — the fleet-channel work is CANCELLED, not pending; see the handoff |
+| 9 | squad roles + Bot Manager badge | **unblocked** — 1-8 are all closed |
 
 ## Open questions being investigated
 
