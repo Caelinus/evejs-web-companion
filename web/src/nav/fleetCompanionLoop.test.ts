@@ -2186,13 +2186,29 @@ test("no player-facing string in this module carries a decorative non-ASCII char
     })
     .join("\n");
 
-  const literal = new RegExp('"((?:[^"\\\\\\n]|\\\\.)*)"', "g");
+  // ⚠ TEMPLATE LITERALS ARE SCANNED TOO, AND THEY WERE NOT UNTIL PHASE 5.
+  // This swept double-quoted literals only. That was complete when it was
+  // written -- every `why` in the file was a plain string -- and phase 7's tag
+  // messages were the first to interpolate, so they were the first player-facing
+  // strings this guard could not see. They happened to be clean; the guard was
+  // blind to them either way, and a rung that reports a drone count or a
+  // hold-off has every reason to interpolate. Backticked strings are now swept
+  // on the same terms. The `${...}` holes are blanked first: what a hole
+  // interpolates is a value, judged where it is built, not text this file wrote.
+  const doubleQuoted = new RegExp('"((?:[^"\\\\\\n]|\\\\.)*)"', "g");
+  const backticked = new RegExp("`((?:[^`\\\\]|\\\\.)*)`", "g");
   const offenders: string[] = [];
-  for (const match of code.matchAll(literal)) {
-    const value = match[1] ?? "";
-    if ([...value].some((character) => (character.codePointAt(0) ?? 0) > 127)) {
-      offenders.push(value);
+  const judge = (value: string): void => {
+    const withoutHoles = value.replace(/\$\{[^}]*\}/g, "");
+    if ([...withoutHoles].some((character) => (character.codePointAt(0) ?? 0) > 127)) {
+      offenders.push(withoutHoles);
     }
+  };
+  for (const match of code.matchAll(doubleQuoted)) {
+    judge(match[1] ?? "");
+  }
+  for (const match of code.matchAll(backticked)) {
+    judge(match[1] ?? "");
   }
   assert.deepEqual(
     offenders,
