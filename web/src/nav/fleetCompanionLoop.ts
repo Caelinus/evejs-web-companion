@@ -1036,6 +1036,16 @@ export interface CompanionLadderMemory {
    */
   readonly lastDroneRepairTargetID: number | null;
   /**
+   * The target this pilot's COMBAT drones were last sent onto.
+   *
+   * ⚠ SAME SHAPE AND SAME REASON AS `lastDroneRepairTargetID` ABOVE: drones
+   * already shooting the right ship need telling nothing, and re-issuing the
+   * engage every tick would spend this loop's one call per tick on an order the
+   * server has already obeyed. A NEW call from the fleet is a different id and
+   * re-issues by itself, which is the whole of the latch's logic.
+   */
+  readonly lastDroneEngageTargetID: number | null;
+  /**
    * How many salvage drones the standing salvage order was last issued for.
    *
    * ⚠ A COUNT AND NOT A FLAG, because the set of drones out can CHANGE while
@@ -1182,6 +1192,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     droneCycle: null,
     droneCyclesSpent: 0,
     lastDroneRepairTargetID: null,
+    lastDroneEngageTargetID: null,
     lastSalvageOrderedFor: null,
     lootedItemIDs: [],
     lootApproaching: null,
@@ -1468,6 +1479,7 @@ export function decideCompanionAction(
     lastTagAttempts: memory.lastTagAttempts,
     taggingGaveUpOn: memory.taggingGaveUpOn,
     lastDroneRepairTargetID: memory.lastDroneRepairTargetID,
+    lastDroneEngageTargetID: memory.lastDroneEngageTargetID,
     lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
     lootedItemIDs: memory.lootedItemIDs,
     lootApproaching: memory.lootApproaching,
@@ -4097,6 +4109,82 @@ type CompanionDroneRole = "combat" | "logistic" | "salvage";
  * the fleet - a pilot that went quiet for ten seconds every time a drone got
  * shot would be worse than one with no drones at all.
  */
+/**
+ * The ship the fleet is telling this pilot to shoot, with the words for saying
+ * so — or null when nobody is calling anything.
+ *
+ * ⚠ ONE DEFINITION, READ BY TWO RUNGS, AND THAT IS THE POINT. Rung 7 brings the
+ * guns up on this ship and rung 6 sends the drones onto it. Two copies of "a
+ * TAG first, then a `Target` call" would eventually disagree, and the failure
+ * that makes -- drones chewing one ship while the guns fire on another -- is
+ * invisible in a readout that can only name one of them.
+ *
+ * ⚠ THE ORDER IS PASSED IN RATHER THAN RESOLVED HERE. `resolveNamedOrder` is
+ * the source of the other four named orders too (align, travel, jump, warp), so
+ * rung 7 has already resolved it for branches it alone handles; resolving it a
+ * second time in here would mean two answers to "what is standing right now"
+ * within one tick, which is the same class of bug this function exists to close.
+ *
+ * ⚠ IT DOES NOT ASK WHETHER RUNG 7 WILL ACT ON THE ANSWER. That rung answers a
+ * Heal call ahead of a target call, so a pilot repping a fleet-mate locks
+ * nothing -- and the LOCK TEST at the drone call site is what makes that safe,
+ * because a ship nobody locked is a ship the drones are never sent onto.
+ */
+interface CalledTarget {
+  readonly itemID: number;
+  readonly source: "tag" | "broadcast" | "chat";
+  readonly heard: string;
+  readonly why: string;
+}
+
+function calledTarget(
+  obs: FleetCompanionObservation,
+  entities: readonly SpaceEntity[],
+  measurement: SpaceMeasurement | null,
+  order: NamedOrder | null,
+): CalledTarget | null {
+  const tags = obs.fleetTargetTags ?? null;
+  if (tags !== null) {
+    const tagged = bestTaggedEntity(tags, entities, measurement);
+    if (tagged !== null) {
+      return {
+        itemID: tagged.itemID,
+        source: "tag",
+        heard: "the fleet's tagged target",
+        why: "The fleet has tagged a target on this grid.",
+      };
+    }
+  }
+  if (order?.name === "Target") {
+    return {
+      itemID: order.itemID,
+      source: order.source,
+      heard: order.heard,
+      why: order.why,
+    };
+  }
+  return null;
+}
+
+/** The called target's id alone, for the drone rung. */
+function calledCombatTargetID(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+): number | null {
+  const snapshot = obs.snapshot ?? null;
+  if (snapshot === null) {
+    return null;
+  }
+  const entities = snapshot.entities;
+  const called = calledTarget(
+    obs,
+    entities,
+    measureSpace(snapshot),
+    resolveNamedOrder(request, obs, entities),
+  );
+  return called === null ? null : called.itemID;
+}
+
 function decideDrones(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
@@ -4279,18 +4367,45 @@ function decideDrones(
     };
   }
 
-  // They are out. Two of the three roles need to be TOLD what to do; the third
-  // does not.
+  // They are out. All three roles can need TELLING what to do.
   //
-  // ⚠ COMBAT DRONES ARE DELIBERATELY GIVEN NO ORDER, AND THAT IS NOT AN
-  // OMISSION. The server assigns idle combat drones onto whatever shoots their
-  // controller by itself (`noteIncomingAggression`, droneRuntime.js), and the
-  // behaviour setting that gates it defaults to on with no client surface to
-  // change it. So "use combat drones to defend" is achieved by HAVING THEM OUT.
-  // Issuing an engage of our own would fight the server's own choice of target
-  // for no gain, one call per tick.
+  // ⚠ COMBAT DRONES DEFEND THEMSELVES AND ATTACK ON ORDER, AND THE DIFFERENCE
+  // IS WHOSE FIGHT IT IS. The server assigns idle combat drones by itself, but
+  // only onto something that shoots THEIR OWN CONTROLLER: `noteIncomingAggression`
+  // (droneRuntime.js) is called with the damaged ship as the target and walks
+  // that ship's own idle drones. So having them out IS the whole of "defend
+  // yourself", and nothing in it ever looks at what the FLEET is shooting.
+  //
+  // ⚠ THAT IS WHY A CALLED TARGET NEEDS AN EXPLICIT ORDER, AND WHY ITS ABSENCE
+  // WAS A BUG RATHER THAN A SETTING. Reported live 2026-09-11: "they see rats,
+  // they harden and launch drones, even target, but drones do not engage". Of
+  // course they did not -- the rats were shooting the commander, so the
+  // companion's own controller was never hit and the server's auto-assign had
+  // nothing to fire on. The pilot locked the primary and its drones watched.
+  //
+  // ⚠ ONLY ONCE THE TARGET IS ACTUALLY LOCKED, read off `lockedTargetIDs` and
+  // not off our own memory of having asked. Drones cannot be sent onto a ship
+  // this hull has not locked, and this rung sits ABOVE the one that does the
+  // locking -- so on the tick the call first lands there is nothing to send
+  // them onto yet, and the order belongs on the tick after it, when the lock is
+  // a fact.
   if (role === "combat") {
-    return nothing;
+    const called = calledCombatTargetID(request, obs);
+    if (called === null || memory.lastDroneEngageTargetID === called) {
+      return nothing;
+    }
+    if (!isAlreadyLocked(called, obs.lockedTargetIDs, memory)) {
+      return nothing;
+    }
+    return {
+      decision: {
+        action: { kind: "engageDrones", droneIDs: roleOut, targetID: called },
+        phase: "Drones",
+        why: "Putting the combat drones on the target the fleet called.",
+        memory: { ...memory, lastDroneEngageTargetID: called },
+      },
+      memory,
+    };
   }
   if (role === "salvage") {
     // ⚠ `targetID: 0` IS THE SERVER'S OWN AUTO-PICK, not a null we forgot to
@@ -4534,22 +4649,6 @@ function decideFleetOrders(
     return healDecision;
   }
 
-  // b. The fleet's target tags — a commander's call.
-  if (obs.fleetTargetTags !== null && obs.fleetTargetTags !== undefined) {
-    const tagged = bestTaggedEntity(obs.fleetTargetTags, entities, measurement);
-    if (tagged !== null) {
-      return lockThenEngage(
-        tagged.itemID,
-        "tag",
-        "the fleet's tagged target",
-        "The fleet has tagged a target on this grid.",
-        request,
-        obs,
-        memory,
-      );
-    }
-  }
-
   // c-f. ONE SET OF BRANCHES, TWO SOURCES. A named order reaches this pilot
   //       either as a fleet broadcast or as a line somebody typed in chat, and
   //       from here down it is deliberately the same order. Resolving the
@@ -4559,9 +4658,21 @@ function decideFleetOrders(
   //       partial nobody should be maintaining twice.
   const order = resolveNamedOrder(request, obs, entities);
 
-  // c. A `Target` order.
-  if (order?.name === "Target") {
-    return lockThenEngage(order.itemID, order.source, order.heard, order.why, request, obs, memory);
+  // b + c. The target the fleet is calling: a commander's TAG first, then a
+  //        `Target` broadcast or the chat line standing in for one. Both come
+  //        from `calledTarget`, which rung 6 reads too so the drones and the
+  //        guns can never pick different ships. See its header.
+  const called = calledTarget(obs, entities, measurement, order);
+  if (called !== null) {
+    return lockThenEngage(
+      called.itemID,
+      called.source,
+      called.heard,
+      called.why,
+      request,
+      obs,
+      memory,
+    );
   }
 
   // d. An `AlignTo` order.
@@ -4875,6 +4986,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           // session drop, and a wreck this run has not emptied is a wreck it
           // must be willing to try.
           lastDroneRepairTargetID: null,
+          lastDroneEngageTargetID: null,
           lastSalvageOrderedFor: null,
           lootedItemIDs: [],
           lootApproaching: null,

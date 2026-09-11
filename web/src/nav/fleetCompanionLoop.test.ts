@@ -3254,6 +3254,100 @@ test("no bay listing and an empty bay both launch nothing", () => {
   }
 });
 
+// --- combat drones and the target the fleet called --------------------------
+//
+// ⚠ THE BUG THESE ARE FOR, REPORTED LIVE 2026-09-11: "they see rats, they
+// harden and launch drones, even target, but drones do not engage". The rung
+// gave combat drones no order at all, on the premise that the server assigns
+// idle ones by itself. It does -- but ONLY onto something shooting their own
+// controller (`noteIncomingAggression`, droneRuntime.js, reads the DAMAGED
+// ship's own drones). Rats shooting the commander never touch the companion, so
+// its drones had nothing to react to and watched the fight.
+
+test("combat drones are sent onto the target the fleet called, once it is locked", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    droneObs({
+      myDroneIDs: [DRONE_A],
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [TACKLE],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "engageDrones",
+    droneIDs: [DRONE_A],
+    targetID: TACKLE,
+  });
+  assert.equal(decision.phase, "Drones");
+});
+
+test("...and the order is issued ONCE, not on every tick", () => {
+  // Same reason `lastDroneRepairTargetID` exists: this loop issues one call a
+  // tick, so an engage re-sent twice a second starves every rung beneath it.
+  const grid = droneObs({
+    myDroneIDs: [DRONE_A],
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+  });
+  const first = decideCompanionAction(WITH_DRONES, grid);
+  assert.equal(first.action.kind, "engageDrones");
+  const second = decideCompanionAction(WITH_DRONES, grid, first.memory);
+  assert.notEqual(second.action.kind, "engageDrones");
+});
+
+test("a called target that is NOT locked yet gets no drones, it gets locked first", () => {
+  // ⚠ THE RUNG ORDER MAKES THIS CASE REAL, NOT HYPOTHETICAL. Drones (rung 6)
+  // decide ABOVE the rung that locks (rung 7), so on the tick a call first
+  // lands there is nothing locked to send drones onto. Sending them anyway
+  // would spend the tick's one call on an order the server throws away.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    droneObs({
+      myDroneIDs: [DRONE_A],
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
+});
+
+test("a NEW call moves the drones onto it, without anybody recalling them", () => {
+  const first = decideCompanionAction(
+    WITH_DRONES,
+    droneObs({
+      myDroneIDs: [DRONE_A],
+      fleetTargetTags: new Map([[TACKLE, "A"]]),
+      lockedTargetIDs: [TACKLE],
+    }),
+  );
+  const moved = decideCompanionAction(
+    WITH_DRONES,
+    droneObs({
+      snapshot: gridWithEntities([TACKLE, OTHER]),
+      myDroneIDs: [DRONE_A],
+      fleetTargetTags: new Map([[OTHER, "A"]]),
+      lockedTargetIDs: [TACKLE, OTHER],
+    }),
+    first.memory,
+  );
+  assert.deepEqual(moved.action, {
+    kind: "engageDrones",
+    droneIDs: [DRONE_A],
+    targetID: OTHER,
+  });
+});
+
+test("with NOBODY calling a target, combat drones are still left to the server", () => {
+  // ⚠ THE OTHER HALF, AND IT MUST NOT REGRESS EITHER. Self-defence is the
+  // server's own job and issuing an engage of our own would fight its choice of
+  // target for no gain. The order exists for the fleet's call and nothing else.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    droneObs({ myDroneIDs: [DRONE_A], fleetTargetTags: new Map(), lockedTargetIDs: [] }),
+  );
+  assert.notEqual(decision.action.kind, "engageDrones");
+});
+
 test("drones already out are not launched again", () => {
   const decision = decideCompanionAction(WITH_DRONES, droneObs({ myDroneIDs: [DRONE_A] }));
   assert.notEqual(decision.action.kind, "launchDrones");
