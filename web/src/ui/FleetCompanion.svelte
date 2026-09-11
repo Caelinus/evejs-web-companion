@@ -7,25 +7,22 @@
   // precedence and the reasons all live in nav/fleetCompanionLoop.ts, and every
   // word on screen here came from that loop or from the server.
   //
-  // ⚠ THIS IS PHASE 0'S LAUNCHER. The loop itself only waits this phase — no
-  // broadcasts are read, no target is tagged, no module is cycled — but the
-  // REQUEST already carries every field later phases will act on, because a
-  // player set up for phase 0 should not have to redo their settings when the
-  // next phase lands. The checklist and the readout are exactly as honest about
-  // that as the loop's own comments are.
+  // ⚠ 2026-09-11 SIMPLIFICATION — SEE docs/fleet-companion-simplification.md.
+  // This panel no longer picks a role, a module, or an order channel: a
+  // companion now reads its own fit at start and obeys every order channel
+  // there is, so there was never anything for a player to disambiguate.
+  // `CompanionSetup` (nav/fleetCompanionLoop.ts) is exactly what this panel
+  // builds, and its six fields are exactly the controls below.
   import { onMount } from "svelte";
   import { isSessionLost } from "../app/flow.ts";
-  import { activatableModules } from "../space/rowActions.ts";
-  import { nameKey, resolvedName, type NameRef } from "../store/names.ts";
+  import { resolvedName, type NameRef } from "../store/names.ts";
   import {
     evaluateRequirements,
     FLEET_COMPANION_REQUIREMENTS,
     type FleetCompanionReads,
   } from "../nav/botRegistry.ts";
   import {
-    DEFAULT_FLEET_COMPANION_REQUEST,
-    FLEET_COMPANION_ORDER_SOURCES,
-    FLEET_COMPANION_ROLES,
+    DEFAULT_COMPANION_SETUP,
     FLEET_COMPANION_ABANDONMENT_WAIT_MS,
     MAX_CAPACITOR_FLOOR,
     MAX_DRONE_HOLD_OFF_SECONDS,
@@ -35,26 +32,14 @@
     MIN_DRONE_HOLD_OFF_SECONDS,
     MIN_FLEE_ATTEMPTS,
     MAX_DRONE_HEALTH_FLOOR,
-  MIN_DRONE_HEALTH_FLOOR,
-  MIN_FLEE_HEALTH_FLOOR,
-    type FleetCompanionOrderSource,
-    type FleetCompanionRole,
+    MIN_DRONE_HEALTH_FLOOR,
+    MIN_FLEE_HEALTH_FLOOR,
+    type CompanionSetup,
   } from "../nav/fleetCompanionLoop.ts";
   // The words this readout uses live in the shared layer, because the Bot
   // Manager's per-pilot row says the same things about the same run and the two
   // must not drift. See companionReadout.ts's header.
-  import {
-    COMPANION_ORDER_SOURCE_LABELS,
-    COMPANION_ROLE_LABELS,
-    canTagWords,
-    companionRoleLabel,
-    inFleetWords,
-    orderFromWords,
-  } from "../bots/companionReadout.ts";
-  import {
-    presetForRole,
-    remoteRepairsCanFire,
-  } from "../bots/companionRolePresets.ts";
+  import { canTagWords, inFleetWords, orderFromWords } from "../bots/companionReadout.ts";
   import {
     isFleetBroadcastFresh,
     type FleetBroadcastName,
@@ -73,103 +58,23 @@
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
   // svelte-ignore state_referenced_locally
-  const fitting = store.fitting;
-  // svelte-ignore state_referenced_locally
   const names = store.names;
 
   let busy = $state(false);
   let error = $state("");
 
-  let role = $state<FleetCompanionRole>(DEFAULT_FLEET_COMPANION_REQUEST.role);
-  /**
-   * The player's OWN pick of defensive equipment, by item id.
-   *
-   * ⚠ NOTHING IS TICKED FOR YOU. Unlike the mining bot's equipment list, this
-   * starts empty and stays empty until the player checks something — a guess
-   * here cycles the wrong module (see `FleetCompanionRequest.defenseModuleIDs`'s
-   * own comment).
-   */
-  let picked = $state<number[]>([]);
-  /**
-   * The player's OWN pick of fitted SELF-repair modules, one list per tank
-   * layer — the module that repairs THIS ship, as distinct from the remote
-   * pickers below, which repair a fleet-mate. A shield booster cannot repair
-   * armour, so the hurt layer picks the list (see
-   * `FleetCompanionRequest.shieldBoosterModuleIDs`'s own comment). Same
-   * "nothing ticked for you" rule as `picked` above.
-   */
-  let pickedShieldBooster = $state<number[]>([]);
-  let pickedArmorRepairer = $state<number[]>([]);
-  let pickedHullRepairer = $state<number[]>([]);
-  /**
-   * The player's OWN pick of fitted REMOTE repair modules, one list per
-   * family — a shield booster cannot repair armour, so each answers only its
-   * own kind of Heal broadcast (see `FleetCompanionRequest.remoteShieldModuleIDs`'s
-   * own comment). Same "nothing ticked for you" rule as `picked` above.
-   */
-  let pickedRemoteShield = $state<number[]>([]);
-  let pickedRemoteArmor = $state<number[]>([]);
-  let pickedRemoteCapacitor = $state<number[]>([]);
-  /**
-   * The player's OWN pick of fitted weapons (turrets, launchers), by item id.
-   *
-   * ⚠ EMPTY IS THE DEFAULT AND A REAL ANSWER. Leave this untouched and the
-   * pilot locks whatever the fleet calls and never fires it - see
-   * `FleetCompanionRequest.weaponModuleIDs`'s own comment. Same "nothing
-   * ticked for you" rule as `picked` above: a wrong guess here fires
-   * something you did not choose at whatever the fleet called.
-   */
-  let pickedWeapon = $state<number[]>([]);
-  let fleeHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.fleeHealthFloor * 100));
-  let droneHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.droneHealthFloor * 100));
-  let capacitorFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.capacitorFloor * 100));
-  let maxFleeAttempts = $state(DEFAULT_FLEET_COMPANION_REQUEST.maxFleeAttempts);
+  let fleeHealthFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.fleeHealthFloor * 100));
+  let droneHealthFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.droneHealthFloor * 100));
+  let capacitorFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.capacitorFloor * 100));
+  let maxFleeAttempts = $state(DEFAULT_COMPANION_SETUP.maxFleeAttempts);
   /**
    * Docking gives the shield and the capacitor back but NOT the armour, so a
    * pilot that fled on armour damage cannot get back above its floor by
    * arriving. Ticking this lets it pay the station to fix the difference;
    * leaving it off means such a pilot stays docked and says so.
    */
-  let repairsAtStation = $state(DEFAULT_FLEET_COMPANION_REQUEST.repairsAtStation);
-  let useDrones = $state(DEFAULT_FLEET_COMPANION_REQUEST.useDrones);
-  let droneHoldOffSeconds = $state(DEFAULT_FLEET_COMPANION_REQUEST.droneRedeployHoldOffSeconds);
-  /**
-   * ⚠ ONLY ONE PILOT PER SQUAD SHOULD TURN THIS ON. A tag is unique fleet-wide,
-   * so two taggers fight over letters and the fleet stops trusting either.
-   */
-  let attemptsTagging = $state(DEFAULT_FLEET_COMPANION_REQUEST.attemptsTagging);
-  let obeys = $state<FleetCompanionOrderSource[]>([...DEFAULT_FLEET_COMPANION_REQUEST.obeys]);
-  let chatCommandSendersText = $state("");
-  /**
-   * Where this pilot runs to if it is ever left alone somewhere with no station
-   * on grid. Empty means "nowhere named", which is a real answer: the pilot
-   * then stops where it is and says so rather than inventing a hiding place.
-   *
-   * ⚠ IT IS A BOOKMARK, NOT A CELESTIAL. There is no sun in this game's scene
-   * to warp to — no celestial appears among its entity kinds and no read
-   * exposes one — so the safe spot is somewhere the player has actually been
-   * and saved.
-   */
-  let safeSpotBookmarkID = $state<number | null>(null);
-  let safeSpots = $state<readonly { bookmarkID: number; name: string }[]>([]);
-
-  // Best-effort, and deliberately quiet: a bookmark list that will not load
-  // leaves the picker empty and the setting at "nowhere", which is exactly what
-  // a player who never set one gets anyway.
-  $effect(() => {
-    let live = true;
-    void flow
-      .listBookmarks()
-      .then((rows) => {
-        if (live) {
-          safeSpots = rows;
-        }
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  });
+  let repairsAtStation = $state(DEFAULT_COMPANION_SETUP.repairsAtStation);
+  let droneHoldOffSeconds = $state(DEFAULT_COMPANION_SETUP.droneRedeployHoldOffSeconds);
 
   const running = $derived($companion.status === "running");
   const paused = $derived($companion.status === "paused");
@@ -190,142 +95,6 @@
   const reads = $derived<FleetCompanionReads>({ inFleet, docked });
   const preflight = $derived(evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, reads));
   const canStart = $derived(preflight.canStart && !active);
-
-  /**
-   * Every module in the fit that is switched on — the pool the player picks
-   * defensive equipment from. Any slot, not just one family: a shield booster
-   * lives in the mid slots, an armour repairer in the low, and this panel has no
-   * business guessing which one a given hull carries.
-   */
-  interface Equipment {
-    readonly itemID: number;
-    readonly label: string;
-  }
-  const equipment = $derived.by<Equipment[]>(() =>
-    activatableModules(
-      $fitting.slots,
-      (typeID) => $names.resolved[nameKey("type", typeID)] ?? null,
-      (typeID) => $names.resolved[nameKey("typeGroup", typeID)] ?? null,
-    )
-      .filter((row) => row.online)
-      .map((row) => ({ itemID: row.itemID, label: row.label ?? "Unknown module" })),
-  );
-
-  function toggleDefense(itemID: number): void {
-    picked = picked.includes(itemID) ? picked.filter((id) => id !== itemID) : [...picked, itemID];
-  }
-
-  function toggleShieldBooster(itemID: number): void {
-    pickedShieldBooster = pickedShieldBooster.includes(itemID)
-      ? pickedShieldBooster.filter((id) => id !== itemID)
-      : [...pickedShieldBooster, itemID];
-  }
-
-  function toggleArmorRepairer(itemID: number): void {
-    pickedArmorRepairer = pickedArmorRepairer.includes(itemID)
-      ? pickedArmorRepairer.filter((id) => id !== itemID)
-      : [...pickedArmorRepairer, itemID];
-  }
-
-  function toggleHullRepairer(itemID: number): void {
-    pickedHullRepairer = pickedHullRepairer.includes(itemID)
-      ? pickedHullRepairer.filter((id) => id !== itemID)
-      : [...pickedHullRepairer, itemID];
-  }
-
-  function toggleRemoteShield(itemID: number): void {
-    pickedRemoteShield = pickedRemoteShield.includes(itemID)
-      ? pickedRemoteShield.filter((id) => id !== itemID)
-      : [...pickedRemoteShield, itemID];
-  }
-
-  function toggleRemoteArmor(itemID: number): void {
-    pickedRemoteArmor = pickedRemoteArmor.includes(itemID)
-      ? pickedRemoteArmor.filter((id) => id !== itemID)
-      : [...pickedRemoteArmor, itemID];
-  }
-
-  function toggleRemoteCapacitor(itemID: number): void {
-    pickedRemoteCapacitor = pickedRemoteCapacitor.includes(itemID)
-      ? pickedRemoteCapacitor.filter((id) => id !== itemID)
-      : [...pickedRemoteCapacitor, itemID];
-  }
-
-  function toggleWeapon(itemID: number): void {
-    pickedWeapon = pickedWeapon.includes(itemID)
-      ? pickedWeapon.filter((id) => id !== itemID)
-      : [...pickedWeapon, itemID];
-  }
-
-  /**
-   * Picking a role fills in that role's starting points.
-   *
-   * ⚠ IT OVERWRITES, AND THAT IS THE CONTRACT. A role is a starting point, so
-   * choosing one resets what it covers -- today the flee floor and nothing
-   * else. The table is deliberately narrow and companionRolePresets.ts records
-   * why each other field is excluded; a preset that also reset, say, the module
-   * picks would throw away work the operator cannot get back.
-   *
-   * ⚠ READS THE ROLE OFF THE EVENT, NOT OFF `role`. Both this and `bind:value`
-   * fire from the same change, and depending on the binding to have landed
-   * first would make the preset silently one selection stale.
-   */
-  function applyRolePreset(next: FleetCompanionRole): void {
-    const preset = presetForRole(next);
-    fleeHealthFloorPercent = Math.round(preset.fleeHealthFloor * 100);
-  }
-
-  /**
-   * Remote-rep modules that can never fire, because the call that would ask for
-   * them is a BROADCAST and this pilot is not listening to broadcasts.
-   *
-   * ⚠ THIS IS A WARNING, NEVER A CORRECTION. `obeys` is a deliberate setting
-   * and the panel does not quietly turn it back on -- see the `obeys` note in
-   * companionRolePresets.ts for why this is not a role preset.
-   */
-  const remoteRepsCannotFire = $derived(
-    !remoteRepairsCanFire({
-      obeys,
-      remoteShieldModuleIDs: pickedRemoteShield,
-      remoteArmorModuleIDs: pickedRemoteArmor,
-      remoteCapacitorModuleIDs: pickedRemoteCapacitor,
-    }),
-  );
-
-  function toggleObeys(source: FleetCompanionOrderSource): void {
-    obeys = obeys.includes(source) ? obeys.filter((row) => row !== source) : [...obeys, source];
-  }
-
-  /**
-   * Character ids the player has typed, in addition to whoever the fleet roster
-   * already names a commander.
-   *
-   * ⚠ NEVER POPULATED FROM CHAT TEXT — only from what the player typed here,
-   * which is what keeps the list unspoofable (see the request field's own
-   * comment).
-   */
-  function parseChatCommandSenders(text: string): number[] {
-    const ids = new Set<number>();
-    for (const token of text.split(/[\s,]+/)) {
-      if (!/^\d+$/.test(token)) {
-        continue;
-      }
-      const id = Number(token);
-      if (Number.isSafeInteger(id) && id > 0) {
-        ids.add(id);
-      }
-    }
-    return [...ids];
-  }
-  const chatCommandSenderIDs = $derived(parseChatCommandSenders(chatCommandSendersText));
-
-  $effect(() => {
-    if (chatCommandSenderIDs.length > 0) {
-      const refs: NameRef[] = chatCommandSenderIDs.map((id) => ({ kind: "character", id }));
-      flow.requestNames(refs);
-    }
-  });
-
 
   /**
    * Roughly how long an abandoned pilot has left, in whole minutes.
@@ -351,39 +120,17 @@
   });
 
   /**
-   * What the fleet has most recently said, in the player's words.
-   *
-   * ⚠ THIS READS THE SLICE DIRECTLY, NOT THE COMPANION'S READOUT, and that is
-   * the point of having it. The store records every broadcast the session
-   * receives whether or not this pilot is configured to obey it, so the panel
-   * can show "your FC broadcast Target and this pilot ignores broadcasts"
-   * — which is a settings problem the player can fix, and is otherwise
-   * indistinguishable from a bot that is simply not working.
+   * What the fleet has most recently said, in the player's words. Shown even
+   * before this pilot can act on any of it: during live QA the first question
+   * is always "is the broadcast even arriving".
    */
   const lastOrder = $derived($fleet.lastBroadcast);
   const orderIsFresh = $derived(
     lastOrder === null ? false : isFleetBroadcastFresh(lastOrder, Date.now()),
   );
-  /**
-   * ⚠ THIS READS THE SETUP FORM, NOT THE RUNNING PILOT'S REQUEST, and it is
-   * only correct because of something that is not obvious.
-   *
-   * `$companion` is THIS TAB's own store slice, so this readout can only ever
-   * be showing a companion this tab started — a headless one's state lives in
-   * the BFF's store, not here — and the form is the only way to start one, so
-   * `obeys` still holds exactly what was sent. A reload would desynchronise
-   * them, but a reload also empties the slice, so `active` goes false and this
-   * block does not render at all.
-   *
-   * The day this panel learns to display a HEADLESS companion, that argument
-   * collapses and this warning starts lying — telling a player to go and fix a
-   * setting that is already correct, which is worse than saying nothing. Carry
-   * `obeys` on the companion readout before that happens.
-   */
-  const obeysBroadcasts = $derived(obeys.includes("broadcast"));
 
   // The broadcaster is a character id; the player should read a name. Same
-  // shape as the chat-commander lookup above.
+  // shape as the abandonment lookup above.
   $effect(() => {
     const sender = $fleet.lastBroadcast?.senderCharID ?? null;
     if (sender !== null) {
@@ -394,8 +141,8 @@
   /** Plain words for a broadcast name. Never the wire name, which is jargon. */
   const broadcastWords: Record<FleetBroadcastName, string> = {
     // ⚠ NOT "shoot this". Answering a Target call always means LOCKING the
-    // ship first, and firing after only happens if a weapon is picked below --
-    // saying "shoot" here would promise every pilot something only some of
+    // ship first, and firing after only happens if this hull carries a weapon
+    // -- saying "shoot" here would promise every pilot something only some of
     // them can do.
     Target: "lock this target",
     AlignTo: "align to this",
@@ -414,31 +161,17 @@
     Location: "reporting position",
   };
 
-
   function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
   }
 
   /**
-   * The checklist's live reads need the fit, the fleet and the flight status.
+   * The checklist's live reads need the fleet and the flight status.
    * Best-effort, same as `Bots.svelte`: a failed read leaves the requirement at
    * "could not check", which is the honest answer.
    */
   onMount(() => {
     void Promise.resolve(flow.loadFleet()).catch(() => {});
-    void Promise.resolve(flow.loadFitting()).catch(() => {});
-  });
-
-  $effect(() => {
-    const refs = $fitting.slots
-      .filter((slot) => slot.module !== null)
-      .flatMap((slot) => [
-        { kind: "type" as const, id: slot.module!.typeID },
-        { kind: "typeGroup" as const, id: slot.module!.typeID },
-      ]);
-    if (refs.length > 0) {
-      flow.requestNames(refs);
-    }
   });
 
   async function run(action: () => Promise<void> | void): Promise<void> {
@@ -463,32 +196,18 @@
   async function start(): Promise<void> {
     await run(() =>
       flow.startFleetCompanion({
-        role,
-        defenseModuleIDs: picked,
-        shieldBoosterModuleIDs: pickedShieldBooster,
-        armorRepairerModuleIDs: pickedArmorRepairer,
-        hullRepairerModuleIDs: pickedHullRepairer,
-        remoteShieldModuleIDs: pickedRemoteShield,
-        remoteArmorModuleIDs: pickedRemoteArmor,
-        remoteCapacitorModuleIDs: pickedRemoteCapacitor,
-        weaponModuleIDs: pickedWeapon,
         fleeHealthFloor: clamp(fleeHealthFloorPercent, MIN_FLEE_HEALTH_FLOOR * 100, MAX_FLEE_HEALTH_FLOOR * 100) / 100,
-        droneHealthFloor:
-          clamp(droneHealthFloorPercent, MIN_DRONE_HEALTH_FLOOR * 100, MAX_DRONE_HEALTH_FLOOR * 100) / 100,
         capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
         maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
         repairsAtStation,
-        useDrones,
+        droneHealthFloor:
+          clamp(droneHealthFloorPercent, MIN_DRONE_HEALTH_FLOOR * 100, MAX_DRONE_HEALTH_FLOOR * 100) / 100,
         droneRedeployHoldOffSeconds: clamp(
           droneHoldOffSeconds,
           MIN_DRONE_HOLD_OFF_SECONDS,
           MAX_DRONE_HOLD_OFF_SECONDS,
         ),
-        attemptsTagging,
-        obeys,
-        chatCommandSenders: chatCommandSenderIDs,
-        safeSpotBookmarkID,
-      }),
+      } satisfies CompanionSetup),
     );
   }
 </script>
@@ -552,7 +271,6 @@
       <table class="guests reflow">
         <thead>
           <tr>
-            <th>Role</th>
             <th>In fleet</th>
             <th>Following orders from</th>
             <th>Last order heard</th>
@@ -561,7 +279,6 @@
         </thead>
         <tbody>
           <tr>
-            <td data-label="Role">{companionRoleLabel($companion.role)}</td>
             <td data-label="In fleet">{inFleetWords($companion.inFleet)}</td>
             <td data-label="Following orders from">{orderFromWords($companion.followingOrderFrom)}</td>
             <td data-label="Last order heard">{$companion.lastOrderHeard ?? "-"}</td>
@@ -608,11 +325,6 @@
         <p class="note">
           That call has lapsed, so this pilot is back on its own judgement. A
           call only stands for about half a minute.
-        </p>
-      {:else if !obeysBroadcasts}
-        <p class="note warn">
-          This pilot is set NOT to listen to broadcasts, so it is ignoring that.
-          Stop it and tick "Fleet broadcasts" if you want it answered.
         </p>
       {/if}
     {/if}
@@ -676,176 +388,13 @@
       {/each}
     </ul>
 
-    <h3>Role</h3>
+    <h3>What it uses</h3>
     <p class="note">
-      Picks the starting points below - it does not gate what the companion
-      can actually do, and every capability stays its own setting. Choosing a
-      role resets what it covers, so pick it first and tune afterwards.
+      This pilot reads its own fit when it starts and uses whatever it finds -
+      hardeners, repairers, remote repairers and weapons. It listens to fleet
+      broadcasts, target tags and chat orders from your fleet commanders, with
+      nothing here to switch on.
     </p>
-    <p class="field">
-      <label for="companion-role">This pilot is</label>
-      <select
-        id="companion-role"
-        bind:value={role}
-        onchange={(event) =>
-          applyRolePreset((event.currentTarget as HTMLSelectElement).value as FleetCompanionRole)}
-      >
-        {#each FLEET_COMPANION_ROLES as choice (choice)}
-          <option value={choice}>{COMPANION_ROLE_LABELS[choice]}</option>
-        {/each}
-      </select>
-    </p>
-
-    <h3>Defensive equipment</h3>
-    {#if equipment.length === 0}
-      <p class="empty">
-        Nothing powered up. Power your defensive equipment up under Your
-        equipment, then come back.
-      </p>
-    {:else}
-      <p class="note">
-        Tick what the companion may run to defend itself. Nothing is picked for
-        you - a wrong guess would cycle the wrong module, so this is entirely
-        your own call.
-      </p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={picked.includes(row.itemID)}
-            onchange={() => toggleDefense(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-    {/if}
-
-    <h3>Self repair</h3>
-    <p class="note">
-      Tick what this pilot may run on ITSELF - the module that repairs THIS
-      ship, as distinct from the remote-repair pickers below, which repair a
-      fleet-mate. A shield booster cannot repair armour, so pick each fitted
-      module under the layer it actually reps - nothing is guessed for you
-      here either.
-    </p>
-    {#if equipment.length === 0}
-      <p class="empty">
-        Nothing powered up. Power your self-repair equipment up under Your
-        equipment, then come back.
-      </p>
-    {:else}
-      <p><strong>Shield boosters</strong> (repairs this ship's own shield)</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedShieldBooster.includes(row.itemID)}
-            onchange={() => toggleShieldBooster(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-      <p><strong>Armour repairers</strong> (repairs this ship's own armour)</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedArmorRepairer.includes(row.itemID)}
-            onchange={() => toggleArmorRepairer(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-      <p><strong>Hull repairers</strong> (repairs this ship's own hull)</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedHullRepairer.includes(row.itemID)}
-            onchange={() => toggleHullRepairer(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-    {/if}
-
-    <h3>Remote repair</h3>
-    <p class="note">
-      Tick what this pilot may run on a fleet-mate who calls for reps - a
-      module that repairs THIS ship, ticked above, cannot repair one of these
-      instead. A shield booster cannot repair armour, so pick each fitted
-      module under the layer it actually reps - nothing is guessed for you
-      here either.
-    </p>
-    {#if equipment.length === 0}
-      <p class="empty">
-        Nothing powered up. Power your remote-repair equipment up under Your
-        equipment, then come back.
-      </p>
-    {:else}
-      <p><strong>Remote shield boosters</strong> (answers "needs shield reps")</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedRemoteShield.includes(row.itemID)}
-            onchange={() => toggleRemoteShield(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-      <p><strong>Remote armour repairers</strong> (answers "needs armour reps")</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedRemoteArmor.includes(row.itemID)}
-            onchange={() => toggleRemoteArmor(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-      <p><strong>Capacitor transfer arrays</strong> (answers "needs capacitor")</p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedRemoteCapacitor.includes(row.itemID)}
-            onchange={() => toggleRemoteCapacitor(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-    {/if}
-
-    <h3>Weapons</h3>
-    <p class="note warn">
-      Leave this empty and the pilot only LOCKS what the fleet calls - it will
-      never fire. Tick a weapon here if you want it to actually shoot the
-      target once locked.
-    </p>
-    {#if equipment.length === 0}
-      <p class="empty">
-        Nothing powered up. Power your turrets or launchers up under Your
-        equipment, then come back.
-      </p>
-    {:else}
-      <p class="note">
-        Tick the fitted weapons the companion may fire at a locked target.
-        Nothing is picked for you here either - a wrong guess would fire
-        something you did not choose.
-      </p>
-      {#each equipment as row (row.itemID)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={pickedWeapon.includes(row.itemID)}
-            onchange={() => toggleWeapon(row.itemID)}
-          />
-          {row.label}
-        </label>
-      {/each}
-    {/if}
 
     <h3>Keeping your ship alive</h3>
     <p class="field">
@@ -892,10 +441,6 @@
       Docking gives back shield and capacitor for free, but not armour. Without this
       a pilot that fled on armour damage stays docked instead of coming back.
     </p>
-    <label class="check">
-      <input type="checkbox" bind:checked={useDrones} />
-      Use drones to defend itself
-    </label>
     <p class="field">
       <label for="companion-drone-floor">Bring a drone home below</label>
       <input
@@ -904,7 +449,6 @@
         min={Math.round(MIN_DRONE_HEALTH_FLOOR * 100)}
         max={Math.round(MAX_DRONE_HEALTH_FLOOR * 100)}
         step="5"
-        disabled={!useDrones}
         bind:value={droneHealthFloorPercent}
       />
       <span class="note">% of its shield, armour or hull. Coming home refills its shield</span>
@@ -917,76 +461,10 @@
         min={MIN_DRONE_HOLD_OFF_SECONDS}
         max={MAX_DRONE_HOLD_OFF_SECONDS}
         step="1"
-        disabled={!useDrones}
         bind:value={droneHoldOffSeconds}
       />
-      <span class="note">seconds before relaunching them (only matters if it uses drones)</span>
+      <span class="note">seconds before relaunching them</span>
     </p>
-
-    <h3>Target tagging</h3>
-    <label class="check">
-      <input type="checkbox" bind:checked={attemptsTagging} />
-      Let this pilot try to tag targets for the fleet
-    </label>
-    <p class="note">
-      Only one pilot per squad should turn this on. A tag is unique fleet-wide,
-      so two taggers fight over letters and the fleet stops trusting them. The
-      server drops the write silently if this pilot is not a fleet commander,
-      so this is only ever a try.
-    </p>
-
-    <h3>What it listens to</h3>
-    <p class="note">
-      Turning a channel off never changes the order of who wins - the server's
-      own fleet warp always comes first, then this pilot's own flee rule, then
-      a broadcast, then a chat command, then its own judgement.
-    </p>
-    {#if remoteRepsCannotFire}
-      <p class="note">
-        <strong>Heads up:</strong> this pilot has remote repair modules ticked
-        but is not listening to fleet broadcasts. A call for shields or armour
-        arrives as a broadcast, so those modules will never fire. Tick Fleet
-        broadcasts below to answer them.
-      </p>
-    {/if}
-    {#each FLEET_COMPANION_ORDER_SOURCES as source (source)}
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={obeys.includes(source)}
-          onchange={() => toggleObeys(source)}
-        />
-        {COMPANION_ORDER_SOURCE_LABELS[source]}
-      </label>
-    {/each}
-    {#if obeys.includes("chat")}
-      <p class="field">
-        <label for="companion-chat-senders">Also obey chat commands from</label>
-        <input
-          id="companion-chat-senders"
-          type="text"
-          placeholder="character IDs, separated by commas"
-          bind:value={chatCommandSendersText}
-        />
-      </p>
-      <p class="note">
-        Whoever the fleet roster already names a commander is obeyed
-        regardless. This is only for anyone else you want heard, by character
-        ID - never filled in from chat text itself.
-      </p>
-      <p class="note">
-        Commands are read from LOCAL chat, so everyone in the system can see
-        what you type. Fleet chat is not reachable on this server at all.
-      </p>
-      {#if chatCommandSenderIDs.length > 0}
-        <p class="note">
-          Will also obey:
-          {chatCommandSenderIDs
-            .map((id) => resolvedName($names.resolved, "character", id, "(name pending)"))
-            .join(", ")}
-        </p>
-      {/if}
-    {/if}
 
     <h3>If it ends up alone</h3>
     <p class="note">
@@ -996,26 +474,9 @@
       who WAS in the fleet to invite it back - then it releases the ship. An
       invite from anybody else is ignored.
     </p>
-    <p class="field">
-      <label for="companion-safe-spot">If there is no station in sight, warp to</label>
-      <select
-        id="companion-safe-spot"
-        value={safeSpotBookmarkID === null ? "" : String(safeSpotBookmarkID)}
-        onchange={(event) => {
-          const picked = (event.currentTarget as HTMLSelectElement).value;
-          safeSpotBookmarkID = picked === "" ? null : Number(picked);
-        }}
-      >
-        <option value="">nowhere - stop and say so</option>
-        {#each safeSpots as spot (spot.bookmarkID)}
-          <option value={String(spot.bookmarkID)}>{spot.name}</option>
-        {/each}
-      </select>
-    </p>
     <p class="note">
-      Pick a bookmark you have actually checked. Leaving this at "nowhere" is a
-      real answer - the pilot stops where it is and tells you, rather than
-      warping somewhere neither of you has looked at.
+      If there is no station in sight when it needs to hide, it warps to this
+      system's star instead - nothing to set for that.
     </p>
 
     {#if $companion.failureReason}
@@ -1042,9 +503,6 @@
   #companion-drone-floor,
   #companion-drone-holdoff {
     width: 5rem;
-  }
-  #companion-chat-senders {
-    min-width: 16rem;
   }
   .checklist {
     list-style: none;

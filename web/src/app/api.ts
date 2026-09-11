@@ -41,10 +41,9 @@ import type {
 import type { NameRef } from "../store/names.ts";
 import type { BotLaunchGrant, BotRiskClass } from "../bots/runPolicy.ts";
 import {
-  FLEET_COMPANION_ROLES,
+  type CompanionSetup,
   type CompanionOrderAuthority,
   type FleetCompanionRequest,
-  type FleetCompanionRole,
 } from "../nav/fleetCompanionLoop.ts";
 import type {
   ScannerOperationsSnapshot,
@@ -1931,6 +1930,38 @@ function asFoundAgent(value: JsonValue): FoundAgent {
   };
 }
 
+/**
+ * Whether `characterID` is a member of the SESSION character's corporation.
+ *
+ * ⚠ SESSION-CORP-SCOPED AND NOT REDIRECTABLE. The underlying `GetMember` looks
+ * the id up in the session corp's own member table and answers null for anyone
+ * outside it, so a caller cannot ask about somebody else's corporation by
+ * passing a different id -- the worst a bad id can do is answer "no".
+ *
+ * ⚠ THREE-STATE, AND THE THIRD MATTERS. `null` is "could not tell" -- the read
+ * failed or returned nothing usable -- and a caller acting on membership must
+ * treat it as NO, never as yes. Auto-accepting a fleet invitation on an
+ * unreadable answer would join whatever asked.
+ */
+export async function isInMyCorporation(
+  characterID: number,
+  options: ApiOptions = {},
+): Promise<boolean | null> {
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    return null;
+  }
+  try {
+    const data = await getJson(`/api/bridge/corp-members?memberID=${characterID}`, options);
+    const member = (data as Record<string, JsonValue>).member ?? null;
+    if (member === null || member === undefined) {
+      return false;
+    }
+    return true;
+  } catch {
+    return null;
+  }
+}
+
 /** Find agents from the static reference table (filtered + capped server-side). */
 export async function findAgents(
   filters: FindAgentsFilters = {},
@@ -2402,9 +2433,18 @@ export async function stopShip(options: ApiOptions = {}): Promise<FlightStepResu
 }
 
 /** Jump through an NPC stargate (beyonce.CmdStargateJump). */
+/**
+ * Jump through a stargate.
+ *
+ * ⚠ `toGateID` IS OPTIONAL — PASS 0 AND THE SERVER RESOLVES IT. A stargate
+ * record carries its own `destinationID`, and `jumpSessionViaStargate` uses it
+ * whenever the far id is absent; it rejects only a far id that CONTRADICTS the
+ * source gate. A caller that knows which gate it is at -- the autopilot has a
+ * solved route, the fleet companion has only a broadcast -- does not need one.
+ */
 export async function jump(
   fromGateID: number,
-  toGateID: number,
+  toGateID = 0,
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(
@@ -3011,7 +3051,6 @@ export async function deleteBotScript(scriptID: string, options: ApiOptions = {}
  * Null on this type means "not reported", NEVER "no" -- see `canTag`.
  */
 export interface ServerBotCompanion {
-  readonly role: FleetCompanionRole | null;
   /** Whether the pilot is in a fleet at all. Null while the roster is unread. */
   readonly inFleet: boolean | null;
   /** Which authority its last decision came from. Null before it decided one. */
@@ -3132,7 +3171,6 @@ function asServerBotCompanion(value: JsonValue | undefined): ServerBotCompanion 
   }
   const row = value as Record<string, JsonValue>;
   return {
-    role: asFleetCompanionRole(row.role),
     inFleet: typeof row.inFleet === "boolean" ? row.inFleet : null,
     followingOrderFrom: asCompanionOrderAuthority(row.followingOrderFrom),
     lastOrderHeard: typeof row.lastOrderHeard === "string" ? row.lastOrderHeard : null,
@@ -3141,13 +3179,6 @@ function asServerBotCompanion(value: JsonValue | undefined): ServerBotCompanion 
       ? row.fitWarnings.filter((line): line is string => typeof line === "string")
       : [],
   };
-}
-
-/** A role we actually know, or null. An unrecognised one is not invented into a real one. */
-function asFleetCompanionRole(value: JsonValue | undefined): FleetCompanionRole | null {
-  return typeof value === "string" && FLEET_COMPANION_ROLES.includes(value as FleetCompanionRole)
-    ? (value as FleetCompanionRole)
-    : null;
 }
 
 /**
@@ -3163,7 +3194,10 @@ function asCompanionOrderAuthority(value: JsonValue | undefined): CompanionOrder
   return value === "broadcast" ||
     value === "tag" ||
     value === "chat" ||
-    value === "squad-board" ||
+    // ⚠ `squad-board` USED TO BE ACCEPTED HERE AND IS NOT ANY MORE. Nothing in
+    // the companion ever emitted it -- it was a settings checkbox no decision
+    // rung read -- so a row carrying it is a row from an older build, and null
+    // ("not reported") is the honest reading of it.
     value === "own-ladder"
     ? value
     : null;
@@ -3283,7 +3317,12 @@ export async function startServerBot(
  */
 export async function startServerCompanion(
   characterID: number,
-  request: FleetCompanionRequest,
+  // ⚠ A SETUP, NOT A REQUEST. What is sent over the wire and persisted in the
+  // BFF's roster is only what an operator saved; the eight module lists are
+  // filled in by the HOST, from the hull the pilot turns out to be sitting in,
+  // because a squad start has nobody to ask and a list saved earlier would be
+  // stale the moment that pilot refits.
+  request: CompanionSetup,
   grant: BotLaunchGrant,
   options: ApiOptions = {},
 ): Promise<ServerBot> {

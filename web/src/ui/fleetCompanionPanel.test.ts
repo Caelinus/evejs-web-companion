@@ -1,20 +1,22 @@
 // The fleet companion panel as it actually RENDERS — third instance of the
 // MiningBot.svelte / MissionBot.svelte pattern.
 //
-// What this panel can get wrong is narrow but expensive, same shape as its
-// siblings:
+// ⚠ 2026-09-11 SIMPLIFICATION — SEE docs/fleet-companion-simplification.md.
+// The panel no longer picks a role, a module, or an order channel: those
+// sections are gone for good, and the regression guards near the bottom of
+// this file exist so they cannot quietly come back.
+//
+// What this panel can still get wrong is narrow but expensive, same shape as
+// its siblings:
 //
 //   1. GATING ON THE WRONG THING. "In a fleet" is the one requirement the
 //      ladder cannot resolve for itself, so it must actually block Start.
 //      "Docked" is the companion's own first move, so it must NEVER block
 //      Start — an advisory requirement that blocks is a launcher narrower
 //      than the bot it launches.
-//   2. GUESSING A DEFENSIVE MODULE. `defenseModuleIDs` must be the player's
-//      OWN pick — nothing may start ticked, unlike the mining bot's
-//      "suggested" equipment.
-//   3. Never showing internal vocabulary ("blocking", "cannot-tell") to the
+//   2. Never showing internal vocabulary ("blocking", "cannot-tell") to the
 //      player — it must always be translated into plain words.
-//   4. The standing invariants — R7d (no visible numeric IDs), R9a (plain
+//   3. The standing invariants — R7d (no visible numeric IDs), R9a (plain
 //      player language), R8 (data-label on every cell of a reflow table).
 
 import test from "node:test";
@@ -40,11 +42,6 @@ const CHARACTER_ID = 90000001;
 const FLEET_ID = 90000010;
 const SHIP_ID = 90000020;
 const STATION_ID = 90000030;
-const DEFENSE_MODULE_A_ITEM_ID = 90000101;
-const DEFENSE_MODULE_A_TYPE_ID = 90000201;
-const DEFENSE_MODULE_B_ITEM_ID = 90000102;
-const DEFENSE_MODULE_B_TYPE_ID = 90000202;
-const CHAT_SENDER_ID = 90000301;
 
 function fakeFlow(): unknown {
   return new Proxy({}, { get: () => async () => {} });
@@ -143,55 +140,11 @@ function applyFlight(
   });
 }
 
-/** A fit with two online, non-mining modules — nothing here should suggest itself. */
-function applyDefensiveFitting(store: ReturnType<typeof createClientStore>): void {
-  store.apply({
-    type: "fitting/loaded",
-    activeShipID: SHIP_ID,
-    slots: [
-      {
-        family: "mid",
-        index: 0,
-        module: {
-          itemID: DEFENSE_MODULE_A_ITEM_ID,
-          typeID: DEFENSE_MODULE_A_TYPE_ID,
-          groupID: null,
-          online: true,
-          charge: null,
-        },
-      },
-      {
-        family: "low",
-        index: 0,
-        module: {
-          itemID: DEFENSE_MODULE_B_ITEM_ID,
-          typeID: DEFENSE_MODULE_B_TYPE_ID,
-          groupID: null,
-          online: true,
-          charge: null,
-        },
-      },
-    ],
-    resources: createClientStore().get().fitting.resources,
-    stats: createClientStore().get().fitting.stats,
-    slotsError: null,
-    resourcesError: null,
-  });
-  store.apply({
-    type: "names/resolved",
-    entries: {
-      [`type:${DEFENSE_MODULE_A_TYPE_ID}`]: "Test Shield Booster",
-      [`type:${DEFENSE_MODULE_B_TYPE_ID}`]: "Test Armour Repairer",
-    },
-  });
-}
-
-/** In a real fleet, in space, with two defensive modules powered up. */
+/** In a real fleet, in space. */
 function readyStore(): ReturnType<typeof createClientStore> {
   const store = createClientStore();
   applyFleet(store, readyFleetSnapshot());
   applyFlight(store, { docked: false, inSpace: true });
-  applyDefensiveFitting(store);
   return store;
 }
 
@@ -250,107 +203,46 @@ test("in a fleet and already out in space: both requirements read Ready", () => 
   assert.match(text, /Ready.*Your ship is out in space/);
 });
 
-// --- 2. nothing is guessed for the player -----------------------------------
+// --- 2. the setup form only offers what nobody could derive -----------------
 
-test("every equipment picker starts with NOTHING ticked — unlike the mining bot's suggestion", () => {
-  const body = renderPanel(readyStore());
-  const checkboxBlocks = [...body.matchAll(/<label class="check[^"]*">[\s\S]*?<\/label>/g)].map((m) => m[0]);
-  const equipmentBoxes = checkboxBlocks.filter(
-    (block) => block.includes("Test Shield Booster") || block.includes("Test Armour Repairer"),
-  );
-  // EIGHT pickers now offer every online module: defensive equipment, one
-  // per SELF-repair layer (shield, armour, hull), one per remote-repair
-  // family (shield, armour, capacitor), and weapons. Two modules in each.
-  //
-  // ⚠ EVERY PICKER OFFERS EVERY ONLINE MODULE ON PURPOSE. The panel cannot
-  // tell a remote shield booster from a self shield booster, an armour
-  // repairer (self or remote), or a weapon by name, and guessing is the one
-  // thing this whole surface refuses to do — a wrong guess cycles the wrong
-  // module. The player picks; the panel only lists.
-  assert.equal(equipmentBoxes.length, 16, "every picker must offer both online modules");
-  for (const block of equipmentBoxes) {
-    assert.doesNotMatch(block, /checked/, "no module may be pre-ticked, in any picker");
-  }
-});
-
-test("with nothing powered up, the panel says so rather than showing an empty list", () => {
-  const store = createClientStore();
-  applyFleet(store, readyFleetSnapshot());
-  applyFlight(store, { docked: false, inSpace: true });
-  const text = visibleText(renderPanel(store));
-  assert.match(text, /Nothing powered up/i);
-});
-
-test("the source never invents defenseModuleIDs — Start always sends exactly `picked`", () => {
-  assert.match(SOURCE, /defenseModuleIDs:\s*picked/);
-  assert.doesNotMatch(SOURCE, /suggested/i, "there must be no mining-style suggested default here");
-});
-
-// --- 3. tagging's own warning, and chat senders are player-typed, not chat-derived --
-
-test("the tagging checkbox carries the one-pilot-per-squad warning", () => {
+test("the setup form explains what the pilot uses without any control to switch it on", () => {
   const text = visibleText(renderPanel(readyStore()));
-  assert.match(text, /Only one pilot per squad should turn this on/i);
+  assert.match(text, /reads its own fit/i);
+  assert.match(text, /hardeners, repairers, remote repairers and weapons/i);
+  assert.match(text, /nothing here to switch on/i);
 });
 
-test("chat command senders are typed by the player, and preview by NAME once resolved", () => {
-  const store = readyStore();
-  store.apply({
-    type: "names/resolved",
-    entries: { [`character:${CHAT_SENDER_ID}`]: "Test Wingmate" },
-  });
-  // The component starts its own text field empty (no interactivity in an SSR
-  // render), so this pins the WIRING instead: the parsed ids feed both the
-  // preview and the request, and never come from chat text.
-  assert.match(SOURCE, /chatCommandSenders:\s*chatCommandSenderIDs/);
-  assert.match(SOURCE, /NEVER POPULATED FROM CHAT TEXT/);
-  void store;
+test("the source builds Start's request as exactly a CompanionSetup, nothing invented", () => {
+  assert.match(SOURCE, /satisfies CompanionSetup/);
+  assert.match(SOURCE, /fleeHealthFloor:/);
+  assert.match(SOURCE, /capacitorFloor:/);
+  assert.match(SOURCE, /maxFleeAttempts:/);
+  assert.match(SOURCE, /repairsAtStation/);
+  assert.match(SOURCE, /droneHealthFloor:/);
+  assert.match(SOURCE, /droneRedeployHoldOffSeconds:/);
 });
 
-test("the role picker applies its preset, and reads the role off the event", () => {
-  // ⚠ PINNED AGAINST THE SOURCE BECAUSE SSR CANNOT CLICK. `svelte/server`
-  // renders once to a string with no event loop, so no test in this repo can
-  // fire the change handler -- there is no DOM harness anywhere in the tree.
-  // The TABLE itself is unit-tested in bots/companionRolePresets.test.ts; what
-  // can only be pinned here is that the panel is wired to it at all.
-  assert.match(SOURCE, /onchange=\{\(event\) =>\s*applyRolePreset\(/);
-  assert.match(SOURCE, /presetForRole/, "the preset must come from the shared table");
-
-  // ⚠ AND THAT IT READS THE EVENT, NOT `role`. `bind:value` and this handler
-  // fire from the same change; depending on the binding having landed first
-  // would leave the preset one selection stale, which is the sort of bug that
-  // looks like "the first time I pick a role nothing happens".
-  assert.match(SOURCE, /applyRolePreset\(\(event\.currentTarget as HTMLSelectElement\)\.value/);
-  assert.doesNotMatch(
-    SOURCE,
-    /onchange=\{\(\) => applyRolePreset\(role\)\}/,
-    "the handler must not read the bound `role`",
-  );
+test("the drone number inputs are never disabled — there is no useDrones flag to gate them", () => {
+  const body = renderPanel(readyStore());
+  const droneFloorInput = body.match(/<input[^>]*id="companion-drone-floor"[^>]*>/)?.[0] ?? "";
+  const droneHoldoffInput = body.match(/<input[^>]*id="companion-drone-holdoff"[^>]*>/)?.[0] ?? "";
+  assert.notEqual(droneFloorInput, "", "the drone floor input must render");
+  assert.notEqual(droneHoldoffInput, "", "the drone hold-off input must render");
+  assert.doesNotMatch(droneFloorInput, /disabled/);
+  assert.doesNotMatch(droneHoldoffInput, /disabled/);
 });
 
-test("the panel never quietly re-enables an order channel the operator turned off", () => {
-  // The remote-rep warning exists precisely BECAUSE `obeys` is not a preset:
-  // the Heal family is gated on `obeys` carrying "broadcast", so remote-rep
-  // modules on a pilot that ignores broadcasts can never fire. The panel says
-  // so and changes nothing. If a later edit made `obeys` a preset instead, this
-  // fails -- which is the point.
-  assert.match(SOURCE, /remoteRepsCannotFire/);
-  assert.doesNotMatch(SOURCE, /obeys\s*=\s*\[\.\.\.preset/);
-  assert.doesNotMatch(SOURCE, /preset\.obeys/);
-});
-
-// --- 4. the readout, once running -------------------------------------------
+// --- 3. the readout, once running -------------------------------------------
 
 function startedStore(): ReturnType<typeof createClientStore> {
   const store = readyStore();
-  store.apply({ type: "companion/started", role: "logi", fitWarnings: [], startedAt: Date.now() });
+  store.apply({ type: "companion/started", fitWarnings: [], startedAt: Date.now() });
   store.apply({
     type: "companion/progress",
     status: "running",
     phase: "Holding formation",
     action: "Wait",
     why: "Nothing has asked for anything yet.",
-    role: "logi",
     inFleet: true,
     followingOrderFrom: "broadcast",
     lastOrderHeard: "Orbit the fleet commander",
@@ -367,9 +259,8 @@ test("the readout shows the WHY, which is the whole point of the panel", () => {
   assert.match(text, /Nothing has asked for anything yet/);
 });
 
-test("the readout translates role, order source and the three-state canTag into player words", () => {
+test("the readout translates order source and the three-state canTag into player words", () => {
   const text = visibleText(renderPanel(startedStore()));
-  assert.match(text, /Logistics/);
   assert.match(text, /a fleet broadcast/);
   assert.match(text, /Orbit the fleet commander/);
   assert.match(text, /no - not a fleet commander/);
@@ -383,7 +274,6 @@ test("canTag is three-state: null reads as 'not known', never as a settled no", 
     phase: "Holding formation",
     action: "Wait",
     why: "Nothing has asked for anything yet.",
-    role: "logi",
     inFleet: true,
     followingOrderFrom: null,
     lastOrderHeard: null,
@@ -411,7 +301,6 @@ test("a PAUSED companion still reads as holding the ship, with the standard paus
     phase: "Holding formation",
     action: null,
     why: "You paused it.",
-    role: "logi",
     inFleet: true,
     followingOrderFrom: null,
     lastOrderHeard: null,
@@ -426,14 +315,13 @@ test("a PAUSED companion still reads as holding the ship, with the standard paus
 
 test("a failure reason is shown while running", () => {
   const store = readyStore();
-  store.apply({ type: "companion/started", role: "dps", fitWarnings: [], startedAt: Date.now() });
+  store.apply({ type: "companion/started", fitWarnings: [], startedAt: Date.now() });
   store.apply({
     type: "companion/progress",
     status: "error",
     phase: null,
     action: null,
     why: null,
-    role: "dps",
     inFleet: null,
     followingOrderFrom: null,
     lastOrderHeard: null,
@@ -448,21 +336,46 @@ test("a failure reason is shown while running", () => {
   assert.match(text, /fleet roster could not be read/);
 });
 
+// --- 4. regression guards: the deleted controls must not come back ---------
+
+test("REGRESSION — no module-picking control renders anywhere in the panel", () => {
+  for (const store of [readyStore(), startedStore()]) {
+    const body = renderPanel(store);
+    assert.doesNotMatch(body, /companion-role/, "the role picker must not come back");
+    assert.doesNotMatch(body, /<h3>Defensive equipment<\/h3>/i);
+    assert.doesNotMatch(body, /<h3>Self repair<\/h3>/i);
+    assert.doesNotMatch(body, /<h3>Remote repair<\/h3>/i);
+    assert.doesNotMatch(body, /<h3>Weapons<\/h3>/i);
+    assert.doesNotMatch(body, /<h3>Target tagging<\/h3>/i);
+    assert.doesNotMatch(body, /Nothing powered up/i, "there is no equipment list left to be empty");
+  }
+});
+
+test("REGRESSION — no channel toggle renders anywhere in the panel", () => {
+  for (const store of [readyStore(), startedStore()]) {
+    const body = renderPanel(store);
+    assert.doesNotMatch(body, /What it listens to/i);
+    assert.doesNotMatch(body, /Fleet broadcasts/);
+    assert.doesNotMatch(body, /Local chat commands/);
+    assert.doesNotMatch(body, /The squad board/i);
+    assert.doesNotMatch(body, /companion-chat-senders/);
+    assert.doesNotMatch(body, /Use drones to defend itself/i);
+  }
+});
+
+test("REGRESSION — the safe-spot bookmark picker is gone; the panel names the star instead", () => {
+  const text = visibleText(renderPanel(readyStore()));
+  assert.doesNotMatch(text, /companion-safe-spot/);
+  assert.doesNotMatch(text, /nowhere - stop and say so/i);
+  assert.match(text, /warps to this system's star/i);
+});
+
 // --- 5. the standing invariants ---------------------------------------------
 
 test("R7d — no numeric id reaches the player, running or not", () => {
   for (const store of [readyStore(), startedStore()]) {
     const text = visibleText(renderPanel(store));
-    for (const id of [
-      CHARACTER_ID,
-      FLEET_ID,
-      SHIP_ID,
-      STATION_ID,
-      DEFENSE_MODULE_A_ITEM_ID,
-      DEFENSE_MODULE_A_TYPE_ID,
-      DEFENSE_MODULE_B_ITEM_ID,
-      DEFENSE_MODULE_B_TYPE_ID,
-    ]) {
+    for (const id of [CHARACTER_ID, FLEET_ID, SHIP_ID, STATION_ID]) {
       assert.equal(text.includes(String(id)), false, `numeric id leaked: ${id}`);
     }
   }
@@ -478,6 +391,10 @@ test("R9a — no raw vocabulary reaches the player", () => {
     "FleetCompanionRunState",
     "followingOrderFrom",
     "defenseModuleIDs",
+    "useDrones",
+    "attemptsTagging",
+    "obeys",
+    "safeSpotBookmarkID",
   ]) {
     assert.equal(text.includes(raw), false, `raw vocabulary leaked: ${raw}`);
   }

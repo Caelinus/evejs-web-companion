@@ -549,7 +549,6 @@ test("activeBotVitalsWords joins health and holds, and is empty when there is no
 // --- the companion badge's source selection ---------------------------------
 
 const COMPANION_ON_WIRE: ServerBotCompanion = {
-  role: "logi",
   inFleet: true,
   followingOrderFrom: "broadcast",
   lastOrderHeard: "the fleet's target call",
@@ -563,7 +562,6 @@ function companionSlice(over: Partial<FleetCompanionState> = {}): FleetCompanion
     phase: "Obeying fleet",
     action: null,
     why: null,
-    role: "tackle",
     inFleet: false,
     followingOrderFrom: "own-ladder",
     lastOrderHeard: null,
@@ -599,7 +597,6 @@ test("a server companion's badge comes off the wire", () => {
 test("a tab companion's badge comes off the store slice", () => {
   const slice = companionSlice();
   const facts = companionFactsFor("tab", bots({ runningBotID: "companion" }), slice, null);
-  assert.equal(facts?.role, "tackle");
   assert.equal(facts?.inFleet, false);
   assert.equal(facts?.followingOrderFrom, "own-ladder");
 });
@@ -612,9 +609,9 @@ test("⚠ a row holding BOTH reads the SERVER, never the tab's stale slice", () 
   // BotManager.svelte looks a server bot up for EVERY held session, because a
   // pilot can have a tab open here while the host holds the hull. The two
   // sources below disagree on every single field on purpose: the tab says a
-  // tackle taking its own decisions in no fleet, the server says a logi obeying
-  // broadcasts in one. Read the wrong side and the badge is confidently wrong
-  // about all five.
+  // pilot taking its own decisions in no fleet, the server says one obeying
+  // broadcasts in a fleet. Read the wrong side and the badge is confidently
+  // wrong about all four.
   const facts = companionFactsFor(
     "server",
     bots({ runningBotID: "companion" }),
@@ -622,7 +619,6 @@ test("⚠ a row holding BOTH reads the SERVER, never the tab's stale slice", () 
     serverBot({ kind: "companion", companion: COMPANION_ON_WIRE }),
   );
   assert.deepEqual(facts, COMPANION_ON_WIRE, "the server bot is the truth for this row");
-  assert.notEqual(facts?.role, "tackle", "that is the tab's stale role");
   assert.notEqual(facts?.inFleet, false, "and the tab's stale fleet reading");
 });
 

@@ -82,6 +82,53 @@
 // patterns below require their own closing tag, so a truncated tag simply
 // fails to match — the message decodes to `null`, never to a guessed,
 // possibly-wrong id built from a fragment.
+//
+// ─── `salvage` AND `loot`: THE FIRST VERBS WITH NO LINK AT ALL ─────────────
+//
+// ⚠ Every verb above names an OBJECT ("target this ship", "align to this
+// structure") and the link is how that object is identified — no link, no
+// object, no command. `salvage` and `loot` are different in kind, not just
+// missing a link by accident: they name an AREA ("salvage the wrecks in
+// vicinity", "loot the wrecks and containers in vicinity"), and there is
+// nothing in a fleet-mate's chat line that could name a specific wreck or
+// container even in principle — a wreck has no bookmark-able name a human
+// would paste as a showinfo link the way a ship or gate does. The operator
+// explicitly rejected a link-taking form of these two verbs. So
+// `{ kind: "salvage" }` and `{ kind: "loot" }` carry no `itemID` at all —
+// the first command kinds in this module that are a command in full on the
+// verb alone, and `parseChatCommand` below branches to return them BEFORE
+// the link-extraction loop runs, never through it. The existing "a verb
+// matched but no usable link followed it -> null" rule stays exactly as it
+// was for the four link verbs; it is not loosened or reused for these two,
+// because these two never ask a link to follow them in the first place.
+//
+// The two verbs also have different REACH, on purpose, not by omission:
+// salvaging any wreck is legal regardless of who owned it, but looting is
+// ownership-gated — `isOwnWreck` (`web/src/nav/scriptMacros.ts:1715`) opens
+// a wreck only when its owner reads back as this character or this
+// corporation (a wreck whose owner cannot be read is never opened), while
+// loot containers carry no ownership check at all. That gating lives in the
+// script-macro layer this module does not import — recorded here only so a
+// reader does not mistake `loot` and `salvage` for the same action under two
+// names.
+//
+// TRAILING CHATTER, DECIDED: a bare `salvage` or `loot` is followed by
+// whatever a human fleet-mate naturally types next — "salvage the wrecks in
+// vicinity", "loot the wrecks and containers in vicinity" — and the task's
+// own phrasing of what these commands mean IS a verb plus trailing words.
+// Demanding an exact, nothing-else-follows match would make that natural
+// phrasing fail to parse, which is worse than the alternative risk (some
+// unrelated sentence that happens to start with the bare word "loot" or
+// "salvage" firing a command it didn't mean). This also keeps the two verbs
+// mechanically consistent with the four link verbs above, which already
+// tolerate arbitrary trailing text before their link (e.g. "target that guy
+// <link>" matches today — `extractShowInfoItemID` searches the remainder,
+// it does not anchor to it). So: matched by the same anchored,
+// word-bounded `^verb\b` pattern as every other verb, and ANYTHING may
+// follow — trailing whitespace, trailing chatter, or nothing at all. Only
+// the anchoring and word-boundary discipline (unchanged from the rest of
+// this file) keeps "salvaged", "looting", "salvager" and a mid-sentence
+// mention ("did you loot that wreck?") from matching.
 
 import type { ChatMessage } from "../store/types.ts";
 // ⚠ Not `../bridge/chat.ts`, even though that is the module that PRODUCES a
@@ -92,19 +139,35 @@ import type { ChatMessage } from "../store/types.ts";
 // module does not own.
 
 /** The chat-command kinds this parser recognises. */
-export type ChatCommandKind = "target" | "align" | "travel" | "jump";
+export type ChatCommandKind =
+  | "target"
+  | "align"
+  | "travel"
+  | "jump"
+  | "salvage"
+  | "loot"
+  | "stop";
 
 /**
- * One parsed chat command. Every kind carries exactly the resolved numeric
- * item id the `decideFleetOrders` rung it mirrors expects — never a name,
- * never the raw link — so a caller can hand `itemID` straight to the same
- * rung logic that already handles the broadcast it mirrors.
+ * One parsed chat command. The four link verbs carry exactly the resolved
+ * numeric item id the `decideFleetOrders` rung each mirrors expects — never
+ * a name, never the raw link — so a caller can hand `itemID` straight to the
+ * same rung logic that already handles the broadcast it mirrors.
+ *
+ * `salvage` and `loot` carry no `itemID` — see this file's header, "the
+ * first verbs with no link at all". They name an area ("the wrecks in
+ * vicinity"), not an object, so there is nothing for a link to identify and
+ * nothing for a caller to read off the command beyond which of the two it
+ * was.
  */
 export type ChatCommand =
   | { readonly kind: "target"; readonly itemID: number }
   | { readonly kind: "align"; readonly itemID: number }
   | { readonly kind: "travel"; readonly itemID: number }
-  | { readonly kind: "jump"; readonly itemID: number };
+  | { readonly kind: "jump"; readonly itemID: number }
+  | { readonly kind: "salvage" }
+  | { readonly kind: "loot" }
+  | { readonly kind: "stop" };
 
 /**
  * Verb -> command kind, each with its own anchored, case-insensitive
@@ -131,8 +194,40 @@ const COMMAND_VERBS: ReadonlyArray<{
   { verb: "jump", pattern: /^jump\b/i, kind: "jump" },
 ];
 
-/** The chat verbs this parser recognises (`target`/`primary` alias to the same kind). */
-export const CHAT_COMMAND_VERBS: readonly string[] = Object.freeze(COMMAND_VERBS.map((c) => c.verb));
+/**
+ * `salvage` and `loot` — the area verbs, checked separately from
+ * `COMMAND_VERBS` above because they never look for a link at all (see this
+ * file's header). Same anchoring and word-boundary discipline as every
+ * other verb (`^verb\b`), so "salvaged", "looting" and "salvager" do not
+ * match and a mid-sentence mention never fires — but unlike the four link
+ * verbs, whatever follows the verb (nothing, whitespace, or trailing
+ * chatter) is irrelevant: the verb alone IS the whole command.
+ */
+const AREA_COMMAND_VERBS: ReadonlyArray<{
+  readonly verb: string;
+  readonly pattern: RegExp;
+  readonly kind: "salvage" | "loot" | "stop";
+}> = [
+  { verb: "salvage", pattern: /^salvage\b/i, kind: "salvage" },
+  { verb: "loot", pattern: /^loot\b/i, kind: "loot" },
+  // ⚠ `stop` CANCELS A STANDING AREA JOB AND NOTHING ELSE. `salvage` and `loot`
+  // LATCH -- they are jobs that run until the grid is clear, not instants -- so
+  // there has to be a way to call one off early. It does not stop the bot, it
+  // does not stop the ship, and it has no effect on a broadcast or a target
+  // call: those carry their own freshness and their own authority. Anchored and
+  // word-bounded like the rest, so "stopped" never fires it.
+  { verb: "stop", pattern: /^stop\b/i, kind: "stop" },
+];
+
+/**
+ * The chat verbs this parser recognises (`target`/`primary` alias to the
+ * same kind; `salvage`/`loot` are the link-free area verbs — see this
+ * file's header).
+ */
+export const CHAT_COMMAND_VERBS: readonly string[] = Object.freeze([
+  ...COMMAND_VERBS.map((c) => c.verb),
+  ...AREA_COMMAND_VERBS.map((c) => c.verb),
+]);
 
 /**
  * Both legal showinfo tag forms in one alternation, so "the first tag in the
@@ -189,9 +284,20 @@ function extractShowInfoItemID(text: string): number | null {
  * caller wiring this in later never has to juggle two different values for
  * "the chat line" — the same reason `isChatCommandSenderAllowed` below also
  * takes the whole message.
+ *
+ * Checks the area verbs (`salvage`, `loot`) FIRST and returns straight away
+ * on a match, deliberately before the link-extraction loop below ever runs
+ * — those two verbs never enter it, so the "matched but no usable link
+ * followed" -> `null` rule further down cannot apply to them and is not
+ * being loosened to accommodate them. See this file's header.
  */
 export function parseChatCommand(message: ChatMessage): ChatCommand | null {
   const trimmed = message.message.trim();
+  for (const { pattern, kind } of AREA_COMMAND_VERBS) {
+    if (pattern.test(trimmed)) {
+      return { kind };
+    }
+  }
   for (const { pattern, kind } of COMMAND_VERBS) {
     const verbMatch = pattern.exec(trimmed);
     if (verbMatch === null) {

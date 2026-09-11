@@ -626,7 +626,6 @@ const INITIAL_FLEET_COMPANION: FleetCompanionState = Object.freeze({
   phase: null,
   action: null,
   why: null,
-  role: null,
   inFleet: null,
   followingOrderFrom: null,
   lastOrderHeard: null,
@@ -2338,8 +2337,7 @@ export function createClientStore(): ClientStore {
         companion.set({
           ...INITIAL_FLEET_COMPANION,
           status: "running",
-          role: event.role,
-          startedAt: event.startedAt,
+            startedAt: event.startedAt,
           fitWarnings: event.fitWarnings,
         });
         break;
@@ -2350,8 +2348,7 @@ export function createClientStore(): ClientStore {
           phase: event.phase,
           action: event.action,
           why: event.why,
-          role: event.role,
-          inFleet: event.inFleet,
+            inFleet: event.inFleet,
           followingOrderFrom: event.followingOrderFrom,
           lastOrderHeard: event.lastOrderHeard,
           canTag: event.canTag,

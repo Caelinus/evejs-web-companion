@@ -64,22 +64,18 @@ const ENDED_STATUSES = new Set(["stopped", "error", "idle"]);
 // constant's comment for why two copies of a bare 1 would be a bug waiting to
 // surface as a bogus "this bot changed after its run was approved".
 
-// The companion's roster-row `scriptName` — the slot a player reads in the
-// Server Bots list — derived from the request's role rather than authored,
-// because a companion request has no name field of its own (unlike a saved
-// script). Not exhaustive by construction on purpose: an unrecognised role
-// cannot reach here at all, since decodeFleetCompanionRequestValue refuses
-// any value outside FLEET_COMPANION_ROLES before start() ever calls this.
+// The companion's roster-row `scriptName` -- the slot a player reads in the
+// Server Bots list. A companion setup has no name field of its own (unlike a
+// saved script), so this is a fixed label rather than a derived one.
 //
-// ⚠ THE LABELS THEMSELVES ARE NOT DEFINED HERE, AND USED TO BE. They were a
-// verbatim second copy of `roleLabels` in FleetCompanion.svelte, in a second
-// language, with nothing to fail if one drifted -- exactly the bug the
-// COMPANION_GRANT_SCRIPT_REV comment above exists to prevent. They now come off
-// the loaded stack, the same way that sentinel does.
-function companionScriptName(role, labels) {
-  const label = labels[role] || "companion";
-  return `Fleet companion (${label})`;
-}
+// ⚠ IT USED TO NAME THE PILOT'S ROLE, and there are no roles any more. A role
+// set exactly one threshold and no decision rung ever read it
+// (docs/fleet-companion-simplification.md), so it was deleted along with the
+// rest of the settings surface -- and with it the `COMPANION_ROLE_LABELS` this
+// function used to take off the loaded stack. What a companion is FOR is now
+// visible where it is actually true: in the badge, which says what the pilot is
+// doing and who it is obeying right now.
+const COMPANION_SCRIPT_NAME = "Fleet companion";
 
 // How often each running bot's ship vitals are sampled for the landing-page
 // readout. Plain reads through the bot's own flow — the same polls an open
@@ -106,7 +102,11 @@ function defaultLoadStack() {
     const webSrc = path.resolve(__dirname, "..", "web", "src");
     const webUrl = (rel) => pathToFileURL(path.join(webSrc, rel)).href;
     stackPromise = (async () => {
-      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy, companionReadout] =
+      // ⚠ `companionReadout` IS NO LONGER LOADED. It was imported for one thing:
+      // the role labels that named a roster row. Roles are gone, the row is a
+      // fixed label now (COMPANION_SCRIPT_NAME), and every other word in that
+      // module is written for a browser panel this host does not render.
+      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy] =
         await Promise.all([
           import(webUrl("app/sessionToken.ts")),
           import(webUrl("store/clientStore.ts")),
@@ -114,7 +114,6 @@ function defaultLoadStack() {
           import(webUrl("bots/scriptCodec.ts")),
           import(webUrl("bots/runPolicy.ts")),
           import(webUrl("bots/companionRunPolicy.ts")),
-          import(webUrl("bots/companionReadout.ts")),
         ]);
       // The server has no sessionStorage; force the in-memory fallback. Bots
       // never use the global token anyway (perSessionToken), but the module
@@ -129,13 +128,9 @@ function defaultLoadStack() {
         // The companion's own risk-derivation and codec door — same BotRunPolicy
         // shape, same validateBotLaunchGrant, per companionRunPolicy.ts's header.
         analyzeCompanionRunPolicy: companionRunPolicy.analyzeCompanionRunPolicy,
-        decodeFleetCompanionRequestValue: companionRunPolicy.decodeFleetCompanionRequestValue,
+        decodeCompanionSetupValue: companionRunPolicy.decodeCompanionSetupValue,
         decodeCompanionAbandonmentValue: companionRunPolicy.decodeCompanionAbandonmentValue,
         COMPANION_GRANT_SCRIPT_REV: companionRunPolicy.COMPANION_GRANT_SCRIPT_REV,
-        // The role LABELS, off the shared layer for the same reason the sentinel
-        // above is: this host and the browser both put them in front of a player
-        // and two copies would drift in silence. See companionReadout.ts.
-        COMPANION_ROLE_LABELS: companionReadout.COMPANION_ROLE_LABELS,
       };
     })();
     stackPromise.catch(() => {
@@ -381,7 +376,7 @@ function createBotHost(options) {
       // because a HEADLESS companion had no other way to say what it was doing
       // (a server-only row has no session and so no store to read).
       //
-      // ⚠ FIVE, NOT SEVEN. `action` and `failureReason` are still left out.
+      // ⚠ FOUR, NOT SIX. `action` and `failureReason` are still left out.
       // `why` already carries the sentence a player reads, and `failureReason`
       // duplicates what `startError` and the ended-run outcome already say --
       // adding either would put a second, drifting answer on the wire for a
@@ -391,8 +386,11 @@ function createBotHost(options) {
       // it must stay a plain assignment. It deliberately does NOT persistRoster:
       // see the record's own `companionReadout` comment for why a readout has no
       // business on disk.
+      // ⚠ `role` USED TO BE THE FIFTH AND IS GONE. A companion has no role any
+      // more (docs/fleet-companion-simplification.md): it set one threshold and
+      // no rung read it. What the pilot is FOR is visible in the four facts
+      // below, which say what it is doing and who it is obeying right now.
       record.companionReadout = {
-        role: typeof snapshot.role === "string" ? snapshot.role : null,
         inFleet: typeof snapshot.inFleet === "boolean" ? snapshot.inFleet : null,
         followingOrderFrom:
           typeof snapshot.followingOrderFrom === "string" ? snapshot.followingOrderFrom : null,
@@ -541,14 +539,14 @@ function createBotHost(options) {
 
     if (isCompanion) {
       // The persisted (or freshly submitted) request is untrusted bytes like
-      // any other — decodeFleetCompanionRequestValue is its ONE gate, mirroring
+      // any other — decodeCompanionSetupValue is its ONE gate, mirroring
       // decodeScriptValue below. Not a single field of it is trusted before
       // this call returns ok.
-      const decoded = stack.decodeFleetCompanionRequestValue(request);
+      const decoded = stack.decodeCompanionSetupValue(request);
       if (!decoded.ok) {
         return { ok: false, code: "BOTCOMPANION_INVALID", message: decoded.refusal };
       }
-      decodedRequest = decoded.request;
+      decodedRequest = decoded.setup;
       // A persisted abandonment is untrusted bytes exactly like the request
       // beside it, and gets the same one gate. A row that fails to decode is
       // DROPPED rather than refused: the companion simply starts a fresh
@@ -583,10 +581,10 @@ function createBotHost(options) {
       // Reuse the script's roster slots (docs/fleet-companion-handoff.md,
       // "3. Extend botHost") rather than inventing companion-shaped fields:
       // scriptID is a fixed literal (there is no library entry to look up),
-      // scriptName is derived from the request's role so a player reads a
-      // sensible pilot name in the roster instead of a blank column.
+      // and so is scriptName now that a setup carries nothing to derive one
+      // from -- see COMPANION_SCRIPT_NAME.
       recordScriptID = "companion";
-      recordScriptName = companionScriptName(decodedRequest.role, stack.COMPANION_ROLE_LABELS);
+      recordScriptName = COMPANION_SCRIPT_NAME;
     } else {
       // A stored bot doc is untrusted bytes like any other; the codec is the door.
       const decoded = stack.decodeScriptValue(doc);
@@ -1022,7 +1020,7 @@ function createBotHost(options) {
                 kind: "companion",
                 // No library entry to re-bind to — the persisted row's own
                 // `request` field IS the authority (persistRoster's comment).
-                // It goes through decodeFleetCompanionRequestValue again
+                // It goes through decodeCompanionSetupValue again
                 // inside start(), exactly like a fresh start's request.
                 request: row.request,
                 // The clock this companion was already waiting on. Keeping it

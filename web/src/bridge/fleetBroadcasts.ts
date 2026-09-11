@@ -76,7 +76,7 @@ export type FleetBroadcastItemMeaning =
   | "destination-system" // TravelTo: ⚠ NOT an item — a solar system id in the itemID slot
   | "sender-own-ship" // HealShield/HealArmor/HealCapacitor: rep the sender, not itemID's owner
   | "third-party-ship" // HealTarget: a third party's ship, distinct from the sender
-  | "server-warp-object" // WarpTo: the server warps the fleet itself
+  | "warp-object" // WarpTo: the object the fleet is told to warp to
   | "sender-beacon" // JumpBeacon: a beacon the sender holds
   | "nearest-ball"; // EnemySpotted/NeedBackup/HoldPosition/InPosition/Location: whatever was nearest the sender
 
@@ -94,9 +94,15 @@ export interface FleetBroadcastClassification {
  * "enemy spotted" in local. That is exactly why these are announcements —
  * log them, never act on the itemID.
  *
- * `WarpTo` also acts=false, for a different reason: the fleet warp itself is
- * executed server-side once the broadcast lands. A client that also acts on
- * itemID is fighting the server's own warp, not helping it.
+ * ⚠ `WarpTo` USED TO BE acts=false ON A CLAIM THAT IS FALSE. The note here read
+ * "the fleet warp itself is executed server-side once the broadcast lands", and
+ * it conflated two different things. `sendBroadcast` (fleetRuntime.js) does
+ * exactly one thing -- `notifySession(..., "OnFleetBroadcast", ...)` -- and
+ * warps nobody. The server-side fleet warp is a SEPARATE command, michelle's
+ * `CmdWarpToStuff` with `fleet=1`, which a follower yields to by seeing its own
+ * ship enter warp. A `WarpTo` BROADCAST is an instruction to the fleet, and a
+ * follower that ignored it simply did not go. Checked against the server
+ * 2026-09-11.
  *
  * `JumpBeacon` also acts=false: the itemID is a beacon the SENDER holds, not
  * one the follower can use directly; the client's own handling prefers
@@ -113,7 +119,7 @@ export const FLEET_BROADCAST_CLASSIFICATION: Readonly<
   HealArmor: { itemMeaning: "sender-own-ship", act: true },
   HealCapacitor: { itemMeaning: "sender-own-ship", act: true },
   HealTarget: { itemMeaning: "third-party-ship", act: true },
-  WarpTo: { itemMeaning: "server-warp-object", act: false },
+  WarpTo: { itemMeaning: "warp-object", act: true },
   JumpBeacon: { itemMeaning: "sender-beacon", act: false },
   EnemySpotted: { itemMeaning: "nearest-ball", act: false },
   NeedBackup: { itemMeaning: "nearest-ball", act: false },

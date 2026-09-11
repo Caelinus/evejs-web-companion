@@ -11,11 +11,6 @@
   // menu, which is passed in so only one menu is open across the whole screen.
   import type { HangarPilot } from "../app/hangar.ts";
   import type { Squad } from "../app/hangarPrefs.ts";
-  import {
-    FLEET_COMPANION_ROLES,
-    type FleetCompanionRole,
-  } from "../nav/fleetCompanionLoop.ts";
-  import { COMPANION_ROLE_LABELS } from "../bots/companionReadout.ts";
   import type { ActiveServerBot } from "../app/api.ts";
   import { formatIskCompact, formatSpCompact } from "../app/hangar.ts";
   // One vocabulary for every bot readout in the client — see bots/pilotRoster.ts.
@@ -39,10 +34,8 @@
     onStopBot,
     onToggleSquadMenu,
     onToggleSquad,
-    companionRoleFor = () => null,
-    companionTagsFor = () => false,
-    onSetCompanionRole = () => {},
-    onToggleCompanionTagging = () => {},
+    companionEnabledFor = () => false,
+    onToggleCompanion = () => {},
   }: {
     pilot: HangarPilot;
     selected: boolean;
@@ -69,19 +62,20 @@
     onToggleSquadMenu: () => void;
     onToggleSquad: (squadID: string) => void;
     /**
-     * What this pilot is set up to do in one squad, or null when it has no
-     * companion setup there.
+     * Whether this pilot is set up to fly a companion in one squad.
      *
-     * ⚠ THE SETUP IS A ROLE AND SETTINGS, NOT A FIT. What a squad member
-     * stores carries no module ids at all: the companion reads the ship it is
-     * actually in when it starts, because a list saved here would be stale the
-     * moment this pilot refits or changes hull. That is why this fits in a
-     * 210px popover when the original plan's whole-request version could not.
+     * ⚠ PRESENCE IS THE WHOLE SETTING NOW. There used to be a role here, and
+     * the role doubled as this same yes/no -- picking one meant "yes, and this
+     * is the job"; picking none meant "no". With the role gone
+     * (docs/fleet-companion-simplification.md, "The one-line version"), the
+     * yes/no is asked directly: a companion setup either exists for this pilot
+     * in this squad or it does not, and there is nothing left in the hangar to
+     * tune -- the setup it starts with is the shipped default. See
+     * `companionConfigFor` in hangarPrefs.ts.
      */
-    companionRoleFor?: (squadID: string) => FleetCompanionRole | null;
-    companionTagsFor?: (squadID: string) => boolean;
-    onSetCompanionRole?: (squadID: string, role: FleetCompanionRole | null) => void;
-    onToggleCompanionTagging?: (squadID: string) => void;
+    companionEnabledFor?: (squadID: string) => boolean;
+    /** Turn a companion setup on (shipped defaults) or off (remove it) for one squad. */
+    onToggleCompanion?: (squadID: string) => void;
   } = $props();
 
   // Manage mode deliberately makes the row inert: it is the mode where you
@@ -225,12 +219,11 @@
             <div class="hangar-squadmenu-list">
               {#each squads as squad (squad.id)}
                 {@const member = memberOf.has(squad.id)}
-                {@const role = companionRoleFor(squad.id)}
                 <!--
                   ⚠ THE TICK STAYS ITS OWN BUTTON AND THE SETUP SITS BENEATH IT.
                   A control nested inside that button would be invalid HTML and
-                  would fire the membership toggle on every click, so the role
-                  picker is a sibling, not a child.
+                  would fire the membership toggle on every click, so the
+                  companion toggle is a sibling, not a child.
 
                   ⚠ AND IT APPEARS ONLY FOR A SQUAD THIS PILOT IS IN. Growing
                   EVERY row was tried before and rejected -- at eleven squads it
@@ -250,35 +243,26 @@
                   <span class="hangar-squadmenu-name">{squad.name}</span>
                 </button>
                 {#if member}
+                  <!--
+                    ⚠ A TOGGLE, NOT A PICKER, AND THAT IS THE WHOLE OF WHAT
+                    LIVES HERE NOW. There used to be a role select (setting
+                    both "is this pilot a companion here" and "what job") and a
+                    second checkbox underneath it for tagging. The role is gone
+                    (docs/fleet-companion-simplification.md) and tagging is
+                    every pilot's, gated by the server's own commander check --
+                    so the only question left is yes/no, and this is the whole
+                    of it. Ticking it writes the shipped default setup; there
+                    is nothing in the hangar left to tune.
+                  -->
                   <div class="hangar-squadmenu-setup">
                     <label class="hangar-squadmenu-setuprow">
-                      <span>Flies as</span>
-                      <select
-                        value={role ?? ""}
-                        onchange={(event) => {
-                          const picked = (event.currentTarget as HTMLSelectElement).value;
-                          onSetCompanionRole(
-                            squad.id,
-                            picked === "" ? null : (picked as FleetCompanionRole),
-                          );
-                        }}
-                      >
-                        <option value="">Not set up</option>
-                        {#each FLEET_COMPANION_ROLES as choice (choice)}
-                          <option value={choice}>{COMPANION_ROLE_LABELS[choice]}</option>
-                        {/each}
-                      </select>
+                      <input
+                        type="checkbox"
+                        checked={companionEnabledFor(squad.id)}
+                        onchange={() => onToggleCompanion(squad.id)}
+                      />
+                      <span>Flies as companion</span>
                     </label>
-                    {#if role !== null}
-                      <label class="hangar-squadmenu-setuprow">
-                        <input
-                          type="checkbox"
-                          checked={companionTagsFor(squad.id)}
-                          onchange={() => onToggleCompanionTagging(squad.id)}
-                        />
-                        <span>Calls targets</span>
-                      </label>
-                    {/if}
                   </div>
                 {/if}
               {/each}

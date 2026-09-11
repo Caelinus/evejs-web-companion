@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { createAppFlow } from "./flow.ts";
 import { createClientStore } from "../store/clientStore.ts";
 import {
+  DEFAULT_COMPANION_SETUP,
   DEFAULT_FLEET_COMPANION_REQUEST,
   type FleetCompanionRequest,
 } from "../nav/fleetCompanionLoop.ts";
@@ -243,7 +244,24 @@ function chatHarness(
               "members",
               {
                 type: "dict",
-                entries: [[memberCharacterID, keyVal([["charID", memberCharacterID]])]],
+                entries: [
+                  [memberCharacterID, keyVal([["charID", memberCharacterID]])],
+                  // ⚠ THE CHAT SENDER IS ON THE ROSTER AS A COMMANDER, AND THAT
+                  // IS NOW THE ENTIRE GATE. A chat order used to be authorised
+                  // by a hand-typed list of character ids on the request; that
+                  // list is gone, and the roster decides instead
+                  // (docs/fleet-companion-simplification.md). FLEET_ROLE_LEADER
+                  // is 1. Without this row the order is correctly IGNORED, which
+                  // is what the sender-gate tests in fleetCompanionLoop.test.ts
+                  // pin from the other side.
+                  [
+                    ALLOWED_CHAT_SENDER,
+                    keyVal([
+                      ["charID", ALLOWED_CHAT_SENDER],
+                      ["role", 1],
+                    ]),
+                  ],
+                ],
               },
             ],
             ["squads", emptyDict],
@@ -321,7 +339,6 @@ test("a companion in a fleet starts", async () => {
   const { store, flow } = harness({ inFleet: true });
   await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
   assert.equal(store.get().companion.status, "running");
-  assert.equal(store.get().companion.role, DEFAULT_FLEET_COMPANION_REQUEST.role);
   flow.stopFleetCompanion();
 });
 
@@ -425,7 +442,6 @@ test("clearing the character drops the companion readout", async () => {
   store.apply({ type: "character/offline" });
 
   assert.equal(store.get().companion.status, "idle");
-  assert.equal(store.get().companion.role, null);
   flow.stopFleetCompanion();
 });
 
@@ -538,123 +554,6 @@ async function waitForCompanionTick(
   await waitFor(() => companionWhy() !== null, "the tick to decide something");
 }
 
-test("the chat cost gate: the DEFAULT companion opens no request to the chat bridge at all", async () => {
-  // ⚠ THIS IS THE ONE THAT STOPS THE FEATURE QUIETLY COSTING A FIFTH ROUND
-  // TRIP PER TICK FOR EVERY PILOT THAT NEVER TOUCHES CHAT. The default obeys
-  // broadcast+tag and ships with an empty chatCommandSenders, so a companion
-  // nobody has configured for chat must never open /api/bridge/chat/anything.
-  const { store, flow, calls } = chatHarness();
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
-    "obeys has no chat and chatCommandSenders is the shipped empty default -- nothing should ask the chat bridge anything",
-  );
-  flow.stopFleetCompanion();
-});
-
-test("the chat cost gate: chat in obeys plus an allowed sender reads the LOCAL channel", async () => {
-  const { store, flow, calls } = chatHarness();
-  const request: FleetCompanionRequest = {
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [ALLOWED_CHAT_SENDER],
-  };
-
-  await flow.startFleetCompanion(request);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    calls.includes("/api/bridge/chat/local"),
-    "chat in obeys with a non-empty allowlist must pay for the fifth round trip",
-  );
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/chat/") && path !== "/api/bridge/chat/local"),
-    "fleet chat is unreachable on this server (the gateway only ever computes local/corp rooms) -- it must ask local, never anything else",
-  );
-  flow.stopFleetCompanion();
-});
-
-test("chat in obeys but an EMPTY allowlist still reads nothing", async () => {
-  // An empty chatCommandSenders can never produce an order (isChatCommandSenderAllowed
-  // refuses everyone), so paying for the read would buy an answer nothing could act on.
-  const { store, flow, calls } = chatHarness();
-  const request: FleetCompanionRequest = {
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [],
-  };
-
-  await flow.startFleetCompanion(request);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
-    "an empty allowlist must read nothing, exactly like the default case",
-  );
-  flow.stopFleetCompanion();
-});
-
-test("the stale-capture trap: chat OFF then ON, on the SAME companion, must read on the second run", async () => {
-  // ⚠ THE WHOLE REASON `liveCompanionRequest` EXISTS. `makeFleetCompanionDeps()`
-  // is built only on the FIRST start (`if (!fleetCompanion)`), so a naive
-  // implementation that captured the request at deps-build time would answer
-  // this second start with the FIRST run's chat-off setting, forever.
-  const { store, flow, calls } = chatHarness();
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  await waitForCompanionTick(() => store.get().companion.why);
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
-    "first run: chat is off, so nothing is read yet",
-  );
-  flow.stopFleetCompanion();
-
-  calls.length = 0;
-  const withChat: FleetCompanionRequest = {
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [ALLOWED_CHAT_SENDER],
-  };
-  await flow.startFleetCompanion(withChat);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    calls.includes("/api/bridge/chat/local"),
-    "the SECOND start's request must be the one the live tick reads",
-  );
-  flow.stopFleetCompanion();
-});
-
-test("the stale-capture trap, reversed: chat ON then OFF, on the SAME companion, must stop reading on the second run", async () => {
-  const { store, flow, calls } = chatHarness();
-  const withChat: FleetCompanionRequest = {
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [ALLOWED_CHAT_SENDER],
-  };
-
-  await flow.startFleetCompanion(withChat);
-  await waitForCompanionTick(() => store.get().companion.why);
-  assert.ok(
-    calls.includes("/api/bridge/chat/local"),
-    "first run: chat is on, so the local channel is read",
-  );
-  flow.stopFleetCompanion();
-
-  calls.length = 0;
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
-    "the SECOND start turned chat off -- a request captured at deps-build time (the first, chat-on, run) would keep reading it forever",
-  );
-  flow.stopFleetCompanion();
-});
-
 // --- freshness: a lapsed chat order must fall back to the pilot's own ladder --
 
 /** An `align <belt>` chat line from the allowed sender, `ageMs` old. */
@@ -669,6 +568,43 @@ function alignChatLine(ageMs: number): unknown {
   };
 }
 
+test("every companion reads LOCAL chat, and never any other room", async () => {
+  // ⚠ THIS REPLACES FIVE COST-GATE TESTS FOR A GATE THAT WAS A BUG. Chat used
+  // to be read only when the operator had ticked a channel AND hand-typed at
+  // least one character id -- so the settings screen's own promise that
+  // "whoever the fleet roster names a commander is obeyed regardless" was false
+  // twice over: nothing consulted the roster, and with an empty list the read
+  // never happened at all. A companion now always listens, and the ROSTER
+  // decides who it hears (see the sender-gate tests in fleetCompanionLoop.test.ts).
+  //
+  // ⚠ AND IT MUST ASK LOCAL, NEVER "FLEET". Fleet chat is unreachable on this
+  // server -- the gateway only ever computes local and corp rooms -- so a read
+  // of anything else is a read that can never answer.
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(calls.includes("/api/bridge/chat/local"));
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/") && path !== "/api/bridge/chat/local"),
+  );
+  flow.stopFleetCompanion();
+});
+
+test("every companion reads its own drone bay, with nothing to switch on", async () => {
+  // ⚠ THE OLD GATE WAS `useDrones`, AND THERE IS NO SUCH SETTING. A pilot flies
+  // the drones it is carrying, so "is it carrying any" is precisely what this
+  // read answers and cannot be skipped on the strength of an answer nobody gave.
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(calls.some((path) => path.startsWith("/api/bridge/drones")));
+  flow.stopFleetCompanion();
+});
+
 test("a chat order older than FLEET_BROADCAST_TTL_MS does not reach the loop", async () => {
   const { store, flow, calls } = chatHarness({
     humanMemberCharacterID: HUMAN_FLEET_MEMBER,
@@ -676,8 +612,6 @@ test("a chat order older than FLEET_BROADCAST_TTL_MS does not reach the loop", a
   });
   const request: FleetCompanionRequest = {
     ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [ALLOWED_CHAT_SENDER],
   };
 
   await flow.startFleetCompanion(request);
@@ -703,8 +637,6 @@ test("a chat order inside FLEET_BROADCAST_TTL_MS reaches the loop and is obeyed"
   });
   const request: FleetCompanionRequest = {
     ...DEFAULT_FLEET_COMPANION_REQUEST,
-    obeys: ["chat"],
-    chatCommandSenders: [ALLOWED_CHAT_SENDER],
   };
 
   await flow.startFleetCompanion(request);
@@ -1021,7 +953,7 @@ test("a scram push reaches the ladder and the tackler is lettered for the fleet"
   store.apply({ type: "fleet/target-tags", tags: new Map() });
   scramble(store);
 
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
   await waitFor(() => tagWrites(calls).length > 0, "a tag write to reach the BFF");
 
   const write = tagWrites(calls)[0];
@@ -1034,21 +966,6 @@ test("a scram push reaches the ladder and the tackler is lettered for the fleet"
 // ⚠ The dead-config check, end to end this time. attemptsTagging shipped as a
 // checkbox with no reader; a regression that unwired it again would leave every
 // unit test above passing.
-test("the same scram writes nothing when the operator left tagging off", async () => {
-  const { store, flow, calls } = taggingHarness();
-  seatOnlineCharacter(store, OWN_CHARACTER_ID);
-  store.apply({ type: "fleet/target-tags", tags: new Map() });
-  scramble(store);
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  // Wait until the gate itself has answered YES, so the only thing left that
-  // could be stopping the write is the setting.
-  await waitFor(() => store.get().companion.canTag === true, "the tagging gate to answer");
-
-  assert.equal(tagWrites(calls).length, 0);
-  flow.stopFleetCompanion();
-});
-
 // ⚠ THE NEGATIVE CASE THE PHASE TABLE ASKS FOR. The server drops a
 // non-commander's tag silently, so a test that only ever exercised the happy
 // path could not tell a working gate from one that always says yes.
@@ -1085,7 +1002,7 @@ test("a plain member writes no tag, however hard it is being scrambled", async (
   store.apply({ type: "fleet/target-tags", tags: new Map() });
   scramble(store);
 
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
   await waitFor(() => store.get().companion.canTag !== null, "the tagging gate to answer");
 
   assert.equal(store.get().companion.canTag, false);
@@ -1107,59 +1024,10 @@ test("a plain member writes no tag, however hard it is being scrambled", async (
 // What the snapshot gives free -- which drones are out, and how hurt they are --
 // is built ungated, because it costs nothing.
 
-test("the drone cost gate: the DEFAULT companion never asks the drone bridge for a bay", async () => {
-  const { store, flow, calls } = chatHarness();
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.equal(
-    DEFAULT_FLEET_COMPANION_REQUEST.useDrones,
-    false,
-    "the default must stay off, or this test proves nothing",
-  );
-  assert.ok(
-    !calls.some((path) => path.startsWith("/api/bridge/drones")),
-    "a companion that is not set to use drones must not read the bay",
-  );
-  flow.stopFleetCompanion();
-});
-
-test("useDrones ON does read the bay", async () => {
-  const { store, flow, calls } = chatHarness();
-
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, useDrones: true });
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    calls.some((path) => path.startsWith("/api/bridge/drones")),
-    "a companion set to use drones needs the bay to launch from",
-  );
-  flow.stopFleetCompanion();
-});
-
 // ⚠ THE STALE-CAPTURE TRAP, the same one the chat gate carries a pair of tests
 // for. The gate reads the LIVE request, not the one captured when the deps were
 // built, so flipping the setting between two runs of the SAME companion has to
 // change what the next run reads.
-test("useDrones OFF then ON, on the SAME companion, reads the bay on the second run", async () => {
-  const { store, flow, calls } = chatHarness();
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  await waitForCompanionTick(() => store.get().companion.why);
-  flow.stopFleetCompanion();
-  assert.ok(!calls.some((path) => path.startsWith("/api/bridge/drones")));
-
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, useDrones: true });
-  await waitForCompanionTick(() => store.get().companion.why);
-
-  assert.ok(
-    calls.some((path) => path.startsWith("/api/bridge/drones")),
-    "the second run has drones on and must read the bay",
-  );
-  flow.stopFleetCompanion();
-});
-
 // --- the two grid reads observe() owes the ladder ----------------------------
 //
 // ⚠ THIS SECTION EXISTS BECAUSE THE LADDER'S OWN UNIT TESTS CANNOT SEE THIS
@@ -1182,8 +1050,28 @@ test("useDrones OFF then ON, on the SAME companion, reads the bay on the second 
 const RIVAL_CHARACTER_ID = 90000012;
 const RIVAL_SHIP_ITEM_ID = 90000013;
 const RIVAL_HULL_TYPE_ID = 90000014;
-/** A hardener on this pilot's own fit, for the tank rung to switch on. */
+/**
+ * A hardener on this pilot's own fit, for the tank rung to switch on.
+ *
+ * ⚠ IT IS ON THE FIT NOW, NOT ON THE REQUEST. These tests used to hand the
+ * itemID straight to `startFleetCompanion` in `defenseModuleIDs`. There is no
+ * such field to hand it to any more -- a companion derives every module list
+ * from the hull it is sitting in -- so the fixture has to put a real hardener
+ * on a real fit and let the classifier find it. That makes these tests cover
+ * MORE than they used to: the derivation and the rung, not just the rung.
+ */
 const HARDENER_ITEM_ID = 7101;
+const HARDENER_TYPE_ID = 90000030;
+
+/** The hardener as a fitted row, in a mid slot the Procurer fixture leaves free. */
+const HARDENER_ROW = Object.freeze({
+  itemID: HARDENER_ITEM_ID,
+  typeID: HARDENER_TYPE_ID,
+  flagID: 22,
+  groupID: 77,
+  name: "Kinetic Deflection Field II",
+  groupName: "Shield Hardener",
+});
 
 // The two tacklers of the ranking test. The NEARER one is the bigger hull, so
 // nearest-first and class-first disagree about which to letter -- which is the
@@ -1202,6 +1090,10 @@ const FAR_CEPTOR_TYPE_ID = 90000023;
 const HULL_GROUPS: Readonly<Record<number, string>> = Object.freeze({
   [NEAR_BRICK_TYPE_ID]: "Battleship",
   [FAR_CEPTOR_TYPE_ID]: "Interceptor",
+  // ⚠ THE CLASSIFIER SKIPS ANY MODULE WHOSE GROUP HAS NOT RESOLVED -- "never
+  // run a mystery module" -- so without this row the hardener is on the fit and
+  // in no list, and the tank rung has nothing to light.
+  [HARDENER_TYPE_ID]: "Shield Hardener",
 });
 
 /** One ship row, as the space bridge marshals a PLAYER hull on grid. */
@@ -1269,6 +1161,17 @@ function hullGroupNamesBody(body: Record<string, unknown>): unknown {
 function gridHarness(options: {
   readonly entities: readonly unknown[];
   readonly commander?: boolean;
+  /**
+   * Put a real Shield Hardener on this pilot's fit.
+   *
+   * ⚠ OPT-IN, AND IT HAS TO BE. Every module list is DERIVED from the hull
+   * now, so a hardener served to every test in this harness arms the tank rung
+   * everywhere -- and the tank rung sits ABOVE tagging in the ladder. The
+   * interceptor-ranking test below would then spend its first ticks lighting a
+   * hardener instead of writing the letter it is about. A fixture that changes
+   * which rung fires is not a neutral fixture.
+   */
+  readonly hardener?: boolean;
 }) {
   const calls: RecordedCall[] = [];
 
@@ -1315,6 +1218,9 @@ function gridHarness(options: {
         if (path === "/api/bridge/flight/status") return flightBody(false);
         if (path === "/api/bridge/space/snapshot") return spaceBodyWithGrid();
         if (path === "/api/names") return hullGroupNamesBody(parsed);
+        if (path === "/api/bridge/fitting") {
+          return fittingBody(options.hardener === true ? { extraModules: [HARDENER_ROW] } : {});
+        }
         if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
         if (path === "/api/bridge/bound-fleet") {
           return readyFleet({
@@ -1358,6 +1264,7 @@ test("a PLAYER lock alone lights a hardener, through the real observe()", async 
   // halves false, and this pilot then sits in a player gatecamp with its
   // hardeners dark -- which is the state the companion shipped in until now.
   const { store, flow, calls } = gridHarness({
+    hardener: true,
     entities: [
       rivalShip({
         itemID: RIVAL_SHIP_ITEM_ID,
@@ -1369,10 +1276,7 @@ test("a PLAYER lock alone lights a hardener, through the real observe()", async 
     ],
   });
 
-  await flow.startFleetCompanion({
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    defenseModuleIDs: [HARDENER_ITEM_ID],
-  });
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
   await waitForCompanionTick(() => store.get().companion.why);
 
   assert.equal(
@@ -1392,6 +1296,7 @@ test("the same grid with NOBODY locking leaves the hardener alone", async () => 
   // rung that lit up here would be firing on the mere presence of a stranger,
   // which would make the test above prove nothing.
   const { store, flow, calls } = gridHarness({
+    hardener: true,
     entities: [
       rivalShip({
         itemID: RIVAL_SHIP_ITEM_ID,
@@ -1402,10 +1307,7 @@ test("the same grid with NOBODY locking leaves the hardener alone", async () => 
     ],
   });
 
-  await flow.startFleetCompanion({
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    defenseModuleIDs: [HARDENER_ITEM_ID],
-  });
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
   await waitForCompanionTick(() => store.get().companion.why);
 
   assert.equal(store.get().companion.phase, "Standing by");
@@ -1464,7 +1366,7 @@ test("the fleet's letter goes to the INTERCEPTOR four times further out, not the
   scrambledBy(store, NEAR_BRICK_ITEM_ID);
   scrambledBy(store, FAR_CEPTOR_ITEM_ID);
 
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, attemptsTagging: true });
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
   await waitFor(() => tagWrites(calls).length > 0, "a tag write to reach the BFF");
 
   const write = tagWrites(calls)[0];
@@ -1474,30 +1376,6 @@ test("the fleet's letter goes to the INTERCEPTOR four times further out, not the
     "tackle outranks everything, and the interceptor is the tackle here",
   );
   assert.equal(write?.body.tag, "A");
-  flow.stopFleetCompanion();
-});
-
-test("the tagging cost gate: with tagging OFF, no hull's group name is resolved at all", async () => {
-  // Same rule the chat read and the drone bay are under. `decideTackleTag` is
-  // the only reader of `targetGroupNames` in this ladder and it returns before
-  // it ever looks when `attemptsTagging` is false -- so the lookup this costs
-  // on every NEW hull type, on a two-second tick and per companion, would be
-  // buying an answer nothing reads.
-  const { store, flow, calls } = gridHarness({ entities: TWO_TACKLERS, commander: true });
-  seatOnlineCharacter(store, OWN_CHARACTER_ID);
-  store.apply({ type: "fleet/target-tags", tags: new Map() });
-  scrambledBy(store, NEAR_BRICK_ITEM_ID);
-  scrambledBy(store, FAR_CEPTOR_ITEM_ID);
-
-  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
-  // Wait until the gate itself has answered YES, so the only thing that can
-  // still be holding the lookup back is the setting.
-  await waitFor(() => store.get().companion.canTag === true, "the tagging gate to answer");
-
-  assert.ok(
-    !askedForGroupOf(calls, FAR_CEPTOR_TYPE_ID) && !askedForGroupOf(calls, NEAR_BRICK_TYPE_ID),
-    "tagging is off in the shipped default -- nothing should be classifying hulls",
-  );
   flow.stopFleetCompanion();
 });
 
@@ -1518,7 +1396,6 @@ test("a deriving start WARMS THE GROUP NAMES before it classifies the fit", asyn
   const { flow, posted } = harness();
   await flow.startFleetCompanion({
     ...DEFAULT_FLEET_COMPANION_REQUEST,
-    deriveModulesFromFit: true,
   });
   flow.stopFleetCompanion();
 
@@ -1534,15 +1411,6 @@ test("a deriving start WARMS THE GROUP NAMES before it classifies the fit", asyn
   assert.ok(askedForGroups, "it must ask for typeGroup names, which is what the classifiers read");
 });
 
-test("a start that does NOT derive still reports on the fit, and never rewrites it", async () => {
-  // Warnings are computed for every start: an empty ammo bay is worth saying
-  // whoever picked the guns. What must not happen is the picks being replaced.
-  const { store, flow } = harness();
-  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST });
-  flow.stopFleetCompanion();
-  assert.ok(Array.isArray(store.companion.get().fitWarnings));
-});
-
 test("fit warnings never refuse a start", async () => {
   // ⚠ ADVISORY BY THE OPERATOR'S OWN RULE: warn, and let a human either load
   // the missing thing or ignore it and fly. A run that refused on a warning
@@ -1550,8 +1418,6 @@ test("fit warnings never refuse a start", async () => {
   const { store, flow } = harness();
   await flow.startFleetCompanion({
     ...DEFAULT_FLEET_COMPANION_REQUEST,
-    deriveModulesFromFit: true,
-    useDrones: true,
   });
   const slice = store.companion.get();
   assert.equal(slice.status, "running", "warnings must not stop the run");
@@ -1571,17 +1437,22 @@ test("the LOOP is started on the derived request, not the one that came in", () 
   // Verified by mutation: swapping `flownRequest` back to `request` breaks no
   // test in this file, which is exactly why this one is written differently.
   //
-  // Proving it behaviourally needs a fit fixture carrying a hardener or a gun,
-  // which means widening the shared botFixtures every other bot suite builds
-  // on. Worth doing when something else needs that fixture; not worth the blast
-  // radius for this one line today.
+  // ⚠ THAT IS NO LONGER THE ONLY PROOF, AND THIS TEST IS NOW THE BACKSTOP.
+  // This comment used to end "proving it behaviourally needs a fit fixture
+  // carrying a hardener or a gun, which means widening the shared
+  // botFixtures". That fixture now exists: `fittingBody({ extraModules })`,
+  // and the two hardener tests above fly a Procurer with a real Shield
+  // Hardener on it and watch the tank rung light a module NOBODY passed in.
+  // Those cover the claim end to end. This one stays because it is cheap and
+  // it catches the narrower mistake they cannot: handing the loop the
+  // un-derived value while the derivation itself still works.
   const source = readFileSync(new URL("./flow.ts", import.meta.url), "utf8");
-  assert.match(source, /const flownRequest = requestForFit\(request, fitFacts\);/);
+  assert.match(source, /const flownRequest = requestForFit\(setup, fitFacts\);/);
   assert.match(source, /liveCompanionRequest = flownRequest;/);
   assert.match(source, /fleetCompanion\.start\(flownRequest, resuming\);/);
   assert.doesNotMatch(
     source,
-    /fleetCompanion\.start\(request, resuming\);/,
-    "the loop must never be handed the un-derived request",
+    /fleetCompanion\.start\(setup, resuming\);/,
+    "the loop must never be handed the un-derived setup",
   );
 });

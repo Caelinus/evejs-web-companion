@@ -101,8 +101,23 @@ test("returns null for an unrecognised broadcast name (decode garbage, not a leg
 test("the classification table covers exactly the 15 legal names with the documented act/no-act split", () => {
   assert.deepEqual(Object.keys(FLEET_BROADCAST_CLASSIFICATION).sort(), [...FLEET_BROADCAST_NAMES].sort());
 
-  const actOn = ["Target", "AlignTo", "JumpTo", "TravelTo", "HealShield", "HealArmor", "HealCapacitor", "HealTarget"];
-  const noAct = ["WarpTo", "JumpBeacon", "EnemySpotted", "NeedBackup", "HoldPosition", "InPosition", "Location"];
+  // ⚠ `WarpTo` MOVED FROM noAct TO actOn ON 2026-09-11, because the reason it
+  // sat in noAct was false. The table said the fleet warp "is executed
+  // server-side once the broadcast lands"; `sendBroadcast` (fleetRuntime.js)
+  // only ever calls `notifySession` and warps nobody. The server-side fleet
+  // warp is a different command entirely (`CmdWarpToStuff` with `fleet=1`).
+  const actOn = [
+    "Target",
+    "AlignTo",
+    "JumpTo",
+    "TravelTo",
+    "WarpTo",
+    "HealShield",
+    "HealArmor",
+    "HealCapacitor",
+    "HealTarget",
+  ];
+  const noAct = ["JumpBeacon", "EnemySpotted", "NeedBackup", "HoldPosition", "InPosition", "Location"];
   for (const name of actOn) {
     assert.equal(FLEET_BROADCAST_CLASSIFICATION[name as keyof typeof FLEET_BROADCAST_CLASSIFICATION].act, true, name);
   }

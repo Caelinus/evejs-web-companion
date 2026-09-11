@@ -57,7 +57,6 @@
     companionSquadRoster,
     companionConfigFor,
     setCompanionConfig,
-    competingTaggers,
     toggleSquadMember,
     updateSquad,
     type HangarPrefs,
@@ -96,12 +95,7 @@
     type SquadStartEntry,
   } from "../bots/squadStart.ts";
   import { createBotLaunchGrant, DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
-  import {
-    DEFAULT_FLEET_COMPANION_REQUEST,
-    type FleetCompanionRequest,
-    type FleetCompanionRole,
-  } from "../nav/fleetCompanionLoop.ts";
-  import { presetForRole } from "../bots/companionRolePresets.ts";
+  import { DEFAULT_COMPANION_SETUP } from "../nav/fleetCompanionLoop.ts";
   import {
     analyzeCompanionRunPolicy,
     COMPANION_GRANT_SCRIPT_REV,
@@ -364,8 +358,10 @@
     squadStartFor = squadID;
     squadStartDone = null;
     // Said BEFORE anything flies, because after the start it is too late to be
-    // useful. Advisory throughout: none of these refuses the squad.
-    squadStartNotes = squadStartWarnings(targets, competingTaggers(prefs, squadID));
+    // useful. Advisory throughout: none of these refuses the squad. There is
+    // no tagging count to pass in any more -- see squadStart.ts's own comment
+    // on `squadStartWarnings` for why both of its old warnings are gone.
+    squadStartNotes = squadStartWarnings(targets);
     squadStartRows = targets.map((target) => ({
       characterID: target.characterID,
       state: "queued" as const,
@@ -378,20 +374,20 @@
     try {
       const entries = await startCompanionSquad(
         {
-          // ⚠ THE GRANT IS BUILT PER PILOT, FROM THAT PILOT'S OWN REQUEST.
-          // Two pilots in one squad need not carry the same risk: a request
-          // that reads its own fit earns "combat" whatever its module lists
-          // say, and one that pays for repairs earns "financial". The host
-          // re-derives this from the request it decodes and refuses a start
-          // whose grant does not match, so one grant reused across a squad
-          // would fail for whichever pilot it did not describe.
-          startCompanion: async (characterID, request) => {
+          // ⚠ THE GRANT IS BUILT PER PILOT, FROM THAT PILOT'S OWN SETUP. Every
+          // companion now reads its own fit unconditionally, so "combat" is an
+          // unconditional risk class for all of them -- but a setup that pays
+          // for repairs still earns "financial" and one that does not, does
+          // not. The host re-derives this from the setup it decodes and
+          // refuses a start whose grant does not match, so one grant reused
+          // across a squad would fail for whichever pilot it did not describe.
+          startCompanion: async (characterID, setup) => {
             const grant = createBotLaunchGrant(
               COMPANION_GRANT_SCRIPT_REV,
-              analyzeCompanionRunPolicy(request),
+              analyzeCompanionRunPolicy(setup),
               DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
             );
-            await startServerCompanion(characterID, request, grant);
+            await startServerCompanion(characterID, setup, grant);
           },
         },
         targets,
@@ -406,39 +402,6 @@
     } finally {
       squadStarting = false;
     }
-  }
-
-  /**
-   * The setup a pilot gets when a role is picked for it in a squad.
-   *
-   * ⚠ THE ROLE PRESET IS WHAT MAKES A ROLE MEAN ANYTHING HERE. Picking
-   * "Logistics" is the only chance this screen gets to set a flee threshold --
-   * there is nowhere else in the hangar to tune one -- so the preset table is
-   * the whole of the difference between the four roles. See
-   * companionRolePresets.ts for what it does and does not set, and why.
-   *
-   * ⚠ AND THE MODULE LISTS STAY EMPTY, WITH `deriveModulesFromFit` ON. The
-   * hangar cannot pick modules: they are itemIDs of one hull's fitted gear and
-   * this pilot is not mounted. The companion reads the ship it is actually in
-   * when it starts.
-   *
-   * ⚠ CHANGING A ROLE KEEPS WHAT THE ROLE DOES NOT COVER. Re-picking must not
-   * silently clear a tagging choice that is still true of this pilot; only the
-   * fields the preset names are rewritten.
-   */
-  function companionSetupFor(
-    current: HangarPrefs,
-    squadID: string,
-    characterID: number,
-    role: FleetCompanionRole,
-  ): FleetCompanionRequest {
-    const existing = companionConfigFor(current, squadID, characterID);
-    return {
-      ...(existing ?? DEFAULT_FLEET_COMPANION_REQUEST),
-      ...presetForRole(role),
-      role,
-      deriveModulesFromFit: true,
-    };
   }
 
   function pilotNameFor(characterID: number): string {
@@ -882,29 +845,25 @@
                   (squadMenuFor = squadMenuFor === pilot.characterID ? null : pilot.characterID)}
                 onToggleSquad={(squadID) =>
                   commit(toggleSquadMember(prefs, squadID, pilot.characterID))}
-                companionRoleFor={(squadID) =>
-                  companionConfigFor(prefs, squadID, pilot.characterID)?.role ?? null}
-                companionTagsFor={(squadID) =>
-                  companionConfigFor(prefs, squadID, pilot.characterID)?.attemptsTagging ?? false}
-                onSetCompanionRole={(squadID, role) =>
+                companionEnabledFor={(squadID) =>
+                  companionConfigFor(prefs, squadID, pilot.characterID) !== null}
+                onToggleCompanion={(squadID) =>
                   commit(
                     setCompanionConfig(
                       prefs,
                       squadID,
                       pilot.characterID,
-                      role === null ? null : companionSetupFor(prefs, squadID, pilot.characterID, role),
+                      // ⚠ PRESENCE IS THE WHOLE SETTING NOW. There is no role
+                      // to pick and nothing here to tune -- see
+                      // `companionConfigFor`'s own comment in hangarPrefs.ts.
+                      // Ticking it writes the shipped defaults; unticking it
+                      // removes the entry outright, exactly what "unset" means
+                      // for a map keyed by presence.
+                      companionConfigFor(prefs, squadID, pilot.characterID) === null
+                        ? DEFAULT_COMPANION_SETUP
+                        : null,
                     ),
                   )}
-                onToggleCompanionTagging={(squadID) => {
-                  const current = companionConfigFor(prefs, squadID, pilot.characterID);
-                  if (current === null) return;
-                  commit(
-                    setCompanionConfig(prefs, squadID, pilot.characterID, {
-                      ...current,
-                      attemptsTagging: !current.attemptsTagging,
-                    }),
-                  );
-                }}
               />
             {/each}
             {#each { length: account.emptySlots } as _, index (index)}

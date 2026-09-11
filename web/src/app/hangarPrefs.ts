@@ -14,8 +14,15 @@
 // component reaches into storage itself, and every rule is testable without a
 // DOM.
 
-import { decodeFleetCompanionRequestValue } from "../bots/companionRunPolicy.ts";
-import type { FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+// ⚠ THIS NAME DOES NOT EXIST YET AT THE TIME OF WRITING. The codec module is
+// being renamed from `decodeFleetCompanionRequestValue` to
+// `decodeCompanionSetupValue` (verdict: `{ ok: true; setup: CompanionSetup }`
+// or `{ ok: false; refusal: string }`) by the agent that owns
+// `bots/companionRunPolicy.ts`, alongside the retired-keys allowance that lets
+// an old role/tagging/module-list config still decode. This file calls the new
+// name regardless, on the assumption that rename lands alongside this one.
+import { decodeCompanionSetupValue } from "../bots/companionRunPolicy.ts";
+import type { CompanionSetup } from "../nav/fleetCompanionLoop.ts";
 
 /** One player-made group of pilots, spanning accounts. */
 export interface Squad {
@@ -37,7 +44,7 @@ export interface HangarPrefs {
   readonly collapsedAccounts: readonly string[];
   /**
    * What each pilot DOES in a squad: squad id -> character id -> the companion
-   * request that pilot starts with. A squad says WHICH pilots; this says what
+   * setup that pilot starts with. A squad says WHICH pilots; this says what
    * each one is for.
    *
    * ⚠ A PARALLEL MAP, NOT A RICHER `members`, AND THAT IS THE WHOLE MIGRATION
@@ -48,23 +55,29 @@ export interface HangarPrefs {
    * A key an older build has never heard of is simply ignored by it: nothing to
    * migrate, nothing to lose, and membership keeps working exactly as before.
    *
-   * ⚠ THE VALUE IS A WHOLE `FleetCompanionRequest`, WITH ITS MODULE LISTS
-   * EMPTY. That is not laziness about the type -- the request's own header says
-   * it is "stored as the VALUE against a pilot in a Pilot Hangar squad", and it
-   * means `decodeFleetCompanionRequestValue` is already the door on the way out
-   * of localStorage, so this file invents no second codec. The eight module
-   * lists stay empty and `deriveModulesFromFit` carries the load, because an
-   * itemID saved here would be stale the moment that pilot refits or changes
-   * ship (see that flag's own comment).
+   * ⚠ THE VALUE IS A `CompanionSetup`, NOT A WHOLE REQUEST WITH EMPTY MODULE
+   * LISTS ANY MORE. There is no role to pick and nothing here derives modules
+   * from a fit -- see docs/fleet-companion-simplification.md. What is stored is
+   * exactly `fleeHealthFloor`, `capacitorFloor`, `maxFleeAttempts`,
+   * `repairsAtStation`, `droneHealthFloor` and `droneRedeployHoldOffSeconds`;
+   * `decodeCompanionSetupValue` is the door on the way out of localStorage, the
+   * same door `botHost.start()` trusts, so this file invents no second codec.
+   * A companion's eight module lists are never saved anywhere: they are read
+   * off the hull it is actually flying when it starts, because an itemID saved
+   * here would be stale the moment that pilot refits or changes ship.
+   *
+   * ⚠ THE PRESENCE OF AN ENTRY IS NOW THE ONLY MARKER THAT A PILOT IS SET UP
+   * HERE. A role used to double as "this pilot is a companion in this squad";
+   * with no role, that fact is exactly whether `companionConfigFor` returns
+   * non-null, and unsetting one means removing the entry (`setCompanionConfig`
+   * with `null`), not writing some sentinel into it.
    *
    * ⚠ AND IT IS localStorage, SO IT IS NOT THE AUTHORITY FOR A RUNNING BOT.
    * A headless run outlives the tab; `botHost` persists the request it was
    * STARTED with in its own durable roster row. This map is the template a
    * start is built from, never a live handle on a run.
    */
-  readonly companionConfigs: Readonly<
-    Record<string, Readonly<Record<string, FleetCompanionRequest>>>
-  >;
+  readonly companionConfigs: Readonly<Record<string, Readonly<Record<string, CompanionSetup>>>>;
 }
 
 /** The five squad colours. A squad's colour is picked from these and no others. */
@@ -133,15 +146,23 @@ function numberList(value: unknown): number[] {
  * ⚠ THE CODEC IS THE DOOR, AND IT IS THE ONE THE BOT HOST ALREADY USES.
  * `localStorage` is untrusted bytes like any other input -- another tab, an
  * older build, a hand-edited value -- so every entry goes through
- * `decodeFleetCompanionRequestValue`, the same function `botHost.start()`
- * trusts. A refused entry is DROPPED rather than defaulted: an arrangement that
- * cannot be read back is a pilot with no config, which the UI already knows how
- * to show, whereas a fabricated default would be a setup nobody chose.
+ * `decodeCompanionSetupValue`, the same function `botHost.start()` trusts. A
+ * refused entry is DROPPED rather than defaulted: an arrangement that cannot
+ * be read back is a pilot with no config, which the UI already knows how to
+ * show, whereas a fabricated default would be a setup nobody chose.
+ *
+ * ⚠ AN OLD-SHAPE STORED VALUE MUST STILL DECODE. Every config saved before
+ * 2026-09-11 carries `role`, `attemptsTagging` and the eight module-id lists —
+ * keys `CompanionSetup` no longer has. That is the codec's job, not this
+ * file's: `decodeCompanionSetupValue` forgives exactly those retired keys and
+ * hands back a `CompanionSetup` with the current ones. This function does not
+ * (and must not) run a second migration of its own — it only decides, per
+ * entry, whether the codec accepted it.
  */
 function companionConfigMap(
   value: unknown,
-): Record<string, Readonly<Record<string, FleetCompanionRequest>>> {
-  const out: Record<string, Record<string, FleetCompanionRequest>> = {};
+): Record<string, Readonly<Record<string, CompanionSetup>>> {
+  const out: Record<string, Record<string, CompanionSetup>> = {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return out;
   }
@@ -149,11 +170,11 @@ function companionConfigMap(
     if (!perPilot || typeof perPilot !== "object" || Array.isArray(perPilot)) {
       continue;
     }
-    const pilots: Record<string, FleetCompanionRequest> = {};
-    for (const [characterID, request] of Object.entries(perPilot as Record<string, unknown>)) {
-      const decoded = decodeFleetCompanionRequestValue(request);
+    const pilots: Record<string, CompanionSetup> = {};
+    for (const [characterID, stored] of Object.entries(perPilot as Record<string, unknown>)) {
+      const decoded = decodeCompanionSetupValue(stored);
       if (decoded.ok) {
-        pilots[characterID] = decoded.request;
+        pilots[characterID] = decoded.setup;
       }
     }
     if (Object.keys(pilots).length > 0) {
@@ -351,7 +372,7 @@ export function forgetPilots(prefs: HangarPrefs, characterIDs: readonly number[]
   for (const [squadID, ids] of Object.entries(prefs.members)) {
     members[squadID] = ids.filter((id) => !gone.has(id));
   }
-  const companionConfigs: Record<string, Readonly<Record<string, FleetCompanionRequest>>> = {};
+  const companionConfigs: Record<string, Readonly<Record<string, CompanionSetup>>> = {};
   for (const [squadID, perPilot] of Object.entries(prefs.companionConfigs)) {
     const kept = Object.fromEntries(
       Object.entries(perPilot).filter(([characterID]) => !gone.has(Number(characterID))),
@@ -380,16 +401,16 @@ export function setCompanionConfig(
   prefs: HangarPrefs,
   squadID: string,
   characterID: number,
-  request: FleetCompanionRequest | null,
+  setup: CompanionSetup | null,
 ): HangarPrefs {
   if (!(prefs.members[squadID] ?? []).includes(characterID)) {
     return prefs;
   }
   const perPilot = { ...(prefs.companionConfigs[squadID] ?? {}) };
-  if (request === null) {
+  if (setup === null) {
     delete perPilot[String(characterID)];
   } else {
-    perPilot[String(characterID)] = request;
+    perPilot[String(characterID)] = setup;
   }
   const companionConfigs = { ...prefs.companionConfigs };
   if (Object.keys(perPilot).length === 0) {
@@ -400,12 +421,19 @@ export function setCompanionConfig(
   return { ...prefs, companionConfigs };
 }
 
-/** One pilot's companion setup in one squad, or null when it has none. */
+/**
+ * One pilot's companion setup in one squad, or null when it has none.
+ *
+ * ⚠ THIS NULL IS NOW THE WHOLE OF "IS THIS PILOT A COMPANION HERE". A role
+ * used to answer that question and set the pilot's job in the same field; with
+ * no role, existence is the only signal left, so the hangar UI reads this
+ * directly rather than reaching for a field on the result.
+ */
 export function companionConfigFor(
   prefs: HangarPrefs,
   squadID: string,
   characterID: number,
-): FleetCompanionRequest | null {
+): CompanionSetup | null {
   return prefs.companionConfigs[squadID]?.[String(characterID)] ?? null;
 }
 
@@ -418,32 +446,23 @@ export function companionConfigFor(
 export function companionSquadRoster(
   prefs: HangarPrefs,
   squadID: string,
-): readonly { readonly characterID: number; readonly request: FleetCompanionRequest }[] {
+): readonly { readonly characterID: number; readonly setup: CompanionSetup }[] {
   const perPilot = prefs.companionConfigs[squadID] ?? {};
   return (prefs.members[squadID] ?? []).flatMap((characterID) => {
-    const request = perPilot[String(characterID)];
-    return request === undefined ? [] : [{ characterID, request }];
+    const setup = perPilot[String(characterID)];
+    return setup === undefined ? [] : [{ characterID, setup }];
   });
 }
 
-/**
- * The pilots in this squad that would both try to tag.
- *
- * ⚠ THIS IS WHERE THE ONE-TAGGER RULE BECOMES ENFORCEABLE, and it is why role
- * presets deliberately never set `attemptsTagging`. A tag is unique fleet-wide
- * and the server deletes any other item holding the same letter, so two taggers
- * fight over letters and the fleet stops trusting them. A ROLE cannot know how
- * many of itself are in a squad; a squad can simply count.
- *
- * Returns every tagger when there is more than one, and nothing when there is
- * one or none -- so a caller warns on a non-empty answer without re-counting.
- */
-export function competingTaggers(prefs: HangarPrefs, squadID: string): readonly number[] {
-  const taggers = companionSquadRoster(prefs, squadID)
-    .filter((row) => row.request.attemptsTagging)
-    .map((row) => row.characterID);
-  return taggers.length > 1 ? taggers : [];
-}
+// ⚠ `competingTaggers` USED TO LIVE HERE AND IS GONE. It counted pilots with
+// `attemptsTagging` set, because a tag is unique fleet-wide and two taggers in
+// one squad would fight over letters. That setting no longer exists: tagging
+// is gated server-side on `obs.canTag` (only a fleet/wing/squad commander may
+// write a tag) and the rung only ever tags a ship that is tackling THIS pilot,
+// with an already-lettered ship skipped -- so two companions can collide only
+// if the same ship tackled both of them in the same tick, before either letter
+// was visible. See docs/fleet-companion-simplification.md, "Tagging", and the
+// matching note in bots/squadStart.ts.
 
 /** The squads one pilot belongs to, in the order the player made them. */
 export function squadsForPilot(prefs: HangarPrefs, characterID: number): Squad[] {

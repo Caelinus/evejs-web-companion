@@ -24,7 +24,6 @@
   // so one run never reads two different ways in two places.
   import {
     canTagWords,
-    companionRoleLabel,
     inFleetWords,
     orderFromWords,
   } from "../bots/companionReadout.ts";
@@ -361,9 +360,15 @@
         {#if modeLabel}
           <span class="badge" class:accent={runState.mode === "server"}>{modeLabel}</span>
         {/if}
-        {#if companionFacts !== null && companionFacts.role !== null}
-          <span class="badge">{companionRoleLabel(companionFacts.role)}</span>
-        {/if}
+        <!--
+          ⚠ THE ROLE BADGE IS GONE, AND NOTHING REPLACES IT. A companion had a
+          role that picked exactly one threshold and that no decision rung ever
+          read, so it was deleted with the rest of the settings surface
+          (docs/fleet-companion-simplification.md). A badge saying "DPS" while
+          the pilot was repairing a fleet-mate would have been worse than no
+          badge -- and the line below already says what it is ACTUALLY doing and
+          whose order it is following, which is the thing a player wants.
+        -->
       </div>
       {#if companionFacts}
         <p class="note why">

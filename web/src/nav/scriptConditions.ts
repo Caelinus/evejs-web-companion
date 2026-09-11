@@ -153,6 +153,22 @@ export interface ScriptObservation {
   readonly salvageDroneBayItemIDs?: readonly number[] | null;
   readonly combatDroneIDs?: readonly number[] | null;
   readonly salvageDroneIDs?: readonly number[] | null;
+  /**
+   * Logistic (remote-repair) drones, same two shapes as the pairs above.
+   *
+   * ⚠ FILLED FOR THE FLEET COMPANION, WHICH IS SO FAR THE ONLY THING THAT USES
+   * THEM. The scripted blocks have no repair job to do, so nothing in
+   * `scriptMacros.ts` reads these -- they are here rather than on the companion's
+   * own observation because every other drone role already lives on this type
+   * and splitting one role out would mean two places to look.
+   *
+   * ⚠ THE SERVER WILL NOT REPAIR AN OUT-OF-CORP FLEET-MATE. `isFriendlyRepairTarget`
+   * tests character, owner, corporation and alliance, never fleet membership, so
+   * an engage aimed at a fleet-mate outside the corp is accepted and does
+   * nothing. Anything reading these must not promise otherwise.
+   */
+  readonly logisticDroneBayItemIDs?: readonly number[] | null;
+  readonly logisticDroneIDs?: readonly number[] | null;
   /** Bay stacks whose type or group could not be read this tick — in no role. */
   readonly unclassifiedDroneBayItemIDs?: readonly number[] | null;
   /**

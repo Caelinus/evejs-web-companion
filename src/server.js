@@ -15454,8 +15454,19 @@ app.post("/api/bridge/flight/jump", requireAuth, async (req, res, next) => {
   }
   const fromGateID = Number(req.body && req.body.fromGateID) || 0;
   const toGateID = Number(req.body && req.body.toGateID) || 0;
-  if (fromGateID <= 0 || toGateID <= 0) {
-    res.status(400).json({ ok: false, error: "INVALID_GATE", message: "Positive fromGateID and toGateID are required." });
+  // ⚠ `toGateID` IS OPTIONAL, AND THIS CHECK USED TO PRETEND OTHERWISE. It
+  // demanded a positive far-side gate, which made a jump impossible for any
+  // caller that knows which gate it is sitting on but has not solved a route --
+  // the fleet companion answering a `JumpTo` broadcast is exactly that caller,
+  // and it stopped at the gate for a whole phase because of this line.
+  //
+  // The GAME never required it: `jumpSessionViaStargate` resolves the
+  // destination from `sourceGate.destinationID` when the far id is absent and
+  // rejects only a MISMATCHED one (STARGATE_DESTINATION_MISMATCH), so passing 0
+  // through is both safe and exactly what the server expects. A stargate knows
+  // where it goes.
+  if (fromGateID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_GATE", message: "A positive fromGateID is required." });
     return;
   }
   try {

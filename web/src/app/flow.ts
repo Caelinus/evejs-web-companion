@@ -187,6 +187,7 @@ import {
   type FleetCompanionController,
   type FleetCompanionDeps,
   type FleetCompanionObservation,
+  type CompanionSetup,
   type FleetCompanionRequest,
   type CompanionAbandonmentRecord,
 } from "../nav/fleetCompanionLoop.ts";
@@ -230,8 +231,10 @@ import { decodeFittings } from "../bridge/fittings.ts";
 import { decodeActiveBookmarks } from "../bridge/bookmarks.ts";
 import {
   authoritativeFleetMemberCharacterIDs,
+  fleetCommanderCharacterIDs,
   decodeFleetCenter,
   decodeFleetInviteNotification,
+  type FleetPendingInvite,
 } from "../bridge/fleetCenter.ts";
 import { canTagInFleet } from "../bridge/fleetCommand.ts";
 import type { FleetCenterSnapshot } from "../bridge/fleetCenter.ts";
@@ -1005,9 +1008,17 @@ export interface AppFlow {
    * equipment the PLAYER picked. Surfaces a start problem through the bot
    * slice rather than throwing.
    */
-  /** Start the fleet companion — a pilot that takes its orders from the fleet. */
+  /**
+   * Start the fleet companion — a pilot that takes its orders from the fleet.
+   *
+   * ⚠ IT TAKES A `CompanionSetup`, NOT A REQUEST, and the difference is the
+   * whole of what a caller has to provide. A setup is the six things that
+   * cannot be read off a ship; the eight module lists that complete a
+   * `FleetCompanionRequest` are filled in HERE, from the hull this pilot is
+   * actually sitting in, before the loop sees anything.
+   */
   startFleetCompanion(
-    request: FleetCompanionRequest,
+    setup: CompanionSetup,
     resuming?: CompanionAbandonmentRecord | null,
   ): Promise<void>;
   pauseFleetCompanion(): void;
@@ -1439,6 +1450,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       if (fleetInvite.inviterID !== null) {
         requestNames([{ kind: "character", id: fleetInvite.inviterID }]);
       }
+      void autoAcceptCorpFleetInvite(fleetInvite);
       return;
     }
     // The two fleet pushes that carry their own payload rather than merely
@@ -2907,6 +2919,48 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       () => api.inviteToFleet(characterID, callOptions),
       "ready",
     );
+  }
+
+  /**
+ * Join a fleet a CORP-MATE invited us to, without anybody clicking anything.
+ *
+ * ⚠ THE MANUAL PATH WAS UNRELIABLE IN A WAY NOBODY COULD SEE. An invitation
+ * lives only in the session that received the push -- `pendingInvite` starts
+ * null and is only ever set by `OnFleetInvite` -- so a page reload destroys it
+ * and the panel then truthfully reports that no invitation has arrived. To an
+ * operator that reads as "accepting invites works sometimes". It also sat behind
+ * a `window.confirm`, which some embedded browsers suppress outright, failing
+ * silently. Neither is fixed by trying again; both are fixed by not needing a
+ * human at the moment the push lands.
+ *
+ * ⚠ CORP-MATES ONLY, AND "COULD NOT TELL" MEANS NO. `isInMyCorporation` is
+ * three-state; an unreadable answer leaves the invitation sitting in the panel
+ * for a human, which is exactly what used to happen for every invitation. This
+ * only ever REMOVES a click, never widens who can put this character in a fleet:
+ * an invite from outside the corporation still waits to be accepted by hand.
+ *
+ * ⚠ AND IT NEVER OVERRIDES A FLEET WE ARE ALREADY IN. `acceptFleetInvite`
+ * refuses when the roster already reads ready, so a stray invitation cannot pull
+ * a pilot out of the fleet it is flying with.
+ */
+  async function autoAcceptCorpFleetInvite(invite: FleetPendingInvite): Promise<void> {
+    const inviter = invite.inviterID;
+    if (inviter === null) {
+      return;
+    }
+    const sameCorp = await api.isInMyCorporation(inviter, callOptions);
+    if (sameCorp !== true) {
+      return;
+    }
+    // Still pending? A human may have accepted it in the seconds this read took.
+    if (store.fleet.get().pendingInvite?.fleetID !== invite.fleetID) {
+      return;
+    }
+    try {
+      await acceptFleetInvite();
+    } catch {
+      // The panel still shows the invitation; a human can press the button.
+    }
   }
 
   async function acceptFleetInvite(): Promise<void> {
@@ -5406,6 +5460,118 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * `decodeSpaceSnapshot`, `decodeFleetCenter`, `hostileRows`, `lowestHealth`
    * the script runner uses — just called without a macro deciding whether to.
    */
+  /**
+   * The companion's own hull-bay cache, for the `loot` chat order.
+   *
+   * ⚠ A SECOND CACHE, NOT A SECOND ROUTING RULE, AND THE DIFFERENCE MATTERS.
+   * The actual work is `lootIntoShip` -- the one implementation the Overview's
+   * "Take everything" and every scripted bot also go through -- so a companion
+   * cannot fill a different hold than a player would. What is duplicated here is
+   * only the question "which bays does this hull have", because the script
+   * runner answers it off its own `capabilityCache`, which is DSL machinery this
+   * loop deliberately does not have (the same reason it builds its own
+   * observation instead of reusing `observe(hint)`).
+   *
+   * ⚠ AND THE ROUTING IS THE WHOLE POINT OF GOING THROUGH IT. Every bay this
+   * hull has is offered the loot first; only what nothing will take falls to
+   * ship cargo. Looting straight into cargo would be wrong on any hull with a
+   * specialised bay.
+   *
+   * Keyed on the hull, because what bays a ship has is a property of the ship
+   * and not of the moment. Fill level is deliberately never cached: the server
+   * rules on room, and a refused bay spills into cargo.
+   */
+  let companionBayCache: { readonly shipID: number; readonly bays: readonly ShipBay[] } | null =
+    null;
+  /**
+   * What the `loot` order has finished with: cans it emptied, and cans it tried
+   * enough times without emptying.
+   *
+   * ⚠ THE RUNG USED TO MARK A CAN DONE THE MOMENT IT ASKED, and throw the
+   * outcome away. `lootIntoShip` returns how many stacks it found and how many
+   * it actually moved, and those differ constantly: each stack is routed to the
+   * bay that will take it, and what fits nowhere STAYS IN THE CAN. So a pilot
+   * took one stack of three, recorded the can as looted, and flew off -- seen
+   * live twice ("flew to can, and nothing or 1 item only looted").
+   *
+   * ⚠ AND IT IS BOUNDED, because "it did not all fit" can be permanent. A hold
+   * with no room for what is left would otherwise have the pilot re-open the
+   * same can for the rest of the run. After MAX_LOOT_ATTEMPTS it is set aside --
+   * not emptied, but finished with.
+   */
+  /**
+   * This companion's own ship, from the snapshot it reads every tick.
+   *
+   * ⚠ `store.inventory.activeShipID` IS NOT AVAILABLE TO THIS LOOP. The
+   * inventory slice is filled by the Inventory panel's own reads, which a
+   * companion never makes -- so it is null for the whole run. `companionLootFrom`
+   * asked it for the ship id, got null, and returned without doing ANYTHING:
+   * no loot call, no error, no attempt counted. The rung re-issued the same
+   * `lootContainer` every two seconds and the pilot sat next to a can for ever
+   * (observed live, 2026-09-11). The snapshot has the ship in it; ask that.
+   */
+  let companionShipID: number | null = null;
+  const companionLootAttempts = new Map<number, number>();
+  const companionLootFinished = new Set<number>();
+  const MAX_LOOT_ATTEMPTS = 3;
+
+  async function companionLootFrom(containerID: number): Promise<void> {
+    // ⚠ COUNTED BEFORE ANYTHING CAN RETURN EARLY. Every path out of this
+    // function has to count as an attempt, or a path that does nothing becomes
+    // a rung that asks for ever -- which is exactly what the `activeShipID`
+    // early return did.
+    const attempts = (companionLootAttempts.get(containerID) ?? 0) + 1;
+    companionLootAttempts.set(containerID, attempts);
+    if (attempts >= MAX_LOOT_ATTEMPTS) {
+      companionLootFinished.add(containerID);
+    }
+    const shipID = companionShipID ?? store.inventory.get().activeShipID;
+    if (shipID === null) {
+      return;
+    }
+    if (companionBayCache === null || companionBayCache.shipID !== shipID) {
+      try {
+        companionBayCache = {
+          shipID,
+          bays: decodeShipBays((await api.getShipBays(shipID, callOptions)).bays),
+        };
+      } catch {
+        // Unreadable is not "no bays", but for ROUTING it has to behave like it:
+        // the only safe destination for a hull we cannot describe is cargo.
+        companionBayCache = { shipID, bays: [] };
+      }
+    }
+    try {
+      const outcome = await lootIntoShip(containerID, companionBayCache.bays, shipID);
+      // Emptied is the only clean finish: every stack it found, it moved.
+      if (outcome.moved >= outcome.stacks) {
+        companionLootFinished.add(containerID);
+      }
+    } catch {
+      // ⚠ SOME CONTAINERS SIMPLY CANNOT BE OPENED. A can 316 m away answered
+      // `FakeItemNotFound` on every try (observed live) -- the id is on the grid
+      // but the inventory service does not recognise it. Nothing here can fix
+      // that, so the attempt bound above is what stops it mattering: the can is
+      // set aside and the pilot gets on with the next one.
+    }
+  }
+
+  /**
+   * How many drones each bay STACK holds, from the last bay read.
+   *
+   * ⚠ THE LADDER DEALS IN STACK IDS AND KNOWS NOTHING OF QUANTITY, deliberately
+   * -- it decides WHICH stacks fly, which is a judgement; how many are in one is
+   * a fact about the bay that belongs to the layer that read it. Without this
+   * the dispatcher fell back to `quantity: 1` and launched ONE drone per stack,
+   * so a pilot carrying five identical drones (one stack) put out one. Observed
+   * live 2026-09-11: a bay of three launched one.
+   *
+   * ⚠ THE SHIP'S CONTROL LIMIT IS THE SERVER'S JOB, NOT OURS.
+   * `launchDronesForSession` stops at `maxActiveDrones` by itself, so asking for
+   * the whole stack is safe: it launches what it can and ignores the rest.
+   */
+  let companionDroneStackSizes = new Map<number, number>();
+
   function makeFleetCompanionDeps(): FleetCompanionDeps {
     return {
       observe: async (): Promise<FleetCompanionObservation> => {
@@ -5414,23 +5580,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // decides on a two-second cadence.
         // ⚠ THE CHAT READ IS PAID FOR ONLY BY A PILOT THAT OBEYS CHAT. It is a
         // fifth round trip on a two-second tick, and on the bot host that cost
-        // is per companion per tick, so it is gated on the run actually wanting
-        // it: chat in `obeys` AND at least one allowed sender. An empty
-        // allowlist can never produce an order (`isChatCommandSenderAllowed`
-        // refuses everyone), so reading chat for it would be paying for an
-        // answer that could not be acted on.
-        const chatWanted =
-          liveCompanionRequest !== null &&
-          liveCompanionRequest.obeys.includes("chat") &&
-          liveCompanionRequest.chatCommandSenders.length > 0;
-        // ⚠ THE SAME COST GATE THE CHAT READ ABOVE IS UNDER, for the same
-        // reason. The drone BAY is the one thing this rung needs that the space
-        // snapshot does not already carry, and it is a whole extra round trip
-        // per tick. A companion whose operator never ticked `useDrones` must not
-        // pay for a listing no rung will read. What the snapshot gives free --
-        // which drones are out and how hurt they are -- is built below,
-        // ungated, because it costs nothing.
-        const droneBayWanted = liveCompanionRequest !== null && liveCompanionRequest.useDrones;
+        // is per companion per tick.
+        //
+        // ⚠ IT IS NO LONGER GATED, AND THE OLD GATE WAS A BUG RATHER THAN A
+        // SAVING. It read chat only when the operator had ticked a channel AND
+        // hand-typed at least one character id -- so the settings screen's own
+        // promise that "whoever the fleet roster names a commander is obeyed
+        // regardless" was false twice over: nothing consulted the roster, and
+        // with an empty list the read never happened at all. A companion now
+        // always listens, and the roster decides who it hears.
+        const chatWanted = liveCompanionRequest !== null;
+        // The drone BAY is the one thing rung 6 needs that the space snapshot
+        // does not already carry, and it is a whole extra round trip per tick.
+        //
+        // ⚠ NO LONGER GATED ON A SETTING, BECAUSE THERE IS NO SETTING. A pilot
+        // flies the drones it is carrying, so "is it carrying any" is precisely
+        // what this read answers and cannot be skipped on the strength of an
+        // answer nobody gave. What the snapshot gives free -- which drones are
+        // out and how hurt they are -- is still built below without a call.
+        const droneBayWanted = liveCompanionRequest !== null;
         const [statusStep, spaceResult, targetsResult, botDriven, chatRaw, droneRaw] =
           await Promise.all([
           api.getFlightStatus(callOptions),
@@ -5450,8 +5618,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // never matches and is never delivered. Local needs no gateway patch
           // and every fleet-mate in the system can see it. What makes an order
           // on a PUBLIC channel safe is the sender allowlist, not the channel.
-          chatWanted ? api.readChat("local", callOptions) : Promise.resolve(null),
-          droneBayWanted ? api.getDrones(callOptions) : Promise.resolve(null),
+          // ⚠ BOTH OF THESE SWALLOW THEIR OWN FAILURE, and they did not have to
+          // before. While each was gated on a setting, a companion whose
+          // operator had not enabled it never made the call at all -- so a
+          // route that answers badly could not reach this `Promise.all`. Now
+          // that every companion reads chat and its own drone bay, an
+          // unavailable route would reject the whole tick and stop a pilot that
+          // is otherwise flying perfectly well. Neither read is load-bearing:
+          // `null` already means "did not look" to every rung beneath, and a
+          // pilot that cannot read chat simply obeys broadcasts and tags.
+          chatWanted
+            ? api.readChat("local", callOptions).catch(() => null)
+            : Promise.resolve(null),
+          droneBayWanted ? api.getDrones(callOptions).catch(() => null) : Promise.resolve(null),
         ]);
         // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
         // regular traffic, so on the bot host they are the ONLY chance a pushed
@@ -5557,10 +5736,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // always a player — resolving only the NPC rows would hand `pickPrimary`
         // a null class for exactly the targets that matter and collapse it to
         // nearest-first, which is the degradation this field exists to avoid.
-        const targetGroupNames =
-          liveCompanionRequest?.attemptsTagging === true
-            ? await classifyTargetGroups(snapshot, origin, true, ship?.itemID ?? null)
-            : null;
+        // ⚠ RESOLVED FOR EVERY COMPANION NOW. This used to be gated on the
+        // `attemptsTagging` tick; every pilot tags what tackles it, so every
+        // pilot needs the class ranking that decides WHICH tackler gets the
+        // letter first. The cost is one /api/names round trip per NEW ship type
+        // seen, not one per tick -- group names are cached after first look.
+        const targetGroupNames = await classifyTargetGroups(
+          snapshot,
+          origin,
+          true,
+          ship?.itemID ?? null,
+        );
 
         // ── The drone reads (rung 6). Two of the three are free: they come off
         // the snapshot already in hand. Only the bay costs a call, and it is
@@ -5573,6 +5759,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // live -- an abandoned drone answers a recall with a 200 and does not
         // move (see `canMyShipOrderDrone`'s own comment).
         const myShipID = ship?.itemID ?? null;
+        companionShipID = myShipID;
         const myDroneIDs: number[] = [];
         let lowestDroneHealth: number | null = null;
         for (const entity of snapshot?.entities ?? []) {
@@ -5596,12 +5783,28 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
         // ⚠ `null` HERE IS "DID NOT LOOK", AND THE RUNG TREATS IT AS SUCH. An
         // empty array is a real "the bay is empty" and a launch that finds one
-        // issues nothing; `null` means the read was never made (ungated off) or
-        // failed, and the rung must not read that as an empty bay.
-        const droneBayItemIDs =
-          droneRaw === null
-            ? null
-            : (decodeDroneBay(droneRaw.bay)?.map((stack) => stack.itemID) ?? null);
+        // issues nothing; `null` means the read was never made or failed, and
+        // the rung must not read that as an empty bay.
+        const companionBay = droneRaw === null ? null : decodeDroneBay(droneRaw.bay);
+        const droneBayItemIDs = companionBay?.map((stack) => stack.itemID) ?? null;
+        if (companionBay !== null) {
+          companionDroneStackSizes = new Map(
+            companionBay.map((stack) => [stack.itemID, Math.max(1, stack.quantity)]),
+          );
+        }
+        // ⚠ SPLIT BY ROLE, AND THIS IS THE FIX FOR THE ONE PLACE IN THIS APP
+        // THAT MIXED DRONE TYPES. Rung 6 used to launch `droneBayItemIDs` whole,
+        // so a bay holding combat and salvage drones sent both into the same
+        // fight -- the salvage drones unable to fight it, and occupying the
+        // control slots the combat drones needed. The scripted blocks have always
+        // used this same split (`launchRoleDrones`); the companion never did.
+        // Reusing `classifyDroneRoles` rather than growing a second classifier
+        // means one answer to "what is this drone for", not two.
+        const companionDroneRoles = await classifyDroneRoles(
+          companionBay,
+          snapshot,
+          ship?.itemID ?? null,
+        );
 
         // The roster is read EVERY tick and not gated, because a companion with
         // no fleet has nothing to obey — this is its most load-bearing read, not
@@ -5670,6 +5873,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           inFleet,
           fleetMemberCharacterIDs,
           myCharacterID: ownCharacterID,
+          // Needed by the `loot` rung's ownership gate. Absent until now,
+          // which is why its corp clause was silently dead.
+          myCorporationID: store.station.get().online?.corporationID ?? null,
           fleetTargetTags,
           fleetBroadcast,
           lockedTargetIDs,
@@ -5703,6 +5909,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           lowestDroneHealth,
           myDroneIDs,
           droneBayItemIDs,
+          // ⚠ WHAT THE LOOT CALLS ACTUALLY ACHIEVED, which the ladder cannot see
+          // for itself: it issues one atomic call and never learns what came
+          // back. A can is finished when it was emptied, or when it has been
+          // tried enough times not to be worth another.
+          lootFinishedItemIDs: [...companionLootFinished],
+          combatDroneBayItemIDs: companionDroneRoles.bay?.combat ?? null,
+          salvageDroneBayItemIDs: companionDroneRoles.bay?.salvage ?? null,
+          logisticDroneBayItemIDs: companionDroneRoles.bay?.logistic ?? null,
+          combatDroneIDs: companionDroneRoles.out?.combat ?? null,
+          salvageDroneIDs: companionDroneRoles.out?.salvage ?? null,
+          logisticDroneIDs: companionDroneRoles.out?.logistic ?? null,
+          // ⚠ THE CHAT-ORDER GATE, AND THE ONLY THING BETWEEN A COMPANION AND A
+          // STRANGER TYPING "target" IN LOCAL. Derived from the roster read this
+          // tick already made -- the same rows `canTag` above is decided from, so
+          // there is one definition of "commander" and not two. A roster that
+          // could not be read yields null, which the ladder treats as "no chat
+          // orders", never as "anybody will do".
+          fleetCommanderCharacterIDs:
+            fleetSnapshot === null ? null : fleetCommanderCharacterIDs(fleetSnapshot),
         };
       },
       issue: async (action) => {
@@ -5717,16 +5942,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             await api.warpTo(action.targetID, null, callOptions);
             return;
           case "approach":
-            await api.approach(action.targetID, null, callOptions);
+            // ⚠ `range` IS WHERE TO STOP, and null hugs the object. Salvaging
+            // and looting pass their working distance so the ship stops in
+            // reach instead of flying all the way in for nothing.
+            await api.approach(action.targetID, action.range ?? null, callOptions);
             return;
           case "dock":
             await api.dock(action.stationID, callOptions);
-            return;
-          case "warpToBookmark":
-            // Zero minimum range: the point is to be somewhere else, and a
-            // landing offset would only be a tactical choice this pilot has no
-            // basis to make.
-            await api.warpToBookmark(action.bookmarkID, 0, callOptions);
             return;
           case "leaveFleet":
             await api.leaveFleet(callOptions);
@@ -5797,8 +6019,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // does not consult even that -- it watches the grid on the next tick,
           // which is the only authority either way.
           case "launchDrones":
+            // ⚠ THE WHOLE STACK, NOT ONE FROM IT. See companionDroneStackSizes.
             await api.launchDrones(
-              action.droneItemIDs.map((itemID) => ({ itemID })),
+              action.droneItemIDs.map((itemID) => ({
+                itemID,
+                quantity: companionDroneStackSizes.get(itemID) ?? 1,
+              })),
               callOptions,
             );
             return;
@@ -5807,6 +6033,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // duplicate what it is already doing.
           case "recallDrones":
             await api.recallDrones(action.droneIDs, callOptions);
+            return;
+          // ⚠ ONE CALL, TWO MEANINGS, AND THE SERVER PICKS. `CmdEngage` aimed at
+          // a hostile is an attack; aimed at a friendly ship it is dispatched to
+          // the drone REPAIR path instead. The companion only ever issues it for
+          // the second case -- combat drones are left alone, because the server
+          // already assigns idle ones onto whatever shoots their controller.
+          case "engageDrones":
+            await api.engageDrones(action.droneIDs, action.targetID, callOptions);
+            return;
+          // ⚠ `targetID: 0` IS THE SERVER'S AUTO-PICK, not a missing value.
+          case "salvageDrones":
+            await api.salvageDrones(action.droneIDs, action.targetID, callOptions);
+            return;
+          // The `loot` chat order. Two calls because a wreck and a can are
+          // different objects on the wire, not because they are different rules.
+          case "lootWreck":
+            await companionLootFrom(action.wreckID);
+            return;
+          case "lootContainer":
+            await companionLootFrom(action.containerID);
             return;
           // Rung 5, the flee's recovery step. ⚠ THE ITEM IDS ARE THE SHOP'S OWN
           // QUOTE, read in observe() above and never guessed at here. The
@@ -5828,6 +6074,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "undock":
             await api.undock(callOptions);
             return;
+          // ⚠ NO FAR-SIDE GATE, AND THAT IS THE POINT. The server resolves the
+          // destination from the gate we are sitting on (`sourceGate.destinationID`);
+          // passing 0 is what asks it to. See the action's own comment.
+          case "jumpGate":
+            await api.jump(action.gateID, 0, callOptions);
+            return;
           default: {
             // ⚠ EXHAUSTIVE ON PURPOSE. Every FleetCompanionAction kind MUST be
             // issued here, or a new kind silently no-ops at runtime instead of
@@ -5846,7 +6098,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           phase: progress.phase,
           action: progress.action,
           why: progress.why,
-          role: progress.role,
           inFleet: progress.inFleet,
           followingOrderFrom: progress.followingOrderFrom,
           lastOrderHeard: progress.lastOrderHeard,
@@ -6517,8 +6768,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     remoteArmorModuleIDs: [],
     remoteCapacitorModuleIDs: [],
     weaponModuleIDs: [],
+    salvagerModuleIDs: [],
     modules: [],
     droneBay: null,
+    droneBayRoles: { combat: [], salvage: [], logistic: [], unknown: [] },
     fitReadable: false,
   });
 
@@ -6536,9 +6789,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * `resolveMiningModuleIDs` first; relying on that here would be an invisible
    * coupling to a mining read the companion has no other use for.
    */
-  async function readCompanionFitFacts(
-    request: FleetCompanionRequest,
-  ): Promise<CompanionFitFacts> {
+  async function readCompanionFitFacts(): Promise<CompanionFitFacts> {
     try {
       await loadFitting();
       const fit = store.fitting.get();
@@ -6576,16 +6827,36 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             takesCharge: fitment !== undefined && fitment.groups.length > 0 ? true : null,
           };
         });
-      // Only when this run would actually use them: the bay is a round trip,
-      // and the same gate `observe()` puts it behind.
-      let droneBay: readonly { readonly quantity: number }[] | null = null;
-      if (request.useDrones) {
-        try {
-          const raw = await api.getDrones(callOptions);
-          droneBay = decodeDroneBay(raw.bay);
-        } catch {
-          droneBay = null;
+      // ⚠ READ UNCONDITIONALLY NOW. This used to sit behind `useDrones`, because
+      // the bay is a round trip and a pilot whose operator had not ticked drones
+      // could never use one. There is no such tick: a companion flies the drones
+      // it is carrying, so whether it has any is exactly the question this read
+      // answers, and it cannot be skipped on the strength of an answer nobody
+      // gave. One extra call, once, at start — not per tick.
+      let droneBay: ReturnType<typeof decodeDroneBay> = null;
+      let droneBayRoles: DroneRoleIDs = { combat: [], salvage: [], logistic: [], unknown: [] };
+      try {
+        const raw = await api.getDrones(callOptions);
+        droneBay = decodeDroneBay(raw.bay);
+        if (droneBay !== null) {
+          // The same resolve-then-judge pass the module classifier makes, for
+          // the same reason: the game says what a type IS and we only read the
+          // answer. Warmed here because a bot host's name cache starts empty,
+          // and an unresolved group leaves a drone in NO role rather than in a
+          // wrong one.
+          await resolveNamesNow(
+            droneBay.map((stack) => ({ kind: "typeGroup" as const, id: stack.typeID })),
+          );
+          const names = store.names.get().resolved;
+          droneBayRoles = splitDroneRoles(
+            droneBay,
+            (stack) => stack.typeID,
+            (stack) => stack.itemID,
+            (typeID) => names[nameKey("typeGroup", typeID)] ?? null,
+          );
         }
+      } catch {
+        droneBay = null;
       }
       return {
         defenseModuleIDs: defense.hardeners,
@@ -6596,8 +6867,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         remoteArmorModuleIDs: remote.armor,
         remoteCapacitorModuleIDs: remote.cap,
         weaponModuleIDs: defense.weapons,
+        // ⚠ ITS OWN CLASSIFIER, NOT A BRANCH OF `resolveDefenseModuleIDs`.
+        // `resolveSalvageModuleIDs` already existed for the DSL and matches the
+        // game's own "Salvager" group in high slots only; reusing it means one
+        // answer to "is this a salvager", not two that can drift.
+        salvagerModuleIDs: resolveSalvageModuleIDs(),
         modules,
         droneBay,
+        droneBayRoles,
         fitReadable: true,
       };
     } catch {
@@ -6606,7 +6883,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startFleetCompanion(
-    request: FleetCompanionRequest,
+    setup: CompanionSetup,
     resuming: CompanionAbandonmentRecord | null = null,
   ): Promise<void> {
     store.apply({ type: "companion/start-error", message: null });
@@ -6616,26 +6893,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     autopilot?.abort();
     claimShip("companion");
 
+    // ⚠ A NEW RUN HAS FINISHED WITH NOTHING, and these two outlive the
+    // controller because they hang off the flow. The ladder's own
+    // `lootedItemIDs` already starts empty on every `start()` — for the reason
+    // spelled out there: a can this run has not emptied is a can it must be
+    // willing to try — and leaving these standing made that promise false from
+    // the outside. A can set aside once (out of reach, a hold with no room, a
+    // bind the server refused) stayed set aside for the life of the tab, so
+    // re-ordering `loot` after fixing the cause did nothing at all and the pilot
+    // ignored the can for ever.
+    companionLootAttempts.clear();
+    companionLootFinished.clear();
+
     const preflight = evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, await fleetCompanionReads());
     if (!preflight.canStart) {
       store.apply({ type: "companion/start-error", message: preflight.blockedBy });
       return;
     }
 
-    // ⚠ READ THE SHIP BEFORE THE LOOP SEES THE REQUEST. A deriving request's
-    // eight module lists are empty until this fills them in, and the first tick
-    // can fire immediately -- so a loop started on the un-derived request would
-    // spend that tick believing the ship carries nothing.
-    const fitFacts = await readCompanionFitFacts(request);
-    const flownRequest = requestForFit(request, fitFacts);
-    // Warnings are computed for EVERY start, not only a deriving one: an empty
-    // ammo bay is worth saying whoever picked the guns. They are advisory and
-    // never refuse the start -- a human loads the missing thing or flies anyway.
-    const fitWarnings = companionFitWarnings(request, fitFacts);
+    // ⚠ READ THE SHIP BEFORE THE LOOP SEES ANYTHING. The setup carries no module
+    // lists at all -- they exist only once this has read the hull -- and the
+    // first tick can fire immediately, so a loop started before this returned
+    // would spend that tick believing the ship carries nothing.
+    const fitFacts = await readCompanionFitFacts();
+    const flownRequest = requestForFit(setup, fitFacts);
+    // Advisory, never a refusal: a human loads the missing thing or flies
+    // anyway. Judged against the DERIVED request, because its lists are what
+    // this run will actually cycle.
+    const fitWarnings = companionFitWarnings(flownRequest, fitFacts);
 
     store.apply({
       type: "companion/started",
-      role: request.role,
       startedAt: Date.now(),
       fitWarnings,
     });
@@ -6752,6 +7040,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         if (group === null) {
           continue; // cannot tell what it is — never run a mystery module
         }
+        // ⚠ PASSIVE MODULES ARE DROPPED HERE, FOR EVERY FAMILY, NOT JUST FOR
+        // HARDENERS. This test used to live inside the hardener branch alone,
+        // because that is where the bug was found: group 60 "Damage Control"
+        // holds the passive Damage Control II AND the cycling Assault Damage
+        // Control II, so no test on the group NAME could separate them. But the
+        // principle was never specific to hardeners -- "what is this for" comes
+        // from the group and "can it be cycled" comes from dogma attribute 73 --
+        // and now that every list is DERIVED rather than ticked by a player
+        // (docs/fleet-companion-simplification.md), a passive module landing in
+        // any of these lists is a call wasted every tick with nothing to show.
+        //
+        // ⚠ UNREADABLE STILL FAILS OPEN, and that is unchanged and deliberate. A
+        // dogma snapshot that did not arrive must not quietly disarm a ship:
+        // cycling a passive module wastes a call, refusing to cycle a real one
+        // loses the tank or the guns. `itemHasActivationCycle` is three-state and
+        // only an explicit `false` excludes.
+        if (itemHasActivationCycle(fit.dogma, slot.module.itemID) === false) {
+          continue;
+        }
         if (/remote/i.test(group)) {
           // ⚠ EXCLUDED BEFORE THE SELF TESTS BELOW, on purpose — this is the
           // Remote-Shield-Booster-read-as-a-local-rep bug the warp-scrambler
@@ -6783,26 +7090,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         } else if (/hull repair/i.test(group)) {
           hull.push(slot.module.itemID);
         } else if (/hardener|damage control|resistance/i.test(group)) {
-          // ⚠ THE GROUP NAME IS NOT ENOUGH HERE, AND ONLY HERE. Checked against
-          // the SDE on 2026-09-11: group 60 "Damage Control" holds Damage
-          // Control II, which has NO duration and is passive the moment it is
-          // online, AND Assault Damage Control II, which cycles for 10125ms and
-          // is worth running. One group, both answers -- so no regex over this
-          // name could ever have told them apart, which is why this defect
-          // outlived attempts to fix it by editing the pattern. Group 295
-          // "Shield Resistance Amplifier" is passive throughout and was being
-          // swept in by the `/resistance/` arm for the same reason.
-          //
-          // Dogma attribute 73 ("Activation time / duration") is the real
-          // discriminator, and the server sends it per fitted module.
-          //
-          // ⚠ UNREADABLE FAILS OPEN, back to the name's verdict. A dogma
-          // snapshot that did not arrive must not quietly stop a ship
-          // hardening: cycling a passive module wastes a call, refusing to
-          // cycle a real hardener loses the tank.
-          if (itemHasActivationCycle(fit.dogma, slot.module.itemID) !== false) {
-            hardeners.push(slot.module.itemID);
-          }
+          // ⚠ THIS BRANCH IS WHERE THE DURATION TEST WAS DISCOVERED, and the
+          // test itself has moved ABOVE the whole chain so every family gets it.
+          // Kept here as the record of why it exists at all: checked against the
+          // SDE on 2026-09-11, group 60 "Damage Control" holds Damage Control II,
+          // which has NO duration and is passive the moment it is online, AND
+          // Assault Damage Control II, which cycles for 10125ms and is worth
+          // running. One group, both answers -- so no regex over this name could
+          // ever have told them apart, which is why this defect outlived attempts
+          // to fix it by editing the pattern. Group 295 "Shield Resistance
+          // Amplifier" is passive throughout and was being swept in by the
+          // `/resistance/` arm for the same reason.
+          hardeners.push(slot.module.itemID);
         } else if (slot.family === "high" && /weapon|launcher|turret/i.test(group)) {
           // "Projectile Weapon", "Hybrid Weapon", "Energy Weapon", "Missile
           // Launcher …" — the game's own turret/launcher groups, high slots only.
@@ -6834,6 +7133,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const group = resolved[nameKey("typeGroup", slot.module.typeID)] ?? null;
         if (group === null) {
           continue; // cannot tell what it is — never run a mystery module
+        }
+        // The same passive-module test the local classifier above applies to
+        // every family. No remote repairer group is known to be passive, so this
+        // is expected to exclude nothing — it is here so that "group says what,
+        // duration says whether" is one rule with no exceptions to remember,
+        // rather than a rule with a footnote. Three-state; only `false` excludes.
+        if (itemHasActivationCycle(fit.dogma, slot.module.itemID) === false) {
+          continue;
         }
         if (/remote shield/i.test(group)) {
           shield.push(slot.module.itemID);

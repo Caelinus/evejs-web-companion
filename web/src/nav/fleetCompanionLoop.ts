@@ -59,70 +59,76 @@ import {
 export type FleetCompanionRunState = "idle" | "running" | "paused" | "stopped" | "error";
 
 /**
- * What this pilot is FOR. Descriptive, and it picks the defaults a UI offers —
- * it does NOT gate behaviour by itself.
- *
- * ⚠ EVERY CAPABILITY IS ITS OWN FIELD ON THE REQUEST, deliberately. Two `dps`
- * pilots in one squad must be able to differ (one tags, one does not; one flees
- * at a third, one at a tenth), and hiding capability behind a role name would
- * make the role a second, implicit config surface nobody can see.
- */
-export type FleetCompanionRole = "dps" | "logi" | "tackle" | "support";
-
-export const FLEET_COMPANION_ROLES: readonly FleetCompanionRole[] =
-  Object.freeze<FleetCompanionRole[]>(["dps", "logi", "tackle", "support"]);
-
-/**
- * Which order sources this pilot listens to.
- *
- * ⚠ THIS TURNS A CHANNEL ON OR OFF. It never reorders precedence, which is
- * fixed (docs/fleet-companion-plan.md, Decisions §3):
- *
- *     server fleet warp > FC broadcast > chat command > own flee rule > own ladder
- */
-export type FleetCompanionOrderSource = "broadcast" | "tag" | "chat" | "squad-board";
-
-export const FLEET_COMPANION_ORDER_SOURCES: readonly FleetCompanionOrderSource[] =
-  Object.freeze<FleetCompanionOrderSource[]>(["broadcast", "tag", "chat", "squad-board"]);
-
-/**
  * Which authority a decision actually came from, for the readout.
  *
- * ⚠ NOT THE SAME AS `FleetCompanionOrderSource` ABOVE, AND THE DIFFERENCE IS
- * `own-ladder`. That one is a setting: the channels an operator may switch on
- * and off. This one is an OBSERVATION, and it has a fifth member no operator
- * can tick, because "nobody told it, it decided for itself" is a real answer to
- * "who is this pilot following" and is not a channel.
+ * ⚠ THIS IS AN OBSERVATION, NOT A SETTING, AND IT NEVER WAS ONE AGAIN.
+ * It used to be defined as `FleetCompanionOrderSource | "own-ladder"`, where
+ * that first half was the set of channels an operator could switch on and off.
+ * There are no such switches any more (docs/fleet-companion-simplification.md,
+ * "What it listens to"): a companion listens to every channel there is and acts
+ * on whatever it can. So the union is written out here in full, and the only
+ * question it answers is the one it always really answered -- who did this
+ * pilot just obey.
+ *
+ * `own-ladder` is the member that proves it was never a settings type: "nobody
+ * told it, it decided for itself" is a real answer to that question and is not
+ * a channel anybody could have ticked.
+ *
+ * ⚠ `squad-board` IS GONE, AND IT WAS NEVER REAL. It sat in this union and in
+ * the settings screen, and nothing in this file ever produced it -- the BFF's
+ * squad board (`src/squadBoard.js`) is read by the SCRIPTED bots and has never
+ * been read by the companion. A readout member no decision can emit is a
+ * promise the readout cannot keep. The board itself is untouched.
  *
  * Named here because it had been written out inline in four places -- this
  * file, the store's types, the store's feed, and the readout words -- and phase
- * 9's wire shape would have been a fifth. Four copies of a five-member union
- * with nothing to fail if one drifted is the same shape of bug as two copies of
- * a bare 1; see COMPANION_GRANT_SCRIPT_REV.
+ * 9's wire shape would have been a fifth. Four copies of a union with nothing
+ * to fail if one drifted is the same shape of bug as two copies of a bare 1;
+ * see COMPANION_GRANT_SCRIPT_REV.
  */
-export type CompanionOrderAuthority = FleetCompanionOrderSource | "own-ladder";
+export type CompanionOrderAuthority = "broadcast" | "tag" | "chat" | "own-ladder";
 
 /**
- * One companion run's whole configuration. Flat, serialisable, UI-editable.
+ * What one companion run actually FLIES WITH: the operator's few settings, plus
+ * the eight module lists read off the hull it is sitting in.
  *
- * ⚠ FLATNESS IS LOAD-BEARING. This is stored as the VALUE against a pilot in a
- * Pilot Hangar squad, and squads routinely span accounts. A role that were a
- * REFERENCE into an account-scoped script library could not be shared by a
- * mixed squad; a value can. See docs/fleet-companion-plan.md, "How the player
- * says which pilots these are".
+ * ⚠ THE EIGHT LISTS ARE DERIVED, NEVER CONFIGURED, AND THAT IS THE WHOLE OF THE
+ * 2026-09-11 SIMPLIFICATION. They used to be eight checkbox columns in the
+ * settings panel, each one defended by a comment saying the player must pick
+ * because "a wrong guess cycles the wrong module". There was never a guess to
+ * make. What a module is FOR comes from the game's own SDE group name, which is
+ * the only thing `resolveDefenseModuleIDs` has ever looked at; whether it can be
+ * CYCLED comes from dogma attribute 73, the duration the server sends per fitted
+ * module (`itemHasActivationCycle`). Group plus duration answers both questions
+ * exactly, so the player was being asked to disambiguate something that was
+ * never ambiguous. See docs/fleet-companion-simplification.md.
+ *
+ * ⚠ THEY SURVIVE AS HANDLES, WHICH IS WHY THEY ARE STILL ITEM IDS. You activate
+ * one particular fitted module, not a group, so the ladder still needs the id of
+ * the thing to cycle. That is all these are now: the answer to "which item", not
+ * the answer to "which of these did you want".
+ *
+ * ⚠ FLATNESS IS LOAD-BEARING. `CompanionSetup` below -- the stored half of this
+ * -- is kept as the VALUE against a pilot in a Pilot Hangar squad, and squads
+ * routinely span accounts. A setup that were a REFERENCE into an account-scoped
+ * library could not be shared by a mixed squad; a value can.
  */
 export interface FleetCompanionRequest {
-  readonly role: FleetCompanionRole;
   /**
-   * The player's OWN pick of fitted defensive modules, by item id — never
-   * guessed here, for the same reason `MiningBotRequest.miningModuleIDs` is not
-   * guessed: a wrong guess cycles the wrong module.
+   * Fitted modules that DEFEND this ship -- hardeners and the like -- by item
+   * id, classified off the hull's own group names at start.
+   *
+   * ⚠ ONLY THE ONES THAT ACTUALLY CYCLE. A passive module in a defensive group
+   * is filtered out by the duration check, because activating it means nothing
+   * and the call would be wasted every tick. Group 60 "Damage Control" is the
+   * case that proves the rule: it holds both the passive Damage Control II and
+   * the cycling Assault Damage Control II, so no test on the group NAME could
+   * ever have separated them.
    */
   readonly defenseModuleIDs: readonly number[];
   /**
-   * The player's OWN pick of fitted SELF-repair modules, by item id, one list
-   * per tank layer. Shield boosters here, armour repairers below, hull
-   * repairers under that.
+   * Fitted SELF-repair modules by item id, one list per tank layer. Shield
+   * boosters here, armour repairers below, hull repairers under that.
    *
    * ⚠ ONE LIST PER LAYER BECAUSE A SHIELD BOOSTER CANNOT REPAIR ARMOUR. The
    * hurt layer chooses the list, exactly as the DSL's `repairersFor` chooses
@@ -130,13 +136,14 @@ export interface FleetCompanionRequest {
    * reaching across families would cycle a module that does nothing for the
    * layer actually taking damage.
    *
-   * ⚠ PICKED, NOT CLASSIFIED, AND THAT BUYS TWO BUGS FOR FREE. The DSL derives
-   * these from the fit by matching the SDE group NAME, and that classifier
-   * cannot tell a free Damage Control from a cap-hungry active hardener (one
-   * regex, `/hardener|damage control|resistance/i`, for both) -- and until
-   * 2026-09-11 it also read every REMOTE repairer as a self repairer, because
-   * its self branches were unanchored. Asking the operator has neither problem
-   * to solve: there is nothing to misclassify.
+   * ⚠ THE TWO CLASSIFIER BUGS THIS COMMENT USED TO CITE ARE BOTH FIXED, which
+   * is what made deriving these safe. It argued for asking the operator because
+   * the classifier "cannot tell a free Damage Control from a cap-hungry active
+   * hardener" and, until 2026-09-11, "read every REMOTE repairer as a self
+   * repairer". The second was fixed by excluding `/remote/i` ahead of the self
+   * tests; the first by the dogma duration check, which answers the question the
+   * group name genuinely could not. Neither is an argument for a checkbox any
+   * more.
    *
    * Empty is a real answer: this pilot has nothing fitted for that layer, and a
    * hurt reading there simply falls through.
@@ -147,13 +154,19 @@ export interface FleetCompanionRequest {
   /** As `shieldBoosterModuleIDs`, for hull. */
   readonly hullRepairerModuleIDs: readonly number[];
   /**
-   * The player's OWN pick of fitted REMOTE shield-repair modules, by item id
-   * — never guessed, for the same reason `defenseModuleIDs` above is not: a
-   * wrong guess cycles the wrong module. Answers a `HealShield` broadcast
-   * (and, alongside the other two lists below, a `HealTarget` one — see
-   * `healModuleCandidates`'s own comment for why that call draws on all
-   * three). Empty means this pilot has no shield remote-rep fitted, and a
-   * `HealShield` call simply falls through unanswered.
+   * Fitted REMOTE shield-repair modules by item id — the ones that repair
+   * SOMEBODY ELSE. Answers a `HealShield` broadcast (and, alongside the other
+   * two lists below, a `HealTarget` one — see `healModuleCandidates`'s own
+   * comment for why that call draws on all three). Empty means this pilot has
+   * no shield remote-rep fitted, and a `HealShield` call simply falls through
+   * unanswered.
+   *
+   * ⚠ THE `/remote/i` TEST RUNS BEFORE THE SELF TESTS, and that ordering is what
+   * keeps these three lists and the three above apart. Every remote-rep group
+   * name also contains "shield booster" / "armor repair" / "hull repair", so an
+   * unordered classifier files a Remote Shield Booster as a SELF repairer -- and
+   * the repair rung then activates it self-targeted, which repairs nothing and
+   * burns capacitor on the one hull whose job is repairing someone else.
    */
   readonly remoteShieldModuleIDs: readonly number[];
   /** As `remoteShieldModuleIDs`, for armour — a shield booster cannot repair
@@ -163,48 +176,57 @@ export interface FleetCompanionRequest {
    *  draws on this list alone, for the same reason. */
   readonly remoteCapacitorModuleIDs: readonly number[];
   /**
-   * The player's OWN pick of fitted WEAPONS (turrets, launchers), by item id.
+   * Fitted WEAPONS (turrets, launchers) by item id, high slots only.
    *
-   * ⚠ EMPTY IS A REAL ANSWER AND IT IS THE DEFAULT: this pilot locks what the
-   * fleet calls and never fires. That is the phase 1 behaviour, kept as the
-   * setting nobody has changed, so adding a weapons rung cannot arm a pilot
-   * whose operator never asked for one.
+   * ⚠ A COMPANION IS NOW ARMED BY DEFAULT, AND THAT IS A DELIBERATE LOSS OF A
+   * SAFETY DEFAULT. This list used to be empty unless an operator ticked a gun,
+   * and empty meant "lock whatever the fleet calls, never fire it" -- so no
+   * companion could shoot without somebody explicitly arming it. Deriving the
+   * list from the hull ends that: a pilot with guns fitted will fire them at
+   * what it is told to fire at. The operator was told this consequence and chose
+   * it (docs/fleet-companion-simplification.md, "The request, after").
    *
-   * ⚠ PICKED, NOT DERIVED, AND THE DSL DOES THE OPPOSITE. `fight-the-rats`
-   * reads `obs.weaponModuleIDs`, which `resolveDefenseModuleIDs` classifies out
-   * of the fit by matching the group NAME against `/weapon|launcher|turret/i`.
-   * The companion asks instead, for the same reason `defenseModuleIDs` and the
-   * three remote lists are asked for: this loop obeys somebody ELSE's target
-   * call, so the cost of a misclassified module is firing something the
-   * operator did not know was armed at something they did not choose. A
-   * mystery module is skipped by that classifier; it is not skipped by a
-   * commander's broadcast.
+   * ⚠ IT IS ALSO WHY `combat` IS NOW AN UNCONDITIONAL RISK CLASS. A grant is
+   * built before the fit has been read, and a hull nobody has looked at may hold
+   * anything, so a run that claimed no combat and then bolted on whatever the
+   * ship turned out to carry would be a falsehood the BFF validates as truth.
+   * See `analyzeCompanionRunPolicy`.
+   *
+   * Empty still happens and is still a real answer -- a hull with no guns -- it
+   * is simply no longer something an operator can choose.
    */
   readonly weaponModuleIDs: readonly number[];
   /**
-   * Read the eight module lists off the SHIP'S OWN FIT at start, instead of
-   * using the eight lists above.
+   * Fitted SALVAGERS by item id, high slots only, classified off the game's own
+   * group name ("Salvager").
    *
-   * ⚠ THIS EXISTS FOR THE SQUAD PATH, WHERE PICKING IS IMPOSSIBLE. Every list
-   * above is an `itemID` of one particular fitted module on one particular
-   * hull, chosen by an operator looking at that ship. A squad start has no such
-   * operator: the pilots are not mounted, nobody can see their fits, and a list
-   * saved earlier would be stale the moment that pilot refits or changes ship.
-   * So the squad stores settings and this flag, and the bot host -- which HAS
-   * signed the pilot in and CAN read the fit -- fills the lists in.
+   * ⚠ A SALVAGE ORDER IS NOT A DRONE ORDER, AND THIS LIST IS WHY. The first cut
+   * of the `salvage` chat verb acted on salvage DRONES alone, because that is
+   * how the request was first phrased. It was wrong for the same reason every
+   * module picker was wrong: what a pilot can do is a property of its FIT, and a
+   * hull with a salvager bolted on can salvage whether or not it carries drones.
+   * Found in live testing, 2026-09-11.
    *
-   * ⚠ IT IS A FLAG AND NOT "EMPTY MEANS DERIVE", DELIBERATELY. Empty already
-   * means something else and something load-bearing: "nothing fitted for that
-   * layer", and for `weaponModuleIDs` it means "lock the call, never fire it".
-   * Making empty mean derive would ARM every pilot whose operator deliberately
-   * left the weapon list alone.
-   *
-   * ⚠ AND IT COSTS THE RUN ITS COMBAT RISK CLASS UNCONDITIONALLY. See
-   * `analyzeCompanionRunPolicy`: a fit that has not been read yet may hold
-   * anything, so a grant claiming no combat while the pilot turns out to be
-   * armed would be a falsehood the server validates as truth.
+   * ⚠ THE TWO ARE NOT EXCLUSIVE. A ship carrying both runs both: the drones
+   * sweep on the server's own auto-pick while the salvager works the nearest
+   * wreck through approach -> lock -> activate. They are separate rungs because
+   * one costs a drone command and the other moves the ship.
    */
-  readonly deriveModulesFromFit: boolean;
+  readonly salvagerModuleIDs: readonly number[];
+  // ─── From here down: the stored setup. See `COMPANION_SETUP_KEYS`. ─────────
+  //
+  // ⚠ THE FIELDS BELOW ARE THE ONLY ONES AN OPERATOR EVER SETS, and the only
+  // ones that are persisted against a pilot in a squad. Everything above is read
+  // off the hull at start. The dividing line is exactly "can this be read off
+  // the ship" -- these six cannot: three of them are thresholds nobody could
+  // derive, one is a budget, one is a wait, and one spends money.
+  //
+  // ⚠ `deriveModulesFromFit` USED TO LIVE HERE AND IS GONE. It was the flag that
+  // said "read the lists off the hull instead of using the picked ones", because
+  // the squad path had no operator to ask. There is no longer any other path: a
+  // companion ALWAYS reads its own fit, so a flag selecting between two
+  // mechanisms has only one mechanism left to select.
+
   /** Remaining fraction (0-1) of any health layer that starts a flee. */
   readonly fleeHealthFloor: number;
   /**
@@ -271,7 +293,6 @@ export interface FleetCompanionRequest {
    * what the DSL's own `repair-ship` and `dock-and-repair` already claim.
    */
   readonly repairsAtStation: boolean;
-  readonly useDrones: boolean;
   /**
    * Seconds to hold drones in the bay before relaunching them.
    *
@@ -289,46 +310,42 @@ export interface FleetCompanionRequest {
    * value is a floor on the wait, never the thing that makes it safe.
    */
   readonly droneRedeployHoldOffSeconds: number;
-  /**
-   * Whether this pilot ATTEMPTS to tag. Only "try": the server silently drops a
-   * non-commander's tag write and still answers ok, so the real gate is the
-   * fleet roster read, not this flag.
-   *
-   * ⚠ ONLY ONE PILOT PER SQUAD SHOULD SET THIS. A tag is unique fleet-wide, so
-   * two taggers fight over letters and the fleet stops trusting them.
-   */
-  readonly attemptsTagging: boolean;
-  readonly obeys: readonly FleetCompanionOrderSource[];
-  /**
-   * Character ids whose fleet-chat commands this pilot will act on, IN ADDITION
-   * to whoever the fleet roster says is a commander. Empty is the safe default.
-   *
-   * ⚠ NEVER POPULATED FROM CHAT TEXT. It comes off the request the operator
-   * controls, which is what keeps it unspoofable.
-   */
-  readonly chatCommandSenders: readonly number[];
-  /**
-   * Where to run to when the abandonment protocol finds no station on grid —
-   * a bookmark id, or `null` for "nowhere has been named".
-   *
-   * ⚠ A BOOKMARK BECAUSE THERE IS NO SUN. Decision 5 asked for "a safe spot
-   * (the sun) if no station exists", and that step cannot be built as asked:
-   * eve.js's scene carries no celestial at all — its entity kinds are `ship`,
-   * `structure`, `drone`, `asteroid`, `stargate`, `station`, `sentryGun`,
-   * `container`, `cynoField` and `signatureSite` — and no read in `api.ts` or
-   * on the BFF exposes one. Checked 2026-09-10.
-   *
-   * A bookmark is better than the celestial would have been. `api.warpToBookmark`
-   * already exists, and the operator names somewhere they have actually checked
-   * rather than the one object every other pilot in the system also warps to.
-   *
-   * `null` is honest, not unfinished: a system with no station on grid AND no
-   * bookmark is the one case with nothing to do, and the companion stops where
-   * it is and says why. A fabricated safe spot would be worse than an honest
-   * stop.
-   */
-  readonly safeSpotBookmarkID: number | null;
 }
+
+/**
+ * The stored half of a request: exactly what an operator configures, and exactly
+ * what is persisted against a pilot in a Pilot Hangar squad.
+ *
+ * ⚠ THIS LIST IS A FENCE, NOT A CONVENIENCE, in the same sense the old
+ * `COMPANION_PRESET_KEYS` was. The codec (`bots/companionRunPolicy.ts`) decodes
+ * these keys and refuses anything else, so widening the stored surface means
+ * widening this constant -- a deliberate act, with the whole of
+ * docs/fleet-companion-simplification.md arguing against it.
+ *
+ * ⚠ THE TEST FOR MEMBERSHIP IS "CAN THIS BE READ OFF THE SHIP". If it can, it is
+ * derived and does not belong here. Everything that survived the 2026-09-11
+ * simplification failed that test: three thresholds nobody could derive, a
+ * budget, a wait, and one setting that spends money.
+ */
+export const COMPANION_SETUP_KEYS = [
+  "fleeHealthFloor",
+  "capacitorFloor",
+  "maxFleeAttempts",
+  "repairsAtStation",
+  "droneHealthFloor",
+  "droneRedeployHoldOffSeconds",
+] as const;
+
+export type CompanionSetupKey = (typeof COMPANION_SETUP_KEYS)[number];
+
+/**
+ * What an operator saves. A `FleetCompanionRequest` is this plus the eight
+ * module lists, filled in from the hull at start by `requestForFit`.
+ *
+ * ⚠ DERIVED FROM THE FLOWN SHAPE RATHER THAN DECLARED BESIDE IT, so the two can
+ * never disagree about a field's type or drift apart when one is edited.
+ */
+export type CompanionSetup = Pick<FleetCompanionRequest, CompanionSetupKey>;
 
 /** Bounds. Stated together rather than scattered, so they can be read at once. */
 export const MIN_FLEE_HEALTH_FLOOR = 0.05;
@@ -358,18 +375,7 @@ export const MAX_DRONE_HOLD_OFF_SECONDS = 300;
  * two marked unverified, which are honest guesses awaiting a live measurement
  * (docs/fleet-companion-plan.md, "Unknowns").
  */
-export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.freeze({
-  role: "dps",
-  defenseModuleIDs: Object.freeze([]),
-  shieldBoosterModuleIDs: Object.freeze([]),
-  armorRepairerModuleIDs: Object.freeze([]),
-  hullRepairerModuleIDs: Object.freeze([]),
-  remoteShieldModuleIDs: Object.freeze([]),
-  remoteArmorModuleIDs: Object.freeze([]),
-  remoteCapacitorModuleIDs: Object.freeze([]),
-  // Empty: locks the call, never fires it. See the field comment for why an
-  // unset weapon list is the right default for a loop that obeys other people.
-  weaponModuleIDs: Object.freeze([]),
+export const DEFAULT_COMPANION_SETUP: CompanionSetup = Object.freeze({
   fleeHealthFloor: 0.3,
   // Half of the worst layer. In a fight that layer is the shield, and a recall
   // gives a shield back whole - so pulling at a half shield costs one round
@@ -386,19 +392,33 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   maxFleeAttempts: 3,
   // Off: nothing this loop does spends money unless an operator asks it to.
   repairsAtStation: false,
-  useDrones: false,
   // A floor on the wait, not a safety guarantee — see the field's own comment.
   droneRedeployHoldOffSeconds: 10,
-  attemptsTagging: false,
-  // Off: the eight lists above are what an operator picked, and a default that
-  // overrode them with whatever happened to be bolted on would be picking for
-  // them. The squad path turns it on because it has nobody to ask.
-  deriveModulesFromFit: false,
-  obeys: Object.freeze<FleetCompanionOrderSource[]>(["broadcast", "tag"]),
-  chatCommandSenders: Object.freeze([]),
-  // No safe spot until an operator names one. See the field's own comment for
-  // why null is a real answer here rather than a missing setting.
-  safeSpotBookmarkID: null,
+} satisfies CompanionSetup);
+
+/**
+ * A whole request with nothing fitted — the shipped setup plus eight empty
+ * lists.
+ *
+ * ⚠ THIS IS NOT WHAT ANY PILOT FLIES, and it is not a default an operator ever
+ * sees. `startFleetCompanion` reads the hull and replaces all eight lists before
+ * the first tick, so a real run's lists are whatever that ship is carrying. This
+ * constant exists for two callers: tests that want a valid request to vary one
+ * field of, and the fallback for a fit that could not be read at all -- where
+ * eight empty lists is the honest answer, because nothing can be cycled if
+ * nothing could be classified.
+ */
+export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.freeze({
+  ...DEFAULT_COMPANION_SETUP,
+  defenseModuleIDs: Object.freeze([]),
+  shieldBoosterModuleIDs: Object.freeze([]),
+  armorRepairerModuleIDs: Object.freeze([]),
+  hullRepairerModuleIDs: Object.freeze([]),
+  remoteShieldModuleIDs: Object.freeze([]),
+  remoteArmorModuleIDs: Object.freeze([]),
+  remoteCapacitorModuleIDs: Object.freeze([]),
+  weaponModuleIDs: Object.freeze([]),
+  salvagerModuleIDs: Object.freeze([]),
 } satisfies FleetCompanionRequest);
 
 /**
@@ -478,6 +498,34 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * both forbid a write, but only `false` is settled. Never guess "no".
    */
   readonly canTag: boolean | null;
+  /**
+   * Character IDs the fleet roster names as COMMANDERS — fleet boss, wing
+   * commander, squad commander, or the fleet's creator. The chat-order rung
+   * takes orders from these and from nobody else.
+   *
+   * ⚠ THE SAME TEST THE SERVER USES FOR TAGGING, POINTED AT A SECOND QUESTION.
+   * `canTag` above is this test applied to THIS pilot's own row; this is the
+   * same test applied to every row. One definition of "commander", used twice,
+   * rather than a second idea of authority invented for chat.
+   *
+   * ⚠ NULL IS "COULD NOT READ THE ROSTER", AND IT MEANS NO CHAT ORDERS. It must
+   * never collapse to "anybody", because the roster is the entire gate: a pilot
+   * that cannot tell who is in charge must not act on somebody claiming to be.
+   * Local chat is readable by everyone in the system, so this list is the only
+   * thing standing between a companion and a stranger typing "target".
+   */
+  readonly fleetCommanderCharacterIDs?: readonly number[] | null;
+  /**
+   * Cans and wrecks the `loot` order is finished with -- emptied, or tried
+   * enough times without emptying.
+   *
+   * ⚠ THE LADDER CANNOT LEARN THIS FOR ITSELF. It issues one atomic call per
+   * tick and never sees what came back, so "did that can actually empty?" is a
+   * fact only the layer that made the call has. Without it the rung marked a can
+   * done the moment it ASKED, and a can that gave up one stack of three was
+   * never opened again.
+   */
+  readonly lootFinishedItemIDs?: readonly number[];
   /**
    * Character IDs THIS HOST is flying with a bot — companions included, and
    * this pilot itself. The supervision gate SUBTRACTS them from the fleet
@@ -601,7 +649,7 @@ export interface FleetCompanionDeps {
  * unrelated groups, each belonging to its own rung:
  *
  *   • the abandonment protocol (decision 5, rung 2) — warp / approach / dock /
- *     warpToBookmark / leaveFleet / acceptFleetInvite — the one thing a
+ *     leaveFleet / acceptFleetInvite — the one thing a
  *     companion left without a human may do unsupervised.
  *   • obeying the fleet (rung 7) — lock / align / activate / travelTo —
  *     answering a fleet tag or broadcast while a human IS supervising. See
@@ -609,12 +657,27 @@ export interface FleetCompanionDeps {
  */
 export type FleetCompanionAction =
   | { readonly kind: "wait" }
-  /** The get-safe ladder: warp in, close the last few km, dock. */
+  /**
+   * The get-safe ladder: warp in, close the last few km, dock.
+   *
+   * ⚠ `warp` ALSO CARRIES THE SAFE-SPOT FALLBACK NOW. When no station is on
+   * grid the pilot warps to the system's STAR, which is an ordinary scene entity
+   * (`kind: "sun"`) reached by the ordinary warp call — so there is no separate
+   * action for it, and the `warpToBookmark` kind that used to serve that case is
+   * gone. See `sunOnGrid`.
+   */
   | { readonly kind: "warp"; readonly targetID: number }
-  | { readonly kind: "approach"; readonly targetID: number }
+  /**
+   * Close on something. `range` is where to STOP, in metres -- null hugs it.
+   *
+   * ⚠ HUGGING IS WRONG FOR A JOB WITH A REACH. A salvager works to about 5 km
+   * and a loot transfer to 2.5 km, so flying all the way to the object wastes
+   * the whole approach and leaves the ship sitting on top of a wreck for no
+   * reason. The get-safe ladder still hugs deliberately: it is closing on a
+   * station to dock, where there is no working distance to stop at.
+   */
+  | { readonly kind: "approach"; readonly targetID: number; readonly range?: number }
   | { readonly kind: "dock"; readonly stationID: number }
-  /** The fallback when no station is on grid: the operator's own safe spot. */
-  | { readonly kind: "warpToBookmark"; readonly bookmarkID: number }
   | { readonly kind: "leaveFleet" }
   | { readonly kind: "acceptFleetInvite"; readonly fleetID: number }
   /**
@@ -650,6 +713,18 @@ export type FleetCompanionAction =
    */
   | { readonly kind: "travelTo"; readonly systemID: number }
   /**
+   * Obeying the fleet: jump through the gate this ship is sitting on.
+   *
+   * ⚠ ONLY THE GATE WE ARE AT, AND NO FAR SIDE. The rung used to stop at the
+   * gate because `api.jump` wanted a `toGateID` it had no way to solve without
+   * the autopilot's route graph. That was OUR constraint, not the game's:
+   * `jumpSessionViaStargate` (transitions.js) resolves the destination itself
+   * from `sourceGate.destinationID` whenever the far id is absent, and the only
+   * thing insisting on one was the BFF's own INVALID_GATE check. A stargate
+   * knows where it goes; we do not have to tell it.
+   */
+  | { readonly kind: "jumpGate"; readonly gateID: number }
+  /**
    * Rung 4, "tackle → tag": letter a ship that is holding this one down, so the
    * whole fleet can call it.
    *
@@ -678,6 +753,41 @@ export type FleetCompanionAction =
    */
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
   /**
+   * Rung 6: point drones at a ship. ENTITY ids, like `recallDrones`.
+   *
+   * ⚠ ONE CALL, TWO MEANINGS, AND THE SERVER DECIDES WHICH. `CmdEngage` against
+   * a HOSTILE is an attack; against a FRIENDLY ship it is a repair, dispatched
+   * to `assignDroneRepairTask` instead. There is no separate "repair" command to
+   * make, which is why the companion's repair-drone rung issues this one.
+   *
+   * ⚠ AND THE FRIENDLY TEST IS NOT FLEET MEMBERSHIP. `isFriendlyRepairTarget`
+   * checks character, owner, corporation and alliance ONLY, so repair drones
+   * cannot rep an out-of-corp fleet-mate: the call is accepted and nothing
+   * happens. That is a server fact, recorded rather than worked around.
+   */
+  | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
+  /**
+   * Rung 6: set salvage drones sweeping. ENTITY ids.
+   *
+   * ⚠ `targetID: 0` MEANS "THE SERVER PICKS THE WRECK" and is the normal case,
+   * not a missing value -- `resolveAutomaticSalvageTarget` chooses one. It is
+   * why a standing salvage order does not have to be re-aimed as each wreck is
+   * consumed.
+   */
+  | { readonly kind: "salvageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
+  /**
+   * The `loot` chat order: empty a wreck, or a container, this ship is already
+   * within range of.
+   *
+   * ⚠ WRECKS ARE OWNERSHIP-GATED AND CONTAINERS ARE NOT, which is why they are
+   * two actions and not one. A wreck is opened only when it belongs to this
+   * pilot or its corporation, and one whose owner cannot be read is never opened
+   * at all -- the no-can-flipping rule, structural rather than polite. Salvaging
+   * has no such gate, because salvaging anything is legal.
+   */
+  | { readonly kind: "lootWreck"; readonly wreckID: number }
+  | { readonly kind: "lootContainer"; readonly containerID: number }
+  /**
    * Rung 5: pay the station to put the armour back.
    *
    * ⚠ `itemIDs` COMES FROM THE SHOP'S OWN QUOTE, never from a guess at what is
@@ -701,7 +811,6 @@ export interface FleetCompanionProgress {
   readonly phase: string | null;
   readonly action: string | null;
   readonly why: string | null;
-  readonly role: FleetCompanionRole | null;
   /** Whether this pilot is in a fleet at all. Null while the roster is unread. */
   readonly inFleet: boolean | null;
   /** Which authority the last decision came from, for the readout. */
@@ -916,6 +1025,105 @@ export interface CompanionLadderMemory {
    * than of any one drone.
    */
   readonly droneCyclesSpent: number;
+  /**
+   * The ship this pilot's repair drones were last sent to.
+   *
+   * ⚠ WITHOUT THIS THE RUNG RE-ISSUES ITS ORDER EVERY TICK. Drones already
+   * repairing the right ship need telling nothing, and re-sending the same
+   * engage twice a second would spend this loop's one atomic call per tick on
+   * an order the server has already obeyed -- starving every rung beneath it.
+   * Same shape, and the same reason, as `lastHealModuleIDs` above.
+   */
+  readonly lastDroneRepairTargetID: number | null;
+  /**
+   * How many salvage drones the standing salvage order was last issued for.
+   *
+   * ⚠ A COUNT AND NOT A FLAG, because the set of drones out can CHANGE while
+   * the order stands: one more launched, or one lost, is a different set, and
+   * the new ones have been told nothing. A bare "already ordered" flag would
+   * leave them drifting. The server auto-picks the wreck, so the order never
+   * needs re-aiming -- only re-issuing to drones that missed it.
+   */
+  readonly lastSalvageOrderedFor: number | null;
+  /**
+   * Wrecks and containers the `loot` order has already emptied this run, and
+   * the one currently being closed on.
+   *
+   * ⚠ A WRECK STAYS ON GRID AFTER IT IS EMPTIED, so "still there" cannot mean
+   * "still has something in it" and this record is the only way the rung knows
+   * to move on. A container is the opposite -- the server despawns an empty
+   * jetcan -- but one list for both is simpler than two rules, and marking a
+   * can that has already vanished costs nothing.
+   */
+  readonly lootedItemIDs: readonly number[];
+  readonly lootApproaching: number | null;
+  /**
+   * The can or wreck this pilot has committed to opening.
+   *
+   * ⚠ WITHOUT THIS THE RUNG WANDERS, and it did (observed live, 2026-09-11: a
+   * pilot flew to a container, did not loot it, and set off for a different
+   * one). The target was re-picked from scratch on EVERY tick, and the inputs
+   * move underneath it: this ship's own distances change as it closes, and the
+   * fleet-mate claim flips as another pilot moves. So the nearest-unclaimed can
+   * stopped being the same can halfway there, and it turned for the new one --
+   * for ever, arriving at none of them.
+   *
+   * The salvage rung latched its wreck from the start (`salvageWreckID`) for
+   * exactly this reason; looting was written without it and should not have
+   * been. Choosing is a decision; a decision that is remade every two seconds is
+   * not a decision.
+   */
+  readonly lootTargetID: number | null;
+  /**
+   * The wreck a fitted SALVAGER is working, and how long its lock has been
+   * waited on. Null when no salvager ladder is under way.
+   *
+   * ⚠ A RECORD, NOT A RE-DERIVATION, for the reason the drone cycle carries one:
+   * the ladder spans several ticks (approach, lock, activate) and the condition
+   * that started it -- a wreck being the nearest -- can change underneath it. A
+   * rung that re-picked the nearest wreck every tick would approach one, lock
+   * another, and salvage neither.
+   */
+  readonly salvageWreckID: number | null;
+  readonly salvageLockIssued: boolean;
+  readonly salvageLockWaited: number;
+  /**
+   * Whether an approach has already been sent for `salvageWreckID`.
+   *
+   * ⚠ NOT DERIVABLE FROM DISTANCE. A ship that is closing is still out of
+   * range, so "too far" cannot tell an approach that has not been issued from
+   * one that is under way -- and re-sending it every tick would spend the
+   * run's one call on a move the server is already making.
+   */
+  readonly salvageApproachIssued: boolean;
+  /**
+   * The standing area job -- `salvage`, `loot`, or none.
+   *
+   * ⚠ A LATCH, AND IT HAS TO BE. These verbs name a JOB ("salvage the wrecks in
+   * vicinity"), not an instant. The first cut read them straight off the chat
+   * backlog, which meant they inherited the BROADCAST freshness window -- right
+   * for a target call, where a primary stops being one in seconds, and wrong
+   * here. Observed live on 2026-09-11: a pilot salvaged exactly ONE wreck and
+   * went back to standing by with two still on grid, because the order aged out
+   * of its thirty-second window mid-job. An operator would have had to re-type
+   * the word every half minute.
+   *
+   * ⚠ IT CLEARS ITSELF WHEN THE JOB IS DONE, which is what keeps a latch from
+   * being a trap: no wrecks left to salvage, or nothing left to loot, and the
+   * pilot goes back to its own ladder without anybody saying so. `stop` cancels
+   * it early, and every rung ABOVE it still preempts it -- a flee, a fleet warp
+   * or a target call interrupts a salvage job exactly as before.
+   */
+  readonly areaJob: "salvage" | "loot" | null;
+  /**
+   * The object a `WarpTo` order has already been answered for.
+   *
+   * ⚠ A WARP IS NOT IDEMPOTENT THE WAY A LOCK IS. Re-sending it while the ship
+   * is already on its way is at best a wasted call and at worst a second warp
+   * the moment the first lands, so the order is answered ONCE per destination
+   * and a repeat of the same call is heard without being obeyed again.
+   */
+  readonly lastWarpedToID: number | null;
   /** Rung 5's flee, or null when the pilot is not running from anything. */
   readonly flee: CompanionFlee | null;
   /**
@@ -973,6 +1181,17 @@ export function freshLadderMemory(): CompanionLadderMemory {
     taggingGaveUpOn: [],
     droneCycle: null,
     droneCyclesSpent: 0,
+    lastDroneRepairTargetID: null,
+    lastSalvageOrderedFor: null,
+    lootedItemIDs: [],
+    lootApproaching: null,
+    lootTargetID: null,
+    salvageWreckID: null,
+    salvageLockIssued: false,
+    salvageLockWaited: 0,
+    salvageApproachIssued: false,
+    areaJob: null,
+    lastWarpedToID: null,
     flee: null,
     fleeTripsSpent: 0,
     fleeRecoveryTicks: 0,
@@ -1209,6 +1428,11 @@ export function decideCompanionAction(
     );
   }
 
+  // ⚠ THE AREA LATCH IS UPDATED BEFORE ANY RUNG DECIDES, and before the
+  // supervision gate, so that a `stop` typed while a pilot is getting safe is
+  // still heard. It issues nothing; it only records what the last order said.
+  memory = withAreaJobCleared(obs, withAreaJob(obs, memory));
+
   const supervisors = supervisorsInFleet(obs);
   if (supervisors === null) {
     // FAIL OPEN, deliberately. A transient roster failure must not dock a live
@@ -1243,6 +1467,17 @@ export function decideCompanionAction(
     lastTagIssuedFor: memory.lastTagIssuedFor,
     lastTagAttempts: memory.lastTagAttempts,
     taggingGaveUpOn: memory.taggingGaveUpOn,
+    lastDroneRepairTargetID: memory.lastDroneRepairTargetID,
+    lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
+    lootedItemIDs: memory.lootedItemIDs,
+    lootApproaching: memory.lootApproaching,
+    lootTargetID: memory.lootTargetID,
+    salvageWreckID: memory.salvageWreckID,
+    salvageLockIssued: memory.salvageLockIssued,
+    salvageLockWaited: memory.salvageLockWaited,
+    salvageApproachIssued: memory.salvageApproachIssued,
+    areaJob: memory.areaJob,
+    lastWarpedToID: memory.lastWarpedToID,
     droneCycle: memory.droneCycle,
     droneCyclesSpent: memory.droneCyclesSpent,
     // ⚠ CARRIED, NOT CLEARED, and the difference from `abandonment` above is
@@ -1313,9 +1548,30 @@ export function decideCompanionAction(
     return obeying;
   }
 
-  // Phases 6 and 8 add further rungs HERE, beneath the fleet-order rung, which
-  // is where the decided precedence puts them and which is only safe now that a
-  // standing order no longer parks the tick.
+  // Rung 8: the `loot` order.
+  //
+  // ⚠ IT SITS HERE, AT THE VERY BOTTOM, BECAUSE IT MOVES THE SHIP. Every other
+  // thing this loop does is fired from where the pilot already is, or is a move
+  // somebody else ordered; looting approaches each wreck in turn and will drift
+  // a companion off formation. Beneath the fleet-order rung means a target call,
+  // a rep call, an align or a fleet warp all interrupt it -- and being beneath
+  // the flee and the supervision gate as well means a pilot that is dying stops
+  // looting without anybody having to say so.
+  //
+  // ⚠ AND IT IS BENEATH THE *STANDING* ORDER CHECK BELOW ON PURPOSE. That is the
+  // slot `CompanionDecision.standing` was built for in phase 5 and which has had
+  // no consumer since the flee moved above the fleet rung: a pilot whose guns are
+  // already running on a called target should go on looting between shots rather
+  // than reporting "Standing by" and doing nothing.
+  const salvaging = decideSalvaging(request, obs, drones.memory);
+  if (salvaging !== null) {
+    return salvaging;
+  }
+
+  const looting = decideLooting(obs, drones.memory);
+  if (looting !== null) {
+    return looting;
+  }
 
   // The standing order, if there was one and nothing beneath it acted. The
   // pilot IS obeying the fleet, so it says so rather than "Standing by".
@@ -1324,7 +1580,7 @@ export function decideCompanionAction(
   }
   return waiting(
     "Standing by",
-    "No fleet order to obey right now, and no further companion behaviour is built yet.",
+    "No fleet order to obey right now, nothing to loot, and nothing hostile to put drones on.",
     drones.memory,
   );
 }
@@ -1371,7 +1627,7 @@ function decideAbandonment(
 
   // 2. Get safe.
   if (!reachedSafety(obs, running)) {
-    const safe = runToSafety(request, obs, mem, {
+    const safe = runToSafety(obs, mem, {
       run: running,
       phase: "Getting safe",
       because: "there is nobody left in the fleet to fly with",
@@ -1549,7 +1805,6 @@ function recallBeforeLeaving(
  * one. So the branch is left to the caller rather than decided here.
  */
 function runToSafety(
-  request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   mem: CompanionLadderMemory,
   leg: SafetyLeg,
@@ -1603,24 +1858,69 @@ function runToSafety(
     };
   }
 
-  const bookmarkID = request.safeSpotBookmarkID;
-  if (bookmarkID === null) {
-    // Nowhere to go. An invented safe spot would be worse than saying so, and
-    // what SAYING so means differs per caller — see this function's header.
+  // ⚠ THE SUN, AND IT IS AN ORDINARY ON-GRID ENTITY LIKE THE STATION ABOVE.
+  // This used to be an operator-named bookmark, because a note here and in the
+  // plan doc said eve.js has no celestial to warp to. That was wrong, and it was
+  // wrong in a specific way worth remembering: it enumerated the entity kinds
+  // this CLIENT's own code mentions and concluded the server emits no others.
+  // Re-checked against the server on 2026-09-11 --
+  //
+  //   * every solar system has a star row (`groupID` 6, `kind: "sun"`) in the
+  //     server's own celestial table, 8,089 of them, each at the system origin;
+  //   * `space/runtime.js` adds every celestial to the scene UNCONDITIONALLY --
+  //     unlike stargates, which sit behind a flag;
+  //   * `canSessionSeeStaticEntityForSession` rejects only bubble-, grid- and
+  //     site-scoped statics, and a star carries none of those markers, so it is
+  //     visible to every session in the system;
+  //   * and `warpState.js` has a dedicated `case "sun":` landing distance, so
+  //     warping to one is a mechanic somebody implemented on purpose.
+  //
+  // The client simply never recognised it: `space/tactical.ts` tests for
+  // `kind === "celestial"` and a star's kind is `"sun"`, so it has been arriving
+  // in every snapshot and falling through unread. An absence in the reader was
+  // read as an absence in the world.
+  const sun = sunOnGrid(obs);
+  if (sun === null) {
+    // No station and no star. This should not happen in a normal system, so it
+    // is reported rather than papered over: what SAYING so means differs per
+    // caller — see this function's header.
     return null;
   }
   if (!leg.run.safeSpotWarpIssued) {
     return {
-      action: { kind: "warpToBookmark", bookmarkID },
+      action: { kind: "warp", targetID: sun },
       phase: leg.phase,
-      why: "No station in view, so this pilot is warping to the safe spot.",
+      why: "No station in view, so this pilot is warping to the sun.",
       memory: leg.write(mem, { ...leg.run, safeSpotWarpIssued: true }),
     };
   }
   // Issued, and no warp has been seen. Do NOT re-issue every two seconds, and
   // do NOT give up: the warp may simply not have started yet, and each caller's
   // own bound is already the answer to one that never does.
-  return waiting(leg.phase, "Waiting for the warp to the safe spot to start.", mem);
+  return waiting(leg.phase, "Waiting for the warp to the sun to start.", mem);
+}
+
+/**
+ * The system's star, by entity id, or null if this snapshot has none.
+ *
+ * ⚠ `kind === "sun"` IS THE SERVER'S OWN WORD, not a guess at a naming scheme.
+ * `buildStaticCelestialEntity` stamps the kind straight from the celestial row,
+ * and every star row carries `kind: "sun"`. Planets and moons arrive the same
+ * way under their own kinds; this deliberately matches only the star, because
+ * "the sun" is what a safe spot means and a planet is somewhere else entirely.
+ *
+ * ⚠ NOT FILTERED ON DISTANCE OR LOCK RANGE. A star is millions of kilometres
+ * away and is warped to, never approached — the whole point of it is that it is
+ * off this grid.
+ */
+function sunOnGrid(obs: FleetCompanionObservation): number | null {
+  const entities = obs.snapshot?.entities ?? [];
+  for (const entity of entities) {
+    if (entity.kind === "sun") {
+      return entity.itemID;
+    }
+  }
+  return null;
 }
 
 // ─── Rung 3: tank up ─────────────────────────────────────────────────────────
@@ -2319,7 +2619,7 @@ function decideHealOrder(
 }
 
 /** The four broadcast names that name a thing to go to or shoot. */
-type NamedOrderName = "Target" | "AlignTo" | "TravelTo" | "JumpTo";
+type NamedOrderName = "Target" | "AlignTo" | "TravelTo" | "JumpTo" | "WarpTo";
 
 /**
  * One order this pilot is being given, with the source it came from already
@@ -2336,7 +2636,20 @@ interface NamedOrder {
   readonly why: string;
 }
 
-const CHAT_ORDER_NAMES: Readonly<Record<ChatCommand["kind"], NamedOrderName>> = Object.freeze({
+/**
+ * The chat verbs that name an OBJECT, and so have a broadcast to map onto.
+ *
+ * ⚠ WRITTEN AS AN EXCLUSION SO A NEW VERB BREAKS THE BUILD RATHER THAN THE RUN.
+ * `CHAT_ORDER_NAMES` below is a total `Record` over this union, so the moment
+ * `chatCommands.ts` learns a verb that IS a named order, this file stops
+ * compiling until somebody says which broadcast it answers. Excluding the two
+ * area verbs by name keeps that tripwire armed; typing the record over
+ * `ChatCommand["kind"]` and adding `salvage`/`loot` entries pointing at some
+ * arbitrary broadcast would have disarmed it AND been a lie about what they do.
+ */
+type NamedChatCommandKind = Exclude<ChatCommand["kind"], "salvage" | "loot" | "stop">;
+
+const CHAT_ORDER_NAMES: Readonly<Record<NamedChatCommandKind, NamedOrderName>> = Object.freeze({
   target: "Target",
   align: "AlignTo",
   travel: "TravelTo",
@@ -2349,6 +2662,7 @@ const ORDER_HEARD: Readonly<Record<NamedOrderName, { readonly broadcast: string;
     AlignTo: { broadcast: "the fleet's align call", chat: "a chat order to align" },
     TravelTo: { broadcast: "the fleet's travel call", chat: "a chat order to travel" },
     JumpTo: { broadcast: "the fleet's jump call", chat: "a chat order to jump" },
+    WarpTo: { broadcast: "the fleet's warp call", chat: "a chat order to warp" },
   });
 
 const ORDER_WHY: Readonly<Record<NamedOrderName, { readonly broadcast: string; readonly chat: string }>> =
@@ -2369,10 +2683,18 @@ const ORDER_WHY: Readonly<Record<NamedOrderName, { readonly broadcast: string; r
       broadcast: "The fleet called a gate on this grid.",
       chat: "An allowed pilot called a gate in chat.",
     },
+    WarpTo: {
+      broadcast: "The fleet broadcast something to warp to.",
+      chat: "An allowed pilot called a warp destination in chat.",
+    },
   });
 
 function asNamedOrderName(name: string | undefined): NamedOrderName | null {
-  return name === "Target" || name === "AlignTo" || name === "TravelTo" || name === "JumpTo"
+  return name === "Target" ||
+    name === "AlignTo" ||
+    name === "TravelTo" ||
+    name === "JumpTo" ||
+    name === "WarpTo"
     ? name
     : null;
 }
@@ -2393,17 +2715,18 @@ function asNamedOrderName(name: string | undefined): NamedOrderName | null {
  * Newest wins, because a later order supersedes an earlier one exactly as a
  * later broadcast replaces the one before it.
  */
-function newestChatOrder(
+function newestChatCommand(
   messages: readonly ChatMessage[],
-  chatCommandSenders: readonly number[],
+  allowedSenders: readonly number[],
+  wanted: (command: ChatCommand) => boolean,
 ): { readonly command: ChatCommand; readonly at: number } | null {
   let best: { readonly command: ChatCommand; readonly at: number } | null = null;
   for (const message of messages) {
-    if (!isChatCommandSenderAllowed(message, chatCommandSenders)) {
+    if (!isChatCommandSenderAllowed(message, allowedSenders)) {
       continue;
     }
     const command = parseChatCommand(message);
-    if (command === null) {
+    if (command === null || !wanted(command)) {
       continue;
     }
     if (best === null || message.createdAtMs >= best.at) {
@@ -2411,6 +2734,147 @@ function newestChatOrder(
     }
   }
   return best;
+}
+
+/**
+ * The newest chat order that names an OBJECT — `target`, `align`, `travel`,
+ * `jump`.
+ *
+ * ⚠ SPLIT FROM THE AREA COMMANDS ON PURPOSE, AND NOT MERELY FOR TIDINESS. Every
+ * command this function returns carries an `itemID` and is answered by
+ * `resolveNamedOrder` mapping it onto the matching BROADCAST name. `salvage` and
+ * `loot` carry no itemID and have no broadcast to map onto -- there is no
+ * salvage call in the fleet vocabulary at all -- so feeding one into that path
+ * would index `CHAT_ORDER_NAMES` with a kind it does not hold and hand
+ * `isOrderActionable` an itemID that does not exist. They are read by their own
+ * rung instead; see `newestAreaCommand`.
+ */
+/**
+ * The newest AREA order standing in chat: `salvage` or `loot`, or null.
+ *
+ * ⚠ A STANDING ORDER, NOT AN EVENT, AND IT LAPSES BY ITSELF. Nothing here
+ * remembers that a salvage order was ever given: the order is "live" exactly as
+ * long as the message that carried it is still inside the freshness window the
+ * observation builder applies to `chatMessages`. That is the same one staleness
+ * policy a broadcast gets, and it is what makes "stop salvaging" require no verb
+ * -- a commander simply stops saying it, and within the window the pilot goes
+ * back to its own ladder.
+ *
+ * ⚠ WHICH ALSO MEANS A SALVAGE ORDER IS NOT A LOCK ON THE SHIP. The rungs above
+ * this one -- the supervision gate, the flee, a fleet warp -- all still win. A
+ * pilot told to salvage still runs when it is dying.
+ */
+function newestAreaCommand(
+  obs: FleetCompanionObservation,
+): "salvage" | "loot" | "stop" | null {
+  const found = newestChatCommand(
+    obs.chatMessages ?? [],
+    commandersFor(obs),
+    (command) =>
+      command.kind === "salvage" || command.kind === "loot" || command.kind === "stop",
+  );
+  if (found === null) {
+    return null;
+  }
+  return found.command.kind as "salvage" | "loot" | "stop";
+}
+
+/**
+ * The area job after this tick's chat, given the one standing before it.
+ *
+ * ⚠ A HEARD ORDER LATCHES; SILENCE CHANGES NOTHING. That is the whole point of
+ * this function and the reason these verbs are not read straight off the
+ * backlog like a target call is: `salvage` names a job that takes minutes, so a
+ * pilot must go on salvaging while nobody is saying anything. The chat window
+ * only has to carry the order ONCE.
+ *
+ * ⚠ `stop` IS THE ONLY WAY TO CANCEL ONE EARLY, and it cancels nothing else. It
+ * does not stop the bot and does not touch a broadcast or a target call -- those
+ * have their own authority and their own freshness.
+ */
+function withAreaJob(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionLadderMemory {
+  const heard = newestAreaCommand(obs);
+  if (heard === null) {
+    return memory;
+  }
+  const next = heard === "stop" ? null : heard;
+  return next === memory.areaJob ? memory : { ...memory, areaJob: next };
+}
+
+/**
+ * A standing area job, cleared if there is nothing left on this grid for it.
+ *
+ * ⚠ THIS IS WHAT KEEPS THE LATCH FROM BEING A TRAP. Without it a pilot told to
+ * salvage stays "salvaging" for the rest of the run, reporting a job it
+ * finished minutes ago and never falling back to its own ladder.
+ *
+ * ⚠ ONLY WHEN THE GRID CAN ACTUALLY BE SEEN. Docked, in warp, or with no
+ * snapshot, "no wrecks" means "could not look" and must NOT cancel the job --
+ * a pilot fleet-warped away mid-salvage would otherwise arrive with its order
+ * silently forgotten.
+ */
+function withAreaJobCleared(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionLadderMemory {
+  const job = memory.areaJob;
+  if (job === null) {
+    return memory;
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null || obs.inWarp === true) {
+    return memory;
+  }
+  const left =
+    job === "salvage"
+      ? snapshot.entities.some((entity) => entity.kind === "wreck")
+      : lootablesOnGrid(obs, memory).length > 0;
+  return left ? memory : { ...memory, areaJob: null, salvageWreckID: null };
+}
+
+/**
+ * What the `loot` job still has to open here: containers, and wrecks that are
+ * legally ours, minus whatever this run has already emptied.
+ */
+function lootablesOnGrid(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): readonly SpaceEntity[] {
+  const finished = obs.lootFinishedItemIDs ?? [];
+  return (obs.snapshot?.entities ?? []).filter((entity) => {
+    // ⚠ TWO SOURCES, AND BOTH ARE NEEDED. `lootedItemIDs` is this ladder's own
+    // record and survives nothing; `lootFinishedItemIDs` is the OUTCOME of the
+    // calls actually made. A can only leaves the list when it is genuinely
+    // done with, not when it was merely reached for.
+    if (memory.lootedItemIDs.includes(entity.itemID) || finished.includes(entity.itemID)) {
+      return false;
+    }
+    return companionMayOpen(entity);
+  });
+}
+
+/** Whether a `salvage` job is standing right now. */
+function salvageWasOrdered(memory: CompanionLadderMemory): boolean {
+  return memory.areaJob === "salvage";
+}
+
+type NamedChatCommand = Extract<ChatCommand, { readonly kind: NamedChatCommandKind }>;
+
+function isNamedChatCommand(command: ChatCommand): command is NamedChatCommand {
+  return command.kind !== "salvage" && command.kind !== "loot" && command.kind !== "stop";
+}
+
+function newestNamedChatOrder(
+  messages: readonly ChatMessage[],
+  allowedSenders: readonly number[],
+): { readonly command: NamedChatCommand; readonly at: number } | null {
+  const found = newestChatCommand(messages, allowedSenders, isNamedChatCommand);
+  return found === null || !isNamedChatCommand(found.command)
+    ? null
+    : { command: found.command, at: found.at };
 }
 
 /**
@@ -2463,36 +2927,65 @@ function resolveNamedOrder(
   obs: FleetCompanionObservation,
   entities: readonly SpaceEntity[],
 ): NamedOrder | null {
-  if (request.obeys.includes("broadcast")) {
-    const name = asNamedOrderName(obs.fleetBroadcast?.name);
-    const itemID = obs.fleetBroadcast?.itemID ?? null;
-    if (name !== null && itemID !== null && isOrderActionable(name, itemID, entities)) {
-      return {
-        name,
-        itemID,
-        source: "broadcast",
-        heard: ORDER_HEARD[name].broadcast,
-        why: ORDER_WHY[name].broadcast,
-      };
-    }
+  // ⚠ NO CHANNEL GATE. Every source this pilot can hear, it acts on. The
+  // `obeys` list that used to wrap each of these branches is gone -- see
+  // docs/fleet-companion-simplification.md, "What it listens to". Precedence is
+  // unchanged and is still expressed by the ORDER of these branches, which is
+  // the only thing that ever decided it.
+  const name = asNamedOrderName(obs.fleetBroadcast?.name);
+  const itemID = obs.fleetBroadcast?.itemID ?? null;
+  if (name !== null && itemID !== null && isOrderActionable(name, itemID, entities)) {
+    return {
+      name,
+      itemID,
+      source: "broadcast",
+      heard: ORDER_HEARD[name].broadcast,
+      why: ORDER_WHY[name].broadcast,
+    };
   }
-  if (request.obeys.includes("chat")) {
-    const chat = newestChatOrder(obs.chatMessages ?? [], request.chatCommandSenders);
-    if (chat !== null) {
-      const name = CHAT_ORDER_NAMES[chat.command.kind];
-      if (!isOrderActionable(name, chat.command.itemID, entities)) {
-        return null;
-      }
-      return {
-        name,
-        itemID: chat.command.itemID,
-        source: "chat",
-        heard: ORDER_HEARD[name].chat,
-        why: ORDER_WHY[name].chat,
-      };
+  const chat = newestNamedChatOrder(obs.chatMessages ?? [], commandersFor(obs));
+  if (chat !== null) {
+    const chatName = CHAT_ORDER_NAMES[chat.command.kind];
+    if (!isOrderActionable(chatName, chat.command.itemID, entities)) {
+      return null;
     }
+    return {
+      name: chatName,
+      itemID: chat.command.itemID,
+      source: "chat",
+      heard: ORDER_HEARD[chatName].chat,
+      why: ORDER_WHY[chatName].chat,
+    };
   }
   return null;
+}
+
+/**
+ * Who this pilot will take a chat order from: the fleet's own commanders.
+ *
+ * ⚠ THIS REPLACES A HAND-TYPED LIST OF CHARACTER IDS, AND IT FIXES A BUG RATHER
+ * THAN RELAXING A GATE. The settings screen told operators that "whoever the
+ * fleet roster already names a commander is obeyed regardless", and that was
+ * simply false: the only gate that ever existed was
+ * `chatCommandSenders.includes(sender)`, and `flow.ts` did not even FETCH chat
+ * unless that list was non-empty. So an FC's chat orders were silently ignored
+ * by every companion nobody had typed ids into. This is the screen's own
+ * promise, finally implemented.
+ *
+ * ⚠ AND IT IS NARROWER THAN WHAT IT REPLACED, not wider. A hand-typed list could
+ * name anybody, including somebody who is not in the fleet at all. This cannot:
+ * the roster is the source, so a commander who leaves stops being obeyed on the
+ * next tick without anyone editing anything.
+ *
+ * ⚠ NULL IS NOT EMPTY. A roster that could not be read yields no commanders and
+ * therefore no chat orders, which is the safe answer -- never "anyone will do".
+ *
+ * The sender id itself is derived server-side from the authenticated session
+ * (`chatRuntime.js`) and never from message text, which is what keeps this
+ * unspoofable.
+ */
+function commandersFor(obs: FleetCompanionObservation): readonly number[] {
+  return obs.fleetCommanderCharacterIDs ?? [];
 }
 
 // ─── Rung 4: tackle → tag ────────────────────────────────────────────────────
@@ -2605,11 +3098,22 @@ function decideTackleTag(
   memory: CompanionLadderMemory,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
-  // The setting the player ticked. Until this rung existed it was read by
-  // nothing at all.
-  if (!request.attemptsTagging) {
-    return nothing;
-  }
+  // ⚠ NO OPERATOR GATE. Every companion tags, and the three things below
+  // are what make that safe rather than a letter-fight:
+  //
+  //   1. THE SERVER IS THE REAL GATE. Only a fleet creator, leader, wing
+  //      commander or squad commander may tag at all, and `obs.canTag` mirrors
+  //      that test off the roster. In an ordinary fleet the companions are
+  //      plain members and this rung writes nothing, whatever anybody ticked.
+  //   2. A LETTERED SHIP IS SKIPPED, below, so a second tagger seeing the same
+  //      tackler leaves the letter it already has alone.
+  //   3. THE TRIGGER IS NARROW: only ships tackling THIS pilot are candidates.
+  //      Two companions collide only if one ship has tackled both of them in
+  //      the same tick, before either letter is visible.
+  //
+  // The `attemptsTagging` checkbox that used to stand here gated behaviour that
+  // was already exactly what was asked for -- tag what is holding you down, and
+  // only that. See docs/fleet-companion-simplification.md, "Tagging".
   const snapshot = obs.snapshot ?? null;
   if (obs.inSpace !== true || snapshot === null) {
     return nothing;
@@ -3043,7 +3547,7 @@ function flyTheFlee(
     return recoverAndReturn(request, obs, mem, running);
   }
 
-  const safe = runToSafety(request, obs, mem, {
+  const safe = runToSafety(obs, mem, {
     run: running,
     phase: "Getting clear",
     because: "this ship is hurt",
@@ -3108,6 +3612,461 @@ function droneCycleHoldTicks(request: FleetCompanionRequest): number {
   return Math.max(1, Math.ceil((request.droneRedeployHoldOffSeconds * 1000) / FLEET_COMPANION_CADENCE_MS));
 }
 
+// ─── The `loot` order ────────────────────────────────────────────────────────
+
+/**
+ * How close this ship must actually be, CENTRE TO CENTRE, before it reaches
+ * into a wreck or a can.
+ *
+ * ⚠ CENTRE TO CENTRE, BECAUSE THAT IS WHAT THE SERVER MEASURES, and measuring
+ * it any other way is what had a companion fly to a can and stand there.
+ * `invbroker` refuses to bind a space container whose straight-line centre
+ * distance from the ship exceeds 2,500 m, and it refuses with `FakeItemNotFound`
+ * -- the same answer it gives for an id it has never heard of, so nothing on the
+ * wire says "not yet, keep coming".
+ *
+ * This rung used to ask `measureSpace`, whose distances are SURFACE distances:
+ * centres minus BOTH radii. So a pilot 2,400 m from the hull of a can was
+ * 2,400 + its own radius + the can's radius away from the centre the server
+ * measures to, and reached in from outside the gate while still flying. Observed
+ * live 2026-09-11: three `GetInventoryFromId` calls answered `FakeItemNotFound`
+ * over four seconds, and the fourth -- a few hundred metres later -- bound the
+ * container and listed it. By then the attempt bound in `companionLootFrom` had
+ * already set the can aside, so the pilot parked next to a can it never opened.
+ *
+ * ⚠ THE MARGIN IS FREE, SO IT IS GENEROUS. The approach below hugs the object
+ * (no range), so a pilot that is going to loot at all is on its way to ~50 m --
+ * waiting for 2,000 m costs it a second of travel and nothing else. Distance to
+ * a can this ship is closing on only ever falls between ticks, so a stale
+ * snapshot can only make this rung MORE cautious, never less.
+ *
+ * ⚠ IT IS NO LONGER THE DSL's `LOOT_RANGE_M`, and that divergence is deliberate
+ * rather than drift. `loot-wrecks` keeps the same 2,400 m surface test and gets
+ * away with it because it has a refusal ledger: a refused transfer marks the
+ * wreck unreachable, the block closes in and tries again. This loop has no
+ * ledger to consult (see the note on the loot action below), so it has to be
+ * right the first time instead of recovering afterwards.
+ */
+const COMPANION_LOOT_REACH_M = 2000;
+
+/**
+ * Where to STOP when closing on a wreck to SALVAGE it.
+ *
+ * ⚠ COMFORTABLY INSIDE THE RANGE THAT LETS THE JOB HAPPEN, AND THAT MARGIN IS
+ * THE WHOLE POINT. It was first set EQUAL to the working range above, and a
+ * pilot then flew to a can and sat next to it doing nothing, for ever (observed
+ * live, 2026-09-11). Asking the server to stop AT the threshold parks the ship
+ * on the boundary, where a metre of overshoot or of rounding leaves
+ * `distance > range` true on every tick -- so the rung waits on an approach that
+ * has already finished, and reports nothing at all.
+ *
+ * A threshold you must be INSIDE must never be the distance you aim for.
+ *
+ * ⚠ LOOTING HAS NO SUCH RANGE, BY THE OPERATOR'S DECISION: "for loot do not use
+ * range, for salvage do". A looter flies all the way to the can and takes what
+ * is in it, which sidesteps the boundary problem entirely rather than managing
+ * it -- and unlike a salvager, there is nothing it gains by standing off.
+ */
+const SALVAGE_APPROACH_STOP_M = 3000;
+
+/**
+ * Run a salvager inside its ~5-6 km reach, with margin.
+ *
+ * ⚠ DUPLICATED FROM `scriptMacros.ts`, DELIBERATELY, AND RECORDED RATHER THAN
+ * SILENTLY ACCEPTED. The DSL has the same constant and it is not exported.
+ * Importing it would pull the whole macro table into a loop whose entire point
+ * is not to be part of the DSL -- the same reason the companion builds its own
+ * observation instead of reusing `observe(hint)`. If these two drift, the
+ * symptom is a companion that reaches from a slightly different distance than a
+ * scripted bot does, which is confusing rather than wrong. The shared-constant
+ * lesson from COMPANION_GRANT_SCRIPT_REV applies to values the SERVER
+ * validates; a salvager's own reach is not one of those.
+ */
+const COMPANION_SALVAGE_RANGE_M = 4500;
+
+/** How many ticks to wait on a wreck's lock before giving up on that wreck. */
+const MAX_SALVAGE_LOCK_WAIT_TICKS = 10;
+
+
+/**
+ * Whether this ship is still under way toward something.
+ *
+ * ⚠ READ OFF THE SHIP, NOT OFF OUR OWN MEMORY OF HAVING ASKED. "I sent an
+ * approach" and "the ship is approaching" are different claims, and only the
+ * second one is worth waiting on.
+ */
+function isClosing(obs: FleetCompanionObservation): boolean {
+  const mode = obs.snapshot?.ship?.mode ?? null;
+  return mode !== null && /follow|approach|warp/i.test(mode);
+}
+
+/**
+ * Straight-line metres between two things that carry a position.
+ *
+ * ⚠ NOT `measureSpace`, WHICH ONLY MEASURES FROM THIS SHIP. The claim rule below
+ * has to ask how far a FLEET-MATE is from a wreck, and that pair never involves
+ * this pilot at all.
+ */
+function metresBetween(a: SpaceEntity, b: SpaceEntity): number {
+  const ax = a.position?.x ?? 0;
+  const ay = a.position?.y ?? 0;
+  const az = a.position?.z ?? 0;
+  const bx = b.position?.x ?? 0;
+  const by = b.position?.y ?? 0;
+  const bz = b.position?.z ?? 0;
+  return Math.hypot(ax - bx, ay - by, az - bz);
+}
+
+/**
+ * Straight-line metres from THIS ship's centre to something else's centre.
+ *
+ * ⚠ THE SERVER'S OWN MEASURE, AND THE ONLY ONE WORTH TESTING A SERVER GATE
+ * AGAINST. `measureSpace` answers SURFACE distances -- centres minus both radii
+ * -- which is the right number to show a player and the wrong one to predict a
+ * refusal with. See `COMPANION_LOOT_REACH_M` for what believing the wrong one
+ * cost.
+ *
+ * ⚠ A MISSING POSITION IS INFINITY, NEVER ZERO. `metresBetween` above reads an
+ * absent coordinate as the origin because both its arguments are grid rows that
+ * always carry one; here a snapshot that cannot say where this ship is must read
+ * as "too far to reach in", so the rung keeps closing instead of reaching from a
+ * distance nobody measured.
+ */
+function centreMetresToShip(obs: FleetCompanionObservation, target: SpaceEntity): number {
+  const snapshot = obs.snapshot ?? null;
+  const self = snapshot?.entities.find((entity) => entity.isSelf === true) ?? null;
+  const origin = snapshot?.ship?.position ?? self?.position ?? null;
+  const there = target.position ?? null;
+  if (origin === null || there === null) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.hypot(origin.x - there.x, origin.y - there.y, origin.z - there.z);
+}
+
+/**
+ * The fleet's OTHER ships on this grid, by their character id.
+ *
+ * ⚠ FLEET MEMBERS ONLY, NEVER EVERY PLAYER ON GRID. A stranger racing us to a
+ * wreck is not somebody to yield to; a fleet-mate is. And it excludes this ship,
+ * because `claimedByThisPilot` compares against it separately.
+ */
+function fleetShipsOnGrid(obs: FleetCompanionObservation): readonly SpaceEntity[] {
+  const fleet = obs.fleetMemberCharacterIDs ?? null;
+  const me = obs.myCharacterID ?? null;
+  if (fleet === null) {
+    return [];
+  }
+  return (obs.snapshot?.entities ?? []).filter(
+    (entity) =>
+      entity.kind === "ship" &&
+      entity.isSelf !== true &&
+      entity.characterID !== null &&
+      entity.characterID !== me &&
+      fleet.includes(entity.characterID),
+  );
+}
+
+/**
+ * Which of `candidates` this pilot should take: the nearest one that NO
+ * fleet-mate on grid is better placed for.
+ *
+ * ⚠ THIS IS DE-CONFLICTION WITHOUT A COORDINATION CHANNEL, and that is why it is
+ * shaped as a claim rather than as a message. Every companion runs this same
+ * rule over the same snapshot and reaches the same answer about who takes what,
+ * so two pilots split a field of wrecks without ever telling each other
+ * anything. Nothing is written, nothing is reserved, and a pilot that leaves or
+ * arrives simply changes the answer on the next tick.
+ *
+ * ⚠ THE PROBLEM IT SOLVES IS REAL AND WAS PREDICTED BEFORE IT WAS SEEN: with
+ * plain nearest-first, two pilots on one grid pick the SAME nearest wreck and
+ * convoy to it, doing the work of one. It is not harmful -- the loser finds it
+ * emptied, marks it and moves on -- but it wastes half the fleet.
+ *
+ * ⚠ TIES BREAK ON CHARACTER ID, NOT ARBITRARILY. Two pilots exactly equidistant
+ * (the same wreck, ships abreast) would otherwise both claim or both yield. The
+ * lower id wins, which every pilot computes identically.
+ *
+ * ⚠ AND A PILOT THAT CLAIMS NOTHING STILL WORKS. If a fleet-mate is better
+ * placed for every candidate, this falls back to the plain nearest rather than
+ * idling -- otherwise the last pilot in a big fleet would sit still while one
+ * ship worked a field alone.
+ */
+function pickForThisPilot(
+  obs: FleetCompanionObservation,
+  candidates: readonly SpaceEntity[],
+): SpaceEntity | null {
+  const me = (obs.snapshot?.entities ?? []).find((entity) => entity.isSelf === true) ?? null;
+  const myID = obs.myCharacterID ?? 0;
+  const mates = me === null ? [] : fleetShipsOnGrid(obs);
+
+  let claimed: { entity: SpaceEntity; metres: number } | null = null;
+  let anyNearest: { entity: SpaceEntity; metres: number } | null = null;
+
+  for (const candidate of candidates) {
+    const mine = me === null ? Number.POSITIVE_INFINITY : metresBetween(me, candidate);
+    if (anyNearest === null || mine < anyNearest.metres) {
+      anyNearest = { entity: candidate, metres: mine };
+    }
+    const beaten = mates.some((mate) => {
+      const theirs = metresBetween(mate, candidate);
+      if (theirs < mine) {
+        return true;
+      }
+      return theirs === mine && (mate.characterID ?? 0) < myID;
+    });
+    if (!beaten && (claimed === null || mine < claimed.metres)) {
+      claimed = { entity: candidate, metres: mine };
+    }
+  }
+  return (claimed ?? anyNearest)?.entity ?? null;
+}
+
+/**
+ * Whether the `loot` order will open this entity.
+ *
+ * ⚠ NO OWNERSHIP CHECK, BY THE OPERATOR'S DECISION: "just loot everything. we
+ * do not care about ownership. this is private server."
+ *
+ * ⚠ AND THE CODEBASE ALREADY SAID SO FOR CONTAINERS. `lootContainers` in the
+ * DSL carries the same call in its own words -- "no ownership check: this is an
+ * emulator, not a client guarding real players from can-flipping, and the
+ * server enforces none either". Wrecks were the inconsistent half.
+ *
+ * ⚠ THE GATE THAT USED TO BE HERE WAS NOT MERELY STRICT, IT WAS BROKEN. It
+ * allowed a wreck owned by this character or this CORPORATION -- but a wreck
+ * carries the CHARACTER id of whoever got the kill, so the corp clause could
+ * never match, and a companion (which kills nothing of its own) could never
+ * attribute a single wreck to itself. Observed live on 2026-09-11: the FC
+ * killed three rats and `loot` did nothing at all. Recorded so nobody
+ * reinstates it believing it ever worked.
+ */
+function companionMayOpen(entity: SpaceEntity): boolean {
+  return entity.kind === "wreck" || entity.kind === "container";
+}
+
+/**
+ * The `loot` order: empty the wrecks that are ours and every can on the grid,
+ * nearest first.
+ *
+ * ⚠ THIS IS THE ONLY THING A COMPANION DOES THAT MOVES THE SHIP OF ITS OWN
+ * ACCORD. Everything else it does is fired from where it already is, or is a
+ * move somebody else ordered. Looting approaches each target in turn, so a
+ * companion told to loot will drift off formation -- which is why this rung sits
+ * at the very bottom of the ladder, beneath the fleet orders and far beneath the
+ * flee. A pilot that is dying, or being fleet-warped, stops looting instantly.
+ */
+function decideLooting(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDecision | null {
+  if (memory.areaJob !== "loot") {
+    return null;
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null || obs.inWarp === true) {
+    return null;
+  }
+  const reachable = lootablesOnGrid(obs, memory);
+  if (reachable.length === 0) {
+    return null;
+  }
+  // ⚠ THE TARGET IS CHOSEN ONCE AND THEN KEPT. Re-picking every tick made this
+  // rung wander -- see `lootTargetID`. A target only stops being the target when
+  // it has been opened or has left the grid, and `lootablesOnGrid` already drops
+  // both of those.
+  let target = reachable.find((entity) => entity.itemID === memory.lootTargetID) ?? null;
+  let mem = memory;
+  if (target === null) {
+    // ⚠ AND THE CLAIM RULE IS CONSULTED HERE, AT THE MOMENT OF CHOOSING, not on
+    // every tick. Two companions would otherwise converge on the same can. See
+    // `pickForThisPilot`.
+    target = pickForThisPilot(obs, reachable);
+    if (target === null) {
+      return null;
+    }
+    mem = { ...memory, lootTargetID: target.itemID, lootApproaching: null };
+  }
+  // ⚠ CENTRE TO CENTRE, THE WAY THE SERVER MEASURES IT. See
+  // `COMPANION_LOOT_REACH_M`: the surface distance this used to ask for is
+  // smaller by both radii, so it read "in range" while the bind was still being
+  // refused, and the refusals spent the whole attempt budget on the last few
+  // hundred metres of the approach.
+  const best = centreMetresToShip(obs, target);
+  if (best > COMPANION_LOOT_REACH_M) {
+    // ⚠ ISSUED ONCE, THEN WAITED ON. Re-sending `approach` at every tick would
+    // spend the run's one call per tick re-ordering a move already under way.
+    // Same rule as the salvage rung: an approach that is no longer running is
+    // not an approach, however recently it was sent.
+    if (mem.lootApproaching === target.itemID && isClosing(obs)) {
+      return waiting("Looting", "Closing on something to loot.", mem);
+    }
+    return {
+      // No range: fly right up to it. See SALVAGE_APPROACH_STOP_M's comment.
+      action: { kind: "approach", targetID: target.itemID },
+      phase: "Looting",
+      why: "Closing on something to loot, as asked.",
+      memory: { ...mem, lootApproaching: target.itemID },
+    };
+  }
+  // ⚠ MARKED LOOTED ON THE ASKING, NOT ON THE ANSWER, AND THAT IS A KNOWN
+  // WEAKER GUARANTEE THAN THE DSL'S. `loot-wrecks` waits a tick and checks the
+  // refusal ledger before believing a transfer landed; this loop has no refusal
+  // ledger to consult. The consequence of being wrong is one skipped wreck on a
+  // pilot whose real job is flying with the fleet, which is a better trade than
+  // a rung that retries a full hold forever.
+  return {
+    action:
+      target.kind === "container"
+        ? { kind: "lootContainer", containerID: target.itemID }
+        : { kind: "lootWreck", wreckID: target.itemID },
+    phase: "Looting",
+    why: "Taking what is inside, as asked.",
+    // ⚠ NOT MARKED LOOTED HERE. Whether the can actually emptied is settled by
+    // `lootFinishedItemIDs` on a later tick, from what the transfer really
+    // moved. Marking it on the asking is what had a pilot take one stack of
+    // three and fly off. The latch is kept for the same reason: this can is
+    // still the target until somebody says it is done.
+    memory: { ...mem, lootApproaching: null },
+  };
+}
+
+
+/**
+ * Run a fitted SALVAGER on the nearest wreck: close, lock, cycle.
+ *
+ * ⚠ THE OTHER HALF OF THE `salvage` ORDER, AND IT WAS MISSING. The first cut of
+ * the verb acted on salvage DRONES alone, because that is how the order was
+ * first described. A hull with a salvager bolted on and no drone bay could be
+ * told to salvage and would stand there. What a pilot can do is a property of
+ * its FIT -- the same principle that deleted every module picker -- so the order
+ * acts on whatever this ship actually has for the job.
+ *
+ * ⚠ IT RUNS ALONGSIDE THE DRONES, NOT INSTEAD OF THEM. A ship carrying both
+ * sweeps with the drones on the server's own auto-pick AND works the nearest
+ * wreck with the module. They are separate rungs because one costs a drone
+ * command and the other moves the ship; nothing here recalls or blocks the
+ * drones.
+ *
+ * ⚠ AND IT MOVES THE SHIP, so it sits at the bottom of the ladder beside the
+ * loot rung. A salvager reaches about 5 km, so closing on a wreck can pull a
+ * companion off formation exactly as looting can -- and it yields to the flee,
+ * to the supervision gate and to a fleet warp for the same reason.
+ */
+function decideSalvaging(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDecision | null {
+  if (!salvageWasOrdered(memory) || request.salvagerModuleIDs.length === 0) {
+    return null;
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null || obs.inWarp === true) {
+    return null;
+  }
+  const wrecks = snapshot.entities.filter((entity) => entity.kind === "wreck");
+  if (wrecks.length === 0) {
+    return null;
+  }
+  const measurement = measureSpace(snapshot);
+
+  // ⚠ THE REMEMBERED WRECK IS DROPPED THE MOMENT IT IS GONE, which is how this
+  // rung knows it finished one: a salvaged wreck leaves the grid. That is the
+  // opposite of looting, where an emptied wreck STAYS and the rung has to keep
+  // its own record of what it has already opened.
+  let wreckID = memory.salvageWreckID;
+  if (wreckID !== null && !wrecks.some((wreck) => wreck.itemID === wreckID)) {
+    wreckID = null;
+  }
+  let mem = memory;
+  if (wreckID === null) {
+    // ⚠ PICKING IS NOT AN ACTION, AND THIS RUNG USED TO TREAT IT AS ONE. It
+    // returned an `approach` the moment it chose a wreck, so a wreck ALREADY in
+    // range cost a wasted tick closing on something it was already next to.
+    // Choosing falls through to the range test below instead.
+    // The wreck this pilot is best placed for, so a fleet splits a field
+    // instead of queueing on one hull. See `pickForThisPilot`.
+    const pick = pickForThisPilot(obs, wrecks);
+    if (pick === null) {
+      return null;
+    }
+    wreckID = pick.itemID;
+    mem = {
+      ...memory,
+      salvageWreckID: wreckID,
+      salvageLockIssued: false,
+      salvageLockWaited: 0,
+      salvageApproachIssued: false,
+    };
+  }
+
+  const distance = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
+  if (distance > COMPANION_SALVAGE_RANGE_M) {
+    // ⚠ ONLY BELIEVE AN APPROACH THAT IS STILL RUNNING. A move that was
+    // refused, or that the server finished early, leaves the ship stopped and
+    // out of reach -- and a rung that trusted its own "already issued" flag
+    // would wait on it for the rest of the run.
+    if (mem.salvageApproachIssued && isClosing(obs)) {
+      return waiting("Salvaging", "Flying to the wreck.", mem);
+    }
+    return {
+      action: { kind: "approach", targetID: wreckID, range: SALVAGE_APPROACH_STOP_M },
+      phase: "Salvaging",
+      why: "Closing on a wreck to salvage it, as asked.",
+      memory: { ...mem, salvageApproachIssued: true },
+    };
+  }
+  if (!(obs.lockedTargetIDs ?? []).includes(wreckID)) {
+    if (!mem.salvageLockIssued) {
+      return {
+        action: { kind: "lock", targetID: wreckID },
+        phase: "Salvaging",
+        why: "Locking the wreck to salvage it.",
+        memory: { ...mem, salvageLockIssued: true, salvageLockWaited: 0 },
+      };
+    }
+    // ⚠ BOUNDED, BECAUSE A WRECK THAT WILL NOT LOCK NEVER SAYS SO. Without this
+    // the rung waits on one wreck for the rest of the run while a grid full of
+    // others goes unsalvaged.
+    if (mem.salvageLockWaited >= MAX_SALVAGE_LOCK_WAIT_TICKS) {
+      return waiting("Salvaging", "That wreck would not lock - moving on.", {
+        ...mem,
+        salvageWreckID: null,
+        salvageLockIssued: false,
+        salvageLockWaited: 0,
+      });
+    }
+    return waiting("Salvaging", "Waiting for the lock.", {
+      ...mem,
+      salvageLockWaited: mem.salvageLockWaited + 1,
+    });
+  }
+  // Locked and in range. Start the first salvager that is not already cycling.
+  const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+  const next = request.salvagerModuleIDs.find((moduleID) => !active.has(moduleID));
+  if (next === undefined) {
+    return waiting("Salvaging", "Salvaging the wreck.", mem);
+  }
+  return {
+    action: { kind: "activate", moduleID: next, targetID: wreckID },
+    phase: "Salvaging",
+    why: "Running the salvager on the wreck.",
+    memory: mem,
+  };
+}
+
+/**
+ * The three drone jobs a companion will actually do.
+ *
+ * ⚠ A SUBSET OF `DroneRole` IN `droneRoles.ts`, ON PURPOSE. That module also
+ * knows `mining` and `other`, and neither belongs here: a companion does not
+ * mine, and `other` is the bucket that holds the drones this server cannot
+ * usefully fly at all (webifier and energy-neutralizer drones have no effect
+ * implementation, and the server refuses to engage them). Naming the subset
+ * here means a new role cannot silently become something a companion launches.
+ */
+type CompanionDroneRole = "combat" | "logistic" | "salvage";
+
 /**
  * Rung 6: keep the drones alive.
  *
@@ -3132,14 +4091,15 @@ function decideDrones(
   memory: CompanionLadderMemory,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
-  if (!request.useDrones) {
-    return nothing;
-  }
+  // ⚠ NO `useDrones` FLAG. A pilot uses the drones it is carrying. What it does
+  // with them is decided by WHAT THEY ARE, not by a checkbox -- see
+  // `wantedDroneRole`.
   if (obs.inSpace !== true || obs.snapshot == null) {
     return nothing;
   }
   const out = obs.myDroneIDs ?? [];
   const cycle = memory.droneCycle;
+  const role = wantedDroneRole(obs, memory);
 
   // --- a cycle already under way ------------------------------------------
 
@@ -3181,23 +4141,59 @@ function decideDrones(
         memory: { ...memory, droneCycle: { ...cycle, waited: cycle.waited + 1 } },
       };
     }
-    const bay = obs.droneBayItemIDs ?? null;
     // The hold-off is over. Whether anything goes back out is the launch
     // branch's decision, taken below on the NEXT tick against a fresh bay
     // read - a relaunch that reached for the ids it recalled would be reaching
     // for a listing a tick older than the one it is about to act on.
-    if (bay === null || bay.length === 0) {
+    //
+    // ⚠ AND IT GOES BACK OUT BY ROLE, not as "whatever was in the bay". The
+    // relaunch used to send `droneBayItemIDs` -- the WHOLE bay -- which is how
+    // a hurt combat drone coming home could take a salvage drone back out with
+    // it. The role is re-decided here because the fight may have ended while
+    // the drones were in the bay.
+    const bay = role === null ? null : droneBayFor(obs, role);
+    if (role === null || bay === null || bay.length === 0) {
       return { decision: null, memory: { ...memory, droneCycle: null } };
     }
     return {
       decision: {
         action: { kind: "launchDrones", droneItemIDs: bay },
         phase: "Drones",
-        why: "Sending the drones back out.",
+        why: `Sending the ${DRONE_ROLE_WORDS[role]} back out.`,
         memory: { ...memory, droneCycle: null },
       },
       memory,
     };
+  }
+
+  // --- never two kinds at once --------------------------------------------
+  //
+  // ⚠ THIS IS THE RUNG'S ONLY DEFENCE AGAINST A MIXED BAY IN SPACE, and it is
+  // why it sits ABOVE the hurt-drone check rather than below it. The operator's
+  // rule is "do not mix drones, at one time one type of the drones", and the
+  // failure it prevents is concrete: a bay holding combat and salvage drones
+  // launched together puts salvage drones into a fight they cannot fight and
+  // fills the control slots the combat drones needed. The scripted bots have
+  // always done this (`launchRoleDrones` recalls other-role drones first); the
+  // companion is the one place in this app that did not.
+  //
+  // Wrong-role drones are brought home BEFORE anything of the right role goes
+  // out, never at the same time -- one atomic call per tick is this loop's whole
+  // contract, and a launch issued while the wrong drones are still on grid is
+  // exactly the mixing this prevents.
+  if (role !== null && out.length > 0) {
+    const wrongRole = out.filter((droneID) => !droneIDsOutFor(obs, role).includes(droneID));
+    if (wrongRole.length > 0) {
+      return {
+        decision: {
+          action: { kind: "recallDrones", droneIDs: wrongRole },
+          phase: "Drones",
+          why: `Bringing the wrong drones home first - this pilot needs its ${DRONE_ROLE_WORDS[role]} out.`,
+          memory,
+        },
+        memory,
+      };
+    }
   }
 
   // --- no cycle: should one start? ----------------------------------------
@@ -3224,34 +4220,221 @@ function decideDrones(
     };
   }
 
-  // --- nothing out, and a fight to be in ----------------------------------
-
-  if (out.length > 0) {
+  // --- the job is over: bring them home -----------------------------------
+  //
+  // ⚠ THIS BRANCH WAS MISSING ENTIRELY, and drones stayed out for the rest of
+  // the run once a grid went quiet (observed live, 2026-09-11). Nothing else
+  // recalls them: the hurt-drone cycle needs a hurt drone, the wrong-role recall
+  // needs another role to want the slots, and the flee only recalls on its way
+  // out. A fight that simply ends left them drifting.
+  //
+  // ⚠ ONLY ON A GRID WE CAN SEE. `hostileOnGrid` is three-state and `null` means
+  // the read failed -- recalling on that would pull drones in every time a
+  // snapshot stumbled, mid-fight. Only a confident `false` ends the job.
+  if (role === null) {
+    if (out.length > 0 && obs.hostileOnGrid === false) {
+      return {
+        decision: {
+          action: { kind: "recallDrones", droneIDs: out },
+          phase: "Drones",
+          why: "Nothing left to do here. Bringing the drones home.",
+          memory,
+        },
+        memory,
+      };
+    }
     return nothing;
+  }
+
+  // --- putting the right drones out, and giving them their job ------------
+  const roleOut = droneIDsOutFor(obs, role);
+  if (roleOut.length === 0) {
+    const bay = droneBayFor(obs, role);
+    if (bay === null || bay.length === 0) {
+      // `null` is "did not look" and `[]` is "none of that kind aboard".
+      // Neither launches, and neither is an error: a pilot without the drones
+      // for this job simply does the job without them, or not at all.
+      return nothing;
+    }
+    return {
+      decision: {
+        action: { kind: "launchDrones", droneItemIDs: bay },
+        phase: "Drones",
+        why: DRONE_LAUNCH_WHY[role],
+        memory,
+      },
+      memory,
+    };
+  }
+
+  // They are out. Two of the three roles need to be TOLD what to do; the third
+  // does not.
+  //
+  // ⚠ COMBAT DRONES ARE DELIBERATELY GIVEN NO ORDER, AND THAT IS NOT AN
+  // OMISSION. The server assigns idle combat drones onto whatever shoots their
+  // controller by itself (`noteIncomingAggression`, droneRuntime.js), and the
+  // behaviour setting that gates it defaults to on with no client surface to
+  // change it. So "use combat drones to defend" is achieved by HAVING THEM OUT.
+  // Issuing an engage of our own would fight the server's own choice of target
+  // for no gain, one call per tick.
+  if (role === "combat") {
+    return nothing;
+  }
+  if (role === "salvage") {
+    // ⚠ `targetID: 0` IS THE SERVER'S OWN AUTO-PICK, not a null we forgot to
+    // fill in: `resolveAutomaticSalvageTarget` chooses a wreck. It is the same
+    // call the DSL's `salvage-wrecks` macro makes, and it means this rung does
+    // not have to rank wrecks itself or re-issue as each one is consumed.
+    if (memory.lastSalvageOrderedFor === roleOut.length) {
+      return nothing;
+    }
+    return {
+      decision: {
+        action: { kind: "salvageDrones", droneIDs: roleOut, targetID: 0 },
+        phase: "Drones",
+        why: "Salvaging the wrecks here, as asked.",
+        memory: { ...memory, lastSalvageOrderedFor: roleOut.length },
+      },
+      memory,
+    };
+  }
+  // Logistic. The ship to repair is whoever the fleet is calling reps for.
+  const healTarget = healCallTargetID(obs);
+  if (healTarget === null || memory.lastDroneRepairTargetID === healTarget) {
+    return nothing;
+  }
+  return {
+    decision: {
+      action: { kind: "engageDrones", droneIDs: roleOut, targetID: healTarget },
+      phase: "Drones",
+      why: "Sending the repair drones to the ship calling for reps.",
+      memory: { ...memory, lastDroneRepairTargetID: healTarget },
+    },
+    memory,
+  };
+}
+
+/** What to call each role in a sentence a player reads. Plain words, no jargon. */
+const DRONE_ROLE_WORDS: Readonly<Record<CompanionDroneRole, string>> = Object.freeze({
+  combat: "combat drones",
+  logistic: "repair drones",
+  salvage: "salvage drones",
+});
+
+const DRONE_LAUNCH_WHY: Readonly<Record<CompanionDroneRole, string>> = Object.freeze({
+  combat: "Something hostile is on grid. Putting the combat drones out.",
+  logistic: "A fleet-mate is calling for reps. Putting the repair drones out.",
+  salvage: "Putting the salvage drones out.",
+});
+
+/**
+ * The ONE kind of drone this pilot should have in space right now, or null for
+ * none at all.
+ *
+ * ⚠ ONE ROLE, NEVER A SET, AND THAT IS THE WHOLE POINT. The operator's rule is
+ * "at one time one type of the drones". Returning a single role is what makes
+ * that structural rather than a thing the launch branches have to remember.
+ *
+ * ⚠ THE ORDER BELOW IS URGENCY, AND IT MATCHES THE LADDER'S OWN. Answering a
+ * rep call outranks joining a fight for exactly the reason `decideFleetOrders`
+ * already puts the Heal family above a tag: somebody is dying NOW, where a
+ * fight is still there next tick. Salvage comes last because it is housekeeping
+ * -- and in practice it never competes, because a hull carrying salvage drones
+ * is rarely carrying combat drones too.
+ *
+ * ⚠ EACH BRANCH REQUIRES THE DRONES AS WELL AS THE REASON. A pilot with no
+ * repair drones is not "the logistic role with nothing to launch", it is simply
+ * not that pilot -- so the branch falls through and it fights instead. This is
+ * what makes "if pilot has repair drones use them on fleet members" true without
+ * anybody selecting a role.
+ *
+ * ⚠ WHAT IS ABSENT IS ABSENT ON PURPOSE. Mining drones are never launched: a
+ * companion does not mine. Electronic-warfare drones are not launched either --
+ * they work on this server, but nothing has asked for them and launching a jam
+ * nobody planned is not a default. Webifier and energy-neutralizer drones CANNOT
+ * be launched usefully at all: the server implements no effect for either, and
+ * refuses to engage them. `droneRoles.ts` records that; none of the three
+ * reaches this function, because `splitDroneRoles` never puts them in a role.
+ */
+function wantedDroneRole(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDroneRole | null {
+  const hasDrones = (role: CompanionDroneRole): boolean =>
+    (droneBayFor(obs, role)?.length ?? 0) > 0 || droneIDsOutFor(obs, role).length > 0;
+
+  if (healCallTargetID(obs) !== null && hasDrones("logistic")) {
+    return "logistic";
   }
   // ⚠ ONLY INTO A FIGHT. `hostileOnGrid` is three-state and only `true` starts
   // a launch: `null` means the grid could not be read, and launching blind
   // would put drones out on a grid this pilot cannot see - the one place they
   // are hardest to get back.
-  if (obs.hostileOnGrid !== true) {
-    return nothing;
+  if (obs.hostileOnGrid === true && hasDrones("combat")) {
+    return "combat";
   }
-  const bay = obs.droneBayItemIDs ?? null;
-  if (bay === null || bay.length === 0) {
-    // `null` is "did not look" and `[]` is "the bay is empty". Neither launches,
-    // and neither is an error: a pilot with no drones aboard simply fights
-    // without them.
-    return nothing;
+  if (salvageWasOrdered(memory) && hasDrones("salvage")) {
+    return "salvage";
   }
-  return {
-    decision: {
-      action: { kind: "launchDrones", droneItemIDs: bay },
-      phase: "Drones",
-      why: "Something hostile is on grid. Putting the drones out.",
-      memory,
-    },
-    memory,
-  };
+  return null;
+}
+
+/** The bay stacks of one role. `null` is "the bay was not read", never "empty". */
+function droneBayFor(
+  obs: FleetCompanionObservation,
+  role: CompanionDroneRole,
+): readonly number[] | null {
+  switch (role) {
+    case "combat":
+      return obs.combatDroneBayItemIDs ?? null;
+    case "logistic":
+      return obs.logisticDroneBayItemIDs ?? null;
+    case "salvage":
+      return obs.salvageDroneBayItemIDs ?? null;
+  }
+}
+
+/**
+ * This ship's drones of one role that are OUT, by entity id.
+ *
+ * ⚠ BAY IDS AND ENTITY IDS ARE DIFFERENT ID SPACES. A stack in the bay and a
+ * drone in space are not the same object and never share an id; `launchDrones`
+ * takes the former and `recallDrones` / `engageDrones` / `salvageDrones` take
+ * the latter. Mixing them answers 200 and does nothing.
+ */
+function droneIDsOutFor(
+  obs: FleetCompanionObservation,
+  role: CompanionDroneRole,
+): readonly number[] {
+  switch (role) {
+    case "combat":
+      return obs.combatDroneIDs ?? [];
+    case "logistic":
+      return obs.logisticDroneIDs ?? [];
+    case "salvage":
+      return obs.salvageDroneIDs ?? [];
+  }
+}
+
+/**
+ * The ship the fleet is currently calling reps for, if that call is live and
+ * that ship is on this grid.
+ *
+ * ⚠ THE SAME ANSWER `decideHealOrder` ACTS ON, read the same way, so a pilot's
+ * repair DRONES and its remote repair MODULES cannot end up working on two
+ * different ships. `itemID` is the ship to repair directly for all four Heal
+ * names -- never `senderCharID` resolved to an entity.
+ */
+function healCallTargetID(obs: FleetCompanionObservation): number | null {
+  const name = asHealBroadcastName(obs.fleetBroadcast?.name);
+  if (name === null) {
+    return null;
+  }
+  const targetID = obs.fleetBroadcast?.itemID ?? null;
+  if (targetID === null) {
+    return null;
+  }
+  return entityOnGrid(targetID, obs.snapshot?.entities ?? []) === null ? null : targetID;
 }
 
 /**
@@ -3334,19 +4517,13 @@ function decideFleetOrders(
   const measurement = measureSpace(snapshot);
 
   // a. The Heal family — see the header above for why this is checked first.
-  if (request.obeys.includes("broadcast")) {
-    const healDecision = decideHealOrder(request, obs, entities, memory);
-    if (healDecision !== null) {
-      return healDecision;
-    }
+  const healDecision = decideHealOrder(request, obs, entities, memory);
+  if (healDecision !== null) {
+    return healDecision;
   }
 
   // b. The fleet's target tags — a commander's call.
-  if (
-    request.obeys.includes("tag") &&
-    obs.fleetTargetTags !== null &&
-    obs.fleetTargetTags !== undefined
-  ) {
+  if (obs.fleetTargetTags !== null && obs.fleetTargetTags !== undefined) {
     const tagged = bestTaggedEntity(obs.fleetTargetTags, entities, measurement);
     if (tagged !== null) {
       return lockThenEngage(
@@ -3416,22 +4593,56 @@ function decideFleetOrders(
     };
   }
 
-  // f. A `JumpTo` order — HONEST PARTIAL, not a full jump.
+  // e2. A `WarpTo` order — warp to the thing the fleet named.
   //
-  //    ⚠ WHAT IS MISSING, AND WHY. `itemID` here is a single stargate
-  //    (`FLEET_BROADCAST_CLASSIFICATION`'s "stargate"), but `api.jump` needs
-  //    the gate on the FAR SIDE too (`fromGateID`, `toGateID` —
-  //    autopilotLoop.ts's own `jump` case), and the only place `toGateID`
-  //    comes from is a planned hop's `RouteHop.jumpToGateID`, solved by the
-  //    static route graph `loadRouteGraph()` loads ASYNCHRONOUSLY. This
-  //    ladder is pure and synchronous and carries no route graph — giving a
-  //    fleet-order rung its own copy of the autopilot's route solver just to
-  //    answer one broadcast is a bigger change than this rung earns, and
-  //    inventing a second gate id could fling an unattended ship into the
-  //    wrong system. So this rung gets the ship TO the named gate and stops
-  //    there: warp, then close in, then hold at jump range — it never fires
-  //    the jump itself. A later phase that threads the route graph in can
-  //    finish this.
+  //    ⚠ THIS RUNG DID NOT EXIST, ON A FALSE PREMISE. `WarpTo` was classified
+  //    `act: false` with the note that "the fleet warp itself is executed
+  //    server-side once the broadcast lands". It is not: `sendBroadcast`
+  //    (fleetRuntime.js) only ever calls `notifySession`, and warps nobody. The
+  //    server-side fleet warp is a DIFFERENT command (`CmdWarpToStuff` with
+  //    `fleet=1`), which this loop yields to by seeing its own ship in warp. So
+  //    a `WarpTo` broadcast was simply being ignored, and a fleet that told this
+  //    pilot to warp watched it sit still.
+  if (order?.name === "WarpTo") {
+    // ⚠ ANSWERED ONCE PER DESTINATION. A broadcast stands for its whole
+    // freshness window, so a rung that re-warped on every tick would re-issue
+    // the same warp for thirty seconds -- and land, then immediately warp again.
+    if (memory.lastWarpedToID === order.itemID) {
+      return {
+        action: WAIT,
+        phase: "Obeying fleet",
+        why: order.why + " Already on the way.",
+        memory,
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
+        standing: true,
+      };
+    }
+    return {
+      action: { kind: "warp", targetID: order.itemID },
+      phase: "Obeying fleet",
+      why: order.why + " Warping to it.",
+      memory: { ...memory, lastWarpedToID: order.itemID },
+      followingOrderFrom: order.source,
+      lastOrderHeard: order.heard,
+    };
+  }
+
+  // f. A `JumpTo` order — warp to the gate, close in, and jump through it.
+  //
+  //    ⚠ IT USED TO STOP AT THE GATE, AND THE REASON RECORDED HERE WAS WRONG.
+  //    The note said a jump "needs the gate on the FAR SIDE too", which only
+  //    `toGateID` on `api.jump` ever wanted -- solved by the autopilot's route
+  //    graph, which this pure ladder has no copy of. But the GAME does not want
+  //    it: `jumpSessionViaStargate` (transitions.js) resolves the destination
+  //    itself from `sourceGate.destinationID` when the far id is absent, and
+  //    rejects only a MISMATCHED one. The requirement was our own BFF's
+  //    INVALID_GATE check, now relaxed to allow it to be omitted. A stargate
+  //    knows where it goes.
+  //
+  //    ⚠ AND THE SHIP MUST BE AT THE GATE, not merely near it. `decideCloseIn`
+  //    against MAX_STARGATE_JUMPING_DISTANCE_M is what makes the jump legal;
+  //    firing it from further out is refused by the server, not by us.
   if (order?.name === "JumpTo") {
     const gateID = order.itemID;
     const step = decideCloseIn(gateID, MAX_STARGATE_JUMPING_DISTANCE_M, measurement, memory.closingOn);
@@ -3447,15 +4658,9 @@ function decideFleetOrders(
     }
     if (step.kind === "arrive") {
       return {
-        action: WAIT,
+        action: { kind: "jumpGate", gateID },
         phase: "Obeying fleet",
-        // The explanation is the point of this sentence, not decoration: the
-        // pilot is sitting still ON the thing it was told to jump through, which
-        // looks exactly like a stuck bot unless it says why it stopped.
-        why:
-          order.why +
-          " At it now, holding here. Jumping needs the gate on the far side too, and there " +
-          "is no safe way to get that from the call alone.",
+        why: order.why + " At the gate, jumping through.",
         memory,
         followingOrderFrom: order.source,
         lastOrderHeard: order.heard,
@@ -3499,7 +4704,6 @@ interface CompanionMemory {
   phase: string | null;
   action: string | null;
   why: string | null;
-  role: FleetCompanionRole | null;
   inFleet: boolean | null;
   followingOrderFrom: FleetCompanionProgress["followingOrderFrom"];
   lastOrderHeard: string | null;
@@ -3517,7 +4721,6 @@ function freshMemory(): CompanionMemory {
     phase: null,
     action: null,
     why: null,
-    role: null,
     inFleet: null,
     followingOrderFrom: null,
     lastOrderHeard: null,
@@ -3559,7 +4762,6 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       phase: mem.phase,
       action: mem.action,
       why: mem.why,
-      role: mem.role,
       inFleet: mem.inFleet,
       followingOrderFrom: mem.followingOrderFrom,
       lastOrderHeard: mem.lastOrderHeard,
@@ -3635,7 +4837,6 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     start(next: FleetCompanionRequest, resuming: CompanionAbandonmentRecord | null = null): void {
       mem = freshMemory();
       mem.status = "running";
-      mem.role = next.role;
       mem.request = next;
       mem.phase = "Standing by";
       if (resuming !== null) {
@@ -3657,6 +4858,21 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
             droneRecallWaited: null,
           },
           closingOn: null,
+          // A resumed run has ordered no drones and looted nothing either: the
+          // drones the dead process had out were abandoned by the server on the
+          // session drop, and a wreck this run has not emptied is a wreck it
+          // must be willing to try.
+          lastDroneRepairTargetID: null,
+          lastSalvageOrderedFor: null,
+          lootedItemIDs: [],
+          lootApproaching: null,
+          lootTargetID: null,
+          salvageWreckID: null,
+          salvageLockIssued: false,
+          salvageLockWaited: 0,
+          salvageApproachIssued: false,
+          areaJob: null,
+          lastWarpedToID: null,
           // A resumed run has tanked up, locked, healed and routed nothing yet
           // either — same reasoning as the get-safe flags just above: this run
           // has not issued any of those calls, so it must not assume one

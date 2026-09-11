@@ -31,7 +31,6 @@ const IDLE_COMPANION_SLICE = Object.freeze({
   phase: null,
   action: null,
   why: null,
-  role: null,
   inFleet: null,
   followingOrderFrom: null,
   lastOrderHeard: null,
@@ -80,29 +79,25 @@ function makeFakeStack(log) {
     // it the way the real stack does: the host reads the revision off the stack
     // rather than holding a second copy of a bare 1 of its own.
     COMPANION_GRANT_SCRIPT_REV: 1,
-    // ⚠ AND THE ROLE LABELS FOR THE SAME REASON. `companionScriptName` reads
-    // them off the stack rather than holding a second copy, so a fake stack
-    // without them makes every companion start throw on `labels[role]` --
-    // which is how this fake was found wanting when the labels moved.
-    COMPANION_ROLE_LABELS: {
-      dps: "DPS",
-      logi: "Logistics",
-      tackle: "Tackle",
-      support: "Support",
-    },
-    analyzeCompanionRunPolicy: (request) => ({
+    // ⚠ COMBAT IS UNCONDITIONAL NOW, matching the real derivation. A grant is
+    // built before the fit has been read, and a hull nobody has looked at may
+    // hold anything -- so there is no longer a setting that could withhold it.
+    analyzeCompanionRunPolicy: (setup) => ({
       riskClasses:
-        request && (request.useDrones === true || (request.defenseModuleIDs || []).length > 0)
-          ? ["fleet", "social", "combat"]
-          : ["fleet", "social"],
+        setup && setup.repairsAtStation === true
+          ? ["fleet", "social", "combat", "financial", "inventory"]
+          : ["fleet", "social", "combat"],
       restartSafe: true,
     }),
-    decodeFleetCompanionRequestValue: (value) => {
-      const KNOWN_ROLES = ["dps", "logi", "tackle", "support"];
-      if (!value || typeof value !== "object" || !KNOWN_ROLES.includes(value.role)) {
+    // A plain fake of the real codec door. The real one refuses any key outside
+    // the stored set and forgives the fifteen RETIRED ones; all this fake needs
+    // to reproduce is "a setup with the required numbers is ok, anything else
+    // is refused", which is what the host's own branches turn on.
+    decodeCompanionSetupValue: (value) => {
+      if (!value || typeof value !== "object" || typeof value.fleeHealthFloor !== "number") {
         return { ok: false, refusal: "That companion setup could not be read." };
       }
-      return { ok: true, request: value };
+      return { ok: true, setup: value };
     },
     // Decision 5's persisted clock gets the same treatment as the request: a
     // plain fake of the real codec door, refusing anything without a usable
@@ -225,24 +220,26 @@ const START = {
 
 // A companion request has no revision series (see COMPANION_GRANT_SCRIPT_REV's
 // comment in botHost.js) — its grant's `scriptRev` is always the sentinel `1`.
+// ⚠ A SETUP, NOT A REQUEST, SINCE 2026-09-11. The eight module lists, the role
+// and every channel toggle are gone: a companion reads its own fit at start and
+// listens to everything. What is persisted is only what cannot be read off a
+// ship. See docs/fleet-companion-simplification.md.
 const COMPANION_REQUEST = Object.freeze({
-  role: "dps",
-  defenseModuleIDs: [],
   fleeHealthFloor: 0.3,
   capacitorFloor: 0.2,
   maxFleeAttempts: 3,
-  useDrones: false,
+  repairsAtStation: false,
+  droneHealthFloor: 0.5,
   droneRedeployHoldOffSeconds: 10,
-  attemptsTagging: false,
-  obeys: ["broadcast", "tag"],
-  chatCommandSenders: [],
 });
 const COMPANION_START = {
   account: ACCOUNT,
   characterID: 140000002,
   kind: "companion",
   request: COMPANION_REQUEST,
-  grant: { scriptRev: 1, riskClasses: ["fleet", "social"], maxRuntimeMinutes: 720 },
+  // ⚠ `combat` IS UNCONDITIONAL NOW: a grant is built before the fit is read,
+  // and a hull nobody has looked at may hold anything.
+  grant: { scriptRev: 1, riskClasses: ["fleet", "social", "combat"], maxRuntimeMinutes: 720 },
 };
 
 function settle() {
@@ -841,7 +838,7 @@ test("a companion flies on its own session, through startFleetCompanion, never s
   // botHost"): a fixed scriptID literal (no library entry exists to name),
   // and a scriptName derived from the request's role.
   assert.equal(outcome.bot.scriptID, "companion");
-  assert.equal(outcome.bot.scriptName, "Fleet companion (DPS)");
+  assert.equal(outcome.bot.scriptName, "Fleet companion");
   assert.ok(log.some((row) => row[0] === "startFleetCompanion"));
   assert.equal(log.some((row) => row[0] === "startCustomBot"), false);
 });
@@ -883,7 +880,6 @@ test("a companion's progress maps status/phase/why honestly, and leaves script-s
       phase: "Escorting",
       action: "wait",
       why: "Waiting on the fleet.",
-      role: "dps",
     },
   });
   await settle();
@@ -911,7 +907,6 @@ test("a companion's badge facts reach the wire, and a script's stay null", async
       status: "running",
       phase: "Obeying fleet",
       why: "The fleet broadcast a target on this grid.",
-      role: "logi",
       inFleet: true,
       followingOrderFrom: "broadcast",
       lastOrderHeard: "the fleet's target call",
@@ -923,7 +918,6 @@ test("a companion's badge facts reach the wire, and a script's stay null", async
   const row = host.list(7)[0];
   assert.equal(row.kind, "companion");
   assert.deepEqual(row.companion, {
-    role: "logi",
     inFleet: true,
     followingOrderFrom: "broadcast",
     lastOrderHeard: "the fleet's target call",
@@ -976,14 +970,14 @@ test("the persisted roster row for a companion carries kind, the flat request, a
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].kind, "companion");
   assert.equal(persisted[0].scriptID, "companion");
-  assert.equal(persisted[0].scriptName, "Fleet companion (DPS)");
+  assert.equal(persisted[0].scriptName, "Fleet companion");
   // A companion request has no revision series — this is the sentinel
   // COMPANION_GRANT_SCRIPT_REV, never a real revision (see its comment).
   assert.equal(persisted[0].scriptRev, 1);
   assert.deepEqual(persisted[0].request, COMPANION_REQUEST);
   assert.match(persisted[0].scriptHash, /^[a-f0-9]{64}$/);
   assert.equal(persisted[0].scriptHash, started.bot.scriptHash);
-  assert.deepEqual(persisted[0].riskClasses, ["fleet", "social"]);
+  assert.deepEqual(persisted[0].riskClasses, ["fleet", "social", "combat"]);
 });
 
 test("resume rebuilds a companion from its persisted request alone — no library lookup", async () => {

@@ -11,7 +11,7 @@
 // what to start and how to start one; this decides the order, what happens when
 // one refuses, and what the player is told.
 
-import type { FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+import type { CompanionSetup } from "../nav/fleetCompanionLoop.ts";
 
 /** Where one pilot in the squad has got to. */
 export type SquadStartState = "queued" | "starting" | "started" | "refused";
@@ -28,13 +28,13 @@ export interface SquadStartDeps {
    * Start one companion on the host. Rejects with the server's refusal; this
    * module turns that into a sentence and carries on.
    */
-  startCompanion(characterID: number, request: FleetCompanionRequest): Promise<void>;
+  startCompanion(characterID: number, setup: CompanionSetup): Promise<void>;
 }
 
 /** One pilot to start, and the setup it flies with. */
 export interface SquadStartTarget {
   readonly characterID: number;
-  readonly request: FleetCompanionRequest;
+  readonly setup: CompanionSetup;
 }
 
 /**
@@ -44,29 +44,33 @@ export interface SquadStartTarget {
  * the operator's rule for fit warnings holds here too: say what is wrong and
  * let a human fix it or fly anyway. The one thing that is not a warning is an
  * EMPTY roster, because there is then nothing to start at all.
+ *
+ * ⚠ BOTH WARNINGS THIS FUNCTION USED TO PRINT ARE GONE, FOR TWO DIFFERENT
+ * REASONS, NEITHER OF WHICH IS "NOBODY NEEDS TO KNOW ANY MORE".
+ *
+ * - The one-tagger warning went because there is no longer a setting to warn
+ *   about. Tagging is not a per-pilot toggle now; every pilot tags when it
+ *   personally tackles something, and the server -- not this screen -- is the
+ *   real gate: only a fleet creator, leader, wing commander or squad commander
+ *   may write a tag (`obs.canTag`), so a companion that is a plain member tags
+ *   nothing no matter how many of them a squad has. And even between two
+ *   commanders, the rung only ever considers a ship that is TACKLING THIS
+ *   PILOT, and skips one already carrying a letter -- so two companions can
+ *   collide only if the same ship tackled both of them in the same tick,
+ *   before either letter was visible to the other. See
+ *   docs/fleet-companion-simplification.md, "Tagging".
+ * - The fit-mixture warning went because the mixture it described cannot
+ *   happen any more. It used to flag a squad where some pilots read their own
+ *   fit and some flew a hand-picked module list; there is no longer a
+ *   hand-picked list to fly instead -- every companion always reads its own
+ *   fit at start -- so there is nothing left for two pilots to disagree about.
+ *
+ * Nothing has replaced them. If a real advisory turns up again, it belongs
+ * here; until then this returns no warnings at all.
  */
-export function squadStartWarnings(
-  targets: readonly SquadStartTarget[],
-  competingTaggerIDs: readonly number[],
-): readonly string[] {
-  const warnings: string[] = [];
-  if (competingTaggerIDs.length > 1) {
-    // ⚠ THE ONE-TAGGER RULE, WARNED ABOUT WHERE IT IS FINALLY VISIBLE. A tag is
-    // unique fleet-wide and the server deletes any other item holding the same
-    // letter, so two taggers overwrite each other and the fleet stops trusting
-    // the letters. A role cannot know how many of itself are in a squad, which
-    // is why this is not a role preset; a squad can simply count.
-    warnings.push(
-      `${competingTaggerIDs.length} pilots in this squad are set to tag targets. A tag is unique across the fleet, so they will overwrite each other - leave tagging on for one of them.`,
-    );
-  }
-  const driving = targets.filter((target) => target.request.deriveModulesFromFit).length;
-  if (driving > 0 && driving < targets.length) {
-    warnings.push(
-      "Some pilots in this squad read their own fit and some fly a hand-picked list. That is allowed, but they will not behave alike.",
-    );
-  }
-  return warnings;
+export function squadStartWarnings(targets: readonly SquadStartTarget[]): readonly string[] {
+  void targets;
+  return [];
 }
 
 /**
@@ -86,11 +90,12 @@ export function squadStartWarnings(
  * next pilot is tried.
  *
  * ⚠ AND THE GRANT IS BUILT PER PILOT, BY THE CALLER, FROM THAT PILOT'S OWN
- * REQUEST. Two pilots in one squad do not necessarily carry the same risk: a
- * request that reads its own fit earns "combat" whatever its module lists say,
- * and one that pays for repairs earns "financial". Reusing one grant across the
- * squad would hand some pilot a grant that does not describe it, and the host
- * re-derives and compares.
+ * SETUP. Every companion now reads its own fit unconditionally, so `combat` is
+ * an unconditional risk class for all of them -- the fit has not been read yet
+ * at grant time and may hold anything. What still varies pilot to pilot is the
+ * rest of the setup: one that pays for repairs earns `financial` and one that
+ * does not, does not. Reusing one grant across the squad would hand some pilot
+ * a grant that does not describe it, and the host re-derives and compares.
  */
 export async function startCompanionSquad(
   deps: SquadStartDeps,
@@ -109,7 +114,7 @@ export async function startCompanionSquad(
     entries[index] = { characterID: target.characterID, state: "starting" };
     report();
     try {
-      await deps.startCompanion(target.characterID, target.request);
+      await deps.startCompanion(target.characterID, target.setup);
       entries[index] = { characterID: target.characterID, state: "started" };
     } catch (cause) {
       // The server's own sentence, unwrapped. There is no code-to-words layer

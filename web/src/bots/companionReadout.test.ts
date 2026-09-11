@@ -2,42 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import {
-  COMPANION_ORDER_SOURCE_LABELS,
-  COMPANION_ROLE_LABELS,
-  canTagWords,
-  companionRoleLabel,
-  inFleetWords,
-  orderFromWords,
-} from "./companionReadout.ts";
-import {
-  FLEET_COMPANION_ORDER_SOURCES,
-  FLEET_COMPANION_ROLES,
-} from "../nav/fleetCompanionLoop.ts";
-
-test("every role the request can carry has a label", () => {
-  // Exhaustive over the SOURCE OF TRUTH rather than over a hand-written list:
-  // a fifth role added to FLEET_COMPANION_ROLES must fail here rather than
-  // render as `undefined` in two readouts.
-  for (const role of FLEET_COMPANION_ROLES) {
-    const label = COMPANION_ROLE_LABELS[role];
-    assert.equal(typeof label, "string", `no label for role ${role}`);
-    assert.ok(label.length > 0, `empty label for role ${role}`);
-  }
-  assert.equal(Object.keys(COMPANION_ROLE_LABELS).length, FLEET_COMPANION_ROLES.length);
-});
-
-test("every order source has a label", () => {
-  for (const source of FLEET_COMPANION_ORDER_SOURCES) {
-    const label = COMPANION_ORDER_SOURCE_LABELS[source];
-    assert.equal(typeof label, "string", `no label for source ${source}`);
-    assert.ok(label.length > 0, `empty label for source ${source}`);
-  }
-  assert.equal(
-    Object.keys(COMPANION_ORDER_SOURCE_LABELS).length,
-    FLEET_COMPANION_ORDER_SOURCES.length,
-  );
-});
+import { canTagWords, inFleetWords, orderFromWords } from "./companionReadout.ts";
 
 test("the chat channel is named LOCAL to the player, never fleet", () => {
   // ⚠ THIS IS A REGRESSION GUARD FOR A STRING THAT SHIPPED WRONG. The panel
@@ -45,18 +10,9 @@ test("the chat channel is named LOCAL to the player, never fleet", () => {
   // LOCAL deliberately -- fleet chat is not reachable on this server at all.
   // The operator accepted Local knowingly; what they accepted is that the whole
   // system can read the command. A label saying "fleet" hid exactly that.
-  const label = COMPANION_ORDER_SOURCE_LABELS.chat;
-  assert.match(label, /local/i, "the chat channel label must say Local");
-  assert.doesNotMatch(label, /fleet/i, "the chat channel is not fleet chat");
-
   const phrase = orderFromWords("chat");
   assert.match(phrase, /local/i);
   assert.doesNotMatch(phrase, /fleet/i);
-});
-
-test("a run that has not reported a role reads as a dash, not as undefined", () => {
-  assert.equal(companionRoleLabel(null), "-");
-  assert.equal(companionRoleLabel("logi"), "Logistics");
 });
 
 test("canTag keeps three states, and the unread one is never 'no'", () => {
@@ -86,8 +42,15 @@ test("inFleet keeps three states too", () => {
 });
 
 test("every authority the progress can name has its own words", () => {
+  // ⚠ `squad-board` IS DELIBERATELY ABSENT FROM THIS LIST. It used to be a
+  // fourth channel here; it is gone from `CompanionOrderAuthority` itself
+  // (`nav/fleetCompanionLoop.ts`) because nothing in the loop ever emitted it
+  // -- see the comment on `orderFromWords`. This list is typed against that
+  // same union (`as const` feeding a `CompanionOrderAuthority | null`
+  // parameter), so writing "squad-board" back in here would fail to compile,
+  // not just fail an assertion.
   const said = new Set<string>();
-  for (const value of ["broadcast", "tag", "chat", "squad-board", "own-ladder", null] as const) {
+  for (const value of ["broadcast", "tag", "chat", "own-ladder", null] as const) {
     const words = orderFromWords(value);
     assert.ok(words.length > 0, `no words for ${String(value)}`);
     assert.ok(!said.has(words), `two authorities read identically: ${words}`);

@@ -177,10 +177,89 @@ test("when a message carries two links, the first one is the command's target", 
   assert.deepEqual(command, { kind: "target", itemID: 1099511628000 });
 });
 
+// --- salvage / loot: the area verbs, no link at all -------------------------
+//
+// Unlike the four verbs above, these carry no `itemID` — see chatCommands.ts's
+// header, "the first verbs with no link at all". A bare verb IS the whole
+// command; nothing needs to follow it.
+
+test("a bare 'salvage' parses to a salvage command carrying no itemID", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("salvage")), { kind: "salvage" });
+});
+
+test("a bare 'loot' parses to a loot command carrying no itemID", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("loot")), { kind: "loot" });
+});
+
+test("'salvage'/'loot' are matched case-insensitively", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("SALVAGE")), { kind: "salvage" });
+  assert.deepEqual(parseChatCommand(chatMessage("Loot")), { kind: "loot" });
+});
+
+test("leading and trailing whitespace around a bare area verb does not block the match", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("   salvage   ")), { kind: "salvage" });
+  assert.deepEqual(parseChatCommand(chatMessage("   loot   ")), { kind: "loot" });
+});
+
+// Trailing-chatter decision (see chatCommands.ts header): the task's own
+// phrasing of these commands — "salvage the wrecks in vicinity", "loot the
+// wrecks and containers in vicinity" — IS a verb plus trailing words, so
+// trailing chatter after the verb is accepted, same as the four link verbs
+// already tolerate arbitrary text before their link.
+test("'salvage'/'loot' followed by trailing chatter still parse — natural phrasing is verb-plus-words", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("salvage the wrecks in vicinity")), {
+    kind: "salvage",
+  });
+  assert.deepEqual(
+    parseChatCommand(chatMessage("loot the wrecks and containers in vicinity")),
+    { kind: "loot" },
+  );
+});
+
+test("a link after 'salvage'/'loot' is irrelevant — these verbs never look for one", () => {
+  assert.deepEqual(
+    parseChatCommand(chatMessage("salvage <url=showinfo:670//1099511628000>Some Rifter</url>")),
+    { kind: "salvage" },
+  );
+  assert.deepEqual(
+    parseChatCommand(chatMessage("loot <url=showinfo:670//1099511628000>Some Rifter</url>")),
+    { kind: "loot" },
+  );
+});
+
+test("'salvaged' does not match the 'salvage' verb", () => {
+  assert.equal(parseChatCommand(chatMessage("salvaged")), null);
+});
+
+test("'salvager' does not match the 'salvage' verb", () => {
+  assert.equal(parseChatCommand(chatMessage("salvager reporting in")), null);
+});
+
+test("'looting' does not match the 'loot' verb", () => {
+  assert.equal(parseChatCommand(chatMessage("looting the last can")), null);
+});
+
+test("a sentence merely mentioning 'loot' or 'salvage', not at the start, is not a command", () => {
+  assert.equal(parseChatCommand(chatMessage("did you loot that wreck?")), null);
+  assert.equal(parseChatCommand(chatMessage("someone salvage this later")), null);
+});
+
+// --- the four link verbs are unaffected by salvage/loot ---------------------
+
+test("the four link verbs still return null with no link, unaffected by the area verbs' branch", () => {
+  assert.equal(parseChatCommand(chatMessage("target that guy")), null);
+  assert.equal(parseChatCommand(chatMessage("align over there")), null);
+  assert.equal(parseChatCommand(chatMessage("travel somewhere")), null);
+  assert.equal(parseChatCommand(chatMessage("jump through")), null);
+});
+
 // --- CHAT_COMMAND_VERBS ------------------------------------------------------
 
 test("CHAT_COMMAND_VERBS lists exactly the recognised verbs, target/primary included as aliases", () => {
-  assert.deepEqual([...CHAT_COMMAND_VERBS].sort(), ["align", "jump", "primary", "target", "travel"]);
+  assert.deepEqual(
+    [...CHAT_COMMAND_VERBS].sort(),
+    ["align", "jump", "loot", "primary", "salvage", "stop", "target", "travel"],
+  );
 });
 
 // --- the sender gate ---------------------------------------------------------

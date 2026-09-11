@@ -100,7 +100,6 @@ import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
 import type {
   CompanionAbandonmentRecord,
   CompanionOrderAuthority,
-  FleetCompanionRole,
   FleetCompanionRunState,
 } from "../nav/fleetCompanionLoop.ts";
 
@@ -869,7 +868,6 @@ export type FeedEvent =
   // as the two bots above: the loop pushes, this slice records.
   | {
       readonly type: "companion/started";
-      readonly role: FleetCompanionRole;
       readonly startedAt: number;
       /** What is missing or unusable about this pilot's fit. Advisory, never fatal. */
       readonly fitWarnings: readonly string[];
@@ -880,7 +878,6 @@ export type FeedEvent =
       readonly phase: string | null;
       readonly action: string | null;
       readonly why: string | null;
-      readonly role: FleetCompanionRole | null;
       readonly inFleet: boolean | null;
       readonly followingOrderFrom: CompanionOrderAuthority | null;
       readonly lastOrderHeard: string | null;

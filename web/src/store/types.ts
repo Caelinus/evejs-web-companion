@@ -23,7 +23,6 @@ import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
 import type {
   CompanionAbandonmentRecord,
   CompanionOrderAuthority,
-  FleetCompanionRole,
   FleetCompanionRunState,
 } from "../nav/fleetCompanionLoop.ts";
 
@@ -2333,7 +2332,6 @@ export interface FleetCompanionState {
   readonly action: string | null;
   /** WHY it did that — always present while running. */
   readonly why: string | null;
-  readonly role: FleetCompanionRole | null;
   readonly inFleet: boolean | null;
   /** Which authority the last decision came from, for the readout. */
   readonly followingOrderFrom: CompanionOrderAuthority | null;

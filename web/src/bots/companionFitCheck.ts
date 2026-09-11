@@ -6,9 +6,9 @@
 // particular hull, picked by an operator looking at that ship in the fitting
 // panel. A squad start has no such operator -- the pilots are not mounted,
 // nobody can see their fits, and a list saved earlier would be stale the moment
-// that pilot refits or swaps hull. So a squad stores settings, and the bot
-// host, which HAS signed the pilot in and CAN read the fit, fills the lists in
-// here. Nothing about a fit is ever saved.
+// that pilot refits or swaps hull. So a squad stores settings (`CompanionSetup`),
+// and the bot host, which HAS signed the pilot in and CAN read the fit, fills
+// the lists in here. Nothing about a fit is ever saved.
 //
 // ⚠ THE WARNINGS ARE ADVISORY AND MUST STAY THAT WAY. The operator's own words:
 // warn, and let a human either load the missing thing or ignore it and fly.
@@ -21,9 +21,12 @@
 // unreadable fit teaches an operator to ignore it -- and the one time it is
 // right is the time they will ignore it too.
 //
-// PURE. No store, no I/O. The caller hands it plain data read elsewhere.
+// PURE. No store, no I/O. The caller hands it plain data read elsewhere -- this
+// module cannot itself resolve a drone's typeID to a group name, which is why
+// the role split below arrives already computed.
 
-import type { FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+import type { CompanionSetup, FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+import type { DroneRoleIDs } from "../nav/droneRoles.ts";
 
 /** One module as the classifier judged it, with what it is carrying. */
 export interface CompanionFitModule {
@@ -43,6 +46,12 @@ export interface CompanionFitModule {
   readonly takesCharge: boolean | null;
 }
 
+/** One stack in the drone bay. */
+export interface CompanionFitDroneStack {
+  readonly typeID: number;
+  readonly quantity: number;
+}
+
 /** What the ship turned out to be carrying, and what the classifier made of it. */
 export interface CompanionFitFacts {
   /** The eight lists, as derived from the hull. */
@@ -54,6 +63,8 @@ export interface CompanionFitFacts {
   readonly remoteArmorModuleIDs: readonly number[];
   readonly remoteCapacitorModuleIDs: readonly number[];
   readonly weaponModuleIDs: readonly number[];
+  /** Fitted salvagers, for the `salvage` chat order. See the request's field. */
+  readonly salvagerModuleIDs: readonly number[];
   /** Every online module the fit carries, for the charge checks. */
   readonly modules: readonly CompanionFitModule[];
   /**
@@ -61,32 +72,47 @@ export interface CompanionFitFacts {
    *
    * ⚠ NULL IS UNREADABLE AND `[]` IS CONFIDENTLY EMPTY, which is the same
    * distinction `decodeDroneBay` is built around and states in its own header.
-   * Only the empty array is worth warning about.
+   * An empty bay is NOT warned about here -- see `companionFitWarnings` -- a
+   * ship with no drones is a ship doing something else, the same reasoning
+   * that already applied when drones were an operator toggle.
    */
-  readonly droneBay: readonly { readonly quantity: number }[] | null;
+  readonly droneBay: readonly CompanionFitDroneStack[] | null;
+  /**
+   * The same bay, split by launchable role.
+   *
+   * ⚠ COMPUTED BY THE CALLER, NEVER HERE. Splitting a stack by role means
+   * resolving a typeID to an SDE group name (`splitDroneRoles`,
+   * `nav/droneRoles.ts`), which is I/O this module deliberately has none of.
+   * The caller runs that resolve-then-judge pass once and hands the answer in.
+   * Meaningless while `droneBay` is null -- the caller may pass empty lists
+   * then, since nothing here reads it in that case.
+   */
+  readonly droneBayRoles: DroneRoleIDs;
   /** False when the fit itself could not be read; nothing is judged then. */
   readonly fitReadable: boolean;
 }
 
 /**
- * The request this pilot will actually fly, with the eight lists filled in from
- * the hull.
+ * The request this pilot will actually fly: the setup's six stored fields
+ * carried through untouched, and the eight module lists always read off the
+ * hull.
  *
- * ⚠ IT REPLACES THE LISTS RATHER THAN MERGING THEM. A deriving request's lists
- * are empty by construction, but if one ever were not, the hull is still the
- * authority -- the whole point is that the saved value cannot be trusted to
- * describe the ship in front of us. Everything that is NOT read off the fit
- * (thresholds, toggles, obeys, the safe spot) is kept exactly as configured.
+ * ⚠ THE HULL IS THE ONLY AUTHORITY, AND THERE IS NO OTHER PATH TO CHOOSE
+ * BETWEEN ANY MORE. A squad start has no operator looking at the ship in front
+ * of it, and a list saved earlier would describe whatever hull an operator was
+ * looking at when they last touched this squad's settings -- stale the moment
+ * this pilot refits or swaps hull, with nobody watching to notice. This used to
+ * be conditional on `deriveModulesFromFit`, a flag choosing between this and a
+ * hand-picked alternative; the alternative is gone
+ * (docs/fleet-companion-simplification.md), so there is nothing left to choose
+ * between and this function is now total.
  */
 export function requestForFit(
-  request: FleetCompanionRequest,
+  setup: CompanionSetup,
   facts: CompanionFitFacts,
 ): FleetCompanionRequest {
-  if (!request.deriveModulesFromFit) {
-    return request;
-  }
   return {
-    ...request,
+    ...setup,
     defenseModuleIDs: [...facts.defenseModuleIDs],
     shieldBoosterModuleIDs: [...facts.shieldBoosterModuleIDs],
     armorRepairerModuleIDs: [...facts.armorRepairerModuleIDs],
@@ -95,11 +121,17 @@ export function requestForFit(
     remoteArmorModuleIDs: [...facts.remoteArmorModuleIDs],
     remoteCapacitorModuleIDs: [...facts.remoteCapacitorModuleIDs],
     weaponModuleIDs: [...facts.weaponModuleIDs],
+    salvagerModuleIDs: [...facts.salvagerModuleIDs],
   };
 }
 
 /**
  * What is missing or unusable about this pilot's fit, in the player's words.
+ *
+ * ⚠ TAKES THE DERIVED REQUEST -- the one `requestForFit` already produced --
+ * because its eight lists ARE what this run will actually cycle. There is no
+ * flag any more and so nothing left to choose between a hand-picked set and the
+ * hull's own; the request's lists are the hull's own.
  *
  * Empty means nothing worth saying -- which is also what an unreadable fit
  * gives, deliberately (see the header).
@@ -114,18 +146,13 @@ export function companionFitWarnings(
   const warnings: string[] = [];
   const byID = new Map(facts.modules.map((module) => [module.itemID, module]));
 
-  // ⚠ JUDGED AGAINST THE LISTS THIS RUN WILL ACTUALLY FLY, not against the
-  // whole fit. A module the companion was never going to cycle is not this
-  // pilot's problem, and warning about it would bury the ones that are.
-  const flying = modulesThisRunWillCycle(request, facts);
-
   const unloaded = (ids: readonly number[]): number =>
     ids.filter((id) => {
       const module = byID.get(id);
       return module !== undefined && module.takesCharge === true && !module.hasCharge;
     }).length;
 
-  const gunsUnloaded = unloaded(flying.weaponModuleIDs);
+  const gunsUnloaded = unloaded(request.weaponModuleIDs);
   if (gunsUnloaded > 0) {
     warnings.push(
       gunsUnloaded === 1
@@ -139,13 +166,13 @@ export function companionFitWarnings(
   // because the fit read cannot tell a script from a round -- they are the same
   // field on the wire -- so naming one would be a guess.
   const others = [
-    ...flying.defenseModuleIDs,
-    ...flying.shieldBoosterModuleIDs,
-    ...flying.armorRepairerModuleIDs,
-    ...flying.hullRepairerModuleIDs,
-    ...flying.remoteShieldModuleIDs,
-    ...flying.remoteArmorModuleIDs,
-    ...flying.remoteCapacitorModuleIDs,
+    ...request.defenseModuleIDs,
+    ...request.shieldBoosterModuleIDs,
+    ...request.armorRepairerModuleIDs,
+    ...request.hullRepairerModuleIDs,
+    ...request.remoteShieldModuleIDs,
+    ...request.remoteArmorModuleIDs,
+    ...request.remoteCapacitorModuleIDs,
   ];
   const othersUnloaded = unloaded(others);
   if (othersUnloaded > 0) {
@@ -156,18 +183,36 @@ export function companionFitWarnings(
     );
   }
 
-  // ⚠ ONLY WHEN THIS RUN ACTUALLY USES DRONES. An empty drone bay on a pilot
-  // whose operator never ticked drones is not a fault, it is a ship without
-  // drones doing something else.
-  if (request.useDrones && facts.droneBay !== null) {
+  // ⚠ ONLY WHEN THE BAY HOLDS NOTHING THIS COMPANION CAN LAUNCH. There is no
+  // "use drones" setting any more -- a companion launches whatever it has, in
+  // whatever role it can (`nav/droneRoles.ts`: combat, logistic, salvage). An
+  // EMPTY bay is not warned about at all: a ship with no drones is a ship doing
+  // something else, the same reasoning that already excused it when drones were
+  // a toggle. What IS worth a warning is a bay that is not empty and still
+  // launches nothing, because that is not a choice anybody made on purpose --
+  // it is webifier, neutralizer, mining or EW drones sitting where combat,
+  // logistic or salvage drones belong.
+  //
+  // ⚠ SILENT WHENEVER A ROW COULD NOT BE RESOLVED. `droneBayRoles.unknown`
+  // holds stacks whose type or group did not resolve, and an unresolved stack
+  // might well be a launchable role that failed to classify. Warning anyway
+  // would risk telling an operator their combat drones are useless because a
+  // name lookup timed out -- exactly the false confidence the header's
+  // fail-silent rule exists to prevent.
+  if (facts.droneBay !== null) {
     const carried = facts.droneBay.reduce((total, stack) => total + stack.quantity, 0);
-    if (carried === 0) {
-      warnings.push("The drone bay is empty, and this pilot is set to use drones.");
+    const launchable =
+      facts.droneBayRoles.combat.length +
+      facts.droneBayRoles.logistic.length +
+      facts.droneBayRoles.salvage.length;
+    if (carried > 0 && launchable === 0 && facts.droneBayRoles.unknown.length === 0) {
+      warnings.push(
+        "The drone bay holds drones this companion will never launch - only combat, logistic and salvage drones are ever used.",
+      );
     }
   }
 
   if (
-    request.deriveModulesFromFit &&
     facts.defenseModuleIDs.length === 0 &&
     facts.shieldBoosterModuleIDs.length === 0 &&
     facts.armorRepairerModuleIDs.length === 0 &&
@@ -177,23 +222,4 @@ export function companionFitWarnings(
   }
 
   return warnings;
-}
-
-/** Just the eight lists this run will actually cycle: the hull's, or the operator's. */
-interface ModulesInPlay {
-  readonly weaponModuleIDs: readonly number[];
-  readonly defenseModuleIDs: readonly number[];
-  readonly shieldBoosterModuleIDs: readonly number[];
-  readonly armorRepairerModuleIDs: readonly number[];
-  readonly hullRepairerModuleIDs: readonly number[];
-  readonly remoteShieldModuleIDs: readonly number[];
-  readonly remoteArmorModuleIDs: readonly number[];
-  readonly remoteCapacitorModuleIDs: readonly number[];
-}
-
-function modulesThisRunWillCycle(
-  request: FleetCompanionRequest,
-  facts: CompanionFitFacts,
-): ModulesInPlay {
-  return request.deriveModulesFromFit ? facts : request;
 }

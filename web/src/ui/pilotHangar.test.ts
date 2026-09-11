@@ -26,7 +26,7 @@ const HangarSquadAssign = (await import("./HangarSquadAssign.svelte")).default;
 const HangarSquadPicker = (await import("./HangarSquadPicker.svelte")).default;
 
 const ROSTER_KEY = "evejs-web-known-characters:v1";
-import { DEFAULT_FLEET_COMPANION_REQUEST } from "../nav/fleetCompanionLoop.ts";
+import { DEFAULT_COMPANION_SETUP } from "../nav/fleetCompanionLoop.ts";
 
 const PREFS_KEY = "evejs-web-hangar-prefs:v1";
 
@@ -458,17 +458,13 @@ test("with no squads yet the chooser is straight to naming a new one", () => {
 const SQUAD = { id: "s-fly", name: "Strike Wing", color: "#52d9a3" };
 
 function prefsWithSquad(configured: boolean): string {
-  const request = {
-    ...DEFAULT_FLEET_COMPANION_REQUEST,
-    deriveModulesFromFit: true,
-  };
   return JSON.stringify({
     squads: [SQUAD],
     members: { [SQUAD.id]: [90000001] },
     pinnedSquads: [SQUAD.id],
     pinnedPilots: [],
     collapsedAccounts: [],
-    companionConfigs: configured ? { [SQUAD.id]: { "90000001": request } } : {},
+    companionConfigs: configured ? { [SQUAD.id]: { "90000001": DEFAULT_COMPANION_SETUP } } : {},
   });
 }
 
@@ -502,8 +498,15 @@ test("a squad with a configured pilot offers FLY, and says how it differs from A
 
 
 // --- the per-pilot companion setup, in the squad popover --------------------
+//
+// ⚠ THERE IS NO ROLE PICKER ANY MORE, AND NO SEPARATE TAGGING CHECKBOX.
+// docs/fleet-companion-simplification.md removes the role entirely and makes
+// the PRESENCE of a companion setup the only marker that a pilot is a
+// companion in a squad -- see `companionConfigFor`'s own comment in
+// hangarPrefs.ts. What used to be a role select plus a tagging checkbox is now
+// one plain "Flies as companion" toggle.
 
-test("a ticked squad offers a role picker; an unticked one does not", () => {
+test("a ticked squad offers a companion toggle; only that squad does", () => {
   // ⚠ ONLY THE SQUADS THIS PILOT IS IN GROW A SECOND LINE. Growing EVERY row
   // was tried before and rejected: at eleven squads it made each row about
   // 230px tall (docs/pilot-hangar.md). A pilot is typically in one or two.
@@ -513,15 +516,19 @@ test("a ticked squad offers a role picker; an unticked one does not", () => {
     squads: [SQUAD, { id: "s-other", name: "Scout Net", color: "#6fb4e8" }],
     pilot: { ...basePilot(), squads: [SQUAD] },
   });
-  assert.match(inOne, /Flies as/, "the squad it is in offers a setup");
-  assert.match(inOne, /Not set up/);
-  assert.equal((inOne.match(/Flies as/g) ?? []).length, 1, "and only that one does");
+  assert.match(inOne, /Flies as companion/, "the squad it is in offers the toggle");
+  assert.equal(
+    (inOne.match(/Flies as companion/g) ?? []).length,
+    1,
+    "and only that one does",
+  );
 });
 
-test("the tick and the role picker are SEPARATE controls", () => {
+test("the tick and the companion toggle are SEPARATE controls", () => {
   // ⚠ A CONTROL NESTED IN THE TICK WOULD BE INVALID HTML AND WOULD FIRE THE
-  // MEMBERSHIP TOGGLE ON EVERY CLICK. The row is a <button>; the setup is its
-  // sibling. This asserts the select is not inside the button element.
+  // MEMBERSHIP TOGGLE ON EVERY CLICK. The row is a <button>; the companion
+  // toggle is its sibling. This asserts the checkbox is not inside the button
+  // element.
   const body = renderRow({
     manage: true,
     squadMenuOpen: true,
@@ -531,33 +538,30 @@ test("the tick and the role picker are SEPARATE controls", () => {
   const rowStart = body.indexOf('class="hangar-squadmenu-row');
   assert.ok(rowStart >= 0, "the membership button is there");
   const rowEnd = body.indexOf("</button>", rowStart);
-  const selectAt = body.indexOf("<select", rowStart);
-  assert.ok(selectAt > rowEnd, "the select must sit AFTER the button closes");
+  const checkboxAt = body.indexOf('type="checkbox"', rowStart);
+  assert.ok(checkboxAt > rowEnd, "the companion toggle must sit AFTER the button closes");
 });
 
-test("a pilot with no setup is not offered a tagging choice", () => {
-  // "Calls targets" only means something once a role is chosen: there is no
-  // setup to put it on otherwise.
+test("a pilot with no companion setup shows the toggle unticked", () => {
   const body = renderRow({
     manage: true,
     squadMenuOpen: true,
     squads: [SQUAD],
     pilot: { ...basePilot(), squads: [SQUAD] },
-    companionRoleFor: () => null,
+    companionEnabledFor: () => false,
   });
-  assert.doesNotMatch(body, /Calls targets/);
+  assert.match(body, /Flies as companion/);
+  assert.doesNotMatch(body, /checked/, "nothing on this row is ticked");
 });
 
-test("a pilot set up as logi shows that role, and can be told to call targets", () => {
+test("a pilot set up as a companion shows the toggle ticked", () => {
   const body = renderRow({
     manage: true,
     squadMenuOpen: true,
     squads: [SQUAD],
     pilot: { ...basePilot(), squads: [SQUAD] },
-    companionRoleFor: () => "logi",
-    companionTagsFor: () => true,
+    companionEnabledFor: () => true,
   });
-  assert.match(body, /Logistics/);
-  assert.match(body, /Calls targets/);
-  assert.match(body, /checked/, "the tagging choice reflects what is stored");
+  assert.match(body, /Flies as companion/);
+  assert.match(body, /checked/, "the toggle reflects what is stored");
 });

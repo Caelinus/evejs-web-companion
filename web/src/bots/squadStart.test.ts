@@ -9,7 +9,7 @@ import {
   type SquadStartEntry,
   type SquadStartTarget,
 } from "./squadStart.ts";
-import { DEFAULT_FLEET_COMPANION_REQUEST } from "../nav/fleetCompanionLoop.ts";
+import { DEFAULT_COMPANION_SETUP } from "../nav/fleetCompanionLoop.ts";
 
 // Synthetic throughout: 90000001-and-up mirrors ESI's documented example id.
 const PILOT_A = 90000001;
@@ -19,7 +19,7 @@ const PILOT_C = 90000003;
 function target(characterID: number, over = {}): SquadStartTarget {
   return {
     characterID,
-    request: { ...DEFAULT_FLEET_COMPANION_REQUEST, deriveModulesFromFit: true, ...over },
+    setup: { ...DEFAULT_COMPANION_SETUP, ...over },
   };
 }
 
@@ -98,24 +98,22 @@ test("a throw that carries no message still reads as something", async () => {
   assert.ok((entries[0]!.sentence ?? "").length > 0, "never an empty explanation");
 });
 
-test("each pilot is started with ITS OWN request", async () => {
-  // ⚠ TWO PILOTS IN ONE SQUAD ARE NOT THE SAME RUN. A request that reads its
-  // own fit earns combat risk whatever its lists say; one that pays for repairs
-  // earns financial. A start that reused one pilot's request for another would
-  // fly it under a setup nobody chose for it.
-  const seen: { id: number; role: string }[] = [];
+test("each pilot is started with ITS OWN setup", async () => {
+  // ⚠ TWO PILOTS IN ONE SQUAD ARE NOT THE SAME RUN. Reusing one pilot's setup
+  // for another would fly it under thresholds nobody chose for it.
+  const seen: { id: number; capacitorFloor: number }[] = [];
   const deps = {
-    async startCompanion(characterID: number, request: { role: string }) {
-      seen.push({ id: characterID, role: request.role });
+    async startCompanion(characterID: number, setup: { capacitorFloor: number }) {
+      seen.push({ id: characterID, capacitorFloor: setup.capacitorFloor });
     },
   };
   await startCompanionSquad(deps, [
-    target(PILOT_A, { role: "logi" }),
-    target(PILOT_B, { role: "tackle" }),
+    target(PILOT_A, { capacitorFloor: 0.2 }),
+    target(PILOT_B, { capacitorFloor: 0.4 }),
   ]);
   assert.deepEqual(seen, [
-    { id: PILOT_A, role: "logi" },
-    { id: PILOT_B, role: "tackle" },
+    { id: PILOT_A, capacitorFloor: 0.2 },
+    { id: PILOT_B, capacitorFloor: 0.4 },
   ]);
 });
 
@@ -162,37 +160,30 @@ test("an empty squad starts nothing and says so", async () => {
 });
 
 // --- what the operator is told before anything starts -----------------------
+//
+// ⚠ THERE IS NO TAGGING SETTING AND NO HAND-PICKED MODULE LIST ANY MORE, SO
+// NEITHER OLD WARNING CAN FIRE. Tagging is gated server-side on `obs.canTag`
+// and only ever tags a ship tackling THIS pilot, so two companions collide
+// only if the same ship tackled both in the same tick before either letter was
+// visible -- nothing a squad's own settings could cause or prevent. And every
+// companion always reads its own fit now, so the fit-mixture warning describes
+// a mixture that cannot occur. See squadStart.ts's own comment on
+// `squadStartWarnings`.
 
-test("two taggers in one squad are warned about, one is not", () => {
+test("starting a squad never mentions tagging", () => {
   const targets = [target(PILOT_A), target(PILOT_B)];
-  assert.deepEqual(squadStartWarnings(targets, []), []);
-  assert.deepEqual(squadStartWarnings(targets, [PILOT_A]), [], "one tagger is correct");
-
-  const warned = squadStartWarnings(targets, [PILOT_A, PILOT_B]);
-  assert.equal(warned.length, 1);
-  assert.match(warned[0]!, /unique across the fleet/);
-});
-
-test("a squad mixing derived and hand-picked pilots is worth a word", () => {
-  const mixed = [target(PILOT_A), target(PILOT_B, { deriveModulesFromFit: false })];
-  assert.ok(squadStartWarnings(mixed, []).some((line) => /not behave alike/.test(line)));
-
-  // All one way or all the other is not worth saying.
-  assert.deepEqual(squadStartWarnings([target(PILOT_A), target(PILOT_B)], []), []);
-  assert.deepEqual(
-    squadStartWarnings(
-      [target(PILOT_A, { deriveModulesFromFit: false }), target(PILOT_B, { deriveModulesFromFit: false })],
-      [],
-    ),
-    [],
-  );
+  const warnings = squadStartWarnings(targets);
+  assert.deepEqual(warnings, []);
+  for (const line of warnings) {
+    assert.doesNotMatch(line, /tag/i);
+  }
 });
 
 test("no warning ever refuses the squad", () => {
   // ⚠ ADVISORY, BY THE OPERATOR'S OWN RULE. `squadStartWarnings` returns words
   // and nothing else -- there is no verdict, no boolean, no blocker on it, so a
   // caller physically cannot read one as a refusal.
-  const warnings = squadStartWarnings([target(PILOT_A), target(PILOT_B)], [PILOT_A, PILOT_B]);
+  const warnings = squadStartWarnings([target(PILOT_A), target(PILOT_B)]);
   assert.ok(Array.isArray(warnings));
   for (const line of warnings) {
     assert.equal(typeof line, "string");
@@ -201,10 +192,7 @@ test("no warning ever refuses the squad", () => {
 
 test("every warning and summary is plain ASCII", () => {
   const lines = [
-    ...squadStartWarnings(
-      [target(PILOT_A), target(PILOT_B, { deriveModulesFromFit: false })],
-      [PILOT_A, PILOT_B],
-    ),
+    ...squadStartWarnings([target(PILOT_A), target(PILOT_B)]),
     squadStartSummary([]),
     squadStartSummary([{ characterID: PILOT_A, state: "started" }]),
     squadStartSummary([{ characterID: PILOT_A, state: "refused", sentence: "x" }]),

@@ -5,7 +5,6 @@ import { readFileSync } from "node:fs";
 import {
   DEFAULT_FLEET_COMPANION_REQUEST,
   FLEET_COMPANION_ABANDONMENT_WAIT_MS,
-  FLEET_COMPANION_ROLES,
   TANK_LAYER_HURT_THRESHOLD,
   createFleetCompanion,
   decideCompanionAction,
@@ -48,6 +47,12 @@ function obs(overrides: Partial<FleetCompanionObservation> = {}): FleetCompanion
     // unrelated test into the abandonment protocol.
     inFleet: true,
     fleetMemberCharacterIDs: [HUMAN, COMPANION],
+    // ⚠ THE CHAT GATE, AND IT MOVED FROM THE REQUEST TO THE ROSTER. A chat
+    // order is obeyed only from a character the fleet roster names a
+    // COMMANDER; the hand-typed `chatCommandSenders` list that used to decide
+    // this is gone. HUMAN is the commander in every test here, so a command
+    // from anyone else -- see UNLISTED_SENDER -- must do nothing.
+    fleetCommanderCharacterIDs: [HUMAN],
     botDrivenCharacterIDs: [COMPANION],
     myCharacterID: COMPANION,
     pendingFleetInvite: null,
@@ -63,6 +68,31 @@ function alone(overrides: Partial<FleetCompanionObservation> = {}): FleetCompani
 const REQUEST = DEFAULT_FLEET_COMPANION_REQUEST;
 
 /** A space snapshot carrying one station at a given surface distance. */
+/**
+ * The system's star, the safe-spot fallback when no station is on grid.
+ *
+ * ⚠ `kind: "sun"` IS THE SERVER'S OWN WORD. `buildStaticCelestialEntity` stamps
+ * the kind straight off the celestial row and every star row carries "sun";
+ * it is added to every scene unconditionally and is visible to every session
+ * in the system. Checked against the server 2026-09-11, after a note in this
+ * repo claiming there was no sun to warp to turned out to be wrong.
+ */
+const SUN = 40000001;
+
+/** A grid with no station, but with the star every real system has. */
+function gridWithSunOnly(): SpaceSnapshot {
+  const grid = gridWithStation(null) as unknown as { entities: unknown[] };
+  grid.entities.push({
+    itemID: SUN,
+    kind: "sun",
+    isSelf: false,
+    position: { x: 900_000_000, y: 0, z: 0 },
+    radius: 63_350_000,
+    mode: null,
+  });
+  return grid as unknown as SpaceSnapshot;
+}
+
 function gridWithStation(distanceM: number | null): SpaceSnapshot {
   const entities = [
     {
@@ -185,17 +215,17 @@ test("the default request is inside its own bounds", () => {
   assert.ok(request.droneRedeployHoldOffSeconds >= 1);
 });
 
-test("the default request does NOT tag — one tagger per squad is opt-in", () => {
-  // A tag is unique fleet-wide, so a default of `true` would mean every
-  // companion in a squad fighting over letters the moment two are launched.
-  assert.equal(DEFAULT_FLEET_COMPANION_REQUEST.attemptsTagging, false);
-});
-
-test("every role is a distinct, non-empty id", () => {
-  assert.equal(new Set(FLEET_COMPANION_ROLES).size, FLEET_COMPANION_ROLES.length);
-  for (const role of FLEET_COMPANION_ROLES) {
-    assert.ok(role.length > 0);
-  }
+test("the default request arms nothing, because nothing has been read off a hull yet", () => {
+  // ⚠ NOT A SAFETY DEFAULT ANY MORE, JUST AN EMPTY ONE. It used to be both: an
+  // unticked weapon list meant "lock the call, never fire it", so a companion
+  // could only shoot if somebody armed it. Deriving the lists from the hull
+  // ended that deliberately (docs/fleet-companion-simplification.md). What this
+  // constant now means is "no fit has been read", which is what a test wants
+  // when it varies one field, and what a start falls back to when the fit could
+  // not be read at all.
+  assert.deepEqual(DEFAULT_FLEET_COMPANION_REQUEST.weaponModuleIDs, []);
+  assert.deepEqual(DEFAULT_FLEET_COMPANION_REQUEST.defenseModuleIDs, []);
+  assert.deepEqual(DEFAULT_FLEET_COMPANION_REQUEST.remoteShieldModuleIDs, []);
 });
 
 // --- lifecycle --------------------------------------------------------------
@@ -223,7 +253,6 @@ test("start / pause / resume / stop move through the states", () => {
   assert.equal(controller.snapshot().status, "idle");
   controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
   assert.equal(controller.snapshot().status, "running");
-  assert.equal(controller.snapshot().role, DEFAULT_FLEET_COMPANION_REQUEST.role);
 
   controller.pause();
   assert.equal(controller.snapshot().status, "paused");
@@ -564,36 +593,40 @@ test("the deadline beats a VALID invite — a bounded wait is not extendable", (
   assert.notEqual(late.action.kind, "acceptFleetInvite");
 });
 
-test("no station in view and NO safe spot: it stops where it is, and says why", () => {
-  // Decision 5's one case with nothing to do. A fabricated safe spot would be
-  // worse than an honest stop — there is no sun here to warp to.
-  assert.equal(REQUEST.safeSpotBookmarkID, null);
+test("no station AND no star in view: it stops where it is, and says why", () => {
+  // The one case with nothing to do. It should not happen in a real system --
+  // every one of them has a star -- so it is reported rather than papered over.
   const decision = decideCompanionAction(REQUEST, alone({ snapshot: gridWithStation(null) }));
   assert.ok(decision.stop);
   assert.match(decision.stop as string, /no safe spot/i);
 });
 
-test("no station in view but a safe spot named: it warps there, ONCE", () => {
-  const request: FleetCompanionRequest = { ...REQUEST, safeSpotBookmarkID: 4242 };
-  const first = decideCompanionAction(request, alone({ snapshot: gridWithStation(null) }));
-  assert.deepEqual(first.action, { kind: "warpToBookmark", bookmarkID: 4242 });
+test("no station in view: it warps to the SUN, ONCE, with nothing configured", () => {
+  // ⚠ NOTHING ON THE REQUEST SAYS WHERE TO GO, and that is the point. This used
+  // to need an operator-named bookmark because a note in this repo said eve.js
+  // had no celestial to warp to. It has one in every system, it is in the
+  // snapshot the loop already reads, and warping to it is a mechanic the server
+  // implements on purpose (`warpState.js` has a dedicated landing distance for
+  // `kind: "sun"`).
+  const first = decideCompanionAction(REQUEST, alone({ snapshot: gridWithSunOnly() }));
+  assert.deepEqual(first.action, { kind: "warp", targetID: SUN });
   assert.equal(first.memory.abandonment?.safeSpotWarpIssued, true);
   // Not re-issued every two seconds while the server gets around to it.
-  const second = decideCompanionAction(request, alone({ snapshot: gridWithStation(null) }), first.memory);
+  const second = decideCompanionAction(REQUEST, alone({ snapshot: gridWithSunOnly() }), first.memory);
   assert.equal(second.action.kind, "wait");
-  assert.match(second.why, /warp to the safe spot to start/i);
+  assert.match(second.why, /warp to the sun to start/i);
 });
 
-test("the safe spot counts as safe only once the warp has been SEEN and is over", () => {
+test("the sun counts as safe only once the warp has been SEEN and is over", () => {
   // ⚠ "Issued the warp" is not "left the grid": the POST returns before
   // shipMode flips, and treating the two as the same would drop fleet with the
   // ship still sitting where it was. Confirmed by a reading, never by a timer.
-  const request: FleetCompanionRequest = { ...REQUEST, safeSpotBookmarkID: 4242 };
-  const issued = decideCompanionAction(request, alone({ snapshot: gridWithStation(null) }));
+  const request: FleetCompanionRequest = REQUEST;
+  const issued = decideCompanionAction(request, alone({ snapshot: gridWithSunOnly() }));
   // Still on grid, warp not yet seen: it must NOT decide it is safe.
   const notYet = decideCompanionAction(
     request,
-    alone({ inFleet: true, snapshot: gridWithStation(null) }),
+    alone({ inFleet: true, snapshot: gridWithSunOnly() }),
     issued.memory,
   );
   assert.notEqual(notYet.action.kind, "leaveFleet");
@@ -603,7 +636,7 @@ test("the safe spot counts as safe only once the warp has been SEEN and is over"
   // ...and once it is over, the ship is safe and may drop fleet.
   const landed = decideCompanionAction(
     request,
-    alone({ inFleet: true, snapshot: gridWithStation(null) }),
+    alone({ inFleet: true, snapshot: gridWithSunOnly() }),
     inWarp.memory,
   );
   assert.deepEqual(landed.action, { kind: "leaveFleet" });
@@ -629,10 +662,7 @@ test("a re-seated abandonment does NOT claim the ship already reached safety", a
     observe: async () => alone({ inFleet: true, snapshot: gridWithStation(200_000) }),
   });
   const companion = createFleetCompanion(deps);
-  companion.start(
-    { ...REQUEST, safeSpotBookmarkID: 4242 },
-    { abandonedAtMs: Date.now(), supervisorCharacterIDs: [HUMAN] },
-  );
+  companion.start(REQUEST, { abandonedAtMs: Date.now(), supervisorCharacterIDs: [HUMAN] });
   await companion.tick();
   assert.deepEqual(issued, [{ kind: "warp", targetID: 60000001 }]);
 });
@@ -784,30 +814,6 @@ test("an AlignTo broadcast aligns to the item it names", () => {
   assert.equal(decision.followingOrderFrom, "broadcast");
   // Never the wire name verbatim — the panel shows plain words.
   assert.ok(!decision.lastOrderHeard?.includes("AlignTo"));
-});
-
-test("obeys without \"tag\" ignores a tag on grid", () => {
-  const request: FleetCompanionRequest = { ...REQUEST, obeys: ["broadcast"] };
-  const decision = decideCompanionAction(
-    request,
-    obs({ snapshot: gridWithEntities([TACKLE]), fleetTargetTags: new Map([[TACKLE, "A"]]) }),
-  );
-  assert.notEqual(decision.action.kind, "lock");
-  assert.equal(decision.phase, "Standing by");
-});
-
-test("obeys without \"broadcast\" ignores a Target broadcast", () => {
-  const request: FleetCompanionRequest = { ...REQUEST, obeys: ["tag"] };
-  const decision = decideCompanionAction(
-    request,
-    obs({
-      snapshot: gridWithEntities([TACKLE]),
-      fleetTargetTags: null,
-      fleetBroadcast: fleetBroadcast("Target", TACKLE),
-    }),
-  );
-  assert.notEqual(decision.action.kind, "lock");
-  assert.equal(decision.phase, "Standing by");
 });
 
 test("an already-locked target is not re-locked, and an EMPTY weaponModuleIDs holds it without firing", () => {
@@ -1470,15 +1476,43 @@ test("a JumpTo broadcast closes in when too close for the server to warp to", ()
   assert.equal(decision.memory.closingOn, GATE);
 });
 
-test("a JumpTo broadcast HOLDS at jump range — it never invents a second gate id", () => {
+test("a JumpTo broadcast JUMPS once the ship is at the gate", () => {
+  // ⚠ THIS TEST USED TO PIN THE OPPOSITE, and the reason it did was wrong. It
+  // was "HOLDS at jump range - it never invents a second gate id", because
+  // `api.jump` demanded a far-side gate this pure ladder could not solve. The
+  // GAME never demanded one: `jumpSessionViaStargate` resolves the destination
+  // from the source gate and rejects only a MISMATCHED far id. The requirement
+  // was our own BFF check. Nothing is invented here -- 0 asks the server to use
+  // the gate's own `destinationID`.
   const decision = decideCompanionAction(
     REQUEST,
     obs({ snapshot: gridWithGate(1_000), fleetBroadcast: fleetBroadcast("JumpTo", GATE) }),
   );
-  assert.equal(decision.action.kind, "wait");
+  assert.deepEqual(decision.action, { kind: "jumpGate", gateID: GATE });
   assert.equal(decision.phase, "Obeying fleet");
   assert.equal(decision.followingOrderFrom, "broadcast");
-  assert.match(decision.why, /holding here/i);
+});
+
+test("a WarpTo broadcast warps to the named object, ONCE", () => {
+  // ⚠ THIS RUNG DID NOT EXIST. `WarpTo` was classified "no action needed"
+  // because the table claimed the server warps the fleet when the broadcast
+  // lands. It does not -- `sendBroadcast` only notifies -- so a fleet telling
+  // this pilot to warp watched it sit still.
+  const first = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithGate(500_000), fleetBroadcast: fleetBroadcast("WarpTo", GATE) }),
+  );
+  assert.deepEqual(first.action, { kind: "warp", targetID: GATE });
+  assert.equal(first.followingOrderFrom, "broadcast");
+
+  // ⚠ AND NOT AGAIN. A broadcast stands for its whole freshness window, so a
+  // rung that re-warped every tick would land and immediately warp off again.
+  const second = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithGate(500_000), fleetBroadcast: fleetBroadcast("WarpTo", GATE) }),
+    first.memory,
+  );
+  assert.notEqual(second.action.kind, "warp");
 });
 
 test("a JumpTo broadcast for a gate OFF this grid falls through", () => {
@@ -1531,8 +1565,6 @@ function gridWithGateFollowing(distanceM: number): SpaceSnapshot {
 test("a chat 'target <link>' from an ALLOWED sender locks the named ship, then fires once the lock is observed", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
     weaponModuleIDs: [GUN_1],
   };
   const chatMessages = [chatLine(chatCommandText("target", TACKLE), HUMAN)];
@@ -1558,11 +1590,35 @@ test("a chat 'target <link>' from an ALLOWED sender locks the named ship, then f
   assert.equal(firing.followingOrderFrom, "chat");
 });
 
+test("a companion obeys EVERY channel, with nothing configured to enable them", () => {
+  // ⚠ THE TWO TESTS THIS REPLACES PINNED A FEATURE THAT NO LONGER EXISTS.
+  // They were "obeys without tag ignores a tag" and "obeys without broadcast
+  // ignores a Target broadcast" -- the `obeys` list an operator could untick a
+  // channel from. The operator asked for that whole surface to go
+  // (docs/fleet-companion-simplification.md): a companion listens to everything
+  // and acts on what it can. What is worth pinning now is the opposite claim.
+  const tagged = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithEntities([TACKLE]), fleetTargetTags: new Map([[TACKLE, "A"]]) }),
+  );
+  assert.deepEqual(tagged.action, { kind: "lock", targetID: TACKLE });
+  assert.equal(tagged.followingOrderFrom, "tag");
+
+  const broadcast = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: gridWithEntities([TACKLE]),
+      fleetTargetTags: null,
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+    }),
+  );
+  assert.deepEqual(broadcast.action, { kind: "lock", targetID: TACKLE });
+  assert.equal(broadcast.followingOrderFrom, "broadcast");
+});
+
 test("THE SENDER GATE: a chat command from someone NOT in chatCommandSenders does nothing at all", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -1575,35 +1631,17 @@ test("THE SENDER GATE: a chat command from someone NOT in chatCommandSenders doe
   assert.equal(decision.phase, "Standing by");
 });
 
-test("THE SENDER GATE: an EMPTY chatCommandSenders, the shipped default, obeys nobody over chat", () => {
-  // ⚠ Not even the fleet's own supervising human. Nobody is authorised until
-  // the operator says so on the request — see `chatCommandSenders`'s own
-  // comment: "NEVER POPULATED FROM CHAT TEXT".
-  const request: FleetCompanionRequest = {
-    ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-  };
-  assert.deepEqual(request.chatCommandSenders, []);
+test("THE SENDER GATE: a fleet with NO commander on the roster obeys nobody over chat", () => {
+  // ⚠ AN UNREADABLE OR COMMANDERLESS ROSTER MEANS OBEY NOBODY, never "anybody
+  // will do". The roster is the entire gate now that the hand-typed sender
+  // list is gone, and chat is LOCAL chat -- readable by everyone in the system
+  // -- so collapsing "cannot tell who is in charge" into "obey the sender"
+  // would hand this pilot to a stranger.
+  const request: FleetCompanionRequest = REQUEST;
   const decision = decideCompanionAction(
     request,
     obs({
-      snapshot: gridWithEntities([TACKLE]),
-      chatMessages: [chatLine(chatCommandText("target", TACKLE), HUMAN)],
-    }),
-  );
-  assert.notEqual(decision.action.kind, "lock");
-  assert.equal(decision.phase, "Standing by");
-});
-
-test("obeys without \"chat\" ignores a chat command even from an allowed sender", () => {
-  const request: FleetCompanionRequest = {
-    ...REQUEST,
-    obeys: ["broadcast", "tag"],
-    chatCommandSenders: [HUMAN],
-  };
-  const decision = decideCompanionAction(
-    request,
-    obs({
+      fleetCommanderCharacterIDs: [],
       snapshot: gridWithEntities([TACKLE]),
       chatMessages: [chatLine(chatCommandText("target", TACKLE), HUMAN)],
     }),
@@ -1615,8 +1653,6 @@ test("obeys without \"chat\" ignores a chat command even from an allowed sender"
 test("A BROADCAST OUTRANKS A CHAT LINE when they disagree, and chat is obeyed once the broadcast is gone", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const chatMessages = [chatLine(chatCommandText("target", OTHER), HUMAN)];
 
@@ -1651,8 +1687,6 @@ test("an OFF-GRID broadcast falls through to a chat order instead of starving it
   // source and testing whether it can be acted on have to be the same step.
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -1672,7 +1706,7 @@ test("an off-grid broadcast with NO chat order to fall through to still just sta
   // simply start obeying off-grid calls: with nothing underneath to fall
   // through TO, an unactionable call is still no order for this pilot.
   const decision = decideCompanionAction(
-    { ...REQUEST, obeys: ["broadcast", "tag", "chat"], chatCommandSenders: [HUMAN] },
+    REQUEST,
     obs({
       snapshot: gridWithEntities([OTHER]),
       fleetBroadcast: fleetBroadcast("Target", TACKLE),
@@ -1686,8 +1720,6 @@ test("an off-grid broadcast with NO chat order to fall through to still just sta
 test("NEWEST WINS: the later createdAtMs is obeyed, regardless of which order the lines arrive in", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const older = chatLine(chatCommandText("target", TACKLE), HUMAN, 1_000);
   const newer = chatLine(chatCommandText("target", OTHER), HUMAN, 5_000);
@@ -1715,8 +1747,6 @@ test("a non-command chat line from an allowed sender is ignored, and does NOT su
   // broadcast, never by silence.
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const order = chatLine(chatCommandText("target", TACKLE), HUMAN, 1_000);
   const chatter = chatLine("nice kill on that last one", HUMAN, 5_000);
@@ -1731,8 +1761,6 @@ test("a non-command chat line from an allowed sender is ignored, and does NOT su
 test("a chat 'align <link>' reaches the align rung", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -1748,8 +1776,6 @@ test("a chat 'align <link>' reaches the align rung", () => {
 test("a chat 'travel <link>' reaches the travelTo rung", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -1762,15 +1788,13 @@ test("a chat 'travel <link>' reaches the travelTo rung", () => {
   assert.equal(decision.followingOrderFrom, "chat");
 });
 
-test("a chat 'jump <link>' reaches the JumpTo honest partial, through all four decideCloseIn steps", () => {
+test("a chat 'jump <link>' reaches the JumpTo rung, through all four decideCloseIn steps", () => {
   // ⚠ FOUR STEP KINDS, ALL FOUR MUST STILL WORK FROM CHAT: arrive, closing,
   // approach, and the warp fallthrough. The broadcast tests above this section
   // never exercised "closing" at all (it needs the ship reading FOLLOW, not
   // merely a distance) — `gridWithGateFollowing` supplies that.
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const chatMessages = [chatLine(chatCommandText("jump", GATE), HUMAN)];
 
@@ -1798,10 +1822,11 @@ test("a chat 'jump <link>' reaches the JumpTo honest partial, through all four d
   assert.match(closing.why, /closing on it/i);
   assert.equal(closing.followingOrderFrom, "chat");
 
-  // arrive — at jump range: holds, never invents a second gate id.
+  // arrive — at jump range: it jumps. This step used to HOLD, because
+  // `api.jump` demanded a far-side gate the ladder could not solve; the game
+  // never demanded one and our own BFF check did.
   const arrived = decideCompanionAction(request, obs({ snapshot: gridWithGate(1_000), chatMessages }));
-  assert.equal(arrived.action.kind, "wait");
-  assert.match(arrived.why, /holding here/i);
+  assert.deepEqual(arrived.action, { kind: "jumpGate", gateID: GATE });
   assert.equal(arrived.followingOrderFrom, "chat");
 });
 
@@ -1810,8 +1835,6 @@ test("lastOrderHeard and the why sentence name CHAT, not the fleet, when the ord
   // from "somebody typed this" — see `NamedOrder`'s own comment.
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -1830,8 +1853,6 @@ test("lastOrderHeard and the why sentence name CHAT, not the fleet, when the ord
 test("chat orders are ALSO skipped once the supervision gate has failed", () => {
   const request: FleetCompanionRequest = {
     ...REQUEST,
-    obeys: ["broadcast", "tag", "chat"],
-    chatCommandSenders: [HUMAN],
   };
   const decision = decideCompanionAction(
     request,
@@ -2341,12 +2362,18 @@ test("nothing this ladder says about a NOT-YET-LOCKED Target call claims the pil
 //
 // ABOVE obeying the fleet, because that rung PARKS the tick once a called
 // target is locked and a standing FC primary is exactly the situation this
-// pilot is scrambled in. Reads `attemptsTagging`, which until this rung existed
-// was a panel checkbox nothing consulted. Writes a LETTER, never a digit, so it
-// can never collide with the DSL block that writes "1".
+// pilot is scrambled in. Writes a LETTER, never a digit, so it can never
+// collide with the DSL block that writes "1".
+//
+// ⚠ EVERY COMPANION TAGS NOW; THERE IS NO `attemptsTagging` CHECKBOX. The rung
+// already only ever lettered ships that are tackling THIS pilot, which is
+// exactly what was asked for, so the toggle gated behaviour that was already
+// right. What keeps two companions from fighting over letters is not a setting:
+// the server drops a non-commander's write (see the `canTag` tests below), and
+// an already-lettered ship is skipped.
 
-/** A request that tags, with the supervision default left alone. */
-const TAGGING: FleetCompanionRequest = { ...REQUEST, attemptsTagging: true };
+/** A request that tags -- which is now simply any request at all. */
+const TAGGING: FleetCompanionRequest = REQUEST;
 
 /** The commander verdict the gate produces for a real fleet boss. */
 function taggingObs(
@@ -2371,12 +2398,13 @@ test("a ship that has this pilot scrambled is lettered for the fleet", () => {
   assert.equal(decision.phase, "Tagging");
 });
 
-// ⚠ THE DEAD-CONFIG TEST. `attemptsTagging` shipped with a panel checkbox and
-// no reader at all; this is the assertion that it is wired to something.
-test("attemptsTagging OFF writes no tag, however tackled the pilot is", () => {
-  const decision = decideCompanionAction(REQUEST, taggingObs());
+// ⚠ THE REPLACEMENT FOR THE OLD "attemptsTagging OFF writes no tag" TEST. There
+// is no OFF any more, so what has to be pinned is the trigger instead: a pilot
+// that is not being held down tags nothing, however many hostiles are on grid.
+// "Only when they are tackled" was the operator's own wording.
+test("a pilot that is NOT tackled writes no tag, however hostile the grid", () => {
+  const decision = decideCompanionAction(REQUEST, taggingObs({ tackledBy: [] }));
   assert.notEqual(decision.action.kind, "setFleetTargetTag");
-  assert.equal(REQUEST.attemptsTagging, false, "the default must stay off");
 });
 
 // ⚠ THREE STATES. `null` is "could not read the roster", `false` is "read it,
@@ -2880,7 +2908,7 @@ test("a fleeing ship still lights an idle hardener first", () => {
 // --- the drones come home, and do not go back out -----------------------------
 
 test("a flee recalls what is in space before it warps", () => {
-  const request: FleetCompanionRequest = { ...REQUEST, useDrones: true };
+  const request: FleetCompanionRequest = REQUEST;
   const decision = decideCompanionAction(request, fleeObs({ myDroneIDs: [DRONE_A] }));
   assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
 });
@@ -2889,7 +2917,7 @@ test("a flee recalls what is in space before it warps", () => {
 // merely by where the rung happens to be written. A redeploy record left
 // standing would have rung 6 putting drones back out of a ship that is leaving.
 test("latching a flee drops any drone redeploy cycle in flight", () => {
-  const request: FleetCompanionRequest = { ...REQUEST, useDrones: true };
+  const request: FleetCompanionRequest = REQUEST;
   const mid: CompanionLadderMemory = {
     ...freshLadderMemory(),
     droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], waited: 1 },
@@ -3153,16 +3181,31 @@ const DRONE_B = 700002;
 const DRONE_BAY_STACK = 800001;
 
 /** A companion set up to fly drones, with the shipped floor and hold-off. */
-const WITH_DRONES: FleetCompanionRequest = { ...REQUEST, useDrones: true };
+const WITH_DRONES: FleetCompanionRequest = REQUEST;
 
 function droneObs(
   overrides: Partial<FleetCompanionObservation> = {},
 ): FleetCompanionObservation {
+  // ⚠ THE ROLE LISTS ARE WHAT THE RUNG ACTUALLY READS NOW, and the flat ones
+  // are kept only because other rungs still use them. The companion used to
+  // launch `droneBayItemIDs` -- the WHOLE bay -- which is how a hurt combat
+  // drone coming home could take a salvage drone back out with it. It launches
+  // one role at a time now, so a fixture that set only the flat list would be
+  // describing a ship whose drones the rung cannot classify and will not fly.
+  // Combat by default: that is the hostile-on-grid case these tests are about.
+  // ⚠ `in`, NOT `??`. `null` is a MEANING here -- "the bay was not read" --
+  // and a nullish default would silently turn a test that deliberately says
+  // "we could not look" into one that says "a stack of combat drones".
+  const combatBay =
+    "droneBayItemIDs" in overrides ? overrides.droneBayItemIDs : [DRONE_BAY_STACK];
+  const combatOut = "myDroneIDs" in overrides ? overrides.myDroneIDs : [];
   return obs({
     snapshot: gridWithEntities([TACKLE]),
     hostileOnGrid: true,
     myDroneIDs: [],
     droneBayItemIDs: [DRONE_BAY_STACK],
+    combatDroneBayItemIDs: combatBay,
+    combatDroneIDs: combatOut,
     lowestDroneHealth: null,
     ...overrides,
   });
@@ -3177,12 +3220,16 @@ test("a hostile on grid and an empty sky puts the drones out", () => {
   assert.equal(decision.phase, "Drones");
 });
 
-// ⚠ THE DEAD-CONFIG TEST. useDrones had exactly one reader anywhere - the risk
-// classifier that labels a run before launch - and no rung consulted it.
-test("useDrones OFF launches nothing, whatever is on grid", () => {
-  const decision = decideCompanionAction(REQUEST, droneObs());
+// ⚠ THE REPLACEMENT FOR THE OLD "useDrones OFF launches nothing" TEST. There is
+// no toggle any more -- a pilot flies the drones it is carrying -- so what has
+// to be pinned instead is that an EMPTY bay is not an error and launches
+// nothing. A ship with no drones is a ship doing something else.
+test("a pilot carrying no drones launches nothing, whatever is on grid", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    droneObs({ droneBayItemIDs: [], combatDroneBayItemIDs: [] }),
+  );
   assert.notEqual(decision.action.kind, "launchDrones");
-  assert.equal(REQUEST.useDrones, false, "the default must stay off");
 });
 
 // ⚠ hostileOnGrid IS THREE-STATE and only `true` launches. `null` means the
@@ -3495,10 +3542,10 @@ test("a recall that never completes does not strand the pilot in space", () => {
 });
 
 // The safe-spot half of the ladder is a departure too, and has the same hazard.
-test("the safe-spot warp also recalls first", () => {
+test("the warp to the sun also recalls first", () => {
   const decision = decideCompanionAction(
-    { ...WITH_DRONES, safeSpotBookmarkID: 60000002 },
-    alone({ snapshot: gridWithStation(null), myDroneIDs: [DRONE_A] }),
+    WITH_DRONES,
+    alone({ snapshot: gridWithSunOnly(), myDroneIDs: [DRONE_A] }),
   );
   assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
 });
@@ -3512,4 +3559,1111 @@ test("a pilot already at the station docks without a fresh recall round", () => 
     alone({ snapshot: gridWithStation(500), myDroneIDs: [] }),
   );
   assert.equal(decision.action.kind, "dock");
+});
+
+// --- one kind of drone at a time -------------------------------------------
+//
+// ⚠ THE OPERATOR'S OWN RULE: "Do not mix drones, at one time one type of the
+// drones". The companion used to launch `droneBayItemIDs` -- the WHOLE bay --
+// which is how a hull carrying combat and salvage drones sent both into the
+// same fight: the salvage drones cannot fight it, and they fill the control
+// slots the combat drones needed. Every scripted bot in this app has always
+// launched one role at a time; this rung was the one place that did not.
+
+/** A grid with a hostile and a WRECK, so a salvage job has something to do. */
+function gridWithWreck(): SpaceSnapshot {
+  const grid = gridWithEntities([TACKLE]) as unknown as { entities: unknown[] };
+  grid.entities.push({
+    itemID: 980350000099,
+    kind: "wreck",
+    isSelf: false,
+    ownerID: null,
+    position: { x: 3_000, y: 0, z: 0 },
+    radius: 0,
+    mode: null,
+  });
+  return grid as unknown as SpaceSnapshot;
+}
+
+const SALVAGE_BAY_STACK = 800002;
+const LOGI_BAY_STACK = 800003;
+const SALVAGE_DRONE_OUT = 700010;
+const LOGI_DRONE_OUT = 700011;
+
+/** A drone bay holding one stack of each kind, and nothing out. */
+function mixedBayObs(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithEntities([TACKLE]),
+    hostileOnGrid: true,
+    myDroneIDs: [],
+    droneBayItemIDs: [DRONE_BAY_STACK, SALVAGE_BAY_STACK, LOGI_BAY_STACK],
+    combatDroneBayItemIDs: [DRONE_BAY_STACK],
+    salvageDroneBayItemIDs: [SALVAGE_BAY_STACK],
+    logisticDroneBayItemIDs: [LOGI_BAY_STACK],
+    combatDroneIDs: [],
+    salvageDroneIDs: [],
+    logisticDroneIDs: [],
+    lowestDroneHealth: null,
+    ...overrides,
+  });
+}
+
+test("a mixed bay launches ONLY the combat drones into a fight", () => {
+  const decision = decideCompanionAction(WITH_DRONES, mixedBayObs());
+  assert.deepEqual(decision.action, {
+    kind: "launchDrones",
+    droneItemIDs: [DRONE_BAY_STACK],
+  });
+});
+
+test("drones of the WRONG role are brought home before the right ones go out", () => {
+  // A salvage sweep that ran into a fight: the salvage drones are still in
+  // space, and a hostile has arrived. The rung must not launch combat drones
+  // alongside them -- it recalls first, and only then fills the slots.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "recallDrones",
+    droneIDs: [SALVAGE_DRONE_OUT],
+  });
+  assert.match(decision.why, /combat drones/i);
+});
+
+test("combat drones already out are given NO order - the server defends with them", () => {
+  // ⚠ NOT AN OMISSION. The server assigns idle combat drones onto whatever
+  // shoots their controller by itself, and the behaviour setting that gates it
+  // defaults to on with no client surface to change it. An engage of our own
+  // would fight the server's choice of target for no gain, one call per tick.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({ myDroneIDs: [DRONE_A], combatDroneIDs: [DRONE_A] }),
+  );
+  assert.notEqual(decision.action.kind, "engageDrones");
+  assert.notEqual(decision.action.kind, "launchDrones");
+});
+
+// --- repair drones ----------------------------------------------------------
+
+test("a rep call puts the REPAIR drones out, not the combat ones", () => {
+  // ⚠ URGENCY, THE SAME ORDER THE MODULE RUNGS USE. Answering a rep call
+  // outranks joining a fight because somebody is dying now, where a fight is
+  // still there next tick.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      snapshot: gridWithEntities([LOGI]),
+      fleetBroadcast: fleetBroadcast("HealArmor", LOGI),
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "launchDrones",
+    droneItemIDs: [LOGI_BAY_STACK],
+  });
+});
+
+test("repair drones already out are sent to the ship the FLEET is calling for", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      snapshot: gridWithEntities([LOGI]),
+      fleetBroadcast: fleetBroadcast("HealShield", LOGI),
+      myDroneIDs: [LOGI_DRONE_OUT],
+      logisticDroneIDs: [LOGI_DRONE_OUT],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "engageDrones",
+    droneIDs: [LOGI_DRONE_OUT],
+    targetID: LOGI,
+  });
+});
+
+test("a repair order is issued once, not re-sent every tick", () => {
+  // One atomic call per tick is this loop's whole contract; re-aiming drones
+  // that are already repairing the right ship would starve every rung below.
+  const observation = mixedBayObs({
+    snapshot: gridWithEntities([LOGI]),
+    fleetBroadcast: fleetBroadcast("HealShield", LOGI),
+    myDroneIDs: [LOGI_DRONE_OUT],
+    logisticDroneIDs: [LOGI_DRONE_OUT],
+  });
+  const first = decideCompanionAction(WITH_DRONES, observation);
+  const second = decideCompanionAction(WITH_DRONES, observation, first.memory);
+  assert.notEqual(second.action.kind, "engageDrones");
+});
+
+test("a pilot with no repair drones answers a rep call by fighting on", () => {
+  // A hull that cannot do the job is not "the logistic role with nothing to
+  // launch" -- it is simply not that pilot, so the branch falls through.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      snapshot: gridWithEntities([LOGI, TACKLE]),
+      fleetBroadcast: fleetBroadcast("HealArmor", LOGI),
+      logisticDroneBayItemIDs: [],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "launchDrones",
+    droneItemIDs: [DRONE_BAY_STACK],
+  });
+});
+
+// --- the salvage and loot chat orders ---------------------------------------
+
+const WRECK = 300001;
+const CAN = 300002;
+
+/** A bare `salvage` / `loot` line from the fleet's commander. */
+function areaOrder(verb: string): ChatMessage {
+  return { characterID: HUMAN, characterName: "Fleet Mate", message: verb, createdAtMs: 1_000 };
+}
+
+test("a bare 'salvage' from a commander puts the SALVAGE drones out", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      // ⚠ A WRECK HAS TO BE ON GRID. A salvage job clears itself the moment
+      // there is nothing left to salvage, so an empty grid is "job done" and
+      // correctly launches nothing.
+      snapshot: gridWithWreck(),
+      chatMessages: [areaOrder("salvage")],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "launchDrones",
+    droneItemIDs: [SALVAGE_BAY_STACK],
+  });
+});
+
+test("salvage drones out are set sweeping, with the SERVER picking the wreck", () => {
+  // ⚠ `targetID: 0` IS THE AUTO-PICK, not a value we forgot to fill in. It is
+  // why a standing salvage order never has to be re-aimed as each wreck goes.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      snapshot: gridWithWreck(),
+      chatMessages: [areaOrder("salvage")],
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "salvageDrones",
+    droneIDs: [SALVAGE_DRONE_OUT],
+    targetID: 0,
+  });
+});
+
+test("nobody said salvage, so the salvage drones stay in the bay", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({ hostileOnGrid: false, combatDroneBayItemIDs: [] }),
+  );
+  assert.notEqual(decision.action.kind, "launchDrones");
+});
+
+test("a salvage order from someone who is NOT a commander does nothing", () => {
+  // The roster is the whole gate, and chat is LOCAL chat -- readable by
+  // everyone in the system.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      combatDroneBayItemIDs: [],
+      chatMessages: [
+        { characterID: 90000099, characterName: "Nobody", message: "salvage", createdAtMs: 1_000 },
+      ],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "launchDrones");
+});
+
+/**
+ * A grid carrying a wreck and a can, at the distances the loot rung cares about.
+ *
+ * ⚠ `containerDistance` IS CENTRE TO CENTRE, which is what both the rung and the
+ * server measure. The radii default to 0 so that for most tests here the surface
+ * distance is the same number; the pair that gives them real values is pinning
+ * exactly the case where the two disagree.
+ */
+function lootGrid(options: {
+  readonly wreckOwner?: number | null;
+  readonly wreckDistance?: number;
+  readonly containerDistance?: number;
+  readonly stationDistance?: number;
+  /** The ship's own mode, so a test can say "a move is still under way". */
+  readonly shipMode?: string;
+  readonly shipRadius?: number;
+  readonly containerRadius?: number;
+}): SpaceSnapshot {
+  const shipRadius = options.shipRadius ?? 0;
+  const entities: unknown[] = [
+    {
+      itemID: 1,
+      kind: "ship",
+      isSelf: true,
+      position: { x: 0, y: 0, z: 0 },
+      radius: shipRadius,
+      mode: null,
+    },
+  ];
+  if (options.wreckOwner !== undefined) {
+    entities.push({
+      itemID: WRECK,
+      kind: "wreck",
+      isSelf: false,
+      ownerID: options.wreckOwner,
+      position: { x: options.wreckDistance ?? 100, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    });
+  }
+  if (options.containerDistance !== undefined) {
+    entities.push({
+      itemID: CAN,
+      kind: "container",
+      isSelf: false,
+      ownerID: null,
+      position: { x: options.containerDistance, y: 0, z: 0 },
+      radius: options.containerRadius ?? 0,
+      mode: null,
+    });
+  }
+  if (options.stationDistance !== undefined) {
+    entities.push({
+      itemID: 60000001,
+      kind: "station",
+      isSelf: false,
+      ownerID: null,
+      position: { x: options.stationDistance, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    });
+  }
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: shipRadius, mode: options.shipMode ?? null },
+    entities,
+  } as unknown as SpaceSnapshot;
+}
+
+test("a bare 'loot' empties a wreck of this pilot's own, in range", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ wreckOwner: COMPANION }),
+      chatMessages: [areaOrder("loot")],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lootWreck", wreckID: WRECK });
+  assert.equal(decision.phase, "Looting");
+});
+
+test("a container is looted whoever owns it - the server applies no check either", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 100 }),
+      chatMessages: [areaOrder("loot")],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lootContainer", containerID: CAN });
+});
+
+test("something out of reach is approached first, and the approach is issued ONCE", () => {
+  const observation = obs({
+    snapshot: lootGrid({ containerDistance: 40_000 }),
+    chatMessages: [areaOrder("loot")],
+  });
+  const first = decideCompanionAction(WITH_DRONES, observation);
+  // ⚠ NO RANGE ON THE APPROACH: a looter flies all the way in, by the
+  // operator's own call ("for loot do not use range, for salvage do"). It has
+  // nothing to gain by standing off, and hugging the can is what keeps it
+  // clear of the server's own 2,500 m bind gate instead of parked on the edge
+  // of it -- see SALVAGE_APPROACH_STOP_M for what parking on a threshold costs.
+  assert.deepEqual(first.action, { kind: "approach", targetID: CAN });
+  // ⚠ THE SHIP MUST ACTUALLY BE MOVING for the rung to wait. An approach that
+  // was refused, or that finished early, leaves the ship stopped out of reach
+  // -- and the rung re-issues rather than waiting on it for ever, which is the
+  // bug that had a pilot parked next to a can doing nothing.
+  const stillFlying = obs({
+    snapshot: lootGrid({ containerDistance: 40_000, shipMode: "FOLLOW" }),
+    chatMessages: [areaOrder("loot")],
+  });
+  const second = decideCompanionAction(WITH_DRONES, stillFlying, first.memory);
+  assert.notEqual(second.action.kind, "approach");
+
+  // ...and a ship that has STOPPED short gets a fresh approach.
+  const stalled = decideCompanionAction(WITH_DRONES, observation, first.memory);
+  assert.equal(stalled.action.kind, "approach");
+});
+
+test("a can whose HULL is near but whose CENTRE is not is closed on, never reached into", () => {
+  // ⚠ THE BUG THIS IS FOR, OBSERVED LIVE 2026-09-11: a companion flew to a
+  // container and stood next to it having looted nothing.
+  //
+  // `invbroker` binds a space container only while the straight-line distance
+  // between the two CENTRES is within 2,500 m, and it refuses with
+  // `FakeItemNotFound` -- the same answer it gives for an id it has never heard
+  // of. The rung used to ask `measureSpace`, which answers SURFACE distances:
+  // centres minus both radii. Here that is 2,800 - 200 - 300 = 2,300 m, inside
+  // the old 2,400 m test, while the server was measuring 2,800 and refusing.
+  //
+  // The server log of the incident shows exactly that: three refusals over four
+  // seconds while the ship was still closing, then a fourth call -- a few
+  // hundred metres later -- binding the container and listing it. By then
+  // `companionLootFrom`'s attempt bound had set the can aside for good.
+  const stillTooFar = obs({
+    snapshot: lootGrid({
+      containerDistance: 2_800,
+      shipRadius: 200,
+      containerRadius: 300,
+    }),
+    chatMessages: [areaOrder("loot")],
+  });
+  const decision = decideCompanionAction(WITH_DRONES, stillTooFar);
+  assert.deepEqual(
+    decision.action,
+    { kind: "approach", targetID: CAN },
+    "2,300 m of clear space between the hulls is still 2,800 m to the server",
+  );
+
+  // ...and the same can, genuinely close, is opened. Both halves matter: a
+  // rung that simply refused to loot anything would pass the assertion above.
+  const arrived = obs({
+    snapshot: lootGrid({
+      containerDistance: 900,
+      shipRadius: 200,
+      containerRadius: 300,
+    }),
+    chatMessages: [areaOrder("loot")],
+  });
+  assert.deepEqual(
+    decideCompanionAction(WITH_DRONES, arrived, decision.memory).action,
+    { kind: "lootContainer", containerID: CAN },
+  );
+});
+
+test("nobody said loot, so a grid full of wrecks is left alone", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({ snapshot: lootGrid({ wreckOwner: COMPANION }) }),
+  );
+  assert.notEqual(decision.action.kind, "lootWreck");
+});
+
+test("looting is BENEATH the flee - a pilot that is dying stops looting", () => {
+  // ⚠ THE ONLY THING A COMPANION DOES THAT MOVES THE SHIP OF ITS OWN ACCORD, so
+  // it is the one rung that could carry a pilot away from its fleet. It sits at
+  // the very bottom of the ladder for exactly that reason.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      // ⚠ A STATION ON GRID, so the flee has somewhere to GO. Without one the
+      // get-safe ladder has nothing to issue and the tick falls through -- which
+      // would make this test pass for the wrong reason.
+      snapshot: lootGrid({ wreckOwner: COMPANION, stationDistance: 200_000 }),
+      chatMessages: [areaOrder("loot")],
+      shieldRatio: 0.05,
+      armorRatio: 0.05,
+      hullRatio: 0.05,
+      health: 0.05,
+    }),
+  );
+  assert.notEqual(decision.action.kind, "lootWreck");
+});
+
+// --- the salvage order acts on the FIT, not only on the drone bay -----------
+//
+// ⚠ FOUND IN LIVE TESTING, 2026-09-11. The first cut of the `salvage` verb
+// acted on salvage DRONES alone, so a hull with a salvager bolted on and an
+// empty drone bay was told to salvage and stood there. What a pilot can do is a
+// property of its FIT -- the same principle that deleted every module picker.
+
+const SALVAGER_1 = 11400001;
+const SALVAGER_2 = 11400002;
+const WRECK_NEAR = 300010;
+
+/** A grid with one wreck at `distanceM`, plus this ship. */
+function salvageGrid(distanceM: number, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null, activeModuleIDs },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      {
+        itemID: WRECK_NEAR,
+        kind: "wreck",
+        isSelf: false,
+        // ⚠ OURS, so this one grid can serve BOTH jobs. Salvaging ignores
+        // ownership entirely; looting does not, and a wreck nobody can
+        // attribute is never opened -- so an unowned wreck would make a `loot`
+        // job clear itself the instant it was given.
+        ownerID: COMPANION,
+        position: { x: distanceM, y: 0, z: 0 },
+        radius: 0,
+        mode: null,
+      },
+    ],
+  } as unknown as SpaceSnapshot;
+}
+
+/** A pilot with a salvager fitted and NOTHING in its drone bay. */
+const WITH_SALVAGER: FleetCompanionRequest = {
+  ...REQUEST,
+  salvagerModuleIDs: [SALVAGER_1],
+};
+
+function salvageObs(
+  snapshot: SpaceSnapshot,
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot,
+    chatMessages: [areaOrder("salvage")],
+    droneBayItemIDs: [],
+    combatDroneBayItemIDs: [],
+    salvageDroneBayItemIDs: [],
+    logisticDroneBayItemIDs: [],
+    ...overrides,
+  });
+}
+
+test("a salvager-fitted pilot with an EMPTY drone bay still salvages when told", () => {
+  // The exact live case: a hull that can salvage, no drones aboard, and an order
+  // it used to ignore completely.
+  const decision = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(30_000)));
+  // Stops in salvager reach, not on the wreck itself.
+  assert.deepEqual(decision.action, { kind: "approach", targetID: WRECK_NEAR, range: 3000 });
+  assert.equal(decision.phase, "Salvaging");
+});
+
+test("in range it locks the wreck, then runs the salvager on it", () => {
+  const inRange = salvageGrid(1_000);
+  const locking = decideCompanionAction(WITH_SALVAGER, salvageObs(inRange));
+  assert.deepEqual(locking.action, { kind: "lock", targetID: WRECK_NEAR });
+
+  const running = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(inRange, { lockedTargetIDs: [WRECK_NEAR] }),
+    locking.memory,
+  );
+  assert.deepEqual(running.action, {
+    kind: "activate",
+    moduleID: SALVAGER_1,
+    targetID: WRECK_NEAR,
+  });
+});
+
+test("a second salvager is started rather than the first re-activated", () => {
+  const both: FleetCompanionRequest = {
+    ...REQUEST,
+    salvagerModuleIDs: [SALVAGER_1, SALVAGER_2],
+  };
+  const decision = decideCompanionAction(
+    both,
+    salvageObs(salvageGrid(1_000, [SALVAGER_1]), { lockedTargetIDs: [WRECK_NEAR] }),
+    {
+      ...freshLadderMemory(),
+      salvageWreckID: WRECK_NEAR,
+      salvageLockIssued: true,
+    } satisfies CompanionLadderMemory,
+  );
+  assert.deepEqual(decision.action, {
+    kind: "activate",
+    moduleID: SALVAGER_2,
+    targetID: WRECK_NEAR,
+  });
+});
+
+test("a wreck that will not lock is given up on rather than waited on for ever", () => {
+  // ⚠ THE SILENT CASE. Nothing tells a client that a lock will never land, so
+  // without a bound this rung waits on one wreck while a grid full of others
+  // goes unsalvaged.
+  let memory: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    salvageWreckID: WRECK_NEAR,
+    salvageLockIssued: true,
+  };
+  let gaveUp = false;
+  for (let tick = 0; tick < 20; tick += 1) {
+    const decision = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)), memory);
+    memory = decision.memory;
+    if (memory.salvageWreckID === null) {
+      gaveUp = true;
+      break;
+    }
+  }
+  assert.ok(gaveUp, "the rung must move on from a wreck it cannot lock");
+});
+
+test("nobody said salvage, so a fitted salvager stays dark", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000), { chatMessages: [] }),
+  );
+  assert.notEqual(decision.phase, "Salvaging");
+});
+
+test("a pilot with no salvager and no salvage drones simply stands by", () => {
+  // Not an error, and not a complaint: a ship that cannot do the job does not
+  // do it. The same answer the drone half gives for an empty bay.
+  const decision = decideCompanionAction(REQUEST, salvageObs(salvageGrid(1_000)));
+  assert.notEqual(decision.phase, "Salvaging");
+  assert.notEqual(decision.action.kind, "launchDrones");
+});
+
+test("salvaging is BENEATH the flee - a dying pilot stops salvaging", () => {
+  // It moves the ship, exactly as looting does, so it sits at the bottom of the
+  // ladder and a pilot that is dying leaves instead.
+  const grid = salvageGrid(1_000);
+  (grid as unknown as { entities: unknown[] }).entities.push({
+    itemID: 60000001,
+    kind: "station",
+    isSelf: false,
+    position: { x: 200_000, y: 0, z: 0 },
+    radius: 0,
+    mode: null,
+  });
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(grid, {
+      shieldRatio: 0.05,
+      armorRatio: 0.05,
+      hullRatio: 0.05,
+      health: 0.05,
+    }),
+  );
+  assert.notEqual(decision.phase, "Salvaging");
+});
+
+// --- an area order is a JOB, not an instant ---------------------------------
+//
+// ⚠ FOUND LIVE, 2026-09-11. These verbs were first read straight off the chat
+// backlog, so they inherited the BROADCAST freshness window -- thirty seconds,
+// which is right for a target call and wrong for a job that takes minutes. A
+// pilot salvaged exactly ONE wreck and went back to standing by with two still
+// on grid, because the order aged out mid-job. It latches now.
+
+test("a salvage job outlives the chat message that started it", () => {
+  // ⚠ THE REGRESSION THIS EXISTS FOR. The order is heard on the first tick and
+  // NEVER HEARD AGAIN -- the second tick sees an empty chat, exactly as it would
+  // once the message aged out of the freshness window. The job must continue.
+  const heard = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000)),
+  );
+  assert.equal(heard.memory.areaJob, "salvage");
+
+  const silent = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000), { chatMessages: [] }),
+    heard.memory,
+  );
+  assert.equal(silent.memory.areaJob, "salvage", "silence must not cancel a job");
+  assert.equal(silent.phase, "Salvaging");
+});
+
+test("a salvage job clears ITSELF once the grid has no wrecks left", () => {
+  // ⚠ WHAT KEEPS THE LATCH FROM BEING A TRAP. Without this a pilot reports a job
+  // it finished minutes ago and never falls back to its own ladder.
+  const working = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  assert.equal(working.memory.areaJob, "salvage");
+
+  const swept = decideCompanionAction(
+    WITH_SALVAGER,
+    obs({ snapshot: gridWithEntities([]), chatMessages: [] }),
+    working.memory,
+  );
+  assert.equal(swept.memory.areaJob, null);
+  assert.notEqual(swept.phase, "Salvaging");
+});
+
+test("a grid it cannot SEE never cancels a job", () => {
+  // ⚠ "No wrecks" and "could not look" are different answers. A pilot
+  // fleet-warped away mid-salvage must arrive with its order intact.
+  const working = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  for (const blind of [
+    obs({ inWarp: true, chatMessages: [] }),
+    obs({ inSpace: false, docked: true, snapshot: null, chatMessages: [] }),
+  ]) {
+    const decision = decideCompanionAction(WITH_SALVAGER, blind, working.memory);
+    assert.equal(decision.memory.areaJob, "salvage", JSON.stringify({ blind: blind.inWarp }));
+  }
+});
+
+test("'stop' from a commander cancels a standing job", () => {
+  const working = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  assert.equal(working.memory.areaJob, "salvage");
+
+  const stopped = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000), { chatMessages: [areaOrder("stop")] }),
+    working.memory,
+  );
+  assert.equal(stopped.memory.areaJob, null);
+  assert.notEqual(stopped.phase, "Salvaging");
+});
+
+test("'stop' from someone who is NOT a commander cancels nothing", () => {
+  // The same roster gate the order itself passed through. A stranger in local
+  // must not be able to call off a fleet's work.
+  const working = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  const ignored = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000), {
+      chatMessages: [
+        { characterID: 90000099, characterName: "Nobody", message: "stop", createdAtMs: 2_000 },
+      ],
+    }),
+    working.memory,
+  );
+  assert.equal(ignored.memory.areaJob, "salvage");
+});
+
+test("a loot job latches and clears the same way", () => {
+  const heard = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ wreckOwner: COMPANION }),
+      chatMessages: [areaOrder("loot")],
+    }),
+  );
+  assert.equal(heard.memory.areaJob, "loot");
+  assert.deepEqual(heard.action, { kind: "lootWreck", wreckID: WRECK });
+
+  // Once the transfer reports it emptied, nothing else is lootable here.
+  const done = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ wreckOwner: COMPANION }),
+      chatMessages: [],
+      lootFinishedItemIDs: [WRECK],
+    }),
+    heard.memory,
+  );
+  assert.equal(done.memory.areaJob, null);
+});
+
+test("switching job: 'loot' while salvaging replaces the job rather than stacking", () => {
+  // There is one area job, not a queue. The newest order is the one that stands.
+  const salvaging = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  assert.equal(salvaging.memory.areaJob, "salvage");
+  const switched = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(1_000), { chatMessages: [areaOrder("loot")] }),
+    salvaging.memory,
+  );
+  assert.equal(switched.memory.areaJob, "loot");
+});
+
+test("a job is heard even while the pilot is getting safe, so 'stop' always lands", () => {
+  // ⚠ THE LATCH IS UPDATED ABOVE THE SUPERVISION GATE. A pilot that is docking
+  // itself because nobody is left must still hear a cancel, or an operator who
+  // comes back finds a job they called off standing.
+  const working = decideCompanionAction(WITH_SALVAGER, salvageObs(salvageGrid(1_000)));
+  const whileAlone = decideCompanionAction(
+    WITH_SALVAGER,
+    alone({
+      snapshot: gridWithStation(200_000),
+      chatMessages: [areaOrder("stop")],
+      fleetCommanderCharacterIDs: [HUMAN],
+    }),
+    working.memory,
+  );
+  assert.equal(whileAlone.memory.areaJob, null);
+});
+
+
+test("loot opens ANY wreck, whoever owns it - this is a private server", () => {
+  // ⚠ THE OPERATOR'S OWN CALL: "just loot everything. we do not care about
+  // ownership. this is private server." The codebase already said the same for
+  // containers -- `lootContainers` in the DSL notes the server enforces no
+  // ownership check either -- so wrecks were the inconsistent half.
+  //
+  // ⚠ AND THE GATE THIS REPLACES WAS BROKEN, NOT MERELY STRICT. It allowed a
+  // wreck owned by this character or this CORPORATION, but a wreck carries the
+  // CHARACTER id of whoever killed it -- so the corp clause could never match,
+  // and a companion (which kills nothing) could never attribute one to itself.
+  for (const owner of [COMPANION, HUMAN, 90000042, null]) {
+    const decision = decideCompanionAction(
+      WITH_DRONES,
+      obs({
+        snapshot: lootGrid({ wreckOwner: owner }),
+        chatMessages: [areaOrder("loot")],
+      }),
+    );
+    assert.deepEqual(
+      decision.action,
+      { kind: "lootWreck", wreckID: WRECK },
+      "owner " + String(owner),
+    );
+  }
+});
+
+// --- two pilots on one grid split the work -----------------------------------
+//
+// ⚠ PREDICTED BEFORE IT WAS SEEN, by the operator: "two pilots will loot now.
+// might be interesting race condition." With plain nearest-first both pick the
+// SAME nearest can and convoy to it, doing the work of one. Not harmful -- the
+// loser finds it emptied and moves on -- but half the fleet is wasted.
+//
+// The rule is a CLAIM computed from the shared snapshot, not a message: every
+// companion runs it over the same data and reaches the same answer about who
+// takes what, so they split a field without telling each other anything.
+
+const MATE = 90000007;
+
+/** A grid with two cans and, optionally, a fleet-mate's ship sitting on one. */
+/**
+ * Two cans and, optionally, a fleet-mate parked on the near one.
+ *
+ * `nearAt` defaults to INSIDE loot range, so the plain claim tests loot at once
+ * rather than flying; the latch tests pass a distance that forces an approach,
+ * because a target only stays latched while it is being flown to.
+ */
+function twoCanGrid(mateAt: { x: number } | null, nearAt = 1_000): SpaceSnapshot {
+  const entities: unknown[] = [
+    {
+      itemID: 1,
+      kind: "ship",
+      isSelf: true,
+      characterID: COMPANION,
+      position: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    },
+    {
+      itemID: CAN,
+      kind: "container",
+      isSelf: false,
+      ownerID: null,
+      position: { x: nearAt, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    },
+    {
+      itemID: CAN_FAR,
+      kind: "container",
+      isSelf: false,
+      ownerID: null,
+      // ⚠ THE OTHER SIDE OF THE SHIP, deliberately. With both cans the same
+      // way out, a mate parked on the near one is closer to the far one TOO,
+      // every candidate is beaten, and the rule correctly falls back to plain
+      // nearest -- which would test the fallback instead of the claim.
+      position: { x: -30_000, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    },
+  ];
+  if (mateAt !== null) {
+    entities.push({
+      itemID: 2,
+      kind: "ship",
+      isSelf: false,
+      characterID: MATE,
+      position: { x: mateAt.x, y: 0, z: 0 },
+      radius: 0,
+      mode: null,
+    });
+  }
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+    entities,
+  } as unknown as SpaceSnapshot;
+}
+
+const CAN_FAR = 300003;
+
+test("alone on the grid, a pilot takes the NEAREST can", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({ snapshot: twoCanGrid(null), chatMessages: [areaOrder("loot")] }),
+  );
+  assert.deepEqual(decision.action, { kind: "lootContainer", containerID: CAN });
+});
+
+test("a fleet-mate sitting on the near can sends this pilot to the FAR one", () => {
+  // ⚠ THE WHOLE POINT. The near can is still nearest to us in absolute terms --
+  // plain nearest-first would send us there and put two pilots on one can.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: twoCanGrid({ x: 1_000 }),
+      chatMessages: [areaOrder("loot")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, MATE],
+    }),
+  );
+  assert.deepEqual(
+    decision.action,
+    { kind: "approach", targetID: CAN_FAR },
+    "the near can belongs to the mate parked on it",
+  );
+});
+
+test("a STRANGER on the near can is not yielded to", () => {
+  // Only fleet-mates are coordinated with. Somebody else racing us is not
+  // somebody to give way to.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: twoCanGrid({ x: 1_000 }),
+      chatMessages: [areaOrder("loot")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lootContainer", containerID: CAN });
+});
+
+test("a pilot beaten to EVERY can still works rather than idling", () => {
+  // ⚠ OTHERWISE THE LAST PILOT IN A BIG FLEET SITS STILL. Falling back to the
+  // plain nearest means a duplicated trip at worst, which is better than a ship
+  // doing nothing at all.
+  const grid = twoCanGrid({ x: 1_000 }) as unknown as { entities: unknown[] };
+  grid.entities.push({
+    itemID: 3,
+    kind: "ship",
+    isSelf: false,
+    characterID: 90000008,
+    position: { x: -30_000, y: 0, z: 0 },
+    radius: 0,
+    mode: null,
+  });
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: grid as unknown as SpaceSnapshot,
+      chatMessages: [areaOrder("loot")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, MATE, 90000008],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "wait");
+  assert.equal(decision.phase, "Looting");
+});
+
+test("an exact tie breaks on character id, so both pilots agree who takes it", () => {
+  // Two ships abreast, equidistant from the same can: without a tie-break both
+  // claim it or both yield. COMPANION (90000002) is lower than MATE (90000007),
+  // so this pilot takes it and the mate -- running the identical rule -- does not.
+  const grid = {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, characterID: COMPANION, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: 2, kind: "ship", isSelf: false, characterID: MATE, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: CAN, kind: "container", isSelf: false, ownerID: null, position: { x: 1_000, y: 0, z: 0 }, radius: 0, mode: null },
+    ],
+  } as unknown as SpaceSnapshot;
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: grid,
+      chatMessages: [areaOrder("loot")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, MATE],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lootContainer", containerID: CAN });
+});
+
+test("salvage splits a field the same way", () => {
+  const grid = {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, characterID: COMPANION, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: 2, kind: "ship", isSelf: false, characterID: MATE, position: { x: 2_000, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: WRECK_NEAR, kind: "wreck", isSelf: false, ownerID: null, position: { x: 2_000, y: 0, z: 0 }, radius: 0, mode: null },
+      // Opposite side, so the mate on the near wreck is not nearer to this one.
+      { itemID: 300099, kind: "wreck", isSelf: false, ownerID: null, position: { x: -30_000, y: 0, z: 0 }, radius: 0, mode: null },
+    ],
+  } as unknown as SpaceSnapshot;
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    obs({
+      snapshot: grid,
+      chatMessages: [areaOrder("salvage")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, MATE],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "approach", targetID: 300099, range: 3000 });
+});
+
+// --- the fight ends, the drones come home ------------------------------------
+//
+// ⚠ THIS BRANCH WAS MISSING AND NOTHING ELSE COVERED IT (observed live,
+// 2026-09-11: a cleared grid left drones drifting for the rest of the run). The
+// hurt-drone cycle needs a hurt drone; the wrong-role recall needs another role
+// to want the slots; the flee only recalls on its way out. A fight that simply
+// ENDS is none of those.
+
+test("a cleared grid brings the drones home", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      myDroneIDs: [DRONE_A, DRONE_B],
+      combatDroneIDs: [DRONE_A, DRONE_B],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "recallDrones",
+    droneIDs: [DRONE_A, DRONE_B],
+  });
+  assert.equal(decision.phase, "Drones");
+});
+
+test("a grid we cannot READ does not pull the drones in", () => {
+  // ⚠ `hostileOnGrid` is three-state and `null` is "the read failed". Recalling
+  // on that would yank drones out of a live fight every time a snapshot
+  // stumbled -- the one moment they are most needed.
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: null,
+      myDroneIDs: [DRONE_A],
+      combatDroneIDs: [DRONE_A],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "recallDrones");
+});
+
+test("a still-hostile grid keeps them out", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({ myDroneIDs: [DRONE_A], combatDroneIDs: [DRONE_A] }),
+  );
+  assert.notEqual(decision.action.kind, "recallDrones");
+});
+
+test("nothing out and nothing to do issues no recall at all", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({ hostileOnGrid: false, myDroneIDs: [], combatDroneIDs: [] }),
+  );
+  assert.notEqual(decision.action.kind, "recallDrones");
+});
+
+test("salvage drones come home once the wrecks are gone", () => {
+  // The same branch, reached from the other side: the area job cleared itself
+  // when the grid ran out of wrecks, so no role is wanted and the drones that
+  // were doing it are no longer doing anything.
+  const working = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      snapshot: gridWithWreck(),
+      chatMessages: [areaOrder("salvage")],
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+    }),
+  );
+  assert.equal(working.memory.areaJob, "salvage");
+
+  const swept = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      chatMessages: [],
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+    }),
+    working.memory,
+  );
+  assert.deepEqual(swept.action, {
+    kind: "recallDrones",
+    droneIDs: [SALVAGE_DRONE_OUT],
+  });
+});
+
+// --- a chosen can stays chosen ------------------------------------------------
+//
+// ⚠ OBSERVED LIVE, 2026-09-11: "approached, not looted, chose different
+// container to loot". The rung re-picked its target from scratch on every tick,
+// and the inputs move underneath it -- this ship's distances change as it
+// closes, and the fleet-mate claim flips as another pilot moves -- so the
+// nearest-unclaimed can stopped being the same can halfway there. It turned for
+// the new one, and arrived at none of them.
+
+test("a can being approached is not abandoned when another becomes nearer", () => {
+  // The ship starts nearer CAN, commits to it, and then a fleet-mate parks on
+  // CAN -- which is exactly the input that used to make it turn around. The
+  // claim rule is consulted when CHOOSING, not on every tick.
+  const start = decideCompanionAction(
+    WITH_DRONES,
+    obs({ snapshot: twoCanGrid(null, 20_000), chatMessages: [areaOrder("loot")] }),
+  );
+  assert.deepEqual(start.action, { kind: "approach", targetID: CAN });
+  assert.equal(start.memory.lootTargetID, CAN);
+
+  const tempted = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: twoCanGrid({ x: 20_000 }, 20_000),
+      chatMessages: [areaOrder("loot")],
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, MATE],
+    }),
+    start.memory,
+  );
+  assert.equal(tempted.memory.lootTargetID, CAN, "it must stay committed");
+  // ⚠ STILL THE SAME CAN. It is out of reach and the fixture's ship is not
+  // shown moving, so a fresh approach is the RIGHT call here -- what must never
+  // happen is that approach naming CAN_FAR, which is what the wander looked
+  // like live.
+  assert.deepEqual(tempted.action, { kind: "approach", targetID: CAN });
+});
+
+test("a can is finished by the OUTCOME, not by having been reached for", () => {
+  // ⚠ THE RUNG USED TO MARK IT DONE THE MOMENT IT ASKED. `lootIntoShip` routes
+  // each stack to the bay that will take it, and what fits nowhere STAYS IN THE
+  // CAN -- so a pilot took one stack of three and flew off, twice, live.
+  const asking = decideCompanionAction(
+    WITH_DRONES,
+    obs({ snapshot: lootGrid({ containerDistance: 100 }), chatMessages: [areaOrder("loot")] }),
+  );
+  assert.deepEqual(asking.action, { kind: "lootContainer", containerID: CAN });
+  assert.equal(asking.memory.lootTargetID, CAN, "still the target until it is empty");
+  assert.ok(!asking.memory.lootedItemIDs.includes(CAN));
+
+  // Told it emptied, the rung lets go of it.
+  const done = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 100 }),
+      chatMessages: [areaOrder("loot")],
+      lootFinishedItemIDs: [CAN],
+    }),
+    asking.memory,
+  );
+  assert.notEqual(done.action.kind, "lootContainer");
+});
+
+test("a target that leaves the grid is dropped rather than waited on", () => {
+  // A jetcan despawns when it is emptied -- by us or by anybody else. The rung
+  // must notice it is gone and choose again, not hold a latch on nothing.
+  const committed = decideCompanionAction(
+    WITH_DRONES,
+    obs({ snapshot: twoCanGrid(null, 20_000), chatMessages: [areaOrder("loot")] }),
+  );
+  assert.equal(committed.memory.lootTargetID, CAN);
+
+  const vanished = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 40_000 }),
+      chatMessages: [areaOrder("loot")],
+    }),
+    { ...committed.memory, lootTargetID: 999999 },
+  );
+  assert.equal(vanished.memory.lootTargetID, CAN, "it picks again rather than stalling");
 });

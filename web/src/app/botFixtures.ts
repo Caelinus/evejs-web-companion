@@ -142,15 +142,30 @@ const SHIP_ATTRIBUTES: ReadonlyArray<readonly [number, unknown]> = Object.freeze
  * "what does the requirement say when the miners are fitted but powered down?"
  * against the same ship rather than a second fixture.
  */
-export function fittingBody(options: { readonly offline?: readonly number[] } = {}): unknown {
+export function fittingBody(
+  options: {
+    readonly offline?: readonly number[];
+    /**
+     * Extra fitted rows appended to the Procurer's own.
+     *
+     * ⚠ ADDED RATHER THAN PUT IN `PROCURER_MODULES` DELIBERATELY. That list is
+     * shared by every bot suite, and the fleet companion now DERIVES its module
+     * lists from whatever the fit holds -- so a hardener added there would
+     * silently arm the tank rung in tests that are about something else
+     * entirely. A caller that wants a module says so.
+     */
+    readonly extraModules?: readonly FittedRow[];
+  } = {},
+): unknown {
   const offline = new Set(options.offline ?? []);
+  const fitted = [...PROCURER_MODULES, ...(options.extraModules ?? [])];
   return {
     ok: true,
     activeShipID: SHIP_ID,
     stationID: STATION_ID,
     slots: {
       type: "list",
-      items: PROCURER_MODULES.map((row) =>
+      items: fitted.map((row) =>
         packedRow({
           itemID: row.itemID,
           typeID: row.typeID,
@@ -185,7 +200,7 @@ export function fittingBody(options: { readonly offline?: readonly number[] } = 
     },
     online: {
       type: "list",
-      items: PROCURER_MODULES.map((row) => row.itemID).filter((id) => !offline.has(id)),
+      items: fitted.map((row) => row.itemID).filter((id) => !offline.has(id)),
     },
     errors: { slots: null, shipInfo: null, online: null },
   };
