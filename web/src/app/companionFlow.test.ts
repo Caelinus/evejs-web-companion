@@ -14,7 +14,11 @@ import assert from "node:assert/strict";
 
 import { createAppFlow } from "./flow.ts";
 import { createClientStore } from "../store/clientStore.ts";
-import { DEFAULT_FLEET_COMPANION_REQUEST } from "../nav/fleetCompanionLoop.ts";
+import {
+  DEFAULT_FLEET_COMPANION_REQUEST,
+  type FleetCompanionRequest,
+} from "../nav/fleetCompanionLoop.ts";
+import { FLEET_BROADCAST_TTL_MS } from "../bridge/fleetBroadcasts.ts";
 import {
   STRIP_MINER_ITEM_IDS,
   fittingBody,
@@ -26,6 +30,12 @@ import {
 
 const BELT = 40000123;
 const STATION = 60003760;
+
+// A chat sender the operator allowed, and a fleet-mate the roster carries as a
+// human -- both synthetic, neighbours of the documented 90000001 example, per
+// this repo's rule that a real character id or handle never reaches a test.
+const ALLOWED_CHAT_SENDER = 90000010;
+const HUMAN_FLEET_MEMBER = 90000011;
 
 const MINING_REQUEST = {
   beltID: BELT,
@@ -112,6 +122,103 @@ function harness(options: { readonly docked?: boolean; readonly inFleet?: boolea
 
   const store = createClientStore();
   return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
+}
+
+/**
+ * As `harness()`, but for the chat-command rung: it RECORDS every request
+ * path so a test can assert which endpoints were (or were not) hit, and it
+ * can seat a real human in the fleet roster (`humanMemberCharacterID`).
+ *
+ * ⚠ WHY THE ROSTER MATTERS HERE AND NOT IN `harness()`. `readyFleet()`'s own
+ * roster is empty, which is enough to pass the preflight (it only asks
+ * whether the fleet is READY) but starts the abandonment protocol the moment
+ * the ladder actually runs a tick -- and rung 3, "obeying the fleet", is
+ * never reached from inside that protocol. The cost-gate tests only care
+ * whether the chat READ happened, so the empty roster is fine for them; the
+ * freshness test needs an order to actually be OBEYED, which needs a
+ * supervised companion, same as a live one would be.
+ */
+function chatHarness(
+  options: {
+    readonly humanMemberCharacterID?: number;
+    readonly chatEntries?: readonly unknown[];
+  } = {},
+) {
+  const calls: string[] = [];
+  const chatEntries = options.chatEntries ?? [];
+
+  function boundFleetBody(): unknown {
+    if (options.humanMemberCharacterID === undefined) {
+      return readyFleet();
+    }
+    const memberCharacterID = options.humanMemberCharacterID;
+    const emptyDict = { type: "dict", entries: [] };
+    return {
+      ok: true,
+      characterID: 90000001,
+      fleetID: null,
+      reads: {
+        GetInitState: {
+          result: keyVal([
+            ["motd", "Ready up."],
+            ["fleetID", 90000002],
+            [
+              "members",
+              {
+                type: "dict",
+                entries: [[memberCharacterID, keyVal([["charID", memberCharacterID]])]],
+              },
+            ],
+            ["squads", emptyDict],
+            ["wings", emptyDict],
+          ]),
+        },
+        GetWings: { result: emptyDict },
+        GetMotd: { result: "Ready up." },
+        GetJoinRequests: { result: emptyDict },
+        GetFleetComposition: { result: { type: "list", items: [] } },
+      },
+    };
+  }
+
+  const fakeFetch = (async (input: unknown) => {
+    const path = String(input);
+    calls.push(path);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return respond(path);
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  function respond(path: string): unknown {
+    if (path === "/api/bridge/flight/status") return flightBody(false);
+    if (path === "/api/bridge/space/snapshot") return spaceBody();
+    if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+    if (path === "/api/bridge/bound-fleet") return boundFleetBody();
+    // LOCAL only, deliberately -- see flow.ts's own comment on the chat read:
+    // fleet chat is unreachable on this server, so nothing here should ever
+    // be asked for anything else.
+    if (path === "/api/bridge/chat/local") {
+      return {
+        ok: true,
+        chat: {
+          roomName: "Local",
+          corporationID: null,
+          solarSystemID: null,
+          messages: chatEntries,
+          roster: [],
+        },
+      };
+    }
+    if (path === "/api/bridge/flight/align") return { ok: true, flight: null, notifications: [] };
+    return { ok: true };
+  }
+
+  const store = createClientStore();
+  return { store, flow: createAppFlow(store, { fetch: fakeFetch }), calls };
 }
 
 // --- the preflight ----------------------------------------------------------
@@ -336,5 +443,204 @@ test("a drained response with no notifications changes nothing", async () => {
   await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(store.get().fleet.pendingInvite, null);
+  flow.stopFleetCompanion();
+});
+
+// --- the chat read: a cost gate, and the stale-capture trap it depends on --
+
+/**
+ * `store.companion.why` starts `null` on every fresh `companion/started` and
+ * every branch of the ladder fills it in — so this is true only once a tick
+ * has fully DECIDED something, which is after `observe()`'s whole
+ * `Promise.all` (chat included) has resolved and `issue()` (if any) has
+ * already landed, not merely been dispatched.
+ */
+async function waitForCompanionTick(
+  companionWhy: () => string | null,
+): Promise<void> {
+  await waitFor(() => companionWhy() !== null, "the tick to decide something");
+}
+
+test("the chat cost gate: the DEFAULT companion opens no request to the chat bridge at all", async () => {
+  // ⚠ THIS IS THE ONE THAT STOPS THE FEATURE QUIETLY COSTING A FIFTH ROUND
+  // TRIP PER TICK FOR EVERY PILOT THAT NEVER TOUCHES CHAT. The default obeys
+  // broadcast+tag and ships with an empty chatCommandSenders, so a companion
+  // nobody has configured for chat must never open /api/bridge/chat/anything.
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
+    "obeys has no chat and chatCommandSenders is the shipped empty default -- nothing should ask the chat bridge anything",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("the chat cost gate: chat in obeys plus an allowed sender reads the LOCAL channel", async () => {
+  const { store, flow, calls } = chatHarness();
+  const request: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [ALLOWED_CHAT_SENDER],
+  };
+
+  await flow.startFleetCompanion(request);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.includes("/api/bridge/chat/local"),
+    "chat in obeys with a non-empty allowlist must pay for the fifth round trip",
+  );
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/") && path !== "/api/bridge/chat/local"),
+    "fleet chat is unreachable on this server (the gateway only ever computes local/corp rooms) -- it must ask local, never anything else",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("chat in obeys but an EMPTY allowlist still reads nothing", async () => {
+  // An empty chatCommandSenders can never produce an order (isChatCommandSenderAllowed
+  // refuses everyone), so paying for the read would buy an answer nothing could act on.
+  const { store, flow, calls } = chatHarness();
+  const request: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [],
+  };
+
+  await flow.startFleetCompanion(request);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
+    "an empty allowlist must read nothing, exactly like the default case",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("the stale-capture trap: chat OFF then ON, on the SAME companion, must read on the second run", async () => {
+  // ⚠ THE WHOLE REASON `liveCompanionRequest` EXISTS. `makeFleetCompanionDeps()`
+  // is built only on the FIRST start (`if (!fleetCompanion)`), so a naive
+  // implementation that captured the request at deps-build time would answer
+  // this second start with the FIRST run's chat-off setting, forever.
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
+    "first run: chat is off, so nothing is read yet",
+  );
+  flow.stopFleetCompanion();
+
+  calls.length = 0;
+  const withChat: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [ALLOWED_CHAT_SENDER],
+  };
+  await flow.startFleetCompanion(withChat);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.includes("/api/bridge/chat/local"),
+    "the SECOND start's request must be the one the live tick reads",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("the stale-capture trap, reversed: chat ON then OFF, on the SAME companion, must stop reading on the second run", async () => {
+  const { store, flow, calls } = chatHarness();
+  const withChat: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [ALLOWED_CHAT_SENDER],
+  };
+
+  await flow.startFleetCompanion(withChat);
+  await waitForCompanionTick(() => store.get().companion.why);
+  assert.ok(
+    calls.includes("/api/bridge/chat/local"),
+    "first run: chat is on, so the local channel is read",
+  );
+  flow.stopFleetCompanion();
+
+  calls.length = 0;
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/chat/")),
+    "the SECOND start turned chat off -- a request captured at deps-build time (the first, chat-on, run) would keep reading it forever",
+  );
+  flow.stopFleetCompanion();
+});
+
+// --- freshness: a lapsed chat order must fall back to the pilot's own ladder --
+
+/** An `align <belt>` chat line from the allowed sender, `ageMs` old. */
+function alignChatLine(ageMs: number): unknown {
+  return {
+    characterID: ALLOWED_CHAT_SENDER,
+    // Obviously synthetic on purpose: a plausible-looking capsuleer name in a
+    // fixture is indistinguishable from a real one lifted out of a live session.
+    characterName: "Allowed Commander",
+    message: `align <url=showinfo:15//${BELT}>Asteroid Belt 1</url>`,
+    createdAtMs: Date.now() - ageMs,
+  };
+}
+
+test("a chat order older than FLEET_BROADCAST_TTL_MS does not reach the loop", async () => {
+  const { store, flow, calls } = chatHarness({
+    humanMemberCharacterID: HUMAN_FLEET_MEMBER,
+    chatEntries: [alignChatLine(FLEET_BROADCAST_TTL_MS + 5_000)],
+  });
+  const request: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [ALLOWED_CHAT_SENDER],
+  };
+
+  await flow.startFleetCompanion(request);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(calls.includes("/api/bridge/chat/local"), "the read itself still happens");
+  assert.ok(
+    !calls.includes("/api/bridge/flight/align"),
+    "a chat order past its TTL must not be obeyed -- a lapsed order is exactly as stale as a lapsed broadcast",
+  );
+  assert.equal(
+    store.get().companion.phase,
+    "Standing by",
+    "with the order dropped as stale, this supervised pilot has nothing to obey",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("a chat order inside FLEET_BROADCAST_TTL_MS reaches the loop and is obeyed", async () => {
+  const { store, flow, calls } = chatHarness({
+    humanMemberCharacterID: HUMAN_FLEET_MEMBER,
+    chatEntries: [alignChatLine(1_000)],
+  });
+  const request: FleetCompanionRequest = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    obeys: ["chat"],
+    chatCommandSenders: [ALLOWED_CHAT_SENDER],
+  };
+
+  await flow.startFleetCompanion(request);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.includes("/api/bridge/flight/align"),
+    "a fresh chat order must reach the loop and be obeyed",
+  );
+  assert.equal(
+    store.get().companion.followingOrderFrom,
+    "chat",
+    "and the readout must attribute it to chat, not the fleet's own ladder",
+  );
   flow.stopFleetCompanion();
 });

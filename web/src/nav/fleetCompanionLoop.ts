@@ -47,7 +47,13 @@ import {
 // re-derived for the same reason the get-safe helpers above are: one answer to
 // "where does this tag rank", shared with the combat priority list.
 import { fleetTagRank } from "./targetPriority.ts";
-import type { SpaceEntity } from "../store/types.ts";
+import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
+import type { ChatMessage } from "../store/types.ts";
+import {
+  isChatCommandSenderAllowed,
+  parseChatCommand,
+  type ChatCommand,
+} from "./chatCommands.ts";
 
 /** The run states, mirroring the other loops exactly (`MiningBotRunState`). */
 export type FleetCompanionRunState = "idle" | "running" | "paused" | "stopped" | "error";
@@ -112,6 +118,25 @@ export interface FleetCompanionRequest {
   /** As `remoteShieldModuleIDs`, for capacitor transfers — `HealCapacitor`
    *  draws on this list alone, for the same reason. */
   readonly remoteCapacitorModuleIDs: readonly number[];
+  /**
+   * The player's OWN pick of fitted WEAPONS (turrets, launchers), by item id.
+   *
+   * ⚠ EMPTY IS A REAL ANSWER AND IT IS THE DEFAULT: this pilot locks what the
+   * fleet calls and never fires. That is the phase 1 behaviour, kept as the
+   * setting nobody has changed, so adding a weapons rung cannot arm a pilot
+   * whose operator never asked for one.
+   *
+   * ⚠ PICKED, NOT DERIVED, AND THE DSL DOES THE OPPOSITE. `fight-the-rats`
+   * reads `obs.weaponModuleIDs`, which `resolveDefenseModuleIDs` classifies out
+   * of the fit by matching the group NAME against `/weapon|launcher|turret/i`.
+   * The companion asks instead, for the same reason `defenseModuleIDs` and the
+   * three remote lists are asked for: this loop obeys somebody ELSE's target
+   * call, so the cost of a misclassified module is firing something the
+   * operator did not know was armed at something they did not choose. A
+   * mystery module is skipped by that classifier; it is not skipped by a
+   * commander's broadcast.
+   */
+  readonly weaponModuleIDs: readonly number[];
   /** Remaining fraction (0-1) of any health layer that starts a flee. */
   readonly fleeHealthFloor: number;
   /**
@@ -216,6 +241,9 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   remoteShieldModuleIDs: Object.freeze([]),
   remoteArmorModuleIDs: Object.freeze([]),
   remoteCapacitorModuleIDs: Object.freeze([]),
+  // Empty: locks the call, never fires it. See the field comment for why an
+  // unset weapon list is the right default for a loop that obeys other people.
+  weaponModuleIDs: Object.freeze([]),
   fleeHealthFloor: 0.3,
   // Not a guess and not a placeholder: the constant the script runner already
   // uses to switch a repairer off, with the same reasoning ("an empty capacitor
@@ -275,6 +303,24 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * ONLY way back into a fleet, and rung 2 gates it on who sent it.
    */
   readonly pendingFleetInvite: CompanionFleetInvite | null;
+  /**
+   * Recent chat lines, for the chat-command rung. Absent or empty means no
+   * chat was read this tick, which is the same answer as "nobody said
+   * anything" and is what a pilot that does not obey chat always sees.
+   *
+   * ⚠ ALREADY FRESHNESS-FILTERED BY THE BUILDER, exactly as `fleetBroadcast`
+   * is, and against the same window. The loop deliberately carries no clock for
+   * this: a stale order has to lapse so the pilot falls back to its own ladder,
+   * and having ONE staleness policy for both sources is what stops "the fleet
+   * called it" and "somebody typed it" ageing at different rates.
+   *
+   * ⚠ RAW LINES, NOT PARSED COMMANDS, AND THAT IS THE SECURITY BOUNDARY. The
+   * sender allowlist lives on the REQUEST, which the builder does not hold, so
+   * the gate has to run here where the request is. Handing this rung
+   * pre-approved commands would move the decision about WHO MAY ORDER THIS SHIP
+   * out of the layer that knows the operator's answer.
+   */
+  readonly chatMessages?: readonly ChatMessage[];
 }
 
 /** A pending fleet invite, narrowed to the two ids the rejoin gate needs. */
@@ -503,6 +549,17 @@ export interface CompanionLadderMemory {
    * The solar system rung 3 last issued a `travelTo` route to, so a standing
    * `TravelTo` broadcast does not restart the shared autopilot every tick.
    */
+  /**
+   * The target rung 3 last aimed a WEAPON at, and which fitted weapons it has
+   * issued for THAT target. The same pair, for the same reason, as
+   * `lastHealTargetID` above: a snapshot says a module is cycling and never
+   * says what it is cycling AT, so a gun still chewing on the rat the commander
+   * has moved off looks identical to one obeying the current call. Reset to a
+   * fresh list the moment the call names a different ship, which is what makes
+   * a new call re-aim the whole rack.
+   */
+  readonly lastFireTargetID: number | null;
+  readonly lastFireModuleIDs: readonly number[];
   readonly lastRoutedSystemID: number | null;
 }
 
@@ -514,6 +571,8 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastLockIssuedFor: null,
     lastHealTargetID: null,
     lastHealModuleIDs: [],
+    lastFireTargetID: null,
+    lastFireModuleIDs: [],
     lastRoutedSystemID: null,
   };
 }
@@ -542,7 +601,7 @@ export interface CompanionDecision {
    * answer for the warp yield, the supervision gate, the abandonment protocol
    * and "Standing by" alike — none of them are obeying an external order.
    */
-  readonly followingOrderFrom?: "tag" | "broadcast";
+  readonly followingOrderFrom?: "tag" | "broadcast" | "chat";
   /** Short plain words for the panel — never the broadcast's wire name. */
   readonly lastOrderHeard?: string;
 }
@@ -683,6 +742,8 @@ export function decideCompanionAction(
     abandonment: null,
     closingOn: memory.closingOn,
     lastLockIssuedFor: memory.lastLockIssuedFor,
+    lastFireTargetID: memory.lastFireTargetID,
+    lastFireModuleIDs: memory.lastFireModuleIDs,
     lastHealTargetID: memory.lastHealTargetID,
     lastHealModuleIDs: memory.lastHealModuleIDs,
     lastRoutedSystemID: memory.lastRoutedSystemID,
@@ -938,30 +999,158 @@ function isAlreadyLocked(
   return memory.lastLockIssuedFor === targetID;
 }
 
-/** One rung-3 decision: lock `targetID`, or hold if it is already locked. */
-function lockOrHold(
+/**
+ * Every weapon the ship is running, counting a banked SLAVE as running whenever
+ * its master is.
+ *
+ * ⚠ WITHOUT THE BANK PASS THIS RUNG RE-ISSUES THE SAME GUN FOREVER, and the
+ * pilot does nothing else for as long as the order stands.
+ * `SpaceShipStatus.weaponBanks` says it plainly: activating a slave fires the
+ * whole bank THROUGH its master, and `activeModuleIDs` then names only the
+ * master. So a slave never appears to be cycling on its own, and because this
+ * loop issues at most one call per tick, that one slave eats the action slot
+ * every rung beneath it needs.
+ *
+ * ⚠ THE SAME GAP IS LIVE IN THE DSL, and is deliberately not fixed from here.
+ * `fightTheRats` and `engagePrey` both do the naive `find` over
+ * `activeModuleIDs`, and nothing under `nav/` reads `weaponBanks` at all --
+ * only the manual rack does. It costs them less, because their tick has nowhere
+ * else to be, so it reads there as wasted calls rather than as a stall. Worth
+ * fixing; not worth a companion rung quietly changing what the ratting block
+ * does.
+ */
+function cyclingWeapons(snapshot: SpaceSnapshot | null): ReadonlySet<number> {
+  const cycling = new Set(snapshot?.ship?.activeModuleIDs ?? []);
+  const banks = snapshot?.ship?.weaponBanks ?? null;
+  for (const masterID of Object.keys(banks ?? {})) {
+    if (!cycling.has(Number(masterID))) {
+      continue;
+    }
+    for (const slaveID of banks?.[Number(masterID)] ?? []) {
+      cycling.add(slaveID);
+    }
+  }
+  return cycling;
+}
+
+/**
+ * Is this weapon already firing at THIS target?
+ *
+ * The same two-part test `isHealModuleAlreadyRunning` makes, for the same
+ * reason: a snapshot says a module is cycling, and never says what it is
+ * cycling AT. So "cycling" alone cannot answer this -- a gun happily chewing on
+ * the rat the commander has just moved off is cycling, and it is exactly the
+ * gun that needs re-issuing. The memory of what this rung aimed where is the
+ * half that knows the target, and it is reset the moment the call names a
+ * different ship, so a new call re-aims the whole rack a gun at a time.
+ *
+ * When `activeModuleIDs` is unreadable the memory is trusted ALONE, which is
+ * what stops an unreadable snapshot re-firing the rack every tick.
+ */
+function isWeaponAlreadyFiringAt(
+  moduleID: number,
   targetID: number,
-  source: "tag" | "broadcast",
+  cycling: ReadonlySet<number>,
+  activeModuleIDs: readonly number[] | null,
+  memory: CompanionLadderMemory,
+): boolean {
+  const issuedAtThisTarget =
+    memory.lastFireTargetID === targetID && memory.lastFireModuleIDs.includes(moduleID);
+  if (activeModuleIDs !== null) {
+    return cycling.has(moduleID) && issuedAtThisTarget;
+  }
+  return issuedAtThisTarget;
+}
+
+/**
+ * The fleet called this target and the lock has landed: open fire.
+ *
+ * One weapon per tick, the same discipline `hardenersOn` uses on a rack of
+ * hardeners -- the guns come up over a few ticks rather than in one burst of
+ * calls, and every tick re-reads what is actually cycling before it picks the
+ * next one.
+ *
+ * `null` is "nothing NEW to start", covering no weapon picked and every picked
+ * weapon already firing at this target alike, and the caller falls through on
+ * both -- the same shape, and the same reason, as `decideHealOrder`.
+ */
+function decideOpenFire(
+  targetID: number,
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly moduleID: number; readonly memory: CompanionLadderMemory } | null {
+  const activeModuleIDs = obs.snapshot?.ship?.activeModuleIDs ?? null;
+  const cycling = cyclingWeapons(obs.snapshot ?? null);
+  const next = request.weaponModuleIDs.find(
+    (id) => !isWeaponAlreadyFiringAt(id, targetID, cycling, activeModuleIDs, memory),
+  );
+  if (next === undefined) {
+    return null;
+  }
+  const aimed =
+    memory.lastFireTargetID === targetID ? [...memory.lastFireModuleIDs, next] : [next];
+  return {
+    moduleID: next,
+    memory: { ...memory, lastFireTargetID: targetID, lastFireModuleIDs: aimed },
+  };
+}
+
+/**
+ * One rung-3 decision over a called target: lock it, then shoot it.
+ *
+ * ⚠ THE ORDER IS LOCK, OBSERVE, THEN FIRE, and the middle step is not a
+ * formality. `isAlreadyLocked` prefers the authoritative `lockedTargetIDs`
+ * read precisely because a lock this loop ISSUED may have been refused, and a
+ * weapon activated against an unlocked ship is a call the server throws away.
+ * Firing only past that check means the guns come up on the tick the lock is
+ * seen to exist, never on the tick it was asked for.
+ */
+function lockThenEngage(
+  targetID: number,
+  source: "tag" | "broadcast" | "chat",
   heard: string,
   why: string,
+  request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
 ): CompanionDecision {
-  if (isAlreadyLocked(targetID, obs.lockedTargetIDs, memory)) {
+  if (!isAlreadyLocked(targetID, obs.lockedTargetIDs, memory)) {
     return {
-      action: WAIT,
+      action: { kind: "lock", targetID },
       phase: "Obeying fleet",
-      why: why + " Already locked.",
-      memory,
+      why: why + " Locking it.",
+      memory: { ...memory, lastLockIssuedFor: targetID },
+      followingOrderFrom: source,
+      lastOrderHeard: heard,
+    };
+  }
+  const fire = decideOpenFire(targetID, request, obs, memory);
+  if (fire !== null) {
+    return {
+      action: { kind: "activate", moduleID: fire.moduleID, targetID },
+      phase: "Obeying fleet",
+      why: why + " Opening fire on it.",
+      memory: fire.memory,
       followingOrderFrom: source,
       lastOrderHeard: heard,
     };
   }
   return {
-    action: { kind: "lock", targetID },
+    action: WAIT,
     phase: "Obeying fleet",
-    why: why + " Locking it.",
-    memory: { ...memory, lastLockIssuedFor: targetID },
+    // ⚠ THE NO-WEAPON CASE SAYS SO, and that is the whole of its job. An empty
+    // weapon list is a setting, not a fault, so it must not read as one -- but
+    // a pilot that locks a called target and never shoots it is EXACTLY what
+    // this rung was built to stop being, and an operator who left the list
+    // empty by accident would otherwise watch the old behaviour and conclude
+    // the feature is broken.
+    why:
+      why +
+      (request.weaponModuleIDs.length === 0
+        ? " Locked. No weapon is picked for this pilot, so it holds the lock without firing."
+        : " Locked, and firing on it."),
+    memory,
     followingOrderFrom: source,
     lastOrderHeard: heard,
   };
@@ -1132,6 +1321,183 @@ function decideHealOrder(
   };
 }
 
+/** The four broadcast names that name a thing to go to or shoot. */
+type NamedOrderName = "Target" | "AlignTo" | "TravelTo" | "JumpTo";
+
+/**
+ * One order this pilot is being given, with the source it came from already
+ * decided. `why` is the readout sentence's opening clause and `heard` is the
+ * one-line "what it is obeying" the panel shows; both name the SOURCE, because
+ * "the fleet called this" and "somebody typed this" are different claims and a
+ * player reading the panel is entitled to know which one they are looking at.
+ */
+interface NamedOrder {
+  readonly name: NamedOrderName;
+  readonly itemID: number;
+  readonly source: "broadcast" | "chat";
+  readonly heard: string;
+  readonly why: string;
+}
+
+const CHAT_ORDER_NAMES: Readonly<Record<ChatCommand["kind"], NamedOrderName>> = Object.freeze({
+  target: "Target",
+  align: "AlignTo",
+  travel: "TravelTo",
+  jump: "JumpTo",
+});
+
+const ORDER_HEARD: Readonly<Record<NamedOrderName, { readonly broadcast: string; readonly chat: string }>> =
+  Object.freeze({
+    Target: { broadcast: "the fleet's target call", chat: "a chat order to shoot a target" },
+    AlignTo: { broadcast: "the fleet's align call", chat: "a chat order to align" },
+    TravelTo: { broadcast: "the fleet's travel call", chat: "a chat order to travel" },
+    JumpTo: { broadcast: "the fleet's jump call", chat: "a chat order to jump" },
+  });
+
+const ORDER_WHY: Readonly<Record<NamedOrderName, { readonly broadcast: string; readonly chat: string }>> =
+  Object.freeze({
+    Target: {
+      broadcast: "The fleet broadcast a target on this grid.",
+      chat: "An allowed pilot called a target in chat.",
+    },
+    AlignTo: {
+      broadcast: "The fleet broadcast an align point on this grid.",
+      chat: "An allowed pilot called an align point in chat.",
+    },
+    TravelTo: {
+      broadcast: "The fleet broadcast a system to travel to.",
+      chat: "An allowed pilot called a system to travel to in chat.",
+    },
+    JumpTo: {
+      broadcast: "The fleet called a gate on this grid.",
+      chat: "An allowed pilot called a gate in chat.",
+    },
+  });
+
+function asNamedOrderName(name: string | undefined): NamedOrderName | null {
+  return name === "Target" || name === "AlignTo" || name === "TravelTo" || name === "JumpTo"
+    ? name
+    : null;
+}
+
+/**
+ * The newest chat line that is BOTH from a sender the operator allowed AND a
+ * command this loop has a rung for.
+ *
+ * ⚠ THE GATE IS THE SENDER, AND IT IS CHECKED BEFORE THE TEXT MEANS ANYTHING.
+ * `isChatCommandSenderAllowed` keys on `characterID`, which the chat backend
+ * fills in server-side from the authenticated session and never from the
+ * message body — so no amount of crafting the text changes who a line is
+ * attributed to. `chatCommandSenders` comes off the request the operator
+ * controls, and is NEVER populated from chat itself. An empty list allows
+ * nobody, which is the shipped default: a companion nobody has explicitly
+ * authorised takes orders from no one over chat.
+ *
+ * Newest wins, because a later order supersedes an earlier one exactly as a
+ * later broadcast replaces the one before it.
+ */
+function newestChatOrder(
+  messages: readonly ChatMessage[],
+  chatCommandSenders: readonly number[],
+): { readonly command: ChatCommand; readonly at: number } | null {
+  let best: { readonly command: ChatCommand; readonly at: number } | null = null;
+  for (const message of messages) {
+    if (!isChatCommandSenderAllowed(message, chatCommandSenders)) {
+      continue;
+    }
+    const command = parseChatCommand(message);
+    if (command === null) {
+      continue;
+    }
+    if (best === null || message.createdAtMs >= best.at) {
+      best = { command, at: message.createdAtMs };
+    }
+  }
+  return best;
+}
+
+/**
+ * Can this pilot actually act on that order, here, now?
+ *
+ * ⚠ THIS IS THE TEST THAT MAKES "FALL THROUGH TO THE NEXT SOURCE" TRUE, and it
+ * has to run while choosing the source rather than inside the branch that acts.
+ * The rung's header has always said that a call for something not on this grid
+ * is skipped "falling through to the next source" -- back when a broadcast was
+ * the only source that could not be observed, because the only thing below it
+ * was "Standing by". Now that chat is a real next source, an off-grid broadcast
+ * that is chosen and only THEN found unactionable does not fall through to
+ * anything: it silently starves a perfectly good chat order, and the pilot
+ * stands by while somebody with authority is telling it what to shoot.
+ *
+ * `TravelTo` is the standing exception, for the reason the header gives: its
+ * itemID is a solar SYSTEM, not an object, so there is nothing on this grid to
+ * check it against.
+ */
+function isOrderActionable(
+  name: NamedOrderName,
+  itemID: number,
+  entities: readonly SpaceEntity[],
+): boolean {
+  return name === "TravelTo" || entityOnGrid(itemID, entities) !== null;
+}
+
+/**
+ * Which named order this pilot is obeying this tick, from whichever source is
+ * entitled to give it one.
+ *
+ * ⚠ A BROADCAST OUTRANKS A CHAT LINE, and the decided precedence table says so:
+ * server fleet warp > FC broadcast > chat command > own flee rule > own ladder.
+ * The reason is that a broadcast is the game's own fleet mechanism, carried on
+ * a channel only fleet members can reach, while a chat line is text on a
+ * channel anybody in the system can type into — it is trustworthy here only
+ * because the operator named its sender in advance. When both speak at once,
+ * the in-game mechanism is the one that wins.
+ *
+ * ⚠ STALENESS IS NOT HANDLED HERE, ON PURPOSE. Both sources arrive already
+ * freshness-filtered by the observation builder — `fleetBroadcast` against
+ * `FLEET_BROADCAST_TTL_MS`, and `chatMessages` against the same window for the
+ * same reason. That is what makes a lapsed order fall back to this pilot's own
+ * ladder rather than standing forever, and it is deliberately ONE policy rather
+ * than two: a chat order that has gone quiet is exactly as stale as a broadcast
+ * that has.
+ */
+function resolveNamedOrder(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  entities: readonly SpaceEntity[],
+): NamedOrder | null {
+  if (request.obeys.includes("broadcast")) {
+    const name = asNamedOrderName(obs.fleetBroadcast?.name);
+    const itemID = obs.fleetBroadcast?.itemID ?? null;
+    if (name !== null && itemID !== null && isOrderActionable(name, itemID, entities)) {
+      return {
+        name,
+        itemID,
+        source: "broadcast",
+        heard: ORDER_HEARD[name].broadcast,
+        why: ORDER_WHY[name].broadcast,
+      };
+    }
+  }
+  if (request.obeys.includes("chat")) {
+    const chat = newestChatOrder(obs.chatMessages ?? [], request.chatCommandSenders);
+    if (chat !== null) {
+      const name = CHAT_ORDER_NAMES[chat.command.kind];
+      if (!isOrderActionable(name, chat.command.itemID, entities)) {
+        return null;
+      }
+      return {
+        name,
+        itemID: chat.command.itemID,
+        source: "chat",
+        heard: ORDER_HEARD[name].chat,
+        why: ORDER_WHY[name].chat,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Rung 3: obeying the fleet. Below the supervision gate (only reached while a
  * human is here) and above "Standing by". Returns `null` when there is
@@ -1149,7 +1515,7 @@ function decideHealOrder(
  * SHIP'S STATE at all — a logi can run a repairer and hold a lock at once.
  * It only competes for THIS TICK'S one atomic call. That is exactly why
  * `decideHealOrder` returns `null` — falls through, rather than parking the
- * tick the way `lockOrHold`'s "already locked" branch does — the moment
+ * tick the way `lockThenEngage`'s "already locked" branch does — the moment
  * there is nothing NEW to start: a logi whose repairer is already cycling is
  * still free to lock the primary on the very same tick's next check, and a
  * dps pilot with nothing fitted for the call is never blocked by it at all.
@@ -1175,12 +1541,29 @@ function decideHealOrder(
  * its itemID is a solar SYSTEM, not an object, so there is nothing on this
  * grid to check it against.
  *
- * ⚠ LOCKING IS THE WHOLE OF WHAT THIS RUNG DOES WITH A TAGGED OR CALLED
- * TARGET, AND THAT IS HONEST, NOT HALF-DONE. There is no weapons rung yet
- * and no weapon-module field on `FleetCompanionRequest` — shooting is a
- * later phase. A lock is the real, complete first half of answering a
- * primary; the readout says exactly that rather than implying this pilot is
- * shooting.
+ * ⚠ THIS RUNG NOW LOCKS **AND FIRES**, and the sentence that used to stand here
+ * said the opposite: "there is no weapons rung yet and no weapon-module field
+ * on `FleetCompanionRequest` -- shooting is a later phase. A lock is the real,
+ * complete first half of answering a primary." That was honest when it was
+ * written and it is dead now. `weaponModuleIDs` exists, and `lockThenEngage`
+ * opens fire once the lock is OBSERVED. Locking alone is still what a pilot
+ * with an empty weapon list does, and the readout says so in those words --
+ * but it is now a SETTING, not the limit of the feature.
+ *
+ * ⚠ AND IT STILL PARKS THE TICK, which matters more now than it did. The
+ * "already locked" branch returns a wait rather than falling through the way
+ * `decideHealOrder` does, so while a target call stands, every rung BELOW this
+ * one is starved. That was harmless when the branch meant "locked, nothing
+ * more to do"; it is load-bearing now that the same branch means "locked and
+ * shooting", because a standing primary is exactly the situation in which the
+ * rungs below want a turn.
+ *
+ * It is left parked deliberately, for the readout: a pilot fighting the FC's
+ * primary should say "Obeying fleet", not fall through to "Standing by" while
+ * its guns are running. **But phase 6 must not put its flee beneath this rung**
+ * -- a pilot that never stops obeying a target call would never flee -- and
+ * phase 5's drone recall has the same problem. The planned ladder puts both
+ * below; that ordering has to be revisited when they are built, not inherited.
  */
 function decideFleetOrders(
   request: FleetCompanionRequest,
@@ -1210,49 +1593,45 @@ function decideFleetOrders(
   ) {
     const tagged = bestTaggedEntity(obs.fleetTargetTags, entities, measurement);
     if (tagged !== null) {
-      return lockOrHold(
+      return lockThenEngage(
         tagged.itemID,
         "tag",
         "the fleet's tagged target",
         "The fleet has tagged a target on this grid.",
+        request,
         obs,
         memory,
       );
     }
   }
 
-  // c. A `Target` broadcast — any member may send one, so it is only reached
-  //    once the tag above has found nothing to obey.
-  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "Target") {
-    const itemID = obs.fleetBroadcast.itemID;
-    if (itemID !== null && entityOnGrid(itemID, entities) !== null) {
-      return lockOrHold(
-        itemID,
-        "broadcast",
-        "the fleet's target call",
-        "The fleet broadcast a target on this grid.",
-        obs,
-        memory,
-      );
-    }
+  // c-f. ONE SET OF BRANCHES, TWO SOURCES. A named order reaches this pilot
+  //       either as a fleet broadcast or as a line somebody typed in chat, and
+  //       from here down it is deliberately the same order. Resolving the
+  //       source ONCE, above the branches, is what stops chat being a second
+  //       copy of Target/AlignTo/TravelTo/JumpTo that drifts out of step with
+  //       the first -- the JumpTo branch alone is thirty lines of honest
+  //       partial nobody should be maintaining twice.
+  const order = resolveNamedOrder(request, obs, entities);
+
+  // c. A `Target` order.
+  if (order?.name === "Target") {
+    return lockThenEngage(order.itemID, order.source, order.heard, order.why, request, obs, memory);
   }
 
-  // d. An `AlignTo` broadcast.
-  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "AlignTo") {
-    const itemID = obs.fleetBroadcast.itemID;
-    if (itemID !== null && entityOnGrid(itemID, entities) !== null) {
-      return {
-        action: { kind: "align", targetID: itemID },
-        phase: "Obeying fleet",
-        why: "The fleet broadcast an align point on this grid, so this pilot is aligning to it.",
-        memory,
-        followingOrderFrom: "broadcast",
-        lastOrderHeard: "the fleet's align call",
-      };
-    }
+  // d. An `AlignTo` order.
+  if (order?.name === "AlignTo") {
+    return {
+      action: { kind: "align", targetID: order.itemID },
+      phase: "Obeying fleet",
+      why: order.why + " Aligning to it.",
+      memory,
+      followingOrderFrom: order.source,
+      lastOrderHeard: order.heard,
+    };
   }
 
-  // e. A `TravelTo` broadcast — a destination SOLAR SYSTEM
+  // e. A `TravelTo` order — a destination SOLAR SYSTEM
   //    (`FLEET_BROADCAST_CLASSIFICATION`'s "destination-system"), not an
   //    on-grid object, so there is no grid-presence check here. Routing
   //    restarts the shared autopilot, so it is issued once per DISTINCT
@@ -1270,21 +1649,18 @@ function decideFleetOrders(
   //    gaps could still issue a lock/align/heal call alongside the
   //    autopilot's own navigation. That is an accepted, un-solved gap, not a
   //    claim that this rung fully hands off control.
-  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "TravelTo") {
-    const systemID = obs.fleetBroadcast.itemID;
-    if (systemID !== null && systemID !== memory.lastRoutedSystemID) {
-      return {
-        action: { kind: "travelTo", systemID },
-        phase: "Obeying fleet",
-        why: "The fleet broadcast a system to travel to, so this pilot is starting the route.",
-        memory: { ...memory, lastRoutedSystemID: systemID },
-        followingOrderFrom: "broadcast",
-        lastOrderHeard: "the fleet's travel call",
-      };
-    }
+  if (order?.name === "TravelTo" && order.itemID !== memory.lastRoutedSystemID) {
+    return {
+      action: { kind: "travelTo", systemID: order.itemID },
+      phase: "Obeying fleet",
+      why: order.why + " Starting the route.",
+      memory: { ...memory, lastRoutedSystemID: order.itemID },
+      followingOrderFrom: order.source,
+      lastOrderHeard: order.heard,
+    };
   }
 
-  // f. A `JumpTo` broadcast — HONEST PARTIAL, not a full jump.
+  // f. A `JumpTo` order — HONEST PARTIAL, not a full jump.
   //
   //    ⚠ WHAT IS MISSING, AND WHY. `itemID` here is a single stargate
   //    (`FLEET_BROADCAST_CLASSIFICATION`'s "stargate"), but `api.jump` needs
@@ -1300,61 +1676,63 @@ function decideFleetOrders(
   //    there: warp, then close in, then hold at jump range — it never fires
   //    the jump itself. A later phase that threads the route graph in can
   //    finish this.
-  if (request.obeys.includes("broadcast") && obs.fleetBroadcast?.name === "JumpTo") {
-    const gateID = obs.fleetBroadcast.itemID;
-    if (gateID !== null && entityOnGrid(gateID, entities) !== null) {
-      const step = decideCloseIn(gateID, MAX_STARGATE_JUMPING_DISTANCE_M, measurement, memory.closingOn);
-      if (step === null) {
-        return {
-          action: WAIT,
-          phase: "Obeying fleet",
-          why: "The fleet called a gate on this grid, but it is not measurable this tick.",
-          memory,
-          followingOrderFrom: "broadcast",
-          lastOrderHeard: "the fleet's jump call",
-        };
-      }
-      if (step.kind === "arrive") {
-        return {
-          action: WAIT,
-          phase: "Obeying fleet",
-          why:
-            "At the gate the fleet called, holding here. Jumping needs the gate on the far " +
-            "side too, and there is no safe way to get that from the call alone.",
-          memory,
-          followingOrderFrom: "broadcast",
-          lastOrderHeard: "the fleet's jump call",
-        };
-      }
-      if (step.kind === "closing") {
-        return {
-          action: WAIT,
-          phase: "Obeying fleet",
-          why: "Closing on the gate the fleet called.",
-          memory,
-          followingOrderFrom: "broadcast",
-          lastOrderHeard: "the fleet's jump call",
-        };
-      }
-      if (step.kind === "approach") {
-        return {
-          action: { kind: "approach", targetID: gateID },
-          phase: "Obeying fleet",
-          why: "The fleet called a gate on this grid, so this pilot is closing on it.",
-          memory: { ...memory, closingOn: gateID },
-          followingOrderFrom: "broadcast",
-          lastOrderHeard: "the fleet's jump call",
-        };
-      }
+  if (order?.name === "JumpTo") {
+    const gateID = order.itemID;
+    const step = decideCloseIn(gateID, MAX_STARGATE_JUMPING_DISTANCE_M, measurement, memory.closingOn);
+    if (step === null) {
       return {
-        action: { kind: "warp", targetID: gateID },
+        action: WAIT,
         phase: "Obeying fleet",
-        why: "The fleet called a gate on this grid, so this pilot is warping to it.",
+        why: order.why + " It is not measurable this tick.",
         memory,
-        followingOrderFrom: "broadcast",
-        lastOrderHeard: "the fleet's jump call",
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
       };
     }
+    if (step.kind === "arrive") {
+      return {
+        action: WAIT,
+        phase: "Obeying fleet",
+        // The explanation is the point of this sentence, not decoration: the
+        // pilot is sitting still ON the thing it was told to jump through, which
+        // looks exactly like a stuck bot unless it says why it stopped.
+        why:
+          order.why +
+          " At it now, holding here. Jumping needs the gate on the far side too, and there " +
+          "is no safe way to get that from the call alone.",
+        memory,
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
+      };
+    }
+    if (step.kind === "closing") {
+      return {
+        action: WAIT,
+        phase: "Obeying fleet",
+        why: order.why + " Closing on it.",
+        memory,
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
+      };
+    }
+    if (step.kind === "approach") {
+      return {
+        action: { kind: "approach", targetID: gateID },
+        phase: "Obeying fleet",
+        why: order.why + " Starting to close on it.",
+        memory: { ...memory, closingOn: gateID },
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
+      };
+    }
+    return {
+      action: { kind: "warp", targetID: gateID },
+      phase: "Obeying fleet",
+      why: order.why + " Warping to it.",
+      memory,
+      followingOrderFrom: order.source,
+      lastOrderHeard: order.heard,
+    };
   }
 
   return null;
@@ -1524,6 +1902,8 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           // not issued any of those calls, so it must not assume one already
           // landed.
           lastLockIssuedFor: null,
+          lastFireTargetID: null,
+          lastFireModuleIDs: [],
           lastHealTargetID: null,
           lastHealModuleIDs: [],
           lastRoutedSystemID: null,

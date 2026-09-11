@@ -5,10 +5,18 @@ Companion to [fleet-companion-plan.md](fleet-companion-plan.md). That doc says
 know it works**. Read the plan first — nothing here re-argues a decision made
 there.
 
-Status: **not started, phases 1-6 specified.** Specs for phases 1, 2, 4,
-5 and 6 are below and have been checked against the code. Two of the three live
-unknowns are answered (see the plan doc); the chat-link shape remains open and
-needs a capture, not a code read.
+Status: **phases 0, 0b, 1 and 2 are COMPLETE** (see the handoff doc for state).
+Specs for 3, 4, 5 and 6 are below and have been checked against the code.
+
+⚠ **ALL THREE live unknowns are answered, and this line used to say the
+chat-link shape "remains open and needs a capture, not a code read".** It was
+wrong twice over: the plan doc had ALREADY answered it from the decompiled
+client on 2026-09-10 -- see its "The chat link format, read out of the client"
+section, which gives the showinfo url form, the anchor-tag variant, the
+entity-escaping, the 2048-char truncation, and the rule that a link CONTAINS
+SPACES so a parser must never whitespace-split before extracting it -- and the
+answer simply never reached this file. A doc that calls a settled question open
+costs a session re-answering it.
 
 ## Branch and commit strategy
 
@@ -241,9 +249,9 @@ not exist is worse than no spec, because it reads as authority.
 | 5 | drone recall-and-redeploy | **below, verified** |
 | 6 | flee and return | **below, verified** |
 | 2 | one inWarp guard | **below, verified** |
-| 3 | tank-up block | small enough to spec inline when started |
+| 3 | tank-up: port the DSL thermostat into the companion | **below, verified** |
 | 7 | tackle -> tag | unblocked: the tackle read exists; spec when started |
-| 8 | blocked on the chat-link wire shape | blocked |
+| 8 | chat commands: the PARSER is built and tested; only the fleet CHANNEL is blocked | **parser done, channel blocked** |
 | 9 | blocked on 1-8 | blocked |
 
 ## Open questions being investigated
@@ -609,6 +617,132 @@ accepts **any** non-empty trimmed string and no tag vocabulary exists anywhere
 in the server. So the ordering is ours to define. Two consequences: our writer
 picks its own letters, and our reader must rank an unrecognised tag rather than
 drop it, because a human FC in the real client can type anything at all.
+
+### Phase 3 — the spec
+
+⚠ **THE RUNG-2 TABLE ABOVE IS WRONG IN BOTH ITS "ENTIRELY NEW" ROWS, and this
+spec replaces it.** Checked against the code 2026-09-11. Self-repair and
+capacitor awareness both already exist, symmetric across all three tank layers,
+and have done since before this feature started:
+
+| The table said | What is actually there |
+| --- | --- |
+| shield/armour/hull booster cycling — "entirely new", "nothing in the codebase self-reps" | The `repair` interrupt response (`scriptDecide.ts`) is a per-layer self-repair thermostat. `repairersFor(kind, obs)` dispatches `shield-below` → `shieldRepairerIDs`, `armor-below` → `armorRepairerIDs`, `hull-below` → `hullRepairerIDs`, and `health-below` → all three. It switches one idle repairer on per tick, self-targeted |
+| capacitor awareness — "entirely new", "`hardenersOn` has none" | The same response stops at `REPAIR_CAP_FLOOR`, and INVERTS below it: it switches a running repairer OFF even while the layer is still hurt |
+| hardeners off when the fight ends — "new" | Correct, and it exists as `standDownAfterFight`, which is the SHAPE to copy, exactly as the table says |
+
+The DSL also lights the tank before the guns on a `fight-back` watch, and its
+comment is the principle this phase's rung order rests on: **"THE TANK GOES UP
+FIRST. A hardener is instant and self-targeted ... the same thing a player
+reaches for before they reach for the guns."**
+
+⚠ **The cap floor's stated REASON in the rung-2 table is the one already
+retracted twice elsewhere.** It says the floor answers "can I still afford to
+warp out". It does not: warp costs no capacitor on this server (no reference to
+capacitor anywhere under `space/destiny/`), and both the handoff's "Two things
+the server does not do" and `FleetCompanionRequest.capacitorFloor`'s own comment
+say so at length. The floor earns its place because **an empty capacitor repairs
+nothing** — a repairer running below it burns cycles that heal nothing. Same
+number, sound reason.
+
+#### So phase 3 is a PORT, not an invention
+
+The whole of the work is carrying a proven pattern into a loop that cannot reach
+it. The companion cannot reuse the DSL's version directly for the reason the
+handoff already gives — `observe(hint)` is not reusable, and `decideScriptAction`
+is driven by `InterruptRow`s the companion does not have — but the *shape* is
+settled, and departing from it needs a reason.
+
+Three things genuinely block it, and they are the real spec:
+
+**1. The companion's action vocabulary cannot switch a module OFF.**
+`FleetCompanionAction` has an `activate` kind and no `deactivate` kind at all.
+Both halves of this phase need one: hardeners down when the fight ends, and a
+repairer off at the cap floor. Add the kind, and its `issue:` case in
+`makeFleetCompanionDeps` calling `api.deactivateModule`.
+
+> ⚠ `api.deactivateModule`'s own comment warns that a prop mod only actually
+> STOPS when Deactivate names its propulsion effect — the server infers a
+> default effect on activate but not on deactivate. Hardeners and repairers are
+> not affected. Do not generalise this action kind to prop mods without reading
+> that comment.
+
+**2. The companion's `activate` case cannot self-target.** `makeFleetCompanionDeps`
+always passes a real `targetID`, and its comment says so deliberately: "Every
+heal target the ladder issues is a REAL on-grid ship it already measured, never
+the DSL's targetID-0 'self' convention, so that branch is not needed here."
+Hardeners and self-repairers ARE self-targeted. Relax the case to the DSL's
+form — `targetID > 0 ? {targetID, repeat: -1} : {repeat: -1}` — and correct that
+comment, because it stops being true the moment this phase lands.
+
+**3. The companion has no module lists to cycle.** Its `observe()` never
+populates `hardenerModuleIDs` or the three `*RepairerIDs`; they are inherited
+from `ScriptObservation` and simply never assigned, so they read `undefined`.
+
+⚠ **DO NOT CLOSE THAT GAP BY CLASSIFYING THE FIT.** Take them off the REQUEST,
+the way every other module list this loop uses is taken. `defenseModuleIDs`
+already exists for the hardeners and is consumed by nothing yet; add three
+self-repair lists mirroring the remote trio. The reason is the one already
+written on `defenseModuleIDs` and on `weaponModuleIDs` — a wrong guess cycles
+the wrong module — and here it buys two specific bugs for free:
+
+- **The Damage Control problem disappears.** `resolveDefenseModuleIDs` matches
+  one regex, `/hardener|damage control|resistance/i`, so a free Damage Control
+  and a cap-hungry active hardener land in one indistinguishable list. The
+  rung-2 table's advice was to cap-gate both and accept delaying a free cycle.
+  A player's own pick does not have the problem to solve.
+- **The Remote-Shield-Booster double-classification disappears.** `/shield
+  boost/i` is UNANCHORED, so a group named "Remote Shield Booster" matches it
+  AND `/remote shield/i` — the same module in `shieldRepairerIDs` and
+  `remoteShieldRepairerIDs` at once. The code's own neighbouring comment names
+  this bug shape as the reason the warp-scrambler branch was anchored; the
+  shield branch was never fixed. **Unverified against the SDE group name and
+  worth confirming — if it is live it is a DSL bug independent of this phase.**
+
+#### The rung, and where it sits
+
+Rung 2, ABOVE the fleet-order rung, on the DSL's own stated principle: the tank
+goes up before the guns. It costs at most a tick or two of not obeying, because
+the rung has something to do only while a module is off, and falls through the
+moment the rack is up — the same fall-through `decideHealOrder` uses, and for
+the same reason.
+
+The ladder, in order, one action per tick:
+
+1. **Hardeners up while a fight is on.** Trigger on `obs.hostileOnGrid` (and
+   `targetedByPlayer` if it is readable — both already exist on the
+   observation). One per tick, self-targeted, skipping any already cycling.
+2. **A hurt layer cycles its own repairer.** Per layer against
+   `request.fleeHealthFloor`'s sibling — a hurt threshold, not the flee floor —
+   shield from the shield list, armour from the armour list, hull from the hull
+   list. Never across families: a shield booster cannot repair armour.
+3. **The cap floor inverts it.** Below `request.capacitorFloor`, switch a
+   RUNNING repairer off rather than starting another, even while the layer is
+   still hurt. This is the inversion the whole rung exists for and it must be
+   tested as its own case.
+4. **Stand down when the fight ends.** Copy `standDownAfterFight`'s shape, not
+   its code: a record of what THIS rung switched on, driven by its own always-run
+   pass rather than by the trigger — because the trigger is gone the moment the
+   grid clears, which is precisely when the stand-down has to run. Only switch
+   off what this rung itself lit.
+
+⚠ **Never stand down on a blind read.** `standDownAfterFight` fires only on an
+explicit `not-met`, never on cannot-tell, and its comment says why: "standing
+down blind is the worst possible moment to drop the tank." A null
+`hostileOnGrid` keeps the tank up.
+
+#### What phase 3 must NOT do
+
+- **Do not cap-gate the hardeners.** The rung-2 table said to, because the DSL's
+  merged list cannot tell a Damage Control from an active hardener. Off a
+  player's own pick there is nothing to be unsure about, and delaying a free
+  cycle for a cap floor that exists to protect REPAIR throughput is a cost with
+  no matching benefit.
+- **Do not invent a second cap constant.** `request.capacitorFloor` exists,
+  defaults to `REPAIR_CAP_FLOOR`, and is consumed by nothing today. This phase
+  is its first consumer.
+- **Do not add a flee.** That is phase 6, and `fleeHealthFloor` is its field,
+  not this one's.
 
 ### Phase 4 — the spec
 

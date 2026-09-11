@@ -32,6 +32,8 @@ function request(overrides: Partial<FleetCompanionRequest> = {}): FleetCompanion
 // A synthetic item-type id, not a real game identifier — nothing here names an
 // actual character, corp, or asset.
 const DEFENSE_MODULE_A = 11200001;
+// Same, for a fitted weapon.
+const WEAPON_MODULE_A = 11200005;
 // The ESI docs' own example CharacterID (obviously synthetic, self-describing).
 const SYNTHETIC_CHARACTER_ID = 90000001;
 
@@ -79,6 +81,13 @@ test("a fitted remote-repair module ALONE earns combat authority — a logi is a
     );
     assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"], `${field} should earn combat`);
   }
+});
+
+test("a fitted weapon ALONE earns combat authority", () => {
+  const policy = analyzeCompanionRunPolicy(
+    request({ useDrones: false, defenseModuleIDs: [], weaponModuleIDs: [WEAPON_MODULE_A] }),
+  );
+  assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"]);
 });
 
 test("risk classes come out in the same stable order runPolicy.ts uses", () => {
@@ -129,6 +138,7 @@ function validPayload(): Record<string, unknown> {
     remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
     remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
     remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
+    weaponModuleIDs: [WEAPON_MODULE_A],
     fleeHealthFloor: 0.3,
     capacitorFloor: 0.2,
     maxFleeAttempts: 3,
@@ -150,6 +160,7 @@ test("a well-formed request round-trips", () => {
       remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
       remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
       remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
+      weaponModuleIDs: [WEAPON_MODULE_A],
       fleeHealthFloor: 0.3,
       capacitorFloor: 0.2,
       maxFleeAttempts: 3,
@@ -330,6 +341,42 @@ test("a request missing a remote-repair module list is refused, like defenseModu
   const payload = validPayload();
   delete payload.remoteShieldModuleIDs;
   assert.equal(decodeFleetCompanionRequestValue(payload).ok, false);
+});
+
+test("weaponModuleIDs refuses a bad entry, and an ABSENT list resumes as empty", () => {
+  assert.equal(
+    decodeFleetCompanionRequestValue({ ...validPayload(), weaponModuleIDs: [0] }).ok,
+    false,
+  );
+  assert.equal(
+    decodeFleetCompanionRequestValue({ ...validPayload(), weaponModuleIDs: [-1] }).ok,
+    false,
+  );
+  assert.equal(
+    decodeFleetCompanionRequestValue({ ...validPayload(), weaponModuleIDs: [1.5] }).ok,
+    false,
+  );
+  assert.equal(
+    decodeFleetCompanionRequestValue({ ...validPayload(), weaponModuleIDs: "not-an-array" }).ok,
+    false,
+  );
+  // Empty is valid, and the default: no weapon picked means locks, never fires.
+  assert.equal(decodeFleetCompanionRequestValue({ ...validPayload(), weaponModuleIDs: [] }).ok, true);
+  // ⚠ A MISSING LIST IS ACCEPTED, and unlike its neighbours that is deliberate.
+  // `src/botHost.js` puts a persisted roster row's own request back through this
+  // decoder on every BFF restart -- for a companion that row IS the authority,
+  // there being no library entry to re-bind to. So refusing an absent field
+  // would refuse every row written before the field existed, and a headless
+  // companion would quietly fail to come back from a restart it used to
+  // survive. Absent decodes to empty, which is what such a row already meant:
+  // lock what the fleet calls, never fire. Same rule, same reason, as
+  // safeSpotBookmarkID.
+  const payload = validPayload();
+  delete payload.weaponModuleIDs;
+  const resumed = decodeFleetCompanionRequestValue(payload);
+  assert.equal(resumed.ok, true, "a pre-field request still resumes");
+  assert.deepEqual(resumed.ok ? resumed.request.weaponModuleIDs : null, [],
+    "and it resumes holding its fire, not firing");
 });
 
 test("fleeHealthFloor and capacitorFloor are refused outside their real domain bounds", () => {

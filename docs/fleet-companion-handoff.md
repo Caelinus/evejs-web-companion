@@ -19,6 +19,7 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 0b | **COMPLETE** — the supervision gate and the abandonment protocol |
 | Phase 1 | **COMPLETE** — broadcasts and target tags, decoded, stored and obeyed |
 | Phase 2 | **COMPLETE** — no watch and no macro decides into a warp, on any tank |
+| Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
 | Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
@@ -297,6 +298,109 @@ repair watch, today, with no fleet anywhere near it.
   not do" says so and `FleetCompanionRequest.capacitorFloor` carries the full
   write-up. The floor earns its place because an empty capacitor REPAIRS
   nothing, not because it strands the ship.
+
+## The companion ENGAGES what it is told to, 2026-09-11
+
+Phase 1 shipped an honest partial: a called target got LOCKED and never shot,
+and the live-QA table said a locked-and-not-firing pilot was the pass condition.
+The operator read that as the feature being broken, which is the correct reading
+of "I told it to shoot and it did not shoot". This closes it, and adds chat as a
+second way to give the order.
+
+| Piece | Where |
+| --- | --- |
+| `weaponModuleIDs` on the request, and its fifth panel picker | `fleetCompanionLoop.ts`, `companionRunPolicy.ts`, `ui/FleetCompanion.svelte` |
+| `lockThenEngage` (was `lockOrHold`), `decideOpenFire`, `cyclingWeapons` | `nav/fleetCompanionLoop.ts` |
+| `lastFireTargetID` / `lastFireModuleIDs` on the ladder memory | same |
+| The chat grammar, the link reader, the sender gate | `nav/chatCommands.ts` + test |
+| `resolveNamedOrder` -- one set of branches, two sources | `nav/fleetCompanionLoop.ts` |
+| The gated local-chat read, and `liveCompanionRequest` | `app/flow.ts` |
+
+### Decided by the operator, 2026-09-11 -- do not re-litigate
+
+- **A `Target` BROADCAST opens fire**, not only a tag. The alternative on the
+  table was to fire only on a tag or a roster-verified commander, because
+  `sendBroadcast` checks fleet MEMBERSHIP and nothing else -- any member may
+  broadcast `Target`. That risk was put to the operator explicitly and the
+  answer was the broadcast. So the fire gate is the same gate as the lock gate,
+  and the roster read is NOT a prerequisite for this feature.
+- **It shoots whatever is called**, player or rat. No NPC/player distinction,
+  no opt-in flag. ⚠ Note this cuts directly across `fightTheRats`'s comment
+  that "Players on grid are FRIENDLY in this world" -- that assumption belongs
+  to the ratting block and does not hold here.
+- **Chat commands ride LOCAL chat.** Fleet chat is unreachable without the
+  gateway patch, and the parser is channel-agnostic, so the patch becomes a
+  one-line channel swap rather than the thing everything waits on.
+
+### Five things worth knowing
+
+- **Engaging needed no new plumbing.** There is no "fire" action anywhere in
+  this codebase: weapons go through the SAME generic
+  `{kind: "activate", moduleID, targetID}` with `repeat: -1` that drives miners,
+  hardeners and repairers, and `api.activateModule`'s own header says so ("a
+  later combat goal drives a turret through the same five unchanged"). The
+  companion's `issue` already had that case, wired for remote reps. What was
+  missing was a decision, not a route.
+- ⚠ **A NEW CALL MUST RE-AIM THE WHOLE RACK, and `activeModuleIDs` cannot tell
+  you that.** A snapshot says a module is cycling; it never says what it is
+  cycling AT. So a gun still chewing on the target the commander has moved off
+  looks identical to one obeying the current call, and an idle-check alone would
+  leave the rack shooting the wrong ship forever. `lastFireTargetID` +
+  `lastFireModuleIDs` are the memory that knows the target, reset the moment the
+  call names a different ship -- the same pair, for the same reason, as
+  `lastHealTargetID` / `lastHealModuleIDs` right above them.
+- ⚠ **WEAPON BANKS WOULD HAVE STALLED THE WHOLE LADDER.** Activating a banked
+  SLAVE fires the bank through its MASTER and `activeModuleIDs` then names only
+  the master, so a naive idle-check picks the same slave every tick forever --
+  and since this loop issues one call per tick, that slave eats the action slot
+  every rung beneath it needs. `cyclingWeapons` counts a slave as running when
+  its master is. **The same gap is LIVE in the DSL** (`fightTheRats`,
+  `engagePrey`); nothing under `nav/` reads `weaponBanks` at all. It costs them
+  less because their tick has nowhere else to be, so it reads as wasted calls
+  rather than a stall. Not fixed from here.
+- ⚠ **THIS RUNG PARKS THE TICK, and that now matters.** The "already locked"
+  branch returns a wait rather than falling through like `decideHealOrder`, so
+  while a target call stands every rung BELOW it is starved. Harmless when the
+  branch meant "locked, nothing more to do"; load-bearing now that it means
+  "locked and shooting". Kept parked for the readout -- a pilot fighting the
+  FC's primary should say "Obeying fleet", not "Standing by" with its guns
+  running -- but **phase 6 must not put its flee beneath this rung**, and phase
+  5's drone recall has the same problem. The planned ladder puts both below.
+  That ordering has to be revisited when they are built, not inherited.
+- ⚠ **AN OFF-GRID BROADCAST WAS STARVING AN ACTIONABLE CHAT ORDER**, against
+  this rung's own header. The header has always said an off-grid call is skipped
+  "falling through to the NEXT SOURCE", which was trivially true while the only
+  thing under a broadcast was "Standing by". Choosing the broadcast first and
+  only THEN finding it unactionable fell through to nothing. `isOrderActionable`
+  now runs while the source is being CHOSEN. Caught by a review sweep, not by
+  the tests, which all passed.
+
+### One set of branches, two sources
+
+`resolveNamedOrder` picks the source once and branches c-f serve both, rather
+than chat getting its own copy of Target/AlignTo/TravelTo/JumpTo. The JumpTo
+branch alone is thirty lines of carefully-argued honest partial, and a second
+copy is the thing that drifts.
+
+⚠ **The refactor dropped a case, and it is worth knowing how it was caught.**
+`step.kind === "closing"` went missing, so a ship already closing on a called
+gate fell through to `warp` and re-warped. One test failed -- on WORDING, not on
+the re-warp -- and chasing that wording found the missing branch. The four
+`decideCloseIn` steps now have a chat-order test that walks all of them.
+
+### What this deliberately did NOT do
+
+- **No stand-down.** Nothing ever issues `deactivate` for a gun -- the DSL does
+  not either, and a module stops server-side when its target dies. The
+  companion's action vocabulary has no `deactivate` kind at all yet; **phase 3
+  adds it**, and that is the phase that should decide whether guns stand down
+  too.
+- **No roster read.** It was a prerequisite only under the fire-gate the
+  operator did not choose. `obs.canTag` is still hard-coded `null` and phase 7
+  still needs the read.
+- **No weapon range check.** Neither does the DSL: `hostilesInReach` gates the
+  LOCK on targeting range, and guns are activated with no distance test at all.
+  The server rules on it.
 
 ## Decided, so do not re-litigate
 

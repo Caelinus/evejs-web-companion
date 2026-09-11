@@ -121,7 +121,9 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
     request.defenseModuleIDs.length > 0 ||
     request.remoteShieldModuleIDs.length > 0 ||
     request.remoteArmorModuleIDs.length > 0 ||
-    request.remoteCapacitorModuleIDs.length > 0
+    request.remoteCapacitorModuleIDs.length > 0 ||
+    // A fitted weapon is combat risk with no ambiguity to argue about.
+    request.weaponModuleIDs.length > 0
   ) {
     risks.add("combat");
   }
@@ -172,6 +174,7 @@ const REQUEST_KEYS = new Set<string>([
   "remoteShieldModuleIDs",
   "remoteArmorModuleIDs",
   "remoteCapacitorModuleIDs",
+  "weaponModuleIDs",
   "fleeHealthFloor",
   "capacitorFloor",
   "maxFleeAttempts",
@@ -212,6 +215,7 @@ const SAY = {
   badRemoteShieldModuleIDs: "This companion setup's remote shield-repair module list is not valid.",
   badRemoteArmorModuleIDs: "This companion setup's remote armour-repair module list is not valid.",
   badRemoteCapacitorModuleIDs: "This companion setup's remote capacitor-transfer module list is not valid.",
+  badWeaponModuleIDs: "This companion setup's weapon module list is not valid.",
   badFleeHealthFloor: "This companion setup's flee-health threshold is not a valid number.",
   badCapacitorFloor: "This companion setup's capacitor threshold is not a valid number.",
   badMaxFleeAttempts: "This companion setup's flee-attempt limit is not a valid number.",
@@ -282,6 +286,22 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
   const remoteCapacitorModuleIDs = obj["remoteCapacitorModuleIDs"];
   if (!isPositiveSafeIntegerArray(remoteCapacitorModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
     return { ok: false, refusal: SAY.badRemoteCapacitorModuleIDs };
+  }
+  // ABSENT DECODES TO EMPTY, on the same grounds as `safeSpotBookmarkID` below:
+  // a request written before this field existed still reads, and it costs
+  // nothing because the two mean the same thing. Empty is "lock what the fleet
+  // calls, never fire" -- exactly what such a request already did.
+  //
+  // ⚠ THIS IS NOT PEDANTRY, IT IS THE RESTART PATH. `src/botHost.js` puts a
+  // persisted roster row's own `request` back through this decoder on every BFF
+  // restart, because for a companion that row IS the authority -- there is no
+  // library entry to re-bind to. A strictly-required new field would refuse
+  // every row written before it, and a headless companion would quietly fail to
+  // come back from a restart it used to survive.
+  const weaponRaw = obj["weaponModuleIDs"];
+  const weaponModuleIDs = weaponRaw === undefined ? [] : weaponRaw;
+  if (!isPositiveSafeIntegerArray(weaponModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badWeaponModuleIDs };
   }
 
   const fleeHealthFloor = obj["fleeHealthFloor"];
@@ -356,6 +376,7 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
     remoteShieldModuleIDs: Object.freeze([...remoteShieldModuleIDs]),
     remoteArmorModuleIDs: Object.freeze([...remoteArmorModuleIDs]),
     remoteCapacitorModuleIDs: Object.freeze([...remoteCapacitorModuleIDs]),
+    weaponModuleIDs: Object.freeze([...weaponModuleIDs]),
     fleeHealthFloor,
     capacitorFloor,
     maxFleeAttempts,

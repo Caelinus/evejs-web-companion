@@ -82,6 +82,16 @@
   let pickedRemoteShield = $state<number[]>([]);
   let pickedRemoteArmor = $state<number[]>([]);
   let pickedRemoteCapacitor = $state<number[]>([]);
+  /**
+   * The player's OWN pick of fitted weapons (turrets, launchers), by item id.
+   *
+   * ⚠ EMPTY IS THE DEFAULT AND A REAL ANSWER. Leave this untouched and the
+   * pilot locks whatever the fleet calls and never fires it - see
+   * `FleetCompanionRequest.weaponModuleIDs`'s own comment. Same "nothing
+   * ticked for you" rule as `picked` above: a wrong guess here fires
+   * something you did not choose at whatever the fleet called.
+   */
+  let pickedWeapon = $state<number[]>([]);
   let fleeHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.fleeHealthFloor * 100));
   let capacitorFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.capacitorFloor * 100));
   let maxFleeAttempts = $state(DEFAULT_FLEET_COMPANION_REQUEST.maxFleeAttempts);
@@ -185,6 +195,12 @@
     pickedRemoteCapacitor = pickedRemoteCapacitor.includes(itemID)
       ? pickedRemoteCapacitor.filter((id) => id !== itemID)
       : [...pickedRemoteCapacitor, itemID];
+  }
+
+  function toggleWeapon(itemID: number): void {
+    pickedWeapon = pickedWeapon.includes(itemID)
+      ? pickedWeapon.filter((id) => id !== itemID)
+      : [...pickedWeapon, itemID];
   }
 
   function toggleObeys(source: FleetCompanionOrderSource): void {
@@ -318,10 +334,10 @@
 
   /** Plain words for a broadcast name. Never the wire name, which is jargon. */
   const broadcastWords: Record<FleetBroadcastName, string> = {
-    // ⚠ NOT "shoot this". Answering a Target call means LOCKING the ship --
-    // the companion has no weapons rung and does not fire. Saying "shoot" here
-    // would promise the player something the pilot cannot do, which is exactly
-    // what `lockOrHold`'s own comment warns against.
+    // ⚠ NOT "shoot this". Answering a Target call always means LOCKING the
+    // ship first, and firing after only happens if a weapon is picked below --
+    // saying "shoot" here would promise every pilot something only some of
+    // them can do.
     Target: "lock this target",
     AlignTo: "align to this",
     WarpTo: "warp to this",
@@ -406,6 +422,7 @@
         remoteShieldModuleIDs: pickedRemoteShield,
         remoteArmorModuleIDs: pickedRemoteArmor,
         remoteCapacitorModuleIDs: pickedRemoteCapacitor,
+        weaponModuleIDs: pickedWeapon,
         fleeHealthFloor: clamp(fleeHealthFloorPercent, MIN_FLEE_HEALTH_FLOOR * 100, MAX_FLEE_HEALTH_FLOOR * 100) / 100,
         capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
         maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
@@ -671,6 +688,35 @@
             type="checkbox"
             checked={pickedRemoteCapacitor.includes(row.itemID)}
             onchange={() => toggleRemoteCapacitor(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+    {/if}
+
+    <h3>Weapons</h3>
+    <p class="note warn">
+      Leave this empty and the pilot only LOCKS what the fleet calls - it will
+      never fire. Tick a weapon here if you want it to actually shoot the
+      target once locked.
+    </p>
+    {#if equipment.length === 0}
+      <p class="empty">
+        Nothing powered up. Power your turrets or launchers up under Your
+        equipment, then come back.
+      </p>
+    {:else}
+      <p class="note">
+        Tick the fitted weapons the companion may fire at a locked target.
+        Nothing is picked for you here either - a wrong guess would fire
+        something you did not choose.
+      </p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedWeapon.includes(row.itemID)}
+            onchange={() => toggleWeapon(row.itemID)}
           />
           {row.label}
         </label>

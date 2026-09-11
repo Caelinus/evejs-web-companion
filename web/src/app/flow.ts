@@ -229,6 +229,7 @@ import {
 } from "../bridge/fleetCenter.ts";
 import { decodeAvailableFleetAds } from "../bridge/fleetAds.ts";
 import {
+  FLEET_BROADCAST_TTL_MS,
   decodeFleetBroadcastNotification,
   decodeFleetStateChangeNotification,
   isFleetBroadcastFresh,
@@ -5392,7 +5393,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // The supervision read rides along with the other two rather than
         // queueing behind them: it is independent of both, and a companion
         // decides on a two-second cadence.
-        const [statusStep, spaceResult, targetsResult, botDriven] = await Promise.all([
+        // ⚠ THE CHAT READ IS PAID FOR ONLY BY A PILOT THAT OBEYS CHAT. It is a
+        // fifth round trip on a two-second tick, and on the bot host that cost
+        // is per companion per tick, so it is gated on the run actually wanting
+        // it: chat in `obeys` AND at least one allowed sender. An empty
+        // allowlist can never produce an order (`isChatCommandSenderAllowed`
+        // refuses everyone), so reading chat for it would be paying for an
+        // answer that could not be acted on.
+        const chatWanted =
+          liveCompanionRequest !== null &&
+          liveCompanionRequest.obeys.includes("chat") &&
+          liveCompanionRequest.chatCommandSenders.length > 0;
+        const [statusStep, spaceResult, targetsResult, botDriven, chatRaw] = await Promise.all([
           api.getFlightStatus(callOptions),
           api.getSpaceSnapshot(callOptions),
           // ⚠ THE LOCK LIST IS AUTHORITATIVE AND THE LADDER NEEDS IT, rather
@@ -5404,6 +5416,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // check honest rather than hopeful.
           api.getTargets(callOptions),
           botDrivenCharacterIDs(),
+          // LOCAL, deliberately. Fleet chat is not reachable: the gateway's chat
+          // service hardcodes CHAT_CHANNELS to local and corp, and its push side
+          // only ever computes a local and a corp room name, so a fleet room
+          // never matches and is never delivered. Local needs no gateway patch
+          // and every fleet-mate in the system can see it. What makes an order
+          // on a PUBLIC channel safe is the sender allowlist, not the channel.
+          chatWanted ? api.readChat("local", callOptions) : Promise.resolve(null),
         ]);
         // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
         // regular traffic, so on the bot host they are the ONLY chance a pushed
@@ -5433,6 +5452,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           snapshot,
           gateLinks: gateLinksForSnapshot(snapshot),
         });
+
+        // ⚠ FILTERED HERE, ON THE BROADCAST'S OWN TTL, because the ladder is pure
+        // and carries no clock of its own. One staleness policy for both order
+        // sources is the point: a chat order that has gone quiet is exactly as
+        // stale as a broadcast that has, and a lapsed order must stop standing so
+        // the pilot falls back to its own ladder. Without this the backlog the
+        // channel read returns would replay as live orders every tick, and a
+        // restart would obey a line somebody typed ten minutes ago.
+        const chatNowMs = Date.now();
+        const chatMessages =
+          chatRaw === null
+            ? []
+            : decodeChatChannel(chatRaw).messages.filter(
+                (entry) => chatNowMs - entry.createdAtMs < FLEET_BROADCAST_TTL_MS,
+              );
 
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
@@ -5506,6 +5540,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // carried its own drain, so the slice is as fresh as anything else
           // here, and a companion polls no extra route for it.
           pendingFleetInvite: companionPendingInvite(),
+          chatMessages,
         };
       },
       issue: async (action) => {
@@ -5981,6 +6016,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   function stopCompanionController(): void {
     fleetCompanion?.stop();
+    liveCompanionRequest = null;
     // The companion's movement rungs ride the same shared autopilot the mission
     // and custom loops use, so stopping the outer loop alone would leave that
     // inner controller flying after another bot takes the ship.
@@ -6261,6 +6297,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (!fleetCompanion) {
       fleetCompanion = createFleetCompanion(makeFleetCompanionDeps());
     }
+    // Before start(), not after: the first tick can fire immediately, and a tick
+    // that read a stale request would decide this run on the last one's orders.
+    liveCompanionRequest = request;
     fleetCompanion.start(request, resuming);
     void fleetCompanion.run();
   }
@@ -6286,6 +6325,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // fire; the player's blocks choose which, in which order.
   let scriptRunner: ScriptRunnerController | null = null;
   let fleetCompanion: FleetCompanionController | null = null;
+  /**
+   * The request the companion is CURRENTLY running, for the reads whose cost
+   * depends on it -- chat, today.
+   *
+   * ⚠ IT IS A LIVE REFERENCE AND NOT A CAPTURED ONE, AND THAT IS THE WHOLE
+   * POINT. `makeFleetCompanionDeps()` is built ONCE and the controller is
+   * cached (`if (!fleetCompanion)`), so a request threaded in at deps-build
+   * time would be the FIRST run's request forever: start a companion with chat
+   * off, stop it, start another with chat on, and the second one would silently
+   * never read chat. Assigned on EVERY start, cleared on stop.
+   */
+  let liveCompanionRequest: FleetCompanionRequest | null = null;
   // Bumped on every start/stop/panic. `startCustomBot` awaits a fitting read
   // before it creates the runner; without this a second Start (or a Stop) during
   // that gap would leave the FIRST run() loop orphaned and unstoppable — two
