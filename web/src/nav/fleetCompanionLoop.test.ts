@@ -672,7 +672,7 @@ test("the ladder's memory is threaded, not dropped, between ticks", async () => 
   assert.equal(companion.snapshot().inFleet, true);
 });
 
-// --- rung 6: obeying the fleet ------------------------------------------------
+// --- rung 7: obeying the fleet ------------------------------------------------
 //
 // Below the supervision gate (only reached while a human is here) and above
 // "Standing by". Tag beats broadcast — AUTHORITY, not freshness: a tag can
@@ -869,7 +869,7 @@ test("obeying the fleet is skipped entirely once the supervision gate has failed
   assert.match(decision.stop as string, /no safe spot/i);
 });
 
-// --- rung 6: the Heal family --------------------------------------------------
+// --- rung 7: the Heal family --------------------------------------------------
 //
 // HealShield/HealArmor/HealCapacitor/HealTarget. Checked BEFORE the tag and
 // the Target broadcast (a rep call is time-critical; a tag is standing
@@ -1076,7 +1076,7 @@ test("once the heal is already running, the SAME tick's tag is obeyed — not mu
   assert.equal(decision.followingOrderFrom, "tag");
 });
 
-// --- rung 6: opening fire once a called target is locked ---------------------
+// --- rung 7: opening fire once a called target is locked ---------------------
 //
 // `lockThenEngage` replaced `lockOrHold` (see its own header in
 // fleetCompanionLoop.ts): a called target that is ALREADY locked no longer
@@ -1384,7 +1384,7 @@ test("a satisfied Heal call falls through to the tag; a satisfied rack does not 
   assert.match(decision.why, /firing on it/i);
 });
 
-// --- rung 6: TravelTo ---------------------------------------------------------
+// --- rung 7: TravelTo ---------------------------------------------------------
 
 /** Synthetic solar system ids — no on-grid meaning, just a destination. */
 const SYSTEM_B = 30000001;
@@ -1420,7 +1420,7 @@ test("a TravelTo broadcast naming a NEW system routes again", () => {
   assert.deepEqual(second.action, { kind: "travelTo", systemID: SYSTEM_C });
 });
 
-// --- rung 6: JumpTo (honest partial) ------------------------------------------
+// --- rung 7: JumpTo (honest partial) ------------------------------------------
 //
 // `itemID` is a single stargate; `api.jump` needs the gate on the far side
 // too, which nothing available to this pure, synchronous ladder can supply
@@ -1489,7 +1489,7 @@ test("a JumpTo broadcast for a gate OFF this grid falls through", () => {
   assert.equal(decision.phase, "Standing by");
 });
 
-// --- rung 6: chat commands ----------------------------------------------------
+// --- rung 7: chat commands ----------------------------------------------------
 //
 // A chat order reaches the SAME c-f branches a broadcast does, through
 // `resolveNamedOrder` — see that function's own header and `decideFleetOrders`'s
@@ -1843,7 +1843,7 @@ test("chat orders are ALSO skipped once the supervision gate has failed", () => 
   assert.notEqual(decision.phase, "Obeying fleet");
 });
 
-// --- rung 6: everything above is skipped once abandonment starts -------------
+// --- rung 7: everything above is skipped once abandonment starts -------------
 
 test("Heal and TravelTo are ALSO skipped once the supervision gate has failed", () => {
   const request: FleetCompanionRequest = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
@@ -2547,7 +2547,7 @@ test("a standing fleet tag order does not starve the tackle rung", () => {
     TAGGING,
     taggingObs({
       snapshot: gridWithEntities([LOGI, TACKLE]),
-      // The FC has already called LOGI, so rung 6 has work and would park.
+      // The FC has already called LOGI, so rung 7 has work and would park.
       fleetTargetTags: new Map([[LOGI, "A"]]),
       lockedTargetIDs: [LOGI],
       tackledBy: [TACKLE],
@@ -2683,7 +2683,7 @@ test("a fleet order with a real call to make still beats everything beneath it",
   assert.notEqual(decision.standing, true, "a real call is never merely standing");
 });
 
-// --- rung 5: drones ----------------------------------------------------------
+// --- rung 6: drones ----------------------------------------------------------
 //
 // Recall a hurt drone, hold off, put them back out. Driven by a RECORD rather
 // than by the condition that started it, because the condition extinguishes

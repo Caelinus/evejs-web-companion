@@ -43,7 +43,7 @@ import {
   STATION_DOCKING_RADIUS_M,
   type SpaceMeasurement,
 } from "./autopilotLoop.ts";
-// The kill-order authority (rung 6, "obeying the fleet"). Imported rather than
+// The kill-order authority (rung 7, "obeying the fleet"). Imported rather than
 // re-derived for the same reason the get-safe helpers above are: one answer to
 // "where does this tag rank", shared with the combat priority list.
 import { fleetTagRank, pickPrimary } from "./targetPriority.ts";
@@ -479,7 +479,7 @@ export interface FleetCompanionDeps {
  *   • the abandonment protocol (decision 5, rung 2) — warp / approach / dock /
  *     warpToBookmark / leaveFleet / acceptFleetInvite — the one thing a
  *     companion left without a human may do unsupervised.
- *   • obeying the fleet (rung 6) — lock / align / activate / travelTo —
+ *   • obeying the fleet (rung 7) — lock / align / activate / travelTo —
  *     answering a fleet tag or broadcast while a human IS supervising. See
  *     `decideFleetOrders`.
  */
@@ -494,15 +494,15 @@ export type FleetCompanionAction =
   | { readonly kind: "leaveFleet" }
   | { readonly kind: "acceptFleetInvite"; readonly fleetID: number }
   /**
-   * Obeying the fleet (rung 6): a tag or a `Target` broadcast, locked. Locking
+   * Obeying the fleet (rung 7): a tag or a `Target` broadcast, locked. Locking
    * is the whole of what this rung does with a target — there is no weapons
    * rung yet, so this is never a stand-in for shooting.
    */
   | { readonly kind: "lock"; readonly targetID: number }
-  /** Obeying the fleet (rung 6): an `AlignTo` broadcast. */
+  /** Obeying the fleet (rung 7): an `AlignTo` broadcast. */
   | { readonly kind: "align"; readonly targetID: number }
   /**
-   * Obeying the fleet (rung 6): a Heal broadcast, answered with a fitted
+   * Obeying the fleet (rung 7): a Heal broadcast, answered with a fitted
    * remote-repair module aimed at the ship named. `repeat: -1` (run
    * continuously) is this codebase's own "keep cycling" — see the DSL's
    * `activate` case in flow.ts.
@@ -520,7 +520,7 @@ export type FleetCompanionAction =
    */
   | { readonly kind: "deactivate"; readonly moduleID: number }
   /**
-   * Obeying the fleet (rung 6): a `TravelTo` broadcast — a solar system, not
+   * Obeying the fleet (rung 7): a `TravelTo` broadcast — a solar system, not
    * an on-grid object, so this hands off to the SHARED autopilot
    * (flow.ts's `startRoute`) rather than warping or approaching itself.
    */
@@ -538,13 +538,13 @@ export type FleetCompanionAction =
    */
   | { readonly kind: "setFleetTargetTag"; readonly targetID: number; readonly tag: string }
   /**
-   * Rung 5: put drones out. `droneItemIDs` are BAY STACK ids, not drone entity
+   * Rung 6: put drones out. `droneItemIDs` are BAY STACK ids, not drone entity
    * ids - a stack and a drone in space live in different id spaces, and the
    * launch route takes the former.
    */
   | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[] }
   /**
-   * Rung 5: bring drones home. `droneIDs` are the ENTITY ids of drones in
+   * Rung 6: bring drones home. `droneIDs` are the ENTITY ids of drones in
    * space, the other half of the pair above.
    *
    * ⚠ THIS IS THE WHOLE MOVE, NOT HALF OF IT. There is no scoop to follow: the
@@ -710,14 +710,14 @@ export interface CompanionLadderMemory {
    */
   readonly lastTankUpModuleIDs: readonly number[];
   /**
-   * The target rung 6 last issued a `lock` call for — the fallback for
+   * The target rung 7 last issued a `lock` call for — the fallback for
    * `isAlreadyLocked` when `obs.lockedTargetIDs` itself is unreadable. See
    * that function's own comment for why the authoritative read still wins
    * whenever it is available.
    */
   readonly lastLockIssuedFor: number | null;
   /**
-   * The ship rung 6 last aimed a Heal-family `activate` at, and which fitted
+   * The ship rung 7 last aimed a Heal-family `activate` at, and which fitted
    * modules it has issued for THAT ship. This is the fallback
    * `isHealModuleAlreadyRunning` uses when `activeModuleIDs` cannot say —
    * nothing in a space snapshot exposes a remote-repair module's target, so
@@ -728,11 +728,11 @@ export interface CompanionLadderMemory {
   readonly lastHealTargetID: number | null;
   readonly lastHealModuleIDs: readonly number[];
   /**
-   * The solar system rung 6 last issued a `travelTo` route to, so a standing
+   * The solar system rung 7 last issued a `travelTo` route to, so a standing
    * `TravelTo` broadcast does not restart the shared autopilot every tick.
    */
   /**
-   * The target rung 6 last aimed a WEAPON at, and which fitted weapons it has
+   * The target rung 7 last aimed a WEAPON at, and which fitted weapons it has
    * issued for THAT target. The same pair, for the same reason, as
    * `lastHealTargetID` above: a snapshot says a module is cycling and never
    * says what it is cycling AT, so a gun still chewing on the rat the commander
@@ -763,7 +763,7 @@ export interface CompanionLadderMemory {
    */
   readonly taggingGaveUpOn: readonly number[];
   /**
-   * Rung 5's recall-and-relaunch cycle, or null when none is running.
+   * Rung 6's recall-and-relaunch cycle, or null when none is running.
    *
    * ⚠ A RECORD, BECAUSE THE TRIGGER EXTINGUISHES ITSELF. The instant the recall
    * lands the drones are not in space, so `lowestDroneHealth` reads null and the
@@ -839,7 +839,7 @@ export interface CompanionDecision {
   readonly stop?: string;
   /**
    * Which authority this decision came from, for the readout. Omitted (never
-   * `null` here — `tick()` supplies the default) by every rung except rung 6;
+   * `null` here — `tick()` supplies the default) by every rung except rung 7;
    * the controller reads that omission as `"own-ladder"`, which is the honest
    * answer for the warp yield, the supervision gate, the abandonment protocol
    * and "Standing by" alike — none of them are obeying an external order.
@@ -963,7 +963,7 @@ function nearestOf(
  * — returns null — the moment the rack is up. See `decideTankUp`'s own
  * header for the ladder inside this rung.
  *
- * ⚠ RUNG 4 IS OBEYING THE FLEET, BELOW TANK UP AND ABOVE "Standing by".
+ * ⚠ RUNG 7 IS OBEYING THE FLEET, BELOW TANK UP AND ABOVE "Standing by".
  * Unlike rung 2 it IS an order source (see `decideFleetOrders`'s own header
  * for the tag-over-broadcast reasoning and why an off-grid call is not an
  * order for this pilot at all).
@@ -1048,7 +1048,7 @@ export function decideCompanionAction(
     return tagging.decision;
   }
 
-  // Rung 5: drones. Above the fleet rung, like tank-up and tackle-tag and for
+  // Rung 6: drones. Above the fleet rung, like tank-up and tackle-tag and for
   // the same reason: it moves nothing, costs one call, and a pilot does not
   // stop obeying its commander to keep its drones alive. Threaded like rung 3
   // because most of what it does - waiting out a recall, counting down a
@@ -1058,7 +1058,7 @@ export function decideCompanionAction(
     return drones.decision;
   }
 
-  // Rung 6: obeying the fleet.
+  // Rung 7: obeying the fleet.
   //
   // ⚠ A STANDING ORDER IS HELD ASIDE, NOT RETURNED. When this rung has a real
   // call to issue it wins outright, exactly as the precedence says. But when it
@@ -1198,7 +1198,7 @@ function reachedSafety(obs: FleetCompanionObservation, running: CompanionAbandon
 /**
  * How long the get-safe step waits for its recall before leaving anyway.
  *
- * Shorter than rung 5's own wait on purpose. That one is a pilot choosing to
+ * Shorter than rung 6's own wait on purpose. That one is a pilot choosing to
  * spend time on its drones during a fight it is still in; this one is a pilot
  * with nobody left to fly with, which is the situation the whole abandonment
  * protocol exists to end quickly. Drones are worth a few seconds and are not
@@ -1476,7 +1476,7 @@ interface TankUpStep {
 
 /**
  * Rung 3: tank up. See the header above `decideCompanionAction` for why this
- * sits above obeying the fleet (rung 6) and below the supervision gate.
+ * sits above obeying the fleet (rung 7) and below the supervision gate.
  *
  * ⚠ HARDENERS ARE NEVER CAP-GATED, UNLIKE THE REPAIRERS BELOW. The
  * implementation doc's earlier rung-2 table said to gate them too, because
@@ -1938,7 +1938,7 @@ function healOrderHeard(name: HealBroadcastName): string {
 }
 
 /**
- * Whether `moduleID` is already cycling on `targetID`, so rung 6 does not
+ * Whether `moduleID` is already cycling on `targetID`, so rung 7 does not
  * re-activate a running repairer every tick.
  *
  * ⚠ THE AUTHORITATIVE READ (`activeModuleIDs`, the ship snapshot's own
@@ -2410,7 +2410,7 @@ function decideTackleTag(
   };
 }
 
-// ─── Rung 5: drones ──────────────────────────────────────────────────────────
+// ─── Rung 6: drones ──────────────────────────────────────────────────────────
 
 /**
  * How long a recall is believed to be in progress before the rung stops waiting
@@ -2452,7 +2452,7 @@ function droneCycleHoldTicks(request: FleetCompanionRequest): number {
 }
 
 /**
- * Rung 5: keep the drones alive.
+ * Rung 6: keep the drones alive.
  *
  * Three states, driven by a record rather than by the condition that started
  * them - the shape `standDownAfterFight` uses, and for the same reason it does.
@@ -2598,7 +2598,7 @@ function decideDrones(
 }
 
 /**
- * Rung 6: obeying the fleet. Below the supervision gate and rung 3 (tank up)
+ * Rung 7: obeying the fleet. Below the supervision gate and rung 3 (tank up)
  * and above "Standing by". Returns `null` when there is nothing to obey,
  * which is how the caller falls through to standing by.
  *
@@ -2948,7 +2948,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     mem.phase = decision.phase;
     mem.why = decision.why;
     mem.action = decision.action.kind;
-    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 6
+    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 7
     // (obeying the fleet) leaves these two fields unset on its decision, and
     // that omission means "this pilot is not obeying an external order" —
     // the warp yield, the supervision gate, the abandonment protocol and
