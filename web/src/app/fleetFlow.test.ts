@@ -464,3 +464,58 @@ test("an unrecognised method still invents no refresh (unaffected by the new dis
   assert.equal(store.get().fleet.lastBroadcast, null);
   assert.equal(store.get().fleet.targetTags, null);
 });
+
+// --- fleet-companion phase 7: the jam pushes -------------------------------
+//
+// OnJamStart/OnJamEnd reach the browser on the same SSE channel as the fleet
+// notifications (the gateway's stub suppresses only DoDestinyUpdate), so this
+// needs no gateway patch. It is the only read anywhere that says WHO is
+// holding this ship down.
+
+test("a pushed OnJamStart lands on the space slice, naming the aggressor", async () => {
+  const { store, source } = await onlineFleetFlow();
+  assert.deepEqual([...store.get().space.jams], []);
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "warpScramblerMWD", 0, 5000]),
+  );
+
+  await waitFor(
+    () => store.get().space.jams.length === 1,
+    "the pushed OnJamStart never landed on the space slice",
+  );
+  const jam = store.get().space.jams[0];
+  assert.equal(jam?.sourceBallID, 9001, "the aggressor names itself and must survive the trip");
+  assert.equal(jam?.jammingType, "warpScramblerMWD");
+  assert.equal(jam?.durationMs, 5000);
+});
+
+test("the matching OnJamEnd takes it off again", async () => {
+  const { store, source } = await onlineFleetFlow();
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "warpScrambler", 0, 5000]),
+  );
+  await waitFor(() => store.get().space.jams.length === 1, "the jam never landed");
+
+  source.emit(notificationFrame("OnJamEnd", 2, [9001, 9002, 90000001, "warpScrambler"]));
+  await waitFor(() => store.get().space.jams.length === 0, "the jam was never released");
+});
+
+// A jam push must not be mistaken for a roster invalidation - it carries its
+// own payload and there is no route to re-read it from.
+test("a jam push triggers no fleet reread", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "webify", 0, 5000]),
+  );
+  await waitFor(() => store.get().space.jams.length === 1, "the jam never landed");
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(state.fleetReads, 0, "a jam is not a roster invalidation");
+  // ⚠ EVERY JAM TYPE IS KEPT, not just tackle. Narrowing to the two tackle
+  // types is a READ-time job (tacklersHolding), so a later reader that wants to
+  // know it is being webbed does not have to re-plumb the wire.
+  assert.equal(store.get().space.jams[0]?.jammingType, "webify");
+});

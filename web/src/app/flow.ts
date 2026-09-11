@@ -236,6 +236,7 @@ import {
   decodeFleetStateChangeNotification,
   isFleetBroadcastFresh,
 } from "../bridge/fleetBroadcasts.ts";
+import { decodeJamNotification } from "../bridge/jamNotifications.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -1447,6 +1448,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const fleetTargetTags = decodeFleetStateChangeNotification(method, args);
     if (fleetTargetTags !== null) {
       store.apply({ type: "fleet/target-tags", tags: fleetTargetTags });
+      return;
+    }
+    // Fleet-companion phase 7 — `OnJamStart` / `OnJamEnd`, the ONLY read
+    // anywhere that says who is holding this ship down. Like the two fleet
+    // pushes above and unlike the invalidation sets below, these ARE the
+    // payload: there is no route to re-read them from, and a dropped one is a
+    // tackler the tag rung never learns about.
+    const jam = decodeJamNotification(method, args, receivedAtMs);
+    if (jam !== null) {
+      store.apply({ type: "space/jam", event: jam });
       return;
     }
     if (method !== null && fleetSnapshotNotifications.has(method)) {
