@@ -650,6 +650,25 @@ export interface CompanionAbandonment extends CompanionAbandonmentRecord {
    * never by elapsed time.
    */
   readonly safeSpotWarpSeen: boolean;
+  /**
+   * How many ticks the get-safe step has spent waiting on a drone recall, or
+   * null if it has not issued one.
+   *
+   * ⚠ THE SERVER ABANDONS EVERY CONTROLLED DRONE ON ANY WARP, JUMP OR DOCK, and
+   * an abandoned drone can be scooped by ANYBODY on grid. `handleControllerLost`
+   * (`droneRuntime.js:5735`) only attempts a bay recovery when the lifecycle
+   * reason is a disconnect or a logoff; a normal departure passes neither, so
+   * the recovery branch is skipped outright however close the drones are. So
+   * leaving without recalling does not merely cost this pilot its drones -- it
+   * hands them to whoever is still there.
+   *
+   * ⚠ AND IT MUST NEVER BLOCK THE ESCAPE. This is a bound, not a promise: a
+   * recall that cannot complete -- a full bay, which the server refuses in
+   * silence -- must not strand an unsupervised pilot in space for the whole
+   * thirty-minute wait. Drones are worth a few seconds of delay and are not
+   * worth the ship.
+   */
+  readonly droneRecallWaited: number | null;
 }
 
 /**
@@ -1076,6 +1095,7 @@ function decideAbandonment(
     // remembered forward — it cannot be read now.
     supervisorCharacterIDs: [...memory.lastSupervisorIDs],
     safeSpotWarpIssued: false,
+    droneRecallWaited: null,
     safeSpotWarpSeen: false,
   };
   const mem: CompanionLadderMemory = { ...memory, abandonment: running };
@@ -1163,6 +1183,62 @@ function reachedSafety(obs: FleetCompanionObservation, running: CompanionAbandon
  * companion launches a drone yet, so there is nothing to leave behind — the day
  * a rung does, this warp starts costing drones.
  */
+/**
+ * How long the get-safe step waits for its recall before leaving anyway.
+ *
+ * Shorter than rung 5's own wait on purpose. That one is a pilot choosing to
+ * spend time on its drones during a fight it is still in; this one is a pilot
+ * with nobody left to fly with, which is the situation the whole abandonment
+ * protocol exists to end quickly. Drones are worth a few seconds and are not
+ * worth the ship.
+ */
+const MAX_GET_SAFE_RECALL_WAIT_TICKS = 8;
+
+/**
+ * The recall the get-safe ladder makes before it warps, or null when there is
+ * nothing to wait for and it may leave.
+ *
+ * Returns null in three different situations that must not be conflated:
+ * nothing is out, the recall has finished, or the wait has been given up on.
+ * All three mean the same thing to the caller -- go -- and none of them is an
+ * error.
+ */
+function recallBeforeLeaving(
+  obs: FleetCompanionObservation,
+  mem: CompanionLadderMemory,
+  running: CompanionAbandonment,
+): CompanionDecision | null {
+  const out = obs.myDroneIDs ?? [];
+  if (out.length === 0) {
+    // Nothing of this ship's is in space. ⚠ This is also the only honest answer
+    // when the read is simply absent: a host that does not wire `myDroneIDs` up
+    // gets the behaviour it had before this existed, rather than a pilot that
+    // refuses to leave over drones nobody can see.
+    return null;
+  }
+  const waited = running.droneRecallWaited;
+  if (waited === null) {
+    return {
+      action: { kind: "recallDrones", droneIDs: out },
+      phase: "Getting safe",
+      why: "Calling the drones in before leaving, so they are not left behind.",
+      memory: { ...mem, abandonment: { ...running, droneRecallWaited: 0 } },
+    };
+  }
+  if (waited >= MAX_GET_SAFE_RECALL_WAIT_TICKS) {
+    // ⚠ GIVE UP AND GO. A recall that has not completed by now is most likely
+    // one the server refused in silence for a full bay, and no amount of
+    // further waiting fixes that. Leaving costs the drones; staying risks the
+    // ship, and the ship is what the protocol is for.
+    return null;
+  }
+  return waiting(
+    "Getting safe",
+    "Waiting for the drones to come home before leaving.",
+    { ...mem, abandonment: { ...running, droneRecallWaited: waited + 1 } },
+  );
+}
+
 function getSafe(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
@@ -1172,6 +1248,17 @@ function getSafe(
   const snapshot = obs.snapshot ?? null;
   if (obs.inSpace !== true || snapshot === null) {
     return waiting("Getting safe", "Waiting for the ship to be out in space.", mem);
+  }
+  // ⚠ RECALL BEFORE COMMITTING TO LEAVE. Every branch below that WARPS is a
+  // point of no return for anything still in space: the server abandons every
+  // controlled drone on a normal departure and does not try to recover them,
+  // and an abandoned drone can be scooped by anyone on grid. See
+  // `droneRecallWaited`. Docking and approaching are not departures and are
+  // left alone -- a dock is the destination, and the recall happens before the
+  // warp that reaches it.
+  const recall = recallBeforeLeaving(obs, mem, running);
+  if (recall !== null) {
+    return recall;
   }
   const measurement = measureSpace(snapshot);
   const target = nearestOf(
@@ -2871,6 +2958,10 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
             supervisorCharacterIDs: [...resuming.supervisorCharacterIDs],
             safeSpotWarpIssued: false,
             safeSpotWarpSeen: false,
+            // A restart cannot know about a recall the dead process issued, and
+            // the server has already abandoned whatever was out when the session
+            // dropped. Starting at null means this run makes its own one attempt.
+            droneRecallWaited: null,
           },
           closingOn: null,
           // A resumed run has tanked up, locked, healed and routed nothing yet

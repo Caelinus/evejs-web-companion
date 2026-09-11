@@ -2856,3 +2856,108 @@ test("a standing fleet order does not stop a hurt drone being recalled", () => {
   );
   assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
 });
+
+// --- getting safe no longer gives the drones away ---------------------------
+//
+// ⚠ THE SERVER ABANDONS EVERY CONTROLLED DRONE ON ANY WARP, JUMP OR DOCK.
+// handleControllerLost only attempts a bay recovery when the lifecycle reason is
+// a disconnect or a logoff, and a normal departure passes neither - so the
+// recovery branch is skipped outright however close the drones are. And an
+// abandoned drone can be scooped by ANYBODY on grid. Leaving without a recall
+// does not merely cost this pilot its drones; it hands them to whoever is
+// still there.
+
+test("an unsupervised pilot with drones out recalls them before it warps", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500_000), myDroneIDs: [DRONE_A] }),
+  );
+  assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
+  assert.equal(decision.phase, "Getting safe");
+});
+
+test("with nothing out it warps straight away, exactly as it did before", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500_000), myDroneIDs: [] }),
+  );
+  assert.equal(decision.action.kind, "warp");
+});
+
+// ⚠ A HOST THAT DOES NOT WIRE THE READ UP GETS THE OLD BEHAVIOUR, not a pilot
+// that refuses to leave over drones nobody can see.
+test("an absent drone read does not strand the pilot", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500_000) }),
+  );
+  assert.equal(decision.action.kind, "warp");
+});
+
+test("the recall is issued once, then waited on rather than resent", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const stillOut = alone({ snapshot: gridWithStation(500_000), myDroneIDs: [DRONE_A] });
+
+  const first = decideCompanionAction(WITH_DRONES, stillOut, memory);
+  assert.equal(first.action.kind, "recallDrones");
+  memory = first.memory;
+
+  const second = decideCompanionAction(WITH_DRONES, stillOut, memory);
+  assert.deepEqual(second.action, { kind: "wait" }, "a second recall would be a wasted call");
+  assert.equal(second.phase, "Getting safe");
+});
+
+test("once the drones are home the warp goes ahead", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  memory = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500_000), myDroneIDs: [DRONE_A] }),
+    memory,
+  ).memory;
+
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500_000), myDroneIDs: [] }),
+    memory,
+  );
+  assert.equal(decision.action.kind, "warp");
+});
+
+// ⚠ DRONES ARE WORTH A FEW SECONDS AND ARE NOT WORTH THE SHIP. A recall that
+// cannot complete - a full bay, which the server refuses in silence - must not
+// strand an unsupervised pilot in space for the whole thirty-minute wait.
+test("a recall that never completes does not strand the pilot in space", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const stuck = alone({ snapshot: gridWithStation(500_000), myDroneIDs: [DRONE_A] });
+  let left = false;
+
+  for (let tick = 0; tick < 20; tick += 1) {
+    const decision = decideCompanionAction(WITH_DRONES, stuck, memory);
+    memory = decision.memory;
+    if (decision.action.kind === "warp") {
+      left = true;
+      break;
+    }
+  }
+  assert.ok(left, "the pilot must give up on the recall and get itself safe");
+});
+
+// The safe-spot half of the ladder is a departure too, and has the same hazard.
+test("the safe-spot warp also recalls first", () => {
+  const decision = decideCompanionAction(
+    { ...WITH_DRONES, safeSpotBookmarkID: 60000002 },
+    alone({ snapshot: gridWithStation(null), myDroneIDs: [DRONE_A] }),
+  );
+  assert.deepEqual(decision.action, { kind: "recallDrones", droneIDs: [DRONE_A] });
+});
+
+// Docking is not a departure - it is the destination, and the recall already
+// happened before the warp that got here. A pilot on the station must not
+// stall.
+test("a pilot already at the station docks without a fresh recall round", () => {
+  const decision = decideCompanionAction(
+    WITH_DRONES,
+    alone({ snapshot: gridWithStation(500), myDroneIDs: [] }),
+  );
+  assert.equal(decision.action.kind, "dock");
+});
