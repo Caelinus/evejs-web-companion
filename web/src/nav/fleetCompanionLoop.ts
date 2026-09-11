@@ -223,12 +223,6 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
  */
 export interface FleetCompanionObservation extends ScriptObservation {
   /**
-   * Fleet target tags, itemID -> tag. `null` means never received; an empty map
-   * means received and nothing is tagged. The distinction decides whether a
-   * tagger may pick a letter at all.
-   */
-  readonly fleetTargetTags: ReadonlyMap<number, string> | null;
-  /**
    * Whether THIS pilot's tag write can land, from the fleet roster's role/job.
    *
    * ⚠ THREE STATES. `null` (roster unreadable) and `false` (not a commander)

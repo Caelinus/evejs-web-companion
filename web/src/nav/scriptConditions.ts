@@ -30,6 +30,7 @@ import type { SavedFitting } from "../bridge/fittings.ts";
 import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import type { RefusalRecord } from "./refusalLedger.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -213,6 +214,28 @@ export interface ScriptObservation {
    * presence of another player ship on grid.
    */
   readonly fleetMemberCharacterIDs?: readonly number[] | null;
+  /**
+   * Fleet target tags, itemID -> tag, from the last `OnFleetStateChange`. Read
+   * straight off the store, never a fresh call — so unlike the gated fleet
+   * reads above this is never behind a macro gate.
+   *
+   * ⚠ `null` = never received or unreadable; an EMPTY MAP = received and
+   * nothing is tagged. Those are different answers and both are real — the
+   * decoder (`decodeFleetStateChangeNotification`) is careful about this and
+   * an observation that collapsed them would undo that care. Moved up from
+   * `FleetCompanionObservation`, which declared this field first; kept here
+   * because any script (not only the fleet companion) may want to read it.
+   */
+  readonly fleetTargetTags?: ReadonlyMap<number, string> | null;
+  /**
+   * The most recent `OnFleetBroadcast` call ("shoot that"), read off the
+   * store and ALREADY freshness-filtered against `FLEET_BROADCAST_TTL_MS` at
+   * observation build time — never here, and never in the store's reducer.
+   * `null` covers both "never received" and "received, but the call has gone
+   * stale"; a follower whose call has lapsed falls back to its own ladder,
+   * which is a working bot, not a stopped one.
+   */
+  readonly fleetBroadcast?: FleetBroadcast | null;
   /** Fitted hardeners + damage controls, refreshed when the active hull or fit changes. */
   readonly hardenerModuleIDs?: readonly number[];
   /** Fitted WEAPONS (turrets/launchers), resolved once at start (the fight block runs these). */
