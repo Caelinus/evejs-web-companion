@@ -1152,7 +1152,25 @@ function decideAbandonment(
 
   // 2. Get safe.
   if (!reachedSafety(obs, running)) {
-    return getSafe(request, obs, mem, running);
+    const safe = runToSafety(request, obs, mem, {
+      run: running,
+      phase: "Getting safe",
+      because: "there is nobody left in the fleet to fly with",
+      write: (m, run) => ({ ...m, abandonment: { ...running, ...run } }),
+    });
+    if (safe !== null) {
+      return safe;
+    }
+    // Nowhere to go, which for THIS caller is the end of the protocol: a pilot
+    // with nobody to fly with and no way off this grid has nothing further to
+    // try, and decision 5 says so rather than inventing a destination.
+    return {
+      action: WAIT,
+      phase: "Getting safe",
+      why: "No station in view and no safe spot set.",
+      memory: mem,
+      stop: "Nobody is left in the fleet, and there is no station in view and no safe spot set for this pilot.",
+    };
   }
 
   // 3. Drop fleet — each companion for itself. "All pilots drop fleet" is the
@@ -1209,16 +1227,43 @@ function reachedSafety(obs: FleetCompanionObservation, running: CompanionAbandon
 }
 
 /**
- * Step 1 of the protocol: the nearest dock on grid, else the operator's safe
- * spot, else an honest stop.
+ * The bookkeeping a run to safety needs, wherever it happens to live on the
+ * ladder memory.
  *
- * ⚠ NO DRONE RECALL HERE YET, AND PHASE 5 MUST ADD ONE. `dockAtNearest` recalls
- * before it warps because a warp with drones out abandons them. Nothing in the
- * companion launches a drone yet, so there is nothing to leave behind — the day
- * a rung does, this warp starts costing drones.
+ * TWO RUNGS RUN THIS SAME LADDER FOR DIFFERENT REASONS — rung 2 because there
+ * is nobody left to fly with, rung 5 because the ship is hurt — and they want
+ * identical flying and different words. This is the seam that lets them share
+ * one implementation instead of keeping two copies that drift.
+ *
+ * `CompanionAbandonment` and `CompanionFlee` both satisfy it structurally, so
+ * neither had to be reshaped to fit.
  */
+interface SafetyRun {
+  readonly safeSpotWarpIssued: boolean;
+  readonly safeSpotWarpSeen: boolean;
+  readonly droneRecallWaited: number | null;
+}
+
 /**
- * How long the get-safe step waits for its recall before leaving anyway.
+ * One caller's half of the arrangement: its own state, its own readout, and
+ * the way back to wherever that state is kept.
+ */
+interface SafetyLeg {
+  readonly run: SafetyRun;
+  /** The phase this leg reports while it flies. */
+  readonly phase: string;
+  /**
+   * The tail of "Docking, because ..." — the single sentence that differs
+   * between the two callers, kept as a fragment so the rest of the readout can
+   * be written once.
+   */
+  readonly because: string;
+  /** Put an updated run back where this caller keeps it. */
+  readonly write: (mem: CompanionLadderMemory, run: SafetyRun) => CompanionLadderMemory;
+}
+
+/**
+ * How long a run to safety waits for its recall before leaving anyway.
  *
  * Shorter than rung 6's own wait on purpose. That one is a pilot choosing to
  * spend time on its drones during a fight it is still in; this one is a pilot
@@ -1240,7 +1285,7 @@ const MAX_GET_SAFE_RECALL_WAIT_TICKS = 8;
 function recallBeforeLeaving(
   obs: FleetCompanionObservation,
   mem: CompanionLadderMemory,
-  running: CompanionAbandonment,
+  leg: SafetyLeg,
 ): CompanionDecision | null {
   const out = obs.myDroneIDs ?? [];
   if (out.length === 0) {
@@ -1250,13 +1295,13 @@ function recallBeforeLeaving(
     // refuses to leave over drones nobody can see.
     return null;
   }
-  const waited = running.droneRecallWaited;
+  const waited = leg.run.droneRecallWaited;
   if (waited === null) {
     return {
       action: { kind: "recallDrones", droneIDs: out },
-      phase: "Getting safe",
+      phase: leg.phase,
       why: "Calling the drones in before leaving, so they are not left behind.",
-      memory: { ...mem, abandonment: { ...running, droneRecallWaited: 0 } },
+      memory: leg.write(mem, { ...leg.run, droneRecallWaited: 0 }),
     };
   }
   if (waited >= MAX_GET_SAFE_RECALL_WAIT_TICKS) {
@@ -1267,21 +1312,32 @@ function recallBeforeLeaving(
     return null;
   }
   return waiting(
-    "Getting safe",
+    leg.phase,
     "Waiting for the drones to come home before leaving.",
-    { ...mem, abandonment: { ...running, droneRecallWaited: waited + 1 } },
+    leg.write(mem, { ...leg.run, droneRecallWaited: waited + 1 }),
   );
 }
 
-function getSafe(
+/**
+ * The ladder that gets a ship out of here: recall what is in space, then the
+ * nearest dock on grid, then the operator's safe spot.
+ *
+ * ⚠ RETURNS null FOR "NOWHERE TO GO", and that is the one thing the two
+ * callers must answer differently. A pilot with nobody left to fly with and no
+ * station in view has nothing else to try and stops (decision 5). A pilot that
+ * is merely HURT still has a fight to be in, and stopping the run over a grid
+ * with no station would take a shooting ship away from a fleet that still has
+ * one. So the branch is left to the caller rather than decided here.
+ */
+function runToSafety(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   mem: CompanionLadderMemory,
-  running: CompanionAbandonment,
-): CompanionDecision {
+  leg: SafetyLeg,
+): CompanionDecision | null {
   const snapshot = obs.snapshot ?? null;
   if (obs.inSpace !== true || snapshot === null) {
-    return waiting("Getting safe", "Waiting for the ship to be out in space.", mem);
+    return waiting(leg.phase, "Waiting for the ship to be out in space.", mem);
   }
   // ⚠ RECALL BEFORE COMMITTING TO LEAVE. Every branch below that WARPS is a
   // point of no return for anything still in space: the server abandons every
@@ -1290,7 +1346,7 @@ function getSafe(
   // `droneRecallWaited`. Docking and approaching are not departures and are
   // left alone -- a dock is the destination, and the recall happens before the
   // warp that reaches it.
-  const recall = recallBeforeLeaving(obs, mem, running);
+  const recall = recallBeforeLeaving(obs, mem, leg);
   if (recall !== null) {
     return recall;
   }
@@ -1304,25 +1360,25 @@ function getSafe(
     if (step === null || step.kind === "arrive") {
       return {
         action: { kind: "dock", stationID: target.itemID },
-        phase: "Getting safe",
-        why: "Docking, because there is nobody left in the fleet to fly with.",
+        phase: leg.phase,
+        why: `Docking, because ${leg.because}.`,
         memory: mem,
       };
     }
     if (step.kind === "closing") {
-      return waiting("Getting safe", "Closing on the station.", mem);
+      return waiting(leg.phase, "Closing on the station.", mem);
     }
     if (step.kind === "approach") {
       return {
         action: { kind: "approach", targetID: target.itemID },
-        phase: "Getting safe",
+        phase: leg.phase,
         why: "Closing on the station.",
         memory: { ...mem, closingOn: target.itemID },
       };
     }
     return {
       action: { kind: "warp", targetID: target.itemID },
-      phase: "Getting safe",
+      phase: leg.phase,
       why: "Warping to the nearest station.",
       memory: mem,
     };
@@ -1330,28 +1386,22 @@ function getSafe(
 
   const bookmarkID = request.safeSpotBookmarkID;
   if (bookmarkID === null) {
-    // The one case decision 5 says has nothing to do. An invented safe spot
-    // would be worse than saying so.
-    return {
-      action: WAIT,
-      phase: "Getting safe",
-      why: "No station in view and no safe spot set.",
-      memory: mem,
-      stop: "Nobody is left in the fleet, and there is no station in view and no safe spot set for this pilot.",
-    };
+    // Nowhere to go. An invented safe spot would be worse than saying so, and
+    // what SAYING so means differs per caller — see this function's header.
+    return null;
   }
-  if (!running.safeSpotWarpIssued) {
+  if (!leg.run.safeSpotWarpIssued) {
     return {
       action: { kind: "warpToBookmark", bookmarkID },
-      phase: "Getting safe",
+      phase: leg.phase,
       why: "No station in view, so this pilot is warping to the safe spot.",
-      memory: { ...mem, abandonment: { ...running, safeSpotWarpIssued: true } },
+      memory: leg.write(mem, { ...leg.run, safeSpotWarpIssued: true }),
     };
   }
   // Issued, and no warp has been seen. Do NOT re-issue every two seconds, and
-  // do NOT give up: the warp may simply not have started yet, and the
-  // thirty-minute bound above is already the answer to one that never does.
-  return waiting("Getting safe", "Waiting for the warp to the safe spot to start.", mem);
+  // do NOT give up: the warp may simply not have started yet, and each caller's
+  // own bound is already the answer to one that never does.
+  return waiting(leg.phase, "Waiting for the warp to the safe spot to start.", mem);
 }
 
 // ─── Rung 3: tank up ─────────────────────────────────────────────────────────
