@@ -1008,6 +1008,37 @@ export interface CompanionLadderMemory {
    */
   readonly taggingGaveUpOn: readonly number[];
   /**
+   * The target this pilot's last lock refusals were against, and how many it has
+   * had in a row.
+   *
+   * ⚠ THE STREAK IS PER TARGET AND RESETS WHEN THE TARGET CHANGES, the same
+   * shape as `lastTagIssuedFor`/`lastTagAttempts` above. A fleet that calls
+   * three different ships in a row has not exhausted anything; three refusals on
+   * ONE ship is what says this pilot cannot lock that ship.
+   */
+  readonly lockRefusedFor: number | null;
+  readonly lockRefusals: number;
+  /**
+   * Ships this pilot has stopped trying to lock.
+   *
+   * ⚠ WITHOUT THIS, A CALLED TARGET IT CANNOT REACH HOLDS THE WHOLE LADDER. Rung
+   * 7 re-issues a refused lock every tick by design -- the authoritative lock
+   * list is consulted rather than believed, so a refusal never reads as done --
+   * and that is right for a lock that will land once the ship drifts closer. It
+   * is wrong for one that never will: the rung returns a real decision every
+   * tick, so every rung BENEATH it (the loot order, salvage) is starved for as
+   * long as the fleet keeps calling that ship. Observed as a pilot that stopped
+   * looting and did nothing visible at all.
+   *
+   * ⚠ FOR THE RUN, BUT NOT PAST A WARP. What is out of reach is a fact about
+   * where this ship is standing, and a warp moves it -- so the mid-warp tick
+   * empties this. A pilot that lands on a new grid tries everything again, which
+   * is the honest answer: nothing it learned on the old grid is still true.
+   *
+   * Capped like `taggingGaveUpOn`, so a long fight cannot grow it without bound.
+   */
+  readonly lockGaveUpOn: readonly number[];
+  /**
    * Rung 6's recall-and-relaunch cycle, or null when none is running.
    *
    * ⚠ A RECORD, BECAUSE THE TRIGGER EXTINGUISHES ITSELF. The instant the recall
@@ -1189,6 +1220,9 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastTagIssuedFor: null,
     lastTagAttempts: 0,
     taggingGaveUpOn: [],
+    lockRefusedFor: null,
+    lockRefusals: 0,
+    lockGaveUpOn: [],
     droneCycle: null,
     droneCyclesSpent: 0,
     lastDroneRepairTargetID: null,
@@ -1432,6 +1466,14 @@ export function decideCompanionAction(
     if (fleeing !== null && sawIt(fleeing)) {
       next = { ...next, flee: { ...fleeing, safeSpotWarpSeen: true } };
     }
+    // ⚠ AND THE ONE THING A WARP UNLEARNS. "This ship cannot lock that ship" is
+    // a fact about where this ship is STANDING, and a warp moves it somewhere
+    // else -- so every give-up is dropped here rather than carried onto a grid
+    // where it was never measured. See `lockGaveUpOn`. Nothing else in this
+    // memory is distance-shaped, which is why nothing else is cleared.
+    if (next.lockGaveUpOn.length > 0 || next.lockRefusedFor !== null) {
+      next = { ...next, lockGaveUpOn: [], lockRefusedFor: null, lockRefusals: 0 };
+    }
     return waiting(
       "In warp",
       "The fleet is warping this ship. Nothing is decided until it lands.",
@@ -1478,6 +1520,9 @@ export function decideCompanionAction(
     lastTagIssuedFor: memory.lastTagIssuedFor,
     lastTagAttempts: memory.lastTagAttempts,
     taggingGaveUpOn: memory.taggingGaveUpOn,
+    lockRefusedFor: memory.lockRefusedFor,
+    lockRefusals: memory.lockRefusals,
+    lockGaveUpOn: memory.lockGaveUpOn,
     lastDroneRepairTargetID: memory.lastDroneRepairTargetID,
     lastDroneEngageTargetID: memory.lastDroneEngageTargetID,
     lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
@@ -2293,6 +2338,42 @@ function bestTaggedEntity(
  * merely in flight is not re-issued every tick just because this tick's
  * authoritative read did not arrive.
  */
+/**
+ * How many refused locks on ONE ship are enough to stop trying it.
+ *
+ * ⚠ THE SAME "A FEW TRIES" THE TAG RUNG AND THE LOOT ORDER ALREADY USE
+ * (`MAX_COMPANION_TAG_ATTEMPTS`, `MAX_LOOT_ATTEMPTS`), and deliberately the same
+ * number: a pilot that gives up after three goes at anything is one an operator
+ * can predict. At a two-second cadence it is six seconds of trying, which is
+ * long enough for a lock that was going to land.
+ */
+const MAX_REFUSED_LOCK_ATTEMPTS = 3;
+
+/** Record one refused lock, and give up on that ship once the budget is spent. */
+function noteRefusedLock(
+  memory: CompanionLadderMemory,
+  targetID: number,
+): CompanionLadderMemory {
+  // ⚠ A DIFFERENT SHIP STARTS THE COUNT OVER. The budget is "three goes at THIS
+  // ship", not "three refusals ever" -- a fleet calling three ships in a row has
+  // exhausted nothing.
+  const attempts = memory.lockRefusedFor === targetID ? memory.lockRefusals + 1 : 1;
+  if (attempts < MAX_REFUSED_LOCK_ATTEMPTS) {
+    return { ...memory, lockRefusedFor: targetID, lockRefusals: attempts };
+  }
+  return {
+    ...memory,
+    lockRefusedFor: null,
+    lockRefusals: 0,
+    lockGaveUpOn: rememberGiveUp(memory.lockGaveUpOn, targetID),
+  };
+}
+
+/** Has this pilot stopped trying to lock that ship? See `lockGaveUpOn`. */
+function gaveUpOnLocking(memory: CompanionLadderMemory, targetID: number): boolean {
+  return memory.lockGaveUpOn.includes(targetID);
+}
+
 function isAlreadyLocked(
   targetID: number,
   lockedTargetIDs: readonly number[] | null | undefined,
@@ -4662,8 +4743,14 @@ function decideFleetOrders(
   //        `Target` broadcast or the chat line standing in for one. Both come
   //        from `calledTarget`, which rung 6 reads too so the drones and the
   //        guns can never pick different ships. See its header.
+  //
+  //        ⚠ UNLESS THIS PILOT HAS GIVEN UP ON LOCKING IT. Then the call is
+  //        heard, and answered with "I cannot", instead of being re-issued for
+  //        ever -- and crucially the rung falls THROUGH, so the orders below and
+  //        the rungs beneath this one get their ticks back. See `lockGaveUpOn`.
   const called = calledTarget(obs, entities, measurement, order);
-  if (called !== null) {
+  const unreachable = called !== null && gaveUpOnLocking(memory, called.itemID);
+  if (called !== null && !unreachable) {
     return lockThenEngage(
       called.itemID,
       called.source,
@@ -4816,6 +4903,26 @@ function decideFleetOrders(
       memory,
       followingOrderFrom: order.source,
       lastOrderHeard: order.heard,
+    };
+  }
+
+  // The fleet IS calling a target, and this pilot has stopped trying to lock it.
+  //
+  // ⚠ STANDING, NOT PARKED, AND THAT IS THE ENTIRE VALUE OF GIVING UP. A
+  // `standing` decision is kept as the READOUT while the ladder carries on, so
+  // the rungs beneath -- the loot order, salvage -- get the ticks this rung was
+  // spending on a lock that never landed, and the panel still says what the
+  // fleet asked for and why this pilot is not doing it. Parking here would swap
+  // one kind of stuck pilot for another.
+  if (unreachable && called !== null) {
+    return {
+      action: WAIT,
+      standing: true,
+      phase: "Obeying fleet",
+      why: `${called.why} It cannot be locked from here, so this pilot has stopped trying and is getting on with its own work.`,
+      memory,
+      followingOrderFrom: called.source,
+      lastOrderHeard: called.heard,
     };
   }
 
@@ -5008,6 +5115,17 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         const raw = error instanceof Error ? error.message : String(error);
         mem.failureReason = raw;
         mem.why = `${decision.why} ${refusalWords(raw)}`;
+        // ⚠ COUNTED HERE, WHERE THE REFUSAL IS, AND NOWHERE ELSE. The ladder is
+        // pure and never learns what happened to a call it chose; this is the
+        // one place that knows. A lock is the only call counted because it is
+        // the only one that re-issues without bound: the authoritative lock list
+        // is consulted rather than believed, by design, so a refusal never reads
+        // as done. The others all latch on the asking -- the weapons work
+        // through their module list and stop, an align, a warp and a route each
+        // stamp their destination -- so none of them can spin.
+        if (decision.action.kind === "lock") {
+          mem.ladder = noteRefusedLock(mem.ladder, decision.action.targetID);
+        }
         report();
         return { kind: "wait" };
       }
@@ -5072,6 +5190,9 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastTagIssuedFor: null,
           lastTagAttempts: 0,
           taggingGaveUpOn: [],
+          lockRefusedFor: null,
+          lockRefusals: 0,
+          lockGaveUpOn: [],
           // A resumed run has launched and recalled nothing either, and a cycle
           // it was mid-way through is gone with the process that held it. Its
           // drones, if any, are already abandoned in space - that is the

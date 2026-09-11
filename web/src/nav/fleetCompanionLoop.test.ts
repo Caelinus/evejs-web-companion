@@ -365,6 +365,114 @@ test("a refusal is SAID, in plain words, and never in the server's own vocabular
   assert.equal(readout.failureReason, "TargetNotWithinRangeGeneric");
 });
 
+/** A controller whose every call is refused, watching a target the fleet called. */
+function refusingController() {
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () =>
+      obs({
+        snapshot: gridWithEntities([TACKLE]),
+        fleetTargetTags: new Map([[TACKLE, "A"]]),
+        lockedTargetIDs: [],
+      }),
+    issue: async (action) => {
+      attempted.push(action);
+      throw new Error("TargetNotWithinRangeGeneric");
+    },
+    sleep: async () => {},
+  });
+  return { controller, attempted };
+}
+
+test("a target that will not lock is given up on after a few tries", async () => {
+  // ⚠ WHY GIVING UP IS THE RIGHT ANSWER AND RETRYING FOR EVER IS NOT. The lock
+  // is re-issued every tick by design -- the authoritative lock list is
+  // consulted rather than believed -- which is right for a lock that will land
+  // once the ship drifts closer, and wrong for one that never will: rung 7
+  // returns a real decision every tick, so every rung BENEATH it is starved for
+  // as long as the fleet keeps calling that ship.
+  const { controller, attempted } = refusingController();
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+
+  for (let tick = 0; tick < 6; tick += 1) {
+    await controller.tick();
+  }
+
+  assert.equal(attempted.length, 3, "three goes at it, then it stops asking");
+  assert.ok(
+    attempted.every((action) => action.kind === "lock"),
+    "and every one of them was the lock",
+  );
+});
+
+test("...and it SAYS so, rather than going quiet", async () => {
+  const { controller } = refusingController();
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  for (let tick = 0; tick < 4; tick += 1) {
+    await controller.tick();
+  }
+
+  const readout = controller.snapshot();
+  assert.equal(readout.phase, "Obeying fleet", "it is still answering the fleet's call");
+  assert.match(readout.why ?? "", /stopped trying/i);
+  assert.equal(
+    readout.followingOrderFrom,
+    "tag",
+    "the call it cannot answer is still named, so the panel does not just go blank",
+  );
+});
+
+test("a WARP clears every give-up - what is out of reach is a fact about where it stands", async () => {
+  const { controller, attempted } = refusingController();
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  for (let tick = 0; tick < 4; tick += 1) {
+    await controller.tick();
+  }
+  assert.equal(attempted.length, 3, "given up, as above");
+
+  // The fleet then warps this pilot somewhere else, and the mid-warp tick is
+  // what forgets: it is the one tick that knows the ship has moved.
+  const midWarp = decideCompanionAction(
+    DEFAULT_FLEET_COMPANION_REQUEST,
+    obs({ inWarp: true, snapshot: gridWithEntities([TACKLE]) }),
+    { ...freshLadderMemory(), lockGaveUpOn: [TACKLE], lockRefusedFor: TACKLE, lockRefusals: 2 },
+  );
+  assert.deepEqual(midWarp.memory.lockGaveUpOn, [], "a new grid is a clean slate");
+  assert.equal(midWarp.memory.lockRefusedFor, null);
+  assert.equal(midWarp.memory.lockRefusals, 0);
+});
+
+test("three refusals spread across DIFFERENT ships give up on none of them", async () => {
+  // ⚠ THE BUDGET IS "THREE GOES AT THIS SHIP", NOT "THREE REFUSALS EVER". A
+  // fleet calling three ships in a row has exhausted nothing, and a counter that
+  // did not reset per target would retire the third one on its first try.
+  let called = TACKLE;
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () =>
+      obs({
+        snapshot: gridWithEntities([TACKLE, OTHER]),
+        fleetTargetTags: new Map([[called, "A"]]),
+        lockedTargetIDs: [],
+      }),
+    issue: async (action) => {
+      attempted.push(action);
+      throw new Error("TargetNotWithinRangeGeneric");
+    },
+    sleep: async () => {},
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+
+  await controller.tick();
+  called = OTHER;
+  await controller.tick();
+  called = TACKLE;
+  await controller.tick();
+  await controller.tick();
+
+  assert.equal(attempted.length, 4, "every one of those was still worth a try");
+});
+
 test("run() cannot reject, whatever the ladder does", async () => {
   // ⚠ EVERY CALL SITE STARTS THIS WITH `void`, so a rejection here is an
   // unhandled promise rejection in the page. `observe` throwing is already
