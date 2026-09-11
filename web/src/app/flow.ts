@@ -5494,7 +5494,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
 
-        // ── The drone reads (rung 6). Two of the three are free: they come off
+        // ── The drone reads (rung 5). Two of the three are free: they come off
         // the snapshot already in hand. Only the bay costs a call, and it is
         // gated above.
         //
@@ -5663,7 +5663,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "acceptFleetInvite":
             await api.acceptFleetInvite(action.fleetID, callOptions);
             return;
-          // Rung 3, "obeying the fleet" (fleetCompanionLoop.ts): a tag or a
+          // Rung 6, "obeying the fleet" (fleetCompanionLoop.ts): a tag or a
           // `Target` broadcast, locked; an `AlignTo` broadcast, aligned to.
           // Straight to the api layer for the same reason every case above
           // is — the companion has to see a refusal to decide on it, not have
@@ -5674,7 +5674,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "lock":
             await api.lockTarget(action.targetID, callOptions);
             return;
-          // Rung 3, the Heal family (fleetCompanionLoop.ts): a fitted remote
+          // Rung 6, the Heal family (fleetCompanionLoop.ts): a fitted remote
           // repairer, aimed at the ship the broadcast named. `repeat: -1` is
           // this codebase's own "run continuously" (see the DSL's own
           // `activate` case above `makeFleetCompanionDeps`). Phase 3 adds
@@ -5696,7 +5696,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "deactivate":
             await api.deactivateModule(action.moduleID, {}, callOptions);
             return;
-          // Rung 3, `TravelTo`: hand off to the SHARED autopilot, exactly as
+          // Rung 6, `TravelTo`: hand off to the SHARED autopilot, exactly as
           // the DSL's own `startSystemRoute` case does — same solver, same
           // bounds, and the ride ends in space at the destination system
           // since a fleet companion has no station to dock at here.
