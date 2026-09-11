@@ -722,17 +722,51 @@ call.
 script at all.** See "The shape of the thing" above. This was previously left
 open as "consider a `follow-the-fleet` block"; it is now settled the other way.
 
-**3. Precedence — DECIDED.** The order in which the authorities win, once, for
-every ambiguous case:
+**3. Precedence — DECIDED, and AMENDED 2026-09-11 when phase 6 was built.**
+The order in which the authorities win, once, for every ambiguous case:
 
 ```
-server fleet warp  >  FC broadcast  >  chat command  >  own flee rule  >  own ladder
+server fleet warp  >  own flee rule  >  FC broadcast  >  chat command  >  own ladder
 ```
 
 The consequence worth stating out loud, because it is the one that will look
 like a bug: **a bot being fleet-warped does not flee, does not re-target, and
 does not answer a chat command until the warp lands.** That is correct. A pilot
 who breaks formation to save themselves mid-warp is not a fleet-mate.
+
+⚠ **The flee used to sit BELOW the FC broadcast, and that was wrong.** The
+original order read `... > chat command > own flee rule > own ladder`, which
+makes a standing target call outrank a pilot's own survival. It was written
+before there was any code, and `decideFleetOrders` was already contradicting it
+in a comment — "phase 6 must not put its flee beneath this rung; a pilot that
+never stops obeying a target call would never flee" — so the two could not both
+stand.
+
+**What phase 5 had already fixed, and what it had not.** The parking fix made a
+STANDING call (target locked, guns running, nothing new to issue) hand back a
+readout that the ladder holds aside, so rungs below it still get their tick. That
+removed the worst reading of the old order. What it did not remove: a fleet order
+with something REAL left to issue still wins outright, and `lockThenEngage`
+issues one lock and then one activate per weapon before it goes quiet. On a fresh
+primary with six guns that is seven ticks — about fourteen seconds at the two
+second cadence — and an FC that keeps re-calling extends it without limit.
+
+**The operator was asked, and chose the flee.** Fleet warp was never in dispute
+and keeps its place at the top: rung 1 yields to it unconditionally.
+
+⚠ **This is the acceptance test, and only one half of it discriminates.** With
+the flee rung moved back beneath the fleet rung, "a pilot obeying a *standing*
+target call still flees" STILL PASSES, because the parking fix handles it. The
+case that fails is **a pilot mid-lock on a fresh primary**. That was established
+by moving the rung, not by argument, and both tests are in
+`fleetCompanionLoop.test.ts` with a comment saying which is which.
+
+⚠ **A side effect worth knowing.** Nothing now sits beneath the fleet rung, so
+`CompanionDecision.standing` — built in phase 5 specifically so a flee could
+live below it — has no behavioural consumer. It is kept because the readout it
+protects is still correct (a pilot whose guns are running must not report
+"Standing by"), and because phase 8's chat rung is the next candidate for that
+slot. Do not remove it on the grounds that nothing needs it.
 
 **4. The headless launch grant — DECIDED: keep the machinery, drop the dialog.**
 

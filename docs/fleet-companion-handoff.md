@@ -24,7 +24,8 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
 | Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
-| Everything else | phase 6 (flee) not started — and it is the first rung to sit BENEATH the fleet rung, which is now safe; 8 waits on the `/d/evet` gateway patch; 9 waits on the rest |
+| Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
+| Everything else | 8 waits on the `/d/evet` gateway patch, which nobody has written; 9 waits on 8. **Every other in-repo phase is done.** |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
 full suite 5,174 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
@@ -39,12 +40,13 @@ fresh worktree reports 22 because `public/dist` is absent). Check both.
 ## What exists
 
 - `web/src/nav/fleetCompanionLoop.ts` — the loop. Types, the typed request, the
-  controller, and the ladder. ⚠ This bullet described the phase-0 skeleton and
-  was left behind by every phase since; the rungs as they now stand are: 1 warp
-  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 drones,
-  6 obeying the fleet. Phase 6's flee is the first
-  rung to go BENEATH the fleet rung, which phase 5's parking fix made safe.
-- `web/src/nav/fleetCompanionLoop.test.ts` — 162 tests, the ladder, the
+  controller, and the ladder. The rungs as they now stand: 1 warp
+  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 flee,
+  6 drones, 7 obeying the fleet. ⚠ The flee went ABOVE the fleet rung, not
+  beneath it as every earlier draft of this bullet predicted — the operator
+  decided that in phase 6. `decideCompanionAction`'s own header now carries the
+  full list with the reasoning, so prefer it to this bullet.
+- `web/src/nav/fleetCompanionLoop.test.ts` — 196 tests, the ladder, the
   supervision gate, the abandonment protocol, the fleet-order rung, and the
   lifecycle.
 - `web/src/bots/companionRunPolicy.test.ts` — 31 tests, the risk derivation and
@@ -860,6 +862,139 @@ Only the two WARP branches are gated; docking and approaching are not departures
 - **Nothing reads `dronesOut` even now.** `myDroneIDs` supersedes it for this
   loop — it answers the same question and names the drones — and the coarse flag
   was left alone rather than removed, because the DSL still reads it.
+
+## Phase 6 is COMPLETE, 2026-09-11
+
+Flee and return. `fleeHealthFloor`, `maxFleeAttempts` and a new
+`repairsAtStation` all stop being dead config; the ladder gains rung 5 and the
+numbering moves drones to 6 and obeying the fleet to 7.
+
+### The decision the operator made, and what it cost
+
+The written precedence and `decideFleetOrders`'s own header contradicted each
+other about whether a target call outranks a pilot's own flee. **Put to the
+operator before anything was built; they chose the flee.** Decision 3 in the
+plan doc is amended, not left standing.
+
+⚠ **Only one of the two acceptance tests discriminates, and this was found by
+moving the rung rather than by reasoning.** With the flee beneath the fleet rung,
+"a pilot obeying a *standing* target call still flees" still passes — phase 5's
+parking fix already covers it. The case that fails is **a pilot mid-lock on a
+fresh primary**: the fleet rung has a real `lock` to issue, a real call wins
+outright, and the hurt pilot locks instead of leaving.
+
+⚠ **So the standing mechanism now has no behavioural consumer.** It was built in
+phase 5 so a flee could sit below the fleet rung; the flee went above instead.
+Keep it: the readout it protects is still correct, and phase 8's chat rung is the
+next candidate for that slot.
+
+### Two prerequisites that were not in the spec
+
+**The tank-up rung spun forever on an unreadable module map.**
+`activeModuleIDs` has three states and rung 3 read it with `?? []`, so a read
+that COULD NOT ANSWER looked identical to an idle rack. Step 1's search consults
+only that set, never the record of what it already lit, so it re-picked the same
+hardener every tick and grew `lastTankUpModuleIDs` without bound. The cost is not
+the wasted call — a rung that returns a decision every tick **starves every rung
+beneath it**, and a partial snapshot is likeliest during a fight. A flee rung
+underneath that is not a flee rung. Fixed first, with the unknown case falling
+back to what the rung knows it lit; three of its four tests fail against the old
+read.
+
+**flow.ts's rung comments were two renumbers behind** — the drone reads called
+themselves rung 6, and obeying the fleet called itself rung 3 in three places.
+Corrected to today's truth BEFORE the phase-6 shift, because a shift applied on
+top of a stale number is wrong twice rather than merely out of date.
+
+### ⚠ Docking is not a repair, and that is the shape of the whole phase
+
+`topOffShipShieldAndCapacitorForDockingTransition`
+(`/d/evet/server/src/space/transitions.js:242`) writes `charge: 1.0` and
+`shieldCharge: 1.0` and leaves `damage` and `armorDamage` exactly as they were.
+Confirmed by reading it, not assumed.
+
+So a **shield** flee is whole the moment it arrives, and an **armour** flee never
+will be without paying the station. That is why `repairsAtStation` exists: the
+alternative was a pilot that docks once and sits there for the rest of the run.
+
+**The operator was asked about this too, because it spends their ISK.** They
+chose an opt-in field, default off. It earns `financial` and `inventory` in the
+risk derivation, matching what the DSL's own `repair-ship` and `dock-and-repair`
+already claim rather than arguing the question twice.
+
+⚠ **A free full repair exists that nothing here uses.**
+`repairEntityOnTetherEngage` (`space/runtime.js:11885`) sets
+`damage: 0, armorDamage: 0, shieldCharge: 1, charge: 1` on tethering to a
+friendly Upwell structure — server-automatic, no client call, no ISK. The
+companion cannot deliberately pick a tether, so nothing is built against it, but
+it explains a hurt ship coming back whole and nobody had written it down.
+
+### Five things worth knowing
+
+- **The safety ladder is now shared.** `getSafe` became `runToSafety` over a
+  `SafetyLeg` seam; rung 2 and rung 5 fly identical code and differ only in
+  their phase string and one sentence fragment. The one branch that genuinely
+  differs — NOWHERE TO GO — returns null and is answered by each caller. Rung 2
+  stops the run (decision 5). Rung 5 falls through and fights on: a hurt pilot
+  still has guns, and stopping would take a shooting ship away from a fleet that
+  still has a use for it.
+- **Coming back needs MORE than the floor that sent it away.** Without a margin a
+  return is a commute — back at exactly the trigger number, the next tick reads
+  the same number and leaves again, so one fight eats the whole budget without a
+  shot fired. `FLEE_RETURN_MARGIN` is 0.2, capped at 1. Six tests fail if it is
+  removed.
+- **"A return that holds resets the budget"** is made checkable by counting quiet
+  ticks (`fleeRecoveryTicks`, 15 of them), and the reset demands the same harder
+  threshold — a pilot limping just above its floor has not recovered from
+  anything. The half that makes the bound mean something is tested too: a pilot
+  sent home repeatedly never reaches the reset and eventually stays home.
+- **The latch is run-local, not persisted**, unlike `CompanionAbandonment`. That
+  one keeps a thirty-minute clock somebody waits on. This one keeps no clock: a
+  companion that comes back up reads its own health on the first tick and leaves
+  again within one tick if it still needs to.
+- **Option A, "remember the grid", is a SYSTEM and not a spot.** Nothing flies
+  the pilot back to the exact place it left. That is not laziness: there is no
+  read anywhere that says whether a grid is clear — confirmed absent from the
+  server, the BFF and this repo — so a precise return would be no safer, only
+  more code. The attempt budget is what bounds the blindness.
+
+### The trap that nearly shipped
+
+**The first draft of the acceptance tests was vacuous.** `fleeObs`'s default grid
+carries a station and nothing else, so the called ship was off-grid, the fleet
+rung fell through of its own accord, and the tests passed with the flee rung
+moved to the wrong place. Caught by mutation, not by review. The grid now carries
+both the station and the called ship, and a healthy-pilot control proves the
+fleet rung still works on it.
+
+⚠ **Mutation-test every ordering claim in this file.** A test that asserts a
+phase name will happily pass because the rung it was meant to outrank never ran.
+
+### What phase 6 deliberately did NOT do
+
+- **No bookmark written at the moment of leaving.** The spec's own correction
+  notes `beyonce.BookmarkLocation` is reachable, so this is a missing wrapper and
+  not missing plumbing — but option A was chosen and a return point is a feature
+  rather than a step.
+- **No "is the grid clear" read**, because none exists. `hostileOnGrid` counts
+  NPCs only (`overview.ts:244`) and is scoped to the grid the ship is already on,
+  so a hostile *player* is invisible to it and a docked pilot has no read at all.
+- **No repair of anything but what the shop's quote names.** No guess at a ship
+  item id, ever.
+
+### Two pre-existing gaps found while reading, NOT fixed here
+
+Both are fields the companion's `observe()` never populates, so the type promises
+something the runtime does not deliver:
+
+- **`targetedByPlayer`** — rung 3's fight test reads
+  `obs.hostileOnGrid === true || obs.targetedByPlayer === true`, and the second
+  half is dead for a companion. A test passes it by hand, which is why the
+  divergence is invisible.
+- **`targetGroupNames`** — rung 4 reads it and silently degrades to nearest-first.
+
+Neither is in phase 6's scope. Both are worth a look before phase 9 claims the
+ladder is finished.
 
 ## Decided, so do not re-litigate
 

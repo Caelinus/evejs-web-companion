@@ -247,7 +247,7 @@ not exist is worse than no spec, because it reads as authority.
 | 1 | broadcast + tag decode, store slice, observation, script surface | **below, verified** |
 | 4 | keep-at-range / orbit-a-mate / fleet tag / jump-through-fleet | **below, verified** |
 | 5 | drone recall-and-redeploy | **BUILT** — see the handoff doc. ⚠ two claims in the spec below are WRONG and the handoff says why: a recalled drone does NOT leave the scene immediately, and a recall does NOT merge it into a stack |
-| 6 | flee and return | **below, verified** |
+| 6 | flee and return | **BUILT** — see the handoff doc's phase 6 section. ⚠ the spec's PACKAGING half is void (it predates the sibling-loop decision), and the rung went ABOVE the fleet rung rather than below, which the OPERATOR decided |
 | 2 | one inWarp guard | **below, verified** |
 | 3 | tank-up: port the DSL thermostat into the companion | **below, verified** |
 | 7 | tackle -> tag | **BUILT** — see the handoff doc's phase 7 section. ⚠ the read did not exist and had to be built (decoder, slice, push, observation); the rung went ABOVE obeying the fleet, not below |
