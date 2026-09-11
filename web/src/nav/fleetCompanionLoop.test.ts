@@ -2029,6 +2029,105 @@ test("an UNREADABLE layer ratio neither starts nor stops a cycle", () => {
   assert.notEqual(running.phase, "Standing down");
 });
 
+// --- AN UNREADABLE MODULE MAP IS "WHAT I LIT", NOT "NOTHING IS RUNNING" -------
+//
+// `activeModuleIDs` has three states and this rung used to see two: `[]` for an
+// idle rack, `null` for a read that COULD NOT ANSWER, and a `?? []` that made
+// them the same thing. On an unreadable tick every fitted module looked idle,
+// and step 1's search tests only that set -- so it re-picked THE SAME hardener
+// every tick, issued an action every tick, and starved every rung below it.
+//
+// ⚠ THIS IS A LADDER BUG WEARING A TANK BUG'S CLOTHES. A redundant activate
+// costs one call. Returning a decision on every consecutive tick costs every
+// rung beneath rung 3 its turn, for as long as the read stays broken -- and
+// phase 6's flee sits beneath it, in exactly the fight where a partial snapshot
+// is likeliest and leaving is most urgent.
+
+test("an unreadable module map does not re-light the same hardener every tick", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    defenseModuleIDs: [HARDENER_1, HARDENER_2],
+  };
+  const unreadable = tankObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], null) });
+
+  const first = decideCompanionAction(request, unreadable);
+  assert.deepEqual(first.action, { kind: "activate", moduleID: HARDENER_1, targetID: 0 });
+
+  // The tick that used to repeat itself. Nothing about the world has changed --
+  // the map is still unreadable -- so the ONLY thing that can move this on is
+  // the rung's own record of what it lit.
+  const second = decideCompanionAction(request, unreadable, first.memory);
+  assert.deepEqual(
+    second.action,
+    { kind: "activate", moduleID: HARDENER_2, targetID: 0 },
+    "an unreadable map must fall back to the record, not re-pick the first hardener",
+  );
+});
+
+test("an unreadable module map lets the rung FALL THROUGH once its lists are accounted for", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    defenseModuleIDs: [HARDENER_1, HARDENER_2],
+  };
+  const unreadable = tankObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], null) });
+
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  for (let tick = 0; tick < 2; tick += 1) {
+    memory = decideCompanionAction(request, unreadable, memory).memory;
+  }
+
+  // ⚠ THE WHOLE POINT: the rung runs out of things to light and gets out of the
+  // way. Before the fix this assertion could never hold, on any tick.
+  const settled = decideCompanionAction(request, unreadable, memory);
+  assert.notEqual(
+    settled.phase,
+    "Tanking up",
+    "with every fitted hardener lit, an unreadable map must stop claiming the tick",
+  );
+});
+
+test("an unreadable module map still lights a hardener this rung has NO record of", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    defenseModuleIDs: [HARDENER_1, HARDENER_2],
+  };
+  // The record names one of the two. The other has never been lit, and an
+  // unreadable map is not a reason to leave it dark -- that is the failure that
+  // actually costs a ship, and it is the one the fallback must not introduce.
+  const memory: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    lastTankUpModuleIDs: [HARDENER_1],
+  };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], null) }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_2, targetID: 0 });
+});
+
+test("a READABLE empty map is still an idle rack, and the record does not override it", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1] };
+  // The server-side short-cycle case: this rung lit the hardener, the server
+  // dropped it, and the map says so plainly. A readable answer always wins over
+  // the rung's memory of what it asked for -- which is the contract the
+  // `?? []` was hiding rather than honouring.
+  const memory: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    lastTankUpModuleIDs: [HARDENER_1],
+  };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], []) }),
+    memory,
+  );
+  assert.deepEqual(
+    decision.action,
+    { kind: "activate", moduleID: HARDENER_1, targetID: 0 },
+    "a module the server says is off must be re-lit, whatever this rung remembers",
+  );
+});
+
 // --- STAND-DOWN NEVER FIRES ON A BLIND READ ------------------------------------
 
 test("hostileOnGrid === false stands down ONE cycling module per tick, from the record", () => {

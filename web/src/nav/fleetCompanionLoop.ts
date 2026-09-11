@@ -1521,7 +1521,31 @@ function decideTankUp(
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
 ): TankUpStep {
-  const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+  // ⚠ THREE STATES, NOT TWO, AND COLLAPSING THEM SPUN THIS RUNG FOREVER.
+  // `activeModuleIDs` is `[]` when nothing is running and `null` when the read
+  // COULD NOT ANSWER -- `store/types.ts` states that contract and the BFF
+  // preserves it deliberately (`server.js`'s `readActiveModuleIDs`: "null (not
+  // []) when the snapshot could not answer at all"). This read used to be
+  // `?? []`, which threw the distinction away.
+  //
+  // What that cost: on a tick where the module map was unreadable, every
+  // fitted module looked idle. Step 1's `find` tests only this set, never the
+  // record of what it has already lit, so it re-picked THE SAME hardener every
+  // tick -- issuing an action every tick, growing `lastTankUpModuleIDs`
+  // without bound, and starving every rung below this one for as long as the
+  // read stayed broken. The flee rung is one of those, and a fight is exactly
+  // when both the read is most likely to be partial and the flee matters most.
+  //
+  // Unknown now falls back to what this rung KNOWS it lit. That is the only
+  // honest answer available when nothing can say, and it CONVERGES: each tick
+  // lights one module it has no record of, records it, and the rung falls
+  // through once the operator's lists are accounted for. Crucially it still
+  // never withholds a hardener from a module it has not lit -- lighting
+  // something already lit is a wasted call, leaving something dark in a fight
+  // is a lost ship, and only the second is worth avoiding at the cost of the
+  // first.
+  const readModules = obs.snapshot?.ship?.activeModuleIDs ?? null;
+  const active = new Set(readModules ?? memory.lastTankUpModuleIDs);
 
   // 1. Hardeners up while a fight is on. Both reads already exist on the
   //    observation; either one alone is enough to mean "a fight is on".
