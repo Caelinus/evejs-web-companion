@@ -23,6 +23,9 @@ import {
   decodeLocationInfo,
   decodeRequiredSkillLevels,
   decodeTargeters,
+  DOGMA_ATTR_DURATION,
+  itemHasActivationCycle,
+  type BoundDogmaAllInfo,
 } from "./boundDogma.ts";
 import type { JsonValue } from "./wire.ts";
 
@@ -543,4 +546,74 @@ test("decodeBoundDogma tolerates a missing/empty envelope", () => {
   assert.equal(dogma.allInfo.value, null);
   assert.deepEqual(dogma.targeters.value, []);
   assert.equal(dogma.attributeValue.value, null);
+});
+
+
+// --- can this module be cycled at all? --------------------------------------
+
+function dogmaWith(
+  items: readonly { itemID: number; duration?: number | null }[],
+): BoundDogmaAllInfo {
+  return {
+    activeShipID: 90000700,
+    ships: items.map((item) => ({
+      itemID: item.itemID,
+      typeID: 90000800,
+      ownerID: null,
+      locationID: null,
+      flagID: null,
+      groupID: null,
+      categoryID: null,
+      quantity: null,
+      stacksize: null,
+      customInfo: null,
+      time: null,
+      wallclockTime: null,
+      attributes:
+        item.duration === undefined
+          ? []
+          : [{ attributeID: DOGMA_ATTR_DURATION, value: item.duration }],
+      activeEffects: null,
+    })),
+    character: null,
+    characterID: null,
+    shipModifiedCharAttributes: null,
+    shipState: null,
+    charBrain: null,
+    systemWideEffectsOnShip: null,
+    structureInfo: null,
+    locationInfo: null,
+  };
+}
+
+test("a module with a cycle time can be activated; one without cannot", () => {
+  // ⚠ THE REAL CASES, READ OFF THE SDE ON 2026-09-11 and the reason this
+  // function exists at all. Damage Control II carries NO duration and is
+  // passive the moment it is online. Assault Damage Control II carries 10125.
+  // BOTH ARE IN GROUP 60 "Damage Control", so the group name -- which is all
+  // the module classifier had -- cannot tell them apart, and never could.
+  const dogma = dogmaWith([
+    { itemID: 90000101 }, // Damage Control II: no duration attribute at all
+    { itemID: 90000102, duration: 10125 }, // Assault Damage Control II
+    { itemID: 90000103, duration: 10000 }, // Multispectrum Shield Hardener II
+    { itemID: 90000104, duration: null }, // present, unreadable value
+  ]);
+  assert.equal(itemHasActivationCycle(dogma, 90000101), false, "plain Damage Control is passive");
+  assert.equal(itemHasActivationCycle(dogma, 90000102), true, "Assault Damage Control cycles");
+  assert.equal(itemHasActivationCycle(dogma, 90000103), true);
+  assert.equal(itemHasActivationCycle(dogma, 90000104), false, "no usable duration is no cycle");
+});
+
+test("no dogma, or an item that is not in it, is NOT KNOWN rather than passive", () => {
+  // ⚠ THE THIRD STATE, AND THE CALLER DEPENDS ON IT. Reading "cannot say" as
+  // "passive" would stop a ship hardening every time the dogma read stumbled --
+  // which it is allowed to do, because loadFitting deliberately does not gate
+  // the fit on it.
+  assert.equal(itemHasActivationCycle(null, 90000101), null);
+  assert.equal(itemHasActivationCycle(dogmaWith([]), 90000101), null);
+  assert.equal(itemHasActivationCycle(dogmaWith([{ itemID: 90000999 }]), 90000101), null);
+});
+
+test("a zero duration is not a cycle", () => {
+  assert.equal(itemHasActivationCycle(dogmaWith([{ itemID: 90000101, duration: 0 }]), 90000101), false);
 });

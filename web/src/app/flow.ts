@@ -134,6 +134,7 @@ import {
   decodeChatChannelName,
   decodeMessageEntry,
 } from "../bridge/chat.ts";
+import { itemHasActivationCycle } from "../bridge/boundDogma.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
 import {
   companionFitWarnings,
@@ -6549,6 +6550,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           .filter((slot) => slot.module !== null)
           .map((slot) => ({ kind: "typeGroup" as const, id: slot.module!.typeID })),
       );
+      // ⚠ AWAITED, UNLIKE loadFitting's OWN FIRE-AND-FORGET CALL. `loadFitting`
+      // kicks dogma off with `void loadDogma().catch(...)` so a stumbling dogma
+      // read cannot hold the fit up -- which means that after awaiting the fit
+      // alone the dogma slice may still be empty. The hardener branch needs it
+      // to tell a Damage Control from a real hardener; without this the
+      // classifier falls back to the name every time and inherits the very
+      // defect it now avoids.
+      await loadDogma().catch(() => {});
       const defense = resolveDefenseModuleIDs();
       const remote = resolveRemoteRepModuleIDs();
       const modules = fit.slots
@@ -6774,7 +6783,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         } else if (/hull repair/i.test(group)) {
           hull.push(slot.module.itemID);
         } else if (/hardener|damage control|resistance/i.test(group)) {
-          hardeners.push(slot.module.itemID);
+          // ⚠ THE GROUP NAME IS NOT ENOUGH HERE, AND ONLY HERE. Checked against
+          // the SDE on 2026-09-11: group 60 "Damage Control" holds Damage
+          // Control II, which has NO duration and is passive the moment it is
+          // online, AND Assault Damage Control II, which cycles for 10125ms and
+          // is worth running. One group, both answers -- so no regex over this
+          // name could ever have told them apart, which is why this defect
+          // outlived attempts to fix it by editing the pattern. Group 295
+          // "Shield Resistance Amplifier" is passive throughout and was being
+          // swept in by the `/resistance/` arm for the same reason.
+          //
+          // Dogma attribute 73 ("Activation time / duration") is the real
+          // discriminator, and the server sends it per fitted module.
+          //
+          // ⚠ UNREADABLE FAILS OPEN, back to the name's verdict. A dogma
+          // snapshot that did not arrive must not quietly stop a ship
+          // hardening: cycling a passive module wastes a call, refusing to
+          // cycle a real hardener loses the tank.
+          if (itemHasActivationCycle(fit.dogma, slot.module.itemID) !== false) {
+            hardeners.push(slot.module.itemID);
+          }
         } else if (slot.family === "high" && /weapon|launcher|turret/i.test(group)) {
           // "Projectile Weapon", "Hybrid Weapon", "Energy Weapon", "Missile
           // Launcher …" — the game's own turret/launcher groups, high slots only.

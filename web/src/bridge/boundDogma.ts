@@ -248,6 +248,48 @@ export interface BoundDogmaAllInfo {
   readonly locationInfo: JsonValue;
 }
 
+/**
+ * Dogma attribute 73, "Activation time / duration" -- how long one cycle of
+ * this module takes.
+ *
+ * ⚠ IT IS THE ONLY HONEST "CAN THIS BE CYCLED" SIGNAL WE HAVE, and the group
+ * NAME is not one. Checked against the SDE on 2026-09-11: group 60 "Damage
+ * Control" holds Damage Control II with NO duration (passive the moment it is
+ * online) AND Assault Damage Control II with a duration of 10125 (a real burst
+ * module worth running), so no test on the group name can separate them. Group
+ * 295 "Shield Resistance Amplifier" is passive throughout and matched the old
+ * classifier's `/resistance/` arm.
+ */
+export const DOGMA_ATTR_DURATION = 73;
+
+/**
+ * Whether one fitted item has a cycle of its own -- that is, whether activating
+ * it means anything.
+ *
+ * Three-state on purpose. `null` is "we cannot say": no dogma snapshot, or this
+ * item is not in the one we have. A caller must not read that as "passive", or
+ * an unread dogma would quietly stop a ship hardening.
+ */
+export function itemHasActivationCycle(
+  dogma: BoundDogmaAllInfo | null,
+  itemID: number,
+): boolean | null {
+  if (dogma === null) {
+    return null;
+  }
+  const entry = dogma.ships.find((item) => Number(item.itemID) === itemID);
+  if (entry === undefined) {
+    return null;
+  }
+  const duration = entry.attributes.find((attr) => attr.attributeID === DOGMA_ATTR_DURATION);
+  if (duration === undefined || typeof duration.value !== "number") {
+    // Present in the snapshot and carrying no duration at all: that IS the
+    // passive answer, and it is the one the Damage Control case needs.
+    return false;
+  }
+  return duration.value > 0;
+}
+
 /** The inner dict entries of the util.KeyVal top-level wrapper, name-agnostic. */
 function keyValEntries(value: JsonValue | undefined): readonly JsonValue[] {
   const obj = asObject(value);
