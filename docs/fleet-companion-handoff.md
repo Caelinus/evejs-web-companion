@@ -18,10 +18,11 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 0 | **COMPLETE** — grant derivation, headless runs, and a start control |
 | Phase 0b | **COMPLETE** — the supervision gate and the abandonment protocol |
 | Phase 1 | **COMPLETE** — broadcasts and target tags, decoded, stored and obeyed |
+| Phase 2 | **COMPLETE** — no watch and no macro decides into a warp, on any tank |
 | Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite 4,976 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
+full suite 4,982 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
 the pre-work baseline, which was 4,860 tests with the same 17.
 
 ⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
@@ -217,7 +218,9 @@ and pure out, and `tick()` stores it BEFORE anything else can return.
 
 1. **Phase 3 (tank-up), 4 (keep-at-range / fleet tag / jump-through-fleet) and 5
    (drone recall)** are all independent of each other and of phase 1, and make
-   good filler work. Phase 2's warp yield is already built as rung 1.
+   good filler work. **Phase 2 is now COMPLETE** — the companion's warp yield was
+   always rung 1, and the DSL half (the guard over every interrupt) landed
+   2026-09-11; see its own section below.
 2. **Phase 7 needs a roster role/job read**, and two other things are waiting on
    the same read: verifying that a `Target` broadcast came from a commander (see
    the plan doc's note on why a tag outranks one), and `obs.canTag`, which is
@@ -231,6 +234,69 @@ and pure out, and `tick()` stores it BEFORE anything else can return.
 3. The `issue:` switch lift and the private-helper exports are still speculative,
    EXCEPT that 0b needs `continueHeadingHome` to dock. That is the behaviour the
    handoff said would come and claim them.
+
+## Phase 2 is COMPLETE, 2026-09-11
+
+One commit. `decideScriptAction` now waits out a warp instead of deciding
+through it.
+
+| Piece | Where |
+| --- | --- |
+| The guard, and why it sits where it does | top of `decideScriptAction`, `nav/scriptDecide.ts` |
+| `SAY.inWarp` | same file |
+| The tank-layer table, and five more cases | `nav/scriptDecide.test.ts`, "In warp, nothing is decided" |
+
+Gates: `tsc` clean, `docker build --target web-build` clean, suite 4,982 tests
+with `ℹ fail 17` — the same 17 locale failures by NAME as the baseline, which
+was 4,976 with the same 17.
+
+**The companion's rung 1 was already built; this is the OTHER half the phase
+always was.** The spec called phase 2 "one guard, and it is also a bug fix", and
+the bug half was the whole of the remaining work: the macros carry seventeen
+copies of `obs.inWarp === true` (the spec said fifteen) and `fireInterrupt`
+carried none, so a watch could fire in mid-flight and issue a module, drone or
+lock call against a grid the ship had already left. It bites a solo miner with a
+repair watch, today, with no fleet anywhere near it.
+
+### Three things worth knowing
+
+- **The bug was demonstrated, not inferred.** Stashing the guard fails four of
+  the six new tests, one of them showing a `repair` watch returning
+  `{kind: "activate", moduleID: …}` on a tick where `inWarp` is `true`. A guard
+  whose tests pass without it is a guard nobody has tested.
+- ⚠ **THE TANK LAYER IS THE POINT OF PUTTING IT THAT HIGH.** `repairersFor`
+  (`scriptDecide.ts`) is already symmetric across `shieldRepairerIDs`,
+  `armorRepairerIDs` and `hullRepairerIDs`, and a ship may tank with any of the
+  three. A guard proven against `shield-below` alone would have looked correct
+  on every fixture anybody happened to write while leaving the armour-tanked
+  hull firing repairer calls into warp. The test is a TABLE over the three
+  layers plus `capacitor-below` and `drone-health-below`, and every case asserts
+  the watch DOES fire out of warp first — without that half the warp half proves
+  nothing at all.
+- **It is placed AFTER the `done` check, and the spec said before.** A
+  deliberate divergence, commented in place: `done()` issues nothing, so a warp
+  cannot make it unsafe, and going first would hold a finished run `"running"`
+  for the length of a warp it has no stake in.
+
+### Two corrections to the implementation doc, both found from the code
+
+⚠ **These matter because phase 3 is specced on top of both of them.**
+
+- **"Nothing in the codebase self-reps" is WRONG.** The rung-2 table says
+  shield/armour/hull booster cycling is "entirely new" and that capacitor
+  awareness is too. The `repair` interrupt response is already a per-layer
+  self-repair thermostat: `repairersFor(row.when.kind, obs)` picks the layer's
+  own repairers, the response switches one idle module on per tick, the
+  capacitor floor switches one OFF below `REPAIR_CAP_FLOOR` even while the layer
+  is hurt, and `repairShutdown` is the off-half when the condition recovers.
+  **Phase 3 is substantially smaller than its table claims** — the question is
+  what the COMPANION reuses, not what has to be written.
+- **The cap rule's stated reason is the one already retracted elsewhere.** The
+  rung-2 section still says the floor is "can I still afford to warp out". Warp
+  costs no capacitor on this server — the handoff's "Two things the server does
+  not do" says so and `FleetCompanionRequest.capacitorFloor` carries the full
+  write-up. The floor earns its place because an empty capacitor REPAIRS
+  nothing, not because it strands the ship.
 
 ## Decided, so do not re-litigate
 
