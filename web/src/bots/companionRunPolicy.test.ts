@@ -34,6 +34,10 @@ function request(overrides: Partial<FleetCompanionRequest> = {}): FleetCompanion
 const DEFENSE_MODULE_A = 11200001;
 // Same, for a fitted weapon.
 const WEAPON_MODULE_A = 11200005;
+// Same, for the three SELF-repair families (one per tank layer).
+const SHIELD_BOOSTER_MODULE_A = 11200006;
+const ARMOR_REPAIRER_MODULE_A = 11200007;
+const HULL_REPAIRER_MODULE_A = 11200008;
 // The ESI docs' own example CharacterID (obviously synthetic, self-describing).
 const SYNTHETIC_CHARACTER_ID = 90000001;
 
@@ -64,6 +68,22 @@ test("a fitted defensive module alone earns combat authority", () => {
     request({ useDrones: false, defenseModuleIDs: [DEFENSE_MODULE_A] }),
   );
   assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"]);
+});
+
+test("a fitted SELF-repair module ALONE earns combat authority, one layer at a time", () => {
+  // No drones, no defensive module, nothing else that fights — just one
+  // self-repair module. Cycling a shield booster in a fight is fighting,
+  // even though it never touches another pilot's ship.
+  for (const field of [
+    "shieldBoosterModuleIDs",
+    "armorRepairerModuleIDs",
+    "hullRepairerModuleIDs",
+  ] as const) {
+    const policy = analyzeCompanionRunPolicy(
+      request({ useDrones: false, defenseModuleIDs: [], [field]: [11200098] }),
+    );
+    assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"], `${field} should earn combat`);
+  }
 });
 
 test("a fitted remote-repair module ALONE earns combat authority — a logi is a participant too", () => {
@@ -135,6 +155,9 @@ function validPayload(): Record<string, unknown> {
   return {
     role: "dps",
     defenseModuleIDs: [DEFENSE_MODULE_A],
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER_MODULE_A],
+    armorRepairerModuleIDs: [ARMOR_REPAIRER_MODULE_A],
+    hullRepairerModuleIDs: [HULL_REPAIRER_MODULE_A],
     remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
     remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
     remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
@@ -157,6 +180,9 @@ test("a well-formed request round-trips", () => {
     assert.deepEqual(result.request, {
       role: "dps",
       defenseModuleIDs: [DEFENSE_MODULE_A],
+      shieldBoosterModuleIDs: [SHIELD_BOOSTER_MODULE_A],
+      armorRepairerModuleIDs: [ARMOR_REPAIRER_MODULE_A],
+      hullRepairerModuleIDs: [HULL_REPAIRER_MODULE_A],
       remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
       remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
       remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
@@ -341,6 +367,49 @@ test("a request missing a remote-repair module list is refused, like defenseModu
   const payload = validPayload();
   delete payload.remoteShieldModuleIDs;
   assert.equal(decodeFleetCompanionRequestValue(payload).ok, false);
+});
+
+test("each SELF-repair module list refuses a bad entry, and an ABSENT list resumes as empty", () => {
+  for (const key of ["shieldBoosterModuleIDs", "armorRepairerModuleIDs", "hullRepairerModuleIDs"] as const) {
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [0] }).ok,
+      false,
+      `${key} should refuse 0`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [-1] }).ok,
+      false,
+      `${key} should refuse -1`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [1.5] }).ok,
+      false,
+      `${key} should refuse a fraction`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: "not-an-array" }).ok,
+      false,
+      `${key} should refuse a non-array`,
+    );
+    // Empty is valid: no self-repair module fitted for that layer is a real
+    // answer, and the hurt reading for it simply falls through.
+    assert.equal(decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [] }).ok, true);
+
+    // ⚠ A MISSING LIST IS ACCEPTED, same rule and same reason as
+    // `weaponModuleIDs` below: `src/botHost.js` puts a persisted roster row's
+    // own request back through this decoder on every BFF restart, and for a
+    // companion that row IS the authority. Absent decodes to empty, which is
+    // what such a row already meant: nothing fitted for that layer.
+    const payload = validPayload();
+    delete payload[key];
+    const resumed = decodeFleetCompanionRequestValue(payload);
+    assert.equal(resumed.ok, true, `${key} absent should still resume`);
+    assert.deepEqual(
+      resumed.ok ? resumed.request[key] : null,
+      [],
+      `${key} should resume empty, not refused`,
+    );
+  }
 });
 
 test("weaponModuleIDs refuses a bad entry, and an ABSENT list resumes as empty", () => {

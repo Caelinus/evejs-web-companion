@@ -20,6 +20,7 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 1 | **COMPLETE** — broadcasts and target tags, decoded, stored and obeyed |
 | Phase 2 | **COMPLETE** — no watch and no macro decides into a warp, on any tank |
 | Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
+| Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
 | Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
@@ -401,6 +402,90 @@ the re-warp -- and chasing that wording found the missing branch. The four
 - **No weapon range check.** Neither does the DSL: `hostilesInReach` gates the
   LOCK on targeting range, and guns are activated with no distance test at all.
   The server rules on it.
+
+## Phase 3 is COMPLETE, 2026-09-11
+
+Tank up: hardeners on while a fight is on, each layer's own repairer cycled
+while that layer is hurt, and both off-halves. It is rung 3 -- ABOVE obeying the
+fleet, which is now rung 4.
+
+| Piece | Where |
+| --- | --- |
+| The rung, the per-layer thermostat, both off-halves | `decideTankUp` / `decideLayerRepairer`, `nav/fleetCompanionLoop.ts` |
+| `TANK_LAYER_HURT_THRESHOLD` = 0.75 | same |
+| The three self-repair lists, and their panel pickers | `fleetCompanionLoop.ts`, `companionRunPolicy.ts`, `ui/FleetCompanion.svelte` |
+| The `deactivate` action, self-targeted `activate`, the exhaustiveness guard | `FleetCompanionAction`, `app/flow.ts` |
+| `lastTankUpModuleIDs` -- what this rung is holding ON | `CompanionLadderMemory` |
+
+**It was a PORT, and the spec said so.** The `repair` interrupt response was
+already a per-layer self-repair thermostat with a capacitor floor; the work was
+carrying it into a loop that cannot reach it. The three things that genuinely
+blocked that are now gone: the companion had no `deactivate` action at all, its
+`activate` case could not self-target, and it had no module lists to cycle.
+
+### Why the tank goes up before the guns
+
+The DSL's fight-back branch already said it: "THE TANK GOES UP FIRST. A hardener
+is instant and self-targeted ... the same thing a player reaches for before they
+reach for the guns." So this rung sits above the fleet-order rung. It costs at
+most a tick or two of not obeying, because it only has something to do while a
+module is off and falls through the moment the rack is up.
+
+### Four things worth knowing
+
+- ⚠ **THE CAPACITOR FLOOR INVERTS THE RUNG, and its REASON is not the obvious
+  one.** Below `request.capacitorFloor` a RUNNING repairer switches off, even
+  though the layer is still hurt. The floor is not "can this ship still warp" --
+  warp costs no capacitor on this server -- it is that an empty capacitor
+  repairs nothing, so a repairer cycling below the floor spends capacity that
+  heals nobody. `capacitorFloor` existed since phase 0b and this rung is its
+  first consumer; no second constant was invented.
+- ⚠ **THE RECOVERED OFF-HALF WAS MISSING FROM THE SPEC, and the rung is wrong
+  without it.** The spec listed a four-step ladder and step "layer heals back up
+  mid-fight, switch its repairer off" was not one of them; the implementer built
+  what was specified and flagged the omission rather than quietly widening
+  scope. It matters because without it the ONLY way this rung ever stops
+  repairing is by hitting the capacitor floor -- and the floor is the safety
+  net, not the normal off-switch. A rung that only stops by hitting it has
+  arranged to spend every fight at the one capacitor level the floor exists to
+  keep the ship away from. The DSL has `repairShutdown` for exactly this.
+- **One threshold serves both directions**, exactly as a `shield-below` watch
+  and its `repairShutdown` share one. A layer sitting right on the line can
+  chatter. That was chosen over a second hysteresis number tuned by nobody.
+- ⚠ **HARDENERS ARE NOT CAP-GATED, and the old rung-2 table said to gate them.**
+  That advice existed because the DSL's fit classifier cannot tell a free Damage
+  Control from a cap-hungry active hardener -- one regex, `/hardener|damage
+  control|resistance/i`, for both. This rung reads the OPERATOR'S OWN PICK, so
+  there is nothing to be unsure about, and delaying a free cycle for a floor
+  that protects repair throughput is a cost with no matching benefit.
+
+### The tripwire that was not there
+
+⚠ **ADDING AN ACTION KIND DID NOT BREAK THE BUILD.** The companion's `issue:`
+switch had no `default:` and no `never` check, so `deactivate` landed, compiled
+clean, and would have been a silent no-op at runtime -- on a loop that flies an
+unattended ship. There is now an exhaustiveness guard, copied from
+`scriptCodec.ts`'s existing idiom and confirmed to bite by deleting the case and
+watching `tsc` fail. The DSL's own switch already had equivalent coverage
+(`unhandledScriptAction`); the companion's was the only one missing it.
+
+### Stand-down rules
+
+- **Only what this rung lit**, one module per tick, and only while it is still
+  seen cycling. `lastTankUpModuleIDs` is a statement of what the rung is holding
+  ON right now, not a log -- a module switched off for either reason leaves it.
+- ⚠ **NEVER ON A BLIND READ.** `hostileOnGrid === false` stands down;
+  `hostileOnGrid === null` keeps the tank UP. `standDownAfterFight` says why:
+  "standing down blind is the worst possible moment to drop the tank."
+
+### How the tests were made to earn their keep
+
+The rung's 19 tests were mutation-checked: the source was copied, each of the
+four sharp behaviours (the cap-floor inversion, the recovered off-half, the
+blind-read guard, and the rung ORDER against the fleet-order rung) was neutered
+in turn on the copy, and each test was confirmed to fail for the right reason
+and pass unmutated. Worth repeating for any rung whose whole value is that it
+does the counter-intuitive thing.
 
 ## Decided, so do not re-litigate
 

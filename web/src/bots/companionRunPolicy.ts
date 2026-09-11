@@ -51,10 +51,13 @@
 //
 // "combat" is the only conditional class, because it is the only one with a
 // field that actually withholds it: no drones, no fitted defensive module,
-// and no fitted remote-repair module of any family means nothing on the ship
-// can be cycled into a fight — and a logistics pilot with a working
-// repairer is a PARTICIPANT in a fight just as much as a gunner is, so a
-// remote module alone earns the same authority a defensive one does.
+// no fitted SELF-repair module of any layer, and no fitted remote-repair
+// module of any family means nothing on the ship can be cycled into a fight
+// — and a logistics pilot with a working repairer is a PARTICIPANT in a
+// fight just as much as a gunner is, so a remote module alone earns the same
+// authority a defensive one does. A self-repair module earns it for the same
+// reason: cycling a shield booster in a fight is fighting, even though it
+// never touches another pilot's ship.
 //
 // No other class ever applies. Nothing on the request reaches a wallet, an
 // item, a mission, or a colony, so "financial", "inventory", "mission" and
@@ -119,6 +122,11 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
   if (
     request.useDrones ||
     request.defenseModuleIDs.length > 0 ||
+    // A fitted SELF-repair module earns combat the same way a fitted
+    // defensive one does, by the same layer split the request carries.
+    request.shieldBoosterModuleIDs.length > 0 ||
+    request.armorRepairerModuleIDs.length > 0 ||
+    request.hullRepairerModuleIDs.length > 0 ||
     request.remoteShieldModuleIDs.length > 0 ||
     request.remoteArmorModuleIDs.length > 0 ||
     request.remoteCapacitorModuleIDs.length > 0 ||
@@ -171,6 +179,9 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
 const REQUEST_KEYS = new Set<string>([
   "role",
   "defenseModuleIDs",
+  "shieldBoosterModuleIDs",
+  "armorRepairerModuleIDs",
+  "hullRepairerModuleIDs",
   "remoteShieldModuleIDs",
   "remoteArmorModuleIDs",
   "remoteCapacitorModuleIDs",
@@ -212,6 +223,9 @@ const SAY = {
   unknownKey: "This companion setup has settings this app does not recognise.",
   badRole: "This companion setup does not say what role the pilot should fly.",
   badDefenseModuleIDs: "This companion setup's defensive module list is not valid.",
+  badShieldBoosterModuleIDs: "This companion setup's shield booster module list is not valid.",
+  badArmorRepairerModuleIDs: "This companion setup's armour repairer module list is not valid.",
+  badHullRepairerModuleIDs: "This companion setup's hull repairer module list is not valid.",
   badRemoteShieldModuleIDs: "This companion setup's remote shield-repair module list is not valid.",
   badRemoteArmorModuleIDs: "This companion setup's remote armour-repair module list is not valid.",
   badRemoteCapacitorModuleIDs: "This companion setup's remote capacitor-transfer module list is not valid.",
@@ -270,6 +284,34 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
   const defenseModuleIDs = obj["defenseModuleIDs"];
   if (!isPositiveSafeIntegerArray(defenseModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
     return { ok: false, refusal: SAY.badDefenseModuleIDs };
+  }
+
+  // Same shape and same bound as `defenseModuleIDs` above, one list per SELF
+  // tank layer — a shield booster cannot repair armour, so the hurt layer
+  // picks the list (see `FleetCompanionRequest.shieldBoosterModuleIDs`'s own
+  // comment).
+  //
+  // ABSENT DECODES TO EMPTY, same rule and same reason as `weaponModuleIDs`
+  // below: `src/botHost.js` puts a persisted roster row's own request back
+  // through this decoder on every BFF restart, and for a companion that row
+  // IS the authority. A strictly-required new field would refuse every row
+  // written before it existed, and a headless companion would quietly fail
+  // to come back from a restart it used to survive. Empty means "nothing
+  // fitted for that layer", which is what such a row already meant.
+  const shieldBoosterRaw = obj["shieldBoosterModuleIDs"];
+  const shieldBoosterModuleIDs = shieldBoosterRaw === undefined ? [] : shieldBoosterRaw;
+  if (!isPositiveSafeIntegerArray(shieldBoosterModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badShieldBoosterModuleIDs };
+  }
+  const armorRepairerRaw = obj["armorRepairerModuleIDs"];
+  const armorRepairerModuleIDs = armorRepairerRaw === undefined ? [] : armorRepairerRaw;
+  if (!isPositiveSafeIntegerArray(armorRepairerModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badArmorRepairerModuleIDs };
+  }
+  const hullRepairerRaw = obj["hullRepairerModuleIDs"];
+  const hullRepairerModuleIDs = hullRepairerRaw === undefined ? [] : hullRepairerRaw;
+  if (!isPositiveSafeIntegerArray(hullRepairerModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badHullRepairerModuleIDs };
   }
 
   // Same shape and same bound as `defenseModuleIDs` above, by family — a
@@ -373,6 +415,9 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
   const request: FleetCompanionRequest = {
     role: role as FleetCompanionRole,
     defenseModuleIDs: Object.freeze([...defenseModuleIDs]),
+    shieldBoosterModuleIDs: Object.freeze([...shieldBoosterModuleIDs]),
+    armorRepairerModuleIDs: Object.freeze([...armorRepairerModuleIDs]),
+    hullRepairerModuleIDs: Object.freeze([...hullRepairerModuleIDs]),
     remoteShieldModuleIDs: Object.freeze([...remoteShieldModuleIDs]),
     remoteArmorModuleIDs: Object.freeze([...remoteArmorModuleIDs]),
     remoteCapacitorModuleIDs: Object.freeze([...remoteCapacitorModuleIDs]),

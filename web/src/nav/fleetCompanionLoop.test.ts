@@ -6,6 +6,7 @@ import {
   DEFAULT_FLEET_COMPANION_REQUEST,
   FLEET_COMPANION_ABANDONMENT_WAIT_MS,
   FLEET_COMPANION_ROLES,
+  TANK_LAYER_HURT_THRESHOLD,
   createFleetCompanion,
   decideCompanionAction,
   freshLadderMemory,
@@ -670,7 +671,7 @@ test("the ladder's memory is threaded, not dropped, between ticks", async () => 
   assert.equal(companion.snapshot().inFleet, true);
 });
 
-// --- rung 3: obeying the fleet ------------------------------------------------
+// --- rung 4: obeying the fleet ------------------------------------------------
 //
 // Below the supervision gate (only reached while a human is here) and above
 // "Standing by". Tag beats broadcast — AUTHORITY, not freshness: a tag can
@@ -867,7 +868,7 @@ test("obeying the fleet is skipped entirely once the supervision gate has failed
   assert.match(decision.stop as string, /no safe spot/i);
 });
 
-// --- rung 3: the Heal family --------------------------------------------------
+// --- rung 4: the Heal family --------------------------------------------------
 //
 // HealShield/HealArmor/HealCapacitor/HealTarget. Checked BEFORE the tag and
 // the Target broadcast (a rep call is time-critical; a tag is standing
@@ -1074,7 +1075,7 @@ test("once the heal is already running, the SAME tick's tag is obeyed — not mu
   assert.equal(decision.followingOrderFrom, "tag");
 });
 
-// --- rung 3: opening fire once a called target is locked ---------------------
+// --- rung 4: opening fire once a called target is locked ---------------------
 //
 // `lockThenEngage` replaced `lockOrHold` (see its own header in
 // fleetCompanionLoop.ts): a called target that is ALREADY locked no longer
@@ -1382,7 +1383,7 @@ test("a satisfied Heal call falls through to the tag; a satisfied rack does not 
   assert.match(decision.why, /firing on it/i);
 });
 
-// --- rung 3: TravelTo ---------------------------------------------------------
+// --- rung 4: TravelTo ---------------------------------------------------------
 
 /** Synthetic solar system ids — no on-grid meaning, just a destination. */
 const SYSTEM_B = 30000001;
@@ -1418,7 +1419,7 @@ test("a TravelTo broadcast naming a NEW system routes again", () => {
   assert.deepEqual(second.action, { kind: "travelTo", systemID: SYSTEM_C });
 });
 
-// --- rung 3: JumpTo (honest partial) ------------------------------------------
+// --- rung 4: JumpTo (honest partial) ------------------------------------------
 //
 // `itemID` is a single stargate; `api.jump` needs the gate on the far side
 // too, which nothing available to this pure, synchronous ladder can supply
@@ -1487,7 +1488,7 @@ test("a JumpTo broadcast for a gate OFF this grid falls through", () => {
   assert.equal(decision.phase, "Standing by");
 });
 
-// --- rung 3: chat commands ----------------------------------------------------
+// --- rung 4: chat commands ----------------------------------------------------
 //
 // A chat order reaches the SAME c-f branches a broadcast does, through
 // `resolveNamedOrder` — see that function's own header and `decideFleetOrders`'s
@@ -1841,7 +1842,7 @@ test("chat orders are ALSO skipped once the supervision gate has failed", () => 
   assert.notEqual(decision.phase, "Obeying fleet");
 });
 
-// --- rung 3: everything above is skipped once abandonment starts -------------
+// --- rung 4: everything above is skipped once abandonment starts -------------
 
 test("Heal and TravelTo are ALSO skipped once the supervision gate has failed", () => {
   const request: FleetCompanionRequest = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
@@ -1858,6 +1859,308 @@ test("Heal and TravelTo are ALSO skipped once the supervision gate has failed", 
   );
   assert.notEqual(travelDecision.action.kind, "travelTo");
   assert.notEqual(travelDecision.phase, "Obeying fleet");
+});
+
+// --- rung 3: tank up -----------------------------------------
+//
+// Above obeying the fleet, below the supervision gate -- see `decideTankUp`'s
+// own header in fleetCompanionLoop.ts for the full ladder: a fitted hardener
+// while a fight is on, then each layer's own repairer (on while hurt, inverted
+// off below the capacitor floor), then the fight-end stand-down.
+//
+/** Synthetic module item ids for the tank-up rung, distinct from every id used above. */
+const HARDENER_1 = 11400001;
+const HARDENER_2 = 11400002;
+const SHIELD_BOOSTER = 11400003;
+const ARMOR_REPAIRER = 11400004;
+const HULL_REPAIRER = 11400005;
+
+/** A whole, unhurt ship with a full capacitor and no fight -- what every tank-up test overrides from. */
+function tankObs(overrides: Partial<FleetCompanionObservation> = {}): FleetCompanionObservation {
+  return obs({
+    shieldRatio: 1,
+    armorRatio: 1,
+    hullRatio: 1,
+    capacitorRatio: 1,
+    hostileOnGrid: null,
+    targetedByPlayer: null,
+    snapshot: gridWithShipsAndActive([], []),
+    ...overrides,
+  });
+}
+
+test("a fitted hardener switches on, self-targeted, while hostiles are on this grid", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1] };
+  const decision = decideCompanionAction(request, tankObs({ hostileOnGrid: true }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_1, targetID: 0 });
+  assert.equal(decision.phase, "Tanking up");
+});
+
+test("targetedByPlayer ALONE is enough to light a hardener, with hostileOnGrid unreadable", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({ hostileOnGrid: null, targetedByPlayer: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_1, targetID: 0 });
+});
+
+test("an already-active hardener is skipped in favor of the next idle one", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1, HARDENER_2] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({ hostileOnGrid: true, snapshot: gridWithShipsAndActive([], [HARDENER_1]) }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_2, targetID: 0 });
+});
+
+test("only ONE hardener switches on per tick, even with several idle at once", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, defenseModuleIDs: [HARDENER_1, HARDENER_2] };
+  const decision = decideCompanionAction(request, tankObs({ hostileOnGrid: true }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HARDENER_1, targetID: 0 });
+});
+
+// --- EACH LAYER USES ITS OWN LIST AND NEVER ANOTHER'S -------------------------
+
+test("a hurt SHIELD starts its own shield booster", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+    armorRepairerModuleIDs: [ARMOR_REPAIRER],
+    hullRepairerModuleIDs: [HULL_REPAIRER],
+  };
+  const decision = decideCompanionAction(request, tankObs({ shieldRatio: 0.5 }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: SHIELD_BOOSTER, targetID: 0 });
+  assert.match(decision.why, /shield/i);
+});
+
+test("a hurt ARMOUR starts its own armour repairer, NEVER the shield booster", () => {
+  // A shield booster cannot repair armour -- crossing families is the exact bug
+  // this per-layer list shape exists to prevent. Both lists are fitted here so a
+  // bug that reached across families would have something to reach for.
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+    armorRepairerModuleIDs: [ARMOR_REPAIRER],
+    hullRepairerModuleIDs: [HULL_REPAIRER],
+  };
+  const decision = decideCompanionAction(request, tankObs({ armorRatio: 0.5 }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_REPAIRER, targetID: 0 });
+  assert.match(decision.why, /armor/i);
+});
+
+test("a hurt HULL starts its own hull repairer, never a shield or armour repairer", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+    armorRepairerModuleIDs: [ARMOR_REPAIRER],
+    hullRepairerModuleIDs: [HULL_REPAIRER],
+  };
+  const decision = decideCompanionAction(request, tankObs({ hullRatio: 0.5 }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: HULL_REPAIRER, targetID: 0 });
+  assert.match(decision.why, /hull/i);
+});
+
+// --- THE CAPACITOR FLOOR INVERTS THE RUNG --------------------------------------
+
+test("below the capacitor floor, a RUNNING repairer switches OFF even though the layer is still hurt", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+    armorRepairerModuleIDs: [ARMOR_REPAIRER],
+    capacitorFloor: 0.2,
+  };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({
+      armorRatio: 0.5,
+      capacitorRatio: 0.1,
+      snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]),
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "deactivate", moduleID: ARMOR_REPAIRER });
+  assert.match(decision.why, /capacitor/i);
+});
+
+test("an UNREADABLE capacitor fails OPEN toward repairing -- it starts the cycle", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({ armorRatio: 0.5, capacitorRatio: null }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_REPAIRER, targetID: 0 });
+});
+
+// --- THE RECOVERED OFF-HALF ----------------------------------------------------
+
+test("a layer that heals back to the threshold switches its running repairer off, saying the layer is whole -- not the capacitor sentence", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({
+      armorRatio: TANK_LAYER_HURT_THRESHOLD,
+      capacitorRatio: 1,
+      snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]),
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "deactivate", moduleID: ARMOR_REPAIRER });
+  assert.match(decision.why, /whole/i);
+  assert.doesNotMatch(decision.why, /capacitor/i);
+});
+
+// --- an unreadable layer ratio is undecidable, not "not hurt" -----------------
+
+test("an UNREADABLE layer ratio neither starts nor stops a cycle", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+
+  // Idle, and unreadable: must not start.
+  const idle = decideCompanionAction(
+    request,
+    tankObs({ armorRatio: null, snapshot: gridWithShipsAndActive([], []) }),
+  );
+  assert.notEqual(idle.phase, "Tanking up");
+
+  // Running, and unreadable: must not stop either.
+  const running = decideCompanionAction(
+    request,
+    tankObs({ armorRatio: null, snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]) }),
+  );
+  assert.notEqual(running.phase, "Tanking up");
+  assert.notEqual(running.phase, "Standing down");
+});
+
+// --- STAND-DOWN NEVER FIRES ON A BLIND READ ------------------------------------
+
+test("hostileOnGrid === false stands down ONE cycling module per tick, from the record", () => {
+  const memory: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    lastTankUpModuleIDs: [HARDENER_1, ARMOR_REPAIRER],
+  };
+  const decision = decideCompanionAction(
+    REQUEST,
+    tankObs({ hostileOnGrid: false, snapshot: gridWithShipsAndActive([], [HARDENER_1, ARMOR_REPAIRER]) }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "deactivate", moduleID: HARDENER_1 });
+  assert.equal(decision.phase, "Standing down");
+  assert.deepEqual(decision.memory.lastTankUpModuleIDs, [ARMOR_REPAIRER]);
+});
+
+test("hostileOnGrid === false skips a record entry that already stopped cycling on its own", () => {
+  const memory: CompanionLadderMemory = {
+    ...freshLadderMemory(),
+    lastTankUpModuleIDs: [HARDENER_1, ARMOR_REPAIRER],
+  };
+  const decision = decideCompanionAction(
+    REQUEST,
+    // HARDENER_1 is no longer active -- only ARMOR_REPAIRER is still cycling.
+    tankObs({ hostileOnGrid: false, snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]) }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "deactivate", moduleID: ARMOR_REPAIRER });
+  assert.deepEqual(decision.memory.lastTankUpModuleIDs, [HARDENER_1]);
+});
+
+test("hostileOnGrid === null keeps the tank UP -- stand-down never fires on a blind read", () => {
+  const memory: CompanionLadderMemory = { ...freshLadderMemory(), lastTankUpModuleIDs: [HARDENER_1] };
+  const decision = decideCompanionAction(
+    REQUEST,
+    tankObs({ hostileOnGrid: null, snapshot: gridWithShipsAndActive([], [HARDENER_1]) }),
+    memory,
+  );
+  assert.notEqual(decision.phase, "Standing down");
+  assert.deepEqual(decision.memory.lastTankUpModuleIDs, [HARDENER_1]);
+});
+
+test("the stand-down clears its record once everything it lit is off, issuing NO action that tick", () => {
+  const memory: CompanionLadderMemory = { ...freshLadderMemory(), lastTankUpModuleIDs: [HARDENER_1] };
+  const decision = decideCompanionAction(
+    REQUEST,
+    // Nothing in the record is cycling any more -- ended on its own, or already
+    // switched off over the last few ticks.
+    tankObs({ hostileOnGrid: false, snapshot: gridWithShipsAndActive([], []) }),
+    memory,
+  );
+  assert.equal(decision.action.kind, "wait");
+  assert.equal(decision.phase, "Standing by");
+  assert.deepEqual(decision.memory.lastTankUpModuleIDs, []);
+});
+
+// --- RUNG ORDER: the tank goes up before the fleet is obeyed -------------------
+
+test("with both a hurt tank and a live fleet target call, the tank goes up FIRST", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({
+      armorRatio: 0.5,
+      snapshot: gridWithEntities([TACKLE]),
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_REPAIRER, targetID: 0 });
+  assert.equal(decision.phase, "Tanking up");
+});
+
+test("once the rack is up and nothing is hurt, the rung falls through and the fleet order is obeyed on that same tick", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+  const decision = decideCompanionAction(
+    request,
+    tankObs({
+      snapshot: gridWithEntities([TACKLE]),
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
+  assert.equal(decision.phase, "Obeying fleet");
+});
+
+// --- the shipped default (empty module lists) is unaffected --------------------
+
+test("a pilot with EMPTY module lists is completely unaffected -- the rung falls through every tick", () => {
+  // The shipped default: DEFAULT_FLEET_COMPANION_REQUEST's four tank-up lists are
+  // all empty. Even a fight on every layer at once must not touch this rung, or
+  // the existing 96 tests -- none of which set a module list -- would break.
+  const decision = decideCompanionAction(
+    REQUEST,
+    tankObs({
+      hostileOnGrid: true,
+      targetedByPlayer: true,
+      shieldRatio: 0.1,
+      armorRatio: 0.1,
+      hullRatio: 0.1,
+      capacitorRatio: 0.1,
+    }),
+  );
+  assert.notEqual(decision.phase, "Tanking up");
+  assert.notEqual(decision.phase, "Standing down");
+  assert.equal(decision.phase, "Standing by");
+});
+
+// --- the stand-down record states what is held ON right now --------------------
+
+test("switching a repairer off -- for either reason -- drops it from the stand-down record", () => {
+  const request: FleetCompanionRequest = { ...REQUEST, armorRepairerModuleIDs: [ARMOR_REPAIRER] };
+  const memory: CompanionLadderMemory = { ...freshLadderMemory(), lastTankUpModuleIDs: [ARMOR_REPAIRER] };
+
+  const recovered = decideCompanionAction(
+    request,
+    tankObs({ snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]) }),
+    memory,
+  );
+  assert.equal(recovered.action.kind, "deactivate");
+  assert.deepEqual(recovered.memory.lastTankUpModuleIDs, []);
+
+  const capFloored = decideCompanionAction(
+    request,
+    tankObs({
+      armorRatio: 0.5,
+      capacitorRatio: 0.1,
+      snapshot: gridWithShipsAndActive([], [ARMOR_REPAIRER]),
+    }),
+    memory,
+  );
+  assert.equal(capFloored.action.kind, "deactivate");
+  assert.deepEqual(capFloored.memory.lastTankUpModuleIDs, []);
 });
 
 // --- the player-facing surface ----------------------------------------------

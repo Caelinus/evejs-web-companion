@@ -43,7 +43,7 @@ import {
   STATION_DOCKING_RADIUS_M,
   type SpaceMeasurement,
 } from "./autopilotLoop.ts";
-// The kill-order authority (rung 3, "obeying the fleet"). Imported rather than
+// The kill-order authority (rung 4, "obeying the fleet"). Imported rather than
 // re-derived for the same reason the get-safe helpers above are: one answer to
 // "where does this tag rank", shared with the combat priority list.
 import { fleetTagRank } from "./targetPriority.ts";
@@ -102,6 +102,33 @@ export interface FleetCompanionRequest {
    * guessed: a wrong guess cycles the wrong module.
    */
   readonly defenseModuleIDs: readonly number[];
+  /**
+   * The player's OWN pick of fitted SELF-repair modules, by item id, one list
+   * per tank layer. Shield boosters here, armour repairers below, hull
+   * repairers under that.
+   *
+   * ⚠ ONE LIST PER LAYER BECAUSE A SHIELD BOOSTER CANNOT REPAIR ARMOUR. The
+   * hurt layer chooses the list, exactly as the DSL's `repairersFor` chooses
+   * between `shieldRepairerIDs` / `armorRepairerIDs` / `hullRepairerIDs`, and
+   * reaching across families would cycle a module that does nothing for the
+   * layer actually taking damage.
+   *
+   * ⚠ PICKED, NOT CLASSIFIED, AND THAT BUYS TWO BUGS FOR FREE. The DSL derives
+   * these from the fit by matching the SDE group NAME, and that classifier
+   * cannot tell a free Damage Control from a cap-hungry active hardener (one
+   * regex, `/hardener|damage control|resistance/i`, for both) -- and until
+   * 2026-09-11 it also read every REMOTE repairer as a self repairer, because
+   * its self branches were unanchored. Asking the operator has neither problem
+   * to solve: there is nothing to misclassify.
+   *
+   * Empty is a real answer: this pilot has nothing fitted for that layer, and a
+   * hurt reading there simply falls through.
+   */
+  readonly shieldBoosterModuleIDs: readonly number[];
+  /** As `shieldBoosterModuleIDs`, for armour. */
+  readonly armorRepairerModuleIDs: readonly number[];
+  /** As `shieldBoosterModuleIDs`, for hull. */
+  readonly hullRepairerModuleIDs: readonly number[];
   /**
    * The player's OWN pick of fitted REMOTE shield-repair modules, by item id
    * — never guessed, for the same reason `defenseModuleIDs` above is not: a
@@ -238,6 +265,9 @@ export const MAX_DRONE_HOLD_OFF_SECONDS = 300;
 export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.freeze({
   role: "dps",
   defenseModuleIDs: Object.freeze([]),
+  shieldBoosterModuleIDs: Object.freeze([]),
+  armorRepairerModuleIDs: Object.freeze([]),
+  hullRepairerModuleIDs: Object.freeze([]),
   remoteShieldModuleIDs: Object.freeze([]),
   remoteArmorModuleIDs: Object.freeze([]),
   remoteCapacitorModuleIDs: Object.freeze([]),
@@ -369,7 +399,7 @@ export interface FleetCompanionDeps {
  *   • the abandonment protocol (decision 5, rung 2) — warp / approach / dock /
  *     warpToBookmark / leaveFleet / acceptFleetInvite — the one thing a
  *     companion left without a human may do unsupervised.
- *   • obeying the fleet (rung 3) — lock / align / activate / travelTo —
+ *   • obeying the fleet (rung 4) — lock / align / activate / travelTo —
  *     answering a fleet tag or broadcast while a human IS supervising. See
  *     `decideFleetOrders`.
  */
@@ -384,22 +414,33 @@ export type FleetCompanionAction =
   | { readonly kind: "leaveFleet" }
   | { readonly kind: "acceptFleetInvite"; readonly fleetID: number }
   /**
-   * Obeying the fleet (rung 3): a tag or a `Target` broadcast, locked. Locking
+   * Obeying the fleet (rung 4): a tag or a `Target` broadcast, locked. Locking
    * is the whole of what this rung does with a target — there is no weapons
    * rung yet, so this is never a stand-in for shooting.
    */
   | { readonly kind: "lock"; readonly targetID: number }
-  /** Obeying the fleet (rung 3): an `AlignTo` broadcast. */
+  /** Obeying the fleet (rung 4): an `AlignTo` broadcast. */
   | { readonly kind: "align"; readonly targetID: number }
   /**
-   * Obeying the fleet (rung 3): a Heal broadcast, answered with a fitted
+   * Obeying the fleet (rung 4): a Heal broadcast, answered with a fitted
    * remote-repair module aimed at the ship named. `repeat: -1` (run
    * continuously) is this codebase's own "keep cycling" — see the DSL's
    * `activate` case in flow.ts.
    */
   | { readonly kind: "activate"; readonly moduleID: number; readonly targetID: number }
   /**
-   * Obeying the fleet (rung 3): a `TravelTo` broadcast — a solar system, not
+   * Switch a module OFF. The companion's first: until the tank-up rung there
+   * was nothing it started that it ever had to stop.
+   *
+   * ⚠ NOT FOR PROP MODS AS IT STANDS. `api.deactivateModule`'s own comment
+   * warns that an afterburner or MWD only actually STOPS when Deactivate names
+   * its propulsion effect -- the server infers a default effect on activate but
+   * not on deactivate. Hardeners and repairers are unaffected. Read that
+   * comment before widening this to anything that moves the ship.
+   */
+  | { readonly kind: "deactivate"; readonly moduleID: number }
+  /**
+   * Obeying the fleet (rung 4): a `TravelTo` broadcast — a solar system, not
    * an on-grid object, so this hands off to the SHARED autopilot
    * (flow.ts's `startRoute`) rather than warping or approaching itself.
    */
@@ -528,14 +569,28 @@ export interface CompanionLadderMemory {
   /** The target of an approach this loop started, for `decideCloseIn`. */
   readonly closingOn: number | null;
   /**
-   * The target rung 3 last issued a `lock` call for — the fallback for
+   * Modules RUNG 3 (tank up) has switched on and not yet switched back off —
+   * the stand-down record. Mirrors `standDownAfterFight`'s own `hardened`
+   * list, generalised to every module kind rung 3 can light (hardeners AND
+   * self-repairers alike, both self-targeted), because the fight-end
+   * stand-down switches off everything this rung is responsible for, not
+   * hardeners alone.
+   *
+   * ⚠ WITHOUT THIS THE STAND-DOWN COULD SWITCH OFF A MODULE SOMEBODY ELSE
+   * LIT. `activeModuleIDs` says a module is cycling; it never says WHO
+   * switched it on. Only a module this rung remembers lighting is ever a
+   * candidate for this rung to switch back off.
+   */
+  readonly lastTankUpModuleIDs: readonly number[];
+  /**
+   * The target rung 4 last issued a `lock` call for — the fallback for
    * `isAlreadyLocked` when `obs.lockedTargetIDs` itself is unreadable. See
    * that function's own comment for why the authoritative read still wins
    * whenever it is available.
    */
   readonly lastLockIssuedFor: number | null;
   /**
-   * The ship rung 3 last aimed a Heal-family `activate` at, and which fitted
+   * The ship rung 4 last aimed a Heal-family `activate` at, and which fitted
    * modules it has issued for THAT ship. This is the fallback
    * `isHealModuleAlreadyRunning` uses when `activeModuleIDs` cannot say —
    * nothing in a space snapshot exposes a remote-repair module's target, so
@@ -546,11 +601,11 @@ export interface CompanionLadderMemory {
   readonly lastHealTargetID: number | null;
   readonly lastHealModuleIDs: readonly number[];
   /**
-   * The solar system rung 3 last issued a `travelTo` route to, so a standing
+   * The solar system rung 4 last issued a `travelTo` route to, so a standing
    * `TravelTo` broadcast does not restart the shared autopilot every tick.
    */
   /**
-   * The target rung 3 last aimed a WEAPON at, and which fitted weapons it has
+   * The target rung 4 last aimed a WEAPON at, and which fitted weapons it has
    * issued for THAT target. The same pair, for the same reason, as
    * `lastHealTargetID` above: a snapshot says a module is cycling and never
    * says what it is cycling AT, so a gun still chewing on the rat the commander
@@ -568,6 +623,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastSupervisorIDs: [],
     abandonment: null,
     closingOn: null,
+    lastTankUpModuleIDs: [],
     lastLockIssuedFor: null,
     lastHealTargetID: null,
     lastHealModuleIDs: [],
@@ -596,7 +652,7 @@ export interface CompanionDecision {
   readonly stop?: string;
   /**
    * Which authority this decision came from, for the readout. Omitted (never
-   * `null` here — `tick()` supplies the default) by every rung except rung 3;
+   * `null` here — `tick()` supplies the default) by every rung except rung 4;
    * the controller reads that omission as `"own-ladder"`, which is the honest
    * answer for the warp yield, the supervision gate, the abandonment protocol
    * and "Standing by" alike — none of them are obeying an external order.
@@ -689,10 +745,20 @@ function nearestOf(
  *     unsupervised"; it is "was made fleet commander, and its tag writes
  *     started landing", in a fleet nobody is in.
  *
- * ⚠ RUNG 3 IS OBEYING THE FLEET, BELOW THE SUPERVISION GATE AND ABOVE
- * "Standing by". Unlike rung 2 it IS an order source (see
- * `decideFleetOrders`'s own header for the tag-over-broadcast reasoning and
- * why an off-grid call is not an order for this pilot at all).
+ * ⚠ RUNG 3 IS TANK UP, BELOW THE SUPERVISION GATE AND ABOVE OBEYING THE
+ * FLEET. THE TANK GOES UP FIRST — the DSL's own fight-back watch lights
+ * hardeners before it ever calls `fight-the-rats`, and its comment states the
+ * principle this ordering rests on: a hardener is instant and self-targeted,
+ * the same thing a player reaches for before they reach for the guns. It
+ * costs at most a tick or two of a standing order going unobeyed, because
+ * this rung has something to do only while a module is off and falls through
+ * — returns null — the moment the rack is up. See `decideTankUp`'s own
+ * header for the ladder inside this rung.
+ *
+ * ⚠ RUNG 4 IS OBEYING THE FLEET, BELOW TANK UP AND ABOVE "Standing by".
+ * Unlike rung 2 it IS an order source (see `decideFleetOrders`'s own header
+ * for the tag-over-broadcast reasoning and why an off-grid call is not an
+ * order for this pilot at all).
  */
 export function decideCompanionAction(
   request: FleetCompanionRequest,
@@ -741,6 +807,7 @@ export function decideCompanionAction(
     lastSupervisorIDs: [...supervisors],
     abandonment: null,
     closingOn: memory.closingOn,
+    lastTankUpModuleIDs: memory.lastTankUpModuleIDs,
     lastLockIssuedFor: memory.lastLockIssuedFor,
     lastFireTargetID: memory.lastFireTargetID,
     lastFireModuleIDs: memory.lastFireModuleIDs,
@@ -749,17 +816,26 @@ export function decideCompanionAction(
     lastRoutedSystemID: memory.lastRoutedSystemID,
   };
 
-  const obeying = decideFleetOrders(request, obs, supervised);
+  // Rung 3: tank up. Threaded even when it has nothing to do this tick —
+  // `tankedUp.memory` may have forgotten a finished stand-down record on a
+  // tick that issued no action, and dropping it here would lose that the same
+  // way skipping `stand.memory` would in `scriptDecide.ts`'s own equivalent.
+  const tankedUp = decideTankUp(request, obs, supervised);
+  if (tankedUp.decision !== null) {
+    return tankedUp.decision;
+  }
+
+  const obeying = decideFleetOrders(request, obs, tankedUp.memory);
   if (obeying !== null) {
     return obeying;
   }
 
-  // Phases 4-8 add further rungs here, in the order documented in
+  // Phases 5-8 add further rungs here, in the order documented in
   // docs/fleet-companion-implementation.md, "The rung ladder".
   return waiting(
     "Standing by",
     "No fleet order to obey right now, and no further companion behaviour is built yet.",
-    supervised,
+    tankedUp.memory,
   );
 }
 
@@ -937,6 +1013,291 @@ function getSafe(
   // do NOT give up: the warp may simply not have started yet, and the
   // thirty-minute bound above is already the answer to one that never does.
   return waiting("Getting safe", "Waiting for the warp to the safe spot to start.", mem);
+}
+
+// ─── Rung 3: tank up ─────────────────────────────────────────────────────────
+//
+// A PORT, not an invention — see docs/fleet-companion-implementation.md,
+// "Phase 3 — the spec". `scriptDecide.ts`'s `repair` interrupt response, fed by
+// `repairersFor`, is a per-layer self-repair thermostat with a capacitor floor
+// that INVERTS below the floor; `standDownAfterFight` is the shape the
+// fight-end stand-down below copies; `scriptMacros.ts`'s `hardenersOn` is the
+// ON-only hardener ladder this rung's first step mirrors. None of that code
+// runs here — `observe(hint)` and `InterruptRow` belong to the DSL runner this
+// loop is deliberately not part of — so the SHAPE is copied and the DATA comes
+// off the request the operator picked (`defenseModuleIDs`,
+// `shieldBoosterModuleIDs`, `armorRepairerModuleIDs`, `hullRepairerModuleIDs`),
+// never off a fit classifier. See those fields' own comments for the two DSL
+// bugs that disappear by asking instead of guessing.
+
+/**
+ * Below this fraction of a layer's max, that layer counts as hurt and this
+ * rung cycles its own repairer.
+ *
+ * ⚠ NOT `request.fleeHealthFloor`. That field is phase 6's flee trigger and is
+ * deliberately a lower, more desperate number — a pilot reaches for its own
+ * repairer long before it reaches for the door. 0.75 is high enough that a
+ * repairer switched on here has room to land a cycle before ordinary combat
+ * damage could push the layer past what one cycle restores; low enough that a
+ * layer sitting at 90-99% from routine passive regen never trips a repairer
+ * that has nothing useful to do.
+ */
+export const TANK_LAYER_HURT_THRESHOLD = 0.75;
+
+/** One tank layer: its current reading and the operator's own repairer picks. */
+interface TankLayer {
+  readonly name: "shield" | "armor" | "hull";
+  readonly ratio: number | null;
+  readonly moduleIDs: readonly number[];
+}
+
+/**
+ * Shield, then armour, then hull — the same order `repairersFor` lists them
+ * in, and the order a shield-first tank actually loses layers in.
+ */
+function tankLayers(request: FleetCompanionRequest, obs: FleetCompanionObservation): readonly TankLayer[] {
+  return [
+    { name: "shield", ratio: obs.shieldRatio, moduleIDs: request.shieldBoosterModuleIDs },
+    { name: "armor", ratio: obs.armorRatio, moduleIDs: request.armorRepairerModuleIDs },
+    { name: "hull", ratio: obs.hullRatio, moduleIDs: request.hullRepairerModuleIDs },
+  ];
+}
+
+type LayerRepairAction =
+  | { readonly kind: "activate"; readonly moduleID: number; readonly layerName: TankLayer["name"] }
+  | {
+      readonly kind: "deactivate";
+      readonly moduleID: number;
+      readonly layerName: TankLayer["name"];
+      /** Which off-half fired: the capacitor floor, or the layer being whole again. */
+      readonly because: "cap-floor" | "recovered";
+    };
+
+/**
+ * One layer's own repair decision — the `repair` interrupt response's body,
+ * scoped to a single layer instead of a single watch row: this loop has no
+ * rows, so each layer plays the part a `shield-below` / `armor-below` /
+ * `hull-below` row would.
+ *
+ * ⚠ CANNOT-TELL NEVER STARTS A CYCLE. An unreadable layer ratio reads as "not
+ * hurt" here, the same rule every tri-state read in this file follows — a
+ * layer this loop cannot see is not one it can decide is hurt.
+ *
+ * ⚠ THE INVERSION IS THE POINT OF THE WHOLE RUNG. Below `capacitorFloor`, a
+ * RUNNING repairer for this layer switches off instead of an idle one
+ * starting, even though the layer is (by definition, to have reached this
+ * branch) still hurt. The floor is not "can this ship still warp" — warp
+ * costs no capacitor on this server, see `capacitorFloor`'s own comment for
+ * the length of that answer — it is that an empty capacitor repairs nothing,
+ * so a repairer cycling below the floor is spending capacity that heals
+ * nobody.
+ *
+ * `null` covers every "nothing NEW for this layer" case: not hurt,
+ * unreadable, nothing fitted for it, or every fitted candidate is already in
+ * the state this layer wants it in.
+ */
+function decideLayerRepairer(
+  layer: TankLayer,
+  active: ReadonlySet<number>,
+  capacitorRatio: number | null,
+  capacitorFloor: number,
+): LayerRepairAction | null {
+  if (layer.ratio === null) {
+    // Cannot tell: neither start a cycle nor stop one. Stopping blind is the
+    // same mistake as standing the hardeners down blind -- an unreadable layer
+    // is not a layer this rung has seen recover.
+    return null;
+  }
+  if (layer.ratio >= TANK_LAYER_HURT_THRESHOLD) {
+    // ⚠ THE THERMOSTAT'S OTHER OFF-HALF, and the rung is wrong without it. A
+    // layer that heals back up mid-fight leaves its repairer cycling on a whole
+    // layer, and the DSL has a whole pass for exactly this (`repairShutdown`,
+    // scriptDecide.ts) whose comment gives the reason: they "stop eating
+    // capacitor once the ship is whole".
+    //
+    // Leaving it out does not merely waste a little capacitor -- it aims the
+    // ship at the capacitor floor, and the floor is the SAFETY NET, not the
+    // normal off-switch. A rung that only ever stops repairing by hitting the
+    // floor has arranged to spend every fight at the one capacitor level it
+    // exists to keep the ship away from.
+    //
+    // One threshold serves both directions, exactly as a `shield-below` watch
+    // and its `repairShutdown` share one. That can chatter for a layer sitting
+    // right on the line; the DSL has lived with the same property, and a second
+    // hysteresis number tuned by nobody would be worse than the chatter.
+    const running = layer.moduleIDs.find((id) => active.has(id));
+    return running === undefined
+      ? null
+      : { kind: "deactivate", moduleID: running, layerName: layer.name, because: "recovered" };
+  }
+  // Unreadable capacitor fails OPEN toward repairing, not against it — the
+  // same choice the DSL's own `repair` case makes (`cap !== null && cap <
+  // REPAIR_CAP_FLOOR`). The risk of an unseen empty cap is a wasted cycle; the
+  // risk of refusing to repair on a guess is a layer this rung could have saved.
+  if (capacitorRatio !== null && capacitorRatio < capacitorFloor) {
+    const running = layer.moduleIDs.find((id) => active.has(id));
+    return running === undefined
+      ? null
+      : { kind: "deactivate", moduleID: running, layerName: layer.name, because: "cap-floor" };
+  }
+  const idle = layer.moduleIDs.find((id) => !active.has(id));
+  return idle === undefined ? null : { kind: "activate", moduleID: idle, layerName: layer.name };
+}
+
+interface TankUpStep {
+  /** Non-null when this rung has something NEW to do this tick. */
+  readonly decision: CompanionDecision | null;
+  /**
+   * The memory to carry forward regardless of `decision`. Needed because the
+   * fight-end stand-down below can finish — forgetting its own record — on a
+   * tick where it has nothing left to switch off, the same way
+   * `standDownAfterFight` threads a forgotten record through even when its own
+   * action for that tick is null.
+   */
+  readonly memory: CompanionLadderMemory;
+}
+
+/**
+ * Rung 3: tank up. See the header above `decideCompanionAction` for why this
+ * sits above obeying the fleet (rung 4) and below the supervision gate.
+ *
+ * ⚠ HARDENERS ARE NEVER CAP-GATED, UNLIKE THE REPAIRERS BELOW. The
+ * implementation doc's earlier rung-2 table said to gate them too, because
+ * the DSL's fit classifier cannot tell a free Damage Control from a
+ * cap-hungry active hardener — one regex, `/hardener|damage control|
+ * resistance/i`, for both. `defenseModuleIDs` is the operator's OWN pick, so
+ * there is nothing left here to be unsure about, and delaying a free cycle
+ * for a floor that exists to protect REPAIR throughput is a cost with no
+ * matching benefit.
+ *
+ * The ladder, one action per tick, falling through (returning a null
+ * `decision`) the moment there is nothing NEW to do — the same shape and the
+ * same reason `decideHealOrder` uses:
+ *
+ *   1. a fitted hardener switches on while a fight is on
+ *   2. a hurt layer's OWN repairer switches on — shield from the shield list,
+ *      armour from the armour list, hull from the hull list, never across
+ *      families
+ *   3. INVERTED below `request.capacitorFloor`: a RUNNING repairer switches
+ *      OFF instead of another one starting, even while that layer is still
+ *      hurt — see `decideLayerRepairer`'s own comment for why
+ *   4. once the fight is confirmed over, every module THIS rung switched on
+ *      switches back off, one per tick
+ *
+ * ⚠ NEVER STAND DOWN ON A BLIND READ. Step 4 fires only on an explicit
+ * `hostileOnGrid === false`, never on `null` (cannot tell) — the same rule
+ * `standDownAfterFight`'s own comment states: "standing down blind is the
+ * worst possible moment to drop the tank."
+ *
+ * ⚠ A LAYER THAT HEALS MID-FIGHT IS AN ACCEPTED GAP, NOT AN OVERSIGHT. The
+ * DSL's `repairShutdown` stands a repairer down the instant ITS OWN watch
+ * reads not-met, independently of whether a fight is still on at all. This
+ * rung does not port that: a repairer it lit keeps cycling on a layer that has
+ * since topped up until EITHER the capacitor floor inverts it OR the fight
+ * ends and step 4 clears it. A cycle spent on a full layer is a wasted one,
+ * not a dangerous one, and the capacitor floor already bounds how long that
+ * waste can run — a third, per-layer recovery-driven off switch was not asked
+ * for and would need its own bookkeeping distinct from steps 3 and 4's.
+ */
+function decideTankUp(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): TankUpStep {
+  const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+
+  // 1. Hardeners up while a fight is on. Both reads already exist on the
+  //    observation; either one alone is enough to mean "a fight is on".
+  const fightOn = obs.hostileOnGrid === true || obs.targetedByPlayer === true;
+  if (fightOn) {
+    const idleHardener = request.defenseModuleIDs.find((id) => !active.has(id));
+    if (idleHardener !== undefined) {
+      const lit: CompanionLadderMemory = {
+        ...memory,
+        lastTankUpModuleIDs: [...memory.lastTankUpModuleIDs, idleHardener],
+      };
+      return {
+        decision: {
+          action: { kind: "activate", moduleID: idleHardener, targetID: 0 },
+          phase: "Tanking up",
+          why: "Hostiles are on this grid, so a fitted hardener is switching on.",
+          memory: lit,
+        },
+        memory: lit,
+      };
+    }
+  }
+
+  // 2 & 3. Each layer's own repairer — on while hurt, inverted off below the
+  //        capacitor floor. See `decideLayerRepairer`'s own comment.
+  for (const layer of tankLayers(request, obs)) {
+    const layerAction = decideLayerRepairer(layer, active, obs.capacitorRatio ?? null, request.capacitorFloor);
+    if (layerAction === null) {
+      continue;
+    }
+    if (layerAction.kind === "activate") {
+      const lit: CompanionLadderMemory = {
+        ...memory,
+        lastTankUpModuleIDs: [...memory.lastTankUpModuleIDs, layerAction.moduleID],
+      };
+      return {
+        decision: {
+          action: { kind: "activate", moduleID: layerAction.moduleID, targetID: 0 },
+          phase: "Tanking up",
+          why: `The ${layerAction.layerName} is hurt, so a fitted repairer is switching on.`,
+          memory: lit,
+        },
+        memory: lit,
+      };
+    }
+    // Whatever switched it off, this rung is no longer holding it on, so it
+    // leaves the stand-down record. A stale entry would be harmless (the
+    // stand-down only ever switches off what it can still see running) but it
+    // would make the record a log of what this rung once did rather than a
+    // statement of what it is holding on right now, which is what it is for.
+    const dropped: CompanionLadderMemory = {
+      ...memory,
+      lastTankUpModuleIDs: memory.lastTankUpModuleIDs.filter((id) => id !== layerAction.moduleID),
+    };
+    return {
+      decision: {
+        action: { kind: "deactivate", moduleID: layerAction.moduleID },
+        phase: "Tanking up",
+        why:
+          layerAction.because === "cap-floor"
+            ? "The capacitor is too low to keep repairing, so a running repairer is switching off."
+            : `The ${layerAction.layerName} is whole again, so its repairer is switching off.`,
+        memory: dropped,
+      },
+      memory: dropped,
+    };
+  }
+
+  // 4. Stand down once the fight is confirmed over — never on a blind read.
+  if (obs.hostileOnGrid === false && memory.lastTankUpModuleIDs.length > 0) {
+    const stillOn = memory.lastTankUpModuleIDs.find((id) => active.has(id));
+    if (stillOn !== undefined) {
+      const remaining: CompanionLadderMemory = {
+        ...memory,
+        lastTankUpModuleIDs: memory.lastTankUpModuleIDs.filter((id) => id !== stillOn),
+      };
+      return {
+        decision: {
+          action: { kind: "deactivate", moduleID: stillOn },
+          phase: "Standing down",
+          why: "The fight is over, so a module this pilot switched on is switching back off.",
+          memory: remaining,
+        },
+        memory: remaining,
+      };
+    }
+    // Everything this rung lit is already off (switched off here over the
+    // last few ticks, or ended on its own) — forget the record so the next
+    // fight starts clean, with no action issued this tick.
+    return { decision: null, memory: { ...memory, lastTankUpModuleIDs: [] } };
+  }
+
+  return { decision: null, memory };
 }
 
 /** An entity present on THIS grid, or null when the snapshot does not carry it. */
@@ -1232,7 +1593,7 @@ function healOrderHeard(name: HealBroadcastName): string {
 }
 
 /**
- * Whether `moduleID` is already cycling on `targetID`, so rung 3 does not
+ * Whether `moduleID` is already cycling on `targetID`, so rung 4 does not
  * re-activate a running repairer every tick.
  *
  * ⚠ THE AUTHORITATIVE READ (`activeModuleIDs`, the ship snapshot's own
@@ -1499,9 +1860,9 @@ function resolveNamedOrder(
 }
 
 /**
- * Rung 3: obeying the fleet. Below the supervision gate (only reached while a
- * human is here) and above "Standing by". Returns `null` when there is
- * nothing to obey, which is how the caller falls through to standing by.
+ * Rung 4: obeying the fleet. Below the supervision gate and rung 3 (tank up)
+ * and above "Standing by". Returns `null` when there is nothing to obey,
+ * which is how the caller falls through to standing by.
  *
  * Checked in this order — the Heal family, then a fleet tag, then a `Target`
  * broadcast, then `AlignTo`, then `TravelTo`, then `JumpTo` — for two
@@ -1849,7 +2210,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     mem.phase = decision.phase;
     mem.why = decision.why;
     mem.action = decision.action.kind;
-    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 3
+    // ⚠ "own-ladder" IS THE DEFAULT, NOT `null`. Every rung except rung 4
     // (obeying the fleet) leaves these two fields unset on its decision, and
     // that omission means "this pilot is not obeying an external order" —
     // the warp yield, the supervision gate, the abandonment protocol and
@@ -1897,10 +2258,12 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
             safeSpotWarpSeen: false,
           },
           closingOn: null,
-          // A resumed run has locked, healed and routed nothing yet either —
-          // same reasoning as the get-safe flags just above: this run has
-          // not issued any of those calls, so it must not assume one already
-          // landed.
+          // A resumed run has tanked up, locked, healed and routed nothing yet
+          // either — same reasoning as the get-safe flags just above: this run
+          // has not issued any of those calls, so it must not assume one
+          // already landed. A restart mid-fight simply re-lights whatever is
+          // still off on its first live tick.
+          lastTankUpModuleIDs: [],
           lastLockIssuedFor: null,
           lastFireTargetID: null,
           lastFireModuleIDs: [],

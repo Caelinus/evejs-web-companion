@@ -5586,16 +5586,24 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // Rung 3, the Heal family (fleetCompanionLoop.ts): a fitted remote
           // repairer, aimed at the ship the broadcast named. `repeat: -1` is
           // this codebase's own "run continuously" (see the DSL's own
-          // `activate` case above `makeFleetCompanionDeps`). Every heal
-          // target the ladder issues is a REAL on-grid ship it already
-          // measured, never the DSL's targetID-0 "self" convention, so that
-          // branch is not needed here.
+          // `activate` case above `makeFleetCompanionDeps`). Phase 3 adds
+          // SELF-targeted modules too (a hardener, a self-repairer), so this
+          // adopts the DSL's own form: omitting the `targetID` key entirely
+          // is this codebase's convention for "run it on the caster", and
+          // `targetID: 0` is the DSL's sentinel for that, never a real item
+          // id — it is not a ship this ladder measured on grid.
           case "activate":
             await api.activateModule(
               action.moduleID,
-              { targetID: action.targetID, repeat: -1 },
+              action.targetID > 0 ? { targetID: action.targetID, repeat: -1 } : { repeat: -1 },
               callOptions,
             );
+            return;
+          // Phase 3, "tank up": switch a module OFF. Same shape as the DSL's
+          // own `deactivate` case — no target, since deactivation always
+          // targets the caster's own fit.
+          case "deactivate":
+            await api.deactivateModule(action.moduleID, {}, callOptions);
             return;
           // Rung 3, `TravelTo`: hand off to the SHARED autopilot, exactly as
           // the DSL's own `startSystemRoute` case does — same solver, same
@@ -5604,6 +5612,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "travelTo":
             await startRoute(action.systemID);
             return;
+          default: {
+            // ⚠ EXHAUSTIVE ON PURPOSE. Every FleetCompanionAction kind MUST be
+            // issued here, or a new kind silently no-ops at runtime instead of
+            // failing to compile — exactly the gap that let `deactivate` land
+            // with nothing wired up for one revision.
+            const never: never = action;
+            throw new Error(`The fleet companion action dispatcher is missing an action: ${String(never)}`);
+          }
         }
       },
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),

@@ -74,6 +74,17 @@
    */
   let picked = $state<number[]>([]);
   /**
+   * The player's OWN pick of fitted SELF-repair modules, one list per tank
+   * layer — the module that repairs THIS ship, as distinct from the remote
+   * pickers below, which repair a fleet-mate. A shield booster cannot repair
+   * armour, so the hurt layer picks the list (see
+   * `FleetCompanionRequest.shieldBoosterModuleIDs`'s own comment). Same
+   * "nothing ticked for you" rule as `picked` above.
+   */
+  let pickedShieldBooster = $state<number[]>([]);
+  let pickedArmorRepairer = $state<number[]>([]);
+  let pickedHullRepairer = $state<number[]>([]);
+  /**
    * The player's OWN pick of fitted REMOTE repair modules, one list per
    * family — a shield booster cannot repair armour, so each answers only its
    * own kind of Heal broadcast (see `FleetCompanionRequest.remoteShieldModuleIDs`'s
@@ -177,6 +188,24 @@
 
   function toggleDefense(itemID: number): void {
     picked = picked.includes(itemID) ? picked.filter((id) => id !== itemID) : [...picked, itemID];
+  }
+
+  function toggleShieldBooster(itemID: number): void {
+    pickedShieldBooster = pickedShieldBooster.includes(itemID)
+      ? pickedShieldBooster.filter((id) => id !== itemID)
+      : [...pickedShieldBooster, itemID];
+  }
+
+  function toggleArmorRepairer(itemID: number): void {
+    pickedArmorRepairer = pickedArmorRepairer.includes(itemID)
+      ? pickedArmorRepairer.filter((id) => id !== itemID)
+      : [...pickedArmorRepairer, itemID];
+  }
+
+  function toggleHullRepairer(itemID: number): void {
+    pickedHullRepairer = pickedHullRepairer.includes(itemID)
+      ? pickedHullRepairer.filter((id) => id !== itemID)
+      : [...pickedHullRepairer, itemID];
   }
 
   function toggleRemoteShield(itemID: number): void {
@@ -419,6 +448,9 @@
       flow.startFleetCompanion({
         role,
         defenseModuleIDs: picked,
+        shieldBoosterModuleIDs: pickedShieldBooster,
+        armorRepairerModuleIDs: pickedArmorRepairer,
+        hullRepairerModuleIDs: pickedHullRepairer,
         remoteShieldModuleIDs: pickedRemoteShield,
         remoteArmorModuleIDs: pickedRemoteArmor,
         remoteCapacitorModuleIDs: pickedRemoteCapacitor,
@@ -647,11 +679,62 @@
       {/each}
     {/if}
 
+    <h3>Self repair</h3>
+    <p class="note">
+      Tick what this pilot may run on ITSELF - the module that repairs THIS
+      ship, as distinct from the remote-repair pickers below, which repair a
+      fleet-mate. A shield booster cannot repair armour, so pick each fitted
+      module under the layer it actually reps - nothing is guessed for you
+      here either.
+    </p>
+    {#if equipment.length === 0}
+      <p class="empty">
+        Nothing powered up. Power your self-repair equipment up under Your
+        equipment, then come back.
+      </p>
+    {:else}
+      <p><strong>Shield boosters</strong> (repairs this ship's own shield)</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedShieldBooster.includes(row.itemID)}
+            onchange={() => toggleShieldBooster(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+      <p><strong>Armour repairers</strong> (repairs this ship's own armour)</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedArmorRepairer.includes(row.itemID)}
+            onchange={() => toggleArmorRepairer(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+      <p><strong>Hull repairers</strong> (repairs this ship's own hull)</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedHullRepairer.includes(row.itemID)}
+            onchange={() => toggleHullRepairer(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+    {/if}
+
     <h3>Remote repair</h3>
     <p class="note">
-      Tick what this pilot may run on a fleet-mate who calls for reps. A
-      shield booster cannot repair armour, so pick each fitted module under
-      the layer it actually reps - nothing is guessed for you here either.
+      Tick what this pilot may run on a fleet-mate who calls for reps - a
+      module that repairs THIS ship, ticked above, cannot repair one of these
+      instead. A shield booster cannot repair armour, so pick each fitted
+      module under the layer it actually reps - nothing is guessed for you
+      here either.
     </p>
     {#if equipment.length === 0}
       <p class="empty">

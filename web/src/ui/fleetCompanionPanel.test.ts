@@ -258,16 +258,16 @@ test("every equipment picker starts with NOTHING ticked — unlike the mining bo
   const equipmentBoxes = checkboxBlocks.filter(
     (block) => block.includes("Test Shield Booster") || block.includes("Test Armour Repairer"),
   );
-  // FIVE pickers now offer every online module: defensive equipment, one per
-  // remote-repair family (shield, armour, capacitor), and weapons. Two
-  // modules in each.
+  // EIGHT pickers now offer every online module: defensive equipment, one
+  // per SELF-repair layer (shield, armour, hull), one per remote-repair
+  // family (shield, armour, capacitor), and weapons. Two modules in each.
   //
   // ⚠ EVERY PICKER OFFERS EVERY ONLINE MODULE ON PURPOSE. The panel cannot
-  // tell a remote shield booster from an armour repairer (or a weapon) by
-  // name, and guessing is the one thing this whole surface refuses to do — a
-  // wrong guess cycles the wrong module. The player picks; the panel only
-  // lists.
-  assert.equal(equipmentBoxes.length, 10, "every picker must offer both online modules");
+  // tell a remote shield booster from a self shield booster, an armour
+  // repairer (self or remote), or a weapon by name, and guessing is the one
+  // thing this whole surface refuses to do — a wrong guess cycles the wrong
+  // module. The player picks; the panel only lists.
+  assert.equal(equipmentBoxes.length, 16, "every picker must offer both online modules");
   for (const block of equipmentBoxes) {
     assert.doesNotMatch(block, /checked/, "no module may be pre-ticked, in any picker");
   }
