@@ -563,7 +563,37 @@ the way past.
 
 **`scope` needs no filtering, and that is now confirmed rather than assumed.**
 The spec's instinct to keep it an opaque passthrough was right. The server
-filters on scope and range before any session is notified.
+filters on scope and range before any session is notified —
+`collectBroadcastRecipientSessions` for range and `shouldReceiveBroadcast` for
+scope, both inside `sendBroadcast` before any `notifySession` call.
+
+**There are FOUR fleet-slice resets, not three.** Verified 2026-09-11:
+`clientStore.ts:935` (`session/logged-out`), `:998` (**`character/online`** —
+the one this doc missed), `:1033` (`character/offline`) and `:1427`
+(`fleet/cleared`). Any new field on the slice must be reset by all four, and
+`character/online` is the easy one to miss because "coming online" does not
+sound like a reset.
+
+⚠ **`fleet/cleared` is reachable-but-unwired.** It is declared in `feed.ts` and
+handled in `clientStore.ts`, but nothing in `flow.ts` dispatches it — its only
+other reference is `fleetSlice.test.ts`. So do not rely on it to clear a
+broadcast or a tag dict in production; the clear-on-fleet-switch rule has to
+hang off something that actually fires.
+
+**⚠ A PREREQUISITE THIS SPEC IS MISSING: a headless companion receives NO pushed
+notifications at all.** Found 2026-09-11. `applyPushedNotification` has exactly
+one caller — the SSE `notification` branch (`flow.ts:1273`) — and `botHost.js`
+hands every headless bot `stubEventSource()`, a channel that is never live. The
+BFF already anticipates this: "every request route still drains notifications
+onto its response, so a stream that never opens or drops mid-flight degrades to
+the old poll-based behaviour rather than losing data" (`server.js:585`). But
+**nothing in `flow.ts` consumes that drain**, so the fallback is only half
+built. Most push consumers today have a re-read fallback, which is why this has
+gone unnoticed; a broadcast has none — there is no "read the current broadcast"
+route, so a missed push is an order lost for good. Phase 1 needs a commit that
+feeds drained notifications into the same dispatch, or the whole phase works in
+a browser tab and is dead on the bot host that decision 3 made the real
+deployment target.
 
 **`itemID` can arrive as a bare numeric string.** The spec reasoned these ids sit
 under 2^53 and need `unwrapLong` only for the wrapper case. True as far as it
@@ -598,11 +628,18 @@ call, no new action, no new `issue:` case. It is purely a block that resolves a
 *named* fleet-mate instead of the nearest one. `follow-fleet-mate` needs a new
 action kind and `issue:` case but no new wrapper.
 
-**Reuse `orbit-and-boost` as the template** (`scriptMacros.ts:3091`). It already
-does the whole chain: `fleetMatesOnGrid` → pick an anchor → emit once, gated on
-a memory key so it does not re-issue every tick. The new blocks differ in one
-line: `friendlies.find(e => e.characterID === who.charID)` instead of
-`nearest(...)`. The `character` arg kind is fully built already — reuse it.
+**Reuse `orbit-and-boost` as the template** (`scriptMacros.ts:3095`) — but for
+HALF the chain only. It does `fleetMatesOnGrid` → pick an anchor → emit once,
+gated on a memory key (`mem["orbiting"]`, compared and re-stamped at
+`:3117-3125`) so it does not re-issue every tick. That memory-gating idiom is
+exactly what the new blocks want.
+
+⚠ **It is NOT an example of resolving a NAMED fleet-mate, and this doc said it
+was.** Corrected 2026-09-11: `orbitAndBoost` is declared `(_step, obs, mem)` —
+it discards `step` entirely and picks by `nearest(friendlies, ...)`, so there is
+no name resolution in it to copy. For that half, follow `onlyPilotID(step)`
+(`scriptMacros.ts:3386`) as used by `attackPlayer` (`:3661`) and `huntPlayer`
+(`:3701`). Take the gating from one and the resolution from the other.
 
 ⚠ **Add the new macros to `FLEET_SUPPORT_MACROS`** (`flow.ts:6102`) or
 `obs.fleetMemberCharacterIDs` is never fetched and every block waits forever.
@@ -795,10 +832,13 @@ the request body (`server.js:5300`) — it exists to make the caller state inten
 not to raise UI. A bot passes it directly. Expect a `400
 CONFIRMATION_REQUIRED`, not a hang, if it is forgotten.
 
-### The one genuinely open question in phase 1
+### ~~The one genuinely open question in phase 1~~ — ANSWERED 2026-09-11
 
-The exact envelope of `OnFleetStateChange`'s `args[0]` — whether `targetTags` is
-the payload or one field of a larger state KeyVal. The spec's answer is right
-and cheap: try `keyValField(args[0], "targetTags")` first, fall back to treating
-`args[0]` as the dict, and test both shapes. That handles either outcome without
-needing to know which, so it does not block the commit.
+The exact envelope of `OnFleetStateChange`'s `args[0]`. **It is a `util.KeyVal`
+with `targetTags` as one field**, built by `buildFleetStateChangePayload`
+(`fleetPayloads.js:207-211`), and both server call sites use the identical
+builder. So `keyValField(args[0], "targetTags")` is the right read and there is
+no second shape in the server. Keep the fallback and both tests anyway — they
+now cost nothing and pin the assumption.
+
+Phase 1 has no open questions left.

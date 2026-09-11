@@ -897,6 +897,38 @@ them with a real session before building on a guess — the
    session only ever receives a broadcast it already passed both filters for.
    `scope` still arrives as arg[1], but for labelling, not for filtering.
 
+### The exact positional shape of both notifications
+
+Read out of `fleetRuntime.js:2538` and confirmed against the decompiled
+client's own handler signature (`fleetSvc.py:1542`,
+`def OnFleetBroadcast(self, name, scope, charID, solarSystemID, itemID, typeID)`).
+Recorded here because the tables above describe what the fields MEAN without
+ever stating the order, and a decoder needs the order.
+
+`OnFleetBroadcast` is SIX positional arguments:
+
+```
+[0] name                 one of the 15; the server refuses anything else
+[1] scope                1 = DOWN, 2 = UP, 3 = ALL (fleetConstants.js:11-13)
+[2] senderCharID         normalized server-side, plain safe number
+[3] senderSolarSystemID  normalized server-side, plain safe number
+[4] itemID               NOT normalized - see the subtlety below
+[5] typeID               NOT normalized - see the subtlety below
+```
+
+⚠ **`senderSolarSystemID` sits BETWEEN the sender and the itemID.** A decoder
+that assumes the obvious four-field shape reads the system id as the target.
+
+`OnFleetStateChange` is ONE argument, and **the question the implementation doc
+called "the one genuinely open question in phase 1" is now closed.**
+`args[0]` is a `util.KeyVal` whose `targetTags` field carries the dict
+(`buildFleetStateChangePayload`, `fleetPayloads.js:207-211`) - so `targetTags`
+is ONE FIELD of a state object, not the payload itself. Both server call sites
+(`fleetRuntime.js:899` fleet-wide, `:1675` on join) use the identical builder,
+so there is no second shape to handle. The spec's belt-and-braces fallback
+(treat `args[0]` as the dict if the field is absent) costs nothing and should
+stay, but it is now insurance rather than a coin flip.
+
 ### One decoder subtlety, found while answering 4 and 5
 
 `OnFleetBroadcast`'s `senderCharID` and `senderSolarSystemID` are normalised
@@ -915,6 +947,40 @@ target.
 
 Fleet target tags do **not** have this problem: `buildTargetTagsPayload` runs
 every key through `toInteger` server-side, so tag keys are plain JSON numbers.
+
+⚠ **A READING OF THE MARSHAL PATH SAYS THE OPPOSITE, AND IT IS THE WRONG PATH.**
+Re-checked 2026-09-11 after a survey concluded no bare-string case could exist.
+That survey traced `sendNotification` -> `marshalEncode`, where a bigint becomes
+a lossless `PyLongLong` and no string is ever produced. That is correct **for
+the retail client**, which speaks binary Python-marshal. Our web client does
+not: it reads the web gateway's JSON, and `encodeJsonSafeCallValue`
+(`_secondary/express/evejsWebGatewayRuntime.js:4203`) is
+
+```js
+JSON.parse(JSON.stringify(value, (key, fieldValue) => (
+  typeof fieldValue === "bigint" ? fieldValue.toString() : fieldValue
+)))
+```
+
+applied to `notifications` on every response (`:6403`, `:6525`, `:6680`) and to
+`notification` on the stream (`:6500`). A bigint id therefore reaches US as a
+bare decimal string. **Keep the `/^\d+$/` fallback and keep the test that pins
+it**, and do not let a marshal-path argument talk anyone out of either.
+
+### The tag alphabet the real client actually offers
+
+Settled 2026-09-11 from the decompiled client (`menusvc.py:1943-1948`). The
+server enforces no vocabulary at all (below), but the stock client's tag menu
+offers exactly:
+
+- the digits `0`-`9`
+- the letters `A B C D E F G H I J X Y Z` - note the classic gap, **no K
+  through W**
+
+So those are what a human FC in the real client will actually send, and they
+are what our ranking should order deliberately. It does not narrow the reader's
+obligation one bit: `normalizeFleetTag` still accepts any non-empty string, so
+an unrecognised tag must be RANKED rather than dropped.
 
 ### The tag alphabet is ours to choose
 
