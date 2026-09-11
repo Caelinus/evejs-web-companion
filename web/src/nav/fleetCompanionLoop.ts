@@ -277,8 +277,17 @@ export const MAX_DRONE_HEALTH_FLOOR = 0.95;
 export const MIN_CAPACITOR_FLOOR = 0.05;
 export const MAX_CAPACITOR_FLOOR = 0.95;
 export const MIN_FLEE_ATTEMPTS = 1;
-/** Three, matching MAX_RECOVER_TRIPS and MAX_ESCAPE_ATTEMPTS. A fourth trip into
- *  the same camp is a bot commuting, not a bot recovering. */
+/**
+ * The widest an operator may set the budget, NOT the budget itself.
+ *
+ * ⚠ THIS COMMENT USED TO READ "Three, matching MAX_RECOVER_TRIPS and
+ * MAX_ESCAPE_ATTEMPTS", sitting above the value 10. Both halves were true of
+ * different things and the pairing was not: those two constants are 3
+ * (`scriptDecide.ts:744`, `scriptMacros.ts:4793`) and so is this request's
+ * DEFAULT, while this is the ceiling on what the panel will accept. The
+ * reasoning moved to the default, where it applies. Same shape as the drone
+ * hold-off below: a wide range, a sensible default inside it.
+ */
 export const MAX_FLEE_ATTEMPTS = 10;
 export const MIN_DRONE_HOLD_OFF_SECONDS = 1;
 export const MAX_DRONE_HOLD_OFF_SECONDS = 300;
@@ -310,6 +319,9 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   // uses to switch a repairer off, with the same reasoning ("an empty capacitor
   // repairs nothing"). Reusing it means one answer to this question, not two.
   capacitorFloor: REPAIR_CAP_FLOOR,
+  // Three, matching MAX_RECOVER_TRIPS and MAX_ESCAPE_ATTEMPTS, which is where
+  // this number comes from rather than being picked for this file. A fourth
+  // trip into the same camp is a bot commuting, not a bot recovering.
   maxFleeAttempts: 3,
   useDrones: false,
   // A floor on the wait, not a safety guarantee — see the field's own comment.
