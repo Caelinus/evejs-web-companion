@@ -38,7 +38,7 @@ behind by a phase at least once, including this document's own.
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
 | Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
 | Phase 8 | **DONE** — chat commands, on LOCAL chat. The fleet-channel gateway patch is CANCELLED, not pending |
-| Phase 9 | squad roles + Bot Manager badge — **unblocked**, and the only phase left |
+| Phase 9 | squad roles + Bot Manager badge — **IN PROGRESS** on `feat/fleet-companion-phase-9`; role presets and the shared readout are in, the badge and the squad half are not |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
 full suite **5,215 tests with `ℹ fail 17`** — the same eight files with the same
@@ -70,6 +70,17 @@ expect `12,000`) across exactly eight files:
 | `web/src/ui/overviewActions.test.ts` | 1 |
 | `web/src/bridge/contracts.test.ts` | 1 |
 | `web/src/app/freeSkillPointsFlow.test.ts` | 1 |
+
+⚠ **THERE IS A NINTH FILE, AND IT IS FLAKY RATHER THAN BROKEN.**
+`test/eveGatewayStream.test.js` -- "a healthy stream survives the watchdog and
+still delivers frames" -- failed once during phase 9 with `reason: 'ping
+timeout'`, taking the count to 18 and putting a file outside the eight in the
+list. It is a REAL WebSocket server with a wall-clock ping watchdog, so it loses
+under load; phase 9 hit it on a run that followed a docker build. It passed 3/3
+alone and the very next full run was back to 17 on the same commit. It imports
+only `ws` and `src/eveGatewayClient`, so nothing in the companion tree can reach
+it. **If you see 18 and the extra one is this file, re-run before you go
+looking.** If the extra one is any OTHER file, it is yours.
 
 ⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
 test called "defensive equipment starts with NOTHING ticked" — nothing in that
