@@ -64,6 +64,23 @@ test("a fitted defensive module alone earns combat authority", () => {
   assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"]);
 });
 
+test("a fitted remote-repair module ALONE earns combat authority — a logi is a participant too", () => {
+  // No drones, no defensive module, nothing else that fights — just one
+  // remote shield booster. The header comment says a working repairer makes
+  // this pilot a participant in a fight exactly like a gunner is, and this
+  // pins that for each of the three families in turn.
+  for (const field of [
+    "remoteShieldModuleIDs",
+    "remoteArmorModuleIDs",
+    "remoteCapacitorModuleIDs",
+  ] as const) {
+    const policy = analyzeCompanionRunPolicy(
+      request({ useDrones: false, defenseModuleIDs: [], [field]: [11200099] }),
+    );
+    assert.deepEqual(policy.riskClasses, ["combat", "fleet", "social"], `${field} should earn combat`);
+  }
+});
+
 test("risk classes come out in the same stable order runPolicy.ts uses", () => {
   const policy = analyzeCompanionRunPolicy(request({ useDrones: true }));
   assert.deepEqual([...policy.riskClasses], ["combat", "fleet", "social"]);
@@ -99,10 +116,19 @@ test("validateBotLaunchGrant works on a companion's policy unchanged", () => {
 
 // ─── decodeFleetCompanionRequestValue ────────────────────────────────────────
 
+// Synthetic item-type ids for the three remote-repair families — as
+// obviously not-a-real-item as DEFENSE_MODULE_A above.
+const REMOTE_SHIELD_MODULE_A = 11200002;
+const REMOTE_ARMOR_MODULE_A = 11200003;
+const REMOTE_CAPACITOR_MODULE_A = 11200004;
+
 function validPayload(): Record<string, unknown> {
   return {
     role: "dps",
     defenseModuleIDs: [DEFENSE_MODULE_A],
+    remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
+    remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
+    remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
     fleeHealthFloor: 0.3,
     capacitorFloor: 0.2,
     maxFleeAttempts: 3,
@@ -121,6 +147,9 @@ test("a well-formed request round-trips", () => {
     assert.deepEqual(result.request, {
       role: "dps",
       defenseModuleIDs: [DEFENSE_MODULE_A],
+      remoteShieldModuleIDs: [REMOTE_SHIELD_MODULE_A],
+      remoteArmorModuleIDs: [REMOTE_ARMOR_MODULE_A],
+      remoteCapacitorModuleIDs: [REMOTE_CAPACITOR_MODULE_A],
       fleeHealthFloor: 0.3,
       capacitorFloor: 0.2,
       maxFleeAttempts: 3,
@@ -268,6 +297,39 @@ test("defenseModuleIDs rejects a non-positive or non-integer entry", () => {
     decodeFleetCompanionRequestValue({ ...validPayload(), defenseModuleIDs: "not-an-array" }).ok,
     false,
   );
+});
+
+test("each remote-repair module list rejects a non-positive or non-integer entry, on its own", () => {
+  for (const key of ["remoteShieldModuleIDs", "remoteArmorModuleIDs", "remoteCapacitorModuleIDs"] as const) {
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [0] }).ok,
+      false,
+      `${key} should refuse 0`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [-1] }).ok,
+      false,
+      `${key} should refuse -1`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [1.5] }).ok,
+      false,
+      `${key} should refuse a fraction`,
+    );
+    assert.equal(
+      decodeFleetCompanionRequestValue({ ...validPayload(), [key]: "not-an-array" }).ok,
+      false,
+      `${key} should refuse a non-array`,
+    );
+    // Empty is valid: no remote repairer fitted is a real answer.
+    assert.equal(decodeFleetCompanionRequestValue({ ...validPayload(), [key]: [] }).ok, true);
+  }
+});
+
+test("a request missing a remote-repair module list is refused, like defenseModuleIDs", () => {
+  const payload = validPayload();
+  delete payload.remoteShieldModuleIDs;
+  assert.equal(decodeFleetCompanionRequestValue(payload).ok, false);
 });
 
 test("fleeHealthFloor and capacitorFloor are refused outside their real domain bounds", () => {

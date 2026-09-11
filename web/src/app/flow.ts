@@ -5548,6 +5548,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "lock":
             await api.lockTarget(action.targetID, callOptions);
             return;
+          // Rung 3, the Heal family (fleetCompanionLoop.ts): a fitted remote
+          // repairer, aimed at the ship the broadcast named. `repeat: -1` is
+          // this codebase's own "run continuously" (see the DSL's own
+          // `activate` case above `makeFleetCompanionDeps`). Every heal
+          // target the ladder issues is a REAL on-grid ship it already
+          // measured, never the DSL's targetID-0 "self" convention, so that
+          // branch is not needed here.
+          case "activate":
+            await api.activateModule(
+              action.moduleID,
+              { targetID: action.targetID, repeat: -1 },
+              callOptions,
+            );
+            return;
+          // Rung 3, `TravelTo`: hand off to the SHARED autopilot, exactly as
+          // the DSL's own `startSystemRoute` case does — same solver, same
+          // bounds, and the ride ends in space at the destination system
+          // since a fleet companion has no station to dock at here.
+          case "travelTo":
+            await startRoute(action.systemID);
+            return;
         }
       },
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),

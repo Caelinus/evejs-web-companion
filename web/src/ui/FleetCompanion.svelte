@@ -73,6 +73,15 @@
    * own comment).
    */
   let picked = $state<number[]>([]);
+  /**
+   * The player's OWN pick of fitted REMOTE repair modules, one list per
+   * family — a shield booster cannot repair armour, so each answers only its
+   * own kind of Heal broadcast (see `FleetCompanionRequest.remoteShieldModuleIDs`'s
+   * own comment). Same "nothing ticked for you" rule as `picked` above.
+   */
+  let pickedRemoteShield = $state<number[]>([]);
+  let pickedRemoteArmor = $state<number[]>([]);
+  let pickedRemoteCapacitor = $state<number[]>([]);
   let fleeHealthFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.fleeHealthFloor * 100));
   let capacitorFloorPercent = $state(Math.round(DEFAULT_FLEET_COMPANION_REQUEST.capacitorFloor * 100));
   let maxFleeAttempts = $state(DEFAULT_FLEET_COMPANION_REQUEST.maxFleeAttempts);
@@ -158,6 +167,24 @@
 
   function toggleDefense(itemID: number): void {
     picked = picked.includes(itemID) ? picked.filter((id) => id !== itemID) : [...picked, itemID];
+  }
+
+  function toggleRemoteShield(itemID: number): void {
+    pickedRemoteShield = pickedRemoteShield.includes(itemID)
+      ? pickedRemoteShield.filter((id) => id !== itemID)
+      : [...pickedRemoteShield, itemID];
+  }
+
+  function toggleRemoteArmor(itemID: number): void {
+    pickedRemoteArmor = pickedRemoteArmor.includes(itemID)
+      ? pickedRemoteArmor.filter((id) => id !== itemID)
+      : [...pickedRemoteArmor, itemID];
+  }
+
+  function toggleRemoteCapacitor(itemID: number): void {
+    pickedRemoteCapacitor = pickedRemoteCapacitor.includes(itemID)
+      ? pickedRemoteCapacitor.filter((id) => id !== itemID)
+      : [...pickedRemoteCapacitor, itemID];
   }
 
   function toggleObeys(source: FleetCompanionOrderSource): void {
@@ -372,6 +399,9 @@
       flow.startFleetCompanion({
         role,
         defenseModuleIDs: picked,
+        remoteShieldModuleIDs: pickedRemoteShield,
+        remoteArmorModuleIDs: pickedRemoteArmor,
+        remoteCapacitorModuleIDs: pickedRemoteCapacitor,
         fleeHealthFloor: clamp(fleeHealthFloorPercent, MIN_FLEE_HEALTH_FLOOR * 100, MAX_FLEE_HEALTH_FLOOR * 100) / 100,
         capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
         maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
@@ -590,6 +620,53 @@
             type="checkbox"
             checked={picked.includes(row.itemID)}
             onchange={() => toggleDefense(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+    {/if}
+
+    <h3>Remote repair</h3>
+    <p class="note">
+      Tick what this pilot may run on a fleet-mate who calls for reps. A
+      shield booster cannot repair armour, so pick each fitted module under
+      the layer it actually reps - nothing is guessed for you here either.
+    </p>
+    {#if equipment.length === 0}
+      <p class="empty">
+        Nothing powered up. Power your remote-repair equipment up under Your
+        equipment, then come back.
+      </p>
+    {:else}
+      <p><strong>Remote shield boosters</strong> (answers "needs shield reps")</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedRemoteShield.includes(row.itemID)}
+            onchange={() => toggleRemoteShield(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+      <p><strong>Remote armour repairers</strong> (answers "needs armour reps")</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedRemoteArmor.includes(row.itemID)}
+            onchange={() => toggleRemoteArmor(row.itemID)}
+          />
+          {row.label}
+        </label>
+      {/each}
+      <p><strong>Capacitor transfer arrays</strong> (answers "needs capacitor")</p>
+      {#each equipment as row (row.itemID)}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={pickedRemoteCapacitor.includes(row.itemID)}
+            onchange={() => toggleRemoteCapacitor(row.itemID)}
           />
           {row.label}
         </label>

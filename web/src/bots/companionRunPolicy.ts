@@ -50,9 +50,11 @@
 // and this comment (and the one above the function) must change with it.
 //
 // "combat" is the only conditional class, because it is the only one with a
-// field that actually withholds it: no drones and no fitted defensive module
-// means nothing on the ship can be cycled into a fight, so an unarmed
-// companion earns no combat authority.
+// field that actually withholds it: no drones, no fitted defensive module,
+// and no fitted remote-repair module of any family means nothing on the ship
+// can be cycled into a fight — and a logistics pilot with a working
+// repairer is a PARTICIPANT in a fight just as much as a gunner is, so a
+// remote module alone earns the same authority a defensive one does.
 //
 // No other class ever applies. Nothing on the request reaches a wallet, an
 // item, a mission, or a colony, so "financial", "inventory", "mission" and
@@ -114,7 +116,13 @@ export const COMPANION_GRANT_SCRIPT_REV = 1;
 /** Build the same `BotRunPolicy` shape a script produces, from a companion request. */
 export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRunPolicy {
   const risks = new Set<BotRiskClass>(["fleet", "social"]);
-  if (request.useDrones || request.defenseModuleIDs.length > 0) {
+  if (
+    request.useDrones ||
+    request.defenseModuleIDs.length > 0 ||
+    request.remoteShieldModuleIDs.length > 0 ||
+    request.remoteArmorModuleIDs.length > 0 ||
+    request.remoteCapacitorModuleIDs.length > 0
+  ) {
     risks.add("combat");
   }
   return Object.freeze({
@@ -161,6 +169,9 @@ export function analyzeCompanionRunPolicy(request: FleetCompanionRequest): BotRu
 const REQUEST_KEYS = new Set<string>([
   "role",
   "defenseModuleIDs",
+  "remoteShieldModuleIDs",
+  "remoteArmorModuleIDs",
+  "remoteCapacitorModuleIDs",
   "fleeHealthFloor",
   "capacitorFloor",
   "maxFleeAttempts",
@@ -198,6 +209,9 @@ const SAY = {
   unknownKey: "This companion setup has settings this app does not recognise.",
   badRole: "This companion setup does not say what role the pilot should fly.",
   badDefenseModuleIDs: "This companion setup's defensive module list is not valid.",
+  badRemoteShieldModuleIDs: "This companion setup's remote shield-repair module list is not valid.",
+  badRemoteArmorModuleIDs: "This companion setup's remote armour-repair module list is not valid.",
+  badRemoteCapacitorModuleIDs: "This companion setup's remote capacitor-transfer module list is not valid.",
   badFleeHealthFloor: "This companion setup's flee-health threshold is not a valid number.",
   badCapacitorFloor: "This companion setup's capacitor threshold is not a valid number.",
   badMaxFleeAttempts: "This companion setup's flee-attempt limit is not a valid number.",
@@ -252,6 +266,22 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
   const defenseModuleIDs = obj["defenseModuleIDs"];
   if (!isPositiveSafeIntegerArray(defenseModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
     return { ok: false, refusal: SAY.badDefenseModuleIDs };
+  }
+
+  // Same shape and same bound as `defenseModuleIDs` above, by family — a
+  // wrong guess here cycles the wrong repairer, so each is the player's own
+  // pick, never guessed (see the request field's own comment).
+  const remoteShieldModuleIDs = obj["remoteShieldModuleIDs"];
+  if (!isPositiveSafeIntegerArray(remoteShieldModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badRemoteShieldModuleIDs };
+  }
+  const remoteArmorModuleIDs = obj["remoteArmorModuleIDs"];
+  if (!isPositiveSafeIntegerArray(remoteArmorModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badRemoteArmorModuleIDs };
+  }
+  const remoteCapacitorModuleIDs = obj["remoteCapacitorModuleIDs"];
+  if (!isPositiveSafeIntegerArray(remoteCapacitorModuleIDs, MAX_DEFENSE_MODULE_IDS)) {
+    return { ok: false, refusal: SAY.badRemoteCapacitorModuleIDs };
   }
 
   const fleeHealthFloor = obj["fleeHealthFloor"];
@@ -323,6 +353,9 @@ export function decodeFleetCompanionRequestValue(value: unknown): FleetCompanion
   const request: FleetCompanionRequest = {
     role: role as FleetCompanionRole,
     defenseModuleIDs: Object.freeze([...defenseModuleIDs]),
+    remoteShieldModuleIDs: Object.freeze([...remoteShieldModuleIDs]),
+    remoteArmorModuleIDs: Object.freeze([...remoteArmorModuleIDs]),
+    remoteCapacitorModuleIDs: Object.freeze([...remoteCapacitorModuleIDs]),
     fleeHealthFloor,
     capacitorFloor,
     maxFleeAttempts,
