@@ -239,6 +239,29 @@ stopped one. Do not invent a second staleness policy.
 the stand-in for the in-game mechanism. Once tags decode, `squad: follow` should
 read: in-game tag first, then broadcast, then board, then own ladder.
 
+⚠ **WHY A TAG OUTRANKS A BROADCAST, which this doc asserted twice without ever
+saying.** It looks backwards: a broadcast is the fresher, more deliberate act,
+and a reader who trusts that intuition will "fix" the order. The reason is
+AUTHORITY, and it is in the server (checked 2026-09-11):
+
+- `setFleetTargetTag` (`fleetRuntime.js:1318-1326`) refuses any writer that is
+  not a commander -- `(member.job & FLEET_JOB_CREATOR) !== 0` or a role in
+  `FLEET_CMDR_ROLES`. **A tag that exists is provably a commander's.**
+- `sendBroadcast` (`:2519-2522`) checks `ensureFleetMembership` and nothing
+  else. Name, rate limit, range and per-recipient scope are all gated; **the
+  SENDER's rank is not.** Any fleet member may broadcast `Target`, and scope
+  only decides who hears it -- so receiving one says nothing about who sent it.
+
+So the ordering is not "state beats calls", it is "a verified commander beats
+an unverified one". Keep it, and keep this note with it.
+
+**The upgrade this points at, not built yet.** `OnFleetBroadcast` carries
+`senderCharID`, and `boundFleet.ts` already decodes each member's `role` and
+`job` -- fields nothing currently consumes. So a follower COULD check whether a
+broadcast came from a commander and rank a verified one above a tag. That is
+the same roster read phase 7's tagging gate needs, which is where it belongs;
+noted here so the two are built together rather than twice.
+
 ### 2. Chat commands
 
 This is the only piece needing work outside this repo.
