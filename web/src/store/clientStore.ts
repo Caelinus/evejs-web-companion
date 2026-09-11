@@ -363,6 +363,7 @@ const INITIAL_FLEET: FleetCenterState = Object.freeze({
   refreshedAtMs: null,
   lastBroadcast: null,
   targetTags: null,
+  authoritativeFleetID: null,
 });
 
 const INITIAL_SCANNER: ScannerCenterState = Object.freeze({
@@ -1418,9 +1419,17 @@ export function createClientStore(): ClientStore {
         // same one the companion's supervision gate fails open on. Only an
         // AUTHORITATIVE read ("ready" or "not-in-fleet") gets to say the fleet
         // changed.
-        const previousFleetID = current.fleet?.fleetID ?? null;
+        // ⚠ COMPARED AGAINST `authoritativeFleetID`, NEVER `current.fleet.fleetID`.
+        // An unavailable read is stored like any other, so `current.fleet` is
+        // already the decoded-but-empty value with a null id by the time the
+        // NEXT read arrives. Comparing against it means a recovery to the very
+        // same fleet reads as a switch and wipes tags nobody left behind --
+        // which is exactly the bug that survived the first attempt at this
+        // guard, because refusing to clear ON the blip does nothing about the
+        // blip having already destroyed the basis.
         const authoritative = event.availability !== "unavailable";
-        const switchedFleet = authoritative && previousFleetID !== event.fleet.fleetID;
+        const switchedFleet =
+          authoritative && current.authoritativeFleetID !== event.fleet.fleetID;
         fleet.set({
           ...current,
           loaded: true,
@@ -1432,6 +1441,10 @@ export function createClientStore(): ClientStore {
           pendingInvite: event.availability === "ready" ? null : current.pendingInvite,
           lastBroadcast: switchedFleet ? null : current.lastBroadcast,
           targetTags: switchedFleet ? null : current.targetTags,
+          // Only an authoritative read moves the basis; a blip leaves it alone.
+          authoritativeFleetID: authoritative
+            ? event.fleet.fleetID
+            : current.authoritativeFleetID,
           readError: event.readError,
           refreshedAtMs: event.refreshedAtMs,
         });

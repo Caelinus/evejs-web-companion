@@ -69,6 +69,40 @@ test("an UNREADABLE fleet read is not a fleet switch, and keeps the tags", () =>
   assert.equal(store.get().fleet.targetTags, null, "a real switch still clears");
 });
 
+test("RECOVERING from a blip to the SAME fleet keeps the tags", () => {
+  // ⚠ THIS IS THE SECOND HALF OF THE BUG ABOVE, AND THE HALF THAT SURVIVED THE
+  // FIRST FIX. Refusing to clear on the unavailable read is not enough: that
+  // read is still STORED, so `fleet.fleetID` is already null by the time the
+  // next read arrives. Comparing the recovery against it made a return to the
+  // very same fleet look like a switch, and the tags were wiped one tick after
+  // the test above said they had survived.
+  //
+  // The sequence is the ordinary one -- a flaky read, then a good one -- so the
+  // window between them was the only place this ever looked correct.
+  const store = createClientStore();
+  store.apply({ type: "fleet/loaded", ...readyFleet(90000002), readError: null, refreshedAtMs: 1 });
+  store.apply({ type: "fleet/target-tags", tags: new Map([[90000010, "A"]]) });
+
+  store.apply({
+    type: "fleet/loaded",
+    ...unreadableFleet(),
+    readError: "timed out",
+    refreshedAtMs: 2,
+  });
+  assert.equal(store.get().fleet.targetTags?.size, 1, "the blip itself must not clear");
+
+  store.apply({ type: "fleet/loaded", ...readyFleet(90000002), readError: null, refreshedAtMs: 3 });
+  assert.equal(
+    store.get().fleet.targetTags?.size,
+    1,
+    "recovering to the SAME fleet must not clear either",
+  );
+
+  // A genuine switch still clears, blip or no blip.
+  store.apply({ type: "fleet/loaded", ...readyFleet(90000003), readError: null, refreshedAtMs: 4 });
+  assert.equal(store.get().fleet.targetTags, null, "a real switch still clears");
+});
+
 function readyFleet(fleetID: number) {
   return decodeFleetCenter({
     ok: true,

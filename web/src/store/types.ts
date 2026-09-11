@@ -848,6 +848,22 @@ export interface FleetCenterState {
    * that was really there.
    */
   readonly targetTags: ReadonlyMap<number, string> | null;
+  /**
+   * The fleet id of the last read that could actually SEE the fleet, used only
+   * to decide whether the tags and the broadcast above still belong to the
+   * fleet this pilot is in.
+   *
+   * ⚠ IT EXISTS BECAUSE `fleet.fleetID` CANNOT DO THIS JOB, and the reason is
+   * subtle enough that it was got wrong once. An "unavailable" read (every
+   * bridge call failed) is stored like any other: `fleet` is overwritten with
+   * the decoded-but-empty value, whose `fleetID` is `null`. Refusing to CLEAR
+   * on that read is not enough, because the read still destroys the id the
+   * NEXT read compares against -- so a recovery to the very same fleet then
+   * looks like a switch, and wipes tags nobody ever left behind.
+   *
+   * Updated only by an authoritative read, so a transport blip cannot move it.
+   */
+  readonly authoritativeFleetID: number | null;
 }
 
 // --- Scanner / Exploration Center -----------------------------------------
