@@ -1,11 +1,23 @@
 # Fleet companion — handover
 
-Where the work stands, what is decided, and what bites. Self-contained: you
-should not need the conversation that produced this.
+Where the work stands, what is decided, and what bites. **Self-contained, and
+meant to be: a session picking this up needs no handover message, no scratchpad
+file and no access to the conversation that produced it.** If something you had
+to be told is not in here, put it in here.
 
-**Read in this order.** [fleet-companion-plan.md](fleet-companion-plan.md) —
-what and why. [fleet-companion-implementation.md](fleet-companion-implementation.md)
-— order, branch, gates, and the per-phase specs. Then this, for state.
+**Read in this order.** This file first, for state and for what will bite.
+Then [fleet-companion-plan.md](fleet-companion-plan.md) — what and why; note
+that **decision 3 was amended 2026-09-11**, so read it rather than remembering
+it. Then [fleet-companion-implementation.md](fleet-companion-implementation.md)
+— order, branch, and the per-phase specs; ⚠ its phase 8 gateway-patch section is
+CANCELLED and marked so at the top, and is a record of an investigation rather
+than a plan.
+
+⚠ **Then read `decideCompanionAction`'s own header in
+`web/src/nav/fleetCompanionLoop.ts`**, which carries the full seven-rung ladder
+and the reasoning behind each placement. Prefer it to any prose here or
+anywhere else: every other description of the ladder in this repo has been left
+behind by a phase at least once, including this document's own.
 
 ## State
 
@@ -29,14 +41,42 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Phase 9 | squad roles + Bot Manager badge — **unblocked**, and the only phase left |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite 5,174 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
-the pre-work baseline, which was 4,860 tests with the same 17.
+full suite **5,215 tests with `ℹ fail 17`** — the same eight files with the same
+per-file counts as the pre-work baseline.
+
+| Gate | Command | Catches |
+| --- | --- | --- |
+| typecheck | `cd web && npx tsc --noEmit` | the `.ts` surface only |
+| **compile** | `docker build --target web-build .` | **the only thing that typechecks `.svelte`** |
+| tests | `npm test` | behaviour |
+
+⚠ **`npm test` PASSES ON CODE THAT DOES NOT COMPILE.** `node --test` strips
+types without checking them, and `tsc` does not see `.svelte` at all. A phase
+that ran only the tests has verified less than it thinks: phase 6 committed a
+type error that `node --test` reported 183 passes over, and only `tsc` caught it.
+`svelte-check` has ~37 pre-existing errors and is NOT a gate — check only that the
+component you touched is clean.
+
+**The baseline is 17 locale failures** (the host formats `12 000`; the assertions
+expect `12,000`) across exactly eight files:
+
+| File | Failures |
+| --- | --- |
+| `test/marketBrowse.test.js` | 4 |
+| `web/src/ui/planetsPanel.test.ts` | 3 |
+| `web/src/ui/miningPanel.test.ts` | 3 |
+| `web/src/ui/missionBotPanel.test.ts` | 2 |
+| `web/src/nav/missionBotLoop.test.ts` | 2 |
+| `web/src/ui/overviewActions.test.ts` | 1 |
+| `web/src/bridge/contracts.test.ts` | 1 |
+| `web/src/app/freeSkillPointsFlow.test.ts` | 1 |
 
 ⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
 test called "defensive equipment starts with NOTHING ticked" — nothing in that
 name matches a grep for companion/fleet/broadcast/tag, so a name filter said
 clean while the count had gone 17 → 18. The reverse trap is the known one (a
-fresh worktree reports 22 because `public/dist` is absent). Check both.
+fresh worktree reports 22 because `public/dist` is absent). Check both. Comparing
+PER-FILE COUNTS, as the table above allows, catches what either alone misses.
 
 ## What exists
 
@@ -1080,8 +1120,124 @@ never reaches the timer phase, so a `setTimeout`-driven stop never fires and the
 test *hangs* rather than fails. End such a run from inside the loop's own await
 chain.
 
-**Line endings.** The working copy is CRLF. Normalise after any scripted edit,
-or you will commit mixed endings.
+**⚠ MUTATION-TEST EVERY ORDERING CLAIM, and do not trust one that merely
+passes.** This is the sharpest lesson of phase 6. Its first acceptance tests for
+where the flee rung sits were **vacuous**: the grid helper carried a station and
+nothing else, so the called ship was off-grid, `bestTaggedEntity` found nothing,
+the fleet rung fell through of its own accord — and every test passed with the
+flee rung moved to the wrong place. A test that asserts a phase name will happily
+pass because the rung it was meant to outrank never ran at all. **Move the rung,
+watch the test fail by name, move it back.** The same applies to any guard: the
+ASCII guard and the tank-up three-state fix were both confirmed this way, and the
+return margin turned out to be load-bearing for six tests rather than the two its
+author expected.
+
+**A test that passes both ways is worth keeping, but say so.** Phase 6's two
+acceptance tests do not both discriminate: with the flee beneath the fleet rung
+the STANDING case still passes, because phase 5's parking fix already covers it.
+Only the mid-lock case fails. Both are kept and the comment says which is which —
+otherwise the next reader assumes both are load-bearing and deletes the wrong one.
+
+**Renumbering the ladder is a chore every phase.** A rung inserted anywhere but
+the bottom shifts every `rung N` comment below it, across
+`fleetCompanionLoop.ts`, its test file AND `flow.ts` — 37 references in phase 6.
+Do it BEFORE writing new code, with a plain descending rewrite (7→8 first, then
+6→7): nothing freshly written can then be caught by the second pass, and no
+sentinel is needed. Phases 5 and 7 renumbered afterwards and both needed one.
+⚠ A pattern matching `Rung`/`rung` misses the ALL-CAPS `RUNG N` references in
+the ladder header, and phase 6 found FOUR comments in `flow.ts` that were already
+two renumbers stale — a shift applied on top of a stale number is wrong twice
+rather than merely out of date, so correct them to today's truth first.
+
+**Adding a request field is eight sites and one migration trap.** The type, the
+default, `REQUEST_KEYS`, a `SAY.` refusal string, the decode, the reconstructed
+literal, the risk derivation, and the Svelte panel (a `$state` plus the one
+assembly literal). Tests: `validPayload()` and the full-shape `assert.deepEqual`
+in "a well-formed request round-trips". ⚠ **Make absence TOLERATED and
+defaulted, not refused.** `botHost.js` re-decodes a persisted roster row on every
+BFF restart, and a strictly-required new field refuses every row written before
+it existed — stranding every companion that was running when it shipped.
+
+**The Bash tool mangles larger heredocs** ("unexpected EOF while looking for
+matching"). Never root-caused; an earlier session theorised unbalanced
+apostrophes and was wrong. Small heredocs are fine. The workaround that has never
+failed: Write the content to a scratchpad file, then splice it in with python.
+
+**Line endings.** The working copy is CRLF and `git diff` emits LF, so `git
+apply` cannot round-trip its own patch. Edit with EOL-preserving python
+(`newline=""`) or the Edit tool, never by patch. ⚠ Have every splice script
+ASSERT its match count before writing — phase 6's aborted twice on ambiguous
+anchors that would otherwise have patched the wrong one of two identical-looking
+sites in `flow.ts`, and because the assert fires before the write, the file was
+left untouched both times.
+
+## Live QA: what actually needs a pilot — the operator's position
+
+**They will not test every feature live, and they are right not to.** Stated
+2026-09-11, after phase 6 proposed live QA for its repair path: *"just compare
+how it is done in bot scripts. if it is similar, same path, then we are good
+without live. i will not test every single nitty gritty feature live."*
+
+**The rule that follows: where a new call resolves to the same shared `api.*`
+wrapper an existing live-proven caller uses, it is proven by inheritance. Check
+the path before asking for a pilot.** Phase 6's two new actions both passed that
+test:
+
+| | Companion | Already live-proven |
+| --- | --- | --- |
+| `repairItems` | `flow.ts` issue switch | the DSL's `repair-ship` — **byte-identical dispatch line** — and the station panel's own repair button |
+| `undock` | `flow.ts` issue switch | two other bot loops, the DSL runner, and the flight panel's Undock button |
+
+One `quoteShipRepair()`, one `api.repairItems`, one `api.undock`. The only
+companion-specific code was the decision logic and the observe gate, and both are
+unit-tested and mutation-verified. Neither needed a pilot.
+
+**The same argument retires most rung-ordering QA.** Rung 1's warp yield is a
+single early return at the top of `decideCompanionAction`; it returns before any
+lower rung runs. Six rungs already sit behind it and are live-proven, so the
+seventh is not a new interaction.
+
+**What genuinely cannot be proven by inheritance**, and still needs a hand on the
+controls:
+
+- anything MULTI-PILOT — SSR and unit tests cannot see two pilots at once, and
+  almost every behaviour in this plan is multi-pilot by definition
+- anything depending on MOUNT/REMOUNT
+- a composition whose timing the unit tests fake rather than exercise
+
+⚠ **Do not ask for a pilot as a reflex at the end of a phase.** Name the
+specific thing inheritance cannot cover, or do not ask.
+
+## Delegating: what works, and what has broken
+
+**Read-only research sweeps in parallel are safe and pay for themselves.** Three
+earned their tokens in phase 5 and two more in phase 6 — one mapped every site a
+new request field touches and was right about all eight; another found a rung-3
+bug that would have starved the flee rung.
+
+**⚠ But verify their sharper claims, always.** Every sweep so far has been
+valuable AND wrong somewhere:
+
+- a phase 5 sweep reported the observation "inherits the drone fields for free;
+  no extra plumbing needed" — true of the TYPE, false at runtime, because
+  `observe()` builds its own literal and set none of them. Acting on it would
+  have shipped a rung reading `undefined` every tick.
+- a phase 6 sweep reported rung 3's starvation bug. Real — and WORSE than
+  reported once the code was read directly: it re-picked the same module for
+  ever and grew an unbounded array, neither of which the sweep mentioned.
+- another framed a doc-versus-code contradiction as unresolvable when phase 5's
+  parking fix had already half-dissolved it.
+
+**Do not run implementation subagents against this tree.** A subagent once
+overwrote in-progress `flow.ts` edits that had to be restored from backup, and
+subagent verification runs hang on torn files. Subagents run only their own test
+file, never repo-wide gates, never backgrounded. **The coordinator owns
+`flow.ts`.**
+
+⚠ **Grep a subagent's output for real identifiers before it reaches a commit.**
+They do not know what came from a live session and will lift a real character id
+out of a transcript and make it a test constant. Use the documented synthetic
+family (`90000001` and siblings).
 
 ## Two things the server does not do
 
