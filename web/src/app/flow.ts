@@ -1329,6 +1329,54 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "OnSystemScanDone",
   ]);
 
+  /**
+   * Feed the notifications a bridge RESPONSE carried into the same dispatch the
+   * live channel uses.
+   *
+   * ⚠ WITHOUT THIS, A HEADLESS BOT RECEIVES NO PUSHED NOTIFICATION AT ALL, and
+   * that is not a degradation — it is total. `applyPushedNotification` has
+   * exactly one other caller, the SSE `notification` branch, and `src/botHost.js`
+   * hands every headless bot `stubEventSource()`: a channel that is never live,
+   * by design. So on the BFF's bot host the push dispatch simply never runs.
+   *
+   * The BFF already anticipated this and holds up its end — "every request
+   * route still drains notifications onto its response, so a stream that never
+   * opens or drops mid-flight degrades to the old poll-based behaviour rather
+   * than losing data" (`src/server.js`, above `STREAM_RETRY_MS`). Nothing on
+   * this side ever consumed that drain, so only half the fallback existed.
+   *
+   * ⚠ WHY IT WENT UNNOTICED FOR SO LONG, and why a fleet broadcast is the thing
+   * that finally forced it: almost every push consumer here is an INVALIDATION
+   * that schedules a re-read (`scheduleFleetRefresh`, `scheduleHoldRefresh`),
+   * so missing the push costs a little freshness and nothing else. A broadcast
+   * has no re-read to fall back on — there is no "what is the current
+   * broadcast" route anywhere — so a push that never arrives is an order lost
+   * for good.
+   *
+   * Double delivery is safe and does not need a dedupe scheme. The drain is
+   * destructive, so the gateway hands each notification to exactly one of the
+   * two paths; and were that ever to change, the dispatch is idempotent anyway
+   * — the refresh schedulers coalesce on a microtask, and every payload
+   * consumer is last-write-wins.
+   */
+  function applyDrainedNotifications(notifications: readonly JsonValue[]): void {
+    if (notifications.length === 0) {
+      return;
+    }
+    const receivedAtMs = Date.now();
+    for (const entry of notifications) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const row = entry as Record<string, JsonValue>;
+      const method = typeof row.method === "string" ? row.method : null;
+      if (method === null) {
+        continue;
+      }
+      applyPushedNotification(method, Array.isArray(row.args) ? row.args : [], receivedAtMs);
+    }
+  }
+
   function applyPushedNotification(
     method: string | null,
     args: readonly unknown[],
@@ -5293,6 +5341,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           api.getSpaceSnapshot(callOptions),
           botDrivenCharacterIDs(),
         ]);
+        // ⚠ BEFORE ANYTHING IS DECODED. These two reads are the companion's
+        // only regular traffic, so on the bot host they are the ONLY chance a
+        // pushed notification gets to be seen at all — the live channel there
+        // is a stub. Draining them here is what makes a fleet broadcast reach
+        // a headless companion; see `applyDrainedNotifications`.
+        //
+        // The other loops do not do this yet, and that is a real gap rather
+        // than a decision — they simply have no push-only input to miss today.
+        // A loop that grows one must drain here too.
+        applyDrainedNotifications([...statusStep.notifications, ...spaceResult.notifications]);
         const status = decodeFlightStatus(statusStep.flight);
         void observeFlightStatus(status);
         const snapshot = decodeSpaceSnapshot(spaceResult.space);

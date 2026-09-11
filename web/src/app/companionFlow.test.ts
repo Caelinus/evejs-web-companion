@@ -244,3 +244,97 @@ test("clearing the character drops the companion readout", async () => {
   assert.equal(store.get().companion.role, null);
   flow.stopFleetCompanion();
 });
+
+// --- the drain is the only push a headless companion ever gets ---------------
+
+/** Poll until `ready()`, or give up. The flow's ticks are async and untimed. */
+async function waitFor(ready: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (ready()) {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** One pushed notification, shaped exactly as the BFF drains it onto a response. */
+function inviteNotification() {
+  return {
+    kind: "client",
+    service: null,
+    method: "OnFleetInvite",
+    idType: "charid",
+    args: [90000050, 90000001, "AskJoinFleet", {}],
+    kwargs: null,
+  };
+}
+
+test("a notification DRAINED onto a bridge response reaches the push dispatch", async () => {
+  // ⚠ THIS IS THE WHOLE REASON A HEADLESS COMPANION CAN HEAR ITS FLEET.
+  // `applyPushedNotification` has one other caller, the SSE branch, and
+  // `src/botHost.js` gives every headless bot `stubEventSource()` — a channel
+  // that is never live. So on the bot host the live path never runs, and
+  // anything that arrives ONLY as a push is simply never seen.
+  //
+  // The BFF already drains notifications onto every response for exactly this
+  // case; nothing on this side consumed them until now. The event driven here
+  // is a fleet INVITE because it is the push consumer that already existed —
+  // and, not incidentally, the one decision 5's rejoin gate reads.
+  // The bot host's `stubEventSource()`, in miniature: a channel that never
+  // delivers anything, which is the whole condition under test.
+  const eventSource = () => ({
+    close() {},
+    addEventListener() {},
+    removeEventListener() {},
+    onmessage: null,
+    onerror: null,
+    onopen: null,
+  });
+
+  const fakeFetch = (async (input: unknown, init?: { body?: string }) => {
+    const path = String(input);
+    const body = init?.body ? JSON.parse(init.body) : {};
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        if (path === "/api/bridge/flight/status") {
+          // The drain rides along with an ordinary read. No extra route, no
+          // poll of our own — this response was going to be made anyway.
+          return {
+            ...(flightBody(false) as Record<string, unknown>),
+            notifications: [inviteNotification()],
+          };
+        }
+        if (path === "/api/bridge/space/snapshot") return spaceBody();
+        if (path === "/api/bridge/fitting") return fittingBody({});
+        if (path === "/api/names") return namesBody(body as Record<string, unknown>);
+        if (path === "/api/bridge/bound-fleet") return readyFleet();
+        if (path === "/api/bots/active") return { ok: true, characterIDs: [], bots: [] };
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch: fakeFetch, eventSource, livePush: false });
+
+  assert.equal(store.get().fleet.pendingInvite, null, "nothing has been pushed yet");
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitFor(
+    () => store.get().fleet.pendingInvite !== null,
+    "the drained OnFleetInvite to reach the store",
+  );
+  assert.equal(store.get().fleet.pendingInvite?.fleetID, 90000050);
+  flow.stopFleetCompanion();
+});
+
+test("a drained response with no notifications changes nothing", async () => {
+  // The empty case has to stay free: this runs on every read of every tick.
+  const { store, flow } = harness({ inFleet: true });
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(store.get().fleet.pendingInvite, null);
+  flow.stopFleetCompanion();
+});
