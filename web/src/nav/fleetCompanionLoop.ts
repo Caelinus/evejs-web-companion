@@ -653,7 +653,7 @@ export function decideCompanionAction(
         : memory;
     return waiting(
       "In warp",
-      "The fleet is warping this ship — nothing is decided until it lands.",
+      "The fleet is warping this ship. Nothing is decided until it lands.",
       next,
     );
   }
@@ -753,7 +753,7 @@ function decideAbandonment(
     return {
       action: { kind: "leaveFleet" },
       phase: "Abandoned",
-      why: "Safe, and nobody is left to fly with — leaving the fleet.",
+      why: "Safe, and nobody is left to fly with, so this pilot is leaving the fleet.",
       memory: mem,
     };
   }
@@ -868,7 +868,7 @@ function getSafe(
     return {
       action: { kind: "warpToBookmark", bookmarkID },
       phase: "Getting safe",
-      why: "No station in view — warping to the safe spot.",
+      why: "No station in view, so this pilot is warping to the safe spot.",
       memory: { ...mem, abandonment: { ...running, safeSpotWarpIssued: true } },
     };
   }
@@ -1244,7 +1244,7 @@ function decideFleetOrders(
       return {
         action: { kind: "align", targetID: itemID },
         phase: "Obeying fleet",
-        why: "The fleet broadcast an align point on this grid — aligning to it.",
+        why: "The fleet broadcast an align point on this grid, so this pilot is aligning to it.",
         memory,
         followingOrderFrom: "broadcast",
         lastOrderHeard: "the fleet's align call",
@@ -1276,7 +1276,7 @@ function decideFleetOrders(
       return {
         action: { kind: "travelTo", systemID },
         phase: "Obeying fleet",
-        why: "The fleet broadcast a system to travel to — starting the route.",
+        why: "The fleet broadcast a system to travel to, so this pilot is starting the route.",
         memory: { ...memory, lastRoutedSystemID: systemID },
         followingOrderFrom: "broadcast",
         lastOrderHeard: "the fleet's travel call",
@@ -1319,7 +1319,7 @@ function decideFleetOrders(
           action: WAIT,
           phase: "Obeying fleet",
           why:
-            "At the gate the fleet called — holding here. Jumping needs the gate on the far " +
+            "At the gate the fleet called, holding here. Jumping needs the gate on the far " +
             "side too, and there is no safe way to get that from the call alone.",
           memory,
           followingOrderFrom: "broadcast",
@@ -1340,7 +1340,7 @@ function decideFleetOrders(
         return {
           action: { kind: "approach", targetID: gateID },
           phase: "Obeying fleet",
-          why: "The fleet called a gate on this grid — closing on it.",
+          why: "The fleet called a gate on this grid, so this pilot is closing on it.",
           memory: { ...memory, closingOn: gateID },
           followingOrderFrom: "broadcast",
           lastOrderHeard: "the fleet's jump call",
@@ -1349,7 +1349,7 @@ function decideFleetOrders(
       return {
         action: { kind: "warp", targetID: gateID },
         phase: "Obeying fleet",
-        why: "The fleet called a gate on this grid — warping to it.",
+        why: "The fleet called a gate on this grid, so this pilot is warping to it.",
         memory,
         followingOrderFrom: "broadcast",
         lastOrderHeard: "the fleet's jump call",

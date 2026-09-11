@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   DEFAULT_FLEET_COMPANION_REQUEST,
@@ -1190,4 +1191,61 @@ test("Heal and TravelTo are ALSO skipped once the supervision gate has failed", 
   );
   assert.notEqual(travelDecision.action.kind, "travelTo");
   assert.notEqual(travelDecision.phase, "Obeying fleet");
+});
+
+// --- the player-facing surface ----------------------------------------------
+
+test("no player-facing string in this module carries a decorative non-ASCII character", () => {
+  // ⚠ THIS SCANS THE SOURCE, NOT THE LADDER'S OUTPUT, ON PURPOSE. The panel
+  // suite already has an ASCII check, but it renders against hand-written
+  // fixture stores -- so it proves the FIXTURES are clean and never sees a
+  // single `why` this ladder actually produces. Eight real strings slipped
+  // past it that way, including the warp-yield line that fires on essentially
+  // every fleet warp.
+  //
+  // Code COMMENTS are exempt and this file uses non-ASCII in them freely, so
+  // they are stripped before the scan. Only string literals are judged.
+  const source = readFileSync(new URL("./fleetCompanionLoop.ts", import.meta.url), "utf8");
+  const blockComment = new RegExp("/\\*[\\s\\S]*?\\*/", "g");
+  const code = source
+    .replace(blockComment, "")
+    .split("\n")
+    .map((line) => {
+      const comment = line.indexOf("//");
+      return comment < 0 ? line : line.slice(0, comment);
+    })
+    .join("\n");
+
+  const literal = new RegExp('"((?:[^"\\\\\\n]|\\\\.)*)"', "g");
+  const offenders: string[] = [];
+  for (const match of code.matchAll(literal)) {
+    const value = match[1] ?? "";
+    if ([...value].some((character) => (character.codePointAt(0) ?? 0) > 127)) {
+      offenders.push(value);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "player-facing strings must be plain ASCII; an em-dash is the usual culprit",
+  );
+});
+
+test("nothing this ladder says about a Target call claims the pilot is shooting", () => {
+  // ⚠ THE COMPANION HAS NO WEAPONS RUNG. Answering a Target call means LOCKING
+  // the ship, which is the real first half of answering a primary and not a
+  // stand-in for the second. A readout saying "shoot" or "attack" promises
+  // something the pilot cannot do, and a player would then read a pilot
+  // sitting there holding a lock as broken rather than as working exactly as
+  // built.
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: gridWithEntities([TACKLE]),
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+    }),
+  );
+  assert.equal(decision.action.kind, "lock");
+  const said = `${decision.why} ${decision.lastOrderHeard ?? ""}`;
+  assert.doesNotMatch(said, /shoot|shooting|fir(e|ing)|attack/i, said);
 });

@@ -318,7 +318,11 @@
 
   /** Plain words for a broadcast name. Never the wire name, which is jargon. */
   const broadcastWords: Record<FleetBroadcastName, string> = {
-    Target: "shoot this",
+    // ⚠ NOT "shoot this". Answering a Target call means LOCKING the ship --
+    // the companion has no weapons rung and does not fire. Saying "shoot" here
+    // would promise the player something the pilot cannot do, which is exactly
+    // what `lockOrHold`'s own comment warns against.
+    Target: "lock this target",
     AlignTo: "align to this",
     WarpTo: "warp to this",
     JumpTo: "jump through this gate",
