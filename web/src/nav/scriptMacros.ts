@@ -34,7 +34,7 @@ import {
   packageAboard,
 } from "./missionBotLoop.ts";
 import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotLoop.ts";
-import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./targetPriority.ts";
+import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } from "./targetPriority.ts";
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
@@ -122,21 +122,97 @@ function squadRoleOf(step: MacroStep): SquadRoleArg {
 
 /**
  * The called ship, IF it is one of the rows this block could shoot right now.
- * A call for something that is not on this pilot's grid (or is out of its
- * targeting range — the rows are already filtered to reach) is not a target for
- * this pilot, so it answers null and the block picks for itself. That is what
- * keeps a follower flying while the FC is two systems away.
+ *
+ * Three sources, in precedence order — tag, then broadcast, then board:
+ *   1. `obs.fleetTargetTags` — the fleet's in-game target tags.
+ *   2. `obs.fleetBroadcast` — a `Target` fleet broadcast.
+ *   3. `obs.squadPrimaryTargetID` — the shared squad board.
+ *
+ * ⚠ A SOURCE WHOSE SHIP IS NOT AMONG `rows` FALLS THROUGH TO THE NEXT SOURCE,
+ * NOT TO NULL. The rows are already filtered to this grid and to targeting
+ * reach, so "the FC tagged something two systems away" must not blind the
+ * pilot to a broadcast or a board call it CAN act on — only when none of the
+ * three names a ship this pilot can act on does this answer null and the
+ * block picks for itself. That is what keeps a follower flying while the FC
+ * is two systems away.
+ *
+ * ⚠ TAG OUTRANKS BROADCAST, WHICH LOOKS BACKWARDS — a broadcast is the
+ * fresher, more deliberate act, so someone will want to swap this order.
+ * Don't: the reason is AUTHORITY, and it lives in the server, not in
+ * freshness. `setFleetTargetTag` refuses any writer who is not a fleet
+ * commander, so a tag that exists is PROVABLY a commander's. `sendBroadcast`
+ * checks fleet membership and nothing else, so any fleet member may
+ * broadcast `Target` — receiving one tells you nothing about who sent it. A
+ * tag is the one signal here guaranteed to come from command; a broadcast is
+ * not, so it ranks below.
  */
 function calledOnGrid<T>(
   obs: ScriptObservation,
   rows: readonly T[],
   itemIDOf: (row: T) => number,
 ): T | null {
+  const byTag = calledByTag(obs, rows, itemIDOf);
+  if (byTag !== null) {
+    return byTag;
+  }
+  const byBroadcast = calledByBroadcast(obs, rows, itemIDOf);
+  if (byBroadcast !== null) {
+    return byBroadcast;
+  }
   const called = obs.squadPrimaryTargetID ?? null;
   if (called === null) {
     return null;
   }
   return rows.find((row) => itemIDOf(row) === called) ?? null;
+}
+
+/**
+ * Source 1: the fleet's in-game target tags, ranked by `fleetTagRank` (lower
+ * ranks first; an unrecognised tag string still gets a finite rank there, so
+ * it is still obeyed here). Only rows the tag map actually names are
+ * candidates — an untagged row is not "ranked worst", it is simply not this
+ * source's business.
+ *
+ * ⚠ TAGS ARE RESOLVED HERE, ONE RUNG ABOVE `pickPrimary`, AND NEVER PASSED
+ * INTO IT. `pickPrimary` already accepts an optional `tagOf` for this exact
+ * ranking, but every call site in this file still passes none — wiring tags
+ * through there too would be a second mechanism deciding the one thing this
+ * function already decided. Keep the tag read confined to this rung.
+ */
+function calledByTag<T>(obs: ScriptObservation, rows: readonly T[], itemIDOf: (row: T) => number): T | null {
+  const tags = obs.fleetTargetTags ?? null;
+  if (tags === null || tags.size === 0) {
+    return null;
+  }
+  let best: T | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const row of rows) {
+    const tag = tags.get(itemIDOf(row));
+    if (tag === undefined) {
+      continue; // not named in the tag map — not this source's candidate
+    }
+    const rank = fleetTagRank(tag);
+    if (rank < bestRank) {
+      best = row;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/**
+ * Source 2: a `Target` fleet broadcast. `obs.fleetBroadcast` is already
+ * freshness-filtered upstream against the broadcast TTL (null once a call has
+ * lapsed) — no TTL check here. Only the name "Target" is a primary call;
+ * every other broadcast name (AlignTo, WarpTo, ...) means something else
+ * entirely and must never be read as one.
+ */
+function calledByBroadcast<T>(obs: ScriptObservation, rows: readonly T[], itemIDOf: (row: T) => number): T | null {
+  const broadcast = obs.fleetBroadcast ?? null;
+  if (broadcast === null || broadcast.name !== "Target" || broadcast.itemID === null) {
+    return null;
+  }
+  return rows.find((row) => itemIDOf(row) === broadcast.itemID) ?? null;
 }
 
 /** Tell the fleet what this pilot is on — once per primary. Null when there is nothing to say. */
