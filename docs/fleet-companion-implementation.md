@@ -250,7 +250,7 @@ not exist is worse than no spec, because it reads as authority.
 | 6 | flee and return | **below, verified** |
 | 2 | one inWarp guard | **below, verified** |
 | 3 | tank-up: port the DSL thermostat into the companion | **below, verified** |
-| 7 | tackle -> tag | unblocked: the tackle read exists; spec when started |
+| 7 | tackle -> tag | **BUILT** — see the handoff doc's phase 7 section. ⚠ the read did not exist and had to be built (decoder, slice, push, observation); the rung went ABOVE obeying the fleet, not below |
 | 8 | chat commands: the PARSER is built and tested; only the fleet CHANNEL is blocked | **parser done, channel blocked** |
 | 9 | blocked on 1-8 | blocked |
 

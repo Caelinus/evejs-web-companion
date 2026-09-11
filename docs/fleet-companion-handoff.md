@@ -22,10 +22,11 @@ what and why. [fleet-companion-implementation.md](fleet-companion-implementation
 | Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
 | Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
 | Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
-| Everything else | not started; phases 3, 4 and 5 are independent and make good filler |
+| Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
+| Everything else | phases 5 (drone recall) and 6 (flee) not started and independent of each other; 8 waits on the `/d/evet` gateway patch; 9 waits on the rest |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
-full suite 4,982 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
+full suite 5,141 tests with `ℹ fail 17` — the same 17 locale failures by NAME as
 the pre-work baseline, which was 4,860 tests with the same 17.
 
 ⚠ **JUDGE BY THE NAMES AND BY THE COUNT, not either alone.** Phase 1 broke a
@@ -37,9 +38,11 @@ fresh worktree reports 22 because `public/dist` is absent). Check both.
 ## What exists
 
 - `web/src/nav/fleetCompanionLoop.ts` — the loop. Types, the typed request, the
-  controller, and a ladder with two rungs: the warp yield and the supervision
-  gate. Its ORDINARY work still decides `wait` and issues nothing, on purpose —
-  every call it can make belongs to the abandonment protocol.
+  controller, and the ladder. ⚠ This bullet described the phase-0 skeleton and
+  was left behind by every phase since; the rungs as they now stand are: 1 warp
+  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 obeying the
+  fleet. Phases 5 and 6 add theirs beneath, and must read rung 5’s header
+  about parking the tick before choosing where.
 - `web/src/nav/fleetCompanionLoop.test.ts` — 72 tests, the ladder, the
   supervision gate, the abandonment protocol, the fleet-order rung, and the
   lifecycle.
@@ -49,6 +52,11 @@ fresh worktree reports 22 because `public/dist` is absent). Check both.
   preflight, the exclusion pairs, and the notification drain.
 - `web/src/bridge/fleetBroadcasts.ts` + test — 14 tests. The broadcast and
   target-tag decoders, the 15 names, and what each one's `itemID` means.
+- `web/src/bridge/jamNotifications.ts` + test — the `OnJamStart` / `OnJamEnd`
+  decoders, the tackle allowlist, the standing-jam fold and its read-time
+  liveness check (phase 7).
+- `web/src/store/spaceJamSlice.test.ts` — the space slice keeps the jams, and a
+  snapshot poll does not wipe them.
 - `flow.ts` — `makeFleetCompanionDeps()`, `startFleetCompanion` and the
   pause/resume/stop trio, `fleetCompanionReads`, `stopCompanionController`.
 - `botRegistry.ts` — `"companion"` in `BotID`, its requirements, its catalogue
@@ -591,6 +599,128 @@ rank-and-file pilot keeps fighting and looting, it just never fires the write),
   exists to reuse.
 - `FLEET_MATE_ESCORT_RANGE_M = 2000` is a NEW constant rather than a reuse of
   `ORBIT_BOOST_RANGE_M`, which holds the same value for a different reason.
+
+## Phase 7 is COMPLETE, 2026-09-11
+
+**Tackle → tag.** A pilot that is scrambled or disrupted letters the ship
+holding it, so the whole fleet can call the thing that is pinning them.
+`attemptsTagging` stops being dead config — it shipped with a panel checkbox and
+no reader anywhere, exactly as `chatCommandSenders` did before the chat work.
+
+Five commits: the decoder, the store slice, the push wire-up, the observation,
+the rung.
+
+### The read the phase was gated on, and where it actually was
+
+The spec table had phase 7 as "unblocked: the tackle read exists". What it did
+NOT say is that the read was not built: nothing in the repo had ever decoded a
+jam. The build was therefore a small phase-1 in shape — decoder, slice, push,
+observation — with the rung on top.
+
+- **`OnJamStart` / `OnJamEnd` go to the VICTIM'S OWN SESSION**
+  (`space/runtime.js:13127`, reached only through
+  `notifyHostileHudStateToSession(targetSession, …)`). So the aggressor NAMES
+  ITSELF on this ship's own wire. Nothing in a space snapshot carries it; an
+  earlier pass looked only at `space.ts`, found nothing, and concluded wrongly
+  that only the reactive warp refusal existed.
+- Wire: `OnJamStart` is `[sourceBallID, moduleID, targetBallID, jammingType,
+  fileTime, durationMs]`; `OnJamEnd` is the same first four and no more.
+- **It already reaches the browser.** The gateway's notification stub suppresses
+  exactly one method, `DoDestinyUpdate`
+  (`evejsWebGatewayRuntime.js:4031,4357`). No BFF route, no gateway patch —
+  unlike phase 8, this one is entirely in-repo.
+- `args[4]` is a SERVER FILETIME, not a client clock. Nothing reads it; a jam is
+  stamped with the moment the browser received it, so every freshness answer in
+  this client still comes from one clock.
+
+### Six things worth knowing
+
+- **THE RUNG SITS ABOVE OBEYING THE FLEET, and that is the whole reason it
+  works.** `decideFleetOrders` PARKS the tick once a called target is locked, so
+  everything beneath it is starved while a primary stands — and a standing FC
+  primary is exactly the situation a fleet fight is in while this pilot is being
+  scrambled. The fleet-order rung is therefore renumbered **4 → 5** throughout,
+  comments and test headings included; tackle → tag is the new rung 4. The cost
+  of the placement is bounded: at most three writes per tackler, then it falls
+  through for good.
+- **It never returns a `wait`.** Every other rung has branches that park to keep
+  the readout honest. This one has none, because a rung that parks starves the
+  ladder beneath it. "Nothing to tag" and "cannot tag" both read as falling
+  through.
+- **It returns its memory even on a tick that decides nothing** — the shape
+  `decideTankUp` already has. Giving up on a ship happens on a tick that issues
+  NO action, so a signature that dropped the memory on `null` could never record
+  the give-up and the rung would re-pick the same unconfirmable ship for ever.
+  Give-up is remembered **per ship**, capped: a single "stop tagging" flag works
+  right up until a second tackler arrives.
+- **⚠ CANDIDATES ARE RESOLVED AGAINST `snapshot.entities`, NOT `hostileRows` —
+  and the spec said `hostileRows`.** Its point (this pilot's own LOCK RANGE must
+  not suppress a tag a ship further out could use) stands and is honoured. But
+  `hostileRows` filters on `isHostile`, and `isHostile` is `entity.isNpc &&
+  npcEntityType !== "concord"` — it answers NPC-or-not, so **every PLAYER
+  tackler fails it**. Filtering through it would have silently dropped exactly
+  the case this feature exists for, a fleet fight against players, with no error
+  anywhere. A ship running a scrambler on you has classified itself. Ranking is
+  still `pickPrimary`'s, so a host that populates `targetGroupNames` gets class
+  priority and one that does not collapses to nearest-first.
+  ⚠ **This is the same trap phase 4's `fleet-tag-target` block is still in** —
+  see "Deviations the implementer flagged rather than hid": that block ranks
+  over `hostileRows` and so cannot tag a player either. Deliberately left alone
+  here; a DSL block quietly changing which ships it will tag is its own change.
+- **Letters, never digits.** The stock menu offers `0-9` AND `ABCDEFGHIJXYZ`
+  (`menusvc.py:1945-1946`). The DSL's `fleet-tag-target` writes `"1"`; keeping
+  this rung on letters means a squad running both never fights over one tag —
+  which matters, because `setFleetTargetTag` DELETES any other item holding the
+  same letter before it sets one (`fleetRuntime.js:1343`). The first FREE letter
+  is used, compared case-insensitively: the server normalizes a tag by TRIMMING
+  it and nothing else, so writing `"A"` over somebody's `"a"` would steal their
+  ship.
+- **No tag dict, no write.** `fleetTargetTags` being `null` means the client
+  cannot tell which letters are free, and guessing would steal the FC's own
+  mark. An EMPTY map is a real answer and DOES write. This is the caller the
+  null-versus-empty contract in `fleetBroadcasts.ts` was written for, and it is
+  now exercised both ways.
+
+### Where the jams live, and why
+
+On the **space** slice, not the fleet one: they describe what is happening to
+this ship on this grid, and `space/cleared` — which fires on a dock — is exactly
+the right moment to drop them, because a docked ship is not being scrambled by
+anything.
+
+⚠ **They are CARRIED FORWARD across `space/snapshot`, and not for the reason
+`gateLinks` is.** Jams arrive as pushes on their own schedule while the snapshot
+poll runs about once a second. Rebuilding them from the snapshot event would
+wipe a live scram every poll and leave the rung looking at an empty set on most
+ticks. There is a test for exactly that.
+
+Nothing expires in the slice. It keeps what the wire said; `isJamLive` answers
+when a reader asks — the same split `lastBroadcast` and `isFleetBroadcastFresh`
+already make. The client-side expiry is only a safety net for a LOST push:
+`OnJamEnd` is authoritative and prompt (the destiny tick's own expiry sweep
+sends it), and every cycle of a running module re-sends `OnJamStart` with a
+fresh duration, which is why the grace exists at all.
+
+**Every jam type is kept on the slice** — webs, paints, damps, neuts. Narrowing
+to the two tackle types (`warpScramblerMWD` = scram, `warpScrambler` =
+disruptor, and yes they read backwards from how a player says them) is a
+READ-time job, so a later reader that wants to know it is being neuted does not
+have to re-plumb the wire. The narrowing is an **allowlist**: a blacklist would
+silently start lettering ships the fleet is not pinned by the day a new ewar
+type shipped.
+
+### What phase 7 deliberately did NOT do
+
+- **No untagging.** Nothing ever removes a letter — not when the tackler dies,
+  not when it lets go. A tag is fleet state and the FC owns it; a companion that
+  tidied up would be deleting a human's marks.
+- **No re-tagging.** A ship already in `targetTags` is left alone, whatever
+  letter it holds. That is what keeps the fleet's letters stable.
+- **The panel says nothing new.** `attemptsTagging` already had its checkbox;
+  the readout gets the phase "Tagging" and its sentence, and nothing else was
+  added.
+- **`fleet-tag-target`, the DSL block, is untouched** — including its
+  `hostileRows` limitation above.
 
 ## Decided, so do not re-litigate
 
