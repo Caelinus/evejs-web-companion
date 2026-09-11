@@ -52,6 +52,10 @@
     orderFromWords,
   } from "../bots/companionReadout.ts";
   import {
+    presetForRole,
+    remoteRepairsCanFire,
+  } from "../bots/companionRolePresets.ts";
+  import {
     isFleetBroadcastFresh,
     type FleetBroadcastName,
   } from "../bridge/fleetBroadcasts.ts";
@@ -252,6 +256,41 @@
       ? pickedWeapon.filter((id) => id !== itemID)
       : [...pickedWeapon, itemID];
   }
+
+  /**
+   * Picking a role fills in that role's starting points.
+   *
+   * ⚠ IT OVERWRITES, AND THAT IS THE CONTRACT. A role is a starting point, so
+   * choosing one resets what it covers -- today the flee floor and nothing
+   * else. The table is deliberately narrow and companionRolePresets.ts records
+   * why each other field is excluded; a preset that also reset, say, the module
+   * picks would throw away work the operator cannot get back.
+   *
+   * ⚠ READS THE ROLE OFF THE EVENT, NOT OFF `role`. Both this and `bind:value`
+   * fire from the same change, and depending on the binding to have landed
+   * first would make the preset silently one selection stale.
+   */
+  function applyRolePreset(next: FleetCompanionRole): void {
+    const preset = presetForRole(next);
+    fleeHealthFloorPercent = Math.round(preset.fleeHealthFloor * 100);
+  }
+
+  /**
+   * Remote-rep modules that can never fire, because the call that would ask for
+   * them is a BROADCAST and this pilot is not listening to broadcasts.
+   *
+   * ⚠ THIS IS A WARNING, NEVER A CORRECTION. `obeys` is a deliberate setting
+   * and the panel does not quietly turn it back on -- see the `obeys` note in
+   * companionRolePresets.ts for why this is not a role preset.
+   */
+  const remoteRepsCannotFire = $derived(
+    !remoteRepairsCanFire({
+      obeys,
+      remoteShieldModuleIDs: pickedRemoteShield,
+      remoteArmorModuleIDs: pickedRemoteArmor,
+      remoteCapacitorModuleIDs: pickedRemoteCapacitor,
+    }),
+  );
 
   function toggleObeys(source: FleetCompanionOrderSource): void {
     obeys = obeys.includes(source) ? obeys.filter((row) => row !== source) : [...obeys, source];
@@ -624,12 +663,18 @@
 
     <h3>Role</h3>
     <p class="note">
-      Picks the defaults below - it does not gate what the companion can
-      actually do.
+      Picks the starting points below - it does not gate what the companion
+      can actually do, and every capability stays its own setting. Choosing a
+      role resets what it covers, so pick it first and tune afterwards.
     </p>
     <p class="field">
       <label for="companion-role">This pilot is</label>
-      <select id="companion-role" bind:value={role}>
+      <select
+        id="companion-role"
+        bind:value={role}
+        onchange={(event) =>
+          applyRolePreset((event.currentTarget as HTMLSelectElement).value as FleetCompanionRole)}
+      >
         {#each FLEET_COMPANION_ROLES as choice (choice)}
           <option value={choice}>{COMPANION_ROLE_LABELS[choice]}</option>
         {/each}
@@ -881,6 +926,14 @@
       own fleet warp always comes first, then this pilot's own flee rule, then
       a broadcast, then a chat command, then its own judgement.
     </p>
+    {#if remoteRepsCannotFire}
+      <p class="note">
+        <strong>Heads up:</strong> this pilot has remote repair modules ticked
+        but is not listening to fleet broadcasts. A call for shields or armour
+        arrives as a broadcast, so those modules will never fire. Tick Fleet
+        broadcasts below to answer them.
+      </p>
+    {/if}
     {#each FLEET_COMPANION_ORDER_SOURCES as source (source)}
       <label class="check">
         <input

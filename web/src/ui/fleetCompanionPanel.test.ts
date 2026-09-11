@@ -307,6 +307,38 @@ test("chat command senders are typed by the player, and preview by NAME once res
   void store;
 });
 
+test("the role picker applies its preset, and reads the role off the event", () => {
+  // ⚠ PINNED AGAINST THE SOURCE BECAUSE SSR CANNOT CLICK. `svelte/server`
+  // renders once to a string with no event loop, so no test in this repo can
+  // fire the change handler -- there is no DOM harness anywhere in the tree.
+  // The TABLE itself is unit-tested in bots/companionRolePresets.test.ts; what
+  // can only be pinned here is that the panel is wired to it at all.
+  assert.match(SOURCE, /onchange=\{\(event\) =>\s*applyRolePreset\(/);
+  assert.match(SOURCE, /presetForRole/, "the preset must come from the shared table");
+
+  // ⚠ AND THAT IT READS THE EVENT, NOT `role`. `bind:value` and this handler
+  // fire from the same change; depending on the binding having landed first
+  // would leave the preset one selection stale, which is the sort of bug that
+  // looks like "the first time I pick a role nothing happens".
+  assert.match(SOURCE, /applyRolePreset\(\(event\.currentTarget as HTMLSelectElement\)\.value/);
+  assert.doesNotMatch(
+    SOURCE,
+    /onchange=\{\(\) => applyRolePreset\(role\)\}/,
+    "the handler must not read the bound `role`",
+  );
+});
+
+test("the panel never quietly re-enables an order channel the operator turned off", () => {
+  // The remote-rep warning exists precisely BECAUSE `obeys` is not a preset:
+  // the Heal family is gated on `obeys` carrying "broadcast", so remote-rep
+  // modules on a pilot that ignores broadcasts can never fire. The panel says
+  // so and changes nothing. If a later edit made `obeys` a preset instead, this
+  // fails -- which is the point.
+  assert.match(SOURCE, /remoteRepsCannotFire/);
+  assert.doesNotMatch(SOURCE, /obeys\s*=\s*\[\.\.\.preset/);
+  assert.doesNotMatch(SOURCE, /preset\.obeys/);
+});
+
 // --- 4. the readout, once running -------------------------------------------
 
 function startedStore(): ReturnType<typeof createClientStore> {
