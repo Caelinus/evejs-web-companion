@@ -93,6 +93,7 @@ import type {
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { JamEvent } from "../bridge/jamNotifications.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
@@ -600,6 +601,11 @@ export type FeedEvent =
       readonly gateLinks?: readonly GateLink[];
     }
   | { readonly type: "space/gate-map-error"; readonly message: string }
+  // Fleet-companion phase 7 — one `OnJamStart` / `OnJamEnd` push, already
+  // decoded. Carries the event rather than the folded set on purpose: the fold
+  // is identity-sensitive (a jam IS the source/module pair) and belongs in one
+  // place, beside the decoder that knows the wire, not in each producer.
+  | { readonly type: "space/jam"; readonly event: JamEvent }
   // Goal R23 slice A — the GENERIC in-space action layer. Nothing here names
   // mining or combat: these five events carry a target, a module and an effect
   // name, and a later combat goal reuses them unchanged.

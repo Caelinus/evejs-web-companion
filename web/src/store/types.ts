@@ -5,6 +5,7 @@
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { ActiveJam } from "../bridge/jamNotifications.ts";
 import type {
   FleetAvailability,
   FleetPendingInvite,
@@ -1760,6 +1761,25 @@ export interface SpaceState {
    * these gates go" are different facts and a player acts differently on each.
    */
   readonly gateLinksError: string | null;
+  /**
+   * Fleet-companion phase 7 — every hostile module cycle currently landing on
+   * THIS ship, folded from the `OnJamStart` / `OnJamEnd` pushes
+   * (`bridge/jamNotifications.ts`). The aggressor names itself in each one,
+   * which is the only read anywhere that says who is holding this ship down.
+   *
+   * ⚠ EVERY JAM TYPE, NOT JUST TACKLE. Webs, paints, damps and neuts land here
+   * too. Narrowing to the two tackle types is `tacklersHolding`'s job, at read
+   * time, so a later reader that wants to know it is being neuted does not have
+   * to re-plumb the wire.
+   *
+   * ⚠ NOT SELF-EXPIRING. The slice keeps what the wire said; whether a jam is
+   * still believed is answered by `isJamLive` when somebody ASKS — the same
+   * split `lastBroadcast` and `isFleetBroadcastFresh` make on the fleet slice.
+   *
+   * Cleared with the rest of the slice on `space/cleared`, which is right: a
+   * docked ship is not being scrambled by anything.
+   */
+  readonly jams: readonly ActiveJam[];
 }
 
 // --- R23 slice A: targeting + module activation ----------------------------

@@ -99,6 +99,7 @@ import type {
 } from "./types.ts";
 import type { NamesState } from "./names.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
+import { applyJamEvent, type ActiveJam } from "../bridge/jamNotifications.ts";
 
 // --- Typed state slices ----------------------------------------------------
 
@@ -519,6 +520,7 @@ const INITIAL_SPACE: SpaceState = Object.freeze({
   error: null,
   gateLinks: Object.freeze([]) as readonly GateLink[],
   gateLinksError: null,
+  jams: Object.freeze([]) as readonly ActiveJam[],
 });
 
 // R23 slice A — the generic in-space action layer. Reset alongside the space
@@ -1859,9 +1861,19 @@ export function createClientStore(): ClientStore {
           error: null,
           gateLinks: event.gateLinks ?? previous.gateLinks,
           gateLinksError: event.gateLinks !== undefined ? null : previous.gateLinksError,
+          // ⚠ CARRIED FORWARD, for a different reason than the gate links
+          // above. The jams are not part of a snapshot read at all — they are
+          // folded from pushes that arrive on their own schedule, and the
+          // snapshot poll runs ~1s. Rebuilding them from `event` would wipe a
+          // live scram once a second and leave the tackle rung looking at an
+          // empty set on most ticks.
+          jams: previous.jams,
         });
         break;
       }
+      case "space/jam":
+        space.set({ ...space.get(), jams: applyJamEvent(space.get().jams, event.event) });
+        break;
       case "space/gate-map-error":
         // The star map could not be read. Say so rather than rendering a grid
         // whose gates silently offer nothing.
