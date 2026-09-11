@@ -6355,7 +6355,31 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         if (group === null) {
           continue; // cannot tell what it is — never run a mystery module
         }
-        if (/shield boost/i.test(group)) {
+        if (/remote/i.test(group)) {
+          // ⚠ EXCLUDED BEFORE THE SELF TESTS BELOW, on purpose — this is the
+          // Remote-Shield-Booster-read-as-a-local-rep bug the warp-scrambler
+          // comment further down already warned about. Verified against the SDE
+          // (`_local/sde/.../groups.jsonl`): "Remote Shield Booster", "Ancillary
+          // Remote Shield Booster", "Remote Armor Repairer", "Ancillary Remote
+          // Armor Repairer", "Mutadaptive Remote Armor Repairer" and "Remote Hull
+          // Repairer" EVERY ONE of them also matches a self test two lines down
+          // (their names literally contain "shield booster"/"armor repair"/"hull
+          // repair"), and resolveRemoteRepModuleIDs (below) already classifies
+          // every one of them correctly. Without this guard a fitted remote
+          // repairer would land in BOTH lists, and the `repair` interrupt
+          // (nav/scriptDecide.ts) activates a self-list module SELF-TARGETED
+          // (targetID: 0) — a remote repairer told to repair itself repairs
+          // NOTHING and burns capacitor, on the one hull whose job is repairing
+          // someone else. No group any branch here (or the weapon/tackle/web
+          // tests) cares about has "remote" in its name except the remote-rep
+          // groups themselves, so this cannot swallow a genuine self module.
+        } else if (/shield booster/i.test(group)) {
+          // "booster", not "boost": group 338 "Shield Boost Amplifier" also
+          // reads as /shield boost/i but is a PASSIVE module — it raises what an
+          // ACTIVE Shield Booster elsewhere on the fit repairs and has no cycle
+          // of its own, so it must never land in a list this ladder activates.
+          // Anchoring on "booster" keeps "Shield Booster" and "Ancillary Shield
+          // Booster" and drops the amplifier, with no extra branch needed.
           shield.push(slot.module.itemID);
         } else if (/armor repair/i.test(group)) {
           armor.push(slot.module.itemID);
