@@ -567,6 +567,7 @@ function companionSlice(over: Partial<FleetCompanionState> = {}): FleetCompanion
     followingOrderFrom: "own-ladder",
     lastOrderHeard: null,
     canTag: true,
+    fitWarnings: [],
     abandonment: null,
     startedAt: null,
     startError: null,

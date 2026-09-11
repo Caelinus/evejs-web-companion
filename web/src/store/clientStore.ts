@@ -631,6 +631,7 @@ const INITIAL_FLEET_COMPANION: FleetCompanionState = Object.freeze({
   followingOrderFrom: null,
   lastOrderHeard: null,
   canTag: null,
+  fitWarnings: Object.freeze([]),
   abandonment: null,
   startedAt: null,
   startError: null,
@@ -2339,6 +2340,7 @@ export function createClientStore(): ClientStore {
           status: "running",
           role: event.role,
           startedAt: event.startedAt,
+          fitWarnings: event.fitWarnings,
         });
         break;
       case "companion/progress":

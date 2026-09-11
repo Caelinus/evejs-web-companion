@@ -10,6 +10,7 @@
 // steering one ship is a runtime disaster. These drive it for real.
 
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { createAppFlow } from "./flow.ts";
@@ -145,9 +146,11 @@ function harness(
   const docked = options.docked ?? false;
   const inFleet = options.inFleet ?? true;
 
+  const posted: { readonly path: string; readonly body: Record<string, unknown> }[] = [];
   const fakeFetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
     const path = String(input);
     const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    posted.push({ path, body: body as Record<string, unknown> });
     return {
       ok: true,
       status: 200,
@@ -171,7 +174,7 @@ function harness(
   }
 
   const store = createClientStore();
-  return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
+  return { store, flow: createAppFlow(store, { fetch: fakeFetch }), posted };
 }
 
 /**
@@ -1496,4 +1499,89 @@ test("the tagging cost gate: with tagging OFF, no hull's group name is resolved 
     "tagging is off in the shipped default -- nothing should be classifying hulls",
   );
   flow.stopFleetCompanion();
+});
+
+
+// --- reading the ship it is actually in -------------------------------------
+
+test("a deriving start WARMS THE GROUP NAMES before it classifies the fit", async () => {
+  // ⚠ THE SILENT-NAKED-SHIP BUG THIS EXISTS TO CATCH. Both classifiers skip any
+  // module whose typeGroup is not already in the name cache -- deliberately,
+  // "never run a mystery module" -- and on the BOT HOST that cache starts
+  // EMPTY. Without the warming call, a headless deriving start classifies
+  // nothing, flies with no tank and no guns, and reports no error at all: every
+  // list is legitimately empty, so nothing downstream can tell the difference.
+  //
+  // Pinned on the observable call rather than on the derived lists, because a
+  // fit fixture whose modules match no category gives empty lists whether the
+  // names were warmed or not -- a test asserting those would pass over the bug.
+  const { flow, posted } = harness();
+  await flow.startFleetCompanion({
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    deriveModulesFromFit: true,
+  });
+  flow.stopFleetCompanion();
+
+  const nameCalls = posted.filter((call) => call.path === "/api/names");
+  assert.ok(nameCalls.length > 0, "a deriving start must resolve names at all");
+  const askedForGroups = nameCalls.some((call) => {
+    const items = call.body.items;
+    return (
+      Array.isArray(items) &&
+      items.some((item) => (item as { kind?: string }).kind === "typeGroup")
+    );
+  });
+  assert.ok(askedForGroups, "it must ask for typeGroup names, which is what the classifiers read");
+});
+
+test("a start that does NOT derive still reports on the fit, and never rewrites it", async () => {
+  // Warnings are computed for every start: an empty ammo bay is worth saying
+  // whoever picked the guns. What must not happen is the picks being replaced.
+  const { store, flow } = harness();
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST });
+  flow.stopFleetCompanion();
+  assert.ok(Array.isArray(store.companion.get().fitWarnings));
+});
+
+test("fit warnings never refuse a start", async () => {
+  // ⚠ ADVISORY BY THE OPERATOR'S OWN RULE: warn, and let a human either load
+  // the missing thing or ignore it and fly. A run that refused on a warning
+  // would ground a squad over one empty ammo bay.
+  const { store, flow } = harness();
+  await flow.startFleetCompanion({
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    deriveModulesFromFit: true,
+    useDrones: true,
+  });
+  const slice = store.companion.get();
+  assert.equal(slice.status, "running", "warnings must not stop the run");
+  assert.equal(slice.startError, null);
+  flow.stopFleetCompanion();
+});
+
+
+test("the LOOP is started on the derived request, not the one that came in", () => {
+  // ⚠ PINNED AGAINST THE SOURCE, AND THE REASON MATTERS. This is the central
+  // claim of the whole feature -- the pilot must fly the lists read off its
+  // hull, not the empty ones the squad stored -- and it is the one claim this
+  // suite cannot observe behaviourally. The harness's fit fixture (a Procurer:
+  // strip miners, a web, a scrambler) classifies to EMPTY for every category
+  // the companion uses, so the derived request and the incoming one are
+  // identical in this harness and a behavioural test would pass either way.
+  // Verified by mutation: swapping `flownRequest` back to `request` breaks no
+  // test in this file, which is exactly why this one is written differently.
+  //
+  // Proving it behaviourally needs a fit fixture carrying a hardener or a gun,
+  // which means widening the shared botFixtures every other bot suite builds
+  // on. Worth doing when something else needs that fixture; not worth the blast
+  // radius for this one line today.
+  const source = readFileSync(new URL("./flow.ts", import.meta.url), "utf8");
+  assert.match(source, /const flownRequest = requestForFit\(request, fitFacts\);/);
+  assert.match(source, /liveCompanionRequest = flownRequest;/);
+  assert.match(source, /fleetCompanion\.start\(flownRequest, resuming\);/);
+  assert.doesNotMatch(
+    source,
+    /fleetCompanion\.start\(request, resuming\);/,
+    "the loop must never be handed the un-derived request",
+  );
 });

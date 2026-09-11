@@ -570,6 +570,21 @@
         </tbody>
       </table>
     </div>
+    {#if $companion.fitWarnings.length > 0}
+      <!--
+        WHAT THIS SHIP IS MISSING, measured once when the run started.
+        ADVISORY, NEVER A REFUSAL: the operator's rule is that a human either
+        loads the missing thing or ignores this and flies. Nothing here stops a
+        start, and nothing here nags on an unreadable fit -- an empty list is
+        what both "all well" and "could not tell" produce.
+      -->
+      <p class="note"><strong>Worth knowing about this fit:</strong></p>
+      <ul>
+        {#each $companion.fitWarnings as warning (warning)}
+          <li class="note">{warning}</li>
+        {/each}
+      </ul>
+    {/if}
     <!--
       WHAT THE FLEET IS SAYING. Deliberately shown even before this pilot can
       act on any of it: during live QA the first question is always "is the

@@ -343,7 +343,7 @@ test("the panel never quietly re-enables an order channel the operator turned of
 
 function startedStore(): ReturnType<typeof createClientStore> {
   const store = readyStore();
-  store.apply({ type: "companion/started", role: "logi", startedAt: Date.now() });
+  store.apply({ type: "companion/started", role: "logi", fitWarnings: [], startedAt: Date.now() });
   store.apply({
     type: "companion/progress",
     status: "running",
@@ -426,7 +426,7 @@ test("a PAUSED companion still reads as holding the ship, with the standard paus
 
 test("a failure reason is shown while running", () => {
   const store = readyStore();
-  store.apply({ type: "companion/started", role: "dps", startedAt: Date.now() });
+  store.apply({ type: "companion/started", role: "dps", fitWarnings: [], startedAt: Date.now() });
   store.apply({
     type: "companion/progress",
     status: "error",

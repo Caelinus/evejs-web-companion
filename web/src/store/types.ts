@@ -2340,6 +2340,16 @@ export interface FleetCompanionState {
   readonly lastOrderHeard: string | null;
   readonly canTag: boolean | null;
   /**
+   * What was missing or unusable about this pilot's fit when it started: no
+   * ammunition loaded, an empty drone bay, nothing that defends the ship.
+   *
+   * ⚠ ADVISORY, AND MEASURED ONCE AT START. Nothing here ever refused a start
+   * -- the operator's rule is that a human loads the missing thing or ignores
+   * it and flies. Empty means nothing worth saying, which is ALSO what an
+   * unreadable fit produces: this list only speaks when it is confident.
+   */
+  readonly fitWarnings: readonly string[];
+  /**
    * Non-null while decision 5's abandonment protocol is running: nobody in the
    * fleet this host is not flying, so the pilot got safe, dropped fleet, and is
    * waiting out a bounded thirty minutes for a human to invite it back.

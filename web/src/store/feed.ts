@@ -871,6 +871,8 @@ export type FeedEvent =
       readonly type: "companion/started";
       readonly role: FleetCompanionRole;
       readonly startedAt: number;
+      /** What is missing or unusable about this pilot's fit. Advisory, never fatal. */
+      readonly fitWarnings: readonly string[];
     }
   | {
       readonly type: "companion/progress";
