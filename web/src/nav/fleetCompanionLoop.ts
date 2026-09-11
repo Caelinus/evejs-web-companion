@@ -1073,6 +1073,19 @@ function nearestOf(
  *     unsupervised"; it is "was made fleet commander, and its tag writes
  *     started landing", in a fleet nobody is in.
  *
+ * ⚠ THE LADDER AS IT STANDS, IN FULL. Every phase has extended this list and
+ * several left the prose behind, so it is written out here once rather than
+ * assembled from the rung comments below:
+ *
+ *     1  yield to warp              server fleet warp wins, unconditionally
+ *     2  supervision / abandonment  decision 5; getting safe lives here
+ *     3  tank up                    hardeners, then each layer's repairer
+ *     4  tackle -> tag              letter what is holding this ship
+ *     5  flee                       leave, get whole, come back
+ *     6  drones                     launch, recall a hurt one, redeploy
+ *     7  obeying the fleet          tags, broadcasts, chat commands
+ *        "Standing by"
+ *
  * ⚠ RUNG 3 IS TANK UP, BELOW THE SUPERVISION GATE AND ABOVE OBEYING THE
  * FLEET. THE TANK GOES UP FIRST — the DSL's own fight-back watch lights
  * hardeners before it ever calls `fight-the-rats`, and its comment states the
@@ -1083,10 +1096,39 @@ function nearestOf(
  * — returns null — the moment the rack is up. See `decideTankUp`'s own
  * header for the ladder inside this rung.
  *
- * ⚠ RUNG 7 IS OBEYING THE FLEET, BELOW TANK UP AND ABOVE "Standing by".
+ * ⚠ RUNG 5 IS THE FLEE, AND IT SITS ABOVE THE FLEET RUNG BECAUSE THE OPERATOR
+ * PUT IT THERE. The plan doc's decision 3 originally read
+ *
+ *     server fleet warp > FC broadcast > chat command > own flee rule
+ *
+ * which makes a target call outrank a pilot's own survival. Phase 5's parking
+ * fix took the worst of that away — a STANDING call is held aside and no
+ * longer ends the tick — but a call with something real still to issue wins
+ * outright, and `lockThenEngage` issues one lock plus one activate per weapon
+ * before it goes quiet. The operator was asked and chose the flee; decision 3
+ * was amended to match rather than left contradicting this file. Rung 1 still
+ * outranks it, and that half was never in dispute: a fleet already leaving
+ * does not need this pilot's opinion.
+ *
+ * Tank up and tackle-tag stay ABOVE it deliberately, which is how a ship
+ * running away keeps hardening and keeps lettering whatever holds it. The
+ * phase 6 spec asked for those to be "nested inside the flee continuation";
+ * sitting above it is the same result with no nesting, and it only works
+ * because both fall through the moment they have nothing to issue.
+ *
+ * ⚠ RUNG 7 IS OBEYING THE FLEET, THE LAST RUNG BEFORE "Standing by".
  * Unlike rung 2 it IS an order source (see `decideFleetOrders`'s own header
  * for the tag-over-broadcast reasoning and why an off-grid call is not an
  * order for this pilot at all).
+ *
+ * ⚠ NOTHING SITS BENEATH IT ANY MORE, and that is worth saying out loud
+ * because `CompanionDecision.standing` exists for something that sits there.
+ * The parking fix was built so phase 6's flee could live below this rung; the
+ * operator's decision put the flee above it instead, so the standing mechanism
+ * currently has no behavioural consumer. It is kept because the readout it
+ * protects is still correct — a pilot whose guns are running must not report
+ * "Standing by" — and because phase 8's chat rung is the next candidate for
+ * that slot. Do not remove it on the grounds that nothing needs it.
  */
 export function decideCompanionAction(
   request: FleetCompanionRequest,
