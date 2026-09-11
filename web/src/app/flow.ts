@@ -5417,7 +5417,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           liveCompanionRequest !== null &&
           liveCompanionRequest.obeys.includes("chat") &&
           liveCompanionRequest.chatCommandSenders.length > 0;
-        const [statusStep, spaceResult, targetsResult, botDriven, chatRaw] = await Promise.all([
+        // ⚠ THE SAME COST GATE THE CHAT READ ABOVE IS UNDER, for the same
+        // reason. The drone BAY is the one thing this rung needs that the space
+        // snapshot does not already carry, and it is a whole extra round trip
+        // per tick. A companion whose operator never ticked `useDrones` must not
+        // pay for a listing no rung will read. What the snapshot gives free --
+        // which drones are out and how hurt they are -- is built below,
+        // ungated, because it costs nothing.
+        const droneBayWanted = liveCompanionRequest !== null && liveCompanionRequest.useDrones;
+        const [statusStep, spaceResult, targetsResult, botDriven, chatRaw, droneRaw] =
+          await Promise.all([
           api.getFlightStatus(callOptions),
           api.getSpaceSnapshot(callOptions),
           // ⚠ THE LOCK LIST IS AUTHORITATIVE AND THE LADDER NEEDS IT, rather
@@ -5436,6 +5445,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // and every fleet-mate in the system can see it. What makes an order
           // on a PUBLIC channel safe is the sender allowlist, not the channel.
           chatWanted ? api.readChat("local", callOptions) : Promise.resolve(null),
+          droneBayWanted ? api.getDrones(callOptions) : Promise.resolve(null),
         ]);
         // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
         // regular traffic, so on the bot host they are the ONLY chance a pushed
@@ -5483,6 +5493,47 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
+
+        // ── The drone reads (rung 5). Two of the three are free: they come off
+        // the snapshot already in hand. Only the bay costs a call, and it is
+        // gated above.
+        //
+        // ⚠ `canMyShipOrderDrone === true`, NEVER `isMyDrone`. The narrower test
+        // is the right one for both of these: a drone this hull cannot ORDER is
+        // one it cannot recall either, so counting it would make the rung wait
+        // for a recall that can never land. That case is real and was observed
+        // live -- an abandoned drone answers a recall with a 200 and does not
+        // move (see `canMyShipOrderDrone`'s own comment).
+        const myShipID = ship?.itemID ?? null;
+        const myDroneIDs: number[] = [];
+        let lowestDroneHealth: number | null = null;
+        for (const entity of snapshot?.entities ?? []) {
+          if (canMyShipOrderDrone(entity, myShipID) !== true) {
+            continue;
+          }
+          myDroneIDs.push(entity.itemID);
+          // The worst of the three layers, per drone, then the worst across
+          // them -- the same fold `makeScriptRunnerDeps` makes, so a companion
+          // and a script bot judge an identical rack identically. A layer that
+          // did not read is skipped rather than counted as zero.
+          const ratios = [entity.shieldRatio, entity.armorRatio, entity.hullRatio].filter(
+            (ratio): ratio is number => ratio !== null,
+          );
+          if (ratios.length === 0) {
+            continue;
+          }
+          const worst = Math.min(...ratios);
+          lowestDroneHealth =
+            lowestDroneHealth === null ? worst : Math.min(lowestDroneHealth, worst);
+        }
+        // ⚠ `null` HERE IS "DID NOT LOOK", AND THE RUNG TREATS IT AS SUCH. An
+        // empty array is a real "the bay is empty" and a launch that finds one
+        // issues nothing; `null` means the read was never made (ungated off) or
+        // failed, and the rung must not read that as an empty bay.
+        const droneBayItemIDs =
+          droneRaw === null
+            ? null
+            : (decodeDroneBay(droneRaw.bay)?.map((stack) => stack.itemID) ?? null);
 
         // The roster is read EVERY tick and not gated, because a companion with
         // no fleet has nothing to obey — this is its most load-bearing read, not
@@ -5578,6 +5629,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // whole ladder one consistent answer. Free — it rides the same
           // notification drain the fleet slice does and polls nothing.
           tackledBy: tacklersHolding(store.space.get().jams, Date.now()),
+          lowestDroneHealth,
+          myDroneIDs,
+          droneBayItemIDs,
         };
       },
       issue: async (action) => {

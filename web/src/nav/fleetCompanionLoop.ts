@@ -374,6 +374,20 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * that wrongly believes it can warp.
    */
   readonly tackledBy?: readonly number[];
+  /**
+   * This ship's own drones out in space, by entity id — the ones this hull can
+   * actually ORDER, which is a narrower set than the ones it owns.
+   *
+   * ⚠ ORDERABLE, NOT MERELY OWNED, AND THE DIFFERENCE IS A REAL BUG. An
+   * ABANDONED drone still belongs to this character and still shows on grid, but
+   * no hull controls it: a recall aimed at one answers 200 and the drone does
+   * not move (observed live — see `canMyShipOrderDrone`). Counting it would make
+   * the drone rung wait for a recall that can never land, for ever.
+   *
+   * Absent or empty means nothing of this ship's is out. Free — folded from the
+   * space snapshot the tick already read, never a call of its own.
+   */
+  readonly myDroneIDs?: readonly number[];
 }
 
 /** A pending fleet invite, narrowed to the two ids the rejoin gate needs. */

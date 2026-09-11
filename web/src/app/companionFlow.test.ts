@@ -1092,3 +1092,67 @@ test("a plain member writes no tag, however hard it is being scrambled", async (
   );
   flow.stopFleetCompanion();
 });
+
+// --- rung 5: the drone bay cost gate ----------------------------------------
+//
+// ⚠ THE SAME TRAP THE CHAT READ WAS BUILT AROUND, and the reason that gate has
+// its own test. The drone BAY is the one thing the drone rung needs that the
+// space snapshot does not already carry, and it is a whole extra round trip on
+// every tick of every companion. A pilot whose operator never ticked useDrones
+// must not pay for a listing no rung will read.
+//
+// What the snapshot gives free -- which drones are out, and how hurt they are --
+// is built ungated, because it costs nothing.
+
+test("the drone cost gate: the DEFAULT companion never asks the drone bridge for a bay", async () => {
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(
+    DEFAULT_FLEET_COMPANION_REQUEST.useDrones,
+    false,
+    "the default must stay off, or this test proves nothing",
+  );
+  assert.ok(
+    !calls.some((path) => path.startsWith("/api/bridge/drones")),
+    "a companion that is not set to use drones must not read the bay",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("useDrones ON does read the bay", async () => {
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, useDrones: true });
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.some((path) => path.startsWith("/api/bridge/drones")),
+    "a companion set to use drones needs the bay to launch from",
+  );
+  flow.stopFleetCompanion();
+});
+
+// ⚠ THE STALE-CAPTURE TRAP, the same one the chat gate carries a pair of tests
+// for. The gate reads the LIVE request, not the one captured when the deps were
+// built, so flipping the setting between two runs of the SAME companion has to
+// change what the next run reads.
+test("useDrones OFF then ON, on the SAME companion, reads the bay on the second run", async () => {
+  const { store, flow, calls } = chatHarness();
+
+  await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
+  await waitForCompanionTick(() => store.get().companion.why);
+  flow.stopFleetCompanion();
+  assert.ok(!calls.some((path) => path.startsWith("/api/bridge/drones")));
+
+  await flow.startFleetCompanion({ ...DEFAULT_FLEET_COMPANION_REQUEST, useDrones: true });
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.some((path) => path.startsWith("/api/bridge/drones")),
+    "the second run has drones on and must read the bay",
+  );
+  flow.stopFleetCompanion();
+});
