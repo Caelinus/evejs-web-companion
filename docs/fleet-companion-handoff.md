@@ -38,7 +38,7 @@ behind by a phase at least once, including this document's own.
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
 | Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
 | Phase 8 | **DONE** — chat commands, on LOCAL chat. The fleet-channel gateway patch is CANCELLED, not pending |
-| Phase 9 | squad roles + Bot Manager badge — **IN PROGRESS** on `feat/fleet-companion-phase-9`; role presets and the shared readout are in, the badge and the squad half are not |
+| Phase 9 | squad roles + Bot Manager badge — **NEARLY DONE** on `feat/fleet-companion-phase-9`. Built: the shared readout, role presets, the Bot Manager badge, fit derivation + warnings, the classifier fix, squad config storage, and the squad group start. ⚠ **NOT usable end to end yet** — see below |
 
 Gates at the last commit: `tsc` clean, `docker build --target web-build` clean,
 full suite **5,215 tests with `ℹ fail 17`** — the same eight files with the same
@@ -88,6 +88,28 @@ name matches a grep for companion/fleet/broadcast/tag, so a name filter said
 clean while the count had gone 17 → 18. The reverse trap is the known one (a
 fresh worktree reports 22 because `public/dist` is absent). Check both. Comparing
 PER-FILE COUNTS, as the table above allows, catches what either alone misses.
+
+## ⚠ PHASE 9'S ONE REMAINING GAP: NOTHING CAN CREATE A SQUAD CONFIG
+
+`setCompanionConfig` (`web/src/app/hangarPrefs.ts`) is exported, tested and
+has **no UI caller**. So `companionSquadRoster` is always empty, the hangar's
+FLY control never appears, and the squad start cannot be reached by a player.
+Everything underneath it is built and tested; the authoring surface is not.
+
+**It is now a SMALL piece, and it was not going to be.** The original plan had
+the hangar popover carrying a whole `FleetCompanionRequest`, which cannot work:
+the request's seven module lists are `itemID`s of one particular hull's fitted
+modules, picked by an operator looking at that ship, and a squad start has no
+mounted pilot to pick from. The operator settled it — the companion reads its
+own fit at start, and nothing about a fit is ever saved — so what a squad member
+stores is now only a role and some settings. That fits the 210px popover the
+plan predicted.
+
+⚠ Do NOT put a role `<select>` on each popover row without reading
+`HangarPilotRow.svelte:205-215` first: the row is a single `<button>`, so a
+nested control is invalid HTML and would fire the toggle on every click, and
+`docs/pilot-hangar.md:157-158` records that growing these rows vertically was
+tried and rejected at eleven squads.
 
 ## What exists
 
