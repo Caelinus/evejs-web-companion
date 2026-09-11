@@ -26,6 +26,8 @@ const HangarSquadAssign = (await import("./HangarSquadAssign.svelte")).default;
 const HangarSquadPicker = (await import("./HangarSquadPicker.svelte")).default;
 
 const ROSTER_KEY = "evejs-web-known-characters:v1";
+import { DEFAULT_FLEET_COMPANION_REQUEST } from "../nav/fleetCompanionLoop.ts";
+
 const PREFS_KEY = "evejs-web-hangar-prefs:v1";
 
 function storage(seed: Record<string, string> = {}) {
@@ -431,4 +433,52 @@ test("with no squads yet the chooser is straight to naming a new one", () => {
   assert.doesNotMatch(body, /Create a new squad/, "nothing to choose between");
   assert.match(body, /Squad name/);
   assert.match(body, /Create squad with 2 pilots/);
+});
+
+
+// --- starting a squad's companions on the server ----------------------------
+
+const SQUAD = { id: "s-fly", name: "Strike Wing", color: "#52d9a3" };
+
+function prefsWithSquad(configured: boolean): string {
+  const request = {
+    ...DEFAULT_FLEET_COMPANION_REQUEST,
+    deriveModulesFromFit: true,
+  };
+  return JSON.stringify({
+    squads: [SQUAD],
+    members: { [SQUAD.id]: [90000001] },
+    pinnedSquads: [SQUAD.id],
+    pinnedPilots: [],
+    collapsedAccounts: [],
+    companionConfigs: configured ? { [SQUAD.id]: { "90000001": request } } : {},
+  });
+}
+
+test("a squad with nobody set up offers no FLY control at all", () => {
+  // ⚠ THE CONTROL IS GATED ON THERE BEING SOMETHING TO START. A squad start
+  // works from the saved per-pilot setups; a squad with none would start
+  // nothing, and a button that does nothing is worse than no button.
+  setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
+  setHangarPrefsStorage(storage({ [PREFS_KEY]: prefsWithSquad(false) }));
+  const body = renderHangar();
+  assert.match(body, /Strike Wing/, "the squad chip is there either way");
+  assert.doesNotMatch(body, />FLY</);
+});
+
+test("a squad with a configured pilot offers FLY, and says how it differs from ALL", () => {
+  // ⚠ TWO DIFFERENT THINGS, ONE CHIP ROW. "ALL" signs pilots into THIS TAB and
+  // they stop when it closes. "FLY" starts their companions on the bot host,
+  // which keeps flying with the tab shut and does not need them signed in here
+  // at all. A player who cannot tell those apart will close the tab on a fleet.
+  setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
+  setHangarPrefsStorage(storage({ [PREFS_KEY]: prefsWithSquad(true) }));
+  const body = renderHangar();
+  assert.match(body, />FLY</);
+  assert.match(body, />. ALL</, "the tab launch is still there");
+  assert.match(
+    body,
+    /keep flying when this tab closes/,
+    "the difference must be stated on the control itself",
+  );
 });

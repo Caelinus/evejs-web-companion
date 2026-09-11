@@ -3027,6 +3027,15 @@ export interface ServerBotCompanion {
    * every tick before the first roster read.
    */
   readonly canTag: boolean | null;
+  /**
+   * What was missing or unusable about this pilot's fit when it started.
+   *
+   * ⚠ ADVISORY, AND THIS IS THEIR ONLY ROUTE TO A PLAYER ON A HEADLESS RUN.
+   * Nothing here refused the start: a human loads the missing thing or ignores
+   * it and flies. Empty means nothing worth saying, which is also what an
+   * unreadable fit produces.
+   */
+  readonly fitWarnings: readonly string[];
 }
 
 export interface ServerBot {
@@ -3128,6 +3137,9 @@ function asServerBotCompanion(value: JsonValue | undefined): ServerBotCompanion 
     followingOrderFrom: asCompanionOrderAuthority(row.followingOrderFrom),
     lastOrderHeard: typeof row.lastOrderHeard === "string" ? row.lastOrderHeard : null,
     canTag: typeof row.canTag === "boolean" ? row.canTag : null,
+    fitWarnings: Array.isArray(row.fitWarnings)
+      ? row.fitWarnings.filter((line): line is string => typeof line === "string")
+      : [],
   };
 }
 

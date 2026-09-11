@@ -399,6 +399,14 @@ function createBotHost(options) {
         lastOrderHeard:
           typeof snapshot.lastOrderHeard === "string" ? snapshot.lastOrderHeard : null,
         canTag: typeof snapshot.canTag === "boolean" ? snapshot.canTag : null,
+        // ⚠ THE ONLY ROUTE THESE HAVE TO A PLAYER ON A HEADLESS RUN. The fit
+        // warnings are measured once, in the browser stack this host is
+        // driving, and there is no panel open anywhere to show them -- a squad
+        // start is the case they exist for. Advisory, so they ride the readout
+        // rather than blocking anything.
+        fitWarnings: Array.isArray(snapshot.fitWarnings)
+          ? snapshot.fitWarnings.filter((line) => typeof line === "string")
+          : [],
       };
       //
       // `abandonment` is the ONE exception, and it is not a readout: it is

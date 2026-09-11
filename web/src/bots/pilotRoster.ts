@@ -257,6 +257,7 @@ const UNREPORTED_COMPANION: ServerBotCompanion = Object.freeze({
   followingOrderFrom: null,
   lastOrderHeard: null,
   canTag: null,
+  fitWarnings: Object.freeze([]),
 });
 
 /**

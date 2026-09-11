@@ -900,7 +900,7 @@ test("a companion's progress maps status/phase/why honestly, and leaves script-s
   assert.equal(row.note, null);
 });
 
-test("a companion's five badge facts reach the wire, and a script's stay null", async () => {
+test("a companion's badge facts reach the wire, and a script's stay null", async () => {
   const log = [];
   const host = makeHost({ log });
   await host.start(COMPANION_START);
@@ -916,6 +916,7 @@ test("a companion's five badge facts reach the wire, and a script's stay null", 
       followingOrderFrom: "broadcast",
       lastOrderHeard: "the fleet's target call",
       canTag: false,
+      fitWarnings: ["One weapon has nothing loaded. It will not fire until you load it."],
     },
   });
   await settle();
@@ -927,6 +928,9 @@ test("a companion's five badge facts reach the wire, and a script's stay null", 
     followingOrderFrom: "broadcast",
     lastOrderHeard: "the fleet's target call",
     canTag: false,
+    // ⚠ THE ONLY ROUTE THESE HAVE TO A PLAYER ON A HEADLESS RUN. No panel is
+    // open for a bot on the host, and a squad start is the case they exist for.
+    fitWarnings: ["One weapon has nothing loaded. It will not fire until you load it."],
   });
 
   // ⚠ FALSE AND NULL ARE DIFFERENT ANSWERS HERE. `canTag: false` means the

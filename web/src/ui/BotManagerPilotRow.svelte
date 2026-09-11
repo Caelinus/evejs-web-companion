@@ -374,6 +374,15 @@
         {#if companionFacts.lastOrderHeard}
           <p class="note why">Last order heard: {companionFacts.lastOrderHeard}</p>
         {/if}
+        <!--
+          ⚠ THE ONLY PLACE A HEADLESS PILOT'S FIT WARNINGS REACH ANYONE. There
+          is no panel open for a run on the bot host, and a squad start is
+          exactly the case these were written for. Advisory: the run is already
+          flying, and a human loads the missing thing or leaves it.
+        -->
+        {#each companionFacts.fitWarnings as warning (warning)}
+          <p class="alert">{warning}</p>
+        {/each}
       {/if}
       {#if lifetimeNote}
         <p class="note why">{lifetimeNote}</p>
