@@ -523,6 +523,13 @@ function forgetBridgeSession(webSessionID) {
   bridgeSessions.delete(webSessionID);
   publishStreamStatus(held, "ended", "session_released");
   closeHeldStream(held);
+  // The chat connection is this character's presence in Local: it has to go
+  // when the character does, or a pilot nobody is flying stays in the member
+  // list until the stub reaps a half-open socket.
+  if (held.chat) {
+    held.chat.close();
+    held.chat = null;
+  }
   for (const subscriber of [...held.streamSubscribers]) {
     held.streamSubscribers.delete(subscriber);
     try {
@@ -855,7 +862,14 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       streamSubscribers: new Set(),
       streamCursor: null,
       streamRetryTimer: null,
+      // R7 chat: the XMPP connection this character speaks Local and Corp on.
+      // Opened right below, as a retail client does at login — see
+      // joinHeldChat.
+      chat: null,
     });
+    // The character is online; put it in its rooms. Fire-and-forget: a chat
+    // server that is down must never stop a pilot coming online.
+    joinHeldChat(bridgeSessions.get(req.webSessionID));
     res.json({
       ok: true,
       character: {
@@ -14717,14 +14731,145 @@ app.get("/api/bridge/killboard", requireAuth, async (req, res, next) => {
 });
 
 // --- R7 Local + Corp chat ---------------------------------------------------
-// The browser reads a channel's member roster + recent backlog and sends
-// messages to Local or Corp on the held session. Chat delivery bypasses the
-// notification drain, so READ is a backlog poll: the panel polls /chat/read on
-// a modest interval while it is open, and stops when it closes. The BFF holds
-// the bridgeSessionID server-side (never in browser JS); the browser addresses
-// channels by name only. Wire contract: docs/bridge-wire-contract.md.
+// The browser reads a channel's member roster + recent messages and sends
+// messages to Local or Corp on the held session. The BFF holds the connection
+// server-side (never in browser JS); the browser addresses channels by name
+// only. Wire contract: docs/bridge-wire-contract.md.
+//
+// ⚠ THE TRANSPORT CHANGED UNDER THESE ROUTES, THEIR SHAPE DID NOT. Until EveJS
+// v0.12.8 both routes proxied `POST /_evejs-web/v1/chat/read|send`, which read
+// the server's backlog store. That drop deleted those routes, deleted
+// `runtime.readChat`/`sendChat` and `gatewayServices/webChatGatewayService.js`,
+// and marked every browser-backed session as having left Local
+// (`session._localChatDeparted = true`). The reads began answering 404 on every
+// companion tick and every chat-ordered behaviour went silently dead.
+//
+// They are now served by an XMPP client (`src/evejsXmppChat.js`) speaking to the
+// same stub server the retail client speaks to, joined as the held character.
+// The response envelope is unchanged, so `web/src/bridge/chat.ts`, the Chat
+// panel and the fleet companion's order rung all read exactly what they read
+// before.
+//
+// Two honest differences from the backlog-store era:
+//   • `notifications` is always empty. The old route drained the gateway's
+//     capture buffer as a side effect of asking it for chat; this transport
+//     never touches the gateway, and every other bridge call still drains.
+//   • READ returns what was said WHILE THIS SESSION WAS LISTENING, plus (for
+//     Corp) the join-time backlog the room replays. Local has no history in
+//     retail and the stub matches it, so a Local read right after connecting is
+//     empty until somebody speaks. The old store-backed read could answer with
+//     lines from before the browser existed.
 
 const CHAT_CHANNELS = new Set(["local", "corp"]);
+
+/**
+ * The held session's chat connection, opened on first use.
+ *
+ * ⚠ THE CHARACTER ID COMES OFF THE HELD SESSION AND NOWHERE ELSE. The stub
+ * authenticates SASL PLAIN without checking the secret — the JID's local part IS
+ * the identity — so the only thing standing between this BFF and impersonating
+ * an arbitrary pilot in Local is that this line reads `held.characterID`. It
+ * must never take an id from a request.
+ */
+function heldChatSession(held) {
+  if (!held.chat) {
+    // ⚠ FROM THE INJECTED GATEWAY CLIENT, NOT IMPORTED DIRECTLY, and that is
+    // load-bearing rather than tidy. Chat is a second port on the same EveJS
+    // process, so it belongs to the same injected dependency as every other
+    // call to that server — which means an app built with a FAKE gateway (every
+    // test but the chat one) has no chat at all and cannot open a socket to
+    // whatever happens to be listening on the real 5222. Importing the client
+    // here instead made a character select in any unrelated test connect to the
+    // live game server and put a phantom pilot in somebody's Local.
+    if (typeof gateway.createChatSession !== "function") {
+      return null;
+    }
+    held.chat = gateway.createChatSession({
+      characterID: held.characterID,
+      log: (line) => console.log(line),
+    });
+  }
+  return held.chat;
+}
+
+/** The error a chat route answers with when this app has no chat transport. */
+function chatUnavailable(res) {
+  res.status(503).json({
+    ok: false,
+    error: "CHAT_NOT_AVAILABLE",
+    message: "This server has no chat transport configured.",
+  });
+}
+
+/**
+ * Put this character in its chat rooms, the way a retail client does at login.
+ *
+ * ⚠ EAGER, NOT LAZY, AND THAT IS A CORRECTION. The first cut opened the chat
+ * connection on the first chat READ, reasoning that a session nobody reads chat
+ * for should not appear in anyone's Local. That is not how a pilot works: the
+ * retail client connects and joins Local and Corp in the same breath as
+ * selecting a character (its own login is two `<presence to='local_…'>` /
+ * `to='corp_…'` stanzas about a hundred milliseconds after the bind), and a
+ * character who is online but in no room is a pilot nobody in the system can
+ * see or talk to. Worse for this project's own purpose: nothing read chat until
+ * a companion was actually RUNNING, so an idle-but-online companion could not
+ * even be addressed.
+ *
+ * ⚠ NEVER FAILS THE CALLER. A chat server that is down must not stop a
+ * character coming online — this is fire-and-forget by design, and a read is
+ * still the thing that reports the failure to whoever asked for chat.
+ */
+function joinHeldChat(held) {
+  const chat = heldChatSession(held);
+  if (chat === null) {
+    return;
+  }
+  const context = { solarSystemID: Number(held.solarSystemID) || 0 };
+  for (const channel of ["local", "corp"]) {
+    chat
+      .ensureChannel(channel, context)
+      .catch((error) => {
+        console.warn(
+          `[chat] ${channel} join failed for character ${held.characterID}: ${error.message}`,
+        );
+      });
+  }
+}
+
+/**
+ * Keep an ALREADY-CONNECTED session in the right rooms as its pilot moves.
+ *
+ * Called from the flight-status read, which is the one call every session makes
+ * continuously and the place `held.solarSystemID` is kept current. Retail's own
+ * auto-move (`chatHub.moveLocalSession`) rides on `sendSessionChange`, a capture
+ * stub for a browser-backed session, so without this a pilot that jumps keeps
+ * listening to the system it left.
+ *
+ * ⚠ SILENT, AND ONLY FOR A SESSION THAT ALREADY HAS A CONNECTION. It runs on
+ * every poll, so it must neither open a connection for a session that never
+ * wanted one nor log a line each time a down chat server stays down. The client
+ * throttles its own reconnects; the read route is where a failure is reported.
+ */
+function followHeldChat(held) {
+  if (!held.chat) {
+    return;
+  }
+  const context = { solarSystemID: Number(held.solarSystemID) || 0 };
+  for (const channel of ["local", "corp"]) {
+    held.chat.ensureChannel(channel, context).catch(() => {});
+  }
+}
+
+function chatContext(held, req) {
+  return {
+    // The system the held session is in RIGHT NOW, kept current by every
+    // flight-status read. Used only to notice that this pilot has MOVED — the
+    // room itself is resolved server-side from the session, so nothing here
+    // computes a room name. See ensureChannel in src/evejsXmppChat.js.
+    solarSystemID: Number(held.solarSystemID) || 0,
+    limit: Number(req.query?.limit) || undefined,
+  };
+}
 
 function normalizeChatChannel(res, value) {
   const channel = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -14748,18 +14893,15 @@ app.get("/api/bridge/chat/:channel", requireAuth, async (req, res, next) => {
   if (!channel) {
     return;
   }
+  const session = heldChatSession(held);
+  if (session === null) {
+    chatUnavailable(res);
+    return;
+  }
   try {
-    const outcome = await gateway.readChat(
-      held.bridgeSessionID,
-      channel,
-      { userid: held.accountID },
-      { limit: Number(req.query.limit) || undefined },
-    );
-    res.json({ ok: true, chat: outcome.chat, notifications: outcome.notifications });
+    const chat = await session.read(channel, chatContext(held, req));
+    res.json({ ok: true, chat, notifications: [] });
   } catch (error) {
-    if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
-    }
     next(error);
   }
 });
@@ -14782,15 +14924,15 @@ app.post("/api/bridge/chat/:channel/send", requireAuth, async (req, res, next) =
     });
     return;
   }
+  const session = heldChatSession(held);
+  if (session === null) {
+    chatUnavailable(res);
+    return;
+  }
   try {
-    const outcome = await gateway.sendChat(held.bridgeSessionID, channel, message, {
-      userid: held.accountID,
-    });
-    res.json({ ok: true, chat: outcome.chat, notifications: outcome.notifications });
+    const chat = await session.send(channel, message, chatContext(held, req));
+    res.json({ ok: true, chat, notifications: [] });
   } catch (error) {
-    if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
-    }
     next(error);
   }
 });
@@ -14944,6 +15086,11 @@ async function readHeldFlight(held, webSessionID) {
     if (Number(flight.solarSystemID) > 0) {
       held.solarSystemID = Number(flight.solarSystemID);
     }
+    // The pilot's chat rooms follow the pilot. This is the one read every
+    // session makes continuously, and the place the system id above is kept
+    // current, so it is where a jump turns into a Local re-join — retail's own
+    // auto-move never fires for a browser-backed session. See followHeldChat.
+    followHeldChat(held);
     // A latched ("failed") transition is resolved by exactly this kind of
     // fresh authoritative read — the write either landed (adopt it) or never
     // took (release the latch). Every client polls flight status continuously,
@@ -15398,6 +15545,57 @@ app.post("/api/bridge/station/repair", requireAuth, async (req, res, next) => {
   try {
     const outcome = await heldTopLevelCall(held, req.webSessionID, "repairSvc", "RepairItems", [itemIDs, null], null);
     res.json({ ok: true, result: outcome.result, notifications: outcome.notifications });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Warp to a FLEET MEMBER — beyonce.CmdWarpToStuff("char", characterID), the
+// retail "warp to" on a fleet-window row.
+//
+// ⚠ THE ONLY WARP THAT WORKS WHEN THE DESTINATION IS NOT ON THIS GRID, which is
+// the whole reason it exists: every other variant takes something the pilot can
+// already see. The server resolves the member's position itself
+// (`resolveFleetMemberWarpTarget`, beyonceService.js) and enforces the rules
+// this route therefore does not restate: both characters must be in the SAME
+// FLEET, the target must be online, and an Abyssal runner is refused outright.
+// Those refusals arrive as the handler's own CALL_REFUSED, so a stale or wrong
+// character id fails loudly instead of warping the ship somewhere nobody named.
+app.post("/api/bridge/flight/warp-member", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  const characterID = Number(req.body && req.body.characterID) || 0;
+  if (characterID <= 0) {
+    res.status(400).json({
+      ok: false,
+      error: "INVALID_TARGET",
+      message: "A positive characterID is required.",
+    });
+    return;
+  }
+  const minRange = Number(req.body && req.body.minRange) || 0;
+  try {
+    const before = await readHeldFlight(held, req.webSessionID);
+    if (!requireInSpace(res, before.flight)) {
+      return;
+    }
+    const outcome = await boundCall(
+      held,
+      req.webSessionID,
+      parkBindSpec(before.flight.solarSystemID),
+      "CmdWarpToStuff",
+      ["char", characterID],
+      minRange > 0 ? { minRange } : null,
+    );
+    const after = await readHeldFlightAfterCommand(held, req.webSessionID, before);
+    res.json({
+      ok: true,
+      result: outcome.result,
+      flight: after.flight,
+      notifications: [...outcome.notifications, ...after.notifications],
+    });
   } catch (error) {
     next(error);
   }

@@ -1,6 +1,7 @@
 "use strict";
 
 const { WebSocket } = require("ws");
+const { createXmppChatSession } = require("./evejsXmppChat");
 
 const DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:26002/_evejs-web/v1";
 const DEFAULT_TIMEOUT_MS = 1500;
@@ -547,47 +548,24 @@ async function callBoundMethod(service, method, args = [], kwargs = null, sessio
 }
 
 /**
- * Chat read (goal R7) — the held session's Local/Corp member roster + recent
- * backlog. POST /_evejs-web/v1/chat/read. Chat delivery bypasses the
- * notification drain, so READ is a backlog poll; the browser polls this while
- * the Chat panel is open. See docs/bridge-wire-contract.md.
+ * The chat connection this BFF speaks Local and Corp on (goal R7, revised
+ * 2026-09-12).
+ *
+ * ⚠ THIS REPLACES `readChat`/`sendChat`, WHICH WERE DELETED RATHER THAN LEFT TO
+ * ROT. They posted to `/_evejs-web/v1/chat/read|send`, and EveJS v0.12.8 removed
+ * those routes, `runtime.readChat`/`sendChat` and the whole
+ * `webChatGatewayService` behind them — so every call answered 404 on a
+ * two-second tick while the failure was swallowed upstream. Keeping a helper
+ * whose only possible outcome is a 404 would just leave the next reader a trap.
+ *
+ * ⚠ IT LIVES ON THE GATEWAY CLIENT BECAUSE IT IS THE SAME SERVER, a second port
+ * on the same process (`tls://<host>:5222`, the chat edge). That placement is
+ * also what keeps chat OUT of every test that injects a fake gateway: an app
+ * built with a client that has no `createChatSession` simply has no chat, so
+ * nothing but the chat tests themselves ever opens a socket to a real server.
  */
-async function readChat(bridgeSessionID, channel, sessionFields = {}, options = {}) {
-  const body = { bridgeSessionID: String(bridgeSessionID || ""), channel: String(channel || "") };
-  if (sessionFields && typeof sessionFields === "object" && !Array.isArray(sessionFields)) {
-    body.session = sessionFields;
-  }
-  if (Number.isFinite(Number(options.limit)) && Number(options.limit) > 0) {
-    body.limit = Number(options.limit);
-  }
-  const data = await postJson("/chat/read", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
-  return {
-    chat: data.chat && typeof data.chat === "object" ? data.chat : {},
-    notifications: Array.isArray(data.notifications) ? data.notifications : [],
-  };
-}
-
-/**
- * Chat send (goal R7) — broadcast a message to Local or Corp on the held
- * session. POST /_evejs-web/v1/chat/send. Local goes through
- * chatRuntime.broadcastLocalMessage; Corp is a session-derived corp broadcast
- * that writes the corp_<id> backlog (NOT an XMPP send). See
- * docs/bridge-wire-contract.md.
- */
-async function sendChat(bridgeSessionID, channel, message, sessionFields = {}) {
-  const body = {
-    bridgeSessionID: String(bridgeSessionID || ""),
-    channel: String(channel || ""),
-    message: String(message === undefined || message === null ? "" : message),
-  };
-  if (sessionFields && typeof sessionFields === "object" && !Array.isArray(sessionFields)) {
-    body.session = sessionFields;
-  }
-  const data = await postJson("/chat/send", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
-  return {
-    chat: data.chat && typeof data.chat === "object" ? data.chat : {},
-    notifications: Array.isArray(data.notifications) ? data.notifications : [],
-  };
+function createChatSession(options) {
+  return createXmppChatSession(options);
 }
 
 // --- R10 live event channel (gateway push) ---------------------------------
@@ -802,8 +780,7 @@ module.exports = {
   readFlightStatus,
   readScannerState,
   readSpaceSnapshot,
-  readChat,
-  sendChat,
+  createChatSession,
   // The four v1 reads the auth/health surface still needs (goal R9b): account
   // lookup + the character list for login, the one-row snapshot the
   // /api/bridge/select ownership check reads, and gateway status for
