@@ -40,12 +40,32 @@
 // `OnFleetStateChange`, never a chat line at all — there is nothing here to
 // parse a verb for.
 //
-// `WarpTo`, `JumpBeacon`, `EnemySpotted`, `NeedBackup`, `HoldPosition`,
-// `InPosition` and `Location` are the remaining broadcast names, and
-// `decideFleetOrders` has NO rung at all for any of them (see
-// `fleetBroadcasts.ts`'s `FLEET_BROADCAST_CLASSIFICATION`: all seven are
-// `act: false`, announcements or server-driven, never something a follower
-// acts on itemID for) — so none of them gets a chat verb either.
+// `JumpBeacon`, `EnemySpotted`, `NeedBackup`, `HoldPosition`, `InPosition` and
+// `Location` are the remaining broadcast names, and `decideFleetOrders` has NO
+// rung at all for any of them (see `fleetBroadcasts.ts`'s
+// `FLEET_BROADCAST_CLASSIFICATION`: they are `act: false`, announcements or
+// server-driven, never something a follower acts on itemID for) — so none of
+// them gets a chat verb either.
+//
+// ⚠ `warp` IS THE EXCEPTION THAT USED TO BE IN THAT LIST. It was excluded on
+// the same reasoning, and the reasoning went stale: `WarpTo` was classified
+// `act: false` "because the fleet warp is executed server-side once the
+// broadcast lands", which is false — `sendBroadcast` (fleetRuntime.js) only
+// notifies, and a companion told to warp sat still. `decideFleetOrders` grew
+// rung e2 for it, so `warp <link>` now mirrors a rung that genuinely exists,
+// exactly like the four verbs above it.
+//
+// ⚠ AND IT IS THE ONE VERB WHOSE LINK MAY NAME SOMETHING NOT ON THIS GRID. A
+// warp is the only order in this set that is USEFUL at a distance — "come to
+// me" is the whole point of asking for one — and the server has a call for
+// precisely that: `CmdWarpToStuff("char", <characterID>)` resolves a FLEET
+// MEMBER's position itself (`resolveFleetMemberWarpTarget`, beyonceService.js),
+// requiring only that both pilots are in the same fleet and online. A character
+// link carries a character id, an object link carries an object id, and this
+// parser does not try to tell them apart: which one it is, is a question about
+// the reader's own world (is that id on my grid? is it a fleet-mate?) and is
+// answered where that world is known — see `decideFleetOrders`. Here it is one
+// verb with one id, as every other link verb is.
 //
 // ─── THE LINK FORMAT DECIDES THE GRAMMAR ────────────────────────────────────
 //
@@ -129,6 +149,43 @@
 // the anchoring and word-boundary discipline (unchanged from the rest of
 // this file) keeps "salvaged", "looting", "salvager" and a mid-sentence
 // mention ("did you loot that wreck?") from matching.
+//
+// ─── `follow` AND `destination`: VERBS THAT CARRY A VALUE ───────────────────
+//
+// ⚠ A THIRD FAMILY, AND IT IS NOT EITHER OF THE FIRST TWO. The four link verbs
+// carry an id they read out of a showinfo tag and are `null` without one; the
+// two area verbs carry nothing at all and are complete on the verb alone.
+// `follow <N> km` and `destination <link|id>` carry a NUMBER that is part of
+// the order rather than a link that identifies an object — which the
+// `AREA_COMMAND_VERBS` table cannot express, since every entry there returns a
+// bare `{ kind }` with no room for a value, and which `COMMAND_VERBS` cannot
+// express either, since every entry there is answered by the one shared
+// link-extraction step. So they get their own table, `VALUE_COMMAND_VERBS`,
+// whose entries carry a READER over the text after the verb instead of a kind.
+// The anchoring discipline is identical (`^verb\b`), and the table is checked
+// before the link-extraction loop for the same reason the area verbs are: a
+// verb that never asks a link to follow it must not fall into the rule that
+// returns `null` when none does.
+//
+// The two readers differ on what "nothing usable followed the verb" means, and
+// the difference is a property of the orders, not an inconsistency:
+//
+//   • `follow` ALWAYS parses. Its value has a default, and every natural way a
+//     human writes this order — "follow me", "follow the fc", a bare "follow" —
+//     is the same order at the default range. There is nothing a `follow` could
+//     be missing that would make it not an order.
+//   • `destination` returns `null` without a system, exactly like the four link
+//     verbs: "go somewhere" with no somewhere named is not a trip.
+//
+// ⚠ `destination` ACCEPTS A BARE NUMBER AND `travel` DOES NOT. That is an
+// ADDITION, not a mirror of the `travel` verb it otherwise matches: both carry
+// a solar SYSTEM id rather than an on-grid object, but a system id is a number
+// a player can read off the map and type, where an on-grid item id is not.
+// Accepting it costs nothing (the same `parseItemID` bound runs over it) and
+// spares an operator pasting a link for the one order they are most likely to
+// be typing from a route plan. `travel` is left alone rather than widened to
+// match, because nothing asked for it and every change to a verb that is
+// already obeyed is a chance to change what it obeys.
 
 import type { ChatMessage } from "../store/types.ts";
 // ⚠ Not `../bridge/chat.ts`, even though that is the module that PRODUCES a
@@ -146,7 +203,9 @@ export type ChatCommandKind =
   | "jump"
   | "salvage"
   | "loot"
-  | "stop";
+  | "stop"
+  | "follow"
+  | "destination";
 
 /**
  * One parsed chat command. The four link verbs carry exactly the resolved
@@ -159,15 +218,28 @@ export type ChatCommandKind =
  * vicinity"), not an object, so there is nothing for a link to identify and
  * nothing for a caller to read off the command beyond which of the two it
  * was.
+ *
+ * `follow` and `destination` carry a VALUE rather than an object — see the
+ * header's third section. The field names say which: `rangeM` is a stand-off
+ * distance in METRES (already defaulted and already clamped — a caller never
+ * has to re-check it), `systemID` is a solar system, never an on-grid object.
  */
 export type ChatCommand =
   | { readonly kind: "target"; readonly itemID: number }
   | { readonly kind: "align"; readonly itemID: number }
   | { readonly kind: "travel"; readonly itemID: number }
   | { readonly kind: "jump"; readonly itemID: number }
+  /**
+   * `warp <link>`. The id is whatever the link named — an object on the grid,
+   * or a CHARACTER, which a reader that can see its own fleet turns into the
+   * server's own fleet-member warp. See the header's note on this verb.
+   */
+  | { readonly kind: "warp"; readonly itemID: number }
   | { readonly kind: "salvage" }
   | { readonly kind: "loot" }
-  | { readonly kind: "stop" };
+  | { readonly kind: "stop" }
+  | { readonly kind: "follow"; readonly rangeM: number }
+  | { readonly kind: "destination"; readonly systemID: number };
 
 /**
  * Verb -> command kind, each with its own anchored, case-insensitive
@@ -185,13 +257,27 @@ export type ChatCommand =
 const COMMAND_VERBS: ReadonlyArray<{
   readonly verb: string;
   readonly pattern: RegExp;
-  readonly kind: ChatCommandKind;
+  // ⚠ THE FOUR LINK KINDS, NOT `ChatCommandKind`. This used to be the whole
+  // union and only compiled by accident: every other kind then carried NO
+  // fields besides `kind`, so `{ kind, itemID }` was assignable to each of them
+  // with `itemID` as a harmless extra. The value verbs ended that -- a
+  // `{ kind: "follow", itemID }` is missing `rangeM` and the build said so --
+  // which is the tripwire working. Naming the four kinds this table actually
+  // holds is both the fix and what the table always meant, and it matches how
+  // `AREA_COMMAND_VERBS` below has always been typed.
+  readonly kind: "target" | "align" | "travel" | "jump" | "warp";
 }> = [
   { verb: "target", pattern: /^target\b/i, kind: "target" },
   { verb: "primary", pattern: /^primary\b/i, kind: "target" },
   { verb: "align", pattern: /^align\b/i, kind: "align" },
   { verb: "travel", pattern: /^travel\b/i, kind: "travel" },
   { verb: "jump", pattern: /^jump\b/i, kind: "jump" },
+  // ⚠ `warp` MUST NOT MATCH "warping" OR A MID-SENTENCE MENTION, and the `\b`
+  // it shares with every other verb here is what stops it. "warp to me" is the
+  // phrase a fleet actually types, and it parses: the verb matches, the link
+  // that follows is the whole of what is read, and the trailing words are
+  // ignored the same way they are for every link verb.
+  { verb: "warp", pattern: /^warp\b/i, kind: "warp" },
 ];
 
 /**
@@ -210,23 +296,192 @@ const AREA_COMMAND_VERBS: ReadonlyArray<{
 }> = [
   { verb: "salvage", pattern: /^salvage\b/i, kind: "salvage" },
   { verb: "loot", pattern: /^loot\b/i, kind: "loot" },
-  // ⚠ `stop` CANCELS A STANDING AREA JOB AND NOTHING ELSE. `salvage` and `loot`
-  // LATCH -- they are jobs that run until the grid is clear, not instants -- so
-  // there has to be a way to call one off early. It does not stop the bot, it
-  // does not stop the ship, and it has no effect on a broadcast or a target
-  // call: those carry their own freshness and their own authority. Anchored and
-  // word-bounded like the rest, so "stopped" never fires it.
+  // ⚠ `stop` CANCELS EVERY STANDING ORDER THIS PARSER CAN PRODUCE, AND HALTS
+  // THE SHIP. `salvage`, `loot`, `follow` and `destination` all LATCH -- they
+  // are jobs and standing behaviours that run until they are done, not instants
+  // -- so there has to be one word that calls them all off. It was smaller than
+  // this once: it cancelled the area job alone, and the comment here said in so
+  // many words that it did not stop the ship. That stopped being true when
+  // `destination` and the standing `follow` arrived, because both leave the hull
+  // MOVING, and an operator who types "stop" at a companion flying a route means
+  // the ship, not a bookkeeping flag. The operator's own words for this order
+  // are "it stops where it is".
+  //
+  // It still does NOT stop the bot, and it still has no effect on a broadcast or
+  // a target call: those carry their own freshness and their own authority, and
+  // a companion that went deaf to its fleet because somebody typed one word
+  // would be a worse pilot than one that kept flying. Anchored and word-bounded
+  // like the rest, so "stopped" never fires it.
+  //
+  // What `stop` MEANS to each latch lives in `fleetCompanionLoop.ts`; this table
+  // only says the word was typed.
   { verb: "stop", pattern: /^stop\b/i, kind: "stop" },
 ];
 
 /**
+ * The default `follow` stand-off, in metres, used by a bare `follow` and by
+ * any `follow` whose trailing text is not a distance.
+ *
+ * ⚠ DELIBERATELY THE SAME NUMBER AS `FLEET_MATE_ESCORT_RANGE_M`
+ * (`web/src/nav/scriptMacros.ts`), AND DELIBERATELY NOT THE SAME CONSTANT. That
+ * one's comment carries the reasoning for the value and it holds here unchanged:
+ * close enough to stay on the anchor's grid interaction -- inside a web or
+ * scram's own reach, should either carry one -- without literally sitting on top
+ * of them. What does NOT follow is a dependency. This module is a standalone
+ * parser whose only import is a type (see the header), on purpose, and reaching
+ * into the DSL's macro file for a number would couple the chat grammar to the
+ * block editor it exists not to be part of. Two constants, one reason; if either
+ * value ever moves it is a separate decision made with its own reason.
+ *
+ * Exported because the companion ladder needs a starting value for the range it
+ * latches, before anybody has typed `follow` at all.
+ */
+export const COMPANION_FOLLOW_RANGE_M = 2000;
+
+/**
+ * The band a `follow` distance is clamped into.
+ *
+ * ⚠ CLAMPED, NEVER REJECTED, and the difference matters. A distance outside the
+ * band is an UNAMBIGUOUS ORDER with a wrong magnitude -- "follow 100000 km" is
+ * still somebody saying "follow", who meant kilometres and a smaller number --
+ * so the order stands and only the number is corrected. Rejecting it would drop
+ * an order that was perfectly clear; returning `null` would make a typo silently
+ * un-follow a companion that was already following.
+ *
+ * The floor is 500 m because a stand-off tighter than that is an orbit in all
+ * but name: the ship ends up bumping the anchor it is trying to hold station
+ * off, which is what `keepAtRange` exists to avoid. The ceiling is 250 km
+ * because past that a hold-at-range order stops describing anything a fleet
+ * flies -- it is already far outside the grid a fight happens on -- and because
+ * a typo'd unit ("follow 100000 km") must not be able to become a real order.
+ */
+const FOLLOW_RANGE_FLOOR_M = 500;
+const FOLLOW_RANGE_CEILING_M = 250_000;
+
+/**
+ * A `follow` distance: digits, an optional decimal part, and an optional unit,
+ * with NOTHING else after it.
+ *
+ * ⚠ ANCHORED AT BOTH ENDS ON PURPOSE. A pattern that matched a leading number
+ * and ignored the rest would read "follow 10 km behind the fc and stay there" as
+ * 10 km and "follow 2 of us" as 2 km -- confidently, from a sentence that was
+ * never a distance. Demanding that the distance be the WHOLE of what follows the
+ * verb means anything else falls to the default, which is the right answer for
+ * every such line: they are all still "follow".
+ *
+ * ⚠ THE LONGER UNIT SPELLINGS COME FIRST IN THE ALTERNATION, because `m` would
+ * otherwise match the first letter of "metres" and then fail the end anchor,
+ * throwing away a distance that was written out in full.
+ */
+const FOLLOW_DISTANCE = /^(\d+(?:\.\d+)?)\s*(kilometres?|kilometers?|km|metres?|meters?|m)?$/i;
+
+/** A `follow` distance held inside the band above. */
+function clampFollowRange(metres: number): number {
+  return Math.min(FOLLOW_RANGE_CEILING_M, Math.max(FOLLOW_RANGE_FLOOR_M, metres));
+}
+
+/**
+ * The stand-off a `follow` line asks for, in whole metres.
+ *
+ * ⚠ A BARE NUMBER IS KILOMETRES, AND THAT IS A JUDGMENT CALL RATHER THAN A
+ * DERIVATION. Nothing in the game or in this codebase says what unit an
+ * undecorated number in chat means. It is read as km because the order the
+ * operator asked for is written `follow <N> km`, because a player typing a
+ * follow distance in a hurry types "follow 10" and means ten kilometres, and
+ * because the alternative reading -- ten metres -- clamps to the floor and gives
+ * them a companion glued to the anchor, which is the worse of the two ways to
+ * be wrong.
+ *
+ * ⚠ NEVER `null`. Every return here is a real distance: an unparsable trailing
+ * phrase ("follow me", "follow the fc") is not a broken order, it is the SAME
+ * order said in English, and a `follow` that decoded to nothing would leave a
+ * companion standing still while somebody with authority told it to come along.
+ *
+ * An absurd digit run (`follow 9999...9 km`) reads back as `Infinity` rather
+ * than as `NaN` -- the regex guarantees digits -- and the clamp turns that into
+ * the ceiling, which is the same answer any other over-large number gets.
+ */
+function followRangeFrom(remainder: string): number {
+  const trimmed = remainder.trim();
+  const match = trimmed.length === 0 ? null : FOLLOW_DISTANCE.exec(trimmed);
+  const digits = match?.[1];
+  if (digits === undefined) {
+    return COMPANION_FOLLOW_RANGE_M;
+  }
+  const unit = (match?.[2] ?? "").toLowerCase();
+  // Every metre spelling starts with "m" and no kilometre spelling does, so one
+  // test covers both lists -- and the empty unit (a bare number) falls to the
+  // kilometre branch, which is the decision above.
+  const metres = unit.startsWith("m") ? Number(digits) : Number(digits) * 1000;
+  return clampFollowRange(Math.round(metres));
+}
+
+/**
+ * The solar system a `destination` line names: a showinfo link's id, or a bare
+ * number, or `null`.
+ *
+ * The link branch is `travel`'s own, unchanged -- the same tag shapes, the same
+ * `parseItemID` bound. The bare-number branch is the addition (see the header),
+ * and it is run through that same bound rather than trusted: the digits are
+ * player-typed chat text either way.
+ *
+ * ⚠ THE BARE NUMBER MUST BE THE WHOLE REMAINDER. "destination 30000142" is an
+ * order; "destination 3 jumps out" is a sentence, and reading a system id out of
+ * its first number would send a companion somewhere nobody named.
+ */
+function destinationSystemFrom(remainder: string): number | null {
+  const linked = extractShowInfoItemID(remainder);
+  if (linked !== null) {
+    return linked;
+  }
+  const bare = /^\s*(\d+)\s*$/.exec(remainder);
+  const digits = bare?.[1];
+  return digits === undefined ? null : parseItemID(digits);
+}
+
+/**
+ * `follow` and `destination` — the verbs that carry a VALUE. See this file's
+ * header, "verbs that carry a value", for why neither of the two tables above
+ * could hold them.
+ *
+ * Each entry carries a READER over the text after the verb instead of a bare
+ * kind, which is the whole of the difference: the reader decides both what the
+ * value is and whether the line is an order at all. Same anchored,
+ * word-bounded `^verb\b` discipline as every other verb, so "following" and a
+ * mid-sentence "follow" never fire one.
+ */
+const VALUE_COMMAND_VERBS: ReadonlyArray<{
+  readonly verb: string;
+  readonly pattern: RegExp;
+  readonly read: (remainder: string) => ChatCommand | null;
+}> = [
+  {
+    verb: "follow",
+    pattern: /^follow\b/i,
+    read: (remainder) => ({ kind: "follow", rangeM: followRangeFrom(remainder) }),
+  },
+  {
+    verb: "destination",
+    pattern: /^destination\b/i,
+    read: (remainder) => {
+      const systemID = destinationSystemFrom(remainder);
+      return systemID === null ? null : { kind: "destination", systemID };
+    },
+  },
+];
+
+/**
  * The chat verbs this parser recognises (`target`/`primary` alias to the
- * same kind; `salvage`/`loot` are the link-free area verbs — see this
- * file's header).
+ * same kind; `salvage`/`loot`/`stop` are the link-free area verbs and
+ * `follow`/`destination` the value verbs — see this file's header).
+ *
+ * Assembled from the three tables rather than written out, so a verb can only
+ * be missing from this list by being missing from the parser too.
  */
 export const CHAT_COMMAND_VERBS: readonly string[] = Object.freeze([
   ...COMMAND_VERBS.map((c) => c.verb),
   ...AREA_COMMAND_VERBS.map((c) => c.verb),
+  ...VALUE_COMMAND_VERBS.map((c) => c.verb),
 ]);
 
 /**
@@ -285,17 +540,30 @@ function extractShowInfoItemID(text: string): number | null {
  * "the chat line" — the same reason `isChatCommandSenderAllowed` below also
  * takes the whole message.
  *
- * Checks the area verbs (`salvage`, `loot`) FIRST and returns straight away
- * on a match, deliberately before the link-extraction loop below ever runs
- * — those two verbs never enter it, so the "matched but no usable link
- * followed" -> `null` rule further down cannot apply to them and is not
- * being loosened to accommodate them. See this file's header.
+ * Checks the area verbs (`salvage`, `loot`, `stop`) and then the value verbs
+ * (`follow`, `destination`) FIRST, returning straight away on a match and
+ * deliberately before the link-extraction loop below ever runs — none of those
+ * five verbs enters it, so the "matched but no usable link followed" -> `null`
+ * rule further down cannot apply to them and is not being loosened to
+ * accommodate them. See this file's header.
+ *
+ * ⚠ A VALUE VERB MAY STILL DECODE TO `null`, AND THAT IS ITS OWN READER'S
+ * ANSWER, not this loop's rule leaking into it. `destination` with nothing
+ * usable after it is not an order, the same way `travel` with no link is not;
+ * `follow` has no such case at all and always decodes. The two readers state
+ * their own reasons.
  */
 export function parseChatCommand(message: ChatMessage): ChatCommand | null {
   const trimmed = message.message.trim();
   for (const { pattern, kind } of AREA_COMMAND_VERBS) {
     if (pattern.test(trimmed)) {
       return { kind };
+    }
+  }
+  for (const { pattern, read } of VALUE_COMMAND_VERBS) {
+    const verbMatch = pattern.exec(trimmed);
+    if (verbMatch !== null) {
+      return read(trimmed.slice(verbMatch[0].length));
     }
   }
   for (const { pattern, kind } of COMMAND_VERBS) {

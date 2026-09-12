@@ -190,6 +190,7 @@ import {
   type CompanionSetup,
   type FleetCompanionRequest,
   type CompanionAbandonmentRecord,
+  type CompanionCargoCharge,
 } from "../nav/fleetCompanionLoop.ts";
 import { highSlotMiningModules, isDockableKind, ungroupedHighSlotModules } from "../space/rowActions.ts";
 import {
@@ -5572,6 +5573,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    */
   let companionDroneStackSizes = new Map<number, number>();
 
+  /**
+   * The reload rung's three facts, and the clock that rations them.
+   *
+   * ⚠ THROTTLED, BECAUSE EACH IS A ROUND TRIP AND NEITHER CHANGES ON A TICK'S
+   * TIMESCALE. `readCompanionFitFacts` reads the fit ONCE at start, so nothing
+   * the ladder sees per tick knows whether a gun still has rounds in it; that
+   * is the gap this fills. Doing it every two seconds would add two calls per
+   * companion per tick on the bot host for an answer that changes when a
+   * magazine empties -- minutes apart, not seconds. The rung is written to
+   * cost nothing on a stale answer (it confirms a load by watching the gun
+   * leave this list on a LATER tick, never by the call returning), so the
+   * cadence below is a cost decision and not a correctness one.
+   */
+  const COMPANION_AMMO_READ_INTERVAL_MS = 10_000;
+  let companionAmmoReadAtMs = 0;
+  let companionAmmoFacts: {
+    emptyWeaponModuleIDs: readonly number[] | null;
+    cargoCharges: readonly CompanionCargoCharge[] | null;
+    weaponChargeGroups: Readonly<Record<number, readonly number[]>> | null;
+  } = { emptyWeaponModuleIDs: null, cargoCharges: null, weaponChargeGroups: null };
+
   function makeFleetCompanionDeps(): FleetCompanionDeps {
     return {
       observe: async (): Promise<FleetCompanionObservation> => {
@@ -5928,6 +5950,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // orders", never as "anybody will do".
           fleetCommanderCharacterIDs:
             fleetSnapshot === null ? null : fleetCommanderCharacterIDs(fleetSnapshot),
+          // The reload rung's three facts. ⚠ THE REQUEST IS WHAT SAYS WHICH
+          // MODULES ARE GUNS — `weaponModuleIDs` is derived from the hull at
+          // start (`requestForFit`), and without it this read cannot tell a
+          // turret from any other module that happens to take a charge. A run
+          // with no live request yet reads nothing and reports "cannot say".
+          ...(liveCompanionRequest === null
+            ? {
+                emptyWeaponModuleIDs: null,
+                cargoCharges: null,
+                weaponChargeGroups: null,
+              }
+            : await readCompanionAmmoFacts(
+                liveCompanionRequest,
+                status.inSpace === true,
+                Date.now(),
+              )),
         };
       },
       issue: async (action) => {
@@ -5940,6 +5978,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "warp":
             await api.warpTo(action.targetID, null, callOptions);
+            return;
+          case "warpToFleetMember":
+            // Rung e2's other half: an id the ladder could not find on its own
+            // grid, which got that far only by being a fleet-mate. The server
+            // resolves where they are — see the route's own note.
+            await api.warpToFleetMember(action.characterID, null, callOptions);
             return;
           case "approach":
             // ⚠ `range` IS WHERE TO STOP, and null hugs the object. Salvaging
@@ -6079,6 +6123,64 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // passing 0 is what asks it to. See the action's own comment.
           case "jumpGate":
             await api.jump(action.gateID, 0, callOptions);
+            return;
+          // The standing follow rung: hold station off the fleet commander at
+          // the range a `follow` chat order named — `CmdFollowBall` with a
+          // non-zero range, the same call the DSL's own `follow-fleet-mate`
+          // block makes for a hand-picked mate.
+          //
+          // ⚠ THE RUNG ISSUES THIS ONCE PER ANCHOR AND RANGE, NEVER ONCE PER
+          // TICK, and this case is written on that promise. The server treats
+          // it as a STANDING order: the ship goes on holding that station with
+          // nothing further sent. A rung that re-sent it every tick would be
+          // pure bridge traffic for a command already in force — which is why
+          // the memory gate lives up in the ladder and not down here.
+          case "keepAtRange":
+            await api.keepAtRange(action.targetID, action.range, callOptions);
+            return;
+          // `stop` in fleet chat — the only companion action that exists to
+          // UNDO standing orders rather than to issue one.
+          //
+          // ⚠ BOTH HALVES ARE NEEDED AND THE ORDER IS RETAIL'S, mirroring
+          // `flow.stopShip()` above: abort the browser decide-loop FIRST so it
+          // cannot issue another move into the stop, then tell the server to
+          // cut the engines. Aborting alone ends the route and leaves the ship
+          // coasting on the leg it was already flying; stopping alone halts a
+          // ship the autopilot sets moving again on its next tick. A companion
+          // told to stop has to end up stationary by both measures, because
+          // the operator's words for this order are "it stops where it is".
+          case "stopShip":
+            autopilot?.abort();
+            await api.stopShip(callOptions);
+            return;
+          // The reload rung: put rounds in the guns from the ship's own cargo.
+          //
+          // ⚠ ALWAYS "cargo", NEVER "hangar". The BFF pins the concrete source
+          // id from the session's own active ship and docked station (see
+          // `api.loadAmmo`), and a companion that needs this is in space, where
+          // there is no station hangar to draw from — asking for one would be
+          // asking the server for a location this pilot is not at.
+          //
+          // ⚠ NOTHING IS READ BACK OFF THIS CALL, AND NOTHING CAN BE. Which
+          // charges a module accepts lives in dogma attributes the browser has
+          // no allowlisted read for, so the server refuses an incompatible load
+          // with its own words that never reach this layer — an accepted load
+          // and a refused one look identical from here. That is why the rung
+          // confirms by watching the gun leave `emptyWeaponModuleIDs` on a
+          // later tick and keeps its own attempt budget, exactly as rung 4's
+          // tag write does.
+          case "loadAmmo":
+            await api.loadAmmo(action.moduleIDs, [action.chargeItemID], "cargo", callOptions);
+            // ⚠ THE ONE THING THAT MAKES THE RUNG'S ATTEMPT BUDGET MEAN WHAT IT
+            // SAYS. Its budget is three ATTEMPTS per gun, but the facts above
+            // refresh only every ten seconds against a two-second tick — so
+            // without this, all three could be spent against the SAME stale
+            // "still empty" reading, and a load that actually worked would cost
+            // three calls before the next refresh proved it. Expiring the cache
+            // here makes the very next tick re-read, so each attempt is judged
+            // against a fresh answer. Costs one extra pair of reads per load,
+            // which only happens when a gun was genuinely dry.
+            companionAmmoReadAtMs = 0;
             return;
           default: {
             // ⚠ EXHAUSTIVE ON PURPOSE. Every FleetCompanionAction kind MUST be
@@ -6789,6 +6891,112 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * `resolveMiningModuleIDs` first; relying on that here would be an invisible
    * coupling to a mining read the companion has no other use for.
    */
+  /**
+   * The Charge category. Not a guess: this server names it itself, twice —
+   * `services/fitting/liveFittingState.js:44` and
+   * `services/inventory/invBrokerService.js:475` both declare
+   * `CHARGE_CATEGORY_ID = 8`.
+   *
+   * It is what keeps the reload rung's "largest stack" fallback from reaching
+   * for a hold full of ore: without a category filter the biggest stack in a
+   * cargo bay is very often not ammunition at all.
+   */
+  const CHARGE_CATEGORY_ID = 8;
+
+  /**
+   * What the reload rung needs to know, read at most every
+   * `COMPANION_AMMO_READ_INTERVAL_MS` and served from the cache in between.
+   *
+   * ⚠ STRAIGHT TO THE `api.*` WRAPPERS, NEVER THROUGH `loadFitting()` OR
+   * `loadInventory()`. Those two APPLY to the store, which would repaint the
+   * fitting and inventory panels of whichever pilot the player happens to be
+   * looking at — and a background companion must not move the furniture in
+   * front of a human (R92: a background pilot is still working, and its flow
+   * outlives the panel). Decoding here and keeping the answer in this closure
+   * leaves the store alone.
+   *
+   * ⚠ EVERY FIELD IS THREE-STATE. `null` means "could not read", which the
+   * ladder treats as "cannot say" and never as "there is none" — a fit read
+   * that stumbled must not be reported as a ship with no empty guns, nor a
+   * cargo read that stumbled as a ship with no ammunition aboard.
+   */
+  async function readCompanionAmmoFacts(
+    request: FleetCompanionRequest,
+    inSpace: boolean,
+    nowMs: number,
+  ): Promise<typeof companionAmmoFacts> {
+    // Docked there is nothing here to decide: the rung is guarded on being in
+    // space, and a docked pilot's guns are not drawing from this cargo bay.
+    if (!inSpace || nowMs - companionAmmoReadAtMs < COMPANION_AMMO_READ_INTERVAL_MS) {
+      return companionAmmoFacts;
+    }
+    // Stamped BEFORE the reads, so a read that throws waits out the full
+    // interval instead of being retried on every tick.
+    companionAmmoReadAtMs = nowMs;
+
+    let emptyWeaponModuleIDs: readonly number[] | null = null;
+    let weaponChargeGroups: Readonly<Record<number, readonly number[]>> | null = null;
+    try {
+      const reads = await api.loadFitting(callOptions);
+      if (!reads.errors.slots && !reads.errors.online) {
+        const slots = buildSlots(reads.slots, reads.shipInfo, reads.online);
+        const chargeFits = decodeChargeFits(reads.chargeFits);
+        const guns = new Set(request.weaponModuleIDs);
+        const empty: number[] = [];
+        const groups: Record<number, readonly number[]> = {};
+        for (const slot of slots) {
+          const module = slot.module;
+          if (module === null || !module.online || !guns.has(module.itemID)) {
+            continue;
+          }
+          const fitment = chargeFits[module.typeID];
+          groups[module.itemID] = fitment?.groups ?? [];
+          // ⚠ ONLY A MODULE THAT DEMONSTRABLY TAKES A CHARGE COUNTS AS EMPTY.
+          // `decodeChargeFits` returns `{}` both for a module that takes none
+          // and for a fit whose charge data never arrived — its own comment
+          // says so — so a missing fitment is "cannot say", not "empty". This
+          // is the same three-state `companionFitCheck.takesCharge` keeps, for
+          // the same reason: a companion must not spend its attempt budget
+          // trying to load rounds into a shield hardener.
+          if (module.charge === null && (fitment?.groups.length ?? 0) > 0) {
+            empty.push(module.itemID);
+          }
+        }
+        emptyWeaponModuleIDs = empty;
+        weaponChargeGroups = groups;
+      }
+    } catch {
+      // Left null on purpose. See the three-state note above.
+    }
+
+    let cargoCharges: readonly CompanionCargoCharge[] | null = null;
+    try {
+      const panel = await api.loadInventory(callOptions);
+      const cargo = decodeContainer(
+        panel.cargo.list,
+        panel.cargo.capacity,
+        panel.cargo.error,
+        panel.volumes,
+      );
+      cargoCharges =
+        cargo.error !== null
+          ? null
+          : cargo.rows
+              .filter((row) => row.categoryID === CHARGE_CATEGORY_ID && row.quantity > 0)
+              .map((row) => ({
+                itemID: row.itemID,
+                typeID: row.typeID,
+                groupID: row.groupID,
+                quantity: row.quantity,
+              }));
+    } catch {
+      // Left null on purpose. See the three-state note above.
+    }
+
+    companionAmmoFacts = { emptyWeaponModuleIDs, cargoCharges, weaponChargeGroups };
+    return companionAmmoFacts;
+  }
+
   async function readCompanionFitFacts(): Promise<CompanionFitFacts> {
     try {
       await loadFitting();

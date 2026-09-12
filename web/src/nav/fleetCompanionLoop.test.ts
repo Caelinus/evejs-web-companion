@@ -10,6 +10,7 @@ import {
   decideCompanionAction,
   freshLadderMemory,
   supervisorsInFleet,
+  type CompanionCargoCharge,
   type CompanionDecision,
   type FleetCompanionAction,
   type CompanionFlee,
@@ -2025,6 +2026,75 @@ test("a chat 'jump <link>' reaches the JumpTo rung, through all four decideClose
   const arrived = decideCompanionAction(request, obs({ snapshot: gridWithGate(1_000), chatMessages }));
   assert.deepEqual(arrived.action, { kind: "jumpGate", gateID: GATE });
   assert.equal(arrived.followingOrderFrom, "chat");
+});
+
+test("a chat 'warp <link>' to something ON THIS GRID is an ordinary item warp", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+  };
+  const decision = decideCompanionAction(
+    request,
+    obs({
+      snapshot: gridWithEntities([LOGI]),
+      chatMessages: [chatLine(chatCommandText("warp", LOGI), HUMAN)],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "warp", targetID: LOGI });
+  assert.equal(decision.followingOrderFrom, "chat");
+});
+
+test("a chat 'warp <fleet-mate>' warps to the MEMBER, because the id is not on this grid", () => {
+  // ⚠ THE "COME TO ME" CASE, AND THE ONLY ORDER IN THIS SET THAT IS USEFUL AT A
+  // DISTANCE. A character link carries a CHARACTER id, which is in nobody's
+  // grid: the ladder recognises it as a fleet-mate and hands the server its own
+  // fleet-member warp, which resolves where that member is.
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+  };
+  const decision = decideCompanionAction(
+    request,
+    obs({
+      snapshot: gridWithEntities([LOGI]),
+      chatMessages: [chatLine(chatCommandText("warp", HUMAN), HUMAN)],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "warpToFleetMember", characterID: HUMAN });
+  assert.equal(decision.followingOrderFrom, "chat");
+  assert.match(decision.why, /fleet-mate/i);
+});
+
+test("a chat 'warp <id>' naming neither a grid object nor a fleet-mate does nothing", () => {
+  // The refusal that keeps a mistyped or stale link from becoming a warp to
+  // somewhere nobody named. It falls through to this pilot's own ladder rather
+  // than guessing at the id.
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+  };
+  const decision = decideCompanionAction(
+    request,
+    obs({
+      snapshot: gridWithEntities([LOGI]),
+      chatMessages: [chatLine(chatCommandText("warp", 424242), HUMAN)],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "warp");
+  assert.notEqual(decision.action.kind, "warpToFleetMember");
+  assert.equal(decision.followingOrderFrom ?? null, null);
+});
+
+test("a roster that could not be read refuses a member warp rather than taking the id on faith", () => {
+  const request: FleetCompanionRequest = {
+    ...REQUEST,
+  };
+  const decision = decideCompanionAction(
+    request,
+    obs({
+      snapshot: gridWithEntities([LOGI]),
+      fleetMemberCharacterIDs: null,
+      chatMessages: [chatLine(chatCommandText("warp", HUMAN), HUMAN)],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "warpToFleetMember");
 });
 
 test("lastOrderHeard and the why sentence name CHAT, not the fleet, when the order came from chat", () => {
@@ -4960,4 +5030,999 @@ test("a target that leaves the grid is dropped rather than waited on", () => {
     { ...committed.memory, lootTargetID: 999999 },
   );
   assert.equal(vanished.memory.lootTargetID, CAN, "it picks again rather than stalling");
+});
+
+// --- the standing `follow` ---------------------------------------------------
+//
+// Following is the companion's STANDING behaviour: nobody has to type anything
+// for it to happen, `follow <N> km` only changes the distance, and the anchor is
+// whoever the ROSTER names a commander -- never whoever typed. These tests pin
+// where the rung sits (the very bottom) as hard as they pin what it issues,
+// because a formation-keeping rung that outranked anything would be a companion
+// that answers nothing else.
+
+/** The fleet commander's own ship, on this grid. */
+const FC_SHIP = 200010;
+/** A second commander's ship, for the re-anchor case. */
+const FC_SHIP_2 = 200011;
+
+/**
+ * A grid carrying this ship plus one ship per (itemID, characterID) pair.
+ * `characterID` is the field `fleetShipsOnGrid` matches the roster on, and
+ * `gridWithEntities` above deliberately leaves it unset — which is why every
+ * other test's grid anchors nothing.
+ */
+function gridWithFleetShips(
+  ships: readonly { readonly itemID: number; readonly characterID: number }[],
+): SpaceSnapshot {
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      ...ships.map((ship, index) => ({
+        itemID: ship.itemID,
+        kind: "ship",
+        isSelf: false,
+        characterID: ship.characterID,
+        position: { x: (index + 1) * 5_000, y: 0, z: 0 },
+        radius: 0,
+        mode: null,
+      })),
+    ],
+  } as unknown as SpaceSnapshot;
+}
+
+/** The commander's ship alone on the grid — the ordinary escort case. */
+function fcGrid(): SpaceSnapshot {
+  return gridWithFleetShips([{ itemID: FC_SHIP, characterID: HUMAN }]);
+}
+
+/**
+ * The one field `decideDestinationTrip` reads off flight status. Cast the same
+ * way every snapshot helper here is: the rung reads one property and the rest
+ * of `FlightStatus` is noise a test should not have to invent.
+ */
+function inSystem(solarSystemID: number | null): FleetCompanionObservation["flightStatus"] {
+  return { solarSystemID } as unknown as FleetCompanionObservation["flightStatus"];
+}
+
+/** The default escort distance, mirrored from the parser that owns it. */
+const DEFAULT_FOLLOW_M = 2000;
+
+test("with nobody saying anything, a companion holds station on its commander", () => {
+  // ⚠ THE STANDING HALF. No chat at all: following is what a companion does
+  // when nothing above it is acting, not something it is told to start.
+  const decision = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  assert.deepEqual(decision.action, {
+    kind: "keepAtRange",
+    targetID: FC_SHIP,
+    range: DEFAULT_FOLLOW_M,
+  });
+  assert.equal(decision.phase, "Following");
+});
+
+test("the keepAtRange goes out ONCE and is not re-sent on the next tick", () => {
+  // ⚠ `CmdFollowBall` IS A STANDING SERVER-SIDE ORDER. Re-sending it every tick
+  // would spend the loop's one call per tick telling the server what it is
+  // already doing, and starve every rung beneath -- of which there are none, but
+  // the bridge traffic alone is the reason.
+  const first = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  assert.equal(first.action.kind, "keepAtRange");
+
+  const second = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }), first.memory);
+  assert.equal(second.action.kind, "wait");
+  assert.equal(second.phase, "Following", "the readout still says what it is doing");
+});
+
+test("a NEW anchor re-issues: the fleet changed commander, the companion re-forms", () => {
+  const first = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  const reanchored = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: gridWithFleetShips([{ itemID: FC_SHIP_2, characterID: 90000007 }]),
+      fleetMemberCharacterIDs: [HUMAN, COMPANION, 90000007],
+      fleetCommanderCharacterIDs: [90000007],
+    }),
+    first.memory,
+  );
+  assert.deepEqual(reanchored.action, {
+    kind: "keepAtRange",
+    targetID: FC_SHIP_2,
+    range: DEFAULT_FOLLOW_M,
+  });
+});
+
+test("a NEW range re-issues against the same anchor", () => {
+  const first = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  const closer = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("follow 10 km", HUMAN, 2_000)] }),
+    first.memory,
+  );
+  assert.deepEqual(closer.action, { kind: "keepAtRange", targetID: FC_SHIP, range: 10_000 });
+
+  // And then holds there without re-sending it.
+  const held = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("follow 10 km", HUMAN, 2_000)] }),
+    closer.memory,
+  );
+  assert.equal(held.action.kind, "wait");
+  assert.equal(held.phase, "Following");
+});
+
+test("the range a 'follow' named outlives the message that carried it", () => {
+  // Same latch rule as an area job: a heard order changes it, silence does not.
+  const heard = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("follow 10 km", HUMAN)] }),
+  );
+  assert.equal(heard.memory.followRangeM, 10_000);
+
+  const silent = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [] }),
+    heard.memory,
+  );
+  assert.equal(silent.memory.followRangeM, 10_000, "silence must not reset the distance");
+});
+
+test("a 'follow' from someone who is NOT a commander changes nothing", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("follow 100 km", UNLISTED_SENDER)] }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "keepAtRange",
+    targetID: FC_SHIP,
+    range: DEFAULT_FOLLOW_M,
+  });
+});
+
+test("in warp, docked, or with an unread roster, the follow rung issues nothing", () => {
+  // ⚠ EACH OF THE THREE IS REFUSED BY A DIFFERENT RUNG, and only the middle one
+  // is refused by the follow rung's own gates. Rung 1 takes the warp; the
+  // supervision gate takes the unread roster (which is why `decideFollow`'s own
+  // roster check is belt and braces -- see its comment). What is worth pinning
+  // is the OUTCOME: none of the three puts a `keepAtRange` on the wire.
+  for (const blind of [
+    obs({ snapshot: fcGrid(), inWarp: true }),
+    obs({ snapshot: null, inSpace: false, docked: true }),
+    obs({ snapshot: fcGrid(), fleetMemberCharacterIDs: null }),
+  ]) {
+    const decision = decideCompanionAction(REQUEST, blind);
+    assert.notEqual(decision.action.kind, "keepAtRange", JSON.stringify({ inWarp: blind.inWarp }));
+  }
+});
+
+test("no commander on this grid means no anchor, and never a substitute one", () => {
+  // ⚠ A fleet-mate who is not in charge is NOT the anchor. A companion whose FC
+  // has not landed yet stands by rather than forming up on whoever is nearest.
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithFleetShips([{ itemID: FC_SHIP_2, characterID: 90000007 }]) }),
+  );
+  assert.equal(decision.action.kind, "wait");
+  assert.equal(decision.phase, "Standing by");
+});
+
+test("an unreadable commander list anchors nothing — null is never 'anybody'", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), fleetCommanderCharacterIDs: null }),
+  );
+  assert.equal(decision.phase, "Standing by");
+});
+
+test("follow is BENEATH everything — a target call to obey wins the tick", () => {
+  // The rung moves the ship for ever, so it sits at the very bottom. A
+  // companion with a call to answer answers it; formation waits.
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: gridWithFleetShips([
+        { itemID: FC_SHIP, characterID: HUMAN },
+        { itemID: TACKLE, characterID: 90000008 },
+      ]),
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "lock", targetID: TACKLE });
+});
+
+// --- the `destination` trip ---------------------------------------------------
+//
+// The operator's words: "Companion sets destination and travels to it without
+// additional interruption, unless stop is written in chat. It stops where it
+// is." That sentence is why this rung is the ONE thing in the ladder that
+// outranks the fleet's own calls — and why it still sits below the flee.
+
+test("'destination <id>' latches and hands the route to the autopilot, once", () => {
+  const first = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  assert.deepEqual(first.action, { kind: "travelTo", systemID: SYSTEM_B });
+  assert.equal(first.memory.destinationSystemID, SYSTEM_B);
+  assert.equal(first.followingOrderFrom, "chat");
+
+  // ⚠ The route runs on the SHARED autopilot, a separate decide-loop. Re-issuing
+  // would restart the solver twice a second.
+  const riding = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [] }),
+    first.memory,
+  );
+  assert.equal(riding.action.kind, "wait");
+  assert.equal(riding.phase, "Travelling", "a multi-jump ride must not report Standing by");
+  assert.equal(riding.memory.destinationSystemID, SYSTEM_B, "silence does not cancel a trip");
+});
+
+test("'destination <link>' is the same order, written the other way", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine(chatCommandText("destination", SYSTEM_B), HUMAN)],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "travelTo", systemID: SYSTEM_B });
+});
+
+test("a trip is NOT derailed by a Target broadcast arriving mid-route", () => {
+  // ⚠ THE WHOLE POINT OF THE RUNG'S PLACEMENT. "Without additional
+  // interruption" means the fleet's own calls do not win while a trip stands;
+  // beneath rung 7 this companion would stop two jumps out to lock something.
+  const started = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const called = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: gridWithFleetShips([
+        { itemID: FC_SHIP, characterID: HUMAN },
+        { itemID: TACKLE, characterID: 90000008 },
+      ]),
+      fleetBroadcast: fleetBroadcast("Target", TACKLE),
+      chatMessages: [],
+    }),
+    started.memory,
+  );
+  assert.equal(called.action.kind, "wait");
+  assert.equal(called.phase, "Travelling");
+  assert.notEqual(called.action.kind, "lock");
+});
+
+test("a trip still yields to the flee — a dying companion leaves, it does not keep flying", () => {
+  // ⚠ THE DELIBERATE NARROW READING OF "without additional interruption": do not
+  // be distracted by the fleet's calls, NOT keep flying while the ship dies.
+  const grid = gridWithFleetShips([{ itemID: FC_SHIP, characterID: HUMAN }]) as unknown as {
+    entities: unknown[];
+  };
+  grid.entities.push({
+    itemID: 60000001,
+    kind: "station",
+    isSelf: false,
+    position: { x: 200_000, y: 0, z: 0 },
+    radius: 0,
+    mode: null,
+  });
+  const started = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: grid as unknown as SpaceSnapshot,
+      chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)],
+    }),
+  );
+  assert.equal(started.memory.destinationSystemID, SYSTEM_B);
+
+  const dying = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: grid as unknown as SpaceSnapshot,
+      chatMessages: [],
+      shieldRatio: 0.05,
+      armorRatio: 0.05,
+      hullRatio: 0.05,
+      health: 0.05,
+    }),
+    started.memory,
+  );
+  assert.equal(dying.phase, "Getting clear");
+  assert.deepEqual(dying.action, { kind: "warp", targetID: 60000001 });
+  // ⚠ AND THE TRIP IS NOT LOST, ONLY OUTRANKED. Nothing about being hurt says
+  // the operator changed their mind about where this pilot was going.
+  assert.equal(dying.memory.destinationSystemID, SYSTEM_B);
+});
+
+test("arriving clears the trip, and the companion goes back to its own ladder", () => {
+  const started = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const arrived = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [], flightStatus: inSystem(SYSTEM_B) }),
+    started.memory,
+  );
+  assert.equal(arrived.memory.destinationSystemID, null);
+  assert.notEqual(arrived.phase, "Travelling");
+});
+
+test("a flight status that cannot say where the ship is leaves the trip standing", () => {
+  // "Could not tell" is never "not there yet" and never "arrived". The trip
+  // stands rather than ending on a read that failed.
+  const started = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const unreadable = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [], flightStatus: inSystem(null) }),
+    started.memory,
+  );
+  assert.equal(unreadable.memory.destinationSystemID, SYSTEM_B);
+  assert.equal(unreadable.phase, "Travelling");
+});
+
+test("a NEW destination replaces the old one and routes again", () => {
+  const first = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const changed = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine("destination " + SYSTEM_C, HUMAN, 5_000)],
+    }),
+    first.memory,
+  );
+  assert.deepEqual(changed.action, { kind: "travelTo", systemID: SYSTEM_C });
+});
+
+test("a 'destination' from someone who is NOT a commander starts nothing", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine("destination " + SYSTEM_B, UNLISTED_SENDER)],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "travelTo");
+  assert.equal(decision.memory.destinationSystemID, null);
+});
+
+// --- `stop`: the one word that calls all of it off ---------------------------
+
+test("'stop' cancels the trip, halts the ship, and suspends the standing follow", () => {
+  const riding = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  assert.equal(riding.memory.destinationSystemID, SYSTEM_B);
+
+  const stopped = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("stop", HUMAN, 5_000)] }),
+    riding.memory,
+  );
+  assert.deepEqual(stopped.action, { kind: "stopShip" });
+  assert.equal(stopped.memory.destinationSystemID, null, "the trip is off");
+  assert.equal(stopped.memory.followHeld, true, "and the formation is suspended");
+});
+
+test("the stopShip goes out ONCE per 'stop' heard, not once per tick it is fresh", () => {
+  // ⚠ A chat line stands for its whole freshness window. A ship told to stop
+  // every two seconds for thirty seconds is a ship nothing else can move.
+  const chatMessages = [chatLine("stop", HUMAN, 5_000)];
+  const first = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(), chatMessages }));
+  assert.deepEqual(first.action, { kind: "stopShip" });
+
+  const second = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages }),
+    first.memory,
+  );
+  assert.notEqual(second.action.kind, "stopShip");
+});
+
+test("a suspended follow stays suspended — nothing but a 'follow' brings it back", () => {
+  const stopped = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("stop", HUMAN, 5_000)] }),
+  );
+  // The order ages out of the window; the hold does not age with it.
+  const quiet = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [] }),
+    stopped.memory,
+  );
+  assert.notEqual(quiet.action.kind, "keepAtRange");
+  assert.equal(quiet.phase, "Standing by");
+  assert.equal(quiet.memory.followHeld, true);
+});
+
+test("a later 'follow' resumes the standing behaviour — the operator's own resume", () => {
+  const stopped = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("stop", HUMAN, 5_000)] }),
+  );
+  const resumed = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("follow 5 km", HUMAN, 9_000)] }),
+    stopped.memory,
+  );
+  assert.deepEqual(resumed.action, { kind: "keepAtRange", targetID: FC_SHIP, range: 5_000 });
+  assert.equal(resumed.memory.followHeld, false);
+});
+
+test("order within one backlog is decided by timestamp, not by reading order", () => {
+  // ⚠ THE REASON THE LATCH REPLAYS THE BACKLOG IN TIME ORDER. Both lines are
+  // visible on the same tick; the LAST thing said is what stands, per latch.
+  const stopThenFollow = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine("follow 5 km", HUMAN, 9_000), chatLine("stop", HUMAN, 5_000)],
+    }),
+  );
+  assert.equal(stopThenFollow.memory.followHeld, false, "the follow is newer, so it stands");
+  assert.equal(stopThenFollow.memory.followRangeM, 5_000);
+
+  const followThenStop = decideCompanionAction(
+    REQUEST,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine("follow 5 km", HUMAN, 5_000), chatLine("stop", HUMAN, 9_000)],
+    }),
+  );
+  assert.equal(followThenStop.memory.followHeld, true, "the stop is newer, so it wins");
+  assert.deepEqual(followThenStop.action, { kind: "stopShip" });
+});
+
+test("'stop' from someone who is NOT a commander stops nothing", () => {
+  const riding = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const ignored = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("stop", UNLISTED_SENDER, 5_000)] }),
+    riding.memory,
+  );
+  assert.notEqual(ignored.action.kind, "stopShip");
+  assert.equal(ignored.memory.destinationSystemID, SYSTEM_B);
+  assert.equal(ignored.memory.followHeld, false);
+});
+
+test("a re-typed 'destination' after a 'stop' routes again rather than sitting still", () => {
+  // ⚠ THE BUG A SHARED `lastRoutedSystemID` WOULD HAVE CAUSED. `stop` clears the
+  // job but could not clear rung 7's record of the route, so the same system
+  // named twice would have found itself already routed and issued nothing.
+  const riding = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const stopped = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("stop", HUMAN, 5_000)] }),
+    riding.memory,
+  );
+  const again = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN, 9_000)] }),
+    stopped.memory,
+  );
+  assert.deepEqual(again.action, { kind: "travelTo", systemID: SYSTEM_B });
+});
+
+test("a 'stop' is still heard while the pilot is getting safe", () => {
+  // Same reason the area latch is updated above the supervision gate: an
+  // operator who calls a trip off must not find it standing when they come back.
+  const riding = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: fcGrid(), chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)] }),
+  );
+  const whileAlone = decideCompanionAction(
+    REQUEST,
+    alone({
+      snapshot: gridWithStation(200_000),
+      chatMessages: [chatLine("stop", HUMAN, 5_000)],
+      fleetCommanderCharacterIDs: [HUMAN],
+    }),
+    riding.memory,
+  );
+  assert.equal(whileAlone.memory.destinationSystemID, null);
+  assert.equal(whileAlone.memory.followHeld, true);
+});
+
+// --- the reload rung ---------------------------------------------------------
+//
+// ⚠ NOTHING RELOADS A PLAYER'S GUNS ON THIS SERVER -- the charge item is removed
+// outright when the last round is spent and no auto-reload path reaches a player
+// turret. See `decideReload`'s own header for the call sites. That is why these
+// tests are about a rung existing at all, and why it sits above the fleet's own
+// target calls: a companion answering a call with an empty rack is answering
+// nothing.
+
+/** Synthetic gun item ids, distinct from the fire rung's rack above. */
+const AUTOCANNON = 11500001;
+const AUTOCANNON_2 = 11500002;
+const LAUNCHER = 11500003;
+
+/**
+ * Synthetic charge GROUP ids. Deliberately not real ones: the ladder never looks
+ * a group up, it only tests membership of the list the observation carries, so a
+ * real id would suggest a table this file consults and does not.
+ */
+const PROJECTILE_GROUP = 700;
+const MISSILE_GROUP = 701;
+
+/** Synthetic charge stack item ids, in the cargo bay. */
+const SLUGS = 12000001;
+const SLUGS_FEW = 12000002;
+const ROCKETS = 12000003;
+const SLUGS_TIED_HIGH = 12000005;
+const SLUGS_TIED_LOW = 12000004;
+
+function charge(
+  itemID: number,
+  quantity: number,
+  groupID: number | null,
+): CompanionCargoCharge {
+  // The type id is carried by the shape and read by nothing in the ladder -- the
+  // stack is named to the server by ITEM id -- so it is derived from the item id
+  // rather than invented per test.
+  return { itemID, typeID: itemID + 100_000, groupID, quantity };
+}
+
+/** A rack of guns fitted to this hull, so the reload rung has weapons to be empty. */
+const ARMED: FleetCompanionRequest = {
+  ...REQUEST,
+  weaponModuleIDs: [AUTOCANNON, AUTOCANNON_2, LAUNCHER],
+};
+
+test("an empty gun with matching ammunition in cargo is reloaded from cargo", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
+  assert.equal(decision.phase, "Reloading");
+  assert.equal(decision.memory.reloadAttempts[AUTOCANNON], 1);
+});
+
+test("with several compatible stacks it takes the LARGEST -- the operator's own rule", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [
+        charge(SLUGS_FEW, 50, PROJECTILE_GROUP),
+        charge(SLUGS, 500, PROJECTILE_GROUP),
+        // ⚠ THE BIGGEST STACK ABOARD, AND IT IS NOT PICKED: compatibility ranks
+        // first, and only a rack that matches NOTHING falls back to size alone.
+        charge(ROCKETS, 9_000, MISSILE_GROUP),
+      ],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
+});
+
+test("two stacks of the same size break the tie on the LOWER item id, every tick", () => {
+  // ⚠ NOT COSMETIC. Without a second key the pick would follow whatever order
+  // the cargo read returned, which is neither stable across ticks nor assertable
+  // here -- and a gun that chose differently each tick would break the banking.
+  const cargo = [
+    charge(SLUGS_TIED_HIGH, 300, PROJECTILE_GROUP),
+    charge(SLUGS_TIED_LOW, 300, PROJECTILE_GROUP),
+  ];
+  const first = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: cargo,
+    }),
+  );
+  const reversed = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [...cargo].reverse(),
+    }),
+  );
+  const expected = {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS_TIED_LOW,
+  };
+  assert.deepEqual(first.action, expected);
+  assert.deepEqual(reversed.action, expected, "the cargo read's order must not decide this");
+});
+
+test("nothing matches by group, so it loads the largest stack aboard anyway", () => {
+  // ⚠ THE RULE `chargeLooksCompatible` STATES FOR ITSELF: the table is advisory,
+  // the SERVER decides what loads, and hiding a charge that would have worked is
+  // the worse failure. The attempt budget is what bounds a wrong guess.
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(ROCKETS, 120, MISSILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: ROCKETS,
+  });
+});
+
+test("a stack whose group could not be decoded is NEUTRAL, never a no", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 10, null)],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
+});
+
+test("a gun with no entry in the group map is loaded too -- 'cannot say' is not 'no'", () => {
+  const noEntry = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      // The fit was read, and it said nothing about THIS module's charges.
+      weaponChargeGroups: {},
+      cargoCharges: [charge(SLUGS_FEW, 50, PROJECTILE_GROUP), charge(ROCKETS, 120, MISSILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(noEntry.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: ROCKETS,
+  });
+
+  // And the same when the whole map is unreadable.
+  const noMap = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: null,
+      cargoCharges: [charge(SLUGS_FEW, 50, PROJECTILE_GROUP), charge(ROCKETS, 120, MISSILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(noMap.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: ROCKETS,
+  });
+});
+
+test("a bank of guns that chose the same stack is ONE call, not one per gun", () => {
+  // ⚠ THIS LOOP ISSUES ONE ATOMIC CALL PER TICK. Eight guns loaded one a tick is
+  // sixteen seconds of a ship shooting nothing, and `api.loadAmmo` takes a list.
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON, AUTOCANNON_2],
+      weaponChargeGroups: {
+        [AUTOCANNON]: [PROJECTILE_GROUP],
+        [AUTOCANNON_2]: [PROJECTILE_GROUP],
+      },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON, AUTOCANNON_2],
+    chargeItemID: SLUGS,
+  });
+});
+
+test("a gun that chose a DIFFERENT stack waits for its own tick", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON, LAUNCHER],
+      weaponChargeGroups: {
+        [AUTOCANNON]: [PROJECTILE_GROUP],
+        [LAUNCHER]: [MISSILE_GROUP],
+      },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP), charge(ROCKETS, 120, MISSILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
+});
+
+test("no empty guns, nothing to do", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "loadAmmo");
+  assert.equal(decision.phase, "Standing by");
+});
+
+test("empty guns and an EMPTY cargo bay are said out loud, not passed over in silence", () => {
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON, AUTOCANNON_2],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [],
+    }),
+  );
+  assert.equal(decision.action.kind, "wait");
+  assert.equal(decision.phase, "Out of ammunition");
+  assert.match(decision.why, /nothing in the cargo bay/i);
+});
+
+test("the dry-guns readout never suppresses a rung that has something to ISSUE", () => {
+  // ⚠ WHY THE READOUT IS CONSULTED LAST THOUGH ITS RUNG SITS HIGH. It is a
+  // sentence, never a call; ahead of the follow rung it would stop a companion
+  // re-anchoring for as long as its guns were dry.
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: fcGrid(),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [],
+    }),
+  );
+  assert.equal(decision.action.kind, "keepAtRange");
+});
+
+test("a fit or a cargo bay that could not be READ is silence, never a claim", () => {
+  // ⚠ THREE-STATE, BOTH OF THEM. `null` is "could not read": not a ship whose
+  // guns are all loaded, and not a ship with nothing aboard to load them with.
+  const unreadFit = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: null,
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.equal(unreadFit.phase, "Standing by");
+
+  const unreadCargo = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: null,
+    }),
+  );
+  assert.equal(unreadCargo.phase, "Standing by", "an unopened cargo bay is not an empty one");
+});
+
+test("in warp and docked, nothing is loaded", () => {
+  const ammo = {
+    emptyWeaponModuleIDs: [AUTOCANNON],
+    weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+    cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+  };
+  const warping = decideCompanionAction(
+    ARMED,
+    obs({ snapshot: gridWithStation(null), inWarp: true, ...ammo }),
+  );
+  assert.equal(warping.phase, "In warp");
+
+  const docked = decideCompanionAction(
+    ARMED,
+    obs({ snapshot: null, inSpace: false, docked: true, ...ammo }),
+  );
+  assert.notEqual(docked.action.kind, "loadAmmo");
+});
+
+test("a gun that LEFT the empty list is not reloaded again, and gets its budget back", () => {
+  // ⚠ THE CONFIRMATION, AND THE ONLY ONE THERE IS. The call's own ack says
+  // nothing -- the server refuses in words this layer never sees -- so a gun
+  // leaving `emptyWeaponModuleIDs` is what proves the load landed.
+  const loaded = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.equal(loaded.memory.reloadAttempts[AUTOCANNON], 1);
+
+  const confirmed = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(null),
+      emptyWeaponModuleIDs: [],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 400, PROJECTILE_GROUP)],
+    }),
+    loaded.memory,
+  );
+  assert.notEqual(confirmed.action.kind, "loadAmmo");
+  assert.equal(
+    confirmed.memory.reloadAttempts[AUTOCANNON],
+    undefined,
+    "a gun that reloaded may run dry again, so its budget goes back to full",
+  );
+});
+
+test("a gun nothing aboard will fit is given up on, and the next gun still gets loaded", () => {
+  // Three calls and then this gun is left alone -- `MAX_COMPANION_RELOAD_ATTEMPTS`,
+  // the same bound and the same reasoning as the tag rung's.
+  const ammo = {
+    snapshot: gridWithStation(null),
+    emptyWeaponModuleIDs: [AUTOCANNON, LAUNCHER],
+    weaponChargeGroups: {
+      [AUTOCANNON]: [PROJECTILE_GROUP],
+      [LAUNCHER]: [MISSILE_GROUP],
+    },
+    cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP), charge(ROCKETS, 120, MISSILE_GROUP)],
+  };
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const decision = decideCompanionAction(ARMED, obs(ammo), memory);
+    assert.deepEqual(
+      decision.action,
+      { kind: "loadAmmo", moduleIDs: [AUTOCANNON], chargeItemID: SLUGS },
+      `attempt ${attempt} still belongs to the first gun`,
+    );
+    memory = decision.memory;
+  }
+  // ⚠ IT MOVES ON RATHER THAN ENDING THE TICK. One gun that cannot be loaded
+  // must not hold the rest of the rack empty.
+  const nextGun = decideCompanionAction(ARMED, obs(ammo), memory);
+  assert.deepEqual(nextGun.action, {
+    kind: "loadAmmo",
+    moduleIDs: [LAUNCHER],
+    chargeItemID: ROCKETS,
+  });
+
+  // And once every gun has spent its budget the rung falls through entirely,
+  // rather than pinning the ladder for the rest of the run.
+  let spent = nextGun.memory;
+  for (let attempt = 2; attempt <= 3; attempt += 1) {
+    spent = decideCompanionAction(ARMED, obs(ammo), spent).memory;
+  }
+  const done = decideCompanionAction(ARMED, obs(ammo), spent);
+  assert.notEqual(done.action.kind, "loadAmmo");
+  assert.equal(done.phase, "Standing by");
+});
+
+test("reloading is BENEATH the flee -- a dying pilot leaves before it loads", () => {
+  // ⚠ A STATION ON GRID, so the flee has somewhere to GO. Without one the
+  // get-safe ladder issues nothing and this test would pass for the wrong reason.
+  const decision = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: gridWithStation(200_000),
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+      shieldRatio: 0.05,
+      armorRatio: 0.05,
+      hullRatio: 0.05,
+      health: 0.05,
+    }),
+  );
+  assert.notEqual(decision.action.kind, "loadAmmo");
+});
+
+test("reloading is ABOVE obeying the fleet -- an empty rack is loaded before it is fired", () => {
+  // ⚠ THE WHOLE REASON FOR THE PLACEMENT. `lockThenEngage` would `activate` the
+  // gun, the server would accept it, and nothing would come off the target.
+  const called = {
+    snapshot: gridWithEntitiesAndRack([TACKLE]),
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+  };
+  const armedAndEmpty = decideCompanionAction(
+    { ...REQUEST, weaponModuleIDs: [AUTOCANNON] },
+    obs({
+      ...called,
+      emptyWeaponModuleIDs: [AUTOCANNON],
+      weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+      cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+    }),
+  );
+  assert.deepEqual(armedAndEmpty.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
+
+  // With the gun loaded, the very same tick obeys the call as it always did.
+  const loaded = decideCompanionAction(
+    { ...REQUEST, weaponModuleIDs: [AUTOCANNON] },
+    obs({ ...called, emptyWeaponModuleIDs: [], cargoCharges: [] }),
+  );
+  assert.deepEqual(loaded.action, { kind: "activate", moduleID: AUTOCANNON, targetID: TACKLE });
+});
+
+test("a standing destination trip starves the reload rung, and that is the trip's own reading", () => {
+  // ⚠ RECORDED RATHER THAN WORKED AROUND. The trip rung above returns a real
+  // decision every tick it stands -- "travels to it without additional
+  // interruption" -- so a companion crossing systems does not reload on the way,
+  // exactly as it does not answer a target call on the way. Arriving, or `stop`,
+  // frees this rung on the very next tick.
+  const ammo = {
+    emptyWeaponModuleIDs: [AUTOCANNON],
+    weaponChargeGroups: { [AUTOCANNON]: [PROJECTILE_GROUP] },
+    cargoCharges: [charge(SLUGS, 500, PROJECTILE_GROUP)],
+  };
+  const started = decideCompanionAction(
+    ARMED,
+    obs({
+      snapshot: fcGrid(),
+      chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN)],
+      ...ammo,
+    }),
+  );
+  const riding = decideCompanionAction(
+    ARMED,
+    obs({ snapshot: fcGrid(), chatMessages: [], ...ammo }),
+    started.memory,
+  );
+  assert.equal(riding.phase, "Travelling");
+
+  const arrived = decideCompanionAction(
+    ARMED,
+    obs({ snapshot: fcGrid(), chatMessages: [], flightStatus: inSystem(SYSTEM_B), ...ammo }),
+    riding.memory,
+  );
+  assert.deepEqual(arrived.action, {
+    kind: "loadAmmo",
+    moduleIDs: [AUTOCANNON],
+    chargeItemID: SLUGS,
+  });
 });

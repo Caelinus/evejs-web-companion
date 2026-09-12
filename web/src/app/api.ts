@@ -2383,6 +2383,24 @@ export async function warpTo(
 }
 
 /**
+ * Warp to a FLEET MEMBER (CmdWarpToStuff("char", characterID)) — the retail
+ * "warp to" on a fleet-window row.
+ *
+ * ⚠ A CHARACTER ID, NOT AN OBJECT ID, and that is the point: this is the only
+ * warp whose destination need not be on this grid. The server resolves where
+ * the member is, and refuses a character who is not in the same fleet or is not
+ * online — so a wrong id fails rather than flying the ship somewhere.
+ */
+export async function warpToFleetMember(
+  characterID: number,
+  minRange: number | null = null,
+  options: ApiOptions = {},
+): Promise<FlightStepResult> {
+  const body = minRange === null ? { characterID } : { characterID, minRange };
+  return readFlightStep(await postJson("/api/bridge/flight/warp-member", body, options));
+}
+
+/**
  * Approach a gate/target at full speed (beyonce.CmdSetSpeedFraction(1) +
  * CmdFollowBall). The range is retail's: the menu approach uses 50 m, and the
  * autopilot's close-the-gap step uses 0.

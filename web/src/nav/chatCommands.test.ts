@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { CHAT_COMMAND_VERBS, isChatCommandSenderAllowed, parseChatCommand } from "./chatCommands.ts";
+import {
+  CHAT_COMMAND_VERBS,
+  COMPANION_FOLLOW_RANGE_M,
+  isChatCommandSenderAllowed,
+  parseChatCommand,
+} from "./chatCommands.ts";
 import type { ChatMessage } from "../store/types.ts";
 
 // The documented synthetic character id (ESI's own `CharacterID` example),
@@ -56,6 +61,31 @@ test("'jump <link>' parses to a jump command carrying the stargate's ITEMID", ()
   assert.deepEqual(command, { kind: "jump", itemID: 50011239 });
 });
 
+test("'warp <link>' parses to a warp command carrying the link's ITEMID", () => {
+  const command = parseChatCommand(
+    chatMessage("warp <url=showinfo:16//50011239>Stargate (Amarr)</url>"),
+  );
+  assert.deepEqual(command, { kind: "warp", itemID: 50011239 });
+});
+
+test("'warp <character link>' parses the same way — whose id it is, is not this parser's question", () => {
+  // ⚠ A CHARACTER LINK IS THE "COME TO ME" CASE, and the id in it is a
+  // CHARACTER id rather than an object on anybody's grid. This module reads one
+  // number out of one link; which id space it belongs to is answered by the
+  // reader that knows the grid and the fleet roster -- see `decideFleetOrders`.
+  const command = parseChatCommand(
+    chatMessage("warp to me <url=showinfo:1377//90000001>Some Capsuleer</url>"),
+  );
+  assert.deepEqual(command, { kind: "warp", itemID: 90000001 });
+});
+
+test("'warping' does not match the 'warp' verb", () => {
+  assert.equal(
+    parseChatCommand(chatMessage("warping <url=showinfo:16//50011239>Stargate</url>")),
+    null,
+  );
+});
+
 // --- the <a href="showinfo:..."> form --------------------------------------
 
 test("accepts the <a href=\"showinfo:...\"> form other client surfaces emit", () => {
@@ -86,8 +116,12 @@ test("entity-escaped <, > and & inside display text cannot fake a closing tag", 
 // --- conservative: null rather than a guess ---------------------------------
 
 test("an unrecognised verb parses to null", () => {
+  // ⚠ THIS USED TO USE "warp", WHICH IS NOW A VERB. The point of the case is a
+  // well-formed LINK behind a word this parser does not know, so it needs a word
+  // that is not on the list and is not about to join it -- not a near-miss of a
+  // real order.
   assert.equal(
-    parseChatCommand(chatMessage("warp <url=showinfo:670//1099511628000>Some Rifter</url>")),
+    parseChatCommand(chatMessage("scoop <url=showinfo:670//1099511628000>Some Rifter</url>")),
     null,
   );
 });
@@ -244,6 +278,152 @@ test("a sentence merely mentioning 'loot' or 'salvage', not at the start, is not
   assert.equal(parseChatCommand(chatMessage("someone salvage this later")), null);
 });
 
+// --- follow: a verb that carries a DISTANCE ---------------------------------
+//
+// The third family (see chatCommands.ts's header): not a link verb, because
+// nothing is being named, and not an area verb, because the order carries a
+// value. `rangeM` always comes back defaulted and clamped, so nothing
+// downstream ever has to re-check it.
+
+test("a bare 'follow' parses at the default escort range", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("follow")), {
+    kind: "follow",
+    rangeM: COMPANION_FOLLOW_RANGE_M,
+  });
+});
+
+test("'follow 10 km' and 'follow 10km' both read 10 000 metres", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("follow 10 km")), { kind: "follow", rangeM: 10_000 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 10km")), { kind: "follow", rangeM: 10_000 });
+});
+
+test("the unit may be spelled out, in either spelling", () => {
+  for (const line of ["follow 10 kilometres", "follow 10 kilometers", "follow 10 kilometre"]) {
+    assert.deepEqual(parseChatCommand(chatMessage(line)), { kind: "follow", rangeM: 10_000 }, line);
+  }
+});
+
+test("'follow 5000 m' and 'follow 5000m' read metres, not kilometres", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("follow 5000 m")), { kind: "follow", rangeM: 5_000 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 5000m")), { kind: "follow", rangeM: 5_000 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 5000 metres")), {
+    kind: "follow",
+    rangeM: 5_000,
+  });
+});
+
+test("a bare number is read as KILOMETRES — the judgment call, pinned", () => {
+  // ⚠ Nothing in the game says what an undecorated number in chat means. It is
+  // km because the order the operator asked for is written `follow <N> km`, and
+  // because the other reading (ten metres) clamps to the floor and glues the
+  // companion to its anchor. See `followRangeFrom`'s own comment.
+  assert.deepEqual(parseChatCommand(chatMessage("follow 10")), { kind: "follow", rangeM: 10_000 });
+});
+
+test("a decimal distance is accepted and rounded to a whole metre", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("follow 7.5 km")), { kind: "follow", rangeM: 7_500 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 1.2345 km")), {
+    kind: "follow",
+    rangeM: 1_235,
+  });
+});
+
+test("trailing text that is not a distance falls back to the default — 'follow me' is still an order", () => {
+  // ⚠ THE CASE THAT MATTERS MOST IN PRACTICE. These are the natural English
+  // phrasings of the same order; a parser that returned null for them would
+  // leave a companion sitting still while its FC told it to come along.
+  for (const line of ["follow me", "follow the fc", "follow us out", "follow 3 jumps behind"]) {
+    assert.deepEqual(
+      parseChatCommand(chatMessage(line)),
+      { kind: "follow", rangeM: COMPANION_FOLLOW_RANGE_M },
+      line,
+    );
+  }
+});
+
+test("a distance below the floor or above the ceiling clamps rather than being refused", () => {
+  // The intent is unambiguous; only the magnitude is wrong. See the band's own
+  // comment for the two numbers.
+  assert.deepEqual(parseChatCommand(chatMessage("follow 10 m")), { kind: "follow", rangeM: 500 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 0")), { kind: "follow", rangeM: 500 });
+  assert.deepEqual(parseChatCommand(chatMessage("follow 100000 km")), {
+    kind: "follow",
+    rangeM: 250_000,
+  });
+});
+
+test("an absurd digit run clamps to the ceiling rather than decoding to nothing", () => {
+  const absurd = "9".repeat(400);
+  assert.deepEqual(parseChatCommand(chatMessage(`follow ${absurd} km`)), {
+    kind: "follow",
+    rangeM: 250_000,
+  });
+});
+
+test("'following' does not match the 'follow' verb", () => {
+  assert.equal(parseChatCommand(chatMessage("following the fc now")), null);
+});
+
+test("a 'follow' mentioned mid-sentence is not a command", () => {
+  assert.equal(parseChatCommand(chatMessage("i will follow 10 km behind you")), null);
+  assert.equal(parseChatCommand(chatMessage("does anyone follow?")), null);
+});
+
+test("'follow' is matched case-insensitively, and outer whitespace does not block it", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("   FOLLOW 10 KM   ")), {
+    kind: "follow",
+    rangeM: 10_000,
+  });
+});
+
+// --- destination: a verb that carries a SOLAR SYSTEM -------------------------
+//
+// The link form is `travel`'s own, unchanged. The bare-number form is an
+// ADDITION rather than a mirror of it — see chatCommands.ts's header.
+
+test("'destination <link>' reads the solar system id out of the link", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("destination <url=showinfo:5//30000142>Jita</url>")), {
+    kind: "destination",
+    systemID: 30000142,
+  });
+});
+
+test("'destination <bare id>' is accepted — far easier to type than a pasted link", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("destination 30000142")), {
+    kind: "destination",
+    systemID: 30000142,
+  });
+  assert.deepEqual(parseChatCommand(chatMessage("   destination   30000142   ")), {
+    kind: "destination",
+    systemID: 30000142,
+  });
+});
+
+test("a bare 'destination' with nothing after it parses to null", () => {
+  assert.equal(parseChatCommand(chatMessage("destination")), null);
+  assert.equal(parseChatCommand(chatMessage("destination please")), null);
+});
+
+test("a number buried in a sentence is not a destination", () => {
+  // "destination 3 jumps out" names no system; reading its first number would
+  // send the companion somewhere nobody asked for.
+  assert.equal(parseChatCommand(chatMessage("destination 3 jumps out")), null);
+});
+
+test("a 'destination' link truncated mid-tag parses to null, never a guessed id", () => {
+  assert.equal(parseChatCommand(chatMessage("destination <url=showinfo:5//30000 ...")), null);
+});
+
+test("a destination id out of the safe-integer range is rejected, same bound as a link's", () => {
+  const tooLarge = "9".repeat(40);
+  assert.equal(parseChatCommand(chatMessage(`destination ${tooLarge}`)), null);
+  assert.equal(parseChatCommand(chatMessage("destination 0")), null);
+});
+
+test("'destinations' does not match the 'destination' verb", () => {
+  assert.equal(parseChatCommand(chatMessage("destinations 30000142")), null);
+});
+
 // --- the four link verbs are unaffected by salvage/loot ---------------------
 
 test("the four link verbs still return null with no link, unaffected by the area verbs' branch", () => {
@@ -258,7 +438,19 @@ test("the four link verbs still return null with no link, unaffected by the area
 test("CHAT_COMMAND_VERBS lists exactly the recognised verbs, target/primary included as aliases", () => {
   assert.deepEqual(
     [...CHAT_COMMAND_VERBS].sort(),
-    ["align", "jump", "loot", "primary", "salvage", "stop", "target", "travel"],
+    [
+      "align",
+      "destination",
+      "follow",
+      "jump",
+      "loot",
+      "primary",
+      "salvage",
+      "stop",
+      "target",
+      "travel",
+      "warp",
+    ],
   );
 });
 
@@ -274,6 +466,16 @@ test("isChatCommandSenderAllowed: a characterID not on the list is refused", () 
 
 test("isChatCommandSenderAllowed: an empty allowlist refuses everyone — the safe default", () => {
   assert.equal(isChatCommandSenderAllowed(chatMessage("target <link>", SENDER_ID), []), false);
+});
+
+test("isChatCommandSenderAllowed: the gate is verb-blind — a 'follow' from a stranger is refused too", () => {
+  // ⚠ The new verbs go through the SAME gate as every other line; there is no
+  // per-verb allowance and there must never be one. A companion that would
+  // take a standing escort order, or a multi-jump trip, from anybody in local
+  // is a companion anybody in local can fly away.
+  const stranger = chatMessage("follow 10 km", 90000002);
+  assert.equal(isChatCommandSenderAllowed(stranger, [SENDER_ID]), false);
+  assert.equal(isChatCommandSenderAllowed(chatMessage("destination 30000142"), [SENDER_ID]), true);
 });
 
 test("isChatCommandSenderAllowed: gated on characterID alone, never on characterName", () => {

@@ -50,6 +50,7 @@ import { fleetTagRank, pickPrimary } from "./targetPriority.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { ChatMessage } from "../store/types.ts";
 import {
+  COMPANION_FOLLOW_RANGE_M,
   isChatCommandSenderAllowed,
   parseChatCommand,
   type ChatCommand,
@@ -603,6 +604,47 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * space snapshot the tick already read, never a call of its own.
    */
   readonly myDroneIDs?: readonly number[];
+  // ─── The reload rung's three facts ────────────────────────────────────────
+  //
+  // ⚠ THESE ARE THROTTLED READS, NOT PER-TICK TRUTH. Each one costs a round
+  // trip (a fit read and an inventory read), so the builder refreshes them on
+  // its own interval and serves the previous answer in between — several ticks
+  // may see the SAME reading. The rung is written so that costs nothing: it
+  // confirms a load by watching a gun LEAVE `emptyWeaponModuleIDs` on a later
+  // tick and never by a call returning cleanly, so a stale "still empty" is
+  // indistinguishable from a fresh one and both are answered the same way,
+  // under one bounded attempt budget. See `decideReload`.
+  //
+  // ⚠ AND EVERY ONE OF THEM IS THREE-STATE. `null` is "could not read", which
+  // this rung treats as "cannot say" and never as "there is none" — a stumbled
+  // fit read must not be reported as a ship whose guns are all loaded, nor a
+  // stumbled cargo read as a ship with no ammunition aboard.
+
+  /** Online weapon modules that take a charge and currently have none. Null when the fit could not be read this tick. */
+  readonly emptyWeaponModuleIDs?: readonly number[] | null;
+  /** Charge stacks in the ship's cargo. Null when cargo could not be read this tick. */
+  readonly cargoCharges?: readonly CompanionCargoCharge[] | null;
+  /** Weapon module itemID -> the charge groupIDs its type accepts, from the fit's own chargeFits. */
+  readonly weaponChargeGroups?: Readonly<Record<number, readonly number[]>> | null;
+}
+
+/**
+ * One stack of ammunition in this ship's cargo bay.
+ *
+ * ⚠ ALREADY NARROWED TO THE CHARGE CATEGORY BY THE BUILDER, which is what keeps
+ * the "largest stack overall" fallback below from reaching for a hold full of
+ * ore. Nothing in this file re-checks that, because nothing here can: a category
+ * id is not on this shape and the ladder has ids, not a type table.
+ *
+ * `groupID` is three-state in its own right: a stack whose group could not be
+ * decoded carries `null`, which the rung reads as "cannot say" and never as
+ * "not compatible". See `pickChargeFor`.
+ */
+export interface CompanionCargoCharge {
+  readonly itemID: number;
+  readonly typeID: number;
+  readonly groupID: number | null;
+  readonly quantity: number;
 }
 
 /** A pending fleet invite, narrowed to the two ids the rejoin gate needs. */
@@ -667,6 +709,20 @@ export type FleetCompanionAction =
    * gone. See `sunOnGrid`.
    */
   | { readonly kind: "warp"; readonly targetID: number }
+  /**
+   * Obeying the fleet (rung e2): warp to a FLEET MEMBER, named by character id
+   * rather than by anything on this grid.
+   *
+   * ⚠ A SEPARATE ACTION BECAUSE IT IS A SEPARATE CALL, not because it is a
+   * different idea. `warp` above is `CmdWarpToStuff("item", <objectID>)` and
+   * this is `CmdWarpToStuff("char", <characterID>)`: the server resolves the
+   * member's position itself, refuses a character who is not in this fleet or
+   * not online, and so is the only warp that works when the destination is not
+   * on the grid. Folding the two into one action would mean a caller guessing
+   * which id space the number came from — the exact guess rung e2 makes with
+   * the grid in front of it.
+   */
+  | { readonly kind: "warpToFleetMember"; readonly characterID: number }
   /**
    * Close on something. `range` is where to STOP, in metres -- null hugs it.
    *
@@ -804,7 +860,56 @@ export type FleetCompanionAction =
    * ship deliberately back into danger -- which is why everything above it in
    * `recoverAndReturn` is about being sure first.
    */
-  | { readonly kind: "undock" };
+  | { readonly kind: "undock" }
+  /**
+   * The standing `follow`: hold station off the fleet commander at `range`
+   * metres. `CmdFollowBall` with a non-zero range, the same call the DSL's
+   * `follow-fleet-mate` block makes for a hand-picked mate.
+   *
+   * ⚠ A STANDING SERVER-SIDE ORDER, WHICH IS WHY THE RUNG ISSUES IT ONCE. The
+   * ship goes on holding that station with nothing further sent, so a rung that
+   * re-sent this every tick would be pure bridge traffic for a command already
+   * in force -- and would spend this loop's one call per tick on it, starving
+   * everything beneath. `followAnchorID`/`followRangeIssuedM` are the gate.
+   *
+   * ⚠ `range` IS METRES AND IS ALREADY CLAMPED. `chatCommands.ts` defaults and
+   * clamps it as it parses (see `COMPANION_FOLLOW_RANGE_M` and the band beside
+   * it), so nothing between here and the bridge re-checks the number.
+   */
+  | { readonly kind: "keepAtRange"; readonly targetID: number; readonly range: number }
+  /**
+   * The `stop` chat order: cut the engines where the ship is.
+   *
+   * ⚠ THE ONLY COMPANION ACTION THAT EXISTS TO UNDO STANDING ORDERS RATHER THAN
+   * TO ISSUE ONE, and the only one that takes no argument because there is
+   * nothing to name -- "where it is" is wherever that turns out to be. The
+   * dispatcher pairs it with aborting the shared autopilot, because a `stop`
+   * that halted the ship while the route solver was still running would be
+   * undone on the autopilot's very next tick.
+   *
+   * ⚠ ISSUED ONCE PER `stop` HEARD, not once per tick the order is fresh. A
+   * chat line stands in the backlog for its whole freshness window, and a ship
+   * told to stop every two seconds for thirty seconds is a ship nothing else
+   * can move in the meantime. `stopHeardAtMs`/`stopShipIssued` are the gate.
+   */
+  | { readonly kind: "stopShip" }
+  /**
+   * The reload rung: put rounds in empty guns from this ship's own cargo.
+   *
+   * ⚠ SEVERAL MODULES, ONE CALL, ON PURPOSE. `api.loadAmmo` takes a list, and a
+   * bank of eight guns that all chose the same stack is one call rather than
+   * eight ticks of them — which matters because this loop issues at most one
+   * atomic call per tick, so eight separate loads would be sixteen seconds of a
+   * ship shooting nothing.
+   *
+   * ⚠ ONE CHARGE STACK, NAMED BY ITEM ID AND NOT BY TYPE. The item id is what
+   * identifies the stack sitting in this cargo bay; the type id says what kind
+   * of round it is and would not tell the server which pile to draw from.
+   *
+   * The source is always cargo — see the dispatcher's own comment: a companion
+   * that needs this is in space, where there is no station hangar to draw on.
+   */
+  | { readonly kind: "loadAmmo"; readonly moduleIDs: readonly number[]; readonly chargeItemID: number };
 
 export interface FleetCompanionProgress {
   readonly status: FleetCompanionRunState;
@@ -1185,6 +1290,107 @@ export interface CompanionLadderMemory {
    * home -- which is the entire purpose of bounding them.
    */
   readonly fleeRecoveryTicks: number;
+  /**
+   * The stand-off the newest `follow` order named, in metres.
+   *
+   * ⚠ A LATCH LIKE `areaJob`, FOR THE SAME REASON: a heard order changes it and
+   * silence changes nothing. Following is this companion's STANDING behaviour --
+   * nobody has to type anything for it to happen -- so this field starts at the
+   * default rather than at null, and a `follow 10 km` only ever changes the
+   * NUMBER. There is no "not following" value here; that is `followHeld` below.
+   */
+  readonly followRangeM: number;
+  /**
+   * Whether a `stop` has suspended the standing follow.
+   *
+   * ⚠ THIS FLAG EXISTS BECAUSE `stop` AND A STANDING BEHAVIOUR ARE IN DIRECT
+   * TENSION, and deleting it "because nothing reads it as a real order" would
+   * bring the bug straight back. The follow rung re-issues `keepAtRange`
+   * whenever the anchor or range has changed -- and a `stopShip` changes
+   * neither, so on the very next tick the rung would notice the ship is no
+   * longer holding station and put it straight back into the formation the
+   * operator just called off. The operator's words for `stop` are "it stops
+   * where it is", which is a claim about the ship, not about one call. So the
+   * standing behaviour is SUSPENDED rather than merely interrupted, and stays
+   * suspended until somebody says `follow` again.
+   *
+   * Nothing else clears it. A new anchor does not, a warp does not, a fleet
+   * order does not: the operator said stop, and only the operator un-says it.
+   */
+  readonly followHeld: boolean;
+  /**
+   * The anchor and the range a `keepAtRange` has already been sent for.
+   *
+   * ⚠ SAME SHAPE AND SAME REASON AS `lastDroneEngageTargetID` ABOVE, plus the
+   * range: the order is standing server-side, so re-sending it tells the server
+   * nothing it does not already know. The PAIR is what matters -- a re-anchor
+   * onto a different commander and a `follow 20 km` at the same commander are
+   * both genuinely new orders, and either alone would miss one of them.
+   */
+  readonly followAnchorID: number | null;
+  readonly followRangeIssuedM: number | null;
+  /**
+   * The solar system a `destination` order is taking this pilot to, or null.
+   *
+   * ⚠ A LATCH, AND A LONGER-LIVED ONE THAN `areaJob`. A multi-jump trip outlasts
+   * any chat freshness window by minutes, so the order has to be remembered
+   * rather than re-read; and unlike an area job it cannot clear itself by
+   * looking at the grid, because "am I there yet" is a question about the SYSTEM
+   * (`flightStatus.solarSystemID`), not about what is on the overview. It clears
+   * on arrival, or on `stop`, and on nothing else.
+   */
+  readonly destinationSystemID: number | null;
+  /**
+   * The destination a `travelTo` has already been handed to the shared
+   * autopilot for.
+   *
+   * ⚠ DELIBERATELY NOT `lastRoutedSystemID`, WHICH IS RUNG 7'S. Sharing the one
+   * field looked tidy and had a real bug in it: `stop` clears the job but cannot
+   * clear somebody else's record of a route, so a `destination` re-typed for the
+   * SAME system after a `stop` would find the system already routed and issue
+   * nothing at all -- a companion told twice to go somewhere, sitting still.
+   * Cleared with the job, which is what makes re-typing the order work.
+   */
+  readonly destinationRoutedFor: number | null;
+  /**
+   * The `createdAtMs` of the newest `stop` this ladder has answered, and whether
+   * the `stopShip` for it has gone out yet.
+   *
+   * ⚠ KEYED ON THE MESSAGE'S OWN TIMESTAMP, NOT ON A BARE "already stopped"
+   * FLAG. A `stop` sits in the backlog for its whole freshness window, so a flag
+   * would have to be cleared by something, and nothing here is entitled to
+   * decide that an operator's `stop` has expired. A second `stop`, typed later
+   * because the first did not look like it landed, carries a different timestamp
+   * and is answered as the new order it is. Two `stop`s inside the same
+   * millisecond are indistinguishable here and the second is not re-issued;
+   * that is accepted, not overlooked.
+   */
+  readonly stopHeardAtMs: number | null;
+  readonly stopShipIssued: boolean;
+  /**
+   * How many `loadAmmo` calls the reload rung has spent on each gun, keyed by
+   * the module's own item id.
+   *
+   * ⚠ A BUDGET, FOR THE SAME REASON `lastTagAttempts` IS ONE: the call's ack is
+   * worthless. The server decides what may be loaded and refuses in words this
+   * layer never sees (see `api.loadAmmo`), so an accepted load and a refused one
+   * are byte-identical from here and the only confirmation is the gun LEAVING
+   * `emptyWeaponModuleIDs` on a later tick. Without the budget, a gun that
+   * physically cannot take the only ammunition aboard would be reloaded for ever
+   * and starve every rung beneath this one.
+   *
+   * ⚠ PER MODULE, NOT ONE COUNTER, because one call reloads a whole bank and
+   * the guns in it can fail differently — a rack half missiles and half turrets
+   * with only one kind of round aboard is exactly that case. Giving up has to be
+   * per gun, so the rung moves on to the next one instead of stopping.
+   *
+   * ⚠ AND IT IS PRUNED EACH TICK TO THE GUNS THAT ARE STILL EMPTY, which is what
+   * both RESETS a gun that reloaded (it may run dry again, and must be loadable
+   * again when it does) and bounds this map to the size of one high-rack. An
+   * unreadable `emptyWeaponModuleIDs` prunes nothing: "cannot say" is not
+   * evidence a gun was loaded.
+   */
+  readonly reloadAttempts: Readonly<Record<number, number>>;
 }
 
 /** One recall-and-relaunch cycle in flight. */
@@ -1240,6 +1446,19 @@ export function freshLadderMemory(): CompanionLadderMemory {
     flee: null,
     fleeTripsSpent: 0,
     fleeRecoveryTicks: 0,
+    // ⚠ THE DEFAULT RANGE, NOT NULL. Following is the standing behaviour, so a
+    // companion nobody has typed `follow` at still has a distance to hold -- see
+    // `followRangeM`. `followHeld` false for the same reason: it starts
+    // following, it does not start suspended.
+    followRangeM: COMPANION_FOLLOW_RANGE_M,
+    followHeld: false,
+    followAnchorID: null,
+    followRangeIssuedM: null,
+    destinationSystemID: null,
+    destinationRoutedFor: null,
+    stopHeardAtMs: null,
+    stopShipIssued: false,
+    reloadAttempts: {},
   };
 }
 
@@ -1289,6 +1508,13 @@ export interface CompanionDecision {
    *
    * ⚠ A STANDING DECISION'S ACTION MUST BE `wait`. It is only ever a readout;
    * holding a real call aside and then not issuing it would silently drop it.
+   *
+   * ⚠ THE SECOND USER IS NOT AN ORDER AT ALL. `decideReload` marks its
+   * "empty guns, and no ammunition aboard" sentence standing, because that is a
+   * condition with nothing to issue for it and the flag means exactly "keep this
+   * as a readout and let the rungs beneath have the tick". A standing decision
+   * is therefore "something true worth saying that costs no call", which is the
+   * wider reading of the same contract -- not only "already obeying".
    */
   readonly standing?: true;
 }
@@ -1386,7 +1612,14 @@ function nearestOf(
  *     4  tackle -> tag              letter what is holding this ship
  *     5  flee                       leave, get whole, come back
  *     6  drones                     launch, recall a hurt one, redeploy
+ *     6a `stop` heard               one `stopShip`; everything else it does
+ *                                   already happened above the gate
+ *     6b `destination` trip         the ONE rung that outranks the fleet
+ *     6c reload                     load empty guns from this ship's cargo
  *     7  obeying the fleet          tags, broadcasts, chat commands
+ *     8  salvage, then loot         the area jobs; both move the ship
+ *        (the standing-order readout, if rung 7 had one)
+ *     9  follow                     hold station on the FC; standing, endless
  *        "Standing by"
  *
  * ⚠ RUNG 3 IS TANK UP, BELOW THE SUPERVISION GATE AND ABOVE OBEYING THE
@@ -1424,21 +1657,24 @@ function nearestOf(
  * for the tag-over-broadcast reasoning and why an off-grid call is not an
  * order for this pilot at all).
  *
- * ⚠ NOTHING SITS BENEATH IT, AND PROBABLY NOTHING EVER WILL. That matters
- * because `CompanionDecision.standing` exists for something that sits there:
- * phase 5's parking fix was built so phase 6's flee could live below this rung,
- * and the operator's decision put the flee above it instead.
+ * ⚠ THINGS DO SIT BENEATH IT NOW, AND THIS COMMENT ONCE SAID NOTHING EVER
+ * WOULD. It claimed the slot `CompanionDecision.standing` was built for had no
+ * consumer -- true when the flee moved above this rung and nothing was left
+ * below. Four rungs have since filled it: the salvage and loot jobs, and the
+ * standing follow, all of them beneath the standing-order readout because all
+ * three MOVE THE SHIP and obeying the fleet outranks flying formation or
+ * clearing a field of wrecks.
  *
- * There is no rung left to fill the slot either. Chat commands feed THIS rung
- * rather than a rung of their own, the fleet-chat channel work is cancelled for
- * good, and phase 9 is roles and a badge. So the hold-aside half of the
- * mechanism has no consumer.
+ * So the hold-aside half of the mechanism is live in both of its roles: a pilot
+ * whose guns are running goes on looting between shots, AND the readout still
+ * says "Obeying fleet" rather than "Standing by". Do not delete either half.
  *
- * ⚠ IT IS STILL NOT DEAD CODE. The fallback at the end of this ladder returns
- * the standing decision on every tick where a call stands and nothing else
- * acted, which is what stops a pilot whose guns are running from reporting
- * "Standing by". Do not delete it on the grounds that nothing needs it; the
- * readout does.
+ * ⚠ AND THREE RUNGS NOW SIT ABOVE IT THAT ARE NOT FLEET ORDERS AT ALL: the
+ * `stop` call, the `destination` trip and the reload. The first two come from
+ * chat and are the only place in this ladder where a typed word beats a
+ * broadcast; each says why in its own header. The third comes from nobody -- it
+ * outranks a target call because obeying one with an empty rack is obeying
+ * nothing, which `decideReload`'s header states in full.
  */
 export function decideCompanionAction(
   request: FleetCompanionRequest,
@@ -1484,7 +1720,13 @@ export function decideCompanionAction(
   // ⚠ THE AREA LATCH IS UPDATED BEFORE ANY RUNG DECIDES, and before the
   // supervision gate, so that a `stop` typed while a pilot is getting safe is
   // still heard. It issues nothing; it only records what the last order said.
-  memory = withAreaJobCleared(obs, withAreaJob(obs, memory));
+  //
+  // The follow range, the trip and the `stop` gate ride in the same slot for the
+  // same reason -- a `stop` has to land whatever the pilot is doing, and this is
+  // the only point above every rung that can hear one. Note that all of this
+  // sits BELOW the warp yield above: a mid-warp tick decides nothing, and that
+  // includes hearing orders, which is unchanged from how an area job behaves.
+  memory = withStandingChatOrders(obs, withAreaJobCleared(obs, withAreaJob(obs, memory)));
 
   const supervisors = supervisorsInFleet(obs);
   if (supervisors === null) {
@@ -1546,6 +1788,22 @@ export function decideCompanionAction(
     flee: memory.flee,
     fleeTripsSpent: memory.fleeTripsSpent,
     fleeRecoveryTicks: memory.fleeRecoveryTicks,
+    // Carried, every one of them. A human turning up says nothing about where
+    // this pilot was told to fly or how close to hold: an order given while the
+    // fleet was unsupervised was still given, and a `stop` typed a moment before
+    // a supervisor logged back in must not be un-said by their arrival.
+    followRangeM: memory.followRangeM,
+    followHeld: memory.followHeld,
+    followAnchorID: memory.followAnchorID,
+    followRangeIssuedM: memory.followRangeIssuedM,
+    destinationSystemID: memory.destinationSystemID,
+    destinationRoutedFor: memory.destinationRoutedFor,
+    stopHeardAtMs: memory.stopHeardAtMs,
+    stopShipIssued: memory.stopShipIssued,
+    // Carried for the same reason as the orders above: a supervisor logging
+    // back in says nothing about which of this ship's guns are empty or how
+    // many loads have already been spent on them.
+    reloadAttempts: memory.reloadAttempts,
   };
 
   // Rung 3: tank up. Threaded even when it has nothing to do this tick —
@@ -1591,6 +1849,39 @@ export function decideCompanionAction(
     return drones.decision;
   }
 
+  // The `stop` order's one CALL. Everything else `stop` does was done above the
+  // supervision gate, where bookkeeping belongs; this is the half that has to
+  // come through the ladder because it spends the tick's one atomic call.
+  //
+  // ⚠ ABOVE RUNG 7 SO A STANDING TARGET CALL CANNOT SWALLOW IT. "Stop" that
+  // waits for the fleet to go quiet is not a stop. It stays below the flee and
+  // the tank for the same reason the trip below it does: a pilot that is dying
+  // leaves first and stops afterwards.
+  const stopping = decideStopShip(drones.memory);
+  if (stopping !== null) {
+    return stopping;
+  }
+
+  // The `destination` trip -- ABOVE rung 7, and the only rung in this ladder
+  // that outranks the fleet's own calls. See `decideDestinationTrip`'s header
+  // for the operator's sentence this implements and for the exact reading of it.
+  // Threaded like rung 3 because arriving issues nothing.
+  const travelling = decideDestinationTrip(obs, drones.memory);
+  if (travelling.decision !== null) {
+    return travelling.decision;
+  }
+
+  // The reload rung -- ABOVE rung 7 because an empty gun makes rung 7's whole
+  // fire path a no-op, and BELOW the flee and the tank because a reload is
+  // worthless on a ship that is about to be wreckage. See `decideReload`'s own
+  // header for the server fact that makes this rung necessary at all. Threaded
+  // like rung 3 because CONFIRMING a load -- a gun leaving the empty list --
+  // issues nothing.
+  const reloading = decideReload(obs, travelling.memory);
+  if (reloading.decision !== null && reloading.decision.standing !== true) {
+    return reloading.decision;
+  }
+
   // Rung 7: obeying the fleet.
   //
   // ⚠ A STANDING ORDER IS HELD ASIDE, NOT RETURNED. When this rung has a real
@@ -1600,7 +1891,7 @@ export function decideCompanionAction(
   // as a READOUT while the ladder goes on. Before this, that case returned an
   // ordinary wait and ended the tick, so a standing target call starved every
   // rung beneath it for as long as it stood. See `CompanionDecision.standing`.
-  const obeying = decideFleetOrders(request, obs, drones.memory);
+  const obeying = decideFleetOrders(request, obs, reloading.memory);
   if (obeying !== null && obeying.standing !== true) {
     return obeying;
   }
@@ -1620,12 +1911,12 @@ export function decideCompanionAction(
   // no consumer since the flee moved above the fleet rung: a pilot whose guns are
   // already running on a called target should go on looting between shots rather
   // than reporting "Standing by" and doing nothing.
-  const salvaging = decideSalvaging(request, obs, drones.memory);
+  const salvaging = decideSalvaging(request, obs, reloading.memory);
   if (salvaging !== null) {
     return salvaging;
   }
 
-  const looting = decideLooting(obs, drones.memory);
+  const looting = decideLooting(obs, reloading.memory);
   if (looting !== null) {
     return looting;
   }
@@ -1635,10 +1926,29 @@ export function decideCompanionAction(
   if (obeying !== null) {
     return obeying;
   }
+
+  // Rung 9: the standing `follow`. The last rung before "Standing by", BENEATH
+  // even the standing-order readout -- see `decideFollow`'s header for why a
+  // rung that moves the ship for ever belongs at the very bottom, and for what
+  // being beneath the readout costs.
+  const following = decideFollow(obs, reloading.memory);
+  if (following !== null) {
+    return following;
+  }
+  // ⚠ THE DRY-GUNS READOUT COMES LAST, BENEATH EVEN THE FOLLOW, THOUGH ITS RUNG
+  // SITS HIGH. It is a sentence and never a call, so anything above it here
+  // would be a readout SUPPRESSING a rung that has something real to issue --
+  // put ahead of `decideFollow` it would stop a companion re-anchoring for as
+  // long as its guns were dry. Beneath everything it can only ever replace
+  // "Standing by", which is exactly what it is for: a pilot standing there doing
+  // nothing should say why.
+  if (reloading.decision !== null) {
+    return reloading.decision;
+  }
   return waiting(
     "Standing by",
-    "No fleet order to obey right now, nothing to loot, and nothing hostile to put drones on.",
-    drones.memory,
+    "No fleet order to obey right now, nothing to loot, nothing hostile to put drones on, and no commander on this grid to hold station off.",
+    reloading.memory,
   );
 }
 
@@ -2739,14 +3049,41 @@ interface NamedOrder {
  * area verbs by name keeps that tripwire armed; typing the record over
  * `ChatCommand["kind"]` and adding `salvage`/`loot` entries pointing at some
  * arbitrary broadcast would have disarmed it AND been a lie about what they do.
+ *
+ * ⚠ EACH EXCLUSION IS A CLAIM ABOUT THAT VERB, so each is recorded rather than
+ * quietly appended. Widening this list is how the tripwire gets disarmed, and
+ * the only defence is that widening it costs a sentence:
+ *
+ *   • `salvage`, `loot` — name an AREA, not an object. There is no salvage call
+ *     in the fleet's broadcast vocabulary at all, so there is nothing to map.
+ *   • `stop` — cancels standing orders. It is the absence of an order, and an
+ *     absence has no broadcast.
+ *   • `follow` — answers no broadcast either, and is not even an event: it is
+ *     this companion's STANDING behaviour with a distance attached. Nothing the
+ *     fleet can broadcast means "stay near me at 10 km".
+ *   • `destination` — carries an id and so LOOKS like `travel`, which does map
+ *     onto `TravelTo`. It is excluded anyway because the two differ in kind:
+ *     `travel` is obeyed for as long as the call stands and lapses with it,
+ *     while `destination` LATCHES and outlives every freshness window by
+ *     minutes. Mapping it onto `TravelTo` would put it in rung 7, where a
+ *     target call outranks it -- the exact opposite of the "without additional
+ *     interruption" this order was asked for.
  */
-type NamedChatCommandKind = Exclude<ChatCommand["kind"], "salvage" | "loot" | "stop">;
+type NamedChatCommandKind = Exclude<
+  ChatCommand["kind"],
+  "salvage" | "loot" | "stop" | "follow" | "destination"
+>;
 
 const CHAT_ORDER_NAMES: Readonly<Record<NamedChatCommandKind, NamedOrderName>> = Object.freeze({
   target: "Target",
   align: "AlignTo",
   travel: "TravelTo",
   jump: "JumpTo",
+  // ⚠ THE ONE ORDER WHOSE ID MAY NOT BE ON THIS GRID. Every other entry here
+  // names something the pilot can already see; `warp` is asked for precisely
+  // when it cannot. See `isOrderActionable` and rung e2 for the two answers
+  // that follow from that.
+  warp: "WarpTo",
 });
 
 const ORDER_HEARD: Readonly<Record<NamedOrderName, { readonly broadcast: string; readonly chat: string }>> =
@@ -2881,9 +3218,17 @@ function newestAreaCommand(
  * pilot must go on salvaging while nobody is saying anything. The chat window
  * only has to carry the order ONCE.
  *
- * ⚠ `stop` IS THE ONLY WAY TO CANCEL ONE EARLY, and it cancels nothing else. It
- * does not stop the bot and does not touch a broadcast or a target call -- those
- * have their own authority and their own freshness.
+ * ⚠ `stop` IS THE ONLY WAY TO CANCEL ONE EARLY. What it cancels has GROWN, and
+ * this comment used to say the opposite of what the code now does: it said
+ * `stop` did not stop the ship. It does. `destination` and the standing `follow`
+ * both leave the hull moving, so `stop` now also clears the trip, suspends the
+ * follow and issues one `stopShip` -- see `withStandingChatOrders`, which owns
+ * that half. This function still owns the area job and nothing else.
+ *
+ * What `stop` still does NOT do: stop the bot, or touch a broadcast or a target
+ * call. Those have their own authority and their own freshness, and a companion
+ * that went deaf to its fleet because somebody typed one word would be worse
+ * than one that kept flying.
  */
 function withAreaJob(
   obs: FleetCompanionObservation,
@@ -2929,6 +3274,83 @@ function withAreaJobCleared(
 }
 
 /**
+ * The follow range, the trip and the `stop` gate after this tick's chat.
+ *
+ * ⚠ THE SAME "A HEARD ORDER LATCHES; SILENCE CHANGES NOTHING" RULE AS
+ * `withAreaJob`, applied to the two orders that outlive a chat window by even
+ * more than an area job does. A `destination` is a trip of several jumps and a
+ * `follow` is a standing behaviour with no end at all; neither could survive
+ * being read off the backlog the way a target call is.
+ *
+ * ⚠ THE BACKLOG IS REPLAYED IN TIMESTAMP ORDER RATHER THAN SCANNED PER VERB,
+ * which is the only construction that gets `stop` right. `stop` is the one word
+ * that touches all three latches, so "which is newer, the stop or the follow"
+ * has to be answered for each latch separately -- and answering it with three
+ * independent newest-of-this-kind scans means three different tie rules and one
+ * ordering bug waiting to happen. Folding every order onto the memory oldest
+ * first gives the plain answer instead: the last thing said wins, per latch,
+ * exactly as a reader of the chat would expect.
+ *
+ * ⚠ SAME SENDER GATE AS EVERY OTHER CHAT ORDER. `commandersFor` is the roster's
+ * own commander list, so a stranger in local can neither start a trip nor call
+ * one off.
+ */
+function withStandingChatOrders(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionLadderMemory {
+  const senders = commandersFor(obs);
+  const heard: { readonly command: ChatCommand; readonly at: number }[] = [];
+  for (const message of obs.chatMessages ?? []) {
+    if (!isChatCommandSenderAllowed(message, senders)) {
+      continue;
+    }
+    const command = parseChatCommand(message);
+    if (command === null) {
+      continue;
+    }
+    if (command.kind === "follow" || command.kind === "destination" || command.kind === "stop") {
+      heard.push({ command, at: message.createdAtMs });
+    }
+  }
+  if (heard.length === 0) {
+    return memory;
+  }
+  heard.sort((a, b) => a.at - b.at);
+
+  let next = memory;
+  for (const { command, at } of heard) {
+    if (command.kind === "follow") {
+      // ⚠ A `follow` ALSO UN-SUSPENDS. That is the operator's own resume: there
+      // is no separate "start following again" verb, and inventing one would
+      // leave a companion that was told to stop with no way back into formation
+      // short of restarting it.
+      next = { ...next, followRangeM: command.rangeM, followHeld: false };
+      continue;
+    }
+    if (command.kind === "destination") {
+      next = { ...next, destinationSystemID: command.systemID };
+      continue;
+    }
+    // ⚠ A `stop` IS RE-READ ON EVERY TICK OF ITS FRESHNESS WINDOW, AND MUST BE
+    // IDEMPOTENT ACROSS THEM. Suspending the follow and clearing the trip are
+    // safe to repeat; issuing `stopShip` is not, so only that half is keyed on
+    // the message's timestamp. An order that stands for thirty seconds must not
+    // become fifteen calls.
+    const answered = next.stopHeardAtMs === at;
+    next = {
+      ...next,
+      followHeld: true,
+      destinationSystemID: null,
+      destinationRoutedFor: null,
+      stopHeardAtMs: at,
+      stopShipIssued: answered ? next.stopShipIssued : false,
+    };
+  }
+  return next;
+}
+
+/**
  * What the `loot` job still has to open here: containers, and wrecks that are
  * legally ours, minus whatever this run has already emptied.
  */
@@ -2956,8 +3378,20 @@ function salvageWasOrdered(memory: CompanionLadderMemory): boolean {
 
 type NamedChatCommand = Extract<ChatCommand, { readonly kind: NamedChatCommandKind }>;
 
+/**
+ * ⚠ ASKED OF `CHAT_ORDER_NAMES` ITSELF, NOT OF A SECOND HAND-TYPED EXCLUSION
+ * LIST. This predicate used to spell out `!== "salvage" && !== "loot" && !==
+ * "stop"`, which meant the TYPE tripwire above and the RUNTIME test were two
+ * copies of the same list -- and TypeScript checks neither against the other,
+ * because the return type is a plain boolean whatever the body says. A verb
+ * added to the type's exclusion and forgotten here would have passed the build
+ * and then indexed `CHAT_ORDER_NAMES` with a kind it does not hold, handing
+ * `resolveNamedOrder` an undefined broadcast name and `isOrderActionable` an
+ * `itemID` that does not exist on that command at all. Membership in that record
+ * IS the definition of a named order, so it is the thing to ask.
+ */
 function isNamedChatCommand(command: ChatCommand): command is NamedChatCommand {
-  return command.kind !== "salvage" && command.kind !== "loot" && command.kind !== "stop";
+  return Object.prototype.hasOwnProperty.call(CHAT_ORDER_NAMES, command.kind);
 }
 
 function newestNamedChatOrder(
@@ -2986,13 +3420,38 @@ function newestNamedChatOrder(
  * `TravelTo` is the standing exception, for the reason the header gives: its
  * itemID is a solar SYSTEM, not an object, so there is nothing on this grid to
  * check it against.
+ *
+ * ⚠ AND `WarpTo` IS THE SECOND EXCEPTION, FOR A DIFFERENT REASON: a warp is the
+ * one order that is USEFUL at a distance. "Come to me" is the whole point of
+ * asking for one, and a pilot who is already on your grid has no need of it. So
+ * an id that is not on this grid is checked against the FLEET ROSTER before it
+ * is thrown away: a fleet-mate's character id is warpable by the server's own
+ * `CmdWarpToStuff("char", …)`, which resolves where that member is itself.
+ *
+ * ⚠ THE ROSTER, NOT THE COMMANDER LIST. Who may GIVE this order is already
+ * settled by the sender gate; this asks only whether the thing named can be
+ * warped to, and any member of this fleet can. An id belonging to nobody in the
+ * fleet and nothing on the grid is still refused, which is what keeps a
+ * mistyped or stale link from becoming a warp to somewhere nobody named.
+ *
+ * ⚠ A NULL ROSTER IS NOT AN EMPTY ONE, and it must not silently become one:
+ * "the roster could not be read" is a reason to refuse a member warp, never a
+ * reason to treat every id as a stranger's. Both answers refuse here; the
+ * difference matters only in that the refusal is not evidence about the id.
  */
 function isOrderActionable(
   name: NamedOrderName,
   itemID: number,
   entities: readonly SpaceEntity[],
+  fleetMemberCharacterIDs: readonly number[] | null,
 ): boolean {
-  return name === "TravelTo" || entityOnGrid(itemID, entities) !== null;
+  if (name === "TravelTo") {
+    return true;
+  }
+  if (entityOnGrid(itemID, entities) !== null) {
+    return true;
+  }
+  return name === "WarpTo" && (fleetMemberCharacterIDs ?? []).includes(itemID);
 }
 
 /**
@@ -3027,7 +3486,11 @@ function resolveNamedOrder(
   // the only thing that ever decided it.
   const name = asNamedOrderName(obs.fleetBroadcast?.name);
   const itemID = obs.fleetBroadcast?.itemID ?? null;
-  if (name !== null && itemID !== null && isOrderActionable(name, itemID, entities)) {
+  if (
+    name !== null &&
+    itemID !== null &&
+    isOrderActionable(name, itemID, entities, obs.fleetMemberCharacterIDs ?? null)
+  ) {
     return {
       name,
       itemID,
@@ -3039,7 +3502,14 @@ function resolveNamedOrder(
   const chat = newestNamedChatOrder(obs.chatMessages ?? [], commandersFor(obs));
   if (chat !== null) {
     const chatName = CHAT_ORDER_NAMES[chat.command.kind];
-    if (!isOrderActionable(chatName, chat.command.itemID, entities)) {
+    if (
+      !isOrderActionable(
+        chatName,
+        chat.command.itemID,
+        entities,
+        obs.fleetMemberCharacterIDs ?? null,
+      )
+    ) {
       return null;
     }
     return {
@@ -4035,6 +4505,482 @@ function decideLooting(
   };
 }
 
+/**
+ * The `stop` order: cut the engines, once.
+ *
+ * ⚠ EVERYTHING ELSE `stop` DOES HAS ALREADY HAPPENED BY THE TIME THIS RUNS.
+ * `withAreaJob` dropped the area job and `withStandingChatOrders` cleared the
+ * trip and suspended the follow, both above the supervision gate, because those
+ * are bookkeeping and must land even on a tick that can issue nothing. This rung
+ * is only the half that costs a CALL, and a call has to come through the ladder
+ * like any other.
+ *
+ * ⚠ IT DOES NOT CHECK WHETHER THE SHIP IS ACTUALLY MOVING, and that is
+ * deliberate rather than lazy. Nothing this loop reads says what standing order
+ * the server is holding the hull under -- `shipMode` names a mode, not an order
+ * -- so "is there anything to stop" is a question with no honest answer here.
+ * One call, on the tick the word is heard, is cheap and is what the operator
+ * asked for; guessing it was unnecessary is how a `stop` silently does nothing.
+ */
+function decideStopShip(memory: CompanionLadderMemory): CompanionDecision | null {
+  if (memory.stopHeardAtMs === null || memory.stopShipIssued) {
+    return null;
+  }
+  return {
+    action: { kind: "stopShip" },
+    phase: "Stopping",
+    why: "A commander said stop in chat. Cutting the engines where the ship is.",
+    memory: { ...memory, stopShipIssued: true },
+    followingOrderFrom: "chat",
+    lastOrderHeard: "a chat order to stop",
+  };
+}
+
+/**
+ * The `destination` order: a latched multi-jump trip, flown by the shared
+ * autopilot.
+ *
+ * ⚠ THIS RUNG SITS ABOVE RUNG 7 AND THAT IS THE WHOLE FEATURE. The operator's
+ * words are "travels to it without additional interruption, unless stop is
+ * written in chat", and a rung beneath the fleet-order rung would be derailed by
+ * the first `Target` broadcast or chat target call to arrive mid-route -- the
+ * companion would stop two jumps out to lock something it cannot reach and never
+ * finish the trip. So a standing trip PARKS the tick: it returns a real decision
+ * every tick it stands, which is exactly what starves rung 7 and the salvage and
+ * loot rungs beneath it. That is the intended reading, not a side effect.
+ *
+ * ⚠ AND IT SITS BELOW THE SUPERVISION GATE, RUNG 3 (TANK UP) AND RUNG 5 (THE
+ * FLEE), WHICH IS A DELIBERATE READING OF THE SAME SENTENCE. "Without additional
+ * interruption" means "do not get distracted by the fleet's calls". It does not
+ * mean "keep flying while the ship dies": a companion that is dying still flees,
+ * a companion taking damage still runs its tank, and a companion nobody is
+ * supervising still gets itself safe. Read narrowly, the operator's words would
+ * put a route above survival; nobody asks for a bot that flies its corpse to the
+ * destination, and this is recorded as an interpretation rather than smuggled in
+ * as an obvious truth.
+ *
+ * ⚠ THE `travelTo` GOES OUT ONCE PER DESTINATION. It hands off to the SHARED
+ * autopilot (flow.ts's `startRoute` -- see the dispatcher's own `travelTo`
+ * comment: it runs the whole route), a separate decide-loop from this one, so
+ * re-issuing it every tick would restart the route solver twice a second. The
+ * gate is `destinationRoutedFor`, this rung's own and not rung 7's -- see that
+ * field for the bug that sharing one caused.
+ *
+ * Threaded like rung 3 (`{ decision, memory }`) because ARRIVING issues no
+ * action at all: a call site that took only the decision would throw the
+ * cleared job away and go on reporting a trip that finished.
+ */
+function decideDestinationTrip(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const destination = memory.destinationSystemID;
+  if (destination === null) {
+    return { decision: null, memory };
+  }
+  // ⚠ THE SYSTEM, FROM FLIGHT STATUS, AND ONLY WHEN IT READS. `flightStatus` is
+  // the authoritative "where is this pilot" the flee's own return leg already
+  // uses (`fromSolarSystemID`); a null is "could not tell", never "not there
+  // yet", so an unreadable status leaves the job standing rather than ending a
+  // trip that is still running.
+  const here = obs.flightStatus?.solarSystemID ?? null;
+  if (here !== null && here === destination) {
+    return {
+      decision: null,
+      memory: { ...memory, destinationSystemID: null, destinationRoutedFor: null },
+    };
+  }
+  if (memory.destinationRoutedFor !== destination) {
+    return {
+      decision: {
+        action: { kind: "travelTo", systemID: destination },
+        phase: "Travelling",
+        why: "A commander named a destination in chat. Starting the route.",
+        memory: { ...memory, destinationRoutedFor: destination },
+        followingOrderFrom: "chat",
+        lastOrderHeard: "a chat order to travel to a system",
+      },
+      memory,
+    };
+  }
+  // ⚠ A REAL DECISION, NOT A `standing` ONE. `CompanionDecision.standing` means
+  // "hold this aside as a readout and let the rungs beneath have the tick",
+  // which is the opposite of what this order asked for. The panel gets a phase
+  // that names the trip -- a multi-jump ride must not report "Standing by" for
+  // minutes -- and the ladder below it deliberately does not run.
+  return {
+    decision: {
+      action: WAIT,
+      phase: "Travelling",
+      why: "On the way to the system a commander named. Nothing else until it lands or somebody says stop.",
+      memory,
+      followingOrderFrom: "chat",
+      lastOrderHeard: "a chat order to travel to a system",
+    },
+    memory,
+  };
+}
+
+// ─── The reload rung: put rounds back in the guns ────────────────────────────
+//
+// ⚠ NOTHING RELOADS A PLAYER'S GUNS ON THIS SERVER, AND THAT IS THE WHOLE
+// JUSTIFICATION FOR THIS RUNG. It is the opposite of retail, so it is recorded
+// here rather than left to be rediscovered. Turret ammunition is consumed per
+// cycle and at zero the charge item is REMOVED outright
+// (`consumeTurretAmmoCharge`, /d/evet/server/src/space/runtime.js:18473).
+// `queueAutomaticLocalModuleReload` — the thing that would put it back — has
+// exactly three call sites: command bursts, generic modules on cycle end, and
+// NPC turrets. The only producers of the `effectState.autoReloadOnCycleEnd`
+// that drives the generic one are the three PROBE LAUNCH paths in
+// `dogmaService.js` (~8950/8992/9026). So a player gun that runs dry stays dry
+// for the rest of the fight, and nothing in this repo has ever loaded one: the
+// companion merely WARNED, once, at start (`companionFitWarnings`,
+// web/src/bots/companionFitCheck.ts), and then let the guns click empty.
+//
+// ⚠ AND A STANDING `destination` TRIP STARVES THIS RUNG, WHICH WAS CONSIDERED
+// AND KEPT. The trip rung directly above returns a real decision on every tick
+// it stands, deliberately, because the operator's words for it are "travels to
+// it without additional interruption" — so a companion crossing four systems
+// does not reload on the way. That is the same consequence the fleet's own
+// target calls already live with, and unpicking it here would mean unpicking the
+// trip rung's whole reading of that sentence. A pilot that arrives, or is told
+// `stop`, reloads on the very next tick.
+
+/**
+ * Bound on `loadAmmo` calls for ONE gun, mirroring `MAX_COMPANION_TAG_ATTEMPTS`
+ * above and its reasoning exactly: a call whose refusal is INVISIBLE to this
+ * layer must not be resent for ever.
+ *
+ * ⚠ IT BOUNDS CALLS PER EMPTY GUN, NOT RETRIES AGAINST FRESH READINGS, and the
+ * difference is worth stating because the three facts this rung reads are
+ * THROTTLED. Several consecutive ticks may see the same "still empty" list, so a
+ * budget can be spent before a single refreshed reading arrives — meaning a load
+ * that actually worked can still cost three calls before the refresh proves it.
+ * That is accepted: what the budget has to guarantee is that a gun which cannot
+ * take the only ammunition aboard stops being asked, and three calls per
+ * emptiness is a cheap price for never starving the rungs beneath this one.
+ */
+const MAX_COMPANION_RELOAD_ATTEMPTS = 3;
+
+/**
+ * The biggest stack, ties broken on the LOWER item id.
+ *
+ * ⚠ THE TIE-BREAK IS NOT COSMETIC. "Use the one with the largest amount" is the
+ * operator's own rule, and two identical stacks are an ordinary thing to be
+ * carrying; without a second key the choice would depend on the order the cargo
+ * read happened to return, which is neither stable across ticks nor assertable
+ * in a test. A gun that chose differently on each tick would also break the
+ * banking below, which groups guns by the stack they picked.
+ */
+function largestStack(charges: readonly CompanionCargoCharge[]): CompanionCargoCharge | null {
+  let best: CompanionCargoCharge | null = null;
+  for (const charge of charges) {
+    if (
+      best === null ||
+      charge.quantity > best.quantity ||
+      (charge.quantity === best.quantity && charge.itemID < best.itemID)
+    ) {
+      best = charge;
+    }
+  }
+  return best;
+}
+
+/**
+ * The stack this gun should take: the largest one its type accepts, and failing
+ * that the largest one aboard.
+ *
+ * ⚠ THE FALLBACK IS DELIBERATE AND IS NOT SLOPPINESS. It mirrors the rule
+ * `chargeLooksCompatible` (web/src/bridge/fitting.ts:444) states for itself, in
+ * this codebase's own words: the compatibility table is ADVISORY, the SERVER
+ * decides what loads, and "hiding a charge that would have worked is a worse
+ * failure than showing one that will not". So a group list that matches nothing
+ * is a reason to guess, not a reason to refuse — and the attempt budget above is
+ * what keeps a wrong guess from costing more than three calls.
+ *
+ * ⚠ "CANNOT SAY" IS NEUTRAL, NEVER A NO — the same three-state rule that
+ * function's own header states. A module with no entry in `weaponChargeGroups`,
+ * an entry that is empty, and a stack whose `groupID` could not be decoded are
+ * all unknowns: an unknown never suppresses a load, it only fails to RANK one.
+ *
+ * Nothing is imported from `fitting.ts` to do this. The ladder is a pure decider
+ * and the group lists arrive on the observation already decoded; reaching into
+ * the bridge for a size check it has no size for would couple this file to a
+ * panel's helper for no answer it could use.
+ */
+function pickChargeFor(
+  moduleID: number,
+  charges: readonly CompanionCargoCharge[],
+  groups: Readonly<Record<number, readonly number[]>> | null,
+): CompanionCargoCharge | null {
+  const accepted = groups?.[moduleID] ?? null;
+  const compatible =
+    accepted === null || accepted.length === 0
+      ? []
+      : charges.filter(
+          (charge) => charge.groupID !== null && accepted.includes(charge.groupID),
+        );
+  return largestStack(compatible.length > 0 ? compatible : charges);
+}
+
+/**
+ * Drop the attempt record of every gun that is no longer empty.
+ *
+ * This is the whole of the confirm-and-reset half of the rung: a gun that left
+ * `emptyWeaponModuleIDs` took its rounds, so its budget goes back to full and it
+ * can be reloaded again the next time it runs dry.
+ */
+function withReloadAttemptsPruned(
+  memory: CompanionLadderMemory,
+  empty: readonly number[],
+): CompanionLadderMemory {
+  const still = new Set(empty);
+  const kept: Record<number, number> = {};
+  let dropped = false;
+  for (const [key, attempts] of Object.entries(memory.reloadAttempts)) {
+    if (still.has(Number(key))) {
+      kept[Number(key)] = attempts;
+    } else {
+      dropped = true;
+    }
+  }
+  return dropped ? { ...memory, reloadAttempts: kept } : memory;
+}
+
+/**
+ * Load ammunition into guns that have none.
+ *
+ * ⚠ IT SITS ABOVE RUNG 7, AND THAT IS THE POINT. An empty gun makes the whole
+ * fire path of `lockThenEngage` a no-op — the `activate` goes out, the server
+ * accepts it and nothing comes off the target — so reloading has to outrank
+ * obeying a target call or a companion answers every call by pointing an empty
+ * rack at it. The cost of being above rung 7 is bounded and small: at most
+ * `MAX_COMPANION_RELOAD_ATTEMPTS` calls per empty gun and then it falls through
+ * for good.
+ *
+ * ⚠ AND IT SITS BELOW THE FLEE AND BELOW TANK-UP, for the reason those rungs sit
+ * where they do: a reload is worthless on a ship that is about to be wreckage. A
+ * pilot through its health floor leaves first and reloads when it is somewhere
+ * it can.
+ *
+ * ⚠ CONFIRMATION IS THE GUN LEAVING `emptyWeaponModuleIDs`, NEVER THE CALL
+ * RETURNING CLEANLY — the idiom rung 4's tag write uses, copied deliberately and
+ * for the identical reason. The server decides what may be loaded and refuses
+ * with its own words that never reach this layer (see the dispatcher's own
+ * comment on `api.loadAmmo`), so an accepted load and a refused one are
+ * byte-identical here. Everything that follows from that is rung 4's shape too:
+ * one call per tick, a per-gun budget, and a give-up that moves on to the NEXT
+ * empty gun rather than ending the tick.
+ *
+ * ⚠ IT RETURNS ITS MEMORY EVEN WHEN IT DECIDES NOTHING, the shape `decideTankUp`
+ * and `decideTackleTag` both have: the prune above happens on ticks that issue
+ * no action at all, and a call site that took only the decision would throw away
+ * the fact that a gun got loaded.
+ */
+function decideReload(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const nothing = { decision: null, memory } as const;
+  // ⚠ THE WARP GATE IS BELT AND BRACES, like the follow rung's: rung 1 has
+  // already returned before this is reached mid-warp. Kept so the function's
+  // contract does not depend on where it is called from.
+  if (obs.inWarp === true || obs.inSpace !== true) {
+    return nothing;
+  }
+  // `null` is "the fit could not be read", which is not evidence the guns are
+  // loaded. Silence, and nothing pruned.
+  const empty = obs.emptyWeaponModuleIDs ?? null;
+  if (empty === null) {
+    return nothing;
+  }
+  const mem = withReloadAttemptsPruned(memory, empty);
+  if (empty.length === 0) {
+    return { decision: null, memory: mem };
+  }
+  const charges = obs.cargoCharges ?? null;
+  if (charges === null) {
+    // Again "could not read", and again silence: a cargo bay this tick could not
+    // open is not a cargo bay with nothing in it, and saying so in the readout
+    // would report a shortage nobody has measured.
+    return { decision: null, memory: mem };
+  }
+  if (charges.length === 0) {
+    // ⚠ A READOUT, NOT SILENCE, BUT ALSO NOT A REAL DECISION. Empty guns and no
+    // ammunition aboard is a condition the operator wants to SEE -- it is why
+    // this pilot's damage stopped -- and there is nothing whatever to issue for
+    // it. So it goes out as a `standing` decision: the action is `wait`, the
+    // ladder beneath still gets the tick, and `decideCompanionAction` falls back
+    // to this phrase only if nothing else had anything to do. See
+    // `CompanionDecision.standing`, whose contract this is the second user of.
+    return {
+      decision: {
+        action: WAIT,
+        phase: "Out of ammunition",
+        why:
+          empty.length === 1
+            ? "A gun is empty and there is nothing in the cargo bay to load it with."
+            : `${empty.length} guns are empty and there is nothing in the cargo bay to load them with.`,
+        memory: mem,
+        standing: true,
+      },
+      memory: mem,
+    };
+  }
+
+  const groups = obs.weaponChargeGroups ?? null;
+  const spent = (moduleID: number): boolean =>
+    (mem.reloadAttempts[moduleID] ?? 0) >= MAX_COMPANION_RELOAD_ATTEMPTS;
+
+  // The first gun with budget left, and the stack it picked. Guns whose budget
+  // is spent are STEPPED OVER rather than ending the tick -- one gun nothing
+  // aboard will fit must not stop the rest of the rack being loaded.
+  let first: number | null = null;
+  let chosen: CompanionCargoCharge | null = null;
+  for (const moduleID of empty) {
+    if (spent(moduleID)) {
+      continue;
+    }
+    const charge = pickChargeFor(moduleID, charges, groups);
+    if (charge === null) {
+      continue;
+    }
+    first = moduleID;
+    chosen = charge;
+    break;
+  }
+  if (first === null || chosen === null) {
+    // Every empty gun has spent its budget. Nothing is issued and nothing is
+    // said: there IS ammunition aboard, so "out of ammunition" would be false,
+    // and this pilot has done what it can.
+    return { decision: null, memory: mem };
+  }
+
+  // ⚠ ONE CALL FOR THE WHOLE BANK. Every other still-budgeted empty gun that
+  // picked the SAME stack rides along, because `api.loadAmmo` takes a list and
+  // this loop issues one call per tick: eight guns loaded one per tick would be
+  // sixteen seconds of a ship shooting nothing. Guns that picked a different
+  // stack wait for their own tick rather than being loaded with the wrong round.
+  const bank = empty.filter(
+    (moduleID) =>
+      !spent(moduleID) && pickChargeFor(moduleID, charges, groups)?.itemID === chosen.itemID,
+  );
+  const attempts: Record<number, number> = { ...mem.reloadAttempts };
+  for (const moduleID of bank) {
+    attempts[moduleID] = (attempts[moduleID] ?? 0) + 1;
+  }
+  const retrying = (mem.reloadAttempts[first] ?? 0) > 0;
+  return {
+    decision: {
+      action: { kind: "loadAmmo", moduleIDs: bank, chargeItemID: chosen.itemID },
+      phase: "Reloading",
+      // ⚠ NO CHARGE NAME, EVER. This ladder holds ids and never a type name, and
+      // inventing one ("loading Antimatter") would be the readout claiming
+      // something nothing here resolved.
+      why: retrying
+        ? bank.length === 1
+          ? "That gun is still empty. Loading it again from the cargo bay."
+          : `Those ${bank.length} guns are still empty. Loading them again from the cargo bay.`
+        : bank.length === 1
+          ? "A gun is empty. Loading it from the cargo bay."
+          : `${bank.length} guns are empty. Loading them from the cargo bay.`,
+      memory: { ...mem, reloadAttempts: attempts },
+    },
+    memory: mem,
+  };
+}
+
+/**
+ * The standing `follow`: hold station off the fleet commander.
+ *
+ * ⚠ IT IS A STANDING BEHAVIOUR, NOT AN ORDER OBEYED ONCE. Nobody has to type
+ * anything for this to happen: whenever no rung above it is doing something, a
+ * companion sticks to its anchor. `follow 10 km` only changes the DISTANCE, and
+ * `stop` suspends it (see `followHeld`).
+ *
+ * ⚠ THE ANCHOR IS THE FLEET COMMANDER, NEVER THE PILOT WHO TYPED THE ORDER.
+ * `commandersFor` is the roster's own commander list -- the same one that says
+ * whose chat orders are obeyed at all -- so a squad that changes FC re-anchors
+ * on the next tick without anybody typing anything, and a fleet-mate who is not
+ * in charge cannot make a companion escort THEM by typing `follow`.
+ *
+ * ⚠ IT SITS AT THE VERY BOTTOM OF THE LADDER, BENEATH EVEN THE LOOT AND SALVAGE
+ * RUNGS, BECAUSE IT MOVES THE SHIP. That is the same argument the loot rung's
+ * header makes -- see it -- and it applies here with more force, because looting
+ * at least stops when the grid is clear while this never stops at all. A
+ * formation-keeping order that could outrank a fleet order, a flee or a salvage
+ * job would be a companion that answers nothing else for the rest of the run.
+ *
+ * ⚠ AND BENEATH THE STANDING-ORDER READOUT TOO, which means a companion whose
+ * guns are already running on a called target does NOT re-anchor while it
+ * shoots. Obeying the fleet outranks keeping formation; if that ever needs to
+ * change, it is a precedence decision and not a tidy-up.
+ */
+function decideFollow(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionDecision | null {
+  if (memory.followHeld) {
+    return null;
+  }
+  // The same gates `orbitFleetMate` (`scriptMacros.ts`) puts in front of its own
+  // escort, for its own reasons: nothing is decided mid-warp, there is nothing
+  // to hold station off from inside a station, and a grid that cannot be read
+  // cannot be anchored on.
+  //
+  // ⚠ THE WARP GATE HERE IS BELT AND BRACES: rung 1 returns before this rung is
+  // ever reached mid-warp. It is kept because this function's contract should
+  // not depend on where somebody happens to call it from, which is the same
+  // reason the salvage and loot rungs each carry their own copy.
+  if (obs.inWarp === true || obs.inSpace !== true || (obs.snapshot ?? null) === null) {
+    return null;
+  }
+  // ⚠ AND SO IS THIS ONE, UNREACHABLE AS THE LADDER STANDS. `orbitFleetMate`
+  // needs it live -- a DSL block runs with no supervision gate above it -- but
+  // here `supervisorsInFleet` has already turned a null roster into a
+  // "Checking supervision" wait several rungs up, so this can only fire if that
+  // gate is ever moved or removed. It is kept rather than deleted because
+  // `fleetShipsOnGrid` below answers "no fleet ships on grid" for an unread
+  // roster, which is indistinguishable from "the FC is not here" and would have
+  // this rung report standing by for a reason that was never measured.
+  if ((obs.fleetMemberCharacterIDs ?? null) === null) {
+    return null;
+  }
+  const onGrid = fleetShipsOnGrid(obs);
+  let anchor: SpaceEntity | null = null;
+  // ⚠ IN THE ROSTER'S ORDER, NOT THE GRID'S. A fleet can have several
+  // commanders (boss, wing, squad) and more than one may be on this grid; taking
+  // the first the roster names means every companion in the fleet picks the SAME
+  // anchor from the same list, without any of them telling each other anything --
+  // the same no-channel agreement `pickForThisPilot` relies on for wrecks.
+  for (const commanderID of commandersFor(obs)) {
+    const ship = onGrid.find((entity) => entity.characterID === commanderID) ?? null;
+    if (ship !== null) {
+      anchor = ship;
+      break;
+    }
+  }
+  if (anchor === null) {
+    // No commander here -- or no commanders at all, because the roster could not
+    // be read. A companion whose FC is not on this grid is not following
+    // anybody; it falls through to "Standing by" rather than inventing an anchor
+    // out of whichever fleet-mate happens to be nearest.
+    return null;
+  }
+  const range = memory.followRangeM;
+  if (memory.followAnchorID === anchor.itemID && memory.followRangeIssuedM === range) {
+    // Already holding this station. `keepAtRange` is standing server-side, so
+    // there is nothing to send -- but the readout still says what the pilot is
+    // doing, because "Standing by" would be false while it flies formation.
+    return waiting("Following", "Holding station on the fleet commander.", memory);
+  }
+  return {
+    action: { kind: "keepAtRange", targetID: anchor.itemID, range },
+    phase: "Following",
+    why: "Holding station on the fleet commander.",
+    memory: { ...memory, followAnchorID: anchor.itemID, followRangeIssuedM: range },
+  };
+}
 
 /**
  * Run a fitted SALVAGER on the nearest wreck: close, lock, cycle.
@@ -4828,10 +5774,34 @@ function decideFleetOrders(
         standing: true,
       };
     }
+    // ⚠ TWO WARPS, AND THE GRID DECIDES WHICH. An id this pilot can SEE is an
+    // object, warped to with the ordinary item warp. An id it cannot see got
+    // past `isOrderActionable` only by being a fleet-mate's character id, and
+    // that is the server's own fleet-member warp — `CmdWarpToStuff("char", …)`,
+    // which resolves where that member is itself. The distinction is made here,
+    // where the grid is known, and never in the chat parser, which sees only a
+    // link with a number in it.
+    //
+    // ⚠ THE GRID IS ASKED FIRST, so an id that is BOTH (a fleet-mate standing
+    // right here) stays an ordinary warp to the thing on the grid rather than a
+    // round trip through the fleet service for the same destination.
+    if (entityOnGrid(order.itemID, entities) !== null) {
+      return {
+        action: { kind: "warp", targetID: order.itemID },
+        phase: "Obeying fleet",
+        why: order.why + " Warping to it.",
+        memory: { ...memory, lastWarpedToID: order.itemID },
+        followingOrderFrom: order.source,
+        lastOrderHeard: order.heard,
+      };
+    }
     return {
-      action: { kind: "warp", targetID: order.itemID },
+      action: { kind: "warpToFleetMember", characterID: order.itemID },
       phase: "Obeying fleet",
-      why: order.why + " Warping to it.",
+      // ⚠ "FLEET-MATE", NOT A NAME. This ladder holds ids and never resolves a
+      // character name, and inventing one here would be the readout claiming
+      // something nothing in this file looked up.
+      why: order.why + " Warping to that fleet-mate.",
       memory: { ...memory, lastWarpedToID: order.itemID },
       followingOrderFrom: order.source,
       lastOrderHeard: order.heard,
@@ -5207,6 +6177,32 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       flee: null,
       fleeTripsSpent: 0,
       fleeRecoveryTicks: 0,
+          // ⚠ A RESUMED RUN IS NOT FOLLOWING ANYBODY AND IS NOT ON A TRIP, and
+          // that is the honest answer rather than a lossy one. Nothing about a
+          // `keepAtRange` survives the process that sent it: the server may well
+          // still be holding the ship at station, but this run has not observed
+          // that and must not claim it -- so the anchor record starts empty and
+          // the first live tick re-issues, which costs one call. The trip is a
+          // harder case and goes the same way: the shared autopilot died with
+          // the process, so a destination carried across would be a job with
+          // nothing flying it. The range latch resets to the default for the
+          // same reason -- the `follow 10 km` that set it is long out of the
+          // chat window and cannot be re-heard.
+          followRangeM: COMPANION_FOLLOW_RANGE_M,
+          followHeld: false,
+          followAnchorID: null,
+          followRangeIssuedM: null,
+          destinationSystemID: null,
+          destinationRoutedFor: null,
+          stopHeardAtMs: null,
+          stopShipIssued: false,
+          // A resumed run has loaded nothing either. Starting the budget empty
+          // is the generous answer and the right one: the dead process's loads
+          // may well have landed, and if they did, the first live tick sees
+          // those guns absent from `emptyWeaponModuleIDs` and spends nothing.
+          // If they did not, this run gets its own full budget rather than
+          // inheriting a give-up it never measured.
+          reloadAttempts: {},
         };
       }
       runToken += 1;
