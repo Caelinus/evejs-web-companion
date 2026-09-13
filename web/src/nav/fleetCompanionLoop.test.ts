@@ -17,6 +17,7 @@ import {
   type CompanionLadderMemory,
   type FleetCompanionDeps,
   type FleetCompanionObservation,
+  type CompanionPropulsionModule,
   type FleetCompanionRequest,
 } from "./fleetCompanionLoop.ts";
 import type { ChatMessage, SpaceSnapshot } from "../store/types.ts";
@@ -6216,4 +6217,445 @@ test("a standing destination trip starves the reload rung, and that is the trip'
     moduleIDs: [AUTOCANNON],
     chargeItemID: SLUGS,
   });
+});
+
+// --- Rung 3b: the prop mod --------------------------------------------------
+//
+// Before this rung, group 46 "Propulsion Module" fell off the end of
+// `resolveDefenseModuleIDs`'s branch chain and no companion ever touched an
+// afterburner or an MWD. Three separate things had to be true for one to run:
+// the classifier had to keep it, the request had to carry it (with its typeID,
+// because Deactivate cannot stop a prop mod without naming its effect), and a
+// rung had to decide when. These tests cover the third.
+
+/** Two obviously-synthetic prop mods, one of each kind. */
+const AFTERBURNER: CompanionPropulsionModule = {
+  itemID: 11300001,
+  typeID: 90000910,
+  kind: "afterburner",
+};
+const MWD: CompanionPropulsionModule = {
+  itemID: 11300002,
+  typeID: 90000911,
+  kind: "microwarpdrive",
+};
+
+/** An autopilot reading — `running` is the whole of what "travelling" means here. */
+function travelling(status: "idle" | "running" | "arrived" = "running") {
+  return {
+    status,
+    destinationStationID: null,
+    destinationSystemID: 30000001,
+    remainingJumps: 3,
+    failureReason: null,
+  } as FleetCompanionObservation["travel"];
+}
+
+function withProps(
+  modules: readonly CompanionPropulsionModule[] = [MWD],
+): FleetCompanionRequest {
+  return { ...REQUEST, propulsionModules: [...modules] };
+}
+
+test("TRAVELLING lights the prop mod — the case that did not exist before this rung", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling() }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("NOT travelling leaves a prop mod that is already off alone — no call, and the ladder goes on", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("idle") }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ THE OFF-HALF IS THE WHOLE REASON THE ACTION GREW A typeID. A bare
+// Deactivate returns 200 with the burner still cycling: the server infers a
+// prop mod's default effect on ACTIVATE and not on deactivate, and the BFF
+// resolves the effect name from the typeID. A test that only checked the
+// moduleID would pass against the broken call.
+test("travel ENDING stands the prop mod down, and the deactivate NAMES the typeID", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], [MWD.itemID]), travel: travelling("arrived") }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "deactivate",
+    moduleID: MWD.itemID,
+    typeID: MWD.typeID,
+  });
+});
+
+test("a prop mod already lit while travelling is not re-activated — one call, then fall through", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], [MWD.itemID]), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("the deactivate is issued ONCE — the latch holds until the snapshot proves it stopped", () => {
+  const lit = obs({
+    snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+    travel: travelling("arrived"),
+  });
+  const first = decideCompanionAction(withProps(), lit);
+  assert.equal(first.action.kind, "deactivate");
+  // Same observation, one tick later: activeModuleIDs has not caught up yet.
+  const second = decideCompanionAction(withProps(), lit, first.memory);
+  assert.notEqual(second.phase, "Propulsion");
+});
+
+test("the stopping latch clears once the module is seen stopped, so a REFUSED deactivate retries", () => {
+  const lit = obs({
+    snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+    travel: travelling("arrived"),
+  });
+  const first = decideCompanionAction(withProps(), lit);
+  const stopped = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("arrived") }),
+    first.memory,
+  );
+  assert.equal(stopped.memory.propsStoppingID, null);
+  // And it is willing to try again if the burner turns out to still be running.
+  const again = decideCompanionAction(withProps(), lit, stopped.memory);
+  assert.equal(again.action.kind, "deactivate");
+});
+
+// --- the chat override ------------------------------------------------------
+
+test("`props on` lights the prop mod even though this pilot is not travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", HUMAN)],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+  assert.equal(decision.followingOrderFrom, "chat");
+});
+
+test("`props off` stands it down even though this pilot IS travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+      travel: travelling(),
+      chatMessages: [chatLine("props off", HUMAN)],
+    }),
+  );
+  assert.equal(decision.action.kind, "deactivate");
+  assert.equal(decision.followingOrderFrom, "chat");
+});
+
+// ⚠ THE LATCH IS WHY `props on` IS WORTH TYPING ONCE. Re-reading it off the chat
+// backlog every tick would switch the burner off the moment the line aged out of
+// the freshness window — the exact failure `withStandingChatOrders` exists to
+// prevent, and the reason propulsion rides that fold rather than the
+// order-lapses path a target call takes.
+test("the override LATCHES: silence after `props on` does not put it back on automatic", () => {
+  const heard = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", HUMAN)],
+    }),
+  );
+  assert.equal(heard.memory.propsHeld, true);
+  // Chat has gone quiet and the pilot is still not travelling. It stays lit.
+  const later = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("idle") }),
+    heard.memory,
+  );
+  assert.deepEqual(later.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+test("NEWEST WINS between the two halves, replayed in timestamp order like every other latch", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [
+        { ...chatLine("props off", HUMAN), createdAtMs: 2_000 },
+        { ...chatLine("props on", HUMAN), createdAtMs: 1_000 },
+      ],
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ `stop` CANCELS ORDERS AND PROPULSION IS NOT ONE. A commander halting a pilot
+// has said nothing about whether it may keep its speed, and a ship told to stop
+// is often the one that most needs to move again in a hurry.
+test("a `stop` does not clear the propulsion override the way it clears the trip", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [
+        { ...chatLine("props on", HUMAN), createdAtMs: 1_000 },
+        { ...chatLine("stop", HUMAN), createdAtMs: 2_000 },
+      ],
+    }),
+  );
+  assert.equal(decision.memory.propsHeld, true);
+});
+
+test("a stranger in local cannot touch the prop mod — same commander gate as every chat order", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", 90000099)],
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// --- the scram gate ---------------------------------------------------------
+//
+// ⚠ THE ONE PLACE THE AB/MWD SPLIT EARNS ITS KEEP. SDE group 46 holds both, so
+// the classifier has to reach into the SDE's own dogmaEffects to tell them
+// apart. A warp SCRAMBLER (`warpScramblerMWD`, the jam carrying
+// `blocksMicrowarpdrive`) turns an MWD off server-side and does nothing at all
+// to an afterburner.
+
+test("a scram stops the rung re-lighting an MWD the server has already killed", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("a scram does NOT stand an AFTERBURNER down — no jam in this vocabulary touches one", () => {
+  const decision = decideCompanionAction(
+    withProps([AFTERBURNER]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "activate",
+    moduleID: AFTERBURNER.itemID,
+    targetID: 0,
+  });
+});
+
+test("a ship carrying BOTH keeps its afterburner under a scram — the MWD is skipped, not the rung", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD, AFTERBURNER]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "activate",
+    moduleID: AFTERBURNER.itemID,
+    targetID: 0,
+  });
+});
+
+// ⚠ FAIL OPEN, EVERY TIME. A dropped SSE frame must never be what takes the
+// speed off a ship, so only an explicit `true` gates.
+test("an UNREADABLE scram reading does not gate — three-state, and null is not `scrammed`", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: null }),
+  );
+  assert.equal(decision.action.kind, "activate");
+});
+
+// The cheap half of the wrong answer: an unclassifiable prop mod is assumed
+// scram-vulnerable, costing at most a stationary afterburner on an already
+// tackled pilot, rather than a call spent every tick to be refused.
+test("a prop mod whose kind could not be read is treated as an MWD under a scram", () => {
+  const unknown: CompanionPropulsionModule = { itemID: 11300003, typeID: 90000912, kind: null };
+  const decision = decideCompanionAction(
+    withProps([unknown]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// --- the capacitor floor ----------------------------------------------------
+
+test("below the operator's capacitor floor the rung does not LIGHT one", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling(),
+      capacitorRatio: 0.2,
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ AND THE FLOOR MUST NOT GATE THE OFF-HALF, or a burner is stranded ON at
+// exactly the capacitor level that made it dangerous.
+test("below the floor it still STOPS one — a running module must always be stoppable", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({
+      snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+      travel: travelling("arrived"),
+      capacitorRatio: 0.2,
+    }),
+  );
+  assert.equal(decision.action.kind, "deactivate");
+});
+
+test("unreadable capacitor does not gate — the same fail-open rule the rest of the file follows", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), capacitorRatio: null }),
+  );
+  assert.equal(decision.action.kind, "activate");
+});
+
+// --- the reads this rung refuses to guess at ---------------------------------
+
+test("an UNREADABLE activeModuleIDs issues nothing — `cannot say` is not `nothing is running`", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], null), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("a hull with no prop mod fitted never reaches this rung at all", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// A companion that has not been given a travel reading at all — an older host,
+// or one that never wired it up — reads as "not travelling", never as
+// "travelling". It must not burn capacitor on a guess.
+test("an absent travel reading is NOT travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []) }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ THE OVERRIDE DOES NOT SURVIVE A RESTART, and that is deliberate: the
+// `props on` that set it is long out of the chat window and cannot be re-heard,
+// so carrying it would be a standing order nobody can see or countermand.
+test("a fresh ladder memory has no propulsion override — `null`, not `false`", () => {
+  assert.equal(freshLadderMemory().propsHeld, null);
+});
+
+// --- the trigger that actually fires: the ship's own movement mode ----------
+//
+// ⚠ THESE ARE THE REGRESSION TESTS FOR THE BUG THIS RUNG SHIPPED WITH. Reading
+// "travelling" as `obs.travel.status === "running"` — the shared autopilot — is
+// true and nearly useless: a companion in ordinary fleet play never runs its own
+// autopilot. It yields to the commander's fleet warp, holds station on them, and
+// jumps the gate it is sitting on, so the autopilot stayed idle for an entire
+// trip and no prop mod ever lit. Reported from a live fleet, 2026-09-13.
+//
+// The mode vocabulary is the SERVER's own and is six uppercase words
+// (`space/destiny/commands/`): FIELD, FOLLOW, GOTO, ORBIT, STOP, WARP. An
+// approach is GOTO and `keepAtRange`/follow is FOLLOW. ⚠ The word "approach"
+// never appears in it — which is why `isClosing`'s `/follow|approach|warp/i`
+// misses every approach, and why this rung does not reuse it.
+
+/** A grid whose own ship carries a server movement mode. */
+function gridInMode(mode: string | null, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode, activeModuleIDs },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode },
+    ],
+  } as unknown as SpaceSnapshot;
+}
+
+test("GOTO lights the prop mod — an approach, which is how a pilot closes on a gate", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("GOTO") }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+test("FOLLOW lights it too — keeping up with a commander who is pulling away", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("FOLLOW") }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+// ⚠ THE WHOLE POINT OF THE REGRESSION. No autopilot anywhere in this
+// observation — exactly the shape of a companion following its FC through a
+// dozen systems — and it must still burn.
+test("a companion with NO autopilot trip still burns while closing — the reported bug", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("GOTO"), travel: travelling("idle") }),
+  );
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("ORBIT does not light it — a ship holding station has arrived, it is not closing", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("ORBIT") }));
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("STOP stands a lit prop mod down — nothing is being closed on any more", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("STOP", [MWD.itemID]) }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "deactivate",
+    moduleID: MWD.itemID,
+    typeID: MWD.typeID,
+  });
+});
+
+// The server sends uppercase; being liberal about case costs nothing and a
+// future drop that changed it must not silently stop every companion burning.
+test("the mode test is case-insensitive", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("goto") }));
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("an unreadable mode falls back to the autopilot test rather than burning on a guess", () => {
+  const idle = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode(null), travel: travelling("idle") }),
+  );
+  assert.notEqual(idle.phase, "Propulsion");
+  const onTrip = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode(null), travel: travelling() }),
+  );
+  assert.equal(onTrip.phase, "Propulsion");
+});
+
+// ⚠ THE OVERRIDE STILL OUTRANKS THE MODE, in both directions.
+test("`props off` beats a GOTO, and `props on` beats an ORBIT", () => {
+  const off = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridInMode("GOTO", [MWD.itemID]),
+      chatMessages: [chatLine("props off", HUMAN)],
+    }),
+  );
+  assert.equal(off.action.kind, "deactivate");
+  const on = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("ORBIT"), chatMessages: [chatLine("props on", HUMAN)] }),
+  );
+  assert.deepEqual(on.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
 });

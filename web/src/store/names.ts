@@ -27,6 +27,20 @@ export type NameKind =
   | "type"
   | "typeGroup"
   | "typeCategory"
+  /**
+   * A typeID -> its PROPULSION effect name, or null for anything that is not an
+   * afterburner/MWD. The one kind here that does not answer a display name: it
+   * returns the server's own `moduleBonusAfterburner` /
+   * `moduleBonusMicrowarpdrive`, which is never shown to a player.
+   *
+   * It is a name kind anyway because it is the same question in the same shape
+   * — one typeID against the static tables, batched and cached per key — and
+   * because the answer is needed in two places that would otherwise each invent
+   * their own route: telling an afterburner from an MWD (SDE group 46 holds
+   * both, so no group name can), and naming the effect a Deactivate must carry
+   * for a prop mod to actually stop.
+   */
+  | "propulsionEffect"
   | "category"
   | "corporation"
   | "alliance"

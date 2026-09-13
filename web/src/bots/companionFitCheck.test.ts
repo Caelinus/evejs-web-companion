@@ -42,6 +42,7 @@ function facts(over: Partial<CompanionFitFacts> = {}): CompanionFitFacts {
     remoteShieldModuleIDs: [],
     remoteArmorModuleIDs: [],
     remoteCapacitorModuleIDs: [],
+    propulsionModules: [],
     weaponModuleIDs: [GUN_A],
     salvagerModuleIDs: [],
     modules: [module({ itemID: HARDENER, takesCharge: false }), module({ itemID: GUN_A })],

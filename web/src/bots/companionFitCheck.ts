@@ -25,7 +25,11 @@
 // module cannot itself resolve a drone's typeID to a group name, which is why
 // the role split below arrives already computed.
 
-import type { CompanionSetup, FleetCompanionRequest } from "../nav/fleetCompanionLoop.ts";
+import type {
+  CompanionPropulsionModule,
+  CompanionSetup,
+  FleetCompanionRequest,
+} from "../nav/fleetCompanionLoop.ts";
 import type { DroneRoleIDs } from "../nav/droneRoles.ts";
 
 /** One module as the classifier judged it, with what it is carrying. */
@@ -65,6 +69,12 @@ export interface CompanionFitFacts {
   readonly weaponModuleIDs: readonly number[];
   /** Fitted salvagers, for the `salvage` chat order. See the request's field. */
   readonly salvagerModuleIDs: readonly number[];
+  /**
+   * Fitted afterburners/MWDs. Objects rather than ids because stopping one
+   * needs its typeID and gating one on a scram needs to know which it is — see
+   * the request's `propulsionModules`.
+   */
+  readonly propulsionModules: readonly CompanionPropulsionModule[];
   /** Every online module the fit carries, for the charge checks. */
   readonly modules: readonly CompanionFitModule[];
   /**
@@ -122,6 +132,7 @@ export function requestForFit(
     remoteCapacitorModuleIDs: [...facts.remoteCapacitorModuleIDs],
     weaponModuleIDs: [...facts.weaponModuleIDs],
     salvagerModuleIDs: [...facts.salvagerModuleIDs],
+    propulsionModules: [...facts.propulsionModules],
   };
 }
 

@@ -291,3 +291,25 @@ export function tacklersHolding(
   }
   return holding;
 }
+
+/**
+ * Whether a live WARP SCRAMBLER is on this ship — the narrower half of
+ * `tacklersHolding` above, and the only jam that turns a microwarpdrive off.
+ *
+ * ⚠ ONE OF THE TWO TACKLE TYPES, NOT BOTH, AND THE NAMES ARE THE WRONG WAY
+ * ROUND. `warpScramblerMWD` is the SCRAM (the definition carrying
+ * `blocksMicrowarpdrive`) and `warpScrambler` is the DISRUPTOR, which stops a
+ * warp and leaves the prop mod alone — see `TACKLE_JAMMING_TYPES`'s own header.
+ * Reusing `tacklersHolding` here would read a disruptor as an MWD kill and
+ * stand a companion's propulsion down for a jam that never touched it.
+ *
+ * ⚠ AND IT SAYS NOTHING ABOUT AFTERBURNERS, which no jam in this vocabulary
+ * stops. A caller must know which prop mod it is holding before it acts on
+ * this; `propulsionEffect` (store/names.ts) is where that answer comes from.
+ */
+export function scrammedByWarpScrambler(
+  jams: readonly ActiveJam[],
+  nowMs: number,
+): boolean {
+  return jams.some((jam) => jam.jammingType === "warpScramblerMWD" && isJamLive(jam, nowMs));
+}

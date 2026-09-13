@@ -1270,6 +1270,19 @@ function resolveOneName(kind, id) {
       return getType(numericID) ? getTypeGroupName(numericID) : null;
     case "typeCategory":
       return getType(numericID) ? getTypeCategoryName(numericID) : null;
+    // ⚠ NOT A DISPLAY NAME, AND THE ONE KIND HERE THAT IS NOT. It answers
+    // "moduleBonusAfterburner" / "moduleBonusMicrowarpdrive" — the server's own
+    // effect names, never shown to a player — and null for everything that is
+    // not a prop mod. It rides this resolver because it is the same question
+    // every other kind asks (a typeID against the static tables, batched and
+    // cached per key) and because the alternative was a second route doing the
+    // same round-trip: group 46 "Propulsion Module" holds BOTH kinds, so no
+    // group name can tell an afterburner from an MWD, and only a scram
+    // (`warpScramblerMWD`, which carries `blocksMicrowarpdrive`) shuts one of
+    // them off. A caller that cannot tell them apart must either leave a
+    // scrammed MWD cycling uselessly or stand a perfectly good afterburner down.
+    case "propulsionEffect":
+      return getPropulsionEffectName(numericID);
     case "category":
       return getCategory(numericID) ? getCategoryName(numericID) : null;
     case "corporation":

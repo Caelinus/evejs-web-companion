@@ -90,6 +90,22 @@ export type FleetCompanionRunState = "idle" | "running" | "paused" | "stopped" |
 export type CompanionOrderAuthority = "broadcast" | "tag" | "chat" | "own-ladder";
 
 /**
+ * One fitted afterburner or microwarpdrive: what to cycle, what to name when
+ * stopping it, and which of the two it is.
+ *
+ * `kind` is `null` when the SDE effect read did not arrive. That is a third
+ * state and not a default — "the group said propulsion module and the effect
+ * did not answer" — and the rung that reads it fails OPEN, running the module
+ * and assuming the scram-vulnerable half. See `propulsionModules` on the
+ * request.
+ */
+export interface CompanionPropulsionModule {
+  readonly itemID: number;
+  readonly typeID: number;
+  readonly kind: "afterburner" | "microwarpdrive" | null;
+}
+
+/**
  * What one companion run actually FLIES WITH: the operator's few settings, plus
  * the eight module lists read off the hull it is sitting in.
  *
@@ -214,6 +230,30 @@ export interface FleetCompanionRequest {
    * one costs a drone command and the other moves the ship.
    */
   readonly salvagerModuleIDs: readonly number[];
+  /**
+   * Fitted PROPULSION modules — afterburners and microwarpdrives — classified
+   * off SDE group 46 "Propulsion Module".
+   *
+   * ⚠ THE ONLY MODULE LIST HERE THAT IS NOT A BARE LIST OF IDS, and both extra
+   * fields are forced by the game rather than chosen:
+   *
+   *   • `typeID`, because turning one OFF needs it. Deactivate stops a prop mod
+   *     only when it names the propulsion effect — the server infers the default
+   *     effect on activate and NOT on deactivate — so a bare Deactivate returns
+   *     success with the burner still cycling. The BFF resolves the effect name
+   *     from the typeID, so the id has to travel with the module. Every other
+   *     list here names modules that stop when told to.
+   *
+   *   • `kind`, because group 46 holds BOTH and only one of them cares about a
+   *     scram. `warpScramblerMWD` (the jam that carries `blocksMicrowarpdrive`)
+   *     kills a microwarpdrive and does nothing at all to an afterburner. It
+   *     comes from the SDE's own dogmaEffects (6730/6731), not from the type
+   *     name, and `null` means the effect read did not arrive — see
+   *     `decidePropulsion` for what that costs.
+   *
+   * Empty is a real answer and a common one: plenty of hulls fly without one.
+   */
+  readonly propulsionModules: readonly CompanionPropulsionModule[];
   // ─── From here down: the stored setup. See `COMPANION_SETUP_KEYS`. ─────────
   //
   // ⚠ THE FIELDS BELOW ARE THE ONLY ONES AN OPERATOR EVER SETS, and the only
@@ -420,6 +460,7 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   remoteCapacitorModuleIDs: Object.freeze([]),
   weaponModuleIDs: Object.freeze([]),
   salvagerModuleIDs: Object.freeze([]),
+  propulsionModules: Object.freeze([]),
 } satisfies FleetCompanionRequest);
 
 /**
@@ -604,6 +645,28 @@ export interface FleetCompanionObservation extends ScriptObservation {
    */
   readonly tackledBy?: readonly number[];
   /**
+   * Whether a live WARP SCRAMBLER is on this ship — the one jam that turns a
+   * microwarpdrive off.
+   *
+   * ⚠ NARROWER THAN `tackledBy` ABOVE, AND DELIBERATELY A SEPARATE FIELD. That
+   * list counts BOTH tackle types, and the server's names for them are the wrong
+   * way round from how a player says them: `warpScramblerMWD` is the scrambler
+   * (it carries `blocksMicrowarpdrive`) and `warpScrambler` is the disruptor,
+   * which stops a warp and leaves the prop mod running at full effect. Deriving
+   * this from `tackledBy` would read a disruptor as an MWD kill.
+   *
+   * ⚠ THREE-STATE, AND `null` MUST NOT DISARM ANYTHING. Absent or null is "the
+   * jam slice could not be read", not "clear" and not "scrammed". The rung that
+   * uses it treats only an explicit `true` as a reason to stand a microwarpdrive
+   * down — the same fail-open rule `itemHasActivationCycle` follows, and for the
+   * same reason: a dropped SSE frame must never be what takes the speed off a
+   * ship.
+   *
+   * ⚠ AND IT SAYS NOTHING ABOUT AN AFTERBURNER. No jam in this vocabulary stops
+   * one, so a scrammed pilot with an afterburner keeps burning.
+   */
+  readonly scrammed?: boolean | null;
+  /**
    * This ship's own drones out in space, by entity id — the ones this hull can
    * actually ORDER, which is a narrower set than the ones it owns.
    *
@@ -768,13 +831,20 @@ export type FleetCompanionAction =
    * Switch a module OFF. The companion's first: until the tank-up rung there
    * was nothing it started that it ever had to stop.
    *
-   * ⚠ NOT FOR PROP MODS AS IT STANDS. `api.deactivateModule`'s own comment
-   * warns that an afterburner or MWD only actually STOPS when Deactivate names
-   * its propulsion effect -- the server infers a default effect on activate but
-   * not on deactivate. Hardeners and repairers are unaffected. Read that
-   * comment before widening this to anything that moves the ship.
+   * ⚠ `typeID` IS WHAT MAKES THIS SAFE FOR PROP MODS, and it used to be absent.
+   * This action's own comment read "NOT FOR PROP MODS AS IT STANDS": an
+   * afterburner or MWD only actually STOPS when Deactivate names its propulsion
+   * effect — the server infers a default effect on activate but NOT on
+   * deactivate — so the call returned 200 with the burner still cycling. The BFF
+   * resolves that effect name from the typeID, so passing it is the whole of the
+   * fix, and `decidePropulsion` is the rung that needed it.
+   *
+   * ⚠ OPTIONAL BECAUSE EVERY OTHER CALLER IS RIGHT WITHOUT IT. Hardeners and
+   * repairers stop on a bare Deactivate, and the BFF treats an absent typeID
+   * exactly as it always did. Callers that have it should pass it; the tank-up
+   * rung has no reason to.
    */
-  | { readonly kind: "deactivate"; readonly moduleID: number }
+  | { readonly kind: "deactivate"; readonly moduleID: number; readonly typeID?: number }
   /**
    * Obeying the fleet (rung 7): a `TravelTo` broadcast — a solar system, not
    * an on-grid object, so this hands off to the SHARED autopilot
@@ -1426,6 +1496,44 @@ export interface CompanionLadderMemory {
   readonly stopHeardAtMs: number | null;
   readonly stopShipIssued: boolean;
   /**
+   * What the last `props on` / `props off` said, or `null` when nobody has said
+   * either.
+   *
+   * ⚠ THREE STATES, AND `null` IS THE INTERESTING ONE. It does NOT mean "off";
+   * it means nobody has overridden, and the pilot decides for itself — prop mod
+   * on while it is travelling, off otherwise. `true` and `false` are a
+   * commander's standing override in each direction, which is why `props off`
+   * had to exist alongside `props on`: without it there is no way to countermand
+   * a burn short of restarting the companion, the same gap `follow` closes by
+   * doubling as its own resume.
+   *
+   * ⚠ IT LATCHES, LIKE THE TRIP AND THE FOLLOW ABOVE IT, AND UNLIKE A TARGET
+   * CALL. A commander says "props on" once and means it until they say
+   * otherwise; re-reading it off the chat backlog every tick would switch the
+   * burner off the moment the line aged out of the freshness window. See
+   * `withStandingChatOrders`, which folds all four latches in timestamp order so
+   * "the last thing said wins" is answered once rather than per verb.
+   *
+   * ⚠ AND A `stop` DOES NOT CLEAR IT. `stop` cancels standing ORDERS — it
+   * suspends the follow and drops the trip — and propulsion is not one: a
+   * commander halting a pilot has said nothing about whether it may keep its
+   * speed, and a ship told to stop is often the one that most needs to move
+   * again in a hurry.
+   */
+  readonly propsHeld: boolean | null;
+  /**
+   * The prop mod this rung has a `deactivate` in flight for, so the off-half is
+   * issued ONCE rather than every tick until the snapshot catches up.
+   *
+   * ⚠ THE SAME SHAPE AS `stopShipIssued`, AND FOR THE SAME REASON. Switching a
+   * module off is not idempotent in cost: `activeModuleIDs` refreshes on the
+   * space snapshot's own cadence, so between the call and the proof there are
+   * ticks where the module still reads as cycling. Without this latch each of
+   * them spends another Deactivate. Cleared the moment the module is seen
+   * stopped, which is what makes a REFUSED deactivate retry rather than stick.
+   */
+  readonly propsStoppingID: number | null;
+  /**
    * How many `loadAmmo` calls the reload rung has spent on each gun, keyed by
    * the module's own item id.
    *
@@ -1517,6 +1625,11 @@ export function freshLadderMemory(): CompanionLadderMemory {
     destinationRoutedFor: null,
     stopHeardAtMs: null,
     stopShipIssued: false,
+    // ⚠ `null`, NOT `false`. Nobody has said anything about propulsion yet, so
+    // the pilot decides for itself; `false` here would ship every companion with
+    // a standing order never to use its prop mod.
+    propsHeld: null,
+    propsStoppingID: null,
     reloadAttempts: {},
   };
 }
@@ -1668,6 +1781,7 @@ function nearestOf(
  *     1  yield to warp              server fleet warp wins, unconditionally
  *     2  supervision / abandonment  decision 5; getting safe lives here
  *     3  tank up                    hardeners, then each layer's repairer
+ *     3b prop mod                   burn while travelling; `props on`/`off`
  *     4  tackle -> tag              letter what is holding this ship
  *     5  flee                       leave, get whole, come back
  *     6  drones                     launch, recall a hurt one, redeploy
@@ -1860,6 +1974,8 @@ export function decideCompanionAction(
     destinationRoutedFor: memory.destinationRoutedFor,
     stopHeardAtMs: memory.stopHeardAtMs,
     stopShipIssued: memory.stopShipIssued,
+    propsHeld: memory.propsHeld,
+    propsStoppingID: memory.propsStoppingID,
     // Carried for the same reason as the orders above: a supervisor logging
     // back in says nothing about which of this ship's guns are empty or how
     // many loads have already been spent on them.
@@ -1875,12 +1991,35 @@ export function decideCompanionAction(
     return tankedUp.decision;
   }
 
+  // Rung 3b: the prop mod. Directly under tank-up because it is the same KIND of
+  // move -- one call, self-targeted, instant, and a rung that falls through the
+  // moment the rack matches what is wanted -- so it costs the rungs below it a
+  // tick or two after a trip starts or ends and nothing the rest of the time.
+  //
+  // ⚠ ABOVE THE FLEET RUNG SO A STANDING TARGET CALL CANNOT SWALLOW `props on`.
+  // A commander who types it while the fleet is holding a primary means it now;
+  // below rung 7 it would land whenever the call happened to lapse.
+  //
+  // ⚠ BELOW THE FLEE, WHICH IS WHY THE FLEE TURNS IT OFF. Rung 5 does not fly
+  // through the shared autopilot, so `obs.travel` reads as "not travelling" for
+  // the whole flee and this rung stands the burner down. That is the asked-for
+  // behaviour ("when they travel") and `decidePropulsion`'s header records the
+  // cost and the escape hatch.
+  //
+  // Threaded like rung 3: the tick that merely CLEARS a spent stopping latch
+  // issues no action, and a call site taking only the decision would drop it and
+  // re-issue the same deactivate for ever.
+  const burning = decidePropulsion(request, obs, tankedUp.memory);
+  if (burning.decision !== null) {
+    return burning.decision;
+  }
+
   // Rung 4: tackle → tag. ABOVE obeying the fleet, and that placement is the
   // whole reason this rung works — see `decideTackleTag`'s own header. Threaded
   // the way rung 3 is, and for the same reason: the tick that GIVES UP on a
   // ship issues no action, so a call site that only took the decision would
   // throw the give-up away and re-pick the same ship for ever.
-  const tagging = decideTackleTag(request, obs, tankedUp.memory);
+  const tagging = decideTackleTag(request, obs, burning.memory);
   if (tagging.decision !== null) {
     return tagging.decision;
   }
@@ -3121,6 +3260,11 @@ interface NamedOrder {
  *   • `follow` — answers no broadcast either, and is not even an event: it is
  *     this companion's STANDING behaviour with a distance attached. Nothing the
  *     fleet can broadcast means "stay near me at 10 km".
+ *   • `props` — switches this ship's own afterburner/MWD on or off. It names no
+ *     object, answers no broadcast, and is not even an order in the sense the
+ *     others are: it is a standing OVERRIDE of a decision the pilot otherwise
+ *     makes for itself from whether it is travelling. Nothing in the fleet's
+ *     broadcast vocabulary means "use your prop mod".
  *   • `destination` — carries an id and so LOOKS like `travel`, which does map
  *     onto `TravelTo`. It is excluded anyway because the two differ in kind:
  *     `travel` is obeyed for as long as the call stands and lapses with it,
@@ -3131,7 +3275,7 @@ interface NamedOrder {
  */
 type NamedChatCommandKind = Exclude<
   ChatCommand["kind"],
-  "salvage" | "loot" | "stop" | "follow" | "destination"
+  "salvage" | "loot" | "stop" | "follow" | "destination" | "props"
 >;
 
 const CHAT_ORDER_NAMES: Readonly<Record<NamedChatCommandKind, NamedOrderName>> = Object.freeze({
@@ -3334,20 +3478,24 @@ function withAreaJobCleared(
 }
 
 /**
- * The follow range, the trip and the `stop` gate after this tick's chat.
+ * The follow range, the trip, the propulsion override and the `stop` gate after
+ * this tick's chat.
  *
  * ⚠ THE SAME "A HEARD ORDER LATCHES; SILENCE CHANGES NOTHING" RULE AS
- * `withAreaJob`, applied to the two orders that outlive a chat window by even
- * more than an area job does. A `destination` is a trip of several jumps and a
- * `follow` is a standing behaviour with no end at all; neither could survive
- * being read off the backlog the way a target call is.
+ * `withAreaJob`, applied to the three orders that outlive a chat window by even
+ * more than an area job does. A `destination` is a trip of several jumps, a
+ * `follow` is a standing behaviour with no end at all, and a `props` override
+ * stands until it is countermanded; none could survive being read off the
+ * backlog the way a target call is.
  *
  * ⚠ THE BACKLOG IS REPLAYED IN TIMESTAMP ORDER RATHER THAN SCANNED PER VERB,
  * which is the only construction that gets `stop` right. `stop` is the one word
- * that touches all three latches, so "which is newer, the stop or the follow"
- * has to be answered for each latch separately -- and answering it with three
- * independent newest-of-this-kind scans means three different tie rules and one
- * ordering bug waiting to happen. Folding every order onto the memory oldest
+ * that touches two of these latches, so "which is newer, the stop or the follow"
+ * has to be answered for each latch separately -- and answering it with
+ * independent newest-of-this-kind scans means a different tie rule per verb and
+ * one ordering bug waiting to happen. (`props` is the latch `stop` does NOT
+ * touch; it rides this fold anyway, because "the last thing said wins" is the
+ * same rule and there is no reason for it to have a second implementation.) Folding every order onto the memory oldest
  * first gives the plain answer instead: the last thing said wins, per latch,
  * exactly as a reader of the chat would expect.
  *
@@ -3369,7 +3517,12 @@ function withStandingChatOrders(
     if (command === null) {
       continue;
     }
-    if (command.kind === "follow" || command.kind === "destination" || command.kind === "stop") {
+    if (
+      command.kind === "follow" ||
+      command.kind === "destination" ||
+      command.kind === "stop" ||
+      command.kind === "props"
+    ) {
       heard.push({ command, at: message.createdAtMs });
     }
   }
@@ -3390,6 +3543,14 @@ function withStandingChatOrders(
     }
     if (command.kind === "destination") {
       next = { ...next, destinationSystemID: command.systemID };
+      continue;
+    }
+    if (command.kind === "props") {
+      // ⚠ THE STOPPING LATCH IS CLEARED WITH IT, so a commander who says "props
+      // off" and then "props on" before the deactivate has been proven does not
+      // find the rung still holding a stale "I am switching this off". The
+      // override is the newer statement and wins outright.
+      next = { ...next, propsHeld: command.on, propsStoppingID: null };
       continue;
     }
     // ⚠ A `stop` IS RE-READ ON EVERY TICK OF ITS FRESHNESS WINDOW, AND MUST BE
@@ -4697,6 +4858,215 @@ function decideLooting(
     // three and fly off. The latch is kept for the same reason: this can is
     // still the target until somebody says it is done.
     memory: { ...mem, lootApproaching: null },
+  };
+}
+
+/**
+ * The ship's movement modes that mean "closing on something", read off the
+ * SERVER's own vocabulary rather than guessed at.
+ *
+ * ⚠ THE VOCABULARY IS SIX UPPERCASE WORDS AND THESE ARE THE TWO THAT MATTER.
+ * Checked against the server 2026-09-13 (`space/destiny/commands/`): the only
+ * values it ever assigns to `entity.mode` are `FIELD`, `FOLLOW`, `GOTO`,
+ * `ORBIT`, `STOP` and `WARP`. `gotoPointEntity` -- which is what an approach
+ * runs -- sets **GOTO**, and `followShipEntity`, which is `keepAtRange` and so
+ * the follow rung, sets **FOLLOW**.
+ *
+ * ⚠ THE WORD "APPROACH" NEVER APPEARS IN IT, which is the trap this constant
+ * exists to avoid. `isClosing` above tests `/follow|approach|warp/i` and so
+ * matches FOLLOW and WARP and silently MISSES every approach -- worth knowing
+ * before reusing it for anything that spends a call.
+ *
+ * ⚠ ORBIT IS DELIBERATELY NOT HERE. A ship holding an orbit has arrived; it is
+ * circling, not closing, and a prop mod lit for the whole of a standing orbit
+ * burns capacitor for nothing. STOP and FIELD are not movement at all, and WARP
+ * is movement a prop mod cannot help with -- the server stops one on entering
+ * warp, and the ladder never reaches this rung mid-warp anyway because rung 1
+ * yields first.
+ */
+const CLOSING_SHIP_MODES: readonly string[] = ["GOTO", "FOLLOW"];
+
+/**
+ * Whether this pilot is TRAVELLING in the sense the prop-mod rung means: moving
+ * sub-warp toward something, or running a multi-jump route of its own.
+ *
+ * ⚠ THE MODE TEST IS THE ONE THAT ACTUALLY FIRES, AND THE AUTOPILOT TEST ALONE
+ * WAS THE BUG. The first cut of this rung read "travelling" as
+ * `obs.travel?.status === "running"` -- the shared autopilot -- because both of
+ * this loop's own travel rungs (the `destination` trip and a `TravelTo` order)
+ * fly through `startRoute`. That is true and it is nearly useless: in ORDINARY
+ * fleet play a companion never runs its own autopilot at all. It yields to the
+ * commander's fleet warp (rung 1), holds station on them (rung 9) and jumps the
+ * gate it is sitting on (rung 7) -- so the autopilot stays idle for an entire
+ * trip across a dozen systems and no prop mod ever lit. Observed on a live
+ * fleet, 2026-09-13.
+ *
+ * ⚠ BOTH TESTS ARE KEPT, NOT JUST THE NEW ONE. The mode test covers the burn
+ * that matters -- landing off a gate and closing the last few km, keeping up
+ * with a commander who is pulling away -- and the autopilot test keeps the rung
+ * honest about the pilot's OWN trips, including the moments between legs when
+ * the hull is briefly in no interesting mode at all.
+ */
+function isUnderWay(obs: FleetCompanionObservation): boolean {
+  const mode = obs.snapshot?.ship?.mode ?? null;
+  if (mode !== null && CLOSING_SHIP_MODES.includes(mode.toUpperCase())) {
+    return true;
+  }
+  return obs.travel?.status === "running";
+}
+
+/**
+ * Rung 3b: the prop mod. On while this pilot is TRAVELLING, off when it is not,
+ * and a commander's `props on` / `props off` beats both.
+ *
+ * ⚠ "TRAVELLING" IS `isUnderWay`, AND READING IT AS THE AUTOPILOT ALONE WAS THE
+ * BUG THIS RUNG SHIPPED WITH. See that function's header: a companion in
+ * ordinary fleet play never runs its own autopilot, so the first cut of this
+ * rung was correct and never fired. What fires is the ship's own movement MODE
+ * -- GOTO (closing on something) or FOLLOW (keeping up with the commander) --
+ * which is the burn a player actually makes: landing off a gate and covering the
+ * last few km, or chasing an FC who is pulling away.
+ *
+ * ⚠ A FLEE STILL GETS ONE, NOW, AND BY ACCIDENT RATHER THAN BY DESIGN. The
+ * get-safe ladder approaches a station before docking, and an approach is GOTO,
+ * so the burner lights for that leg. The WARP leg of a flee gets nothing,
+ * because the ladder never reaches this rung mid-warp (rung 1 yields first) and
+ * a prop mod is no use in warp anyway. `props on` remains the way to say "keep
+ * it lit regardless".
+ *
+ * ⚠ AN ORBIT IS NOT CLOSING. A ship holding station in ORBIT has arrived, so the
+ * burner goes out rather than circling on full power for ever -- see
+ * `CLOSING_SHIP_MODES`.
+ *
+ * ⚠ THE OVERRIDE IS THREE-STATE AND `null` IS NOT "OFF". `propsHeld` null means
+ * nobody has said anything, so the travel test decides; `true`/`false` are a
+ * standing instruction in either direction. Reading null as off would ship every
+ * companion with a permanent order never to use its prop mod.
+ *
+ * ⚠ A SCRAM STANDS DOWN A MICROWARPDRIVE AND ONLY A MICROWARPDRIVE. The server
+ * turns an MWD off under a warp scrambler, so re-activating one every tick is a
+ * call spent to be refused; an AFTERBURNER is untouched by any jam in that
+ * vocabulary and is exactly what a tackled ship needs. This is the whole reason
+ * `propulsionModules` carries a `kind` at all -- SDE group 46 holds both and no
+ * group name can separate them. `obs.scrammed` is three-state and only an
+ * explicit `true` gates, so a jam slice that could not be read never takes the
+ * speed off a ship.
+ *
+ * ⚠ AN UNKNOWN `kind` IS TREATED AS A MICROWARPDRIVE, which is the cheap half of
+ * the wrong answer. The alternative -- assume afterburner -- keeps re-activating
+ * a dead MWD under a scram; this one costs at most a stationary afterburner on a
+ * pilot that is already tackled and that a commander can re-light by typing.
+ *
+ * ⚠ THE CAPACITOR FLOOR GATES ONLY THE LIGHTING, NEVER THE STOPPING. An MWD
+ * runs at roughly ninety per cent of a frigate's capacitor per cycle, so
+ * lighting one below the operator's own floor is how a companion caps itself out
+ * and then cannot warp. But a module already running must always be stoppable:
+ * gating the off-half on the same floor would strand a burner ON at exactly the
+ * capacitor level that made it dangerous. Null capacitor is unreadable and does
+ * not gate, the same fail-open rule the rest of this file follows.
+ *
+ * ⚠ IT ISSUES ONE CALL AND THEN FALLS THROUGH. Like tank-up, this rung has
+ * something to do only while the rack disagrees with what is wanted, so the cost
+ * to every rung below it is a tick or two after the state changes and nothing at
+ * all the rest of the time.
+ */
+function decidePropulsion(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const fitted = request.propulsionModules;
+  if (fitted.length === 0 || obs.inSpace !== true) {
+    return { decision: null, memory };
+  }
+  // ⚠ `activeModuleIDs` IS THE AUTHORITY AND `null` MEANS "CANNOT SAY". An
+  // unreadable snapshot must not be read as "nothing is running" -- that would
+  // have this rung re-activate a burner that is already lit, every tick, for as
+  // long as the read stayed down.
+  const active = obs.snapshot?.ship?.activeModuleIDs ?? null;
+  if (active === null) {
+    return { decision: null, memory };
+  }
+  const running = new Set(active);
+
+  const wanted = memory.propsHeld ?? isUnderWay(obs);
+  const scrammed = obs.scrammed === true;
+
+  if (!wanted) {
+    // The off-half. Only what is actually cycling, one module per tick, and once
+    // per module until the snapshot proves it stopped.
+    const lit = fitted.find((module) => running.has(module.itemID));
+    if (lit === undefined) {
+      // Nothing is running, so nothing is being stopped -- clearing the latch
+      // here is what lets a REFUSED deactivate be retried rather than stick.
+      return {
+        decision: null,
+        memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
+      };
+    }
+    if (memory.propsStoppingID === lit.itemID) {
+      return { decision: null, memory };
+    }
+    return {
+      decision: {
+        // ⚠ THE typeID IS WHAT MAKES THIS WORK AT ALL. Deactivate stops a prop
+        // mod only when it names the propulsion effect, and the BFF resolves
+        // that name from the typeID -- without it the call returns success and
+        // the burner keeps cycling. See the action's own header.
+        action: { kind: "deactivate", moduleID: lit.itemID, typeID: lit.typeID },
+        phase: "Propulsion",
+        why:
+          memory.propsHeld === false
+            ? "A commander said props off in chat. Standing the prop mod down."
+            : "Not travelling any more. Standing the prop mod down.",
+        memory: { ...memory, propsStoppingID: lit.itemID },
+        ...(memory.propsHeld === false
+          ? {
+              followingOrderFrom: "chat" as const,
+              lastOrderHeard: "a chat order to stop the prop mod",
+            }
+          : {}),
+      },
+      memory,
+    };
+  }
+
+  // The on-half. A scrammed MWD is skipped rather than the whole rung, so a ship
+  // carrying both keeps its afterburner.
+  const idle = fitted.find(
+    (module) => !running.has(module.itemID) && !(scrammed && module.kind !== "afterburner"),
+  );
+  if (idle === undefined) {
+    return {
+      decision: null,
+      memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
+    };
+  }
+  // ⚠ THE FLOOR IS THE OPERATOR'S OWN, the same one the flee rung reads, and it
+  // gates lighting ONLY. Unreadable capacitor does not gate.
+  const capacitor = obs.capacitorRatio ?? null;
+  if (capacitor !== null && capacitor < request.capacitorFloor) {
+    return { decision: null, memory };
+  }
+  return {
+    decision: {
+      // ⚠ SELF-TARGETED, so no `targetID` -- `0` is this codebase's sentinel for
+      // "run it on the caster", the same form the hardeners use.
+      action: { kind: "activate", moduleID: idle.itemID, targetID: 0 },
+      phase: "Propulsion",
+      why:
+        memory.propsHeld === true
+          ? "A commander said props on in chat. Lighting the prop mod."
+          : "Travelling. Lighting the prop mod.",
+      memory: { ...memory, propsStoppingID: null },
+      ...(memory.propsHeld === true
+        ? {
+            followingOrderFrom: "chat" as const,
+            lastOrderHeard: "a chat order to run the prop mod",
+          }
+        : {}),
+    },
+    memory,
   };
 }
 
@@ -6392,6 +6762,14 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           destinationRoutedFor: null,
           stopHeardAtMs: null,
           stopShipIssued: false,
+          // ⚠ THE PROPULSION OVERRIDE RESETS TO `null`, NOT TO WHAT WAS HELD, for
+          // the same reason the follow range just above it does: the `props on`
+          // that set it is long out of the chat window and cannot be re-heard, so
+          // carrying it would be a standing order nobody can see or countermand.
+          // `null` hands the decision back to the travel test, which the first
+          // live tick answers from the autopilot itself.
+          propsHeld: null,
+          propsStoppingID: null,
           // A resumed run has loaded nothing either. Starting the budget empty
           // is the generous answer and the right one: the dead process's loads
           // may well have landed, and if they did, the first live tick sees
