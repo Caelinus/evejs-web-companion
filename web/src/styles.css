@@ -3412,6 +3412,59 @@
   .win-body > .panel::before {
     display: none;
   }
+  /* ⚠ AND A BLOCK INSIDE A WINDOW IS NOT A CARD EITHER.
+   *
+   * The rule above flattens the panel ROOT and deliberately leaves nested
+   * sections framed, "because inside a panel they are real structure". That is
+   * true of an ITEM — a bot card, a plan row, an empty-state placeholder, each
+   * one of several like it — and false of a BLOCK. Three panels drew their
+   * blocks as boxes: Activity's four cards, Settings' four groups and the Bot
+   * Builder's six sections. Each put a bordered box inside a bordered window,
+   * one border about 10px from the other, so the window's own frame stopped
+   * reading as the edge of anything.
+   *
+   * The other twenty-three windows already separate a block with a heading over
+   * a hairline and no box at all. This brings these three onto that idiom
+   * rather than inventing a fourth.
+   *
+   * ⚠ NAMED, NOT GENERALISED TO `section`. A blanket flatten would also take
+   * the six `.state-card`s, the invite cards, the fleet summary and the HUD
+   * clusters, which are cards on purpose. `<section>` marks a block in this
+   * codebase AND several things that are really cards, so the element cannot
+   * tell them apart and a list can.
+   *
+   * ⚠ SCOPED TO A WINDOW. On a phone there is no outer frame to be inside of,
+   * and the box is the only thing giving a block an edge there — the mobile
+   * workspace keeps exactly what it has. */
+  .win-body .activity-card,
+  .win-body .settings-group,
+  .win-body .botbuilder > .panel {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+    padding-inline: 0;
+  }
+  /* Activity and Settings head their blocks with a bare `h3`, so the separation
+   * the box used to provide comes back as a rule above each heading. The Bot
+   * Builder's blocks already carry a `.panel-head`, which draws its own divider
+   * — a hairline there too would be two rules for one heading. */
+  .win-body .activity-card,
+  .win-body .settings-group {
+    border-top: 1px solid var(--color-line);
+    padding-block: 0.7rem 0;
+  }
+  /* ⚠ THE BLEED AGAIN, one level down. `.panel-head`'s negative inline margin
+   * reaches the edges of a PADDED panel; these blocks have just lost their
+   * inline padding, so the head would hang 16px outside each side and scroll
+   * the window sideways. That is R8's bug for the third time, which is why it
+   * is written next to the flattening that causes it rather than somewhere
+   * else. The block keeps its BLOCK padding, so the head's negative top margin
+   * still has something to cancel and is left alone. */
+  .win-body .botbuilder > .panel > .panel-head {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
   /* Someone who has asked for less motion is not asking for less blur — but a
    * backdrop filter is expensive on a large window over an animating canvas, and
    * reduced-motion is the closest standard signal for "prefer the cheap path".
