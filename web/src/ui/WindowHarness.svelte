@@ -24,6 +24,7 @@
   // it with `npm run dev:web` at /window-harness.html.
   import DesktopWindow from "./DesktopWindow.svelte";
   import PanelHost from "./PanelHost.svelte";
+  import MobileWorkspace from "./MobileWorkspace.svelte";
   import { TABS, tabLabel, type TabID } from "./tabs.ts";
   import { createClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -85,20 +86,52 @@
   const deskHeight = $derived(
     GAP + Math.ceil(shown.length / columns) * (ROW_H + GAP),
   );
+
+  /**
+   * The phone layout, which is the same panels with NO window chrome at all.
+   *
+   * ⚠ IT FILLS THE VIEWPORT RATHER THAN SITTING IN A PHONE-SIZED BOX, and that
+   * is the whole point of having it here. The mobile rules are `@media
+   * (max-width: 640px)` — they ask how wide the VIEWPORT is, not how wide this
+   * component is. Rendering the mobile workspace inside a 390px frame on a
+   * desktop-width window would lay it out at 390px with every phone rule
+   * switched OFF, which is a picture of something that does not exist. To look
+   * at the phone, the browser has to BE phone-width.
+   *
+   * So this replaces the desktop grid instead of sitting beside it, and the
+   * thing to do with it is narrow the window.
+   */
+  let phone = $state(false);
 </script>
 
-<div class="harness-controls">
-  <span class="harness-count">{shown.length} windows</span>
+<!-- ⚠ IN PHONE MODE THESE CONTROLS GO WHERE THE CHARACTER BAR WOULD BE. The
+     mobile workspace is `position: fixed; inset: var(--char-bar-h) 0 0 0` — it
+     pins itself under the app's character bar and ignores page flow entirely.
+     A harness bar that WRAPS at phone width therefore does not push it down, it
+     covers it. Fixed, one row, exactly the bar's height: the harness occupies
+     the slot the real chrome would, and hides nothing it is here to show. -->
+<div class="harness-controls" class:phone>
+  <span class="harness-count">{phone ? "phone" : `${shown.length} windows`}</span>
   <button type="button" class:on={docked} onclick={() => (docked = true)}>Docked</button>
   <button type="button" class:on={!docked} onclick={() => (docked = false)}>In space</button>
   <span class="harness-sep"></span>
-  {#each [1, 2, 3] as n (n)}
-    <button type="button" class:on={columns === n} onclick={() => (columns = n)}>
-      {n} wide
-    </button>
-  {/each}
+  <button type="button" class:on={!phone} onclick={() => (phone = false)}>Windows</button>
+  <button type="button" class:on={phone} onclick={() => (phone = true)}>Phone</button>
+  {#if !phone}
+    <span class="harness-sep"></span>
+    {#each [1, 2, 3] as n (n)}
+      <button type="button" class:on={columns === n} onclick={() => (columns = n)}>
+        {n} wide
+      </button>
+    {/each}
+  {:else}
+    <span class="harness-hint">narrow the window to 640px or less</span>
+  {/if}
 </div>
 
+{#if phone}
+  <MobileWorkspace {store} {flow} isDocked={docked} sessions={[]} />
+{:else}
 <div class="desktop harness-desktop" style="height:{deskHeight}px">
   {#each shown as tab, index (tab.id)}
     {@const at = place(index)}
@@ -116,8 +149,30 @@
     </DesktopWindow>
   {/each}
 </div>
+{/if}
 
 <style>
+  .harness-hint {
+    margin-left: 0.4rem;
+    color: #8fa3b8;
+    font-size: 0.75rem;
+  }
+  .harness-controls.phone {
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 60;
+    height: 2.75rem;
+    padding: 0 0.4rem;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .harness-controls.phone button {
+    min-height: 1.6rem;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.7rem;
+  }
+  .harness-controls.phone .harness-hint { display: none; }
   .harness-controls {
     position: sticky;
     top: 0;

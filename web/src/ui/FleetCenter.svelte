@@ -19,6 +19,9 @@
   let inviteeText = $state("");
 
   const roster = $derived($fleet.fleet?.initState.value.members ?? []);
+  // Shared by the strip's stat-line and the fleet-summary count below so the
+  // two can never drift into naming the same roster two different ways.
+  const rosterCountWords = $derived(`${roster.length} ${roster.length === 1 ? "member" : "members"}`);
   const wings = $derived($fleet.fleet?.initState.value.wings ?? []);
   const joinRequests = $derived($fleet.fleet?.joinRequests.value ?? []);
   const inviteeID = $derived(parseCharacterID(inviteeText));
@@ -187,13 +190,38 @@
 
 <section class="panel" aria-busy={$fleet.loading || busy}>
   <header class="panel-head">
-    <div>
-      <h2 class="panel-title">Fleet Center</h2>
-      <p class="subtitle">Your live fleet roster, command structure, and invitations.</p>
-    </div>
-    <button type="button" class="primary" disabled={$fleet.loading || busy} onclick={() => void refresh()}>
-      {$fleet.loading ? "Refreshing…" : "Refresh"}
-    </button>
+    <h2 class="panel-title">Fleet Center</h2>
+    <!-- ⚠ THE SUBTITLE WENT, THE FOUR-WAY STATUS DID NOT. "Your live fleet
+         roster, command structure, and invitations" only restated what the
+         title bar and the sections below already say - the panel-never-
+         describes-itself rule. What belongs on the strip instead is the one
+         thing here that actually changes.
+         ⚠ FOUR BRANCHES, NOT THREE, AND NOT COLLAPSED. `!$fleet.loaded` is its
+         own state because before the first read completes we know nothing -
+         saying "not in a fleet" here would be a guess dressed as an answer.
+         Once loaded, `$fleet.availability` gives the real three-way split
+         from bridge/fleetCenter.ts: "not-in-fleet" is an explicit FleetNotFound
+         from every read, "unavailable" is a failed or partial one. Collapsing
+         those two into a single "no fleet" would tell a player who is still IN
+         a fleet, but whose read just failed, that they have left it - see the
+         `availability` doc comment on FleetCenterState for why the store keeps
+         them apart. -->
+    <p class="stat-line">
+      {#if !$fleet.loaded}
+        Reading your fleet membership…
+      {:else if $fleet.availability === "unavailable"}
+        Could not tell
+      {:else if $fleet.availability === "not-in-fleet"}
+        Not in a fleet
+      {:else}
+        {rosterCountWords}
+      {/if}
+    </p>
+    <span class="controls">
+      <button type="button" class="primary" disabled={$fleet.loading || busy} onclick={() => void refresh()}>
+        {$fleet.loading ? "Refreshing…" : "Refresh"}
+      </button>
+    </span>
   </header>
 
   {#if refreshError}<p class="error">{refreshError}</p>{/if}
@@ -204,7 +232,12 @@
   {/if}
 
   {#if !$fleet.loaded}
-    <p class="note">Reading your fleet membership…</p>
+    <!-- ⚠ THE WORDS MOVED UP, THEY WERE NOT DUPLICATED. "Reading your fleet
+         membership…" now lives in the strip, which is where this window's one
+         changing line belongs; leaving the same sentence here too printed it
+         twice, once under the other, which reads as two separate reads in
+         flight. The body stays empty until the read answers - the strip is
+         already saying what is happening. -->
   {:else if $fleet.availability === "unavailable"}
     <section class="state-card">
       <h3>Fleet status unavailable</h3>
@@ -236,7 +269,7 @@
     <section class="fleet-summary">
       <div>
         <span class="eyebrow">Current fleet</span>
-        <strong class="count">{roster.length} {roster.length === 1 ? "member" : "members"}</strong>
+        <strong class="count">{rosterCountWords}</strong>
       </div>
       <button type="button" class="danger" disabled={busy} onclick={() => void leaveFleet()}>
         Leave fleet
@@ -335,8 +368,11 @@
 </section>
 
 <style>
-  .panel-head > div { min-width: 0; }
-  .subtitle { color: var(--color-muted); margin: 0.2rem 0 0; }
+  /* ⚠ `.panel-head > div` and `.subtitle` used to style the title+blurb
+     wrapper this strip no longer has (see the panel-head comment above) -
+     removed rather than left to style nothing. Do not add them back for a
+     future subtitle; the rule they'd support is the one that just got
+     deleted. */
   .state-card,
   .hierarchy,
   .fleet-summary { margin: 0 0 0.75rem; }

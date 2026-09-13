@@ -887,19 +887,39 @@
   {/each}
 {/snippet}
 
+<!-- ─── The window's strip, hoisted OUT of `.botbuilder` ──────────────────────
+     ⚠ `.botbuilder` IS A CSS CONTAINER, NOT THE WINDOW BODY. The stylesheet's
+     window rules (`.win-body > .panel > .panel-head`) only reach a panel that
+     is a DIRECT CHILD of the window body, and `.botbuilder` used to sit
+     between the two — so this head got none of that treatment: the status
+     badge and Save floated at the top-right inside the first bordered block
+     instead of sitting in a strip under the title bar. Only this section
+     moves. `.botbuilder` keeps everything else, because it is also
+     `container-name: botbuilder` in styles.css and the `@container botbuilder`
+     query further down targets `.builder-plan`, `.builder-watches` and
+     `.inspector-back` by name — none of which live in this head, so hoisting
+     it changes nothing about where the two-pane collapse fires. -->
+<section class="panel">
+  <header class="panel-head">
+    <h2 class="panel-title">Bot builder</h2>
+    <p class="stat-line">
+      {#if blockingCount === 0}
+        <span class="badge good">Ready</span>
+      {:else}
+        <span class="badge warn">{blockingCount} thing{blockingCount === 1 ? "" : "s"} to fix</span>
+      {/if}
+    </p>
+    <div class="controls">
+      <button type="button" class="primary" disabled={problemIndex.hasBlocking} onclick={saveBot}>Save</button>
+    </div>
+  </header>
+</section>
+
 <div class="botbuilder" class:sheet-open={inspectorTarget !== null}>
   <!-- ─── The bot itself ───────────────────────────────────────────────────── -->
   <section class="panel">
     <header class="panel-head">
-      <h2 class="panel-title">Bot builder</h2>
-      <div class="controls">
-        {#if blockingCount === 0}
-          <span class="badge good">Ready</span>
-        {:else}
-          <span class="badge warn">{blockingCount} thing{blockingCount === 1 ? "" : "s"} to fix</span>
-        {/if}
-        <button type="button" class="primary" disabled={problemIndex.hasBlocking} onclick={saveBot}>Save</button>
-      </div>
+      <h2>This bot</h2>
     </header>
 
     <div class="controls identity-row">

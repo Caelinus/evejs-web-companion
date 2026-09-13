@@ -89,17 +89,24 @@
 
 <section class="panel" aria-busy={$activity.loading}>
   <header class="panel-head">
-    <div>
-      <h2 class="panel-title">Activity Center</h2>
-      <p class="subtitle">A read-only overview of what needs your attention.</p>
-    </div>
+    <h2 class="panel-title">Activity Center</h2>
+    <!-- ⚠ THE SUBTITLE WENT, THE COUNTS DID NOT. "A read-only overview of what
+         needs your attention" only restated what the title bar and the Mail /
+         Recent notifications sections below already say - the panel-never-
+         describes-itself rule. The two badges are different: they are live
+         counts, not description, so they stayed, moved from `.controls` into
+         `.stat-line` on the strip's left. Their conditions are unchanged. -->
+    {#if ($activity.unprocessedCount.status === "ready" && $activity.unprocessedCount.value > 0) || $mail.unreadCount > 0}
+      <p class="stat-line">
+        {#if $activity.unprocessedCount.status === "ready" && $activity.unprocessedCount.value > 0}
+          <span class="badge accent">{$activity.unprocessedCount.value} new notices</span>
+        {/if}
+        {#if $mail.unreadCount > 0}
+          <span class="badge accent">{$mail.unreadCount} unread mail</span>
+        {/if}
+      </p>
+    {/if}
     <p class="controls">
-      {#if $activity.unprocessedCount.status === "ready" && $activity.unprocessedCount.value > 0}
-        <span class="badge accent">{$activity.unprocessedCount.value} new notices</span>
-      {/if}
-      {#if $mail.unreadCount > 0}
-        <span class="badge accent">{$mail.unreadCount} unread mail</span>
-      {/if}
       <button type="button" class="primary" disabled={$activity.loading} onclick={() => void refresh()}>
         {$activity.loading ? "Refreshing…" : "Refresh"}
       </button>
@@ -225,13 +232,11 @@
 </section>
 
 <style>
-  .panel-head > div {
-    min-width: 0;
-  }
-  .subtitle {
-    color: var(--color-muted);
-    margin: 0.2rem 0 0;
-  }
+  /* ⚠ `.panel-head > div` and `.subtitle` used to style the title+blurb
+     wrapper this strip no longer has (see the panel-head comment above) -
+     removed rather than left to style nothing. Do not add them back for a
+     future subtitle; the rule they'd support is the one that just got
+     deleted. */
   .activity-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));

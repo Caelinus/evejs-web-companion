@@ -137,10 +137,18 @@
 
 <section class="panel scanner-center" aria-busy={busyAction !== null}>
   <header class="panel-head">
-    <div>
-      <h2 class="panel-title">Scanner / Exploration Center</h2>
-      <p class="subtitle">Signals and supported probe controls for the current system.</p>
-    </div>
+    <h2 class="panel-title">Scanner / Exploration Center</h2>
+    <!-- ⚠ ZERO IS NOT ALWAYS ZERO. `siteView.totalSites` reads 0 for "loading"
+         and "unavailable" too (see buildScannerSitesView in scannerCenter.ts) -
+         that 0 is a placeholder, not a report. Only surface the count once the
+         scan has actually resolved to a real number, including a genuine zero
+         ("empty"). Anywhere else the strip's left stays blank rather than
+         claiming to know a count it does not have. -->
+    {#if siteView.status === "ready" || siteView.status === "empty"}
+      <p class="stat-line">
+        {siteView.totalSites === 1 ? "1 scannable result" : `${siteView.totalSites} scannable results`}
+      </p>
+    {/if}
     {#if onRefresh}
       <p class="controls">
         <button
@@ -244,11 +252,14 @@
   {/if}
 
   <section class="panel inner probe-controls">
+    <!-- ⚠ NO STAT-LINE HERE ON PURPOSE. "Only proven launch, recover, analyze,
+         and reconnect routes are shown" described the panel instead of showing
+         something a player cannot already see - the action-card grid below
+         states, per button, which routes exist and why a disabled one is
+         disabled, and the read-only `.note` covers the all-disabled case. There
+         is no other live count to put in its place. -->
     <header class="panel-head">
-      <div>
-        <h3>Probe controls</h3>
-        <p class="subtitle">Only proven launch, recover, analyze, and reconnect routes are shown.</p>
-      </div>
+      <h3>Probe controls</h3>
     </header>
 
     {#if enabledActionCount === 0}
@@ -318,13 +329,11 @@
 </section>
 
 <style>
-  .panel-head > div {
-    min-width: 0;
-  }
-  .subtitle {
-    color: var(--color-muted);
-    margin: 0.2rem 0 0;
-  }
+  /* ⚠ `.panel-head > div` and `.subtitle` used to style the title+blurb
+     wrapper both strips in this file no longer have (see the two panel-head
+     comments above) - removed rather than left to style nothing. Do not add
+     them back for a future subtitle; the rule they'd support is the one that
+     just got deleted. */
   .scanner-groups {
     display: grid;
     gap: 0.7rem;

@@ -178,6 +178,58 @@
   const view = $derived(libraryView(loaded, error, scripts, query));
   const filtered = $derived(view.kind === "rows" ? view.rows : []);
 
+  // --- the window strip ---------------------------------------------------
+  //
+  // Every window names itself once, in its title bar; a panel underneath
+  // never repeats it. Region A used to sit right under the title bar with its
+  // own `<header class="panel-head"><h2>Pilots</h2></header>`, which is styled
+  // exactly like a window strip and, sitting first, READ as one — a band that
+  // looked like it was answering for the whole window while it was really
+  // just region A's own band, the same idiom Recent runs and Saved bots use
+  // below it. This gives the window a strip of its own, in FleetCompanions.svelte's
+  // shape, so the band directly under the title bar is honestly the window's.
+  //
+  // ⚠ TWO INDEPENDENT READS, ONE LINE, GATED ON BOTH. Region A/C's roster
+  // (`serverBots`, fetched by `refreshPilots`) and region B's library
+  // (`scripts`, fetched by `refresh`) are two unrelated calls, each still able
+  // to be in flight or failed on its own schedule. Printing whatever answered
+  // first would make the strip flicker between an honest partial and a
+  // wrong-looking whole on every render, so it says nothing until BOTH have
+  // settled — `pilotsLoaded` is set true in `refreshPilots`'s `finally`
+  // regardless of outcome, and `view.kind === "loading"` is `libraryView`'s
+  // own word for "the fetch has not answered yet" (see its doc). Nothing
+  // rendered during loading is the CSS's cue too: a `.panel-head` holding
+  // only the clipped `.panel-title` collapses its band rather than drawing an
+  // empty strip (styles.css, the rule beside `.panel-title` itself).
+  //
+  // ⚠ A FAILED READ IS NEVER "0". `scripts.length` only appears once `view`
+  // says the library actually loaded (`view.kind !== "error"`, `!== "loading"`);
+  // `pilotsPart` reads `pilotsError` the same way region A's own rows do. Two
+  // more places drawing that line, not a looser copy of it.
+  //
+  // `scripts.length`, not `filtered.length` — the strip is the LIBRARY's size,
+  // and a search query narrowing `filtered` to zero rows must not read here as
+  // "no bots saved" (that lie is exactly what the "no-matches" state below
+  // exists to tell apart from "empty").
+  function pilotsStatWords(online: number, recentCount: number): string {
+    const recentWords =
+      recentCount === 0 ? "" : `, ${recentCount} recent run${recentCount === 1 ? "" : "s"}`;
+    return online === 0 ? `No pilots online${recentWords}` : `${online} pilot${online === 1 ? "" : "s"} online${recentWords}`;
+  }
+
+  const summary = $derived.by(() => {
+    if (!pilotsLoaded || view.kind === "loading") {
+      return null; // neither read has answered — say nothing rather than guess
+    }
+    const pilotsPart =
+      pilotsError !== null
+        ? "pilots: could not read"
+        : pilotsStatWords(heldSessions.length + extraServerBots.length, recentRuns.length);
+    const libraryPart =
+      view.kind === "error" ? "bot library: could not read" : `${scripts.length} bot${scripts.length === 1 ? "" : "s"} saved`;
+    return `${pilotsPart} · ${libraryPart}`;
+  });
+
   function edit(scriptID: string): void {
     // The tab switch carries no payload, so the script rides this pilot's
     // one-shot mailbox; the Builder loads it on open (or at once, if its
@@ -258,6 +310,15 @@
   }
 
 </script>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2 class="panel-title">Bot Manager</h2>
+    {#if summary !== null}
+      <p class="stat-line">{summary}</p>
+    {/if}
+  </header>
+</section>
 
 <section class="panel">
   <header class="panel-head">
