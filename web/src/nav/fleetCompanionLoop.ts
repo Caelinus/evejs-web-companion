@@ -2127,6 +2127,30 @@ export function decideCompanionAction(
     return fleeing.decision;
   }
 
+  // Rung 5b: get out of the station.
+  //
+  // ⚠ THE LADDER COULD NOT UNDOCK A PILOT AT ALL UNLESS IT WAS MID-FLEE, AND
+  // NOBODY NOTICED BECAUSE THE FLEE ALWAYS WAS. The one `undock` this loop has
+  // ever issued lives in `recoverAndReturn`, which only runs while a flee latch
+  // is standing — so a companion that was docked for any other reason (started
+  // in a station, stopped and restarted while parked, docked by its operator)
+  // sat there for the rest of the run with every rung beneath it reading an
+  // empty grid and deciding nothing. The settings panel has been promising the
+  // opposite in writing the whole time: "It will undock when the fleet gives it
+  // something to do" (`fleetCompanionRequirements.ts`, which is why a docked
+  // start is advisory rather than blocking). This rung is that sentence.
+  //
+  // ⚠ IT SITS BELOW THE FLEE ON PURPOSE, so every deliberate reason to STAY in
+  // a station still wins: a pilot waiting on repairs, one whose operator will
+  // not pay for them, one that has spent its round trips, and the abandonment
+  // protocol above all of them, each hold the tick before it reaches here. What
+  // is left when it does reach here is a docked ship with nothing keeping it
+  // docked and a fleet somewhere else.
+  const leaving = decideLeaveTheStation(obs, fleeing.memory);
+  if (leaving !== null) {
+    return leaving;
+  }
+
   // Rung 6: drones. Above the fleet rung, like tank-up and tackle-tag and for
   // the same reason: it moves nothing, costs one call, and a pilot does not
   // stop obeying its commander to keep its drones alive. Threaded like rung 3
@@ -4308,7 +4332,7 @@ function decideFlee(
   // ship is whole, and it is not evidence the ship is dying either. Fleeing
   // blind would abandon a fleet on a dropped poll; the honest answer is to
   // decide nothing this tick and look again in two seconds.
-  const health = obs.health ?? null;
+  const health = tankHealth(request, obs);
   if (health === null || health >= request.fleeHealthFloor) {
     return { decision: null, memory: countTowardsRecovery(request, obs, memory, nowMs) };
   }
@@ -4397,6 +4421,56 @@ const FLEE_RECOVERY_HOLD_MS = 30_000;
 const MAX_FLEE_REPAIR_ATTEMPTS = 3;
 
 /**
+ * The health that decides whether this ship is in trouble: the worst of the
+ * layers its TANK is actually made of, and nothing above them.
+ *
+ * ⚠ THE WORST OF ALL THREE LAYERS IS THE WRONG NUMBER, AND ON AN ARMOUR-TANKED
+ * HULL IT IS CATASTROPHICALLY WRONG. Damage on this server eats shield, then
+ * armour, then hull, whatever the fit — so an armour tank's shield is not its
+ * tank at all, it is the thing that empties in the first seconds of every fight
+ * on the way to the layer that matters. `lowestHealth` folds all three, so a
+ * cruiser with an armour repairer and a 30% floor ran for the door the moment
+ * its shield dipped, before its repairer had cycled once. Reported live,
+ * 2026-09-13: "they run away when shield is down instead of turning on armor
+ * repair and waiting for armor going below threshold".
+ *
+ * ⚠ WHAT COUNTS IS READ OFF THE HULL, NEVER GUESSED AT. The self-repair lists
+ * are derived from the fit at start (`requestForFit`), and the shallowest layer
+ * this ship can repair is the layer it is tanked in: everything above that is
+ * buffer, and everything at or below it is the tank. A shield booster means the
+ * shield counts (and so, beneath it, do armour and hull); an armour repairer
+ * with no booster means the shield is ignored and the armour is the trigger,
+ * which is the behaviour asked for above. This is the same authority rung 3
+ * already cycles the repairers from, so a ship flees on the layer it defends.
+ *
+ * ⚠ A HULL WITH NO SELF-REPAIRER AT ALL KEEPS THE OLD FOLD. A buffer fit says
+ * nothing about where its hitpoints are — a shield-extender brick and a plated
+ * one look identical from here, because plates and extenders are passive and
+ * never reach these lists — so there is nothing to narrow with, and the worst
+ * layer is the honest answer rather than a guess dressed up as one.
+ *
+ * `null` when no counted layer could be read, which is never "well" and never
+ * "dying" — the callers keep that three-state discipline themselves.
+ */
+function tankHealth(request: FleetCompanionRequest, obs: FleetCompanionObservation): number | null {
+  const layers = [
+    { ratio: obs.shieldRatio, repaired: request.shieldBoosterModuleIDs.length > 0 },
+    { ratio: obs.armorRatio, repaired: request.armorRepairerModuleIDs.length > 0 },
+    { ratio: obs.hullRatio, repaired: request.hullRepairerModuleIDs.length > 0 },
+  ];
+  const tank = layers.findIndex((layer) => layer.repaired);
+  const counted = tank === -1 ? layers : layers.slice(tank);
+  const readable = counted
+    .map((layer) => layer.ratio)
+    .filter((ratio): ratio is number => ratio !== null && Number.isFinite(ratio));
+  // ⚠ THE SNAPSHOT'S OWN FOLD IS THE FALLBACK, not a zero and not a refusal. A
+  // tick whose layer ratios did not arrive but whose `health` did is a tick that
+  // still knows something, and on a hull with nothing to narrow by the two
+  // numbers are the same number anyway.
+  return readable.length === 0 ? (obs.health ?? null) : Math.min(...readable);
+}
+
+/**
  * The health a returning pilot has to be at: its floor plus the margin, capped
  * at a whole ship. One definition, because three different questions ask it —
  * the return itself, and the two layer reads the trigger stamps.
@@ -4476,7 +4550,11 @@ function healthClearOfTheMark(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
 ): boolean {
-  const health = obs.health ?? null;
+  // ⚠ THE SAME LAYERS THAT STARTED THE FLEE, NEVER THE WHOLE FOLD. Judging the
+  // way back by a layer that did not send the pilot away is how an armour-tanked
+  // ship gets stranded at a safe spot: its shield is empty by design, so the
+  // worst-layer fold would never clear the mark however well the armour healed.
+  const health = tankHealth(request, obs);
   if (health === null) {
     // Unreadable is not "well". A pilot that undocked on a dropped poll would
     // be flying back into a fight on no information at all.
@@ -4702,6 +4780,47 @@ function flyTheFlee(
   // and got nothing from, and leaving the latch would park this rung on a
   // condition that cannot change until the ship is somewhere else.
   return { decision: null, memory: { ...mem, flee: null, fleeTripsSpent: mem.fleeTripsSpent - 1 } };
+}
+
+// ─── Rung 5b: out of the station ─────────────────────────────────────────────
+
+/**
+ * A docked companion with nothing keeping it docked leaves.
+ *
+ * ⚠ `null` FOR A SHIP ALREADY IN SPACE, which is every ordinary tick — this
+ * rung costs a boolean and falls straight through.
+ *
+ * ⚠ AN UNDOCK ALREADY UNDER WAY IS NOT RE-ISSUED. The flight status carries the
+ * server's own transition record, so "I have asked and it has not landed yet"
+ * is a fact this loop can read rather than one it has to remember: a `kind:
+ * "undock"` transition that has not reached `ready` (or `failed`) is this rung's
+ * own call still in flight, and re-sending it every two seconds would spend a
+ * call per tick on a session change that is already happening. An older BFF
+ * that does not send the field at all falls back to issuing, which is the
+ * behaviour this rung would have had without it.
+ */
+function decideLeaveTheStation(
+  obs: FleetCompanionObservation,
+  mem: CompanionLadderMemory,
+): CompanionDecision | null {
+  if (obs.docked !== true) {
+    return null;
+  }
+  const transition = obs.flightStatus?.transition;
+  if (
+    transition !== undefined &&
+    transition.kind === "undock" &&
+    transition.phase !== "ready" &&
+    transition.phase !== "failed"
+  ) {
+    return waiting("Undocking", "Undocking, and the station has not let go yet.", mem);
+  }
+  return {
+    action: { kind: "undock" },
+    phase: "Undocking",
+    why: "A companion belongs out with its fleet, not in a station.",
+    memory: mem,
+  };
 }
 
 // ─── Rung 6: drones ──────────────────────────────────────────────────────────

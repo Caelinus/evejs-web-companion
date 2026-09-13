@@ -3182,6 +3182,101 @@ test("the floor that decides is the request's own", () => {
   assert.notEqual(decideCompanionAction(REQUEST, fleeObs({ health: 0.5 })).phase, "Getting clear");
 });
 
+// --- which layers a flee is judged on -----------------------------------------
+//
+// ⚠ DAMAGE EATS SHIELD, THEN ARMOUR, THEN HULL, WHATEVER THE FIT. So an armour
+// tank's shield is not its tank: it is the thing that empties in the first
+// seconds of every fight. Folding all three layers made such a ship run for the
+// door before its repairer had cycled once -- reported live, 2026-09-13, "they
+// run away when shield is down instead of turning on armor repair and waiting
+// for armor going below threshold". What the ship can REPAIR is what it is
+// tanked in, and that is read off the hull at start.
+
+/** A hull with an armour repairer and no booster: shield is buffer, not tank. */
+const ARMOUR_TANKED: FleetCompanionRequest = {
+  ...REQUEST,
+  armorRepairerModuleIDs: [ARMOR_REPAIRER],
+};
+
+/** A hull that repairs its own shield: the shield IS the tank. */
+const SHIELD_TANKED: FleetCompanionRequest = {
+  ...REQUEST,
+  shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+};
+
+test("an armour-tanked ship does not run away over an empty shield", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.equal(decision.memory.flee, null);
+});
+
+// ⚠ THE REPAIRER COMES FIRST, AND THAT IS THE ASKED-FOR ORDER. Rung 3 sits
+// above the flee, so the first tick of a hurt layer switches its own repairer
+// on ("turning on armor repair") and the door is only reached once that is
+// already cycling and the layer is still going.
+test("the hurt layer's own repairer is reached for before the door is", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 0.2, hullRatio: 1 }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_REPAIRER, targetID: 0 });
+  assert.equal(decision.phase, "Tanking up");
+});
+
+/** The same grid, with one of this ship's own modules already cycling. */
+function fleeObsCycling(
+  moduleID: number,
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  const grid = gridWithStation(200_000);
+  return fleeObs({
+    snapshot: { ...grid, ship: { ...grid.ship, activeModuleIDs: [moduleID] } },
+    ...overrides,
+  } as Partial<FleetCompanionObservation>);
+}
+
+test("and it leaves when the layer it actually tanks with drops", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObsCycling(ARMOR_REPAIRER, {
+      health: 0.05,
+      shieldRatio: 0.05,
+      armorRatio: 0.2,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The other half: a shield tank's shield is its health, and ignoring it would
+// be the same mistake in the opposite direction.
+test("a shield-tanked ship still leaves on its shield", () => {
+  const decision = decideCompanionAction(
+    SHIELD_TANKED,
+    fleeObsCycling(SHIELD_BOOSTER, {
+      health: 0.1,
+      shieldRatio: 0.1,
+      armorRatio: 1,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// A buffer fit says nothing about where its hitpoints are -- plates and
+// extenders are passive and never reach these lists -- so there is nothing to
+// narrow by and the worst layer stays the honest answer.
+test("a hull with no self-repairer keeps the worst-layer fold", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
 // Null is not "healthy" and it is not "dying" -- the same three-state discipline
 // the tank-up rung keeps about a layer ratio. Fleeing on a dropped poll would
 // abandon a fleet over a read that merely failed.
@@ -3778,6 +3873,64 @@ test("a recovered pilot at a safe spot routes back to the system it left", () =>
   );
   assert.deepEqual(decision.action, { kind: "travelTo", systemID: HOME_SYSTEM });
   assert.equal(decision.phase, "Going back");
+});
+
+// --- rung 5b: out of the station ----------------------------------------------
+//
+// ⚠ THE LADDER HAD NO WAY TO UNDOCK A PILOT THAT WAS NOT MID-FLEE, and the
+// settings panel promised the opposite in writing the whole time ("It will
+// undock when the fleet gives it something to do"). A companion started in a
+// station, restarted while parked, or docked by its operator simply stayed
+// there: every rung beneath read an empty grid and decided nothing.
+
+/** Docked, with nothing wrong and no flee standing. */
+function dockedWithNothingWrong(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({ docked: true, inSpace: false, health: null, ...overrides });
+}
+
+test("a docked companion with nothing keeping it docked leaves", () => {
+  const decision = decideCompanionAction(REQUEST, dockedWithNothingWrong());
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Undocking");
+});
+
+test("an undock already in flight is waited on, not sent again every tick", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedWithNothingWrong({
+      flightStatus: {
+        docked: true,
+        transition: { kind: "undock", phase: "session-changing" },
+      } as FleetCompanionObservation["flightStatus"],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.equal(decision.phase, "Undocking");
+});
+
+// Every deliberate reason to STAY in a station is above this rung, and has to
+// keep winning: this is the one that would otherwise drag a pilot back out of
+// the repairs it is waiting on.
+test("a pilot holding in a station for a reason is not dragged out of it", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.match(decision.why, /not set to pay for repairs/i);
+});
+
+test("and neither is one that has spent its round trips", () => {
+  const spent: CompanionLadderMemory = {
+    ...fleeing(SHIELD_ONLY),
+    fleeTripsSpent: REQUEST.maxFleeAttempts,
+  };
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), spent);
+  assert.notEqual(decision.action.kind, "undock");
+  assert.match(decision.why, /staying home/i);
 });
 
 // --- rung 6: drones ----------------------------------------------------------

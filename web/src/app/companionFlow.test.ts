@@ -1594,10 +1594,16 @@ async function companionAwaitingOrders() {
       ok: true,
       status: 200,
       async json() {
-        // Docked, and in a fleet with a human in it: the ladder has nothing
-        // dramatic to do, so every tick ends in `wait` and sleeps the FULL
-        // cadence — which is exactly the baseline these tests measure against.
-        if (path === "/api/bridge/flight/status") return flightBody(true);
+        // Out in space on a quiet grid, and in a fleet with a human in it: the
+        // ladder has nothing dramatic to do, so every tick ends in `wait` and
+        // sleeps the FULL cadence — which is exactly the baseline these tests
+        // measure against.
+        //
+        // ⚠ IT USED TO BE DOCKED, AND THAT STOPPED BEING A QUIET TICK. A docked
+        // companion now has one thing it always wants to do -- leave (rung 5b)
+        // -- so a station is the one place this fixture could not say "nothing
+        // to do" from. Being in space says it honestly.
+        if (path === "/api/bridge/flight/status") return flightBody(false);
         if (path === "/api/bridge/space/snapshot") return spaceBody();
         if (path === "/api/bridge/fitting") return fittingBody({});
         if (path === "/api/names") return namesBody(body as Record<string, unknown>);
