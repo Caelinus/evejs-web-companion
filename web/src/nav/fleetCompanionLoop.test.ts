@@ -2886,6 +2886,168 @@ test("an unsupervised pilot tags nothing", () => {
   assert.notEqual(decision.action.kind, "setFleetTargetTag");
 });
 
+// --- rung 4's other arm: tackle -> BROADCAST ---------------------------------
+//
+// THE ARM THAT ACTUALLY RUNS. A companion alt joins somebody else's fleet as a
+// plain member and is never promoted, so `canTag` is `false` for essentially
+// every real run -- and the rung used to stop dead there, which meant the whole
+// "letter what has you tackled" feature described something that never fired.
+//
+// It fires now, the way EVE lets a member fire it: `Target`, broadcast. The
+// server has NO commander gate on broadcasting (`sendBroadcast`,
+// fleetRuntime.js:2521, checks membership and nothing else) where it has a hard
+// one on tagging (fleetRuntime.js:1317). Lettering is a commander's job and
+// calling a target out is everybody's, which is the division these two arms
+// mirror rather than invent.
+
+/** A PLAIN MEMBER that is tackled: in a fleet, no command, nothing lettered. */
+function memberObs(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithEntities([TACKLE]),
+    canTag: false,
+    canBroadcast: true,
+    fleetTargetTags: new Map(),
+    tackledBy: [TACKLE],
+    ...overrides,
+  });
+}
+
+test("a plain member broadcasts the ship that has it scrambled", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs());
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: TACKLE });
+  assert.equal(decision.phase, "Tagging");
+});
+
+// ⚠ THE READOUT MUST NAME THE CALL IT MADE. "Marking it for the fleet" over a
+// broadcast would hide the one thing a player needs to know about this pilot:
+// that its calls arrive in the broadcast window and not on the overview.
+test("the reason says it BROADCAST, never that it marked or lettered", () => {
+  const why = decideCompanionAction(TAGGING, memberObs()).why ?? "";
+  assert.match(why, /broadcast/i);
+  assert.doesNotMatch(why, /marking|letter|tag/i);
+});
+
+// ⚠ `canTag === false` ANSWERS TWO QUESTIONS AND ONLY ONE OF THEM HAS A
+// FALLBACK. `canTagInFleet` returns false both for "in a fleet, not a commander"
+// and for "in no fleet at all", and a pilot in no fleet has nobody to broadcast
+// to. Deriving the second from the first is impossible, which is why
+// `canBroadcast` is asked separately -- and why a host that does not populate it
+// gets silence rather than a guess.
+test("a pilot in no fleet broadcasts nothing", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canBroadcast: false }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+test("an unpopulated canBroadcast is unknown, and unknown stays quiet", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canBroadcast: undefined }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// ⚠ `null` IS NOT THE BROADCAST ARM'S DOOR. An unreadable roster is not
+// evidence this pilot lacks command; sending it down the fallback would make a
+// transient read failure change how the pilot talks to its fleet.
+test("an unreadable roster makes neither call", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canTag: null }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// ⚠ THE ONE PLACE THE TWO ARMS DISAGREE ABOUT THE TAG DICT, and it is not an
+// oversight. The letter arm cannot write without knowing which letters are free
+// (a tag is unique fleet-wide). A broadcast claims no letter, so an unreadable
+// dict is no reason to stay quiet about being tackled.
+test("an unreadable tag dict stops a letter but NOT a broadcast", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ fleetTargetTags: null }));
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: TACKLE });
+});
+
+// ⚠ A LETTERED SHIP IS ALREADY CALLED. Broadcasting it as well would put a
+// second call on a target the fleet is already pointed at -- and because every
+// companion obeys the NEWEST target call, it would shove the commander's own
+// standing primary aside for nothing.
+test("a tackler the commander has already lettered is not broadcast", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ fleetTargetTags: new Map([[TACKLE, "B"]]) }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// ⚠ ONCE PER SHIP, AND THIS IS WHAT STOPS TWO COMPANIONS SHOUTING AT EACH
+// OTHER. A broadcast leaves nothing behind to re-read, so a second send could
+// learn nothing a first did not -- it would just be the same shout every two
+// seconds for as long as the ship held this pilot. And since a `Target`
+// broadcast is an ORDER to every companion that hears it, two pilots tackled by
+// one ship would re-call it in turn without a per-ship memory.
+test("one broadcast per ship, however long it keeps this pilot tackled", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const calls: number[] = [];
+  for (let tick = 0; tick < 5; tick += 1) {
+    const decision = decideCompanionAction(TAGGING, memberObs(), memory);
+    memory = decision.memory;
+    if (decision.action.kind === "broadcastFleetTarget") {
+      calls.push(decision.action.targetID);
+    }
+  }
+  assert.deepEqual(calls, [TACKLE], "called once, then silent about that ship");
+});
+
+// ⚠ PER SHIP, NOT A SINGLE "ALREADY CALLED" FLAG -- the same reasoning that
+// makes the letter arm's give-up list per-ship. A flag would pass the test above
+// and fail the moment a second ship joined in.
+test("having called one tackler does not silence the next", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const grid = gridWithEntities([TACKLE, OTHER]);
+  memory = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: grid, tackledBy: [TACKLE] }),
+    memory,
+  ).memory;
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: grid, tackledBy: [TACKLE, OTHER] }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: OTHER });
+});
+
+// The trigger is the same narrow one the letter arm has: ships holding THIS
+// pilot down, never a ranking of the grid.
+test("a plain member that is not tackled broadcasts nothing, however hostile the grid", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ tackledBy: [] }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+test("a tackler that is not on this grid is not broadcast", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: gridWithEntities([OTHER]), tackledBy: [TACKLE] }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// Rungs 1 and 2 outrank this arm exactly as they outrank the letter arm.
+test("nothing is broadcast mid-warp", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ inWarp: true }));
+  assert.deepEqual(decision.action, { kind: "wait" });
+});
+
+test("an unsupervised pilot broadcasts nothing", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    alone({
+      snapshot: gridWithEntities([TACKLE]),
+      canTag: false,
+      canBroadcast: true,
+      fleetTargetTags: new Map(),
+      tackledBy: [TACKLE],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
 // --- the parking fix: a standing order no longer ends the tick ---------------
 //
 // `lockThenEngage`'s last branch used to return an ordinary wait once the called

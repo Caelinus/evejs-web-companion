@@ -7820,11 +7820,18 @@ app.post("/api/bridge/fleet/broadcast/bubble", requireAuth, async (req, res, nex
     return;
   }
   const body = req.body || {};
+  // ⚠ `typeID` STAYS NULL WHEN IT IS ABSENT, and that is the retail client's
+  // own shape, not a convenience. `SendBroadcast_Target` (fleetSvc.py:1050)
+  // reaches `BroadcastToBubble(name, scope, itemID, typeID=None)` with the
+  // default untouched, and the server passes the slot through to OnFleetBroadcast
+  // without normalising it (fleetRuntime.js:2541-2546). Coercing an absent
+  // typeID to `0` would put a number in a slot the client leaves empty, for a
+  // broadcast whose typeID means nothing — so it is left empty here too.
   await dispatchBridgeWrite(req, res, next, "fleetMgr", "BroadcastToBubble", [
     typeof body.name === "string" ? body.name : "",
     body.scope ?? null,
     Number(body.itemID) || 0,
-    Number(body.typeID) || 0,
+    body.typeID === undefined || body.typeID === null ? null : Number(body.typeID) || 0,
   ]);
 });
 

@@ -500,6 +500,19 @@ export interface FleetCompanionObservation extends ScriptObservation {
    */
   readonly canTag: boolean | null;
   /**
+   * Whether THIS pilot may BROADCAST in its fleet — i.e. whether it is in one
+   * at all. Three states on the same terms as `canTag`: `null` is an unreadable
+   * roster, `false` is a read one saying this pilot is in no fleet.
+   *
+   * ⚠ IT IS A SEPARATE FIELD BECAUSE `canTag === false` ANSWERS TWO QUESTIONS
+   * AT ONCE AND THE FALLBACK ONLY WORKS FOR ONE OF THEM. `canTagInFleet`
+   * returns `false` both for "in a fleet, not a commander" (where a broadcast
+   * is exactly the right substitute) and for "in no fleet" (where there is
+   * nobody to broadcast to). Deriving the second from the first is impossible;
+   * asking the roster the second question directly is a `.find` away.
+   */
+  readonly canBroadcast?: boolean | null;
+  /**
    * Character IDs the fleet roster names as COMMANDERS — fleet boss, wing
    * commander, squad commander, or the fleet's creator. The chat-order rung
    * takes orders from these and from nobody else.
@@ -792,6 +805,29 @@ export type FleetCompanionAction =
    * letter arrive in a later `fleetTargetTags` — never the write's own 200.
    */
   | { readonly kind: "setFleetTargetTag"; readonly targetID: number; readonly tag: string }
+  /**
+   * Rung 4's OTHER half: call the ship out by fleet broadcast instead of
+   * lettering it — `Target`, bubble range, which is the retail client's own
+   * `SendBroadcast_Target` down to the argument (see `api.broadcastFleetTarget`).
+   *
+   * ⚠ THIS EXISTS BECAUSE THE TAG PATH IS SHUT TO ALMOST EVERY COMPANION, AND
+   * PERMANENTLY. A companion alt joins somebody else's fleet as a plain member
+   * and stays one; `setFleetTargetTag` refuses plain members
+   * (fleetRuntime.js:1317). So the rung above it — "letter the ship that has
+   * this one tackled so the fleet can call it" — described something that in
+   * practice never fired. Broadcasting has NO commander gate on the server
+   * (`sendBroadcast`, fleetRuntime.js:2521, gates on membership alone), which is
+   * both EVE's own division of labour and the reason this action closes the gap
+   * rather than papering over it.
+   *
+   * ⚠ AND ITS ACK MEANS SOMETHING, unlike the tag's. `false` back from the
+   * server is a real refusal (the 2-second rate limit) rather than the tag
+   * path's indistinguishable `null`. The dispatcher still does not RETRY on it
+   * — see `decideTackleTag` for why one call per ship is the right budget —
+   * but a dropped call is at least knowable, which is a thing this loop has
+   * never been able to say about a tag.
+   */
+  | { readonly kind: "broadcastFleetTarget"; readonly targetID: number }
   /**
    * Rung 6: put drones out. `droneItemIDs` are BAY STACK ids, not drone entity
    * ids - a stack and a drone in space live in different id spaces, and the
@@ -1113,6 +1149,28 @@ export interface CompanionLadderMemory {
    */
   readonly taggingGaveUpOn: readonly number[];
   /**
+   * Ships this pilot has already called out by BROADCAST (rung 4's fallback for
+   * a non-commander). One entry per ship, one broadcast per entry, for the run.
+   *
+   * ⚠ A BROADCAST HAS NO STATE TO RE-READ, WHICH IS WHY THIS LIST AND NOT AN
+   * ATTEMPT COUNTER. A tag can be watched for in a later `fleetTargetTags`, so
+   * the tag arm knows when to try again and when to give up; a broadcast is a
+   * one-shot notification that leaves nothing behind to observe. With no
+   * confirmation to wait for there is nothing a second call could learn — it
+   * would just be the same shout again, every two seconds, for as long as the
+   * ship held this one tackled.
+   *
+   * ⚠ AND IT IS WHAT STOPS TWO COMPANIONS SHOUTING AT EACH OTHER. A `Target`
+   * broadcast is an ORDER to the other rungs of every companion that hears it
+   * (`asNamedOrderName`, and newest-wins), so without a per-ship memory two
+   * pilots tackled by the same ship would re-call it in turn indefinitely. With
+   * one, the exchange is bounded at one call per pilot per ship and then stops.
+   *
+   * Capped like `taggingGaveUpOn`, for the same reason: a long fight must not
+   * grow it without bound.
+   */
+  readonly tackleCalledOut: readonly number[];
+  /**
    * The target this pilot's last lock refusals were against, and how many it has
    * had in a row.
    *
@@ -1426,6 +1484,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastTagIssuedFor: null,
     lastTagAttempts: 0,
     taggingGaveUpOn: [],
+    tackleCalledOut: [],
     lockRefusedFor: null,
     lockRefusals: 0,
     lockGaveUpOn: [],
@@ -1762,6 +1821,7 @@ export function decideCompanionAction(
     lastTagIssuedFor: memory.lastTagIssuedFor,
     lastTagAttempts: memory.lastTagAttempts,
     taggingGaveUpOn: memory.taggingGaveUpOn,
+    tackleCalledOut: memory.tackleCalledOut,
     lockRefusedFor: memory.lockRefusedFor,
     lockRefusals: memory.lockRefusals,
     lockGaveUpOn: memory.lockGaveUpOn,
@@ -3613,9 +3673,36 @@ function rememberGiveUp(gaveUpOn: readonly number[], itemID: number): readonly n
 }
 
 /**
- * Rung 4: letter the ship that is holding this one down, so the whole fleet can
- * call it. Hands back a decision only on a tick it actually writes — which is
- * few of them — so everything below it keeps its turn.
+ * Rung 4: CALL OUT the ship that is holding this one down, so the whole fleet
+ * can shoot it. Hands back a decision only on a tick it actually writes — which
+ * is few of them — so everything below it keeps its turn.
+ *
+ * ⚠ TWO WAYS TO CALL A SHIP, AND WHICH ONE THIS PILOT HAS IS NOT ITS CHOICE.
+ * Lettering a target (`setFleetTargetTag`) is a COMMANDER's job — the fleet
+ * boss, a wing or squad commander, or the fleet's creator, and nobody else
+ * (fleetRuntime.js:1317). Broadcasting `Target` is EVERY member's
+ * (fleetRuntime.js:2521 gates on membership and nothing more). A companion alt
+ * joins somebody else's fleet as a plain member and will never be promoted, so
+ * for the overwhelming majority of runs the first way is shut for good.
+ *
+ * This rung therefore does not HAVE a commander check in the sense of a thing
+ * it might fail. It has a fork:
+ *
+ *   canTag === true   ->  letter it (stable, survives the tick, re-readable)
+ *   canTag === false  ->  broadcast it, if this pilot is in a fleet at all
+ *   canTag === null   ->  the roster is unreadable; say nothing this tick
+ *
+ * A previous version of this rung stopped dead on the middle line, and the
+ * readout it fed said "cannot tag, not a fleet commander" — true about the
+ * letter, and quite wrong about the pilot, which had a perfectly good way to
+ * name its tackler and was not using it.
+ *
+ * ⚠ THE TWO ARMS ARE NOT THE SAME PROMISE AND MUST NOT BE DESCRIBED AS ONE. A
+ * tag is fleet STATE: it sits on the ship, anyone reading the fleet sees it,
+ * and it can be confirmed by reading it back. A broadcast is an EVENT: it
+ * arrives once, in the broadcast window, and leaves nothing behind. That is
+ * why the arms have different budgets (attempts-and-give-up versus called-once)
+ * and different memories (`lastTagIssuedFor` versus `tackleCalledOut`).
  *
  * ⚠ IT SITS **ABOVE** OBEYING THE FLEET, AND THAT IS THE WHOLE REASON IT WORKS.
  * `decideFleetOrders` PARKS THE TICK once a target call stands and is locked
@@ -3661,45 +3748,57 @@ function decideTackleTag(
   memory: CompanionLadderMemory,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
-  // ⚠ NO OPERATOR GATE. Every companion tags, and the three things below
-  // are what make that safe rather than a letter-fight:
+  // ⚠ NO OPERATOR GATE. Every companion calls out what has it tackled, and the
+  // three things below are what make that safe rather than a shouting match:
   //
-  //   1. THE SERVER IS THE REAL GATE. Only a fleet creator, leader, wing
-  //      commander or squad commander may tag at all, and `obs.canTag` mirrors
-  //      that test off the roster. In an ordinary fleet the companions are
-  //      plain members and this rung writes nothing, whatever anybody ticked.
-  //   2. A LETTERED SHIP IS SKIPPED, below, so a second tagger seeing the same
-  //      tackler leaves the letter it already has alone.
+  //   1. THE SERVER IS THE REAL GATE ON THE LETTER. Only a fleet creator,
+  //      leader, wing or squad commander may tag, and `obs.canTag` mirrors that
+  //      test off the roster. In an ordinary fleet the companions are plain
+  //      members and this rung never writes a letter, whatever anybody ticked —
+  //      it broadcasts instead, which is the call plain members do have.
+  //   2. A SHIP ALREADY CALLED IS SKIPPED, in BOTH arms: lettered ships are
+  //      filtered out below (so a second tagger leaves an existing letter
+  //      alone) and `tackleCalledOut` bounds the broadcast arm to one call per
+  //      ship per pilot (so two pilots cannot re-call each other's tackler
+  //      back and forth).
   //   3. THE TRIGGER IS NARROW: only ships tackling THIS pilot are candidates.
   //      Two companions collide only if one ship has tackled both of them in
-  //      the same tick, before either letter is visible.
+  //      the same tick, before either call is visible.
   //
   // The `attemptsTagging` checkbox that used to stand here gated behaviour that
-  // was already exactly what was asked for -- tag what is holding you down, and
-  // only that. See docs/fleet-companion-simplification.md, "Tagging".
+  // was already exactly what was asked for -- call out what is holding you
+  // down, and only that. See docs/fleet-companion-simplification.md, "Tagging".
   const snapshot = obs.snapshot ?? null;
   if (obs.inSpace !== true || snapshot === null) {
     return nothing;
   }
-  // ⚠ THREE STATES, AND ONLY ONE OF THEM WRITES. `null` is "could not read the
-  // roster" and `false` is "read it, and this pilot is not a commander". Both
-  // forbid the write; neither is remembered here, because a `null` cached as
-  // "no" would freeze a transient roster outage into a pilot that never tags
-  // again for the rest of the run.
-  if (obs.canTag !== true) {
+  // ⚠ THREE STATES, AND THE THIRD IS SILENCE. `null` is "could not read the
+  // roster" — it is not evidence this pilot lacks command, so it must not send
+  // this rung down the broadcast arm any more than it may send it down the tag
+  // arm. Nothing is remembered either way: a `null` cached as an answer would
+  // freeze a transient roster outage into a settled verdict for the whole run.
+  const canTag = obs.canTag ?? null;
+  if (canTag === null) {
     return nothing;
   }
   const tacklers = obs.tackledBy ?? [];
   if (tacklers.length === 0) {
     return nothing;
   }
-  // ⚠ NO TAG DICT, NO WRITE. `null` means this client has never received an
-  // `OnFleetStateChange` (or could not parse one), so it cannot tell which
-  // letters are free — and a tag is unique fleet-wide, so guessing "A" would
-  // silently steal the letter off whatever the FC had already marked. This is
-  // the caller `fleetBroadcasts.ts`'s null-versus-empty contract was written
-  // for: an EMPTY map is a real answer, and it does write.
+  // ⚠ NULL HERE IS FATAL TO THE LETTER AND HARMLESS TO THE BROADCAST, which is
+  // why it is read once and checked in the arm that cares. `null` means this
+  // client has never received an `OnFleetStateChange` (or could not parse one),
+  // so it cannot tell which letters are free — and a tag is unique fleet-wide,
+  // so guessing "A" would silently steal the letter off whatever the FC had
+  // already marked. A broadcast claims no letter and so needs no such reading;
+  // it only USES the dict, when there is one, to avoid re-calling a ship the
+  // commander has already marked. This is the caller `fleetBroadcasts.ts`'s
+  // null-versus-empty contract was written for: an EMPTY map is a real answer.
   const tags = obs.fleetTargetTags ?? null;
+
+  if (canTag === false) {
+    return decideTackleBroadcast(obs, memory, snapshot, tacklers, tags);
+  }
   if (tags === null) {
     return nothing;
   }
@@ -3762,6 +3861,102 @@ function decideTackleTag(
         ...memory,
         lastTagIssuedFor: target.itemID,
         lastTagAttempts: attempts + 1,
+      },
+    },
+    memory,
+  };
+}
+
+/**
+ * Rung 4's other arm: this pilot is in a fleet and is NOT a commander, so the
+ * ship holding it down gets called out by `Target` broadcast instead of
+ * lettered. Reached only from `decideTackleTag` with `canTag === false`.
+ *
+ * ⚠ THIS IS THE ARM THAT ACTUALLY RUNS, in nearly every real fleet. A companion
+ * alt is a plain member; the tag arm above it is for the unusual run where the
+ * companion IS the boss (it formed the fleet itself, say, or the player made it
+ * a squad commander). Treat this one as the main path when reasoning about the
+ * rung's cost, not as a fallback that rarely fires.
+ *
+ * ⚠ `canBroadcast` IS CHECKED SEPARATELY AND IS NOT IMPLIED BY `canTag ===
+ * false`. That verdict covers both "in a fleet, not a commander" and "in no
+ * fleet at all" (see `canTagInFleet`), and only the first of those has anybody
+ * to broadcast to. `undefined` — a host that does not populate the field — is
+ * treated as unknown and stays silent, deliberately: a broadcast is an outward
+ * act, and an outward act on an unread gate is exactly the guess this loop's
+ * three-state discipline exists to forbid.
+ *
+ * ⚠ ONE CALL PER SHIP, AND NO RETRY BUDGET AT ALL — the opposite of the tag
+ * arm's three-attempts-then-give-up, for a reason that is about the two calls
+ * and not about caution. A tag can be re-read, so re-sending one is a way of
+ * finding out whether the first landed. A broadcast leaves nothing to re-read,
+ * so a second send could learn nothing the first did not; it would only be the
+ * same shout again. `tackleCalledOut` is what makes it once.
+ *
+ * ⚠ AND THE SERVER WOULD DROP MOST OF THE RE-SENDS ANYWAY.
+ * `isBroadcastRateLimited` (fleetRuntime.js:2473) refuses a repeat of the same
+ * broadcast name inside `MIN_BROADCAST_TIME_SEC` — 2 seconds, which is exactly
+ * `FLEET_COMPANION_CADENCE_MS`. Two new tacklers arriving on consecutive ticks
+ * sit right on that boundary and one of the two calls may be dropped. It is
+ * left to be dropped: the call is bounded, the refusal is visible in the ack
+ * (unlike a tag's), and spacing sends out over ticks would mean holding a
+ * queue of ships to shout about, which is a worse thing to own than a missed
+ * shout about a ship this pilot is already shooting.
+ */
+function decideTackleBroadcast(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+  snapshot: SpaceSnapshot,
+  tacklers: readonly number[],
+  tags: ReadonlyMap<number, string> | null,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const nothing = { decision: null, memory } as const;
+  if (obs.canBroadcast !== true) {
+    return nothing;
+  }
+
+  const candidates = tacklers
+    .map((itemID) => entityOnGrid(itemID, snapshot.entities))
+    .filter((entity): entity is SpaceEntity => entity !== null)
+    // ⚠ ALREADY LETTERED IS ALREADY CALLED. A commander has marked this ship;
+    // broadcasting it as well would put a second, louder call on a target the
+    // fleet is already pointed at — and because a `Target` broadcast is the
+    // NEWEST call every companion hearing it obeys, it would also shove aside
+    // whatever primary the commander had standing. Nothing to gain, a real
+    // fleet-wide cost. When `tags` is null this filter cannot run and does not:
+    // an unreadable dict is not a reason to stay quiet about being tackled.
+    .filter((entity) => tags === null || !tags.has(entity.itemID))
+    .filter((entity) => !memory.tackleCalledOut.includes(entity.itemID));
+  if (candidates.length === 0) {
+    return nothing;
+  }
+
+  // Same ranking as the tag arm, and for the same reason: one ordering for
+  // combat across this whole client, never a second one invented per rung.
+  const measurement = measureSpace(snapshot);
+  const groups = obs.targetGroupNames ?? null;
+  const target =
+    pickPrimary(
+      candidates,
+      (entity) => entity.typeID,
+      (entity) => measurement?.distances.get(entity.itemID) ?? null,
+      (typeID) => (groups === null ? null : (groups[typeID] ?? null)),
+    ) ?? candidates[0]!;
+
+  return {
+    decision: {
+      action: { kind: "broadcastFleetTarget", targetID: target.itemID },
+      phase: "Tagging",
+      // ⚠ SAYS WHICH CALL IT MADE, not just that it called. The readout is the
+      // only place a player can learn that this pilot broadcasts rather than
+      // letters, and "marking it for the fleet" would hide exactly that.
+      why: "Something has this ship scrambled. Broadcasting it to the fleet as the target.",
+      memory: {
+        ...memory,
+        // Capped the same way, and by the same helper, as the tag arm's
+        // give-up list: both exist to stop one rung re-picking one ship for
+        // ever, and a fight long enough to overflow one has overflowed both.
+        tackleCalledOut: rememberGiveUp(memory.tackleCalledOut, target.itemID),
       },
     },
     memory,
@@ -6160,6 +6355,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastTagIssuedFor: null,
           lastTagAttempts: 0,
           taggingGaveUpOn: [],
+          tackleCalledOut: [],
           lockRefusedFor: null,
           lockRefusals: 0,
           lockGaveUpOn: [],

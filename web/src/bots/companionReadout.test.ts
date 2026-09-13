@@ -15,24 +15,38 @@ test("the chat channel is named LOCAL to the player, never fleet", () => {
   assert.doesNotMatch(phrase, /fleet/i);
 });
 
-test("canTag keeps three states, and the unread one is never 'no'", () => {
-  // ⚠ THE THIRD STATE IS THE WHOLE POINT. The server drops a non-commander's
-  // tag write while answering ok, so a pilot that CANNOT tag looks identical to
-  // one with nothing to tag. Flattening "not known" into "no" would report a
-  // confident falsehood on every tick before the roster is read.
+test("canTag keeps three states, and the unread one is never a settled answer", () => {
+  // ⚠ THE THIRD STATE IS THE WHOLE POINT. The roster is the only place either
+  // answer exists, so a pilot whose roster has not been read yet knows nothing
+  // about how it calls targets. Flattening "not known" into either answer would
+  // report a confident falsehood on every tick before the first roster read.
   //
   // ⚠ AND "THE THREE READ DIFFERENTLY" IS NOT THE ASSERTION. That was the first
-  // version of this test and it was VACUOUS: flattening the unread state to
-  // "no" still left it distinct from "no - not a fleet commander", so the guard
-  // passed over the exact bug it was written to catch. Mutation-tested both
-  // ways. What is actually required is that the unread state is NEITHER ANSWER,
+  // version of this test and it was VACUOUS: flattening the unread state to a
+  // settled answer still left it a distinct STRING from the other two, so the
+  // guard passed over the exact bug it was written to catch. Mutation-tested
+  // both ways. What is required is that the unread state claims NEITHER method,
   // so that is what is asserted.
   const unread = canTagWords(null);
-  assert.doesNotMatch(unread, /^no\b/i, "an unread roster must not read as a refusal");
-  assert.doesNotMatch(unread, /^yes\b/i, "nor as permission");
-  assert.match(canTagWords(false), /^no\b/i);
-  assert.match(canTagWords(false), /commander/, "a refusal should say why");
-  assert.equal(canTagWords(true), "yes");
+  assert.doesNotMatch(unread, /tags targets/i, "an unread roster must not claim it letters targets");
+  assert.doesNotMatch(unread, /broadcasts/i, "nor that it broadcasts them");
+});
+
+test("canTag === false reports a METHOD, not a shortcoming", () => {
+  // ⚠ THE REGRESSION THIS EXISTS FOR SHIPPED, AND READ AS A FAULT ON EVERY RUN.
+  // `false` means "not a fleet, wing or squad commander", which is what a
+  // companion alt in somebody else's fleet permanently is. It used to print
+  // "no - not a fleet commander", which stated the pilot's standing condition as
+  // a refusal -- and was misleading besides: the pilot cannot LETTER a target
+  // (fleetRuntime.js:1317 refuses a non-commander) but broadcasts one perfectly
+  // well (fleetRuntime.js:2521 gates on membership alone), which is what rung 4
+  // now makes it do.
+  const plainMember = canTagWords(false);
+  assert.doesNotMatch(plainMember, /^no\b/i, "a plain member is not refused anything it needs");
+  assert.doesNotMatch(plainMember, /cannot|can't|unable/i);
+  assert.match(plainMember, /broadcast/i, "it must say what the pilot DOES do instead");
+  assert.match(canTagWords(true), /tag/i, "and a commander must still be distinguishable");
+  assert.notEqual(canTagWords(true), plainMember);
 });
 
 test("inFleet keeps three states too", () => {

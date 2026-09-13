@@ -535,6 +535,12 @@
     if (first?.session) selected = first.session.id;
   });
 
+  /** Hand the cockpit to whichever pilot's readout is open. */
+  function goToSelectedPilot(): void {
+    const id = selectedSession?.id;
+    if (id !== undefined) onGoToPilot?.(id);
+  }
+
   let busy = $state(false);
   let error = $state("");
 
@@ -684,8 +690,18 @@
     );
   }
 </script>
-
-<section class="panel">
+<!--
+  ⚠ THREE FRAMES BECAME ONE, BECAUSE THE OP IS ONE THOUGHT. The fleet name, the
+  roster and the control that adds to it used to sit in three stacked panels,
+  each with its own border, accent hairline and bottom margin — and the caption
+  under the fleet field read "Pilots added BELOW join this fleet", a sentence
+  that has to reach ACROSS a panel border to say what it means. A frame is a
+  boundary: drawing one between a field and the list it governs tells the player
+  they are separate settings. They are not. Naming the fleet, listing who flies
+  in it, and adding the next pilot are one task, so they are one panel, read top
+  to bottom: what the op IS, who is IN it, how to add the next.
+-->
+<section class="panel op-panel">
   <header class="panel-head">
     <h2 class="panel-title">Fleet companions</h2>
     <!-- ⚠ NO DESCRIPTION OF WHAT A COMPANION IS. The title says it, the table
@@ -703,12 +719,22 @@
       </button>
     </span>
   </header>
-  <!-- THE FLEET THE OP IS. Every pilot added below watches for this name in the
-       fleet finder and joins it when it appears, so it is asked for once, here,
-       rather than per pilot. Typed as it is advertised: matching is trimmed and
-       case-insensitive but never a substring, so an unattended ship cannot end
-       up in a stranger's fleet whose name happened to contain the word. -->
-  <p class="field">
+
+  <!-- THE FLEET THE OP IS. Every pilot in the roster below watches for this name
+       in the fleet finder and joins it when it appears, so it is asked for once,
+       here, rather than per pilot. Typed as it is advertised: matching is
+       trimmed and case-insensitive but never a substring, so an unattended ship
+       cannot end up in a stranger's fleet whose name happened to contain the
+       word.
+
+       ⚠ THE FIELD GETS THE ROW AND THE EXPLANATION GETS THE NEXT ONE. Side by
+       side, the longest sentence on the screen and the only input on it shared
+       one line, and the input lost: measured in the running app it was squeezed
+       to about a third of the row and clipped its own placeholder mid-word
+       ("the name in the fleet finde"), so the one control that decides what
+       every pilot below does looked like an afterthought beside its own
+       footnote. Under it, the note is still read and the field is a field. -->
+  <div class="op-fleet">
     <label for="companion-op-fleet">Fleet</label>
     <input
       id="companion-op-fleet"
@@ -720,54 +746,30 @@
     />
     <span class="note">
       {#if roster.fleetName.trim().length === 0}
-        Pilots added below join this fleet as soon as it is advertised.
+        Every pilot in this op joins this fleet as soon as it is advertised.
       {:else}
-        Pilots added below wait for "{roster.fleetName.trim()}" and join it as soon as it is
+        Every pilot in this op waits for "{roster.fleetName.trim()}" and joins it as soon as it is
         advertised.
       {/if}
     </span>
-  </p>
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
-  {#if serverError}
-    <p class="error">{serverError}</p>
-  {/if}
-</section>
+  </div>
 
-<section>
   <!-- ⚠ NO "PILOTS" HEADING OVER THE ONLY TABLE HERE. A section heading earns
        its place by telling one block apart from its siblings; this block has
        none, and the table names its own first column "Pilot". A heading over a
        panel's single table is the panel's title said a third time. -->
-
-  <p class="field">
-    <label for="companion-add-pilot">Add a pilot</label>
-    <select id="companion-add-pilot" bind:value={addChoice}>
-      <option value="">Choose a pilot…</option>
-      {#each addable as entry (entry.session.id)}
-        <option value={entry.session.id}>{entry.pilot?.name ?? "This pilot"}</option>
-      {/each}
-    </select>
-    <button type="button" class="primary" disabled={addChoice === ""} onclick={addPilot}>
-      Add
-    </button>
-    <!-- ⚠ ONLY PILOTS ALREADY SIGNED IN. Bringing one online is the Pilot
-         hangar's job and needs an account password; this window takes pilots
-         that are already flying and puts them in a fleet. -->
-    {#if addable.length === 0}
-      <span class="note">Every pilot signed in here is already in this op.</span>
-    {/if}
-  </p>
-
   {#if tabRows.length === 0 && serverRows.length === 0}
+    <!-- ⚠ THE `.empty` TREATMENT, NOT A `.note`. An empty op is the STATE of
+         this window, not a footnote to it: as grey fine print under the fleet
+         field it read like a caption on the field above, and the one thing the
+         player has to do next was set in the quietest ink on the panel. -->
     {#if pilots.length === 0}
-      <p class="note">
+      <p class="empty">
         No pilot is signed in here. Bring one online from the Pilot hangar, then add it to this op.
       </p>
     {:else}
-      <p class="note">
-        Nobody is in this op yet. Add a pilot and it will join the fleet and start flying.
+      <p class="empty">
+        Nobody is in this op yet. Add a pilot below and it will join the fleet and start flying.
       </p>
     {/if}
   {:else}
@@ -799,29 +801,45 @@
                  companion slice is a stale copy of a run it is not driving. -->
             {#if !row.onServer}
               <tr class:selected={row.session !== null && selected === row.session.id}>
+                <!-- ⚠ ONE LINE, NOT THREE. The name, the place and Remove were
+                     three stacked blocks in this cell, so every pilot's row
+                     stood about 80px tall while the four cells beside it held
+                     one line each — a five-pilot op filled the window with one
+                     column's leading. They sit on a line together now, and the
+                     place wraps under the name only when the column is too
+                     narrow to hold both. -->
                 <td data-label="Pilot">
-                  {#if row.session !== null}
-                    {@const sessionID = row.session.id}
+                  <span class="pilot-cell">
+                    <span class="pilot-who">
+                      {#if row.session !== null}
+                        {@const sessionID = row.session.id}
+                        <button
+                          type="button"
+                          class="link-button"
+                          aria-pressed={selected === sessionID}
+                          onclick={() => (selected = sessionID)}
+                        >
+                          {row.name}
+                        </button>
+                      {:else}
+                        <span>{row.name}</span>
+                      {/if}
+                      <span class="note where">{row.where}</span>
+                    </span>
+                    <!-- ⚠ THE ROW'S ONE DESTRUCTIVE ACT, IN THE QUIETEST INK ON
+                         THE ROW. It used to be an underlined link the same
+                         weight as the pilot's own name directly above it, so the
+                         two things you can click in this cell — open this pilot,
+                         take it out of the fleet — looked identical. -->
                     <button
                       type="button"
-                      class="link-button"
-                      aria-pressed={selected === sessionID}
-                      onclick={() => (selected = sessionID)}
+                      class="link-button remove"
+                      disabled={busy}
+                      onclick={() => removePilot(row.characterID)}
                     >
-                      {row.name}
+                      Remove
                     </button>
-                  {:else}
-                    <span>{row.name}</span>
-                  {/if}
-                  <span class="note">{row.where}</span>
-                  <button
-                    type="button"
-                    class="link-button"
-                    disabled={busy}
-                    onclick={() => removePilot(row.characterID)}
-                  >
-                    Remove
-                  </button>
+                  </span>
                 </td>
                 <td data-label="Companion">
                   {companionStatusWords(state?.status ?? null)}
@@ -833,25 +851,24 @@
                   {#if state !== null && !holdsTheShip(state.status) && row.holder !== null && row.holder !== "companion"}
                     <span class="note"> — a bot is flying this ship</span>
                   {/if}
-                  <!-- ⚠ WHERE THE "CAN TAG" COLUMN WENT, AND WHY IT IS SAID
-                       HERE INSTEAD OF EVERYWHERE. The column printed a verdict
-                       for every pilot on every row, and for nearly all of them,
-                       nearly always, that verdict was "yes" — so the one row
-                       that said otherwise had to be spotted in a column nobody
-                       had any reason to look at.
-                       ⚠ BOTH FAILING STATES SURVIVE, STILL UNFLATTENED. The
-                       server drops a non-commander's tag while answering ok, so
-                       a pilot that CANNOT tag looks exactly like one with
-                       nothing to tag; `null` is "we could not tell" and must
-                       never be read as "no". They get different sentences here
-                       for the same reason `canTagWords` gives them different
-                       words. `row.facts` is already silent unless a run holds
-                       this ship, so neither line can appear against an idle
-                       pilot. -->
-                  {#if row.facts.canTag === false}
-                    <span class="note"> — cannot tag, not a fleet commander</span>
-                  {:else if row.facts.canTag === null && holdsTheShip(state?.status ?? "idle")}
-                    <span class="note"> — tagging not known</span>
+                  <!-- ⚠ ONLY ONE OF THESE IS A PROBLEM, AND IT IS NOT THE
+                       COMMON ONE. `canTag === false` says this pilot is not a
+                       fleet, wing or squad commander, which is what a companion
+                       alt in somebody else's fleet always is and always will
+                       be — it calls its tackler out by broadcast instead (rung
+                       4's other arm), and there is nothing here for a player to
+                       fix or even to think about. It used to read "cannot tag,
+                       not a fleet commander", which flagged the normal case as
+                       a fault every run, and was wrong besides: the pilot is
+                       not unable to call a target, only unable to letter one.
+                       ⚠ `null` IS THE ONE WORTH A LINE, and is still unflattened
+                       — "we could not read the roster" is not an answer about
+                       this pilot, and a run that stays there is a run whose
+                       fleet reads are failing. `row.facts` is already silent
+                       unless a run holds this ship, so it cannot appear against
+                       an idle pilot. -->
+                  {#if row.facts.canTag === null && holdsTheShip(state?.status ?? "idle")}
+                    <span class="note"> — fleet roster unreadable, not calling targets</span>
                   {/if}
                 </td>
                 <!-- ⚠ THE JOINING SENTENCE, NOT A BARE YES/NO, and it is the
@@ -881,28 +898,32 @@
             {@const facts = bot.companion}
             <tr class:selected={selected === `server:${bot.botID}`}>
               <td data-label="Pilot">
-                <button
-                  type="button"
-                  class="link-button"
-                  aria-pressed={selected === `server:${bot.botID}`}
-                  onclick={() => (selected = `server:${bot.botID}`)}
-                >
-                  {bot.characterName ?? "Unnamed pilot"}
-                </button>
-                <span class="note">On the server</span>
+                <span class="pilot-cell">
+                  <span class="pilot-who">
+                    <button
+                      type="button"
+                      class="link-button"
+                      aria-pressed={selected === `server:${bot.botID}`}
+                      onclick={() => (selected = `server:${bot.botID}`)}
+                    >
+                      {bot.characterName ?? "Unnamed pilot"}
+                    </button>
+                    <span class="note where">On the server</span>
+                  </span>
+                </span>
               </td>
               <td data-label="Companion">
                 {companionStatusWords(bot.status)}
-                <!-- ⚠ THE SAME TWO SENTENCES AS THE TAB ROWS, and they belong
-                     here MORE, not less: this run is on the server, so nobody
-                     is sitting in front of it to notice its tags going
-                     nowhere. No `holdsTheShip` guard is needed — a row exists
-                     in this half of the roster only while the server is flying
-                     the hull. -->
-                {#if facts?.canTag === false}
-                  <span class="note"> — cannot tag, not a fleet commander</span>
-                {:else if (facts?.canTag ?? null) === null}
-                  <span class="note"> — tagging not known</span>
+                <!-- ⚠ THE SAME SENTENCE AS THE TAB ROWS, and it belongs here
+                     MORE, not less: this run is on the server, so nobody is
+                     sitting in front of it to notice its fleet reads failing.
+                     No `holdsTheShip` guard is needed — a row exists in this
+                     half of the roster only while the server is flying the
+                     hull. `false` is silent here for the same reason it is
+                     silent above: a plain member broadcasts its tackler instead
+                     of lettering it, which is not news. -->
+                {#if (facts?.canTag ?? null) === null}
+                  <span class="note"> — fleet roster unreadable, not calling targets</span>
                 {/if}
               </td>
               <td data-label="In fleet">{inFleetWords(facts?.inFleet ?? null)}</td>
@@ -917,102 +938,180 @@
       <p class="note">Reading the server's companions…</p>
     {/if}
   {/if}
+
+  <!-- ⚠ THE ADD CONTROL IS A FOOTER UNDER THE LIST IT ADDS TO, not a form row
+       above it. It used to open the second panel, so the first thing under the
+       fleet field was a control, and the roster it fills came after — a list
+       introduced by the thing that appends to it. Under the list it needs no
+       explaining: whatever is above is the op, and this is how it grows.
+       ⚠ ONLY PILOTS ALREADY SIGNED IN. Bringing one online is the Pilot
+       hangar's job and needs an account password; this window takes pilots that
+       are already flying and puts them in a fleet. -->
+  <div class="op-add">
+    <label for="companion-add-pilot">Add a pilot</label>
+    <select id="companion-add-pilot" bind:value={addChoice} disabled={addable.length === 0}>
+      <option value="">Choose a pilot…</option>
+      {#each addable as entry (entry.session.id)}
+        <option value={entry.session.id}>{entry.pilot?.name ?? "This pilot"}</option>
+      {/each}
+    </select>
+    <button type="button" class="primary" disabled={addChoice === ""} onclick={addPilot}>
+      Add
+    </button>
+    <!-- Only when there is a pilot signed in to be already added. With none,
+         the empty state above is the honest answer and this would contradict
+         it. -->
+    {#if addable.length === 0 && pilots.length > 0}
+      <span class="note">Every pilot signed in here is already in this op.</span>
+    {/if}
+  </div>
+
+  {#if error}
+    <p class="error">{error}</p>
+  {/if}
+  {#if serverError}
+    <p class="error">{serverError}</p>
+  {/if}
 </section>
 
-<section>
+<section class="limits-section">
   <h2>Limits for every pilot in this op</h2>
   <!-- ⚠ SET HERE, NOT ON EACH PILOT. Adding a pilot starts it, so there is no
        moment at which a per-pilot form would be filled in. A change here
        applies to the next companion that starts; one already flying keeps the
-       numbers it was started with. -->
-  <p class="field">
-    <label for="companion-flee-floor">Flee below</label>
-    <input
-      id="companion-flee-floor"
-      type="number"
-      min={Math.round(MIN_FLEE_HEALTH_FLOOR * 100)}
-      max={Math.round(MAX_FLEE_HEALTH_FLOOR * 100)}
-      step="5"
-      bind:value={fleeHealthFloorPercent}
-      onchange={keepSetup}
-    />
-    <span class="note">% of shield, armour or hull remaining</span>
-  </p>
-  <p class="field">
-    <label for="companion-cap-floor">Do not run repairers below</label>
-    <input
-      id="companion-cap-floor"
-      type="number"
-      min={Math.round(MIN_CAPACITOR_FLOOR * 100)}
-      max={Math.round(MAX_CAPACITOR_FLOOR * 100)}
-      step="5"
-      bind:value={capacitorFloorPercent}
-      onchange={keepSetup}
-    />
-    <span class="note">% capacitor</span>
-  </p>
-  <p class="field">
-    <label for="companion-flee-attempts">Stay home after</label>
-    <input
-      id="companion-flee-attempts"
-      type="number"
-      min={MIN_FLEE_ATTEMPTS}
-      max={MAX_FLEE_ATTEMPTS}
-      step="1"
-      bind:value={maxFleeAttempts}
-      onchange={keepSetup}
-    />
-    <span class="note">flee round trips</span>
-  </p>
-  <!-- The label carries the whole fact: armour is the only damage a station
-       charges for, because docking gives shield and capacitor back by itself. -->
-  <label class="check">
-    <input type="checkbox" bind:checked={repairsAtStation} onchange={keepSetup} />
-    Pay a station to repair armour
-  </label>
-  <p class="field">
-    <label for="companion-drone-floor">Bring a drone home below</label>
-    <input
-      id="companion-drone-floor"
-      type="number"
-      min={Math.round(MIN_DRONE_HEALTH_FLOOR * 100)}
-      max={Math.round(MAX_DRONE_HEALTH_FLOOR * 100)}
-      step="5"
-      bind:value={droneHealthFloorPercent}
-      onchange={keepSetup}
-    />
-    <span class="note">% of its shield, armour or hull. Coming home refills its shield</span>
-  </p>
-  <p class="field">
-    <label for="companion-drone-holdoff">Hold drones in the bay for at least</label>
-    <input
-      id="companion-drone-holdoff"
-      type="number"
-      min={MIN_DRONE_HOLD_OFF_SECONDS}
-      max={MAX_DRONE_HOLD_OFF_SECONDS}
-      step="1"
-      bind:value={droneHoldOffSeconds}
-      onchange={keepSetup}
-    />
-    <span class="note">seconds before relaunching them</span>
-  </p>
+       numbers it was started with.
+
+       ⚠ ONE COLUMN OF BOXES, NOT SIX. Each limit used to be its own flex row of
+       label, box and unit, so six labels of six different lengths — "Flee
+       below" against "Hold drones in the bay for at least" — put six boxes at
+       six different places across the panel, with the unit trailing each at a
+       seventh. There was no column for the eye to run down, and the numbers a
+       player actually came to change were the hardest thing on the block to
+       find. The grid gives the boxes one column and lets the labels END against
+       it, which is also the only arrangement in which these read the way they
+       are written: "Flee below | 30 | % of shield, armour or hull remaining" is
+       one sentence with a control in the middle of it, not a label and a field.
+
+       ⚠ AND THEY ARE IN TWO GROUPS, because they answer two questions. Four of
+       them are about the ship getting hurt and two are about drones, and a flat
+       list of six made the player read all six to find the one they wanted.
+
+       ⚠ THE GROUPS ARE THE COLUMNS. Stacked, the block ran to nine lines of a
+       window whose real subject — the roster and the pilot's readout — sits
+       above and below it, so a form nobody touches between ops pushed the two
+       things they watch during one apart. Side by side it is four lines, and
+       the split costs nothing to explain because the reader already has it:
+       there are two questions here, so there are two columns. They fold back
+       into one when the window is too narrow to hold both without squeezing the
+       units — `auto-fit` off a real minimum, so it is the CONTENT that decides,
+       not a width somebody guessed.
+
+       ⚠ AND THE UNITS WERE TRIMMED TO FIT, ONCE. A half-width column has about
+       twelve characters' less room for the trailing phrase, and a unit that
+       wraps to three lines gives back exactly what the second column won. What
+       went is "remaining" (a floor is remaining health by definition) and
+       "them" — and the drone shield fact, which was never a unit at all: it is
+       a thing that happens when a drone comes home, so it is one note under the
+       row rather than a tail on the label of it. -->
+  <div class="limits">
+    <div class="limit-group">
+      <h3>If the ship gets hurt</h3>
+
+      <label for="companion-flee-floor">Flee below</label>
+      <input
+        id="companion-flee-floor"
+        type="number"
+        min={Math.round(MIN_FLEE_HEALTH_FLOOR * 100)}
+        max={Math.round(MAX_FLEE_HEALTH_FLOOR * 100)}
+        step="5"
+        bind:value={fleeHealthFloorPercent}
+        onchange={keepSetup}
+      />
+      <span class="note">% of shield, armour or hull</span>
+
+      <label for="companion-cap-floor">Do not run repairers below</label>
+      <input
+        id="companion-cap-floor"
+        type="number"
+        min={Math.round(MIN_CAPACITOR_FLOOR * 100)}
+        max={Math.round(MAX_CAPACITOR_FLOOR * 100)}
+        step="5"
+        bind:value={capacitorFloorPercent}
+        onchange={keepSetup}
+      />
+      <span class="note">% capacitor</span>
+
+      <label for="companion-flee-attempts">Stay home after</label>
+      <input
+        id="companion-flee-attempts"
+        type="number"
+        min={MIN_FLEE_ATTEMPTS}
+        max={MAX_FLEE_ATTEMPTS}
+        step="1"
+        bind:value={maxFleeAttempts}
+        onchange={keepSetup}
+      />
+      <span class="note">flee round trips</span>
+
+      <!-- The label carries the whole fact: armour is the only damage a station
+           charges for, because docking gives shield and capacitor back by
+           itself. It sits in the BOX column rather than the label one, so the
+           tick lines up under the numbers and reads as the fourth answer in
+           this group. -->
+      <label class="check">
+        <input type="checkbox" bind:checked={repairsAtStation} onchange={keepSetup} />
+        Pay a station to repair armour
+      </label>
+    </div>
+
+    <div class="limit-group">
+      <h3>Drones</h3>
+
+      <label for="companion-drone-floor">Bring a drone home below</label>
+      <input
+        id="companion-drone-floor"
+        type="number"
+        min={Math.round(MIN_DRONE_HEALTH_FLOOR * 100)}
+        max={Math.round(MAX_DRONE_HEALTH_FLOOR * 100)}
+        step="5"
+        bind:value={droneHealthFloorPercent}
+        onchange={keepSetup}
+      />
+      <span class="note">% of its shield, armour or hull</span>
+
+      <label for="companion-drone-holdoff">Hold drones in the bay</label>
+      <input
+        id="companion-drone-holdoff"
+        type="number"
+        min={MIN_DRONE_HOLD_OFF_SECONDS}
+        max={MAX_DRONE_HOLD_OFF_SECONDS}
+        step="1"
+        bind:value={droneHoldOffSeconds}
+        onchange={keepSetup}
+      />
+      <span class="note">seconds before relaunching</span>
+
+      <!-- Not a unit on either row above, though it used to ride on the first
+           one: it is what COMING HOME does, which is the thing both rows are
+           about. Under them both, once. -->
+      <span class="note group-note">Coming home refills a drone's shield.</span>
+    </div>
+  </div>
 </section>
 
 {#if selectedSession}
-  <section class="panel">
-    <header class="panel-head">
-      <h2>{live[selectedSession.id]?.name ?? "This pilot"}</h2>
-      <span class="controls">
-        {#if onGoToPilot}
-          <button type="button" onclick={() => onGoToPilot?.(selectedSession.id)}>
-            Go to pilot
-          </button>
-        {/if}
-      </span>
-    </header>
-  </section>
   <!--
     THE REAL PANEL, BOUND TO THAT PILOT.
+
+    ⚠ IT NAMES THE PILOT IN ITS OWN STRIP, AND THERE IS NO SECOND HEADING.
+    This used to be preceded by a framed panel whose entire body was its own
+    header: a border, an accent hairline and a divider drawn around a pilot's
+    name and one button, sitting directly on top of the panel that actually
+    reports on that pilot. Two frames, two headings and two rules for one
+    subject — and the emptier of the two came first, so the heaviest chrome in
+    the window was around the least in it. A panel's strip is where it names
+    itself and where its controls live, so the pilot's name and Go to pilot go
+    IN it, beside Pause and Stop.
 
     ⚠ `{#key}` IS LOAD-BEARING. `FleetCompanion.svelte` reads its store's slices
     once at init — it has to, because `$companion` needs a stable top-level
@@ -1025,9 +1124,13 @@
       store={selectedSession.store}
       flow={selectedSession.flow}
       setup={roster.setup}
+      title={live[selectedSession.id]?.name ?? "This pilot"}
+      onGoToPilot={onGoToPilot ? goToSelectedPilot : undefined}
     />
   {/key}
 {:else if selectedServerBot}
+  <!-- The server row keeps its panel: unlike the bar above, this one has a body
+       — what the run is doing, why, and what is wrong with the fit. -->
   <section class="panel">
     <header class="panel-head">
       <h2>{selectedServerBot.characterName ?? "Unnamed pilot"}</h2>
@@ -1074,12 +1177,67 @@
 {/if}
 
 <style>
-  /* The chosen row, marked by weight rather than colour alone — the detail
-     below carries the pilot's name in its own heading, which is the real
+  /* ---------------------------------------------------------------- the op --
+     The panel is a container, so the two layouts below can ask how wide IT is
+     rather than how wide the browser window is — this window floats and is
+     resized, which is the reason `.table-wrap` inside it is already one. Safe
+     to contain for the same reason it is: a panel's inline size comes from its
+     parent and never from its contents. */
+  .op-panel {
+    container-type: inline-size;
+  }
+
+  /* Label, field, and the explanation under the field rather than beside it.
+     The input is given a real width and a ceiling: a fleet name is a handful of
+     words, and a text box stretched across a 1400px window is as hard to read
+     back as one clipped to a third of a row. */
+  .op-fleet {
+    display: grid;
+    grid-template-columns: max-content minmax(10rem, 24rem);
+    align-items: center;
+    gap: 0.3rem 0.6rem;
+    margin: 0 0 0.7rem;
+  }
+  .op-fleet > .note {
+    grid-column: 2;
+  }
+  /* Below the fleet field's own width there is nothing to align to, so it
+     stacks rather than crushing the input into the label. */
+  @container (max-width: 26rem) {
+    .op-fleet {
+      grid-template-columns: 1fr;
+    }
+    .op-fleet > .note {
+      grid-column: 1;
+    }
+  }
+
+  /* The footer under the roster. A row, wrapping, with the note taking the
+     whole of the next line when it appears. */
+  .op-add {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.7rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--color-line);
+  }
+  .op-add > .note {
+    flex-basis: 100%;
+  }
+
+  /* ------------------------------------------------------------- the roster --
+     The chosen row, marked by an edge and a wash rather than colour alone — the
+     detail below carries the pilot's name in its own heading, which is the real
      confirmation of what is open. */
   tr.selected > td {
-    border-top: 1px solid currentColor;
-    border-bottom: 1px solid currentColor;
+    border-top: 1px solid var(--color-accent-dim);
+    border-bottom: 1px solid var(--color-accent-dim);
+    background: rgb(127 180 217 / 0.07);
+  }
+  tr.selected > td:first-child {
+    box-shadow: inset 2px 0 0 0 var(--color-accent);
   }
   .link-button {
     display: inline;
@@ -1091,24 +1249,198 @@
     text-decoration: underline;
     cursor: pointer;
   }
-  td .note {
-    display: block;
+  /* Remove is not the pilot's name. Same cell, quieter ink, and it only
+     underlines when you are on it. */
+  .link-button.remove {
+    color: var(--color-muted);
+    font-size: 12px;
+    text-decoration: none;
   }
-  .field {
+  .link-button.remove:hover:not(:disabled),
+  .link-button.remove:focus-visible {
+    color: var(--color-danger);
+    text-decoration: underline;
+  }
+  /* The pilot cell: who and where on one line, and the row's one destructive
+     control held at the far end of it. */
+  .pilot-cell {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+  }
+  .pilot-who {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
+    align-items: baseline;
+    gap: 0 0.5rem;
+    min-width: 0;
   }
-  .check {
+  .pilot-who > .where {
+    font-size: 12px;
+  }
+  /* ⚠ THE CARD REFLOW MAKES EVERY BUTTON IN A CELL FULL WIDTH (R8: a phone
+     row is a touch target). These two are text in a sentence, not row actions,
+     and stretching them would put the pilot's name and Remove on two 100%-wide
+     lines — the stack this cell just stopped being. */
+  .pilot-cell button {
+    width: auto;
+    min-height: 0;
+  }
+  /* Every OTHER note in a cell is still its own line: the joining refusal and
+     the qualifiers in the Companion column are sentences under a value, not
+     things beside it. */
+  td > .note {
     display: block;
-    margin: 0.25rem 0;
   }
-  #companion-flee-floor,
-  #companion-cap-floor,
-  #companion-flee-attempts,
-  #companion-drone-floor,
-  #companion-drone-holdoff {
+  /* ⚠ THE WIDTH GOES WHERE THE WORDS ARE. Four of these five columns hold two
+     or three words — "Running", "nothing yet", "align to" — and the fifth holds
+     the joining SENTENCE, which is the column a player opens this window to
+     read. Left to size itself, the table gave each column a share of the words
+     it happened to contain and wrapped "nothing yet" onto two lines beside a
+     sentence that had wrapped onto three. So the short ones are told not to
+     wrap and the long one is given the floor it needs; the rest is the table's
+     to distribute. Below the reflow width every cell is its own line and none
+     of this applies. */
+  @container (min-width: 641px) {
+    th:nth-child(1),
+    td:nth-child(1) {
+      min-width: 13rem;
+    }
+    th:nth-child(2),
+    td:nth-child(2),
+    th:nth-child(4),
+    td:nth-child(4),
+    th:nth-child(5),
+    td:nth-child(5) {
+      white-space: nowrap;
+    }
+    /* ...but the Companion column's QUALIFIERS are sentences, and they are the
+       one thing in these columns that has to be allowed to wrap. Holding the
+       status word on one line and letting the sentence under it fold is two
+       rules, because it is two kinds of text in one cell. */
+    td:nth-child(2) > .note {
+      white-space: normal;
+    }
+    td:nth-child(3) {
+      min-width: 20rem;
+    }
+  }
+
+  /* ------------------------------------------------------------- the limits --
+     A container, so the grid below can ask how wide THIS PANEL is rather than
+     how wide the browser window is — the same question `.table-wrap` asks, for
+     the same reason: this window floats and is resized.
+
+     ⚠ AND IT DRAWS ITS OWN SEPARATION, because inside a window it has none. A
+     window flattens the panels directly under it — no frame, no margin, no
+     padding (`.win-body > section`) — so the limits block, which is a sibling
+     of the op panel rather than part of it, ran straight on from the Add row
+     above with nothing between them but a heading. A heading over a hairline is
+     how the other twenty-three windows separate a block; this is that. */
+  .limits-section {
+    container-type: inline-size;
+    margin: 1rem 0 0.9rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--color-line);
+  }
+  /* ⚠ TWO GROUPS SIDE BY SIDE, AND THE TRACK MINIMUM IS WHAT DECIDES. A column
+     has to hold a label, a box and a unit on one line — 28rem, which is not a
+     guess: it is what the browser answers for these two blocks at `width:
+     max-content`, rounded up. A track a rem under it looks like it fits and
+     then folds every unit in both columns onto a second line — and a
+     pair of columns that cannot is worse than one that can, because every unit
+     in both of them wraps and the block comes out taller than it started.
+     `auto-fit` with that minimum lays out two tracks when the panel can afford
+     them and one when it cannot, so the question is asked of the real width
+     every time rather than answered once with a guess.
+
+     `min(28rem, 100%)` rather than a bare `28rem`: below the minimum a track
+     would otherwise stay 28rem wide and push the panel sideways, which is the
+     one thing R8 does not allow.
+
+     ⚠ AND THE PAIR IS CAPPED, because `1fr` tracks divide ALL of a wide
+     window between them. On a maximised one that put about 160px of nothing
+     between the last unit of the left group and the heading of the right, and
+     two blocks that far apart stop reading as a pair and start reading as two
+     unrelated forms that happen to be level. The cap is a little over two
+     tracks' worth, so the columns sit beside each other and the slack goes
+     where slack belongs — the margin. */
+  .limits {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(28rem, 100%), 1fr));
+    align-items: start;
+    gap: 0.5rem 2.5rem;
+    max-width: 60rem;
+  }
+  /* The uneven bottom edge is deliberate and not worth fixing: the ship has
+     four answers and drones have two, and padding one group to match the other
+     would draw a box around nothing. */
+  .limit-group {
+    display: grid;
+    grid-template-columns: max-content max-content 1fr;
+    align-items: center;
+    column-gap: 0.6rem;
+    row-gap: 0.3rem;
+  }
+  .limit-group > h3 {
+    grid-column: 1 / -1;
+    margin: 0.35rem 0 0.15rem;
+  }
+  /* The labels END against the boxes, so each line reads as the sentence it is
+     and no gutter opens up after the short ones. */
+  .limit-group > label {
+    justify-self: end;
+    text-align: right;
+  }
+  .limit-group > input[type="number"] {
     width: 5rem;
   }
+  .limit-group > .note {
+    margin: 0;
+  }
+  /* The tick sits under the boxes, not under the labels: it is an answer in
+     this group, not a heading for one. The group's closing note keeps the same
+     column for the same reason — it is about the rows above it, not about the
+     group. */
+  .limit-group > .check,
+  .limit-group > .group-note {
+    grid-column: 2 / -1;
+    justify-self: start;
+  }
+  .limit-group > .check {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    text-align: left;
+    margin: 0.2rem 0;
+  }
+  .limit-group > .check > input {
+    margin: 0;
+  }
+  .limit-group > .group-note {
+    margin-top: 0.2rem;
+  }
+  /* Narrow: the label takes its own line above the box it names, and the box
+     keeps its unit beside it. Right-aligned labels over a one-box column would
+     be a right-aligned column of sentences, which is worse than either. */
+  @container (max-width: 30rem) {
+    .limit-group {
+      grid-template-columns: max-content 1fr;
+    }
+    .limit-group > label {
+      grid-column: 1 / -1;
+      justify-self: start;
+      text-align: left;
+      margin-top: 0.45rem;
+    }
+    .limit-group > .check,
+    .limit-group > .group-note {
+      grid-column: 1 / -1;
+    }
+    .limit-group > .check {
+      margin-top: 0.5rem;
+    }
+  }
+
 </style>

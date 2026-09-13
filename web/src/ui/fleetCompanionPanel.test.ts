@@ -282,10 +282,14 @@ test("the readout translates order source and the three-state canTag into player
   const text = visibleText(renderPanel(startedStore()));
   assert.match(text, /a fleet broadcast/);
   assert.match(text, /Orbit the fleet commander/);
-  assert.match(text, /no - not a fleet commander/);
+  // ⚠ A PLAIN MEMBER'S ROW SAYS WHAT IT DOES, NOT WHAT IT CANNOT DO. This
+  // used to assert "no - not a fleet commander" against a pilot that calls its
+  // targets out by broadcast perfectly well. See `canTagWords`.
+  assert.match(text, /broadcasts targets/);
+  assert.doesNotMatch(text, /not a fleet commander/);
 });
 
-test("canTag is three-state: null reads as 'not known', never as a settled no", () => {
+test("canTag is three-state: null reads as 'not known', never as a settled method", () => {
   const store = startedStore();
   store.apply({
     type: "companion/progress",
@@ -301,8 +305,8 @@ test("canTag is three-state: null reads as 'not known', never as a settled no", 
     failureReason: null,
   });
   const text = visibleText(renderPanel(store));
-  assert.match(text, /Can tag.*not known/);
-  assert.doesNotMatch(text, /Can tag.*no - not a fleet commander/);
+  assert.match(text, /Calls targets.*not known/);
+  assert.doesNotMatch(text, /Calls targets.*(tags|broadcasts) targets/);
 });
 
 test("a start error is surfaced", () => {

@@ -34,7 +34,7 @@ behind by a phase at least once, including this document's own.
 | Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
 | Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
 | Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
-| Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
+| Phase 7 | **COMPLETE**, and **CORRECTED 2026-09-13** — tackle → call out: a tackled pilot letters what holds it if it may, and BROADCASTS it if it may not (which is every ordinary run). See the correction section |
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
 | Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
 | Phase 8 | **DONE** — chat commands, on LOCAL chat. The fleet-channel gateway patch is CANCELLED, not pending |
@@ -1328,6 +1328,99 @@ bounded 30-minute wait / invite-gated rejoin protocol. Two things there will
 surprise you: a human leaving a two-member fleet leaves the companion in a fleet
 of one and **promotes it to boss**, and **the sun cannot be warped to** — there is
 no celestial in the scene or in any read, so the safe spot is a bookmark.
+
+## Phase 7's tag rung never actually fired — fixed 2026-09-13
+
+**The bug the operator reported was a status line, and the status line was
+telling the truth about a feature that did nothing.** A running companion's
+roster row read
+
+    Running — cannot tag, not a fleet commander
+
+and that is what every companion says, forever. A companion alt joins somebody
+else's fleet as a plain member; nobody promotes it; `canTag` is therefore `false`
+for essentially every real run. Phase 7's whole headline — "a tackled pilot
+letters what holds it" — was gated on a verdict that is permanently no.
+
+So the rung was not just mis-reported. It was **dead in the field**, and the
+readout dutifully said so once every two seconds as though it were a fault the
+player might go and fix.
+
+### What the server actually allows — read, not assumed
+
+The asymmetry is in two functions in the same file:
+
+| | gate | who may |
+| --- | --- | --- |
+| `setFleetTargetTag` (`fleetRuntime.js:1309-1326`) | member record must carry `FLEET_JOB_CREATOR` or a role in `FLEET_CMDR_ROLES` | fleet boss, wing cmdr, squad cmdr, creator |
+| `sendBroadcast` (`fleetRuntime.js:2521-2551`) | `ensureFleetMembership` and nothing else | **anyone in the fleet** |
+
+That is EVE's own division of labour, not a quirk of this server: **lettering a
+target is a commander's job and calling one out is everybody's.** The operator's
+"all pilots should be able to tag an NPC that tackles them" is right about the
+capability and lands on the second row, not the first.
+
+The retail client agrees, call for call (`fleetSvc.py:1050`):
+
+    def SendBroadcast_Target(self, itemID):
+        self.SendBubbleBroadcast(evefleet.BROADCAST_TARGET, itemID)
+
+— `BroadcastToBubble`, bubble range, scope left at the session default
+`BROADCAST_ALL` (`fleetbroadcastexports.py:332`), `typeID` left at `None`. We
+send exactly that and nothing of our own design.
+
+### Rung 4 is now a fork, not a gate
+
+    canTag === true   ->  letter it       (fleet STATE: re-readable, confirmable)
+    canTag === false  ->  broadcast it    (an EVENT: arrives once, leaves nothing)
+    canTag === null   ->  say nothing     (unreadable roster is not an answer)
+
+⚠ **`canBroadcast` is a separate observation field and had to be.**
+`canTagInFleet` returns `false` both for "in a fleet, not a commander" and for
+"in no fleet at all", and only the first has anybody to broadcast to. The second
+cannot be derived from the first; it is a second `.find` on the same roster read,
+so the two verdicts can never disagree about which fleet they describe.
+
+### Three things the two arms deliberately do differently
+
+- **Budget.** The letter arm retries three times and then gives up per ship,
+  because a tag can be re-read and a re-send is how you find out whether the
+  first landed. The broadcast arm calls **once per ship, ever**
+  (`tackleCalledOut`): a broadcast leaves nothing behind, so a second send could
+  learn nothing the first did not.
+- **The tag dict.** A null `fleetTargetTags` stops a letter dead (a tag is
+  unique fleet-wide; guessing "A" would steal the FC's own mark) and does not
+  stop a broadcast, which claims no letter. When the dict IS readable, both arms
+  skip a ship that already carries a letter — for the broadcast that is not
+  politeness, it is necessary: every companion obeys the NEWEST target call, so
+  re-calling a lettered ship would shove the commander's standing primary aside.
+- **The ack.** This is the one fleet write in the loop whose refusal is
+  **knowable**. `Handle_BroadcastToBubble` RETURNS `sendBroadcast`'s boolean
+  where `Handle_CmdFleetTagTarget` discards it (`beyonceService.js:3320`, the
+  discard that `bridge/fleetCommand.ts` exists because of). A `false` is the
+  2-second rate limit (`MIN_BROADCAST_TIME_SEC`, exactly
+  `FLEET_COMPANION_CADENCE_MS`); it is logged and not retried.
+
+### What the readout says now
+
+`canTagWords` reports a **method**, not a deficiency: "tags targets" /
+"broadcasts targets" / "not known". The roster's per-row note for `false` is
+**gone** — a permanent, unfixable, entirely normal condition is not a status
+line. The `null` note survives and was sharpened to "fleet roster unreadable,
+not calling targets", which is the one of the three states actually worth
+interrupting a player for.
+
+### What this did NOT do
+
+- **No `NeedBackup`.** A `Target` broadcast is the call that names the ship;
+  `NeedBackup` names the sender's nearest ball and is a different sentence.
+  One call, the one the retail client makes for this act.
+- **No broadcasting for a commander.** A pilot that can letter, letters. Doing
+  both would put two calls on one ship for no gain.
+- **No retry on a rate-limited call.** See the ack note above.
+- **No player-facing toggle.** Same reasoning phase 7 used to delete
+  `attemptsTagging`: the trigger is already exactly what was asked for — call out
+  what is holding you down, and only that.
 
 ## The method that kept paying
 

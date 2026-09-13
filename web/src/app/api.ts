@@ -12,6 +12,7 @@ import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccou
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
 import { decodeBeyonceWriteAck, type BeyonceWriteAck } from "../bridge/boundBeyonceWrites.ts";
 import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
+import { FLEET_BROADCAST_SCOPE_ALL } from "../bridge/fleetBroadcasts.ts";
 import {
   decodeCharCreationTables,
   type CharCreationTables,
@@ -1283,6 +1284,53 @@ export async function applyToJoinFleet(
 /** LEAVE the session character's current fleet. Confirm-gated. */
 export async function leaveFleet(options: ApiOptions = {}): Promise<void> {
   await postJson("/api/bridge/fleet/leave", { confirm: true }, options);
+}
+
+/**
+ * BROADCAST a `Target` call on an entity — "primary this" — to every fleet
+ * member in the same bubble (fleetMgr.BroadcastToBubble). Confirm-gated at
+ * the BFF.
+ *
+ * ⚠ THIS IS WHAT A PLAIN MEMBER HAS INSTEAD OF A TAG, and it is the retail
+ * client's own path for the same act, call for call. `fleetSvc.py:1050`:
+ *
+ *     def SendBroadcast_Target(self, itemID):
+ *         self.SendBubbleBroadcast(evefleet.BROADCAST_TARGET, itemID)
+ *
+ * and `SendBubbleBroadcast` (fleetSvc.py:991-998) reaches
+ * `fleetMgr.BroadcastToBubble(name, self.broadcastScope, itemID, typeID)` with
+ * `typeID` left at its `None` default. So: BUBBLE range (not system, not
+ * universe — a target call is for the people who can shoot it), and no typeID.
+ * We pass neither differently.
+ *
+ * ⚠ SCOPE IS `BROADCAST_ALL`, WHICH IS THE CLIENT'S DEFAULT AND NOT A CHOICE
+ * MADE HERE. `fleetBroadcastScopeSetting` is a three-option session setting
+ * (`BROADCAST_ALL`/`DOWN`/`UP`) whose `default_value` is `BROADCAST_ALL`
+ * (fleetbroadcastexports.py:332-333). It matters which: `shouldReceiveBroadcast`
+ * (fleetRuntime.js:2430) short-circuits to true for ALL, and for the other two
+ * walks the fleet hierarchy — a plain member broadcasting `UP` would be heard
+ * only by its own squad commander and above, i.e. by nobody who is on grid to
+ * help. ALL is both the default and the only scope that makes a member's
+ * target call useful.
+ *
+ * ⚠ UNLIKE `setFleetTargetTag`, THE ANSWER HERE IS REAL. `sendBroadcast`
+ * returns a boolean and `Handle_BroadcastToBubble` returns it rather than
+ * discarding it, so `false` is the server saying it dropped the call —
+ * `isBroadcastRateLimited`, 2 seconds per repeated name. Callers may act on it.
+ * A missing/non-boolean `result` reads as `true`: an older BFF that answered
+ * `{ok:true}` and nothing else has not told us it refused anything.
+ */
+export async function broadcastFleetTarget(
+  itemID: number,
+  options: ApiOptions = {},
+): Promise<boolean> {
+  const ack = await postJson(
+    "/api/bridge/fleet/broadcast/bubble",
+    { name: "Target", scope: FLEET_BROADCAST_SCOPE_ALL, itemID, confirm: true },
+    options,
+  );
+  const result = (ack as Record<string, unknown>)?.result;
+  return typeof result === "boolean" ? result : true;
 }
 
 // --- Activity Center reads -------------------------------------------------

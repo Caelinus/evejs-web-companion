@@ -47,6 +47,8 @@
     store,
     flow,
     setup,
+    title = "Fleet companion",
+    onGoToPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -62,6 +64,24 @@
      * THIS pilot: the checklist, the controls, and the readout.
      */
     setup: CompanionSetup;
+    /**
+     * What this panel's strip calls itself.
+     *
+     * ⚠ IT EXISTS SO THE EMBEDDED CASE NAMES THE PILOT INSTEAD OF NAMING THE
+     * COMPONENT. Inside the companions window this panel is the readout for the
+     * pilot a player just clicked, and that window used to say so in a framed
+     * strip of its own directly above — a heading with a pilot's name, then a
+     * heading reading "Fleet companion", then the controls. Two headings and two
+     * rules for one subject. The strip is where a panel names itself and where
+     * its controls live, so the name goes IN it. Standalone, the default is the
+     * component's own name and nothing changes.
+     */
+    title?: string;
+    /**
+     * Make this pilot the active cockpit. When absent — standalone, and in
+     * tests — no such button is drawn.
+     */
+    onGoToPilot?: () => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -205,8 +225,14 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Fleet companion</h2>
+    <h2>{title}</h2>
     <span class="controls">
+      <!-- The one thing you can do to this pilot that is not about the run: go
+           and fly it yourself. First in the strip because it is the least
+           destructive thing in it. -->
+      {#if onGoToPilot}
+        <button type="button" onclick={onGoToPilot}>Go to pilot</button>
+      {/if}
       {#if running}
         <button type="button" disabled={busy} onclick={() => run(() => flow.pauseFleetCompanion())}>
           Pause
@@ -264,14 +290,18 @@
           <tr>
             <th>In fleet</th>
             <!-- ⚠ THE SAME SHORT HEADS AS THE ROSTER. These two were each
-                 about twice the width of the value under them. "Can tag" STAYS
-                 here, though the roster dropped it: that table reports one
-                 field for every pilot, where a column of "yes" is noise; this
-                 one reports every field for one pilot, which is the view a
-                 player opens precisely to read the rare answers. -->
+                 about twice the width of the value under them. "Calls targets"
+                 STAYS here, though the roster dropped it: that table reports one
+                 field for every pilot, where a column of near-identical answers
+                 is noise; this one reports every field for one pilot, which is
+                 the view a player opens precisely to read the rare answers.
+                 ⚠ IT ASKS HOW, NOT WHETHER. The head used to read "Can tag"
+                 over a "no" that meant only "this pilot broadcasts its targets
+                 instead of lettering them" — a method, printed as a
+                 shortcoming. See `canTagWords`. -->
             <th>Orders from</th>
             <th>Last order</th>
-            <th>Can tag</th>
+            <th>Calls targets</th>
           </tr>
         </thead>
         <tbody>
@@ -279,7 +309,7 @@
             <td data-label="In fleet">{inFleetWords($companion.inFleet)}</td>
             <td data-label="Orders from">{orderFromWords($companion.followingOrderFrom)}</td>
             <td data-label="Last order">{$companion.lastOrderHeard ?? "-"}</td>
-            <td data-label="Can tag">{canTagWords($companion.canTag)}</td>
+            <td data-label="Calls targets">{canTagWords($companion.canTag)}</td>
           </tr>
         </tbody>
       </table>

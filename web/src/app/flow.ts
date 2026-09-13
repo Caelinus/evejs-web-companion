@@ -241,7 +241,7 @@ import {
   decodeFleetInviteNotification,
   type FleetPendingInvite,
 } from "../bridge/fleetCenter.ts";
-import { canTagInFleet } from "../bridge/fleetCommand.ts";
+import { canBroadcastInFleet, canTagInFleet } from "../bridge/fleetCommand.ts";
 import type { FleetCenterSnapshot } from "../bridge/fleetCenter.ts";
 import { decodeAvailableFleetAds, decodeMyFleetFinderAdvert } from "../bridge/fleetAds.ts";
 import type { FleetFinderRead } from "../nav/fleetJoinWatch.ts";
@@ -6048,6 +6048,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // the same reason -- without it there is no row to find, which is not
           // evidence of anything.
           canTag: ownCharacterID === null ? null : canTagInFleet(fleetSnapshot, ownCharacterID),
+          // The other half of rung 4's fork, off the SAME roster read — so the
+          // two verdicts can never disagree about which fleet they describe.
+          // `canTag === false` alone cannot be used here: it is also what a
+          // pilot in NO fleet gets, and that pilot has nobody to broadcast to.
+          canBroadcast:
+            ownCharacterID === null ? null : canBroadcastInFleet(fleetSnapshot, ownCharacterID),
           botDrivenCharacterIDs: botDriven,
           // The invite the notification drain already parked in the fleet slice.
           // Read rather than re-fetched: every bridge response on this tick
@@ -6191,6 +6197,28 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "setFleetTargetTag":
             await api.setFleetTargetTag(action.targetID, action.tag, callOptions);
             return;
+          // Rung 4's other arm, the one a plain member actually has: call the
+          // tackler out by `Target` broadcast. THE ACK IS REAL HERE — the
+          // server returns whether it sent, and both of its handlers return
+          // that boolean rather than discarding it (the exact thing the tag
+          // path above cannot say). A `false` is the 2-second broadcast rate
+          // limit, which is ordinary and not an error: the rung calls each ship
+          // once and is already shooting the one it just tried to name, so
+          // there is nothing to raise and nothing to retry. Logged, not thrown.
+          case "broadcastFleetTarget": {
+            const sent = await api.broadcastFleetTarget(action.targetID, callOptions);
+            if (!sent) {
+              // ⚠ NOT AN ERROR AND NOT RETRIED. The rung calls each ship once
+              // and is already shooting the one it just tried to name; a
+              // re-send would be the same shout, and the next tick's rate limit
+              // would very likely drop that too. Surfaced here rather than
+              // swallowed only because this is the ONE fleet call whose refusal
+              // is knowable at all -- worth being able to see in a console when
+              // somebody asks why a call never reached the fleet.
+              console.warn("companion: fleet target broadcast dropped (rate limit)", action.targetID);
+            }
+            return;
+          }
           // Rung 6. `launchDrones` takes BAY STACK ids and `recallDrones` takes
           // the ENTITY ids of drones in space -- two different id spaces, which
           // is why the two action kinds carry differently named fields rather

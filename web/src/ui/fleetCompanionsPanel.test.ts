@@ -280,21 +280,43 @@ test("⚠ THE ROSTER IS FIVE COLUMNS, AND 'CAN TAG' IS NOT ONE OF THEM", () => {
   assert.deepEqual(heads, ["Pilot", "Companion", "In fleet", "Orders from", "Last order"]);
 });
 
-test("⚠ DROPPING THE COLUMN DID NOT DROP THE FACT, OR FLATTEN ITS THREE STATES", () => {
-  // This is the whole risk of removing that column. The server drops a
-  // non-commander's tag while answering ok, so a companion that CANNOT tag
-  // looks exactly like one with nothing to tag — and `null` means "could not
-  // tell", which must never be read as "no" (see canTagWords). Both failing
-  // states still reach the roster, in the Companion cell, in their own words;
-  // only a plain "yes" is now silent.
-  assert.match(SOURCE, /canTag === false/, "a pilot that cannot tag says nothing");
-  assert.match(SOURCE, /cannot tag, not a fleet commander/);
-  assert.match(SOURCE, /tagging not known/, "an unknown tag verdict is being flattened away");
+test("⚠ THE ROSTER NEVER CALLS A PLAIN MEMBER BROKEN FOR BEING A PLAIN MEMBER", () => {
+  // THE REGRESSION THIS REPLACES SHIPPED AND READ AS A FAULT ON EVERY RUN. The
+  // roster used to print "cannot tag, not a fleet commander" against every
+  // `canTag === false` — which is every companion alt in somebody else's fleet,
+  // permanently, since one is never promoted. It was noise, and it was
+  // misleading besides: such a pilot cannot LETTER a target but broadcasts one
+  // perfectly well, which is what rung 4 now makes it do. Nothing about it
+  // belongs in a status line.
+  // ⚠ MATCHED AGAINST RENDERED NOTES, NOT AGAINST THE WHOLE FILE. The comment
+  // above the block quotes the old wording so the next reader knows why it went;
+  // a test that forbade the STRING anywhere would forbid recording that.
+  const notes = [...SOURCE.matchAll(/<span class="note">([^<]*)<\/span>/g)].map((m) => m[1] ?? "");
+  // Without this the loop below passes by finding nothing to check.
+  assert.ok(notes.length > 0, "the roster still renders qualifier notes at all");
+  for (const note of notes) {
+    assert.doesNotMatch(note, /cannot tag/i, "a plain member is not reported as broken");
+    assert.doesNotMatch(note, /not a fleet commander/i);
+  }
+  assert.doesNotMatch(
+    SOURCE,
+    /canTag === false\}/,
+    "no note may hang off the ordinary, permanent, unfixable case",
+  );
+});
+
+test("⚠ THE UNREADABLE ROSTER IS STILL REPORTED, AND STILL NOT FLATTENED", () => {
+  // `null` is the state worth a line: it does not mean this pilot letters or
+  // broadcasts, it means the fleet read failed, and a run that stays there is a
+  // run calling no targets at all. Three states in, one sentence out — never
+  // collapsed into either settled answer (see canTagWords).
+  assert.match(SOURCE, /canTag === null|canTag \?\? null\) === null/);
+  assert.match(SOURCE, /fleet roster unreadable, not calling targets/);
   // Both halves of the roster carry it: a server-flown companion has nobody
-  // sitting in front of it to notice its tags going nowhere.
+  // sitting in front of it to notice its fleet reads failing.
   assert.equal(
-    (SOURCE.match(/cannot tag, not a fleet commander/g) ?? []).length,
+    (SOURCE.match(/fleet roster unreadable, not calling targets/g) ?? []).length,
     2,
-    "only one of the tab rows and the server rows reports a failed tag",
+    "only one of the tab rows and the server rows reports an unreadable roster",
   );
 });

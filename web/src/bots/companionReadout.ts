@@ -94,16 +94,24 @@ export function orderFromWords(value: CompanionOrderAuthority | null): string {
 }
 
 /**
- * Whether this pilot's tag write would land.
+ * HOW this pilot calls out a target: by writing a letter, or by broadcasting.
  *
- * ⚠ THREE STATES, AND THE THIRD IS THE POINT. A pilot silently unable to tag
- * looks exactly like one with nothing to tag — the server drops a
- * non-commander's write while answering ok — so "not known" must never be
- * flattened into "no".
+ * ⚠ THIS USED TO REPORT A DEFICIENCY AND NOW REPORTS A METHOD, and the change
+ * is a correction, not a softening. The old "no - not a fleet commander" was
+ * accurate about the LETTER and left a false impression about the PILOT: a
+ * plain member cannot write a fleet tag (fleetRuntime.js:1317 refuses one) but
+ * can broadcast a `Target` call perfectly well (fleetRuntime.js:2521 gates on
+ * membership alone), and rung 4 now does exactly that. A companion alt is a
+ * plain member in every ordinary fleet and will never be promoted, so the old
+ * wording described the normal case as a standing fault.
+ *
+ * ⚠ STILL THREE STATES, AND THE THIRD IS STILL THE POINT. "Not known" is an
+ * unreadable roster. It must never flatten into either answer, because a pilot
+ * that could not look is not a pilot that looked and found something.
  */
 export function canTagWords(value: boolean | null): string {
   if (value === null) {
     return "not known";
   }
-  return value ? "yes" : "no - not a fleet commander";
+  return value ? "tags targets" : "broadcasts targets";
 }
