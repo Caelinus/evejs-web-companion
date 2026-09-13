@@ -171,10 +171,12 @@
 
   <section class="settings-group">
     <h3>Flying distances</h3>
-    <p class="muted">
-      The ranges Warp to, Orbit and Keep at range use on whatever you have selected
-      in the overview.
-    </p>
+    <!-- ⚠ TRIMMED TO THE HALF THAT IS NOT ALREADY ON SCREEN. "The ranges Warp
+         to, Orbit and Keep at range use" names the three fields directly below,
+         which are labelled "Warp to within", "Orbit at" and "Keep at range" —
+         the sentence read the form out loud. What it also carried, and what no
+         label says, is WHAT these ranges get applied to. -->
+    <p class="muted">These apply to whatever you have selected in the overview.</p>
     <div class="settings-field">
       <label for="fd-warp">Warp to within</label>
       <select id="fd-warp" value={$flyingDistances.warp} onchange={(e) => setDistance("warp", e.currentTarget.value)}>

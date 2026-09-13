@@ -456,8 +456,14 @@ export const BOTS: readonly BotDescriptor[] = Object.freeze([
   {
     id: "mining",
     name: "Mining bot",
+    // ⚠ THE DRONES ARE NAMED HERE BECAUSE THEY ARE NAMED NOWHERE ELSE NOW.
+    // MiningBot.svelte opened with a paragraph that said this again, in slightly
+    // richer words, directly under the card that was already showing this line —
+    // so the panel restated the card a player had just clicked. That paragraph
+    // is gone, and the one fact it held that this line did not (that the bot
+    // defends itself) moved here, to the single place the bot describes itself.
     summary:
-      "Picks rocks, runs your mining equipment, hauls a full hold back and unloads it, then goes again.",
+      "Picks rocks, runs your mining equipment, sends the drones out if a pirate turns up, hauls a full hold back and unloads it, then goes again.",
     requirementTitles: MINING_BOT_REQUIREMENTS.map((row) => row.title),
   },
   {

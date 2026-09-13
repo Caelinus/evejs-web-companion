@@ -123,7 +123,14 @@ test("keeps the examples, the shared library, the by-value insert and the import
     assert.ok(text.includes(label), `${label} example is missing`);
   }
   assert.match(text, /Insert steps from a saved bot/);
-  assert.match(text, /copies them once/i, "the by-value insert no longer says it copies rather than links");
+  // ⚠ THE WORDS MOVED, THE FACT DID NOT. This paragraph used to open by
+  // restating its own heading ("Copy a saved bot's steps onto the end of the
+  // plan you already have") before getting to the part that matters; the
+  // restatement is gone and the snapshot-not-a-link rule is now the whole
+  // sentence. Both halves of that rule are asserted, rather than one exact
+  // phrase, so a future rewording has to actually drop the FACT to fail.
+  assert.match(text, /copies the steps once/i, "the by-value insert no longer says it copies rather than links");
+  assert.match(text, /will not change this one/i, "the by-value insert no longer says the copy stops tracking");
   assert.match(text, /Saved bots/);
   assert.match(text, /Import or export/);
   // onMount does not run under SSR, so both library lists start empty and say so.

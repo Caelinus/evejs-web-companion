@@ -292,12 +292,15 @@
       {/if}
     </span>
   </header>
-  <p class="note">
-    Picks rocks, runs your mining equipment, sends the drones out if a pirate
-    turns up, hauls a full hold back and unloads it — then goes again. It runs in
-    this tab: close it and your ship finishes what it was last told to do and
-    sits.
-  </p>
+  <!-- ⚠ NO PARAGRAPH HERE, AND BOTH HALVES OF IT WERE ALREADY ON SCREEN. This
+       panel only ever opens inside the Bots window, under the card a player has
+       just clicked — and that card carries the bot's summary from
+       nav/botRegistry.ts, which said what this said. Its second half ("it runs
+       in this tab: close it and your ship…") is the Bots window's own standing
+       rule, three inches higher up the same screen. So the same two facts were
+       being made three times in one view. The bot's own behaviour is stated
+       once, in the registry; the tab rule once, by the window. -->
+
   {#if error}
     <p class="error">{error}</p>
   {/if}
