@@ -25,6 +25,7 @@
     type PersistedSessions,
   } from "../app/persistedSessions.ts";
   import { setSessionToken, clearSessionToken } from "../app/sessionToken.ts";
+  import { holdsTheShip } from "../nav/botRegistry.ts";
   import { getHealth } from "../app/api.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { healthPollIntervalMs, resolveServerStatus } from "../app/serverStatus.ts";
@@ -32,8 +33,26 @@
   import DesktopWindow from "./DesktopWindow.svelte";
   import PanelHost from "./PanelHost.svelte";
   import { tabLabel, type TabID } from "./tabs.ts";
-  import { MIN_H, MIN_W, type WinState } from "./desktop.ts";
-  import { isGlobalTab, loadGlobalWindow, openGlobal, saveGlobalWindow } from "./globalWindow.ts";
+  // The global layer reuses the desktop's own reducers: a window list behaves
+  // the same wherever it floats, and only OPENING differs (placement, and which
+  // tabs belong here at all), which is globalWindow.ts's job.
+  import {
+    closeWindow,
+    focusWindow,
+    focusedId as focusedWindowId,
+    moveWindow,
+    resizeWindow,
+    toggleMinimize,
+    MIN_H,
+    MIN_W,
+    type WinState,
+  } from "./desktop.ts";
+  import {
+    isGlobalTab,
+    loadGlobalWindows,
+    openGlobal,
+    saveGlobalWindows,
+  } from "./globalWindow.ts";
   import { watchIsMobile } from "./viewport.ts";
 
   // Read the roster retained across a refresh ONCE, before any write effect can
@@ -126,6 +145,37 @@
     }
     return driven;
   }
+
+  /**
+   * How many pilots are flying as companions right now — the number on the
+   * character bar's Companions button.
+   *
+   * ⚠ IT COUNTS ACROSS SESSIONS, WHICH IS WHY IT IS HERE. No pilot's own store
+   * can answer it: each one knows only itself, and the button is on the one
+   * piece of chrome that outlives a pilot switch. Subscribing to every session's
+   * companion slice is the same thing BotManagerPilotRow does for a background
+   * pilot — a store read, not a poll, so an idle squad costs nothing.
+   *
+   * PAUSED COUNTS, because `holdsTheShip` says it does: a paused companion has
+   * not let go of the hull and is one press from flying it again.
+   */
+  let companionCount = $state(0);
+  function recountCompanions(): void {
+    let flying = 0;
+    for (const session of sessions) {
+      if (holdsTheShip(session.store.get().companion.status)) flying += 1;
+    }
+    companionCount = flying;
+  }
+  $effect(() => {
+    const unsubs = sessions.map((session) =>
+      session.store.companion.subscribe(() => recountCompanions()),
+    );
+    recountCompanions();
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  });
 
   // A pilot finished login+select: promote it from onboarding into the online
   // roster and make it the active cockpit (matches "Add character makes it
@@ -385,7 +435,7 @@
   // not a correctness measure: it refetches from scratch, empties its search,
   // closes an open export box, and restarts the roster poll that is a running
   // server bot's only alert delivery. See globalWindow.ts.
-  let globalWin = $state<WinState | null>(null);
+  let globalWins = $state<WinState[]>([]);
   let globalLoaded = false;
 
   // ⚠ NOT MOUNTED ON A PHONE. MobileWorkspace is one panel at a time with no
@@ -401,21 +451,32 @@
   $effect(() => {
     if (globalLoaded) return;
     globalLoaded = true;
-    globalWin = loadGlobalWindow();
+    globalWins = loadGlobalWindows();
   });
   $effect(() => {
-    const win = globalWin;
+    const wins = globalWins;
     if (!globalLoaded) return;
-    const handle = setTimeout(() => saveGlobalWindow(win), 300);
+    const handle = setTimeout(() => saveGlobalWindows(wins), 300);
     return () => clearTimeout(handle);
   });
 
-  const globalOpenIds = $derived(
-    new Set<TabID>(globalWin === null ? [] : [globalWin.id]),
-  );
+  const globalOpenIds = $derived(new Set<TabID>(globalWins.map((win) => win.id)));
+  const globalFocusedId = $derived(focusedWindowId(globalWins));
+  // Drawn vs put away. Split here rather than with an `{#if}` inside the
+  // `{#each}`, so the strip can say whether it has anything to list at all.
+  const shownGlobalWins = $derived(globalWins.filter((win) => !win.minimized));
+  const awayGlobalWins = $derived(globalWins.filter((win) => win.minimized));
   const openGlobalTab = (id: TabID): void => {
     if (!isGlobalTab(id)) return;
-    globalWin = openGlobal(globalWin, id);
+    // ⚠ ON A PHONE THERE IS NOWHERE TO FLOAT. The layer is not mounted there at
+    // all, so opening one here would light the rail's "open" state on a window
+    // nothing draws. MobileWorkspace shows a global tab as an ordinary panel
+    // selection instead, which is what the workspace request below asks for.
+    if (isMobile) {
+      requestOpenInWorkspace(id);
+      return;
+    }
+    globalWins = openGlobal(globalWins, id);
   };
 
   /**
@@ -440,8 +501,10 @@
    * so opening one for a pilot who is not on screen would show the wrong ship.
    */
   const requestOpenInWorkspace = (id: TabID, sessionID?: string): void => {
-    // A global tab would be asking a workspace for something it does not own.
-    if (isGlobalTab(id)) {
+    // A global tab would be asking a workspace for something it does not own —
+    // unless this is a phone, where the workspace is the only place anything
+    // can be shown and `openGlobalTab` has already sent it back here.
+    if (isGlobalTab(id) && !isMobile) {
       openGlobalTab(id);
       return;
     }
@@ -458,18 +521,24 @@
   let globalLayerEl = $state<HTMLElement | null>(null);
   $effect(() => {
     const el = globalLayerEl;
-    const win = globalWin;
-    if (!el || win === null) return;
+    const wins = globalWins;
+    if (!el || wins.length === 0) return;
     const reconcile = (): void => {
       const areaW = el.clientWidth;
       const areaH = el.clientHeight;
       if (areaW <= 0 || areaH <= 0) return;
-      const w = Math.min(win.w, Math.max(MIN_W, areaW));
-      const h = Math.min(win.h, Math.max(MIN_H, areaH));
-      const x = Math.min(Math.max(0, win.x), Math.max(0, areaW - w));
-      const y = Math.min(Math.max(0, win.y), Math.max(0, areaH - h));
-      if (w !== win.w || h !== win.h || x !== win.x || y !== win.y) {
-        globalWin = { ...win, x, y, w, h };
+      let changed = false;
+      const next = wins.map((win) => {
+        const w = Math.min(win.w, Math.max(MIN_W, areaW));
+        const h = Math.min(win.h, Math.max(MIN_H, areaH));
+        const x = Math.min(Math.max(0, win.x), Math.max(0, areaW - w));
+        const y = Math.min(Math.max(0, win.y), Math.max(0, areaH - h));
+        if (w === win.w && h === win.h && x === win.x && y === win.y) return win;
+        changed = true;
+        return { ...win, x, y, w, h };
+      });
+      if (changed) {
+        globalWins = next;
       }
     };
     reconcile();
@@ -485,9 +554,12 @@
       {sessions}
       {activeId}
       {serverStatus}
+      {companionCount}
+      companionsOpen={globalOpenIds.has("companion")}
       onSwitch={switchTo}
       onAdd={addCharacter}
       onHangar={() => (hangarOpen = true)}
+      onCompanions={() => openGlobalTab("companion")}
     />
   </ErrorBoundary>
   <!-- Remount on switch: each Workspace binds one stable store/flow for its
@@ -509,58 +581,60 @@
       />
     </ErrorBoundary>
   {/key}
-  {#if globalWin !== null && !isMobile}
-    <!-- ONE window, on its own layer over whichever workspace is showing.
-         `pointer-events: none` on the layer and `auto` on the window is what
-         keeps a full-viewport overlay from swallowing every click meant for the
-         cockpit underneath it.
+  {#if globalWins.length > 0 && !isMobile}
+    <!-- THE GLOBAL WINDOWS, on their own layer over whichever workspace is
+         showing. `pointer-events: none` on the layer and `auto` on the windows
+         is what keeps a full-viewport overlay from swallowing every click meant
+         for the cockpit underneath it.
 
-         It is given the ACTIVE pilot's store and flow, which change under it
+         Each is given the ACTIVE pilot's store and flow, which change under it
          rather than remounting it — that is exactly the difference from a
-         workspace window, and why the panel keeps its roster, its search box and
-         its poll across a switch. -->
+         workspace window, and why these panels keep their roster, their search
+         box and their polls across a switch. -->
     <div class="global-layer" bind:this={globalLayerEl}>
-      {#if globalWin.minimized}
+      {#if awayGlobalWins.length > 0}
         <!-- ⚠ A PUT-AWAY WINDOW MUST ALWAYS HAVE A WAY BACK (desktop.ts states
-             the rule; Desktop.svelte's strip is its other implementation). This
-             layer holds one window, so it gets one chip rather than a strip —
-             but it must have it: the rail entry alone would light up "open"
-             with nothing on screen to match. -->
+             the rule; Desktop.svelte's strip is its other implementation). The
+             rail entry and the character bar's button both light up "open" for
+             a window that is only put away, so there has to be something on
+             screen that matches. -->
         <div class="win-strip global-strip" role="group" aria-label="Put-away windows">
-          <button
-            type="button"
-            class="win-chip away"
-            aria-pressed="false"
-            title={`Bring back ${tabLabel(globalWin.id)}`}
-            onclick={() =>
-              (globalWin = globalWin === null ? null : { ...globalWin, minimized: false })}
-          >
-            <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(globalWin.id)}
-          </button>
+          {#each awayGlobalWins as win (win.id)}
+            <button
+              type="button"
+              class="win-chip away"
+              aria-pressed="false"
+              title={`Bring back ${tabLabel(win.id)}`}
+              onclick={() => (globalWins = toggleMinimize(globalWins, win.id))}
+            >
+              <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(win.id)}
+            </button>
+          {/each}
         </div>
-      {:else}
-      <ErrorBoundary name={tabLabel(globalWin.id)}>
-        <DesktopWindow
-          win={globalWin}
-          title={tabLabel(globalWin.id)}
-          focused={true}
-          onFocus={() => {}}
-          onClose={() => (globalWin = null)}
-          onToggleMinimize={() =>
-            (globalWin = globalWin === null ? null : { ...globalWin, minimized: !globalWin.minimized })}
-          onMove={(x, y) => (globalWin = globalWin === null ? null : { ...globalWin, x, y })}
-          onResize={(w, h) => (globalWin = globalWin === null ? null : { ...globalWin, w, h })}
-        >
-          <PanelHost
-            store={active.store}
-            flow={active.flow}
-            tab={globalWin.id}
-            onOpen={requestOpenInWorkspace}
-            {sessions}
-          />
-        </DesktopWindow>
-      </ErrorBoundary>
       {/if}
+      {#each shownGlobalWins as win (win.id)}
+        <ErrorBoundary name={tabLabel(win.id)}>
+          <DesktopWindow
+            {win}
+            title={tabLabel(win.id)}
+            focused={win.id === globalFocusedId}
+            onFocus={() => (globalWins = focusWindow(globalWins, win.id))}
+            onClose={() => (globalWins = closeWindow(globalWins, win.id))}
+            onToggleMinimize={() => (globalWins = toggleMinimize(globalWins, win.id))}
+            onMove={(x, y) => (globalWins = moveWindow(globalWins, win.id, x, y))}
+            onResize={(w, h) => (globalWins = resizeWindow(globalWins, win.id, w, h))}
+          >
+            <PanelHost
+              store={active.store}
+              flow={active.flow}
+              tab={win.id}
+              onOpen={requestOpenInWorkspace}
+              onGoToPilot={switchTo}
+              {sessions}
+            />
+          </DesktopWindow>
+        </ErrorBoundary>
+      {/each}
     </div>
   {/if}
 {:else if restoring}

@@ -1,26 +1,30 @@
-// The global window model — the one window that outlives a pilot switch.
+// The global window layer — the windows that outlive a pilot switch.
 //
-// What is worth pinning here is not the arithmetic but the two rules that make
-// the window "global" at all: that its position is NOT stored per character
-// (the bug being fixed is the same window jumping around as you switch pilots),
-// and that a tab which is global can never also be a per-pilot desktop window
-// (which would put a second, character-scoped copy of the roster on screen).
-// The second rule is enforced in desktop.ts and asserted from here, because it
+// What is worth pinning here is not the arithmetic but the rules that make a
+// window "global" at all: that its position is NOT stored per character (the
+// bug being fixed is the same window jumping around as you switch pilots), that
+// a tab which is global can never also be a per-pilot desktop window (which
+// would put a second, character-scoped copy of the roster on screen), and —
+// since the fleet companion arrived beside the Bot Manager — that two global
+// windows can be open AT ONCE rather than evicting each other.
+//
+// The desktop rule is enforced in desktop.ts and asserted from here, because it
 // is this module's decision that desktop.ts is obeying.
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   DEFAULT_GLOBAL_POS,
   GLOBAL_TABS,
   isGlobalTab,
-  loadGlobalWindow,
+  loadGlobalWindows,
   openGlobal,
-  saveGlobalWindow,
+  saveGlobalWindows,
 } from "./globalWindow.ts";
 import { isWindowTab, loadLayout, openWindow, saveLayout, type WinState } from "./desktop.ts";
-import { launchableTabsFor } from "./tabs.ts";
+import { launchableTabsFor, TABS } from "./tabs.ts";
 
 /** A minimal localStorage, since Node has none by default. */
 function installStorage(): void {
@@ -36,22 +40,58 @@ function installStorage(): void {
 const win = (id: string, over: Partial<WinState> = {}): WinState =>
   ({ id, x: 10, y: 10, w: 400, h: 300, z: 1, minimized: false, ...over }) as WinState;
 
+/** One window by position, asserted present — `noUncheckedIndexedAccess` is on. */
+function at(wins: readonly WinState[], index: number): WinState {
+  const found = wins[index];
+  assert.ok(found, `expected a window at index ${index}`);
+  return found;
+}
+
+/** One window by id, asserted present. */
+function byId(wins: readonly WinState[], id: string): WinState {
+  const found = wins.find((w) => w.id === id);
+  assert.ok(found, `expected the ${id} window`);
+  return found;
+}
+
+const CHARACTER_BAR = readFileSync(new URL("./CharacterBar.svelte", import.meta.url), "utf8");
+
 // ─── which tabs are global ───────────────────────────────────────────────────
 
-test("the Bot Manager is the global tab, and an ordinary panel is not", () => {
+test("the Bot Manager and Fleet companions are global; an ordinary panel is not", () => {
   assert.equal(isGlobalTab("botManager"), true);
+  assert.equal(isGlobalTab("companion"), true);
   assert.equal(isGlobalTab("market"), false);
 });
 
-test("every global tab is still offered by the launcher rail", () => {
+test("every global tab has a door somewhere", () => {
   // Being global changes WHERE a panel opens, never whether it can be opened.
   // If this ever fails the panel has become unreachable, which is a worse bug
   // than the crowding the hoist was part of fixing.
+  //
+  // The two have DIFFERENT doors on purpose: the Bot Manager is in the rail,
+  // and Fleet companions is the button beside the brand in the character bar —
+  // the only chrome that survives a pilot switch, which is the honest place for
+  // a window that is about every pilot at once.
   for (const docked of [true, false]) {
     const offered = new Set(launchableTabsFor(docked).map((tab) => tab.id));
-    for (const id of GLOBAL_TABS) {
-      assert.equal(offered.has(id), true, `${id} must stay in the rail`);
-    }
+    assert.equal(offered.has("botManager"), true, "the Bot Manager must stay in the rail");
+    assert.equal(offered.has("companion"), false, "Fleet companions is not a rail entry");
+  }
+  assert.match(CHARACTER_BAR, /onCompanions/, "the character bar must carry the companions door");
+  assert.match(CHARACTER_BAR, /Fleet companions/);
+});
+
+test("a global tab that is not launchable is still a named tab", () => {
+  // The window's title comes from `tabLabel`, and NEOCOM_GLYPHS is exhaustive
+  // over TabID — so a global tab missing from the table would be a window
+  // called by its id, or a build failure in the icon map.
+  for (const id of GLOBAL_TABS) {
+    assert.equal(
+      TABS.some((tab) => tab.id === id),
+      true,
+      `${id} must be in the tab table`,
+    );
   }
 });
 
@@ -59,14 +99,14 @@ test("every global tab is still offered by the launcher rail", () => {
 
 test("a workspace desktop refuses to open a global tab as its own window", () => {
   // Two copies of the roster, one per pilot, is exactly what the hoist removes.
-  const wins = openWindow([], "botManager");
-  assert.deepEqual(wins, []);
+  assert.deepEqual(openWindow([], "botManager"), []);
+  assert.deepEqual(openWindow([], "companion"), []);
 });
 
 test("a layout saved before the hoist does not resurrect a per-pilot copy", () => {
   installStorage();
   saveLayout(140000005, {
-    wins: [win("botManager"), win("market")],
+    wins: [win("botManager"), win("companion"), win("market")],
     dockCollapsed: false,
     dockWidth: 340,
     targetsX: 20,
@@ -82,58 +122,84 @@ test("a global tab is still a WINDOW — the rail filters on that and must keep 
   // isWindowTab: excluding it there would delete the launcher entry instead of
   // just the desktop window. This pins that distinction.
   assert.equal(isWindowTab("botManager"), true);
+  assert.equal(isWindowTab("companion"), true);
 });
 
 // ─── opening ────────────────────────────────────────────────────────────────
 
-test("opening it the first time places it at the default spot", () => {
-  const opened = openGlobal(null, "botManager");
-  assert.equal(opened.id, "botManager");
-  assert.equal(opened.x, DEFAULT_GLOBAL_POS.x);
-  assert.equal(opened.y, DEFAULT_GLOBAL_POS.y);
-  assert.equal(opened.minimized, false);
+test("opening the first one places it at the default spot", () => {
+  const wins = openGlobal([], "botManager");
+  assert.equal(wins.length, 1);
+  assert.equal(at(wins, 0).id, "botManager");
+  assert.equal(at(wins, 0).x, DEFAULT_GLOBAL_POS.x);
+  assert.equal(at(wins, 0).y, DEFAULT_GLOBAL_POS.y);
+  assert.equal(at(wins, 0).minimized, false);
 });
 
-test("re-opening the window already open keeps where the player put it", () => {
-  // The rail entry is a toggle onto a window that may just be put away — it
-  // must not snap a window the player dragged and resized back to the default.
-  const moved = { ...openGlobal(null, "botManager"), x: 300, y: 200, w: 900, h: 600 };
-  const again = openGlobal(moved, "botManager");
-  assert.equal(again.x, 300);
-  assert.equal(again.y, 200);
-  assert.equal(again.w, 900);
-  assert.equal(again.h, 600);
+test("a second global window opens BESIDE the first, never in place of it", () => {
+  // ⚠ THE REGRESSION THIS LAYER WAS RESHAPED FOR. It held exactly one window
+  // while the Bot Manager was alone on it; adding Fleet companions to that
+  // model would have made the two evict each other — open the companions roster
+  // and the Manager you were reading vanishes.
+  const wins = openGlobal(openGlobal([], "botManager"), "companion");
+  assert.deepEqual(wins.map((w) => w.id), ["botManager", "companion"]);
+  assert.notEqual(at(wins, 1).x, at(wins, 0).x, "the second must not land on the first");
+  assert.equal(at(wins, 1).z > at(wins, 0).z, true, "the one just opened is on top");
+});
+
+test("re-opening a window already open keeps where the player put it", () => {
+  // The door is a toggle onto a window that may just be put away — it must not
+  // snap a window the player dragged and resized back to the default.
+  const opened = at(openGlobal([], "botManager"), 0);
+  const again = openGlobal([{ ...opened, x: 300, y: 200, w: 900, h: 600 }], "botManager");
+  assert.equal(again.length, 1);
+  assert.equal(at(again, 0).x, 300);
+  assert.equal(at(again, 0).y, 200);
+  assert.equal(at(again, 0).w, 900);
+  assert.equal(at(again, 0).h, 600);
 });
 
 test("re-opening a put-away window brings it back rather than doing nothing", () => {
-  const away = { ...openGlobal(null, "botManager"), minimized: true };
-  assert.equal(openGlobal(away, "botManager").minimized, false);
+  const away = [{ ...at(openGlobal([], "companion"), 0), minimized: true }];
+  assert.equal(at(openGlobal(away, "companion"), 0).minimized, false);
+});
+
+test("re-opening the one underneath raises it above the other", () => {
+  const both = openGlobal(openGlobal([], "botManager"), "companion");
+  const raised = openGlobal(both, "botManager");
+  assert.equal(byId(raised, "botManager").z > byId(raised, "companion").z, true);
+});
+
+test("a tab that is not global is refused rather than placed here", () => {
+  // It belongs to a pilot's desktop; drawing it here would float a
+  // character-scoped panel above the bar that switches characters.
+  assert.deepEqual(openGlobal([], "market"), []);
 });
 
 // ─── persistence ────────────────────────────────────────────────────────────
 
-test("the saved position round-trips", () => {
+test("the saved positions round-trip", () => {
   installStorage();
-  saveGlobalWindow(win("botManager", { x: 120, y: 90, w: 800, h: 560 }));
-  const loaded = loadGlobalWindow();
-  assert.equal(loaded?.x, 120);
-  assert.equal(loaded?.y, 90);
-  assert.equal(loaded?.w, 800);
-  assert.equal(loaded?.h, 560);
+  saveGlobalWindows([
+    win("botManager", { x: 120, y: 90, w: 800, h: 560 }),
+    win("companion", { x: 200, y: 150, w: 760, h: 500 }),
+  ]);
+  const loaded = loadGlobalWindows();
+  assert.deepEqual(loaded.map((w) => w.id), ["botManager", "companion"]);
+  assert.equal(at(loaded, 0).x, 120);
+  assert.equal(at(loaded, 1).h, 500);
 });
 
-test("the window is stored ONCE, not once per character", () => {
+test("the windows are stored ONCE, not once per character", () => {
   // The whole point: desktop.ts keys its layout by characterID because a
-  // desktop belongs to a pilot. This one does not, so two pilots must not be
-  // able to hold two different positions for it — the "same window jumping
-  // around as you switch" behaviour the hoist exists to remove.
+  // desktop belongs to a pilot. These do not, so two pilots must not be able to
+  // hold two different positions for them — the "same window jumping around as
+  // you switch" behaviour the hoist exists to remove.
   installStorage();
-  saveGlobalWindow(win("botManager", { x: 120, y: 90 }));
-  saveGlobalWindow(win("botManager", { x: 300, y: 200 }));
-  // One record, and it is the latest write rather than a per-pilot fork.
-  assert.equal(loadGlobalWindow()?.x, 300);
+  saveGlobalWindows([win("botManager", { x: 120, y: 90 })]);
+  saveGlobalWindows([win("botManager", { x: 300, y: 200 })]);
+  assert.equal(at(loadGlobalWindows(), 0).x, 300);
 
-  // And no per-character layout carries a copy of it, whichever pilot saved.
   for (const characterID of [140000005, 140000006]) {
     saveLayout(characterID, {
       wins: [win("botManager"), win("market")],
@@ -146,37 +212,70 @@ test("the window is stored ONCE, not once per character", () => {
     assert.deepEqual((loadLayout(characterID)?.wins ?? []).map((w) => w.id), ["market"]);
   }
 });
+
+test("a window saved under the old single-window key is carried over, once", () => {
+  // ⚠ A PLAYER HAS A BOT MANAGER SITTING WHERE THEY PUT IT. Shipping the list
+  // key without reading the old one would silently move it back to the default
+  // corner. It is migrated on the first read and the old key is then cleared,
+  // so it can never drift back into use.
+  installStorage();
+  localStorage.setItem(
+    "evejs-web-global-window:v1",
+    JSON.stringify({ id: "botManager", x: 240, y: 160, w: 700, h: 520, z: 1, minimized: false }),
+  );
+  const loaded = loadGlobalWindows();
+  assert.deepEqual(loaded.map((w) => w.id), ["botManager"]);
+  assert.equal(at(loaded, 0).x, 240);
+  assert.equal(localStorage.getItem("evejs-web-global-window:v1"), null);
+});
+
 test("a stored id that is no longer global is dropped rather than drawn", () => {
   // The migration path if a tab ever leaves GLOBAL_TABS: a leftover record must
   // not open a window on a layer that no longer claims that panel.
   installStorage();
   localStorage.setItem(
-    "evejs-web-global-window:v1",
-    JSON.stringify({ id: "market", x: 10, y: 10, w: 400, h: 300, z: 1, minimized: false }),
+    "evejs-web-global-windows:v2",
+    JSON.stringify([{ id: "market", x: 10, y: 10, w: 400, h: 300, z: 1, minimized: false }]),
   );
-  assert.equal(loadGlobalWindow(), null);
+  assert.deepEqual(loadGlobalWindows(), []);
 });
 
-test("a corrupt record reads as 'no window', never as a throw", () => {
+test("one window per tab, enforced on the way IN as well as by the reducers", () => {
+  // A duplicate id makes App's keyed `{#each … (win.id)}` throw on every render
+  // from then on, permanently, because the bad list is written straight back.
   installStorage();
-  localStorage.setItem("evejs-web-global-window:v1", "{not json");
-  assert.equal(loadGlobalWindow(), null);
   localStorage.setItem(
-    "evejs-web-global-window:v1",
-    JSON.stringify({ id: "botManager", x: "left", y: 10, w: 400, h: 300 }),
+    "evejs-web-global-windows:v2",
+    JSON.stringify([
+      { id: "companion", x: 10, y: 10, w: 400, h: 300, z: 1, minimized: false },
+      { id: "companion", x: 90, y: 90, w: 400, h: 300, z: 2, minimized: false },
+    ]),
   );
-  assert.equal(loadGlobalWindow(), null);
+  const loaded = loadGlobalWindows();
+  assert.equal(loaded.length, 1);
+  assert.equal(at(loaded, 0).x, 10, "first one wins");
 });
 
-test("saving null clears the record", () => {
+test("a corrupt record reads as 'no windows', never as a throw", () => {
   installStorage();
-  saveGlobalWindow(win("botManager"));
-  saveGlobalWindow(null);
-  assert.equal(loadGlobalWindow(), null);
+  localStorage.setItem("evejs-web-global-windows:v2", "{not json");
+  assert.deepEqual(loadGlobalWindows(), []);
+  localStorage.setItem(
+    "evejs-web-global-windows:v2",
+    JSON.stringify([{ id: "botManager", x: "left", y: 10, w: 400, h: 300 }]),
+  );
+  assert.deepEqual(loadGlobalWindows(), []);
+});
+
+test("saving an empty list clears the record", () => {
+  installStorage();
+  saveGlobalWindows([win("botManager")]);
+  saveGlobalWindows([]);
+  assert.deepEqual(loadGlobalWindows(), []);
 });
 
 test("a put-away window comes back put away, not on screen", () => {
   installStorage();
-  saveGlobalWindow(win("botManager", { minimized: true }));
-  assert.equal(loadGlobalWindow()?.minimized, true);
+  saveGlobalWindows([win("companion", { minimized: true })]);
+  assert.equal(at(loadGlobalWindows(), 0).minimized, true);
 });

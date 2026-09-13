@@ -118,3 +118,71 @@ test("the request is passed down as a prop, not pulled from a shared singleton",
   assert.match(withoutComments(WORKSPACE), /openRequest,/);
   assert.match(MARKUP, /\{openRequest\}/);
 });
+
+// ─── the layer holds MORE THAN ONE window ────────────────────────────────────
+
+test("the layer draws every global window, not just the front one", () => {
+  // ⚠ THE REGRESSION THIS GUARDS. The layer held exactly one window while the
+  // Bot Manager was alone on it. Fleet companions joined it, and a layer that
+  // still drew one would make the two evict each other — open the companions
+  // roster and the Manager you were reading vanishes, with nothing on screen
+  // saying why. A `{#each}` over the list is what makes both fit.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /\{#each shownGlobalWins as win \(win\.id\)\}/);
+  assert.match(layer, /<DesktopWindow/);
+});
+
+test("every put-away global window keeps a chip, not just the last one", () => {
+  // A hide with no visible handle is a window the player has lost, and the door
+  // that opened it still lights up "open" — so one chip for a layer of two
+  // would strand whichever window was not the one the strip happened to name.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /\{#each awayGlobalWins as win \(win\.id\)\}/);
+});
+
+test("focus is a real question now that two windows can overlap", () => {
+  // With one window it could be hard-coded true. With two, a hard-coded focus
+  // ring is a lie about which one a keypress reaches.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /focused=\{win\.id === globalFocusedId\}/);
+  assert.doesNotMatch(layer, /focused=\{true\}/);
+});
+
+// ─── the companions door ─────────────────────────────────────────────────────
+
+test("the character bar opens Fleet companions, and sits outside the pilot-switch key", () => {
+  // The bar is the only chrome that survives a switch, which is why the door to
+  // a window about EVERY pilot hangs there — a door inside the key would be
+  // rebuilt with the pilot it is not about.
+  // ⚠ MEASURED IN THE MARKUP, NOT THE WHOLE FILE. `{#key active.id}` is also
+  // written in a code comment up in the script block, and an index taken over
+  // the file would compare a position against that sentence rather than against
+  // the real block.
+  const body = MARKUP.slice(MARKUP.indexOf("</script>"));
+  const keyStart = body.indexOf("{#key active.id}");
+  const barAt = body.indexOf("<CharacterBar");
+  assert.ok(keyStart > 0, "the pilot-switch key block moved or was renamed");
+  assert.ok(barAt >= 0 && barAt < keyStart, "the character bar must stay above the key");
+  assert.match(MARKUP, /onCompanions=\{\(\) => openGlobalTab\("companion"\)\}/);
+  assert.match(MARKUP, /companionsOpen=\{globalOpenIds\.has\("companion"\)\}/);
+});
+
+test("the count on that door is read from every session, not from the active pilot", () => {
+  // No pilot's own store can answer "how many of my pilots are flying as
+  // companions"; reading the mounted one would make the badge count 1 or 0.
+  const counter = APP.slice(APP.indexOf("function recountCompanions"));
+  assert.match(counter, /for \(const session of sessions\)/);
+  assert.match(counter, /holdsTheShip/);
+});
+
+test("on a phone a global tab opens as a PANEL, because the layer is not mounted there", () => {
+  // MobileWorkspace is one panel at a time with nowhere to float. Opening onto
+  // the layer there would light the door's "open" state on a window nothing
+  // draws — a click that appears to do nothing at all.
+  const opener = APP.slice(APP.indexOf("const openGlobalTab"));
+  const mobileAt = opener.indexOf("if (isMobile)");
+  const openAt = opener.indexOf("openGlobal(globalWins, id)");
+  assert.ok(mobileAt >= 0, "the phone case is gone");
+  assert.ok(openAt > mobileAt, "the phone must be answered before the layer is touched");
+  assert.match(MARKUP, /\{#if globalWins\.length > 0 && !isMobile\}/);
+});

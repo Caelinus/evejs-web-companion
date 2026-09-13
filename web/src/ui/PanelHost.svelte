@@ -27,6 +27,7 @@
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
   import BotManager from "./BotManager.svelte";
+  import FleetCompanions from "./FleetCompanions.svelte";
   import Chat from "./Chat.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
@@ -47,6 +48,7 @@
     tab,
     onOpen,
     sessions,
+    onGoToPilot,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -65,6 +67,12 @@
     // Optional and forwarded only to the Bot Manager panel, which is the only
     // one that needs to see pilots beyond its own store/flow.
     sessions?: readonly Session[];
+    /**
+     * Make another pilot the active cockpit. Forwarded only to Fleet
+     * companions, which is a roster of pilots and so the one panel with rows
+     * that are ABOUT a pilot you are not currently flying.
+     */
+    onGoToPilot?: (sessionID: string) => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -134,6 +142,12 @@
   <BotBuilder {store} {flow} />
 {:else if tab === "botManager"}
   <BotManager {store} {flow} {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
+{:else if tab === "companion"}
+  <!-- ⚠ NOT GIVEN `store`. Every other panel here is a view of the mounted
+       pilot; this one is a view of ALL of them and reads each session's own
+       store. `flow` is passed for one thing only: the account-scoped read of
+       the server's companion roster. -->
+  <FleetCompanions {flow} {sessions} {onGoToPilot} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

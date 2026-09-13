@@ -63,27 +63,41 @@ import {
 // --- Which bots exist -------------------------------------------------------
 
 /**
- * Every bot the client can run.
+ * Every BOT the client can run — the catalogue the launcher and the Bot Manager
+ * list, pick from and set up.
  *
- * ⚠ ADDING A MEMBER HERE IS THE ONLY STEP. `createShipClaim`'s stopper record
- * and the store's status readers are both `Record<BotID, …>`, so the build
- * fails until the new bot is wired into each — which is what makes exclusion
- * and the running-bot readout impossible to forget.
+ * ⚠ THE FLEET COMPANION IS NOT ONE OF THESE ANY MORE, and its absence is the
+ * point rather than an omission. A bot is a script you set up against your own
+ * ship and leave running: it picks its own work (a belt, an agent), it is
+ * offered in the Manager's picker beside the saved scripts, and it can be
+ * handed to the server as a saved run. A companion does none of that — it has
+ * no work of its own at all, it does what a fleet tells it, and it is set up
+ * and watched across EVERY pilot at once in the Fleet companions window. It
+ * kept being listed here because it was built as the third instance of the bot
+ * pattern, and that inheritance is what put a fleet readout inside a bot
+ * library. It still HOLDS A SHIP, which is `ShipControllerID` below.
  */
-export type BotID = "mining" | "mission" | "companion";
+export type BotID = "mining" | "mission";
 
-export const BOT_IDS: readonly BotID[] = Object.freeze<BotID[]>(["mining", "mission", "companion"]);
+export const BOT_IDS: readonly BotID[] = Object.freeze<BotID[]>(["mining", "mission"]);
 
 /**
  * Every browser-side decide loop that can issue orders to one ship.
  *
- * `BotID` remains the catalogue of the two built-in launchers. Player-authored
- * bots have no single catalogue row (there can be many saved scripts), but they
- * still participate in the SAME ownership claim. Keeping this as a closed union
- * makes the stopper table and the store's status table exhaustive without
- * pretending that "custom" is one built-in bot.
+ * `BotID` is the catalogue of the built-in bot launchers. The two members
+ * beyond it are not catalogue rows and must never be treated as ones:
+ * player-authored scripts have no single row (there can be many saved ones),
+ * and the fleet companion is its own system entirely. All three kinds
+ * nevertheless issue orders to ONE hull, so all three participate in the same
+ * ownership claim — which is why exclusion is keyed by this union and not by
+ * `BotID`.
+ *
+ * ⚠ THE COMPANION MUST STAY IN HERE. Take it out and a mining bot can be
+ * started on a ship a companion is flying with neither loop aware of the other:
+ * two tickers issuing movement and module calls against one hull, which is the
+ * exact bug `createShipClaim` was written to make structurally impossible.
  */
-export type ShipControllerID = BotID | "custom";
+export type ShipControllerID = BotID | "companion" | "custom";
 
 export const SHIP_CONTROLLER_IDS: readonly ShipControllerID[] = Object.freeze<ShipControllerID[]>([
   "mining",
@@ -106,9 +120,10 @@ export function holdsTheShip(status: string): boolean {
 /**
  * Claim the ship for one bot, stopping every other bot that holds it.
  *
- * The record is exhaustive over `BotID` by type, and the loop walks `BOT_IDS`
- * rather than naming peers — so this function never changes when a bot is
- * added, and the new bot is stopped by every existing one on the day it lands.
+ * The record is exhaustive over `ShipControllerID` by type, and the loop walks
+ * `SHIP_CONTROLLER_IDS` rather than naming peers — so this function never
+ * changes when a controller is added, and the new one is stopped by every
+ * existing one on the day it lands.
  */
 export function createShipClaim(
   stop: Readonly<Record<ShipControllerID, () => void>>,
@@ -235,8 +250,16 @@ export function evaluateRequirements<Reads>(
   };
 }
 
-/** A boolean read that may not have been readable. Null is never "no". */
-function fromNullableBoolean(value: boolean | null): RequirementVerdict {
+/**
+ * A boolean read that may not have been readable. Null is never "no".
+ *
+ * Exported because a requirement declaration does not have to live in this
+ * file: the fleet companion's moved out with the companion itself (see
+ * nav/fleetCompanionRequirements.ts), and it needs the same three-answer
+ * reading of a nullable read that every requirement here uses. The MACHINERY is
+ * shared; the catalogue is not.
+ */
+export function fromNullableBoolean(value: boolean | null): RequirementVerdict {
   if (value === null) {
     return "cannot-tell";
   }
@@ -416,55 +439,6 @@ export const MISSION_BOT_REQUIREMENTS: readonly BotRequirement<MissionBotReads>[
   },
 ]);
 
-// --- The fleet companion ----------------------------------------------------
-
-/**
- * What the launcher needs to know before starting a companion.
- *
- * ⚠ IN A FLEET IS BLOCKING, and it is the one requirement the ladder genuinely
- * cannot resolve for itself. Every companion behaviour — broadcasts, target
- * tags, repping a fleet-mate, yielding to a fleet warp — is addressed to the
- * fleet, and the roster is where the pilot learns who its fleet-mates even are.
- * A companion started outside a fleet is not a bot that will get going shortly;
- * it is a bot with nothing to obey.
- */
-export interface FleetCompanionReads {
-  /** True when this pilot is in a fleet. Null when the roster did not read. */
-  readonly inFleet: boolean | null;
-  /** True when the ship is docked. Null when the flight status did not read. */
-  readonly docked: boolean | null;
-}
-
-const COMPANION_NEEDS_A_FLEET = "Join a fleet first — a companion takes its orders from one.";
-const COMPANION_FLEET_UNREADABLE =
-  "Your fleet could not be read, so there is no way to tell who it would be following.";
-
-export const FLEET_COMPANION_REQUIREMENTS: readonly BotRequirement<FleetCompanionReads>[] =
-  Object.freeze([
-    {
-      id: "in-fleet",
-      title: "You are in a fleet",
-      severity: "blocking",
-      source: "ship",
-      check: (reads) => fromNullableBoolean(reads.inFleet),
-      unmet: COMPANION_NEEDS_A_FLEET,
-      cannotTell: COMPANION_FLEET_UNREADABLE,
-    },
-    {
-      // ADVISORY: undocking is the companion's own first move when the fleet
-      // asks for anything, so refusing a docked start would refuse a start that
-      // works.
-      id: "docked",
-      title: "Your ship is out in space",
-      severity: "advisory",
-      source: "ship",
-      check: (reads) =>
-        reads.docked === null ? "cannot-tell" : reads.docked ? "not-met" : "met",
-      unmet: "It will undock when the fleet gives it something to do.",
-      cannotTell: "Whether your ship is docked could not be read.",
-    },
-  ]);
-
 // --- The catalogue ----------------------------------------------------------
 
 /** One bot, as the launcher lists it. */
@@ -492,12 +466,5 @@ export const BOTS: readonly BotDescriptor[] = Object.freeze([
     summary:
       "Asks an agent for delivery work, turns down anything too far or too big, flies it there and hands it in.",
     requirementTitles: MISSION_BOT_REQUIREMENTS.map((row) => row.title),
-  },
-  {
-    id: "companion",
-    name: "Fleet companion",
-    summary:
-      "Flies with your fleet and does what the fleet asks — holds formation, answers broadcasts, and looks after itself.",
-    requirementTitles: FLEET_COMPANION_REQUIREMENTS.map((row) => row.title),
   },
 ]);

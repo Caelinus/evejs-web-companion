@@ -2690,6 +2690,50 @@
     color: var(--color-accent);
     flex: 0 0 auto;
   }
+  /* The Fleet companions door, beside the brand: the one control in this bar
+     that is about every pilot rather than the active one. Styled as a quiet
+     chrome button that LIGHTS UP while its window is open, so the bar doubles
+     as the answer to "is that thing already on screen somewhere?". */
+  .char-bar-companions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    padding: 0 0.5rem;
+    background: none;
+    border: 1px solid var(--color-line);
+    border-radius: 0;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .char-bar-companions:hover { color: var(--color-text); border-color: var(--color-line-strong); }
+  .char-bar-companions.open {
+    color: var(--color-accent-bright);
+    border-color: var(--color-accent-dim);
+    background: var(--color-panel-2);
+  }
+  .char-bar-companions-glyph {
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* The count is a STATE, so it is not colour alone: the number itself is the
+     information, and the aria-label says it in words. */
+  .char-bar-companions-count {
+    min-width: 1.1rem;
+    padding: 0 0.25rem;
+    text-align: center;
+    background: var(--color-good);
+    color: var(--color-bg);
+    font-size: 0.72rem;
+  }
   .char-bar-list {
     display: flex;
     align-items: stretch;
@@ -2717,6 +2761,7 @@
    * has to be made in the component anyway. Keeping the number in both places
    * would be keeping two things equal by hand. */
   .char-bar.narrow .char-bar-add-text { display: none; }
+  .char-bar.narrow .char-bar-companions-text { display: none; }
   .char-bar.narrow .char-bar-status-text { display: none; }
   .char-bar.narrow .char-bar-list { flex: 0 1 auto; min-width: 0; }
   /* ⚠ THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so several

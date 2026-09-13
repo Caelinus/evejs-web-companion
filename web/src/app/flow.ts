@@ -177,11 +177,15 @@ import {
   MISSION_BOT_REQUIREMENTS,
   createShipClaim,
   evaluateRequirements,
-  FLEET_COMPANION_REQUIREMENTS,
-  type FleetCompanionReads,
   type MiningBotReads,
   type MissionBotReads,
 } from "../nav/botRegistry.ts";
+// The companion's own rows: it is not a bot and no longer declares itself in
+// the bot catalogue. See nav/fleetCompanionRequirements.ts.
+import {
+  FLEET_COMPANION_REQUIREMENTS,
+  type FleetCompanionReads,
+} from "../nav/fleetCompanionRequirements.ts";
 import {
   createFleetCompanion,
   type FleetCompanionController,

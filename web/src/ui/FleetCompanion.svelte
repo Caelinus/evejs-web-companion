@@ -16,11 +16,11 @@
   import { onMount } from "svelte";
   import { isSessionLost } from "../app/flow.ts";
   import { resolvedName, type NameRef } from "../store/names.ts";
+  import { evaluateRequirements } from "../nav/botRegistry.ts";
   import {
-    evaluateRequirements,
     FLEET_COMPANION_REQUIREMENTS,
     type FleetCompanionReads,
-  } from "../nav/botRegistry.ts";
+  } from "../nav/fleetCompanionRequirements.ts";
   import {
     DEFAULT_COMPANION_SETUP,
     FLEET_COMPANION_ABANDONMENT_WAIT_MS,
