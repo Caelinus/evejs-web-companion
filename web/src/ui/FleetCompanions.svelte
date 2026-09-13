@@ -309,11 +309,10 @@
       </button>
     </span>
   </header>
-  <p class="note">
-    Every pilot signed in here, and every companion the server is flying for this
-    account. A companion does what its fleet asks — it picks no work of its own,
-    so there is nothing to set up but the limits it keeps itself alive by.
-  </p>
+  <!-- ⚠ NO DESCRIPTION OF WHAT A COMPANION IS. The title says it, the table
+       shows it, and a paragraph restating it is a paragraph the player reads
+       once and then has to look past every time afterwards. What stays on this
+       panel is the one line that CHANGES: how many are flying. -->
   <p class="stat-line">{summary}</p>
   {#if error}
     <p class="error">{error}</p>

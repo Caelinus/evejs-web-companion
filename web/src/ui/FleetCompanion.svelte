@@ -237,11 +237,11 @@
       {/if}
     </span>
   </header>
-  <p class="note">
-    Flies with your fleet and does what the fleet asks - holds formation,
-    answers broadcasts, and looks after itself. It runs in this tab: close it
-    and your ship finishes what it was last told to do and sits.
-  </p>
+  <!-- ⚠ WHAT IT IS was two sentences here and is now none: the window is called
+       Fleet companions and the readout below says what this one is doing. What
+       survives is the one fact a player cannot see anywhere on screen — that
+       closing the tab ends the run. -->
+  <p class="note">Runs in this tab: close it and your ship stops taking orders.</p>
   {#if error}
     <p class="error">{error}</p>
   {/if}
@@ -368,10 +368,6 @@
     <h2>Set it up</h2>
 
     <h3>Before it can start</h3>
-    <p class="note">
-      Required items must be met before Start will work. The others just say
-      what it will do on its own.
-    </p>
     <ul class="checklist">
       {#each preflight.rows as row (row.id)}
         {@const label = row.verdict === "met" ? "Ready" : row.verdict === "cannot-tell" ? "Unknown" : "Not yet"}
@@ -388,13 +384,11 @@
       {/each}
     </ul>
 
-    <h3>What it uses</h3>
-    <p class="note">
-      This pilot reads its own fit when it starts and uses whatever it finds -
-      hardeners, repairers, remote repairers and weapons. It listens to fleet
-      broadcasts, target tags and chat orders from your fleet commanders, with
-      nothing here to switch on.
-    </p>
+    <!-- ⚠ "What it uses" IS GONE, HEADING AND ALL. It listed the modules and
+         the order channels a companion reads, and every line of it ended in
+         "with nothing here to switch on" — a section of settings that are not
+         settings. A player who wants to know what their ship will use looks at
+         the fit. -->
 
     <h3>Keeping your ship alive</h3>
     <p class="field">
@@ -433,14 +427,14 @@
       />
       <span class="note">flee round trips</span>
     </p>
+    <!-- The label carries the whole fact now: armour is the only damage a
+         station charges for, because docking gives shield and capacitor back by
+         itself. Two sentences explaining that sat under a tick box that can say
+         it in four words. -->
     <label class="check">
       <input type="checkbox" bind:checked={repairsAtStation} />
-      Pay for repairs when it docks hurt
+      Pay a station to repair armour
     </label>
-    <p class="note">
-      Docking gives back shield and capacitor for free, but not armour. Without this
-      a pilot that fled on armour damage stays docked instead of coming back.
-    </p>
     <p class="field">
       <label for="companion-drone-floor">Bring a drone home below</label>
       <input
@@ -466,17 +460,16 @@
       <span class="note">seconds before relaunching them</span>
     </p>
 
+    <!-- ⚠ ONE SENTENCE, AND IT STAYS. This is the one behaviour a player would
+         otherwise meet as a surprise — a companion that stops, leaves the fleet
+         and will not take an invite from a stranger. The paragraph about
+         warping to the star when no station is in reach went: there is nothing
+         to set for it and nothing to do about it. -->
     <h3>If it ends up alone</h3>
     <p class="note">
-      This pilot only ever works while somebody in the fleet is not being flown
-      by this computer. The moment that stops being true it docks at the nearest
-      station, leaves the fleet, and waits half an hour for one of the pilots
-      who WAS in the fleet to invite it back - then it releases the ship. An
-      invite from anybody else is ignored.
-    </p>
-    <p class="note">
-      If there is no station in sight when it needs to hide, it warps to this
-      system's star instead - nothing to set for that.
+      It needs one pilot in the fleet who is not flown by this browser. Without
+      one it docks, leaves the fleet, and waits half an hour for an invite from
+      somebody who was in it.
     </p>
 
     {#if $companion.failureReason}
