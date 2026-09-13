@@ -36,7 +36,12 @@
   import { listServerBots, stopServerBot, type ServerBot } from "../app/api.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { holdsTheShip, type ShipControllerID } from "../nav/botRegistry.ts";
-  import { canTagWords, inFleetWords, orderFromWords } from "../bots/companionReadout.ts";
+  // ⚠ NO `canTagWords` HERE ANY MORE. The roster dropped its Can tag column;
+  // what it says now is a short qualifier in the Companion cell, and only when
+  // the answer is not a plain yes. `canTagWords` is still the wording for the
+  // per-pilot readout in FleetCompanion.svelte, which is the view that reports
+  // every field for one pilot rather than one field for every pilot.
+  import { inFleetWords, orderFromWords } from "../bots/companionReadout.ts";
   import {
     companionStatusWords,
     companionSummaryWords,
@@ -342,12 +347,20 @@
       <table class="guests reflow">
         <thead>
           <tr>
+            <!-- ⚠ FIVE COLUMNS, AND SHORT ONES. "Following orders from" and
+                 "Last order heard" were each about twice the width of the value
+                 under them, so two of the five columns were mostly header. A
+                 column head is a label, not a sentence.
+                 ⚠ AND "CAN TAG" IS NOT ONE OF THEM ANY MORE — see the Companion
+                 cell below, which is where that fact went. It was a column that
+                 read "yes" for nearly every pilot nearly all the time, and a
+                 column whose interesting value is rare is a column a player
+                 stops reading before the day it matters. -->
             <th>Pilot</th>
             <th>Companion</th>
             <th>In fleet</th>
-            <th>Following orders from</th>
-            <th>Last order heard</th>
-            <th>Can tag</th>
+            <th>Orders from</th>
+            <th>Last order</th>
           </tr>
         </thead>
         <tbody>
@@ -379,6 +392,26 @@
                   {#if state !== null && !holdsTheShip(state.status) && row.holder !== null && row.holder !== "companion"}
                     <span class="note"> — a bot is flying this ship</span>
                   {/if}
+                  <!-- ⚠ WHERE THE "CAN TAG" COLUMN WENT, AND WHY IT IS SAID
+                       HERE INSTEAD OF EVERYWHERE. The column printed a verdict
+                       for every pilot on every row, and for nearly all of them,
+                       nearly always, that verdict was "yes" — so the one row
+                       that said otherwise had to be spotted in a column nobody
+                       had any reason to look at.
+                       ⚠ BOTH FAILING STATES SURVIVE, STILL UNFLATTENED. The
+                       server drops a non-commander's tag while answering ok, so
+                       a pilot that CANNOT tag looks exactly like one with
+                       nothing to tag; `null` is "we could not tell" and must
+                       never be read as "no". They get different sentences here
+                       for the same reason `canTagWords` gives them different
+                       words. `row.facts` is already silent unless a run holds
+                       this ship, so neither line can appear against an idle
+                       pilot. -->
+                  {#if row.facts.canTag === false}
+                    <span class="note"> — cannot tag, not a fleet commander</span>
+                  {:else if row.facts.canTag === null && holdsTheShip(state?.status ?? "idle")}
+                    <span class="note"> — tagging not known</span>
+                  {/if}
                 </td>
                 <td data-label="In fleet">{inFleetWords(row.inFleet)}</td>
                 <!-- ⚠ `row.facts`, NOT THE SLICE. The companion slice keeps its
@@ -386,11 +419,8 @@
                      stopped pilot still claiming to be following orders and
                      still reporting whether it could tag — three confident
                      sentences about a pilot doing nothing. -->
-                <td data-label="Following orders from"
-                  >{orderFromWords(row.facts.followingOrderFrom)}</td
-                >
-                <td data-label="Last order heard">{row.facts.lastOrderHeard ?? "-"}</td>
-                <td data-label="Can tag">{canTagWords(row.facts.canTag)}</td>
+                <td data-label="Orders from">{orderFromWords(row.facts.followingOrderFrom)}</td>
+                <td data-label="Last order">{row.facts.lastOrderHeard ?? "-"}</td>
               </tr>
             {/if}
           {/each}
@@ -408,13 +438,23 @@
                 </button>
                 <span class="note">On the server</span>
               </td>
-              <td data-label="Companion">{companionStatusWords(bot.status)}</td>
+              <td data-label="Companion">
+                {companionStatusWords(bot.status)}
+                <!-- ⚠ THE SAME TWO SENTENCES AS THE TAB ROWS, and they belong
+                     here MORE, not less: this run is on the server, so nobody
+                     is sitting in front of it to notice its tags going
+                     nowhere. No `holdsTheShip` guard is needed — a row exists
+                     in this half of the roster only while the server is flying
+                     the hull. -->
+                {#if facts?.canTag === false}
+                  <span class="note"> — cannot tag, not a fleet commander</span>
+                {:else if (facts?.canTag ?? null) === null}
+                  <span class="note"> — tagging not known</span>
+                {/if}
+              </td>
               <td data-label="In fleet">{inFleetWords(facts?.inFleet ?? null)}</td>
-              <td data-label="Following orders from"
-                >{orderFromWords(facts?.followingOrderFrom ?? null)}</td
-              >
-              <td data-label="Last order heard">{facts?.lastOrderHeard ?? "-"}</td>
-              <td data-label="Can tag">{canTagWords(facts?.canTag ?? null)}</td>
+              <td data-label="Orders from">{orderFromWords(facts?.followingOrderFrom ?? null)}</td>
+              <td data-label="Last order">{facts?.lastOrderHeard ?? "-"}</td>
             </tr>
           {/each}
         </tbody>

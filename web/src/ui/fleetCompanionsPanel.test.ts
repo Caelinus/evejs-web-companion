@@ -140,3 +140,32 @@ test("a server run is not offered a setup form it cannot apply", () => {
   // here would change numbers that reach nothing.
   assert.match(SOURCE, /NO SETUP FORM, AND THAT IS NOT AN OVERSIGHT/);
 });
+
+test("⚠ THE ROSTER IS FIVE COLUMNS, AND 'CAN TAG' IS NOT ONE OF THEM", () => {
+  // A column head is a label, not a sentence: "Following orders from" and
+  // "Last order heard" were each about twice the width of the value beneath
+  // them. And the Can tag column printed a verdict on every row that was "yes"
+  // for nearly every pilot nearly always — a column whose interesting value is
+  // rare is one a player stops reading before the day it matters.
+  const heads = [...SOURCE.matchAll(/<th>([^<]+)<\/th>/g)].map((m) => m[1]);
+  assert.deepEqual(heads, ["Pilot", "Companion", "In fleet", "Orders from", "Last order"]);
+});
+
+test("⚠ DROPPING THE COLUMN DID NOT DROP THE FACT, OR FLATTEN ITS THREE STATES", () => {
+  // This is the whole risk of removing that column. The server drops a
+  // non-commander's tag while answering ok, so a companion that CANNOT tag
+  // looks exactly like one with nothing to tag — and `null` means "could not
+  // tell", which must never be read as "no" (see canTagWords). Both failing
+  // states still reach the roster, in the Companion cell, in their own words;
+  // only a plain "yes" is now silent.
+  assert.match(SOURCE, /canTag === false/, "a pilot that cannot tag says nothing");
+  assert.match(SOURCE, /cannot tag, not a fleet commander/);
+  assert.match(SOURCE, /tagging not known/, "an unknown tag verdict is being flattened away");
+  // Both halves of the roster carry it: a server-flown companion has nobody
+  // sitting in front of it to notice its tags going nowhere.
+  assert.equal(
+    (SOURCE.match(/cannot tag, not a fleet commander/g) ?? []).length,
+    2,
+    "only one of the tab rows and the server rows reports a failed tag",
+  );
+});

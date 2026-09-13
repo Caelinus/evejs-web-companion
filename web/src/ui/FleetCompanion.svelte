@@ -272,16 +272,22 @@
         <thead>
           <tr>
             <th>In fleet</th>
-            <th>Following orders from</th>
-            <th>Last order heard</th>
+            <!-- ⚠ THE SAME SHORT HEADS AS THE ROSTER. These two were each
+                 about twice the width of the value under them. "Can tag" STAYS
+                 here, though the roster dropped it: that table reports one
+                 field for every pilot, where a column of "yes" is noise; this
+                 one reports every field for one pilot, which is the view a
+                 player opens precisely to read the rare answers. -->
+            <th>Orders from</th>
+            <th>Last order</th>
             <th>Can tag</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td data-label="In fleet">{inFleetWords($companion.inFleet)}</td>
-            <td data-label="Following orders from">{orderFromWords($companion.followingOrderFrom)}</td>
-            <td data-label="Last order heard">{$companion.lastOrderHeard ?? "-"}</td>
+            <td data-label="Orders from">{orderFromWords($companion.followingOrderFrom)}</td>
+            <td data-label="Last order">{$companion.lastOrderHeard ?? "-"}</td>
             <td data-label="Can tag">{canTagWords($companion.canTag)}</td>
           </tr>
         </tbody>
