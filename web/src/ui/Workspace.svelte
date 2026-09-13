@@ -51,6 +51,8 @@
     sessions,
     globalOpenIds,
     onOpenGlobal,
+    globalWins,
+    onToggleGlobalMinimize,
     openRequest,
     onOpenRequestServed,
     sessionID,
@@ -73,6 +75,16 @@
     globalOpenIds?: ReadonlySet<TabID>;
     /** Hand a global tab up to App, which owns the layer it opens on. */
     onOpenGlobal?: (id: TabID) => void;
+    /**
+     * The global windows themselves, passed through to the desktop's window
+     * STRIP — never to its surface, which App draws on its own layer. A
+     * put-away window's handle belongs in the one strip a player already looks
+     * at, not in a second one that exists because the window lives on another
+     * layer. See Desktop.svelte's own note.
+     */
+    globalWins?: readonly WinState[];
+    /** Put a global window away, or bring it back. App owns the layer. */
+    onToggleGlobalMinimize?: (id: TabID) => void;
     /**
      * A panel App wants opened HERE, as a counter that App bumps.
      *
@@ -362,6 +374,8 @@
             {store}
             {flow}
             {sessions}
+            {globalWins}
+            {onToggleGlobalMinimize}
             {wins}
             {focused}
             {isDocked}

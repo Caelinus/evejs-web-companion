@@ -3580,13 +3580,13 @@
   .global-layer > * {
     pointer-events: auto;
   }
-  /* The put-away chip sits bottom-RIGHT, where a desktop's own strip is bottom-
-   * left: they are two different strips on two different layers, and stacking
-   * them in one corner would read as one strip whose chips behave differently. */
-  .global-strip {
-    left: auto;
-    right: 0.6rem;
-  }
+  /* ⚠ THERE IS NO SECOND STRIP ANY MORE, and its absence is the fix. This layer
+   * used to put its own chips bottom-RIGHT, opposite the desktop's own strip, on
+   * the reasoning that two layers deserved two strips. What a player sees is one
+   * gesture — put a window away — landing its handle in one of two corners
+   * depending on which window it was. The global windows' chips are rendered in
+   * the desktop's strip now (Desktop.svelte), so where a chip lands never
+   * depends on which layer happens to own the window. */
 
   /* Drag-to-resize the dock panel from its left edge (the "expandable" panel). */
   .dock-resize {

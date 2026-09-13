@@ -132,12 +132,47 @@ test("the layer draws every global window, not just the front one", () => {
   assert.match(layer, /<DesktopWindow/);
 });
 
-test("every put-away global window keeps a chip, not just the last one", () => {
-  // A hide with no visible handle is a window the player has lost, and the door
-  // that opened it still lights up "open" — so one chip for a layer of two
-  // would strand whichever window was not the one the strip happened to name.
+test("⚠ a put-away global window keeps a chip, in the ONE strip a player already reads", () => {
+  // ⚠ THE BUG THIS REPLACES A TEST FOR. This layer used to render a strip of
+  // its own, bottom-right, opposite the desktop's own strip — so putting a
+  // window away sent its handle to one of two corners depending on which window
+  // it was, with nothing on screen explaining the difference. One gesture must
+  // not have two answers, so the chips go down to the desktop's strip and this
+  // layer has no strip at all.
+  //
+  // A hide with no visible handle is still a window the player has lost, so
+  // what must hold is not "no strip here" but "listed SOMEWHERE": App hands the
+  // whole list down, Workspace forwards it, and Desktop renders it.
   const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
-  assert.match(layer, /\{#each awayGlobalWins as win \(win\.id\)\}/);
+  assert.doesNotMatch(layer, /win-strip/, "the second strip is back");
+  assert.match(MARKUP, /<Workspace[\s\S]*?\{globalWins\}/);
+  assert.match(MARKUP, /onToggleGlobalMinimize=\{\(id\) =>/);
+
+  const workspace = withoutComments(WORKSPACE);
+  assert.match(workspace, /globalWins,/, "Workspace must take the list");
+  assert.match(workspace, /<Desktop[\s\S]*?\{globalWins\}/, "and hand it to the desktop");
+
+  const desktop = withoutComments(
+    readFileSync(fileURLToPath(new URL("./Desktop.svelte", import.meta.url)), "utf8"),
+  );
+  const strip = desktop.slice(desktop.indexOf('class="win-strip"'));
+  assert.match(strip, /\{#each globalChips as win \(win\.id\)\}/, "the chips must be drawn");
+  assert.match(strip, /onToggleGlobalMinimize\?\.\(win\.id\)/, "and act on the layer that owns them");
+});
+
+test("the desktop draws the global windows' CHIPS and never the windows", () => {
+  // They belong to App's layer, above the pilot-switch remount. A desktop that
+  // drew one would put a character-scoped second copy on screen and tear it
+  // down on every switch — the whole thing the hoist removed.
+  const desktop = withoutComments(
+    readFileSync(fileURLToPath(new URL("./Desktop.svelte", import.meta.url)), "utf8"),
+  );
+  // The SURFACE is the markup above the strip's own `{#if}` — the script block
+  // names the props and the guard counts the chips, and neither is drawing a
+  // window. What must be clean is the part that mounts `<DesktopWindow>`.
+  const body = desktop.slice(desktop.indexOf("</script>"));
+  const surface = body.slice(0, body.indexOf("{#if openHere"));
+  assert.doesNotMatch(surface, /globalChips|globalWins/, "a global window drawn on a pilot's desktop");
 });
 
 test("focus is a real question now that two windows can overlap", () => {

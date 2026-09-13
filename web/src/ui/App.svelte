@@ -462,10 +462,17 @@
 
   const globalOpenIds = $derived(new Set<TabID>(globalWins.map((win) => win.id)));
   const globalFocusedId = $derived(focusedWindowId(globalWins));
-  // Drawn vs put away. Split here rather than with an `{#if}` inside the
-  // `{#each}`, so the strip can say whether it has anything to list at all.
+  /**
+   * The global windows that are actually drawn.
+   *
+   * ⚠ THE PUT-AWAY ONES ARE NOT LISTED HERE ANY MORE. This layer used to carry
+   * a strip of its own, in the opposite corner from the desktop's — so putting
+   * a window away sent its handle to one of two places depending on which
+   * window it was, with nothing on screen explaining why. The chips go down to
+   * the desktop's one strip now (Desktop.svelte); every window is still listed
+   * somewhere, which is the rule that matters.
+   */
   const shownGlobalWins = $derived(globalWins.filter((win) => !win.minimized));
-  const awayGlobalWins = $derived(globalWins.filter((win) => win.minimized));
   const openGlobalTab = (id: TabID): void => {
     if (!isGlobalTab(id)) return;
     // ⚠ ON A PHONE THERE IS NOWHERE TO FLOAT. The layer is not mounted there at
@@ -574,6 +581,8 @@
         flow={active.flow}
         {sessions}
         {globalOpenIds}
+        {globalWins}
+        onToggleGlobalMinimize={(id) => (globalWins = toggleMinimize(globalWins, id))}
         {openRequest}
         sessionID={active.id}
         onOpenRequestServed={() => (openRequest = null)}
@@ -592,26 +601,6 @@
          workspace window, and why these panels keep their roster, their search
          box and their polls across a switch. -->
     <div class="global-layer" bind:this={globalLayerEl}>
-      {#if awayGlobalWins.length > 0}
-        <!-- ⚠ A PUT-AWAY WINDOW MUST ALWAYS HAVE A WAY BACK (desktop.ts states
-             the rule; Desktop.svelte's strip is its other implementation). The
-             rail entry and the character bar's button both light up "open" for
-             a window that is only put away, so there has to be something on
-             screen that matches. -->
-        <div class="win-strip global-strip" role="group" aria-label="Put-away windows">
-          {#each awayGlobalWins as win (win.id)}
-            <button
-              type="button"
-              class="win-chip away"
-              aria-pressed="false"
-              title={`Bring back ${tabLabel(win.id)}`}
-              onclick={() => (globalWins = toggleMinimize(globalWins, win.id))}
-            >
-              <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(win.id)}
-            </button>
-          {/each}
-        </div>
-      {/if}
       {#each shownGlobalWins as win (win.id)}
         <ErrorBoundary name={tabLabel(win.id)}>
           <DesktopWindow
