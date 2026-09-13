@@ -243,7 +243,9 @@ import {
 } from "../bridge/fleetCenter.ts";
 import { canTagInFleet } from "../bridge/fleetCommand.ts";
 import type { FleetCenterSnapshot } from "../bridge/fleetCenter.ts";
-import { decodeAvailableFleetAds } from "../bridge/fleetAds.ts";
+import { decodeAvailableFleetAds, decodeMyFleetFinderAdvert } from "../bridge/fleetAds.ts";
+import type { FleetFinderRead } from "../nav/fleetJoinWatch.ts";
+import type { FleetApplyOutcome } from "../bridge/fleetWrites.ts";
 import {
   FLEET_BROADCAST_TTL_MS,
   decodeFleetBroadcastNotification,
@@ -610,10 +612,47 @@ export interface AppFlow {
   formFleet(): Promise<void>;
   /** Invite one character by ID, then re-read the authoritative fleet. */
   inviteFleetMember(characterID: number): Promise<void>;
-  /** Accept the pending OnFleetInvite observed for this live session. */
-  acceptFleetInvite(): Promise<void>;
+  /**
+   * Accept a fleet invitation, then re-read membership before settling.
+   *
+   * With no argument this accepts the pending OnFleetInvite observed for this
+   * live session — the Fleet Center's own button.
+   *
+   * ⚠ PASS THE `fleetID` WHEN YOU ALREADY KNOW IT, which is what an apply's
+   * caller does. Reading it off `pendingInvite` couples the accept to a
+   * notification having arrived AND been decoded into the slice, which is a
+   * race on the tick right after an apply; the server only checks that the
+   * caller has an invite whose fleetID matches, so passing the id straight
+   * through is both sufficient and more robust.
+   * See docs/join-advertised-fleet-handoff.md.
+   */
+  acceptFleetInvite(fleetID?: number): Promise<void>;
   /** Leave the current fleet, then re-read membership before settling. */
   leaveFleet(): Promise<void>;
+  /**
+   * The fleet finder, for a pilot that has been told which fleet to join: the
+   * adverts open to this session, and the name of the fleet it is already in.
+   *
+   * ⚠ NEITHER ARM IS FATAL AND NEITHER IS FAKED. A listing that could not be
+   * read comes back `null`, which is not the same as an EMPTY listing ("nobody
+   * is advertising") — a watcher must wait on the first and may act on the
+   * second. `ownFleetName` is null both when this pilot is in no fleet and when
+   * the fleet it is in is not advertised; the caller already knows which of
+   * those it is from its own membership read.
+   */
+  readFleetFinder(): Promise<FleetFinderRead>;
+  /**
+   * APPLY to an advertised fleet, and return WHICH HALF of the round trip the
+   * server took.
+   *
+   * ⚠ AN APPLY DOES NOT JOIN YOU, and this deliberately does not pretend
+   * otherwise by running the membership re-read every other fleet write does.
+   * On an open advert the server mints an INVITE and notifies this session;
+   * membership happens only when the client accepts it. The returned outcome is
+   * the server's own answer about which happened and the caller MUST act on it.
+   * Throws what the call threw: the caller is a watcher that retries.
+   */
+  applyToJoinFleet(fleetID: number): Promise<FleetApplyOutcome>;
   /**
    * Load the Mail panel: the whole inbox, plus the NAME of everyone who sent or
    * received a message. ⚠ The inbox is a DELTA SYNC the BFF cold-starts, so
@@ -2968,9 +3007,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
-  async function acceptFleetInvite(): Promise<void> {
-    const invite = store.fleet.get().pendingInvite;
-    if (invite === null) {
+  async function acceptFleetInvite(fleetID?: number): Promise<void> {
+    // ⚠ AN EXPLICIT ID BEATS THE SLICE, and the caller that has one is the one
+    // that just applied. See the declaration for the race this avoids.
+    const wanted = fleetID ?? store.fleet.get().pendingInvite?.fleetID ?? null;
+    if (wanted === null) {
       store.apply({ type: "fleet/action-started", action: "accept" });
       store.apply({
         type: "fleet/action-finished",
@@ -2978,15 +3019,47 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       });
       return;
     }
-    await runFleetAction(
-      "accept",
-      () => api.acceptFleetInvite(invite.fleetID, callOptions),
-      "ready",
-    );
+    await runFleetAction("accept", () => api.acceptFleetInvite(wanted, callOptions), "ready");
   }
 
   async function leaveFleet(): Promise<void> {
     await runFleetAction("leave", () => api.leaveFleet(callOptions), "not-in-fleet");
+  }
+
+  async function readFleetFinder(): Promise<FleetFinderRead> {
+    let raw: Awaited<ReturnType<typeof api.loadFleetAds>>;
+    try {
+      raw = await api.loadFleetAds(callOptions);
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+      }
+      // Not fatal and not faked: a watcher waits for a clean read.
+      return { ads: null, ownFleetName: null };
+    }
+    // ⚠ THE TWO ARMS ARE SETTLED SEPARATELY ON THE BFF (Promise.allSettled), so
+    // one of them failing must not throw the other away. A missing arm decodes
+    // to its own null / empty, which is what each of those already means here.
+    const ads = decodeAvailableFleetAds(raw.availableFleetAds ?? null)
+      .filter((ad) => ad.fleetID !== null && ad.fleetID > 0)
+      .map((ad) => ({
+        fleetID: ad.fleetID as number,
+        fleetName: ad.fleetName,
+        numMembers: ad.numMembers,
+      }));
+    const own = decodeMyFleetFinderAdvert(raw.myFleetFinderAdvert ?? null);
+    const ownFleetName = own !== null && own.fleetName.trim().length > 0 ? own.fleetName : null;
+    return { ads, ownFleetName };
+  }
+
+  async function applyToJoinFleet(fleetID: number): Promise<FleetApplyOutcome> {
+    // ⚠ NO `runFleetAction`, DELIBERATELY. That helper re-reads membership and
+    // calls the write a failure when the expected availability did not arrive —
+    // and an apply's SUCCESS leaves this pilot out of the fleet, holding an
+    // invite. Reporting that as a refused action is how the first version of
+    // this round trip lied about itself.
+    return api.applyToJoinFleet(fleetID, callOptions);
   }
 
   // --- R17 Mail -------------------------------------------------------------
@@ -9717,6 +9790,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     inviteFleetMember,
     acceptFleetInvite,
     leaveFleet,
+    readFleetFinder,
+    applyToJoinFleet,
     loadMail,
     openMail,
     closeMail,

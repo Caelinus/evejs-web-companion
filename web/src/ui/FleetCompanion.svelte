@@ -11,8 +11,13 @@
   // This panel no longer picks a role, a module, or an order channel: a
   // companion now reads its own fit at start and obeys every order channel
   // there is, so there was never anything for a player to disambiguate.
-  // `CompanionSetup` (nav/fleetCompanionLoop.ts) is exactly what this panel
-  // builds, and its six fields are exactly the controls below.
+  //
+  // ⚠ AND IT NO LONGER BUILDS A `CompanionSetup` EITHER. The six limits are one
+  // op-wide answer now, set in FleetCompanions.svelte and handed down as the
+  // `setup` prop, because adding a pilot to the roster is what starts it —
+  // there is no longer a moment at which a per-pilot form would be filled in.
+  // What this panel owns is what is true of THIS pilot: the checklist, the
+  // controls, and the readout.
   import { onMount } from "svelte";
   import { isSessionLost } from "../app/flow.ts";
   import { resolvedName, type NameRef } from "../store/names.ts";
@@ -22,18 +27,7 @@
     type FleetCompanionReads,
   } from "../nav/fleetCompanionRequirements.ts";
   import {
-    DEFAULT_COMPANION_SETUP,
     FLEET_COMPANION_ABANDONMENT_WAIT_MS,
-    MAX_CAPACITOR_FLOOR,
-    MAX_DRONE_HOLD_OFF_SECONDS,
-    MAX_FLEE_ATTEMPTS,
-    MAX_FLEE_HEALTH_FLOOR,
-    MIN_CAPACITOR_FLOOR,
-    MIN_DRONE_HOLD_OFF_SECONDS,
-    MIN_FLEE_ATTEMPTS,
-    MAX_DRONE_HEALTH_FLOOR,
-    MIN_DRONE_HEALTH_FLOOR,
-    MIN_FLEE_HEALTH_FLOOR,
     type CompanionSetup,
   } from "../nav/fleetCompanionLoop.ts";
   // The words this readout uses live in the shared layer, because the Bot
@@ -49,7 +43,26 @@
   import type { AppFlow } from "../app/flow.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
 
-  let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
+  let {
+    store,
+    flow,
+    setup,
+  }: {
+    store: ClientStore;
+    flow: AppFlow;
+    /**
+     * The limits this pilot starts under, set once for the whole op in
+     * FleetCompanions.svelte.
+     *
+     * ⚠ THE FORM THAT USED TO BE HERE IS GONE, AND ITS ABSENCE IS THE POINT.
+     * Adding a pilot to the op now starts it, so a per-pilot form would be a
+     * form nobody gets to fill in before the start it gates — and two forms for
+     * one run is two answers to the same question, of which only one would ever
+     * reach the loop. What this panel still owns is everything that is about
+     * THIS pilot: the checklist, the controls, and the readout.
+     */
+    setup: CompanionSetup;
+  } = $props();
 
   // svelte-ignore state_referenced_locally
   const companion = store.companion;
@@ -62,19 +75,6 @@
 
   let busy = $state(false);
   let error = $state("");
-
-  let fleeHealthFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.fleeHealthFloor * 100));
-  let droneHealthFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.droneHealthFloor * 100));
-  let capacitorFloorPercent = $state(Math.round(DEFAULT_COMPANION_SETUP.capacitorFloor * 100));
-  let maxFleeAttempts = $state(DEFAULT_COMPANION_SETUP.maxFleeAttempts);
-  /**
-   * Docking gives the shield and the capacitor back but NOT the armour, so a
-   * pilot that fled on armour damage cannot get back above its floor by
-   * arriving. Ticking this lets it pay the station to fix the difference;
-   * leaving it off means such a pilot stays docked and says so.
-   */
-  let repairsAtStation = $state(DEFAULT_COMPANION_SETUP.repairsAtStation);
-  let droneHoldOffSeconds = $state(DEFAULT_COMPANION_SETUP.droneRedeployHoldOffSeconds);
 
   const running = $derived($companion.status === "running");
   const paused = $derived($companion.status === "paused");
@@ -161,10 +161,6 @@
     Location: "reporting position",
   };
 
-  function clamp(value: number, min: number, max: number): number {
-    return Math.min(max, Math.max(min, value));
-  }
-
   /**
    * The checklist's live reads need the fleet and the flight status.
    * Best-effort, same as `Bots.svelte`: a failed read leaves the requirement at
@@ -193,22 +189,17 @@
     }
   }
 
+  /**
+   * Start this pilot on the op's limits, exactly as given.
+   *
+   * ⚠ THE SETUP IS PASSED THROUGH UNTOUCHED, AND NOTHING IS INVENTED HERE. It
+   * is a `CompanionSetup` and nothing else: the eight module lists that
+   * complete a request are read off the hull this pilot is actually sitting in,
+   * by `flow.startFleetCompanion`, at the moment it starts — an itemID picked
+   * in a panel would be stale the moment somebody refits.
+   */
   async function start(): Promise<void> {
-    await run(() =>
-      flow.startFleetCompanion({
-        fleeHealthFloor: clamp(fleeHealthFloorPercent, MIN_FLEE_HEALTH_FLOOR * 100, MAX_FLEE_HEALTH_FLOOR * 100) / 100,
-        capacitorFloor: clamp(capacitorFloorPercent, MIN_CAPACITOR_FLOOR * 100, MAX_CAPACITOR_FLOOR * 100) / 100,
-        maxFleeAttempts: clamp(maxFleeAttempts, MIN_FLEE_ATTEMPTS, MAX_FLEE_ATTEMPTS),
-        repairsAtStation,
-        droneHealthFloor:
-          clamp(droneHealthFloorPercent, MIN_DRONE_HEALTH_FLOOR * 100, MAX_DRONE_HEALTH_FLOOR * 100) / 100,
-        droneRedeployHoldOffSeconds: clamp(
-          droneHoldOffSeconds,
-          MIN_DRONE_HOLD_OFF_SECONDS,
-          MAX_DRONE_HOLD_OFF_SECONDS,
-        ),
-      } satisfies CompanionSetup),
-    );
+    await run(() => flow.startFleetCompanion(setup satisfies CompanionSetup));
   }
 </script>
 
@@ -396,74 +387,14 @@
          settings. A player who wants to know what their ship will use looks at
          the fit. -->
 
-    <h3>Keeping your ship alive</h3>
-    <p class="field">
-      <label for="companion-flee-floor">Flee below</label>
-      <input
-        id="companion-flee-floor"
-        type="number"
-        min={Math.round(MIN_FLEE_HEALTH_FLOOR * 100)}
-        max={Math.round(MAX_FLEE_HEALTH_FLOOR * 100)}
-        step="5"
-        bind:value={fleeHealthFloorPercent}
-      />
-      <span class="note">% of shield, armour or hull remaining</span>
-    </p>
-    <p class="field">
-      <label for="companion-cap-floor">Do not run repairers below</label>
-      <input
-        id="companion-cap-floor"
-        type="number"
-        min={Math.round(MIN_CAPACITOR_FLOOR * 100)}
-        max={Math.round(MAX_CAPACITOR_FLOOR * 100)}
-        step="5"
-        bind:value={capacitorFloorPercent}
-      />
-      <span class="note">% capacitor</span>
-    </p>
-    <p class="field">
-      <label for="companion-flee-attempts">Stay home after</label>
-      <input
-        id="companion-flee-attempts"
-        type="number"
-        min={MIN_FLEE_ATTEMPTS}
-        max={MAX_FLEE_ATTEMPTS}
-        step="1"
-        bind:value={maxFleeAttempts}
-      />
-      <span class="note">flee round trips</span>
-    </p>
-    <!-- The label carries the whole fact now: armour is the only damage a
-         station charges for, because docking gives shield and capacitor back by
-         itself. Two sentences explaining that sat under a tick box that can say
-         it in four words. -->
-    <label class="check">
-      <input type="checkbox" bind:checked={repairsAtStation} />
-      Pay a station to repair armour
-    </label>
-    <p class="field">
-      <label for="companion-drone-floor">Bring a drone home below</label>
-      <input
-        id="companion-drone-floor"
-        type="number"
-        min={Math.round(MIN_DRONE_HEALTH_FLOOR * 100)}
-        max={Math.round(MAX_DRONE_HEALTH_FLOOR * 100)}
-        step="5"
-        bind:value={droneHealthFloorPercent}
-      />
-      <span class="note">% of its shield, armour or hull. Coming home refills its shield</span>
-    </p>
-    <p class="field">
-      <label for="companion-drone-holdoff">Hold drones in the bay for at least</label>
-      <input
-        id="companion-drone-holdoff"
-        type="number"
-        min={MIN_DRONE_HOLD_OFF_SECONDS}
-        max={MAX_DRONE_HOLD_OFF_SECONDS}
-        step="1"
-        bind:value={droneHoldOffSeconds}
-      />
-      <span class="note">seconds before relaunching them</span>
+    <!-- The limits form is NOT here any more, and must not come back. The six
+         numbers a companion flies under are set once for the whole op in
+         FleetCompanions.svelte, because adding a pilot there STARTS it: a form
+         on this panel would be a form nobody fills in before the start it
+         gates, and a second copy of one question for the two to disagree on. -->
+    <p class="note">
+      It flies on the limits set for this op, above the roster. Changing them
+      there changes what the next companion starts under.
     </p>
 
     <!-- ⚠ ONE SENTENCE, AND IT STAYS. This is the one behaviour a player would
@@ -486,23 +417,9 @@
 {/if}
 
 <style>
-  .field {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .check {
-    display: block;
-    margin: 0.25rem 0;
-  }
-  #companion-flee-floor,
-  #companion-cap-floor,
-  #companion-flee-attempts,
-  #companion-drone-floor,
-  #companion-drone-holdoff {
-    width: 5rem;
-  }
+  /* The form's own rules went with the form — Svelte prunes unused selectors
+     with a warning, and a stylesheet that still dresses controls this panel no
+     longer has is the first place a deleted section grows back from. */
   .checklist {
     list-style: none;
     margin: 0.25rem 0 0.75rem;

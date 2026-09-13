@@ -16,7 +16,8 @@ import type {
   MacroTick,
   ScriptBoard,
 } from "./scriptDecide.ts";
-import type { DryBelt, FleetAdRow, ScriptObservation } from "./scriptConditions.ts";
+import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
+import { pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
@@ -3531,23 +3532,9 @@ function typedFleetName(step: MacroStep): string {
   return arg !== undefined && arg.kind === "text" ? arg.text.trim() : "";
 }
 
-/** The advertised fleet to join, or null when nobody is advertising that name. */
-function pickAdvertisedFleet(ads: readonly FleetAdRow[], wanted: string): FleetAdRow | null {
-  let best: FleetAdRow | null = null;
-  for (const ad of ads) {
-    if (ad.fleetID <= 0 || ad.fleetName.trim().toLowerCase() !== wanted) {
-      continue;
-    }
-    if (
-      best === null ||
-      ad.numMembers > best.numMembers ||
-      (ad.numMembers === best.numMembers && ad.fleetID < best.fleetID)
-    ) {
-      best = ad;
-    }
-  }
-  return best;
-}
+// ⚠ `pickAdvertisedFleet` MOVED to ./scriptConditions.ts and is imported above.
+// The Fleet companions window joins by name too (nav/fleetJoinWatch.ts), and a
+// second copy of the tie-break is a second copy that drifts.
 
 const joinAdvertisedFleet: MacroDecider = (step, obs, mem) => {
   const typed = typedFleetName(step);

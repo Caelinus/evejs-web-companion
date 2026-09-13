@@ -37,15 +37,101 @@ and lights up while its window is open.
 
 The window is a roster of two kinds of row:
 
-- **tab runs** — a pilot signed into this browser, flown by this tab's own loop;
+- **tab runs** — a pilot you added, flown by this tab's own loop;
 - **server runs** — started from the Pilot Hangar, flown headless by the BFF,
   and still flying when every tab is shut.
 
 Selecting a row opens that pilot's real `FleetCompanion.svelte` panel, bound to
 **that session's** store and flow under a `{#key}` — the same component, the same
-Start / Pause / Stop, the same setup form. Nothing is forked. A server row gets
+Start / Pause / Stop, the same checklist. Nothing is forked. A server row gets
 its readout and a Stop, and no setup form, because its limits were taken when it
 was started and fields here would change numbers that reach nothing.
+
+## The op: a roster you build, and a fleet it joins
+
+**Added 2026-09-13.** The window used to list every pilot signed into the tab,
+automatically. That is not what an operation is: a pilot brought online to check
+a contract sat in the fleet roster beside the three you meant, and nothing on
+screen said which was which.
+
+So the window now holds three things, in `app/companionRosterPrefs.ts`
+(localStorage, `evejs-web-companion-roster:v1`):
+
+| Stored | Why it is one answer, not one per pilot |
+| --- | --- |
+| the **fleet name**, as it appears in the fleet finder | the op is one fleet; asking per pilot is asking the same question four times |
+| the **pilots**, by characterID | a session id is minted per tab and would be empty after a reload while its pilot was still flying |
+| one **`CompanionSetup`** | adding a pilot STARTS it, so there is no moment at which a per-pilot form would be filled in |
+
+⚠ **It is not a hangar squad, and the two must not be merged.** A squad
+(`app/hangarPrefs.ts`) is a durable label on pilots across accounts, used to
+bring them online and launch headless runs from the landing screen; its
+companion configs are per pilot because pilots in a squad do different jobs.
+This is one live operation in one tab, emptied when the op ends. Storing it in
+the squad map would make "who is in tonight's fleet" a permanent property of a
+pilot.
+
+**Adding a pilot** offers only pilots already signed in here — bringing one
+online needs an account password and is the Pilot Hangar's job. The add arms a
+**join watch**, and the watch is what puts the pilot in the fleet and sets it
+flying.
+
+**Removing a pilot** stops it and takes it out of the fleet: the add put it in
+somebody's fleet, and leaving it there after the row is gone leaves a ship in a
+fleet warp chain that nothing on this screen is watching. **Stop all** does
+*not* disband — a stop is how you take a ship back by hand mid-op, and pulling
+it out of the fleet as well is the one thing you would not want at that moment.
+
+## The join watch
+
+`nav/fleetJoinWatch.ts` is the decider — pure, one pilot, one tick — and the
+window is only its driver: it performs what the decider asks for, and hands back
+what the server said. Every unsettled pilot re-reads its own fleet and the fleet
+finder every 10s, through **its own flow**.
+
+The round trip is the one `docs/join-advertised-fleet-handoff.md` paid an
+afternoon to learn, and it is not re-derived here:
+
+```
+apply  ->  the server mints an INVITE and notifies the applicant
+       ->  THE CLIENT ACCEPTS IT
+       ->  only then is the pilot in the fleet
+```
+
+An apply does **not** join you. The apply's own boolean says which half you are
+in (`true` = the advert wants the boss's approval and no invite exists;
+`false` = an invite was minted), and `"unknown"` tries the accept, because a
+wasted accept costs one swallowed call where a refused one strands a pilot with
+an invite waiting.
+
+Four decisions in that module are worth keeping:
+
+1. **An advert that is not there yet is a WAIT, not an answer.** This is the one
+   place the watch differs from the `join-advertised-fleet` block, and it is why
+   the module exists: a block is one step of a script with somewhere else to be,
+   so an empty fleet finder finishes it. The window promised to wait, and the
+   wait has no bound — the player ends it by removing the pilot.
+2. **In a fleet is not in YOUR fleet.** `inFleet` is a boolean; on its own it
+   cannot tell the op's fleet from somebody else's. `GetMyFleetFinderAdvert`
+   names the fleet a pilot is in (verified in the runtime: it resolves the fleet
+   from the session character, not from being its boss, so any member reads it),
+   and a pilot in a fleet that cannot be named that way is **blocked**, not
+   assumed. The cost of guessing right is one saved click; the cost of guessing
+   wrong is an unattended ship taking orders from a fleet nobody picked.
+3. **A companion standing down is left alone.** Decision 5 of the ladder docks a
+   pilot nobody is supervising and *leaves the fleet*. The watch latches that
+   (`stoodDown`) and holds — including after the abandonment ends by releasing
+   the ship — because a watch that rejoined would loop join → abandon → join for
+   as long as the advert stood. A human puts it back.
+4. **A start the player stopped is not started again.** Adding a pilot starts
+   it, so the driver latches `started` and clears that latch only when the pilot
+   is out of the fleet and looking for it again. Without it, Stop (and Stop all)
+   would undo themselves on the next beat.
+
+⚠ **A refused apply is reported.** The refusal ledger's lesson: a watch that
+retries quietly shows the same patient sentence whether the fleet is merely not
+advertised yet or every call is being refused outright. The row carries the
+refusal beside its own words.
 
 ## What left the Bot Manager
 
@@ -86,11 +172,19 @@ it is managed, and offers no controls for it.
 
 ## Where the tests live
 
+- `nav/fleetJoinWatch.test.ts` — the whole round trip, the waiting, and the
+  states only a player can clear. ⚠ It drives apply → answer → accept → in,
+  because the block's original 29 tests all stopped at "emits an apply" and
+  passed while it hung on a healthy fleet.
+- `app/companionRosterPrefs.test.ts` — what survives a reload, and what stored
+  bytes are allowed to do (nothing).
 - `nav/companionRoster.test.ts` — the window's words and sums (a finished server
   run is not a flying one; a roster with nobody flying never says "0 running").
 - `ui/fleetCompanionsPanel.test.ts` — it embeds the real panel, keys it per
-  pilot, reads each session's own store, polls the headless half, and can still
-  stop one.
+  pilot, reads each session's own store, polls the headless half, can still stop
+  one, and the roster/join rules above are pinned off the source.
+- `ui/fleetCompanionPanel.test.ts` — the per-pilot panel, including the
+  regression guard that the limits form does not grow back on it.
 - `ui/globalWindow.test.ts` — two global windows coexist; the v1 migration.
 - `ui/globalWindowMount.test.ts` — the layer draws every window, the door is in
   the character bar above the pilot-switch key, and a phone opens a global tab
@@ -98,3 +192,8 @@ it is managed, and offers no controls for it.
 - `ui/botsPanel.test.ts`, `ui/botManagerPilotRow.test.ts`, `bots/pilotRoster.test.ts`
   — the companion is gone from both bot surfaces, and a hull it holds is still
   named on both.
+
+## Still owed
+
+**A live run of the join.** Tests did not catch the apply/accept defect the
+first time and cannot prove this one: only a real advertised fleet can.

@@ -32,6 +32,7 @@ const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const { decodeFleetCenter } = await import("../bridge/fleetCenter.ts");
 const FleetCompanion = (await import("./FleetCompanion.svelte")).default;
+const { DEFAULT_COMPANION_SETUP } = await import("../nav/fleetCompanionLoop.ts");
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "FleetCompanion.svelte"), "utf8");
@@ -56,7 +57,13 @@ function visibleText(body: string): string {
 }
 
 function renderPanel(store: ReturnType<typeof createClientStore>): string {
-  return render(FleetCompanion as never, { props: { store, flow: fakeFlow() } } as never).body;
+  // ⚠ THE SETUP COMES FROM ABOVE NOW. The six limits are one answer for the
+  // whole op, set in FleetCompanions.svelte, because adding a pilot there is
+  // what starts it — this panel has no form of its own any more and must not
+  // grow one back. The form's own tests moved to fleetCompanionsPanel.test.ts.
+  return render(FleetCompanion as never, {
+    props: { store, flow: fakeFlow(), setup: DEFAULT_COMPANION_SETUP },
+  } as never).body;
 }
 
 function keyVal(entries: readonly (readonly [string, unknown])[]) {
@@ -220,24 +227,28 @@ test("the setup form offers no control for anything the pilot derives itself", (
   }
 });
 
-test("the source builds Start's request as exactly a CompanionSetup, nothing invented", () => {
-  assert.match(SOURCE, /satisfies CompanionSetup/);
-  assert.match(SOURCE, /fleeHealthFloor:/);
-  assert.match(SOURCE, /capacitorFloor:/);
-  assert.match(SOURCE, /maxFleeAttempts:/);
-  assert.match(SOURCE, /repairsAtStation/);
-  assert.match(SOURCE, /droneHealthFloor:/);
-  assert.match(SOURCE, /droneRedeployHoldOffSeconds:/);
+test("Start flies the op's setup, exactly as handed down — nothing invented here", () => {
+  // ⚠ THE PANEL NO LONGER BUILDS THE REQUEST, and that is the change. It passes
+  // the op's `CompanionSetup` through untouched; the module lists that complete
+  // a request are read off the hull by `flow.startFleetCompanion` at the moment
+  // of the start, because an itemID picked in a panel is stale the moment
+  // somebody refits.
+  assert.match(SOURCE, /flow\.startFleetCompanion\(setup satisfies CompanionSetup\)/);
 });
 
-test("the drone number inputs are never disabled — there is no useDrones flag to gate them", () => {
+test("REGRESSION — the limits form does not grow back on the per-pilot panel", () => {
+  // Two forms for one run is two answers to one question, of which only one
+  // would ever reach the loop. The op's form lives in FleetCompanions.svelte.
   const body = renderPanel(readyStore());
-  const droneFloorInput = body.match(/<input[^>]*id="companion-drone-floor"[^>]*>/)?.[0] ?? "";
-  const droneHoldoffInput = body.match(/<input[^>]*id="companion-drone-holdoff"[^>]*>/)?.[0] ?? "";
-  assert.notEqual(droneFloorInput, "", "the drone floor input must render");
-  assert.notEqual(droneHoldoffInput, "", "the drone hold-off input must render");
-  assert.doesNotMatch(droneFloorInput, /disabled/);
-  assert.doesNotMatch(droneHoldoffInput, /disabled/);
+  for (const control of [
+    "companion-flee-floor",
+    "companion-cap-floor",
+    "companion-flee-attempts",
+    "companion-drone-floor",
+    "companion-drone-holdoff",
+  ]) {
+    assert.doesNotMatch(body, new RegExp(control), `${control} belongs to the op, not the pilot`);
+  }
 });
 
 // --- 3. the readout, once running -------------------------------------------

@@ -64,8 +64,11 @@ test("a paused companion is counted apart from an idle one", () => {
   assert.deepEqual(tally, { running: 1, paused: 1, idle: 3 });
 });
 
-test("an empty browser says so, rather than counting nothing", () => {
-  assert.equal(companionSummaryWords(tallyCompanions([])), "No pilots are signed in here.");
+test("an empty op says so, rather than counting nothing", () => {
+  // ⚠ ABOUT THE OP, NOT THE BROWSER. The roster is a list the player builds
+  // now, so "nobody is signed in" would be a flat lie to somebody with four
+  // pilots online and none of them added yet.
+  assert.equal(companionSummaryWords(tallyCompanions([])), "No pilots in this op yet.");
 });
 
 test("a roster with nobody flying never says '0 running'", () => {
