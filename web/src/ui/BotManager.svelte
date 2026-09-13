@@ -354,7 +354,12 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Bot manager</h2>
+    <!-- ⚠ NOT "BOT MANAGER" — that is the WINDOW's name, and this is the third
+         block inside it, beside Pilots and Recent runs. A section headed with
+         the window's own title reads as the start of the panel rather than as
+         one part of it, and leaves the part it actually labels unnamed. What
+         this block is, is the library of saved bots. -->
+    <h2>Saved bots</h2>
   </header>
 
   <div class="controls">

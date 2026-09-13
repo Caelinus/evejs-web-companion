@@ -984,12 +984,15 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>
-      Fitting
-      <small class="note">
-        {activeShipName}{activeShipClass ? ` · ${activeShipClass}` : ""}
-      </small>
-    </h2>
+    <h2 class="panel-title">Fitting</h2>
+    <!-- ⚠ THE SHIP LEAVES THE TITLE RATHER THAN GOING WITH IT. It used to be a
+         `<small>` inside the heading, and a host that already says FITTING
+         clips the heading — which would have taken the name of the hull you are
+         actually looking at with it. Which ship this is, is the one thing on
+         this strip worth reading. -->
+    <p class="stat-line">
+      {activeShipName}{activeShipClass ? ` · ${activeShipClass}` : ""}
+    </p>
     <p class="controls">
       <span class="fit-views">
         <button

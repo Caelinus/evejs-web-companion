@@ -118,7 +118,7 @@
 </script>
 
 <section class="settings-panel">
-  <div class="panel-head"><h2>Settings</h2></div>
+  <div class="panel-head"><h2 class="panel-title">Settings</h2></div>
 
   <section class="settings-group">
     <h3>Item icons</h3>

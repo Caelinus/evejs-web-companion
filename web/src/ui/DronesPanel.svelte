@@ -274,7 +274,7 @@
 
 <section class="panel drones-panel">
   <div class="panel-head">
-    <h2>Drones</h2>
+    <h2 class="panel-title">Drones</h2>
     <!-- The one fact a put-away window may never hide: how many are out. -->
     <span class="drone-summary">{droneSummary}</span>
   </div>

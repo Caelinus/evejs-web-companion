@@ -302,18 +302,22 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Fleet companions</h2>
+    <h2 class="panel-title">Fleet companions</h2>
+    <!-- ⚠ NO DESCRIPTION OF WHAT A COMPANION IS. The title says it, the table
+         shows it, and a paragraph restating it is a paragraph the player reads
+         once and then has to look past every time afterwards. What stays is the
+         one line that CHANGES: how many are flying.
+         And it sits IN the strip, beside Stop all, rather than on its own line
+         under it — the count and the button that acts on the count are one
+         thought, and splitting them across the divider made the strip look like
+         a toolbar with a caption. -->
+    <p class="stat-line">{summary}</p>
     <span class="controls">
       <button type="button" class="danger" disabled={busy || !anyFlying} onclick={stopAll}>
         Stop all
       </button>
     </span>
   </header>
-  <!-- ⚠ NO DESCRIPTION OF WHAT A COMPANION IS. The title says it, the table
-       shows it, and a paragraph restating it is a paragraph the player reads
-       once and then has to look past every time afterwards. What stays on this
-       panel is the one line that CHANGES: how many are flying. -->
-  <p class="stat-line">{summary}</p>
   {#if error}
     <p class="error">{error}</p>
   {/if}
@@ -323,7 +327,11 @@
 </section>
 
 <section>
-  <h2>Pilots</h2>
+  <!-- ⚠ NO "PILOTS" HEADING OVER THE ONLY TABLE HERE. A section heading earns
+       its place by telling one block apart from its siblings; this block has
+       none, and the table names its own first column "Pilot". A heading over a
+       panel's single table is the panel's title said a third time. -->
+
   {#if tabRows.length === 0 && serverRows.length === 0}
     <p class="note">
       No pilot is signed in here. Bring one online from the Pilot hangar, then a

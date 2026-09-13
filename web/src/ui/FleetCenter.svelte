@@ -188,7 +188,7 @@
 <section class="panel" aria-busy={$fleet.loading || busy}>
   <header class="panel-head">
     <div>
-      <h2>Fleet Center</h2>
+      <h2 class="panel-title">Fleet Center</h2>
       <p class="subtitle">Your live fleet roster, command structure, and invitations.</p>
     </div>
     <button type="button" class="primary" disabled={$fleet.loading || busy} onclick={() => void refresh()}>

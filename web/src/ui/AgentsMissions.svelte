@@ -173,17 +173,13 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Agents &amp; Missions</h2>
+    <h2 class="panel-title">Agents &amp; Missions</h2>
     <p class="controls">
       <button type="button" class="primary" disabled={busy} onclick={() => run(async () => { await flow.loadAgents(); await flow.loadJournal(); })}>
         Refresh
       </button>
     </p>
   </header>
-  <p class="note">
-    Talk to an agent, accept a courier, deliver the package, then complete the
-    mission to collect the reward.
-  </p>
   {#if $agents.actionError}
     <p class="error">Last agent action failed: {$agents.actionError}</p>
   {/if}

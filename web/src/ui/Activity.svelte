@@ -90,7 +90,7 @@
 <section class="panel" aria-busy={$activity.loading}>
   <header class="panel-head">
     <div>
-      <h2>Activity Center</h2>
+      <h2 class="panel-title">Activity Center</h2>
       <p class="subtitle">A read-only overview of what needs your attention.</p>
     </div>
     <p class="controls">

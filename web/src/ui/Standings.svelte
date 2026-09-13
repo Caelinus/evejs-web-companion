@@ -186,9 +186,24 @@
   }
 </script>
 
-<section>
-  <h2>Standings</h2>
-  <p class="note">Who you and your corporation stand with, on the −10 to +10 scale.</p>
+<section class="panel">
+  <!-- ⚠ REFRESH LIVES IN THE STRIP, NOT AT THE BOTTOM OF THE PAGE. It used
+       to be a bare <p><button> after the last section, so this window put its
+       one action somewhere no other window puts one — below content of
+       unpredictable length, which on a full read meant scrolling past
+       everything to reach it. Nothing was added or taken away; the control
+       moved to the band every other window keeps its controls in. -->
+  <header class="panel-head">
+    <h2 class="panel-title">Standings</h2>
+    <span class="controls">
+      <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
+    </span>
+  </header>
+  <!-- ⚠ WHAT SURVIVED IS THE LEGEND, NOT THE DESCRIPTION. "Who you and your
+       corporation stand with" is the window's name again; the scale is the key
+       to every number in the tables below, and without it a "−4.1" means
+       nothing in particular. -->
+  <p class="note">Standings run from −10 to +10.</p>
 
   {#if error}
     <p class="error">Could not read your standings: {error}</p>
@@ -294,9 +309,6 @@
   <h3>Your corporation's standings</h3>
   {@render standingList($standings.corp, $standings.corpError, "corp", "Your corporation has no standings with anyone yet.")}
 
-  <p>
-    <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
-  </p>
 </section>
 
 <style>

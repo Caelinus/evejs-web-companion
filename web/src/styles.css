@@ -367,12 +367,73 @@
   .panel-head > h2,
   .panel-head > h3 { margin: 0; }
   .panel-head > .controls { margin: 0; }
+  /* ⚠ THE ACTIONS HUG THE RIGHT EDGE EVEN WHEN THE TITLE IS GONE.
+   *
+   * `justify-content: space-between` only pushes them there while something
+   * else is in the row — and inside a window the title is clipped out of flow
+   * (see `.panel-title`), which left every window's Refresh sitting at the far
+   * LEFT of its strip, under the title bar's own text. The strip then read as a
+   * second toolbar rather than as this panel's one row of actions. */
+  .panel-head > .controls { margin-left: auto; }
+  /* The one line that CHANGES, in the strip beside the actions: how many are
+   * flying, what the balance is, how many are unread. A panel has at most one,
+   * and it belongs here rather than below the divider — the strip is the band a
+   * player's eye already goes to, and a fact on its own line below it is a fact
+   * that has to be hunted for. */
+  .panel-head > .stat-line {
+    margin: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted);
+  }
+  .panel-head > .stat-line strong { color: var(--color-text-bright); }
   /* The panel title. `h1` is the app title in App.svelte, so a panel titles
    * itself with an `h2` — sized up here so it still reads as the page heading,
    * distinct from the smaller in-panel section headers below it. */
   .panel-head > h2 {
     font-size: 0.95rem;
     color: var(--color-accent-bright);
+  }
+
+  /* ⚠ A STRIP IS ONE LINE HIGH, because the frame around it is 30px and a
+   * 60px band under a 30px title bar reads as the heavier of the two.
+   *
+   * Measured before this rule: every window with a head spent 60px on it — a
+   * 40px button (R8's touch minimum) inside 0.6rem of padding — to carry, in
+   * most cases, the single word "Refresh". Six windows spent none at all,
+   * because they have no head; so the same app drew the same zone three
+   * different heights, and the one thing it was never proportional to was how
+   * much it had to say.
+   *
+   * ⚠ THE 40px MINIMUM IS KEPT FOR FINGERS AND RELAXED FOR MICE, which is the
+   * `.hud-stop` trade and scoped the same way: on `pointer: coarse` the button
+   * goes back to full size and the strip grows with it. A pointer query, not a
+   * width — a desktop-width tablet is still a finger. */
+  @media (pointer: fine) {
+    .panel-head { padding-block: 0.15rem; }
+    /* ⚠ ANY CONTROL IN THE STRIP, not just a button inside `.controls`. The
+     * first cut of this rule read `.panel-head > .controls > button` and missed
+     * three of the busiest windows: Fleet puts its button straight in the head,
+     * Fitting nests its view switch one span deeper, and Market's strip is a
+     * search FIELD. Each of those stayed 40px and left its window's strip
+     * standing 10px taller than the rest — the exact raggedness the floor
+     * below exists to remove. */
+    .panel-head :is(button, input, select) { min-height: 1.9rem; }
+    .panel-head :is(button, select) { padding-block: 0.25rem; }
+    /* ⚠ ONE BAND, NOT A BAND PER PANEL. Measured across the thirty windows:
+     * a head holding a button came out 36px, one holding only a count 26px, one
+     * with two rows of controls 46px. Nothing was wrong with any of them on its
+     * own — but the strip is the same zone in the same frame on every window,
+     * and a zone that changes height with its contents stops reading as part of
+     * the frame. A floor, not a fixed height: Scanner genuinely has two rows of
+     * controls and is allowed to be taller.
+     *
+     * A head with nothing visible in it still collapses to nothing — that rule
+     * lives with the title-clipping it belongs to, and comes later in the file
+     * so it wins over this floor. */
+    .panel-head { min-height: 2.2rem; }
   }
 
   /* A section header inside a panel body gets a small accent tick, so the eye
@@ -3938,8 +3999,17 @@
    * controls live (Mining's Refresh, the station panel's collapse) and where its
    * counts live. And the title is CLIPPED rather than removed: panels are
    * `aria-labelledby` their heading, so taking it out of the tree takes the
-   * section's accessible name with it. */
-  .win-body > .panel > .panel-head > h2 {
+   * section's accessible name with it.
+   *
+   * ⚠ THE MARKER IS A CLASS, NOT A POSITION. This rule used to select
+   * `.win-body > .panel > .panel-head > h2` — the title only where it sat
+   * exactly three levels down in exactly that furniture. Eight windows wrapped
+   * theirs one level deeper or used no head at all, and every one of them went
+   * on printing its own name under the title bar: BOT BUILDER over BOT BUILDER,
+   * WALLET over WALLET, SETTINGS over SETTINGS. A path cannot express "this
+   * heading names the whole panel"; `.panel-title` can, and it says so at the
+   * one place that knows — the panel. */
+  .win-body .panel-title {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -3950,8 +4020,17 @@
     white-space: nowrap;
   }
   /* With nothing visible left in it, the head collapses rather than leaving the
-   * band it was drawn for. A head that still has controls keeps its box. */
-  .win-body > .panel > .panel-head:not(:has(> *:not(h2))) {
+   * band it was drawn for. A head that still has controls or a count keeps its
+   * box.
+   *
+   * ⚠ MARKER-SCOPED AND PANEL-AGNOSTIC, for the two reasons the title rule
+   * above is. It used to read `.win-body > .panel > .panel-head:not(:has(>
+   * *:not(h2)))`: Settings' root is `.settings-panel`, not `.panel`, so it
+   * never matched and Settings drew a 6px band with a border and nothing in it
+   * — the ghost of a head whose only child had just been clipped away. And
+   * `h2` was the wrong test even where it matched: a head holding a section's
+   * own subheading is not an empty head. */
+  .win-body .panel-head:not(:has(> *:not(.panel-title))) {
     margin-bottom: 0;
     padding-block: 0;
     border-bottom: 0;
@@ -4595,10 +4674,28 @@
    * The rest of that row STAYS, and that is the load-bearing half: it is where
    * the counts live ("84 things in range", "2 out"), and those are exactly what
    * a card must not hide. Hiding the whole head would have been one selector
-   * shorter and would have taken the numbers with it. */
-  .mob-card-body > .spc-panel > .spc-head > .spc-head-title,
-  .mob-card-body > .panel > .panel-head > h2 {
+   * shorter and would have taken the numbers with it.
+   *
+   * ⚠ SAME MARKER AS THE WINDOW USES, and for the same reason a path could not
+   * do the job — see `.panel-title` above. A card and a window are two hosts
+   * that already name what is inside them; the panel marks its own title once
+   * and both hosts honour it. */
+  .mob-card-body > .spc-panel > .spc-head > .spc-head-title {
     display: none;
+  }
+  /* ⚠ CLIPPED, NOT `display: none` like the space panel above. A panel is
+   * `aria-labelledby` its heading, and `display: none` takes that heading out
+   * of the accessibility tree — which takes the panel's accessible name with
+   * it. */
+  .mob-card-body .panel-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   /* ===================================================== settings panel --

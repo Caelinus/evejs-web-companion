@@ -231,35 +231,41 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Bots</h2>
+    <h2 class="panel-title">Bots</h2>
+    <!-- ⚠ WHAT IS FLYING THE SHIP BELONGS IN THE STRIP. It used to be a
+         line of its own below two paragraphs of standing explanation - so the
+         one fact on this panel that CHANGES sat underneath the two that never
+         do, and the strip above it was empty. -->
+    {#if runningName}
+      <p class="stat-line">
+        <strong>{runningName}</strong> is flying your ship right now.
+      </p>
+    {:else}
+      <p class="stat-line">Nothing is running.</p>
+    {/if}
   </header>
+  <!-- ⚠ "EVERYTHING THIS CLIENT CAN RUN FOR YOU" IS GONE; THE RULES STAYED.
+       That opener described the window, which the title bar and the list below
+       it already do. Every sentence after it is a rule about what happens to
+       your ship that nothing on screen shows. -->
   <p class="note">
-    Everything this client can run for you. A bot runs in this tab: close it and
-    your ship finishes what it was last told to do and sits. Only one bot can fly
-    your ship at a time — starting one stops whatever else was running. A saved
-    bot can instead run <em>on the server</em>, which keeps flying after this tab
-    is gone. Saved bots are shared: anyone with a character here can run any of
-    them.
+    A bot runs in this tab: close it and your ship finishes what it was last
+    told to do and sits. Only one bot can fly your ship at a time — starting one
+    stops whatever else was running. A saved bot can instead run <em>on the
+    server</em>, which keeps flying after this tab is gone. Saved bots are
+    shared: anyone with a character here can run any of them.
   </p>
   <!-- ⚠ NOT "the Bot Manager tab" ANY MORE. There is no such rail entry to send
        anybody to, and this panel is reached FROM the Manager rather than beside
        it, so the old sentence pointed backwards up the path the player just
-       walked. What is worth saying instead is what this panel is FOR, since the
-       Manager is where they came from and where everything else lives. -->
+       walked.
+       ⚠ AND NOT "these bots ship with the client" EITHER. That sentence
+       described what this window is, which the window already is. What stays
+       is the half that sends a player somewhere they cannot otherwise find. -->
   <p class="note">
-    These bots ship with the client, so they are set up here against your ship
-    rather than picked from the saved library. Saved bots, every pilot's
-    current run, and starting one on a pilot you are not sitting in right now
-    all live in the Bot Manager.
+    Saved bots, every pilot's current run, and starting one on a pilot you are
+    not sitting in right now all live in the Bot Manager.
   </p>
-  {#if runningName}
-    <p class="stat-line">
-      <strong>{runningName}</strong>
-      <span class="note"> is flying your ship right now.</span>
-    </p>
-  {:else}
-    <p class="note">Nothing is running.</p>
-  {/if}
 </section>
 
 <section>

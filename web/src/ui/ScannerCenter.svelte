@@ -138,7 +138,7 @@
 <section class="panel scanner-center" aria-busy={busyAction !== null}>
   <header class="panel-head">
     <div>
-      <h2>Scanner / Exploration Center</h2>
+      <h2 class="panel-title">Scanner / Exploration Center</h2>
       <p class="subtitle">Signals and supported probe controls for the current system.</p>
     </div>
     {#if onRefresh}

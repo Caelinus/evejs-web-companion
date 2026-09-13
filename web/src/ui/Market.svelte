@@ -407,7 +407,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Market</h2>
+    <h2 class="panel-title">Market</h2>
     <p class="controls">
       <input
         type="search"

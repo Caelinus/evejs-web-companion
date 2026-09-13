@@ -188,11 +188,15 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Travel (autopilot)</h2>
+    <h2 class="panel-title">Travel (autopilot)</h2>
   </header>
+  <!-- ⚠ THE FIRST SENTENCE IS GONE, THE SECOND IS NOT. "Set a destination and
+       the autopilot flies you there" is this window telling you what a window
+       called Travel is for — read once, looked past forever after. What stays
+       is the half a player cannot see and would not guess. -->
   <p class="note">
-    Set a destination and the autopilot flies you there. Closing this tab stops
-    the autopilot — the ship finishes its last move and waits.
+    Closing this tab stops the autopilot — the ship finishes its last move and
+    waits.
   </p>
 </section>
 

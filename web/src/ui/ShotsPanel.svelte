@@ -95,7 +95,7 @@
 </script>
 
 <section class="panel shots-panel">
-  <div class="panel-head"><h2>Shots fired</h2></div>
+  <div class="panel-head"><h2 class="panel-title">Shots fired</h2></div>
 
   <!--
     THE TOTALS, WITH THEIR DENOMINATOR ATTACHED.

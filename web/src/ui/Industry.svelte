@@ -301,7 +301,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Industry</h2>
+    <h2 class="panel-title">Industry</h2>
     <p class="controls">
       <button type="button" class="primary" disabled={busy} onclick={() => run(() => flow.loadIndustry())}>
         Refresh

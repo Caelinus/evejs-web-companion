@@ -891,7 +891,7 @@
   <!-- ─── The bot itself ───────────────────────────────────────────────────── -->
   <section class="panel">
     <header class="panel-head">
-      <h2>Bot builder</h2>
+      <h2 class="panel-title">Bot builder</h2>
       <div class="controls">
         {#if blockingCount === 0}
           <span class="badge good">Ready</span>

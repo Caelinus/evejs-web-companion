@@ -160,7 +160,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Planets</h2>
+    <h2 class="panel-title">Planets</h2>
     <p class="controls">
       <button
         type="button"

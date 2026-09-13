@@ -71,9 +71,19 @@
   }
 </script>
 
-<section>
-  <h2>Character Sheet</h2>
-  <p class="note">Who you are across New Eden.</p>
+<section class="panel">
+  <!-- ⚠ REFRESH LIVES IN THE STRIP, NOT AT THE BOTTOM OF THE PAGE. It used
+       to be a bare <p><button> after the last section, so this window put its
+       one action somewhere no other window puts one — below content of
+       unpredictable length, which on a full read meant scrolling past
+       everything to reach it. Nothing was added or taken away; the control
+       moved to the band every other window keeps its controls in. -->
+  <header class="panel-head">
+    <h2 class="panel-title">Character Sheet</h2>
+    <span class="controls">
+      <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
+    </span>
+  </header>
 
   {#if error}
     <p class="error">Could not read your character sheet: {error}</p>
@@ -158,9 +168,6 @@
     </ul>
   {/if}
 
-  <p>
-    <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
-  </p>
 </section>
 
 <style>
@@ -204,10 +211,14 @@
   .empty {
     color: rgba(128, 128, 128, 0.9);
   }
-  button {
-    min-height: 40px;
-    padding: 0.4rem 0.9rem;
-  }
+  /* ⚠ NO LOCAL `button` RULE HERE. It set `min-height: 40px` — which is
+     exactly what the shared button already is (R8's touch minimum, 2.5rem in
+     styles.css), so it changed nothing a player could see. What it did do,
+     being a component-scoped rule, was outrank the layered stylesheet: this
+     panel's Refresh ignored the strip's own sizing and left the Character
+     Sheet window standing 10px taller than every other window's strip. A
+     per-panel restatement of a shared rule costs nothing until the shared
+     rule changes, and then it is the one panel that does not follow. */
   .good {
     color: #2e7d32;
   }

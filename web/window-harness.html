@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Window chrome harness</title>
+    <!--
+      DEV-ONLY VISUAL HARNESS: every window the app can open, at once.
+
+      WHY IT EXISTS. Window chrome is shared by thirty panels, so a change to
+      it can only be judged across all of them — a head strip that reads well
+      on Market and badly on Skills is not noticed until the sixth window in.
+      The alternative is the live app, which needs the BFF, the gateway and a
+      signed-in pilot, and shows one window per click.
+
+      `src/windowHarness.ts` mounts the REAL panels through the REAL PanelHost
+      inside the REAL DesktopWindow, against a cold store — so it shows first
+      -frame paint, which is the right subject for chrome and the wrong one for
+      rows. Same reasoning as `station-panel-harness.html`.
+
+      It is NOT part of the build: `vite.config.ts` builds `web/index.html`
+      only. Open it with `npm run dev:web` at /window-harness.html.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        background: #05080d;
+        color: #c8d4e2;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="harness"></div>
+    <script type="module" src="/src/windowHarness.ts"></script>
+  </body>
+</html>
