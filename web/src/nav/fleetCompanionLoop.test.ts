@@ -4522,12 +4522,17 @@ const SALVAGER_2 = 11400002;
 const WRECK_NEAR = 300010;
 
 /** A grid with one wreck at `distanceM`, plus this ship. */
-function salvageGrid(distanceM: number, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
+function salvageGrid(
+  distanceM: number,
+  activeModuleIDs: readonly number[] = [],
+  /** The ship's own server mode, so a test can say what move is being flown. */
+  shipMode: string | null = null,
+): SpaceSnapshot {
   return {
     inSpace: true,
-    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null, activeModuleIDs },
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: shipMode, activeModuleIDs },
     entities: [
-      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: shipMode },
       {
         itemID: WRECK_NEAR,
         kind: "wreck",
@@ -6569,10 +6574,16 @@ test("a fresh ladder memory has no propulsion override — `null`, not `false`",
 // trip and no prop mod ever lit. Reported from a live fleet, 2026-09-13.
 //
 // The mode vocabulary is the SERVER's own and is six uppercase words
-// (`space/destiny/commands/`): FIELD, FOLLOW, GOTO, ORBIT, STOP, WARP. An
-// approach is GOTO and `keepAtRange`/follow is FOLLOW. ⚠ The word "approach"
-// never appears in it — which is why `isClosing`'s `/follow|approach|warp/i`
-// misses every approach, and why this rung does not reuse it.
+// (`space/destiny/commands/`): FIELD, FOLLOW, GOTO, ORBIT, STOP, WARP. ⚠ The
+// word "approach" never appears in it, and an APPROACH IS FOLLOW — there is no
+// CmdApproach at all, so `/flight/approach` sends `CmdFollowBall(target, range)`
+// and `followShipEntity` sets FOLLOW. GOTO is the OTHER burn: an align, an
+// undock, a landing out of warp, a throttle opened from STOP.
+//
+// This rung wants both, because both are a hull burning sub-warp. `isClosing`
+// wants FOLLOW and WARP, because it asks a different question — "is the move I
+// sent the move being flown" — and GOTO is the answer "no". Two lists, on
+// purpose; see `NO_REAPPROACH_SHIP_MODES`.
 
 /** A grid whose own ship carries a server movement mode. */
 function gridInMode(mode: string | null, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
@@ -6658,4 +6669,141 @@ test("`props off` beats a GOTO, and `props on` beats an ORBIT", () => {
     obs({ snapshot: gridInMode("ORBIT"), chatMessages: [chatLine("props on", HUMAN)] }),
   );
   assert.deepEqual(on.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+// --- the approach latch: which modes mean "the move I sent is being flown" ---
+//
+// The loot and the salvage rungs both issue ONE approach and then wait on it, and
+// what they wait on is `isClosing` — the ship's own mode, never their memory of
+// having asked. Which modes that accepts is therefore a call-budget decision on
+// every tick of a run, and it was being made by `/follow|approach|warp/i` over
+// free text.
+//
+// ⚠ AN APPROACH IS **FOLLOW**. There is no CmdApproach on this server: retail's
+// Approach is `CmdFollowBall(targetID, 0)`, `/api/bridge/flight/approach` sends
+// exactly that after opening the throttle, and `followShipEntity` sets FOLLOW at
+// any range — so the looter's range-less approach and the salvager's 3 km one
+// both land there. The regex's "approach" alternative could never match anything
+// the server is able to say; these tests pin the real vocabulary in its place.
+
+/** A wreck 30 km off — out of salvager reach — with the hull in `mode`. */
+function salvagingInMode(mode: string | null): FleetCompanionObservation {
+  return salvageObs(salvageGrid(30_000, [], mode));
+}
+
+/** The memory left behind by the first tick, which issued the approach. */
+function approachIssued(): CompanionLadderMemory {
+  const first = decideCompanionAction(WITH_SALVAGER, salvagingInMode(null));
+  assert.deepEqual(first.action, { kind: "approach", targetID: WRECK_NEAR, range: 3000 });
+  assert.equal(first.memory.salvageApproachIssued, true);
+  return first.memory;
+}
+
+test("FOLLOW is believed — the mode an approach actually sets, so the rung waits", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvagingInMode("FOLLOW"),
+    approachIssued(),
+  );
+  assert.notEqual(decision.action.kind, "approach");
+  assert.equal(decision.phase, "Salvaging");
+});
+
+// ⚠ THE ONE THAT MUST NOT BE SHARED WITH `CLOSING_SHIP_MODES`. GOTO is what the
+// hull is left in when the follow was REFUSED — `followBall` bounces a pilot
+// whose warp landing is still pending — and the throttle was opened BEFORE it,
+// so the ship is under way at full speed somewhere that is not the wreck.
+// Believing that mode would park the rung on one wreck for the rest of the run.
+test("GOTO is NOT believed — a refused approach leaves the hull flying elsewhere", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("GOTO"), approachIssued());
+  assert.deepEqual(decision.action, { kind: "approach", targetID: WRECK_NEAR, range: 3000 });
+});
+
+test("an align by another rung does not hold the salvage latch either", () => {
+  // CmdAlignTo also sets GOTO, and an align is a heading, not an approach: the
+  // ship is burning away from the wreck on somebody else's order.
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("GOTO"), approachIssued());
+  assert.equal(decision.action.kind, "approach");
+});
+
+test("STOP and ORBIT get a fresh approach — neither is a move toward the wreck", () => {
+  for (const mode of ["STOP", "ORBIT", "FIELD"]) {
+    const decision = decideCompanionAction(
+      WITH_SALVAGER,
+      salvagingInMode(mode),
+      approachIssued(),
+    );
+    assert.equal(decision.action.kind, "approach", `${mode} must not hold the latch`);
+  }
+});
+
+// ⚠ WARP IS HELD, AND NOT BECAUSE A WARP IS AN APPROACH. `followShipEntity`
+// refuses outright while the mode is WARP, so an approach sent there is a call
+// spent to be told no. The rung's own `inWarp` guard usually catches this first,
+// but that flag and the snapshot's mode are different reads and can disagree.
+test("WARP holds the latch — an approach sent mid-warp is a call spent to be refused", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(30_000, [], "WARP"), { inWarp: false }),
+    approachIssued(),
+  );
+  assert.notEqual(decision.action.kind, "approach");
+});
+
+test("an unreadable mode re-issues rather than waiting on a move it cannot see", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode(null), approachIssued());
+  assert.equal(decision.action.kind, "approach");
+});
+
+// The server sends uppercase; being liberal about case costs nothing, and a drop
+// that changed it must not silently have every rung re-ordering a move that is
+// already under way.
+test("the latch is case-insensitive", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("follow"), approachIssued());
+  assert.notEqual(decision.action.kind, "approach");
+});
+
+// The looter runs the same latch on its own memory, and its approach carries no
+// range — which changes nothing about the mode, because CmdFollowBall sets
+// FOLLOW at any range at all.
+test("the loot rung reads the same vocabulary — FOLLOW waits, GOTO re-approaches", () => {
+  const out = obs({
+    snapshot: lootGrid({ containerDistance: 40_000 }),
+    chatMessages: [areaOrder("loot")],
+  });
+  const first = decideCompanionAction(WITH_DRONES, out);
+  assert.deepEqual(first.action, { kind: "approach", targetID: CAN });
+
+  const following = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 40_000, shipMode: "FOLLOW" }),
+      chatMessages: [areaOrder("loot")],
+    }),
+    first.memory,
+  );
+  assert.notEqual(following.action.kind, "approach");
+
+  const goingSomewhereElse = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 40_000, shipMode: "GOTO" }),
+      chatMessages: [areaOrder("loot")],
+    }),
+    first.memory,
+  );
+  assert.deepEqual(goingSomewhereElse.action, { kind: "approach", targetID: CAN });
+});
+
+// ⚠ THE REGRESSION THE OLD REGEX WOULD PASS AND THE NEW LIST MUST NOT. A mode
+// that merely CONTAINS one of the old alternatives is not that mode. Nothing in
+// the server's six words does, which is exactly why a substring test over free
+// text was the wrong shape for a closed vocabulary.
+test("a mode is matched whole, not as a substring", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvagingInMode("NOTFOLLOWING"),
+    approachIssued(),
+  );
+  assert.equal(decision.action.kind, "approach");
 });

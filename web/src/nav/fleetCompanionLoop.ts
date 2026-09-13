@@ -4620,6 +4620,47 @@ const MAX_SALVAGE_LOCK_WAIT_TICKS = 10;
 
 
 /**
+ * The ship modes in which sending ANOTHER approach is not worth the call --
+ * either the move already sent is the one the server is flying, or a new one
+ * would be refused outright.
+ *
+ * ⚠ THE VOCABULARY IS THE SERVER'S OWN, AND IT IS SIX UPPERCASE WORDS: FIELD,
+ * FOLLOW, GOTO, ORBIT, STOP, WARP are the only values anything under
+ * `space/destiny/` assigns to `entity.mode`, and the snapshot carries that
+ * string through untouched. ⚠ "APPROACH" IS NOT ONE OF THEM. This test used to
+ * be `/follow|approach|warp/i` over the free text, one third of which could
+ * never match anything the server is able to say -- the same trap
+ * `CLOSING_SHIP_MODES` was written to document.
+ *
+ * ⚠ AN APPROACH IS **FOLLOW**, NOT GOTO, WHICH IS THE FACT THIS WHOLE CONSTANT
+ * TURNS ON. There is no CmdApproach on this server: retail's Approach is
+ * `CmdFollowBall(targetID, 0)`, the BFF's `/flight/approach` issues exactly that
+ * (`CmdSetSpeedFraction(1.0)`, then `CmdFollowBall`), and it lands in
+ * `followShipEntity`, which sets FOLLOW at any range -- so the looter's
+ * range-less approach and the salvager's 3 km one both produce it. `keepAtRange`
+ * is the same server method with a non-zero range, which is also why no mode can
+ * tell "closing on my wreck" from "holding station on the commander". That
+ * ambiguity is bounded by the caller's own `…Approaching` latch, not here.
+ *
+ * ⚠ GOTO IS DELIBERATELY ABSENT, THOUGH `CLOSING_SHIP_MODES` HOLDS IT. GOTO is
+ * what the hull is left in when an approach was REFUSED or when the move being
+ * flown is somebody else's: `followBall` bounces a pilot whose warp landing is
+ * still pending, and a ship that has just landed, undocked, been aligned by the
+ * fleet rung, or merely had its throttle opened from STOP is in GOTO while
+ * travelling somewhere that is not the target. Every one of those is a moment
+ * this rung MUST let go and re-issue, so counting GOTO would turn a one-tick
+ * recovery into a wait that never ends -- precisely the failure the callers'
+ * comments warn about. The two constants answer different questions ("is the
+ * hull burning sub-warp" against "is the move I sent the move being flown") and
+ * their overlap is a coincidence, so they stay separate lists.
+ *
+ * ⚠ WARP IS IN IT, AND NOT BECAUSE A WARP IS AN APPROACH. `followShipEntity`
+ * refuses outright while `entity.mode === "WARP"`, so an approach sent mid-warp
+ * is a call spent to be told no.
+ */
+const NO_REAPPROACH_SHIP_MODES: readonly string[] = ["FOLLOW", "WARP"];
+
+/**
  * Whether this ship is still under way toward something.
  *
  * ⚠ READ OFF THE SHIP, NOT OFF OUR OWN MEMORY OF HAVING ASKED. "I sent an
@@ -4628,7 +4669,9 @@ const MAX_SALVAGE_LOCK_WAIT_TICKS = 10;
  */
 function isClosing(obs: FleetCompanionObservation): boolean {
   const mode = obs.snapshot?.ship?.mode ?? null;
-  return mode !== null && /follow|approach|warp/i.test(mode);
+  // Liberal about case on purpose: the server sends uppercase today, and a drop
+  // that changed that must not silently stop every rung believing its own move.
+  return mode !== null && NO_REAPPROACH_SHIP_MODES.includes(mode.toUpperCase());
 }
 
 /**
@@ -4868,14 +4911,19 @@ function decideLooting(
  * ⚠ THE VOCABULARY IS SIX UPPERCASE WORDS AND THESE ARE THE TWO THAT MATTER.
  * Checked against the server 2026-09-13 (`space/destiny/commands/`): the only
  * values it ever assigns to `entity.mode` are `FIELD`, `FOLLOW`, `GOTO`,
- * `ORBIT`, `STOP` and `WARP`. `gotoPointEntity` -- which is what an approach
- * runs -- sets **GOTO**, and `followShipEntity`, which is `keepAtRange` and so
- * the follow rung, sets **FOLLOW**.
+ * `ORBIT`, `STOP` and `WARP`. **GOTO** is a hull flying a heading of its own --
+ * an align, an undock, a landing out of warp, a throttle opened from STOP.
+ * **FOLLOW** is a hull flying at another object: `followShipEntity`, which is
+ * `keepAtRange`, the follow rung, and -- the one that is easy to get wrong --
+ * an APPROACH, which is `CmdFollowBall(targetID, 0)` and not a goto at all.
+ * Both are the burn this rung exists to help, which is why both are here.
  *
  * ⚠ THE WORD "APPROACH" NEVER APPEARS IN IT, which is the trap this constant
- * exists to avoid. `isClosing` above tests `/follow|approach|warp/i` and so
- * matches FOLLOW and WARP and silently MISSES every approach -- worth knowing
- * before reusing it for anything that spends a call.
+ * exists to avoid: `isClosing` above used to test `/follow|approach|warp/i`,
+ * one third of which could never match anything the server can say. It now
+ * tests `NO_REAPPROACH_SHIP_MODES` -- a DIFFERENT list, deliberately, because it
+ * answers a different question. See that constant before reusing either for
+ * anything that spends a call.
  *
  * ⚠ ORBIT IS DELIBERATELY NOT HERE. A ship holding an orbit has arrived; it is
  * circling, not closing, and a prop mod lit for the whole of a standing orbit
@@ -4923,13 +4971,14 @@ function isUnderWay(obs: FleetCompanionObservation): boolean {
  * BUG THIS RUNG SHIPPED WITH. See that function's header: a companion in
  * ordinary fleet play never runs its own autopilot, so the first cut of this
  * rung was correct and never fired. What fires is the ship's own movement MODE
- * -- GOTO (closing on something) or FOLLOW (keeping up with the commander) --
- * which is the burn a player actually makes: landing off a gate and covering the
- * last few km, or chasing an FC who is pulling away.
+ * -- GOTO (flying a heading of its own) or FOLLOW (approaching something, or
+ * keeping up with the commander) -- which is the burn a player actually makes:
+ * landing off a gate and covering the last few km, or chasing an FC who is
+ * pulling away.
  *
  * ⚠ A FLEE STILL GETS ONE, NOW, AND BY ACCIDENT RATHER THAN BY DESIGN. The
- * get-safe ladder approaches a station before docking, and an approach is GOTO,
- * so the burner lights for that leg. The WARP leg of a flee gets nothing,
+ * get-safe ladder approaches a station before docking, and an approach is
+ * FOLLOW, so the burner lights for that leg. The WARP leg of a flee gets nothing,
  * because the ladder never reaches this rung mid-warp (rung 1 yields first) and
  * a prop mod is no use in warp anyway. `props on` remains the way to say "keep
  * it lit regardless".
@@ -5619,9 +5668,12 @@ function decideSalvaging(
   const distance = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
   if (distance > COMPANION_SALVAGE_RANGE_M) {
     // ⚠ ONLY BELIEVE AN APPROACH THAT IS STILL RUNNING. A move that was
-    // refused, or that the server finished early, leaves the ship stopped and
-    // out of reach -- and a rung that trusted its own "already issued" flag
-    // would wait on it for the rest of the run.
+    // refused, or that the server finished early, leaves the ship out of reach
+    // -- and not necessarily stopped: `/flight/approach` opens the throttle
+    // BEFORE it sends the follow, so a refused one leaves the hull under way in
+    // GOTO, flying somewhere that is not the wreck. A rung that trusted its own
+    // "already issued" flag would wait on that for the rest of the run, which is
+    // why GOTO is not in `NO_REAPPROACH_SHIP_MODES`.
     if (mem.salvageApproachIssued && isClosing(obs)) {
       return waiting("Salvaging", "Flying to the wreck.", mem);
     }
