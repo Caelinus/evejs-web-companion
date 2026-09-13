@@ -3330,11 +3330,25 @@
    * surface stays well above 4.5:1 for body text either way (both the panel token
    * and what shows through it are near-black).
    *
-   * ⚠ CLIP-PATH KILLS AN OUTER BOX-SHADOW. A chamfered corner has to be cut with
-   * `clip-path`, and clipping removes everything outside the shape — the drop
-   * shadow included. Depth therefore comes from `filter: drop-shadow()`, which
-   * follows the clipped silhouette instead of the border box. Inset shadows are
-   * unaffected (they are inside the box) and are what draw the focused rim. */
+   * ⚠ A WINDOW IS A PLAIN RECTANGLE. FOUR SQUARE CORNERS, NOTHING DRAWN ON
+   * THEM. This frame used to chamfer its top-right and bottom-left with
+   * `clip-path` and mark the other two with focus brackets, and the resize
+   * handle drew an angle in the fourth. That is four corners with three
+   * different decorations on them, and every one of them was a place for a
+   * rendering seam to show: clipping removes the border along the cut without
+   * stroking anything in its place, so the frame simply stopped and started
+   * again; the brackets that survived the clip ended in mid-air.
+   *
+   * The fix is not to draw the cut more carefully. It is that the corner was
+   * never carrying information — a window is identified by its title bar and
+   * its border, and focus by the border's colour and the window's opacity,
+   * both of which are still here. Decoration that can only go wrong, for
+   * nothing, goes.
+   *
+   * Depth stays on `filter: drop-shadow()` rather than moving back to
+   * `box-shadow`: with no clip there is no longer a reason it HAS to be, but
+   * the two render the same here and the focused rim is an inset shadow that
+   * would have to be kept separate either way. */
   .win {
     position: absolute;
     display: flex;
@@ -3358,17 +3372,6 @@
     -webkit-backdrop-filter: blur(14px) saturate(1.15);
     backdrop-filter: blur(14px) saturate(1.15);
     border: 1px solid var(--color-line-strong);
-    /* The chamfer: top-right and bottom-left, the asymmetric cut EVE uses. Kept
-     * small — a big bevel reads as a sci-fi sticker, a 0.7rem one reads as a
-     * machined panel. */
-    clip-path: polygon(
-      0 0,
-      calc(100% - 0.7rem) 0,
-      100% 0.7rem,
-      100% 100%,
-      0.7rem 100%,
-      0 calc(100% - 0.7rem)
-    );
     filter: drop-shadow(0 0.5rem 1.1rem rgba(0, 0, 0, 0.55));
   }
   /* The focused window is MORE OPAQUE, not just differently outlined: the one you
@@ -3380,77 +3383,19 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 22%, transparent);
     filter: drop-shadow(0 0.8rem 1.6rem rgba(0, 0, 0, 0.66));
   }
-  /* Corner brackets on the focused window — eight hairlines drawn as background
-   * gradients on one pseudo-element, because there are four corners and only two
-   * pseudo-elements. Purely a focus cue; the accessible focus ring is untouched.
+  /* ⚠ NO CORNER DECORATION AT ALL — not brackets, not a drawn bevel.
+   *
+   * The focused window used to grow eight accent hairlines, two per corner,
+   * and the chamfer needed a drawn diagonal to replace the border the clip had
+   * removed. Both are gone with the chamfer. Focus is still unmistakable and
+   * still carried by two signals: the border turns accent, and the window goes
+   * more opaque than the ones behind it.
    *
    * `.win` is a <section>, so it would otherwise inherit the global panel's
-   * ::before accent hairline; that is cancelled below rather than left to fight
-   * with this. */
-  /* ⚠ THE CHAMFER HAS TO BE DRAWN; `clip-path` ONLY CUTS.
-   *
-   * The two bevelled corners are made by clipping the box, and clipping removes
-   * whatever was there — the border along that diagonal included. So the frame
-   * ran down the left side, stopped, and started again along the bottom with
-   * nothing joining them: the corner did not read as machined, it read as
-   * missing. (Reported from a screenshot, which is the only place it shows.)
-   *
-   * This replaces `.win::before`'s old job of cancelling the global panel
-   * hairline — cancelling it is still the effect, since none of that rule's
-   * geometry survives here. */
-  .win {
-    --chamfer-line: var(--color-line-strong);
-  }
-  .win.focused {
-    --chamfer-line: var(--color-accent-dim);
-  }
-  .win::before {
-    content: "";
-    display: block;
-    position: absolute;
-    inset: 0;
-    top: 0;
-    height: auto;
-    pointer-events: none;
-    /* One hairline per bevel, drawn as a 45° band inside a corner-sized box.
-     * Both cuts run the same way (top-left to bottom-right of their own box),
-     * so one gradient serves both — only the position differs. */
-    background:
-      linear-gradient(
-          45deg,
-          transparent calc(50% - 0.5px),
-          var(--chamfer-line) calc(50% - 0.5px),
-          var(--chamfer-line) calc(50% + 0.5px),
-          transparent calc(50% + 0.5px)
-        )
-        100% 0 / 0.72rem 0.72rem no-repeat,
-      linear-gradient(
-          45deg,
-          transparent calc(50% - 0.5px),
-          var(--chamfer-line) calc(50% - 0.5px),
-          var(--chamfer-line) calc(50% + 0.5px),
-          transparent calc(50% + 0.5px)
-        )
-        0 100% / 0.72rem 0.72rem no-repeat;
-  }
-  .win.focused::after {
-    content: "";
-    position: absolute;
-    inset: 3px;
-    pointer-events: none;
-    --bracket: var(--color-accent);
-    --arm: 0.6rem;
-    /* ⚠ TWO CORNERS, NOT FOUR — the square ones. Arms were drawn on all four,
-     * and the other two are exactly where the chamfer cuts: the clip sliced each
-     * bracket into a stub that ended in mid-air a few pixels short of a corner
-     * that was itself unstroked. A bracket marks a right angle; on a bevel it
-     * has no angle to mark and can only argue with the cut. */
-    background:
-      linear-gradient(var(--bracket), var(--bracket)) 0 0 / var(--arm) 1px no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 0 0 / 1px var(--arm) no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 100% 100% / var(--arm) 1px no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 100% 100% / 1px var(--arm) no-repeat;
-  }
+   * ::before accent hairline across its top edge — inside a border the window
+   * has already drawn. That is what this cancels, which is the job `.win::before`
+   * had before the bevel borrowed it. */
+  .win::before { display: none; }
   /* THE PANEL INSIDE MUST NOT DRAW A SECOND FRAME. Every panel's root is its own
    * <section>, which carries the global panel background, border and accent
    * hairline — opaque, so it would sit on top of the glass and cancel it, inside
@@ -3586,16 +3531,12 @@
   .win-resize-e { top: 0; right: -3px; width: 7px; height: 100%; cursor: ew-resize; }
   .win-resize-s { left: 0; bottom: -3px; height: 7px; width: 100%; cursor: ns-resize; }
   .win-resize-se { right: -3px; bottom: -3px; width: 13px; height: 13px; cursor: nwse-resize; }
-  .win-resize-se::after {
-    content: "";
-    position: absolute;
-    right: 3px;
-    bottom: 3px;
-    width: 6px;
-    height: 6px;
-    border-right: 2px solid var(--color-line-strong);
-    border-bottom: 2px solid var(--color-line-strong);
-  }
+  /* ⚠ THE GRIP MARK IS GONE, THE GRIP IS NOT. This drew a small angle in the
+   * bottom-right corner — the fourth different thing this frame used to put on
+   * a corner, and the one left over once the bevel and the brackets went. The
+   * handle above it is unchanged: the same 13px target, the same drag, and the
+   * `nwse-resize` cursor still says so on hover, which is how a plain window
+   * frame has always advertised a resize. */
 
   /* The fixed top-right dock panel (overview / station services), collapsible. */
   .dock-panel {
