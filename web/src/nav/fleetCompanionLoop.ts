@@ -513,6 +513,45 @@ export interface CompanionFlee {
    * cannot pay, and asking it for ever is not a plan.
    */
   readonly repairAttempts: number;
+  /**
+   * Whether, at the moment the floor was breached, the ARMOUR and the HULL were
+   * both already clear of the return mark — so the shield was the only layer
+   * that had dropped far enough to matter.
+   *
+   * ⚠ THIS FIELD EXISTS BECAUSE A STATION CANNOT ANSWER `obs.health` AT ALL, and
+   * that silence used to strand pilots for ever. `health` is folded from the
+   * SPACE snapshot (`lowestHealth`, miningBotLoop.ts), and a docked ship has no
+   * space snapshot — so every docked tick reads `null`, `wellEnoughToReturn`
+   * read `null` as "not well", and no docked pilot ever undocked itself again.
+   * A shield-only flee (the common one) was the worst case of all: the ship was
+   * whole the moment it arrived, and it sat in the station telling its operator
+   * that its armour needed paying for. Observed live, 2026-09-13, on two pilots
+   * that could not be forced out — every manual undock was answered by the
+   * re-dock below.
+   *
+   * ⚠ IT IS STAMPED AT THE TRIGGER BECAUSE THAT IS THE LAST TICK THAT CAN READ
+   * IT. Once the ship is in the station the layers are unreadable, and neither
+   * armour nor hull can change in there without the shop being paid — so what
+   * was true on the way out is still true on arrival. `false` whenever either
+   * layer could not be read, which keeps the safe direction: an unknown layer
+   * sends the pilot down the quote-and-repair path rather than back into a
+   * fight.
+   *
+   * The server fact this rests on is the one this rung is already built around:
+   * `topOffShipShieldAndCapacitorForDockingTransition` (`space/transitions.js`)
+   * writes `shieldCharge: 1.0` and leaves `damage` and `armorDamage` alone.
+   */
+  readonly onlyTheShieldWasHurt: boolean;
+  /**
+   * Whether this flee has already delivered the ship to safety — docked, or
+   * landed at the safe spot it warped to.
+   *
+   * ⚠ WHAT IT GUARDS IS THE OPERATOR'S OWN UNDOCK. Without it, a parked flee
+   * read `docked === false` as "still on the way out" and docked the ship
+   * again, so a human pulling a pilot out of a station was overruled within two
+   * seconds, for ever. See `flyTheFlee`.
+   */
+  readonly arrivedSafe: boolean;
 
   // ── the `SafetyRun` contract ────────────────────────────────────────
   readonly safeSpotWarpIssued: boolean;
@@ -4222,7 +4261,7 @@ function countTowardsRecovery(
   // number that would send it running has not recovered from anything, and
   // letting that count would hand the budget back to the pilot least able to
   // spend it well.
-  if (!wellEnoughToReturn(request, obs)) {
+  if (!healthClearOfTheMark(request, obs)) {
     return memory.fleeRecoverySinceMs === null
       ? memory
       : { ...memory, fleeRecoverySinceMs: null };
@@ -4291,6 +4330,8 @@ function decideFlee(
     triggeredAtHealth: health,
     fromSolarSystemID: obs.flightStatus?.solarSystemID ?? null,
     repairAttempts: 0,
+    onlyTheShieldWasHurt: armorAndHullClearOfTheMark(request, obs),
+    arrivedSafe: false,
     safeSpotWarpIssued: false,
     safeSpotWarpSeen: false,
     droneRecallWaited: null,
@@ -4356,19 +4397,92 @@ const FLEE_RECOVERY_HOLD_MS = 30_000;
 const MAX_FLEE_REPAIR_ATTEMPTS = 3;
 
 /**
+ * The health a returning pilot has to be at: its floor plus the margin, capped
+ * at a whole ship. One definition, because three different questions ask it —
+ * the return itself, and the two layer reads the trigger stamps.
+ */
+function returnMark(request: FleetCompanionRequest): number {
+  return Math.min(1, request.fleeHealthFloor + FLEE_RETURN_MARGIN);
+}
+
+/**
+ * Whether the armour AND the hull are both readable and both already clear of
+ * the return mark — i.e. whatever is wrong with this ship is wrong with its
+ * SHIELD, which a dock puts back in full.
+ *
+ * ⚠ NULL IS NEVER "CLEAR". A layer that did not read is a layer this pilot
+ * cannot claim is whole, and claiming it would send a hurt ship back into a
+ * fight on no information. False is the safe direction and costs only a quote.
+ */
+function armorAndHullClearOfTheMark(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+): boolean {
+  const mark = returnMark(request);
+  const armor = obs.armorRatio ?? null;
+  const hull = obs.hullRatio ?? null;
+  return armor !== null && hull !== null && armor >= mark && hull >= mark;
+}
+
+/**
  * Whether a ship is well enough to go back to the fight it left.
  *
  * ⚠ A DIFFERENT QUESTION FROM THE ONE THAT STARTED THE FLEE, and deliberately a
  * harder one to answer yes to. See `FLEE_RETURN_MARGIN`.
+ *
+ * ⚠ IT IS ALSO A DIFFERENT QUESTION IN A STATION THAN IT IS IN SPACE, and
+ * asking the space question in a station is the bug this branch exists to end.
+ * `obs.health` is folded from the SPACE snapshot, and a docked ship has none —
+ * so every docked tick reads `null`, and "unreadable is not well" (true and
+ * right in space) meant no pilot that fled to a station ever came back out.
+ * Two things answer it in there instead, in this order:
+ *
+ *   1. The flee's own stamp. A flee that started with the armour and the hull
+ *      already clear of the mark is whole on arrival, because docking gives the
+ *      shield back in full and nothing in a station can hurt the other two.
+ *      This is the common case — a shield-tanked pilot in a fight — and it
+ *      needs no call at all.
+ *   2. The shop's own quote, which is the authority on what a station can see:
+ *      an EMPTY quote is "nothing on this hull is damaged", and that includes
+ *      the armour the stamp could not vouch for. `null` is "we could not say"
+ *      and stays "not well", exactly as it does everywhere else this loop reads
+ *      that field — note that a pilot which does not pay for repairs never
+ *      raises a quote at all, so it falls through to the message that says so.
  */
-function wellEnoughToReturn(request: FleetCompanionRequest, obs: FleetCompanionObservation): boolean {
+function wellEnoughToReturn(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  running: CompanionFlee,
+): boolean {
+  if (obs.docked === true) {
+    if (running.onlyTheShieldWasHurt) {
+      return true;
+    }
+    const damaged = obs.damagedItemIDs ?? null;
+    return damaged !== null && damaged.length === 0;
+  }
+  return healthClearOfTheMark(request, obs);
+}
+
+/**
+ * The live health read, against the return mark — the question as SPACE answers
+ * it, with no station authority behind it.
+ *
+ * Kept separate from `wellEnoughToReturn` because the recovery budget asks it on
+ * ticks where no flee is running at all, so there is no stamp and no quote to
+ * consult: out here, an unreadable health is simply not a recovered ship.
+ */
+function healthClearOfTheMark(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+): boolean {
   const health = obs.health ?? null;
   if (health === null) {
     // Unreadable is not "well". A pilot that undocked on a dropped poll would
     // be flying back into a fight on no information at all.
     return false;
   }
-  return health >= Math.min(1, request.fleeHealthFloor + FLEE_RETURN_MARGIN);
+  return health >= returnMark(request);
 }
 
 /**
@@ -4390,7 +4504,7 @@ function recoverAndReturn(
 ): FleeStep {
   const hurtAt = Math.round(running.triggeredAtHealth * 100);
 
-  if (!wellEnoughToReturn(request, obs)) {
+  if (!wellEnoughToReturn(request, obs, running)) {
     // Not docked: the safe-spot case. There is no shop out here, so the only
     // thing to do is hold and let the layers come back on their own.
     if (obs.docked !== true) {
@@ -4399,11 +4513,28 @@ function recoverAndReturn(
         memory: mem,
       };
     }
+    // ⚠ THE SHOP'S OWN QUOTE DECIDES WHAT IS DAMAGED, never a guess at the ship
+    // item id -- the same authority the DSL's `repair-ship` uses. Null is "we
+    // could not say", which is a tick spent waiting for the quote and never a
+    // conclusion that nothing is wrong.
+    //
+    // ⚠ IT IS ASKED BEFORE THE WALLET IS CONSULTED, AND THE OTHER ORDER WAS A
+    // LIE. A pilot that does not pay for repairs used to answer every docked
+    // tick with "not set to pay for repairs", whether or not anything was
+    // actually damaged -- so the sentence an operator read while a perfectly
+    // whole ship sat in a station blamed a setting for a health read that had
+    // never happened. The quote now comes first, for every companion (see
+    // flow.ts, where it stopped being gated on `repairsAtStation`), so that
+    // sentence is only ever printed over damage the shop has actually named.
+    const damaged = obs.damagedItemIDs ?? null;
+    if (damaged === null) {
+      return { decision: waiting("Safe", "Asking the repair shop for a quote.", mem), memory: mem };
+    }
     if (!request.repairsAtStation) {
       return {
         decision: waiting(
           "Safe",
-          `Left the fight at ${hurtAt}%. Docking gave the shield back but not the armour, and this pilot is not set to pay for repairs, so it is staying put.`,
+          `Left the fight at ${hurtAt}%. Docking gave the shield back, the shop says the armour is still damaged, and this pilot is not set to pay for repairs, so it is staying put.`,
           mem,
         ),
         memory: mem,
@@ -4419,22 +4550,13 @@ function recoverAndReturn(
         memory: mem,
       };
     }
-    // ⚠ THE SHOP'S OWN QUOTE DECIDES WHAT IS DAMAGED, never a guess at the ship
-    // item id -- the same authority the DSL's `repair-ship` uses. Null is "we
-    // could not say", which is a tick spent waiting for the quote and never a
-    // conclusion that nothing is wrong.
-    const damaged = obs.damagedItemIDs ?? null;
-    if (damaged === null) {
-      return { decision: waiting("Safe", "Asking the repair shop for a quote.", mem), memory: mem };
-    }
-    if (damaged.length === 0) {
-      // Nothing the shop will fix, and still below the return mark. Holding is
-      // the honest answer: there is damage no station can take out.
-      return {
-        decision: waiting("Safe", `Left the fight at ${hurtAt}% and the shop has nothing left to fix.`, mem),
-        memory: mem,
-      };
-    }
+    // ⚠ AN EMPTY QUOTE NEVER REACHES HERE ANY MORE, AND THAT IS THE FIX RATHER
+    // THAN AN OVERSIGHT. It used to land on "the shop has nothing left to fix"
+    // and hold — which, for a docked pilot, was every repaired ship for ever:
+    // the repair worked, the quote emptied, and the return was still gated on a
+    // health read no station can produce. `wellEnoughToReturn` now reads that
+    // same empty quote as the station's own "this hull is whole", so a pilot
+    // whose armour has just been paid for undocks on the next tick.
     const asked: CompanionLadderMemory = {
       ...mem,
       flee: { ...running, repairAttempts: running.repairAttempts + 1 },
@@ -4523,7 +4645,39 @@ function flyTheFlee(
   running: CompanionFlee,
 ): FleeStep {
   if (reachedSafety(obs, running)) {
+    // Stamped on the first tick that sees it, and only for what the next branch
+    // needs it for: telling "still on the way out" apart from "somebody took
+    // this ship back out".
+    if (!running.arrivedSafe) {
+      const arrived: CompanionFlee = { ...running, arrivedSafe: true };
+      return recoverAndReturn(request, obs, { ...mem, flee: arrived }, arrived);
+    }
     return recoverAndReturn(request, obs, mem, running);
+  }
+
+  // ⚠ THE OPERATOR'S OWN UNDOCK WINS, AND BEFORE THIS IT COULD NOT. A flee that
+  // has already delivered the ship somewhere safe and now finds it out in space
+  // did not move it: this rung drops its latch before every undock it issues
+  // (see `recoverAndReturn`), and nothing below this rung ever runs while it is
+  // parked. So the only thing that can have undocked this ship is a human — and
+  // the answer to a human was to dock it again, two seconds later, for ever.
+  // Reported live on 2026-09-13: "I can not force them to undock, as soon as
+  // they are undocked they dock back."
+  //
+  // ⚠ THE BUDGET IS SPENT, NOT JUST THE LATCH DROPPED. Dropping the latch alone
+  // would let the very next tick read the same hurt ship, re-latch, and dock it
+  // again — the same loop with one extra step in it. Spending the round trips is
+  // how this ladder already says "stop sending yourself home" (`maxFleeAttempts`
+  // is the operator's own "stay home after N trips"), so the override needs no
+  // new state and reads the same way in the budget it already has. It is not
+  // permanent either: `countTowardsRecovery` hands the budget back after this
+  // pilot has held above its return mark for `FLEE_RECOVERY_HOLD_MS`, so a ship
+  // that actually recovers may flee again later in the same run.
+  if (running.arrivedSafe) {
+    return {
+      decision: null,
+      memory: { ...mem, flee: null, fleeTripsSpent: request.maxFleeAttempts },
+    };
   }
 
   const safe = runToSafety(obs, mem, {

@@ -3407,6 +3407,12 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
       triggeredAtHealth: 0.12,
       fromSolarSystemID: HOME_SYSTEM,
       repairAttempts: 0,
+      // The cautious stamp by default: this flee cannot vouch for the armour,
+      // so a station has to be asked about it. The tests that want the common
+      // case -- a shield-tanked pilot whose other two layers never dropped --
+      // say so explicitly.
+      onlyTheShieldWasHurt: false,
+      arrivedSafe: false,
       safeSpotWarpIssued: false,
       safeSpotWarpSeen: false,
       droneRecallWaited: null,
@@ -3418,7 +3424,9 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
 test("a docked pilot holds, and says what it left at", () => {
   const decision = decideCompanionAction(
     REQUEST,
-    fleeObs({ docked: true, inSpace: false }),
+    // With damage the shop has named: a pilot holding in a station for a reason
+    // is the one whose readout has to carry that reason.
+    fleeObs({ docked: true, inSpace: false, damagedItemIDs: [900001] }),
     fleeing(),
   );
   assert.equal(decision.phase, "Safe");
@@ -3447,56 +3455,123 @@ const RIG_ITEM = 900002;
 // `damage` and `armorDamage` alone, so a shield flee is whole on arrival and an
 // armour flee is not. Everything below is shaped around that one server fact.
 
-/** Docked at the station a flee ended at, with a health the test picks. */
+/**
+ * Docked at the station a flee ended at.
+ *
+ * ⚠ `health: null`, ALWAYS, AND THAT IS THE POINT OF THIS WHOLE SECTION. There
+ * is no health read in a station: `obs.health` is folded from the SPACE
+ * snapshot, and a docked ship has none. These fixtures used to hand the ladder
+ * a docked health anyway -- `dockedAfterFleeing(1)` for "whole",
+ * `dockedAfterFleeing(0.4)` for "hurt in the armour" -- which is a reading the
+ * live loop can never get, and it is exactly why the stranded-pilot bug of
+ * 2026-09-13 passed every test in here. A station answers two questions
+ * instead: the flee's own stamp, and the shop's quote.
+ */
 function dockedAfterFleeing(
-  health: number | null,
   overrides: Partial<FleetCompanionObservation> = {},
 ): FleetCompanionObservation {
-  return fleeObs({ docked: true, inSpace: false, health, ...overrides });
+  return fleeObs({ docked: true, inSpace: false, health: null, ...overrides });
 }
 
-test("a pilot whole again undocks to rejoin", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+/** The flee a shield-tanked pilot latches: armour and hull never dropped. */
+const SHIELD_ONLY = { onlyTheShieldWasHurt: true } as const;
+
+// THE REGRESSION, IN ONE TEST. Docking gives the shield back in full, so a
+// shield-only flee is whole the moment it arrives -- with no health read, no
+// quote, and no wallet.
+test("a station reports no health at all, and a shield-only flee still goes home", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), fleeing(SHIELD_ONLY));
   assert.deepEqual(decision.action, { kind: "undock" });
   assert.equal(decision.phase, "Going back");
 });
 
 // ⚠ THE MARGIN, NOT THE FLOOR. Coming back at exactly the number that sends it
 // running means the next tick reads the same number and leaves again: one fight
-// would eat the whole budget without a shot fired.
+// would eat the whole budget without a shot fired. Asked at a SAFE SPOT, which
+// is where a live health read is the authority.
 test("a pilot only just above its floor stays put rather than commuting", () => {
   const decision = decideCompanionAction(
     REQUEST,
-    dockedAfterFleeing(REQUEST.fleeHealthFloor + 0.01),
-    fleeing(),
+    fleeObs({ health: REQUEST.fleeHealthFloor + 0.01, docked: false }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
   );
   assert.notEqual(decision.action.kind, "undock");
   assert.equal(decision.phase, "Safe");
+  assert.match(decision.why, /waiting out here/i);
 });
 
-test("an UNREADABLE health never undocks", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(null), fleeing());
-  assert.notEqual(decision.action.kind, "undock");
+test("an UNREADABLE health out at a safe spot never goes back", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: null, docked: false }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.equal(decision.phase, "Safe");
 });
 
 // --- the armour case, which is the whole reason the opt-in exists -------------
 
 test("without the opt-in, a pilot hurt in the armour says why it is staying", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(0.4), fleeing());
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
+    fleeing(),
+  );
   assert.deepEqual(decision.action, { kind: "wait" });
   assert.match(decision.why, /not set to pay for repairs/i);
   assert.notEqual(decision.action.kind, "undock");
+});
+
+// ⚠ AND IT SAYS IT ONLY OVER DAMAGE THE SHOP HAS NAMED. The wallet used to be
+// consulted before the quote was, so a whole ship in a station was told it was
+// staying put because nobody would pay to fix it.
+test("a pilot that does not pay for repairs still waits for the quote before blaming it", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: null }),
+    fleeing(),
+  );
+  assert.match(decision.why, /quote/i);
+});
+
+// THE HAND-REPAIRED CASE, REPORTED LIVE THE SAME DAY: the operator fixed the
+// armour themselves, so no companion ever spent a coin — and the pilot has to
+// notice. It notices the only way a docked ship can: the shop has nothing left
+// to quote for.
+test("a pilot repaired BY HAND goes home, with no opt-in and nothing paid", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [] }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Going back");
 });
 
 test("with the opt-in, it pays the shop for exactly what the quote named", () => {
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM, RIG_ITEM] }),
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM, RIG_ITEM] }),
     fleeing(),
   );
   assert.deepEqual(decision.action, { kind: "repairItems", itemIDs: [SHIP_ITEM, RIG_ITEM] });
   assert.equal(decision.phase, "Repairing");
+});
+
+// THE OTHER HALF OF THE SAME BUG. The repair lands, the quote empties -- and the
+// return was still gated on a health read the station cannot produce, so a pilot
+// that had just been paid for stayed docked as surely as one that had not.
+test("a paid-for pilot undocks once the shop's quote comes back empty", () => {
+  const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
+  const decision = decideCompanionAction(
+    paying,
+    dockedAfterFleeing({ damagedItemIDs: [] }),
+    fleeing({ repairAttempts: 1 }),
+  );
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Going back");
 });
 
 // Null is "could not say", never "nothing is damaged" -- the same contract the
@@ -3506,7 +3581,7 @@ test("an unquoted shop is waited on, not read as nothing-to-fix", () => {
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: null }),
+    dockedAfterFleeing({ damagedItemIDs: null }),
     fleeing(),
   );
   assert.deepEqual(decision.action, { kind: "wait" });
@@ -3517,7 +3592,7 @@ test("a shop that keeps not fixing things is given up on, not asked for ever", (
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM] }),
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
     fleeing({ repairAttempts: 3 }),
   );
   assert.deepEqual(decision.action, { kind: "wait" });
@@ -3527,8 +3602,11 @@ test("a shop that keeps not fixing things is given up on, not asked for ever", (
 // --- the budget ---------------------------------------------------------------
 
 test("a pilot that used its last trip stays docked even once it is whole", () => {
-  const spent: CompanionLadderMemory = { ...fleeing(), fleeTripsSpent: REQUEST.maxFleeAttempts };
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), spent);
+  const spent: CompanionLadderMemory = {
+    ...fleeing(SHIELD_ONLY),
+    fleeTripsSpent: REQUEST.maxFleeAttempts,
+  };
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), spent);
   assert.notEqual(decision.action.kind, "undock");
   assert.match(decision.why, /staying home/i);
 });
@@ -3601,8 +3679,88 @@ test("limping just above the floor does not count as recovering", () => {
 // --- the latch ends with the undock -------------------------------------------
 
 test("undocking ends the flee, so the rung stops driving a pilot already back out", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), fleeing(SHIELD_ONLY));
   assert.equal(decision.memory.flee, null);
+});
+
+// --- the operator's own undock ------------------------------------------------
+//
+// ⚠ REPORTED LIVE, 2026-09-13: "I can not force them to undock, as soon as they
+// are undocked they dock back." A parked flee read a ship that was suddenly in
+// space as one still on its way out, and sent it straight back to the station --
+// every two seconds, for ever. Nothing else can undock a parked pilot: this rung
+// drops its own latch before every undock it issues, and no rung below it runs
+// while it is parked.
+
+/** A flee that has already delivered the ship to a station. */
+function parkedInStation(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory {
+  return fleeing({ arrivedSafe: true, ...overrides });
+}
+
+test("a pilot the operator undocks is not docked again", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, docked: false }),
+    parkedInStation(),
+  );
+  assert.notEqual(decision.action.kind, "dock");
+  assert.equal(decision.memory.flee, null, "the flee is over — a human is flying this ship");
+});
+
+test("and it stops sending itself home, rather than re-latching on the next tick", () => {
+  let memory = parkedInStation();
+  const pulledOut = fleeObs({ health: 0.1, docked: false });
+  for (let tick = 0; tick < 5; tick += 1) {
+    const decision = decideCompanionAction(REQUEST, pulledOut, memory);
+    memory = decision.memory;
+    assert.notEqual(decision.action.kind, "dock", "no tick may put it back in the station");
+  }
+  assert.equal(memory.fleeTripsSpent, REQUEST.maxFleeAttempts);
+});
+
+// The override is not permanent: a ship that actually recovers earns its budget
+// back the ordinary way, and may look after itself again later in the same run.
+test("an overridden pilot that recovers gets its flee budget back", () => {
+  let nowMs = 1_000_000;
+  let memory: CompanionLadderMemory = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, docked: false }),
+    parkedInStation(),
+    nowMs,
+  ).memory;
+  assert.equal(memory.fleeTripsSpent, REQUEST.maxFleeAttempts);
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 16; tick += 1) {
+    nowMs += 2_000;
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+  }
+  assert.equal(memory.fleeTripsSpent, 0);
+});
+
+// --- what the trigger stamps --------------------------------------------------
+
+test("a flee that leaves with the armour whole says so, and one that does not, does not", () => {
+  const shieldOnly = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(shieldOnly.memory.flee?.onlyTheShieldWasHurt, true);
+
+  const armourToo = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 0.1, hullRatio: 1 }),
+  );
+  assert.equal(armourToo.memory.flee?.onlyTheShieldWasHurt, false);
+});
+
+// A layer that did not read is a layer nobody can vouch for, and vouching for it
+// is what would send a hurt ship back out of a station on no information.
+test("a layer that could not be read at the trigger never counts as clear", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: null, hullRatio: 1 }),
+  );
+  assert.equal(decision.memory.flee?.onlyTheShieldWasHurt, false);
 });
 
 // The safe-spot half of a return: no station to undock from, so a pilot out at

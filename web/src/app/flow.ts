@@ -5946,11 +5946,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         store.apply({ type: "targeting/targets", targetIDs: lockedTargetIDs });
         const status = decodeFlightStatus(statusStep.flight);
         void observeFlightStatus(status);
-        // ⚠ THE REPAIR QUOTE IS DOUBLE-GATED, and it has to be. It is a sixth
-        // round trip on a two-second tick, so it is gated on the operator
-        // having ticked `repairsAtStation` -- the same cost gate the chat read
-        // and the drone bay are under -- AND on actually being docked, because
-        // the shop only answers to a ship in its own station.
+        // ⚠ THE REPAIR QUOTE IS GATED ON BEING DOCKED, AND ON NOTHING ELSE ANY
+        // MORE. It is a sixth round trip on a two-second tick, so it is gated on
+        // the shop being answerable at all -- the ship has to be in the station
+        // -- which also makes it free in every tick a companion spends flying.
+        //
+        // ⚠ IT USED TO BE GATED ON `repairsAtStation` AS WELL, AND THAT SECOND
+        // GATE WAS A BUG RATHER THAN A SAVING. The quote is not a purchase: it
+        // is the ONLY thing that can tell a docked pilot whether its hull is
+        // whole, because `obs.health` is folded from the space snapshot and a
+        // station has none. So a pilot that does not pay for repairs was a pilot
+        // that could never learn it was fixed -- including when its operator had
+        // just repaired it BY HAND, which is how this was found (2026-09-13: "I
+        // repaired the one ship which had damaged armor and it still refuses to
+        // undock"). Asking the shop what is damaged costs ISK nowhere; the
+        // setting still decides whether anything is ever PAID for, which is the
+        // thing an operator was actually consenting to.
         //
         // It runs AFTER the Promise.all rather than inside it because `docked`
         // is not known until the flight status resolves. That costs a serial
@@ -5961,7 +5972,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // contract the DSL's repair-ship read keeps, and the flee rung treats
         // it as a tick spent waiting rather than as permission to undock.
         let damagedItemIDs: FleetCompanionObservation["damagedItemIDs"] = null;
-        if (liveCompanionRequest?.repairsAtStation === true && status.docked) {
+        if (liveCompanionRequest !== null && status.docked) {
           try {
             const quotes = await quoteShipRepair();
             damagedItemIDs = quotes === null ? null : quotes.map((quote) => quote.itemID);
