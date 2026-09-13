@@ -89,3 +89,70 @@ export function companionSummaryWords(tally: CompanionTally): string {
   if (tally.idle > 0) parts.push(`${tally.idle} idle`);
   return parts.join(", ");
 }
+
+/**
+ * Whether a pilot is in a fleet, for the roster's own column.
+ *
+ * ⚠ TWO SOURCES, AND THE RUNNING ONE WINS. A companion that is flying reports
+ * the fleet IT can see, which is the reading its own decisions are made on —
+ * that is the answer worth showing about a run. An idle pilot has no companion
+ * to ask, so the column falls back to the Fleet Center's availability, the same
+ * read the panel's own checklist uses.
+ *
+ * ⚠ AND AN IDLE PILOT MUST NOT READ AS "no". Before anything has fetched a
+ * roster the honest answer is "not known": `unavailable` means the read failed
+ * and `unknown` means nobody has asked yet, and neither is a pilot who is out
+ * of a fleet. Flattening either into a no is how a roster tells a player to go
+ * join a fleet they are already in.
+ */
+export function inFleetFrom(
+  availability: string | null,
+  companionInFleet: boolean | null,
+  companionHoldsTheShip: boolean,
+): boolean | null {
+  if (companionHoldsTheShip && companionInFleet !== null) {
+    return companionInFleet;
+  }
+  if (availability === "ready") return true;
+  if (availability === "not-in-fleet") return false;
+  return null;
+}
+
+/**
+ * The three columns that describe a RUN, blanked when there is no run.
+ *
+ * ⚠ THE SLICE OUTLIVES ITS RUN, AND A ROSTER THAT FORGETS THAT LIES QUIETLY.
+ * A companion's store slice keeps its last readout after it stops, so a stopped
+ * pilot went on reading "following its own judgement - can tag: no" across the
+ * roster: three confident statements about a pilot that is doing nothing at
+ * all, and "can tag: no" in particular reads as a standing fact about the pilot
+ * rather than the last thing a finished run happened to see. Found by stopping
+ * one and watching the row keep talking.
+ *
+ * ⚠ IN FLEET IS NOT IN HERE, deliberately. That column has a live source of its
+ * own for an idle pilot (`inFleetFrom`, off the Fleet Center read), so blanking
+ * it would throw away an answer that is still true.
+ *
+ * Paused counts as holding, by `holdsTheShip`'s rule: a paused companion has
+ * not let go, and its last order is still the order it will act on when it
+ * resumes.
+ */
+export interface CompanionRunFacts<T> {
+  readonly followingOrderFrom: T | null;
+  readonly lastOrderHeard: string | null;
+  readonly canTag: boolean | null;
+}
+
+export function runFactsFor<T>(
+  holding: boolean,
+  facts: CompanionRunFacts<T> | null,
+): CompanionRunFacts<T> {
+  if (!holding || facts === null) {
+    return { followingOrderFrom: null, lastOrderHeard: null, canTag: null };
+  }
+  return {
+    followingOrderFrom: facts.followingOrderFrom,
+    lastOrderHeard: facts.lastOrderHeard,
+    canTag: facts.canTag,
+  };
+}

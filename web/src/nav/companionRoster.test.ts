@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import {
   companionStatusWords,
   companionSummaryWords,
+  inFleetFrom,
+  runFactsFor,
   serverCompanions,
   tallyCompanions,
 } from "./companionRoster.ts";
@@ -78,4 +80,68 @@ test("what IS flying is counted, and what is resting is named separately", () =>
     "2 running, 1 paused, 1 idle",
   );
   assert.equal(companionSummaryWords(tallyCompanions(["running"])), "1 running");
+});
+
+// ─── the in-fleet column ─────────────────────────────────────────────────────
+
+test("an idle pilot's fleet comes from the Fleet Center read, not from nowhere", () => {
+  // Without this the column reads "not known" for every pilot until something
+  // is started — and "who is not in the fleet yet" is half of what the roster
+  // is for.
+  assert.equal(inFleetFrom("ready", null, false), true);
+  assert.equal(inFleetFrom("not-in-fleet", null, false), false);
+});
+
+test("⚠ a fleet nobody has read yet is NOT a pilot out of a fleet", () => {
+  // `unknown` is nobody asked, `unavailable` is the read failed. Flattening
+  // either into a no is how a roster tells a player to go and join a fleet they
+  // are already in.
+  assert.equal(inFleetFrom("unknown", null, false), null);
+  assert.equal(inFleetFrom("unavailable", null, false), null);
+  assert.equal(inFleetFrom(null, null, false), null);
+});
+
+test("a RUNNING companion reports the fleet it can see, over the panel's read", () => {
+  // Its own decisions are made on that reading, so it is the one worth showing
+  // about a run — even when the two disagree.
+  assert.equal(inFleetFrom("not-in-fleet", true, true), true);
+  assert.equal(inFleetFrom("ready", false, true), false);
+});
+
+test("a companion that has not reported yet falls back rather than saying no", () => {
+  assert.equal(inFleetFrom("ready", null, true), true);
+  assert.equal(inFleetFrom("unknown", null, true), null);
+});
+
+// ─── the run-only columns ────────────────────────────────────────────────────
+
+const LAST_RUN = {
+  followingOrderFrom: "own-ladder" as const,
+  lastOrderHeard: "align",
+  canTag: false,
+};
+
+test("⚠ a STOPPED companion's row stops talking about the run that ended", () => {
+  // FOUND BY STOPPING ONE AND WATCHING THE ROW. The store slice keeps its last
+  // readout after a run ends, so the roster went on printing "following its own
+  // judgement - can tag: no" about a pilot doing nothing at all — and "can tag:
+  // no" in particular reads as a standing fact about the pilot rather than the
+  // last thing a finished run happened to see.
+  assert.deepEqual(runFactsFor(false, LAST_RUN), {
+    followingOrderFrom: null,
+    lastOrderHeard: null,
+    canTag: null,
+  });
+});
+
+test("a run that IS holding the ship reports everything it knows", () => {
+  assert.deepEqual(runFactsFor(true, LAST_RUN), LAST_RUN);
+});
+
+test("a pilot with no companion slice at all reads as unknown, never as no", () => {
+  assert.deepEqual(runFactsFor(true, null), {
+    followingOrderFrom: null,
+    lastOrderHeard: null,
+    canTag: null,
+  });
 });

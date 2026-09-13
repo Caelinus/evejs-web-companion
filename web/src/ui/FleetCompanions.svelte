@@ -40,6 +40,8 @@
   import {
     companionStatusWords,
     companionSummaryWords,
+    inFleetFrom,
+    runFactsFor,
     serverCompanions,
     tallyCompanions,
   } from "../nav/companionRoster.ts";
@@ -87,6 +89,16 @@
     readonly characterID: number | null;
     readonly companion: FleetCompanionState;
     readonly holder: ShipControllerID | null;
+    /**
+     * The Fleet Center's own answer for this pilot.
+     *
+     * ⚠ WITHOUT IT THE IN-FLEET COLUMN IS DEAD UNTIL SOMETHING RUNS. A
+     * companion's slice only carries a fleet reading while it is flying, so a
+     * roster that asked only the slice would print "not known" against every
+     * idle pilot — and "who is not in the fleet yet" is half of what this
+     * window is for. `inFleetFrom` owns which of the two wins.
+     */
+    readonly fleetAvailability: string | null;
   }
   let live = $state<Record<string, LivePilot>>({});
   $effect(() => {
@@ -104,6 +116,7 @@
           characterID: state.station.online?.characterID ?? null,
           companion: state.companion,
           holder: state.bots.runningBotID,
+          fleetAvailability: state.fleet.availability,
         };
       }
       live = next;
@@ -114,11 +127,35 @@
       unsubs.push(session.store.flight.subscribe(refresh));
       unsubs.push(session.store.companion.subscribe(refresh));
       unsubs.push(session.store.bots.subscribe(refresh));
+      unsubs.push(session.store.fleet.subscribe(refresh));
     }
     refresh();
     return () => {
       for (const unsub of unsubs) unsub();
     };
+  });
+
+  /**
+   * Ask each pilot for its fleet, once.
+   *
+   * ⚠ THIS WINDOW HAS TO ASK IN ITS OWN RIGHT. The per-pilot panel loads the
+   * fleet for the pilot it is mounted on, which is exactly the one pilot the
+   * roster did not need help with; nothing else in the app fetches a
+   * BACKGROUNDED pilot's fleet, so every other row would sit at "not known"
+   * forever. Best-effort: a read that fails leaves the column at "not known",
+   * which is the honest answer and what that verdict is for.
+   *
+   * ⚠ ONCE PER PILOT, tracked in a set rather than by a mount. The effect
+   * re-runs whenever the roster changes — a pilot coming online, a store tick —
+   * and a fetch per re-run would be a poll nobody asked for.
+   */
+  const fleetAsked = new Set<string>();
+  $effect(() => {
+    for (const session of pilots) {
+      if (fleetAsked.has(session.id)) continue;
+      fleetAsked.add(session.id);
+      void Promise.resolve(session.flow.loadFleet()).catch(() => {});
+    }
   });
 
   // --- the server's own companions -----------------------------------------
@@ -161,12 +198,20 @@
   const tabRows = $derived(
     pilots.map((session) => {
       const state = live[session.id];
+      const holding = holdsTheShip(state?.companion?.status ?? "idle");
       return {
         session,
         name: state?.name ?? "This pilot",
         where: state?.where ?? "Unknown",
         companion: state?.companion ?? null,
         holder: state?.holder ?? null,
+        inFleet: inFleetFrom(
+          state?.fleetAvailability ?? null,
+          state?.companion?.inFleet ?? null,
+          holding,
+        ),
+        // The run-only columns, silent when no run holds this ship.
+        facts: runFactsFor(holding, state?.companion ?? null),
         onServer:
           state?.characterID !== null && state?.characterID !== undefined
             ? serverHeldCharacterIDs.has(state.characterID)
@@ -328,12 +373,17 @@
                     <span class="note"> — a bot is flying this ship</span>
                   {/if}
                 </td>
-                <td data-label="In fleet">{inFleetWords(state?.inFleet ?? null)}</td>
+                <td data-label="In fleet">{inFleetWords(row.inFleet)}</td>
+                <!-- ⚠ `row.facts`, NOT THE SLICE. The companion slice keeps its
+                     last readout after a run ends, so reading it directly left a
+                     stopped pilot still claiming to be following orders and
+                     still reporting whether it could tag — three confident
+                     sentences about a pilot doing nothing. -->
                 <td data-label="Following orders from"
-                  >{orderFromWords(state?.followingOrderFrom ?? null)}</td
+                  >{orderFromWords(row.facts.followingOrderFrom)}</td
                 >
-                <td data-label="Last order heard">{state?.lastOrderHeard ?? "-"}</td>
-                <td data-label="Can tag">{canTagWords(state?.canTag ?? null)}</td>
+                <td data-label="Last order heard">{row.facts.lastOrderHeard ?? "-"}</td>
+                <td data-label="Can tag">{canTagWords(row.facts.canTag)}</td>
               </tr>
             {/if}
           {/each}
