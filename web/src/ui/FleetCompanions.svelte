@@ -318,12 +318,14 @@
       const fleetSlice = session.store.fleet.get();
       const inFleet = inFleetFrom(fleetSlice.availability, companion?.inFleet ?? null, holding);
 
-      // ⚠ THE FINDER IS READ ONLY WHILE IT IS NEEDED. A pilot that is settled in
-      // the op's fleet needs no listing, and paying for one per pilot per tick
-      // for the whole of an op is a poll nobody asked for. The moment membership
-      // drops, the row is unsettled again and the read comes back.
-      const settled = watch.verdict?.state === "in" && inFleet === true;
-      const finder = settled ? watch.finder : await session.flow.readFleetFinder();
+      // ⚠ READ EVERY TICK, EVEN FOR A PILOT ALREADY IN. It is the only thing
+      // that NAMES the fleet a pilot is in, and a stale name is how a row comes
+      // to claim the wrong fleet: an earlier version skipped this read once a
+      // row settled, and retyping the op's fleet then left a pilot flying in
+      // "Test" reading `In "Nightshift"`. Two argless reads per unsettled pilot
+      // per ten seconds is the cheap half of this tick — `loadFleet` above is
+      // the five-call one, and that is the one that gets skipped.
+      const finder = await session.flow.readFleetFinder();
 
       const verdict = decideFleetJoin(
         {

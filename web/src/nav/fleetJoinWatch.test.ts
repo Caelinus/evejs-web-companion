@@ -74,12 +74,25 @@ test('"unknown" tries the accept rather than assuming approval', () => {
 
 test("membership ends the walk, and the row says which fleet", () => {
   const out = decideFleetJoin(
-    reads({ inFleet: true, currentFleetID: 7 }),
+    reads({ inFleet: true, currentFleetID: 7, currentFleetName: OP }),
     { appliedTo: 7, acceptAttempts: 1 },
   );
   assert.equal(out.state, "in");
   assert.deepEqual(out.action, { kind: "wait" });
   assert.match(out.words, /Gabu ops/);
+});
+
+test("⚠ FOUND LIVE — retyping the op's fleet does not rename the one a pilot is IN", () => {
+  // The first live run caught this: the rung that recognised "we put it there"
+  // ran BEFORE the name check and printed the TYPED name, so retyping the
+  // field left a pilot sitting in "Gabu ops" reading `In "Nightshift"`. A watch
+  // may only ever name a fleet the server named back.
+  const out = decideFleetJoin(
+    reads({ wantedName: "Nightshift", inFleet: true, currentFleetID: 7, currentFleetName: OP }),
+    { appliedTo: 7, acceptAttempts: 1 },
+  );
+  assert.equal(out.state, "blocked");
+  assert.match(out.words, /Already in "Gabu ops", not "Nightshift"/);
 });
 
 test("a previous lap's answer is not mistaken for this one's", () => {
@@ -186,12 +199,15 @@ test("a pilot already in the named fleet when it was added is simply in", () => 
 
 test("an advert closed AFTER this watch got the pilot in does not un-join it", () => {
   // A boss who stops advertising once everyone is aboard must not turn a
-  // flying companion's row into a problem.
+  // flying companion's row into a problem — and must not get it a fleet name
+  // nothing can prove either.
   const out = decideFleetJoin(
     reads({ inFleet: true, currentFleetID: 7, currentFleetName: null }),
     { appliedTo: 7, acceptAttempts: 1 },
   );
   assert.equal(out.state, "in");
+  assert.doesNotMatch(out.words, /Gabu ops/, "it cannot name a fleet the server did not name");
+  assert.match(out.words, /no longer advertised/);
 });
 
 // ─── the two systems that must not fight ─────────────────────────────────────

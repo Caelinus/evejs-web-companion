@@ -202,19 +202,16 @@ export function decideFleetJoin(reads: FleetJoinReads, memory: FleetJoinMemory):
   }
 
   if (reads.inFleet === true) {
-    // 3a. This watch put it there. Settled, and settled WITHOUT asking the
-    //     advert: a boss who closes the advert once everyone is in must not
-    //     turn a flying companion's row into a problem.
-    if (memory.appliedTo !== null && reads.currentFleetID === memory.appliedTo) {
-      return verdict("in", `In "${wanted}".`, WAIT, memory);
-    }
-    // 3b. It was already in the fleet when it was added, or joined by hand.
-    //     The advert's name is the only thing that can tell the op's fleet from
-    //     somebody else's.
-    if (reads.currentFleetName !== null && sameName(reads.currentFleetName, wanted)) {
-      return verdict("in", `In "${wanted}".`, WAIT, memory);
-    }
+    // ⚠ THE NAME IS ASKED FIRST, AND BEATS "WE PUT IT THERE". An earlier draft
+    // checked `appliedTo` first and printed the TYPED name against it, which
+    // was found lying in the first live run: retype the op's fleet while a
+    // pilot is already flying in the old one and its row read `In "Nightshift"`
+    // about a pilot sitting in "Test". A watch may only ever name a fleet the
+    // server named back.
     if (reads.currentFleetName !== null) {
+      if (sameName(reads.currentFleetName, wanted)) {
+        return verdict("in", `In "${reads.currentFleetName.trim()}".`, WAIT, memory);
+      }
       return verdict(
         "blocked",
         `Already in "${reads.currentFleetName.trim()}", not "${wanted}". Take it out of that fleet, or remove it here.`,
@@ -222,10 +219,16 @@ export function decideFleetJoin(reads: FleetJoinReads, memory: FleetJoinMemory):
         EMPTY_JOIN_MEMORY,
       );
     }
-    // 3c. In a fleet nobody is advertising, so there is no way to tell whether
-    //     it is the one you named. ⚠ NOT TREATED AS THE TARGET. The cost of
-    //     guessing right is one saved click; the cost of guessing wrong is an
-    //     unattended ship taking orders from a fleet the player never picked.
+    // In a fleet that is not advertised, so nothing can name it. This watch put
+    // it there and says so without claiming WHICH fleet: a boss who closes the
+    // advert once everyone is in must not turn a flying companion's row into a
+    // problem, and must not get it a name it cannot prove either.
+    if (memory.appliedTo !== null && reads.currentFleetID === memory.appliedTo) {
+      return verdict("in", "In the fleet it joined, which is no longer advertised.", WAIT, memory);
+    }
+    // ⚠ AND AN UNNAMEABLE FLEET IT DID NOT JOIN IS NOT TREATED AS THE TARGET.
+    // The cost of guessing right is one saved click; the cost of guessing wrong
+    // is an unattended ship taking orders from a fleet the player never picked.
     return verdict(
       "blocked",
       `Already in a fleet, and that fleet is not advertised, so it cannot be told from "${wanted}". Advertise it, or take this pilot out of it.`,

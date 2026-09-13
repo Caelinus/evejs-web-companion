@@ -193,7 +193,25 @@ it is managed, and offers no controls for it.
   — the companion is gone from both bot surfaces, and a hull it holds is still
   named on both.
 
-## Still owed
+## The live run, 2026-09-13
 
-**A live run of the join.** Tests did not catch the apply/accept defect the
-first time and cannot prove this one: only a real advertised fleet can.
+Driven against a real advertised fleet with two pilots: add -> apply -> accept
+-> in the fleet -> flying, both of them; remove -> stopped and out of the fleet
+(the fleet's own member count dropped with it); a name nobody is advertising ->
+both rows waiting, indefinitely; and the roster, the fleet name and the limits
+all came back after a BFF rebuild and a reload.
+
+**It found one defect that the tests did not.** The rung that recognised "this
+watch put the pilot there" ran BEFORE the name check and printed the *typed*
+name against it, so retyping the op's fleet while a pilot was already flying in
+the old one left its row reading `In "Nightshift"` about a pilot sitting in
+"Test". Fixed by asking the advert's name first and never naming a fleet the
+server did not name back: a pilot in a fleet that is no longer advertised now
+reads "In the fleet it joined, which is no longer advertised."
+
+That also settled a cost question in the driver the wrong way round. The finder
+read had been skipped for a settled row, to save two calls; but it is the only
+read that NAMES the fleet a pilot is in, so skipping it is exactly what let a
+stale name stand. It is unconditional now. What is skipped instead is
+`flow.loadFleet` — five calls — whenever a flying companion has already
+reported its own fleet, which is both cheaper and fresher.

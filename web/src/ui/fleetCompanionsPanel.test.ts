@@ -129,6 +129,11 @@ test("⚠ a flying companion's own fleet reading is used, not re-fetched every b
   // from the other direction.
   assert.match(SOURCE, /if \(runReading !== true\) \{/);
   assert.match(SOURCE, /inFleetFrom\(fleetSlice\.availability/);
+  // ⚠ BUT THE FINDER READ IS UNCONDITIONAL, and that is the other half of the
+  // same lesson. It is the only read that NAMES the fleet a pilot is in; an
+  // earlier version skipped it once a row settled, and retyping the op's fleet
+  // then left a pilot flying in one fleet claiming to be in another.
+  assert.match(SOURCE, /const finder = await session\.flow\.readFleetFinder\(\);/);
 });
 
 test("⚠ a refused apply is reported, not silently retried for ever", () => {
