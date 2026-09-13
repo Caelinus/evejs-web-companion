@@ -412,7 +412,12 @@
    * goes back to full size and the strip grows with it. A pointer query, not a
    * width — a desktop-width tablet is still a finger. */
   @media (pointer: fine) {
-    .panel-head { padding-block: 0.15rem; }
+    /* ⚠ NOT AS TIGHT AS IT WILL GO. The first cut of this was `0.15rem`, which
+     * put a 30px button inside a 36px band: the controls touched the title bar
+     * above them and the divider below, and the strip read as buttons glued to
+     * the title rather than as a row of its own. A strip needs to be thin AND
+     * to have air in it; these two are not the same instruction. */
+    .panel-head { padding-block: 0.3rem; }
     /* ⚠ ANY CONTROL IN THE STRIP, not just a button inside `.controls`. The
      * first cut of this rule read `.panel-head > .controls > button` and missed
      * three of the busiest windows: Fleet puts its button straight in the head,
@@ -433,7 +438,7 @@
      * A head with nothing visible in it still collapses to nothing — that rule
      * lives with the title-clipping it belongs to, and comes later in the file
      * so it wins over this floor. */
-    .panel-head { min-height: 2.2rem; }
+    .panel-head { min-height: 2.5rem; }
   }
 
   /* A section header inside a panel body gets a small accent tick, so the eye
@@ -3335,6 +3340,20 @@
     display: flex;
     flex-direction: column;
     min-width: 16rem;
+    /* ⚠ A WINDOW IS A FRAME, NOT A CARD — so it has no padding of its own.
+     *
+     * `.win` is a <section>, which meant it quietly took the global panel's
+     * `0.75rem 1rem`: 12px above the title bar and 16px down each side, between
+     * the frame and the bar. A title bar floating inside its own window reads as
+     * a panel that happens to have a strip on top, not as a window — the bar has
+     * to MEET the frame for the frame to be the window's edge.
+     *
+     * The body keeps its own breathing room (`.win-body`), which is where that
+     * inset belonged all along. The margin goes for the same reason: a
+     * free-floating window is positioned, so the panel rhythm below it was only
+     * ever dead space. */
+    padding: 0;
+    margin: 0;
     background: color-mix(in srgb, var(--color-panel) 76%, transparent);
     -webkit-backdrop-filter: blur(14px) saturate(1.15);
     backdrop-filter: blur(14px) saturate(1.15);
@@ -3368,7 +3387,52 @@
    * `.win` is a <section>, so it would otherwise inherit the global panel's
    * ::before accent hairline; that is cancelled below rather than left to fight
    * with this. */
-  .win::before { display: none; }
+  /* ⚠ THE CHAMFER HAS TO BE DRAWN; `clip-path` ONLY CUTS.
+   *
+   * The two bevelled corners are made by clipping the box, and clipping removes
+   * whatever was there — the border along that diagonal included. So the frame
+   * ran down the left side, stopped, and started again along the bottom with
+   * nothing joining them: the corner did not read as machined, it read as
+   * missing. (Reported from a screenshot, which is the only place it shows.)
+   *
+   * This replaces `.win::before`'s old job of cancelling the global panel
+   * hairline — cancelling it is still the effect, since none of that rule's
+   * geometry survives here. */
+  .win {
+    --chamfer-line: var(--color-line-strong);
+  }
+  .win.focused {
+    --chamfer-line: var(--color-accent-dim);
+  }
+  .win::before {
+    content: "";
+    display: block;
+    position: absolute;
+    inset: 0;
+    top: 0;
+    height: auto;
+    pointer-events: none;
+    /* One hairline per bevel, drawn as a 45° band inside a corner-sized box.
+     * Both cuts run the same way (top-left to bottom-right of their own box),
+     * so one gradient serves both — only the position differs. */
+    background:
+      linear-gradient(
+          45deg,
+          transparent calc(50% - 0.5px),
+          var(--chamfer-line) calc(50% - 0.5px),
+          var(--chamfer-line) calc(50% + 0.5px),
+          transparent calc(50% + 0.5px)
+        )
+        100% 0 / 0.72rem 0.72rem no-repeat,
+      linear-gradient(
+          45deg,
+          transparent calc(50% - 0.5px),
+          var(--chamfer-line) calc(50% - 0.5px),
+          var(--chamfer-line) calc(50% + 0.5px),
+          transparent calc(50% + 0.5px)
+        )
+        0 100% / 0.72rem 0.72rem no-repeat;
+  }
   .win.focused::after {
     content: "";
     position: absolute;
@@ -3376,13 +3440,14 @@
     pointer-events: none;
     --bracket: var(--color-accent);
     --arm: 0.6rem;
+    /* ⚠ TWO CORNERS, NOT FOUR — the square ones. Arms were drawn on all four,
+     * and the other two are exactly where the chamfer cuts: the clip sliced each
+     * bracket into a stub that ended in mid-air a few pixels short of a corner
+     * that was itself unstroked. A bracket marks a right angle; on a bevel it
+     * has no angle to mark and can only argue with the cut. */
     background:
       linear-gradient(var(--bracket), var(--bracket)) 0 0 / var(--arm) 1px no-repeat,
       linear-gradient(var(--bracket), var(--bracket)) 0 0 / 1px var(--arm) no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 100% 0 / var(--arm) 1px no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 100% 0 / 1px var(--arm) no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 0 100% / var(--arm) 1px no-repeat,
-      linear-gradient(var(--bracket), var(--bracket)) 0 100% / 1px var(--arm) no-repeat,
       linear-gradient(var(--bracket), var(--bracket)) 100% 100% / var(--arm) 1px no-repeat,
       linear-gradient(var(--bracket), var(--bracket)) 100% 100% / 1px var(--arm) no-repeat;
   }
@@ -5730,9 +5795,25 @@
    * Zeroing the bleed rather than matching it to `.win-body`'s padding keeps
    * the number out of two places; the head simply starts where its panel does.
    */
+  /* ⚠ AND THE SAME IS TRUE UPWARDS. The head's negative margin is `-0.75rem`
+   * on every side for one reason: cancel the panel's own padding so the strip
+   * bleeds to its edges. A windowed panel has NO padding to cancel, so the top
+   * margin stopped being a cancellation and became a 12px pull — dragging the
+   * strip up through the window body's own breathing room until the controls
+   * sat 2px under the title bar. Reported as "buttons glued to title", which is
+   * exactly what it looked like.
+   *
+   * ⚠ SCOPED TO THE FLATTENED ROOT, not to every head in the window. A panel
+   * nested deeper (the Bot Builder's sections, the companion window's per-pilot
+   * detail) keeps its padding, so its head still has something to cancel and
+   * must keep the bleed. `section` is listed beside `.panel` because that is
+   * what the flattening rule above matches — Settings' root is
+   * `.settings-panel`, and a rule that named only `.panel` would miss it. */
+  .win-body > section > .panel-head,
   .win-body > .panel > .panel-head {
     margin-inline: 0;
     padding-inline: 0;
+    margin-top: 0;
   }
 
   /* "Send drones" on a hostile row — the cockpit's fastest path, carried back
