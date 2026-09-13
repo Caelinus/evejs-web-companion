@@ -117,3 +117,112 @@ test("one apply produces exactly one store notification", () => {
   assert.equal(notifications, 1);
   stop();
 });
+
+// --- the pushed lock event (`OnTarget`) --------------------------------------
+//
+// ⚠ WHY THE SLICE TAKES A PUSH AT ALL. `targeting/targets` is the server's
+// answer to `GetTargets` and stays the authority, but it only ever arrives on a
+// POLL — so a lock that completed a moment after one read was invisible until
+// the next. That is dead time the fleet companion cannot afford: it will not
+// send drones onto a ship it has not locked, and will not open fire until the
+// lock is observed. These events let the same fact land the instant the server
+// states it.
+
+test("a pushed lock joins the list without waiting for a poll", () => {
+  const store = createClientStore();
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  assert.deepEqual(store.targeting.get().lockedTargetIDs, [ROCK_ID]);
+});
+
+// The acquiring note is what the page shows as "Locking…". A landed lock ends
+// it, on exactly the rule `targeting/targets` already applies.
+test("a pushed lock retires the acquiring note it belongs to", () => {
+  const store = createClientStore();
+  store.apply({ type: "targeting/acquiring", targetID: ROCK_ID });
+  store.apply({ type: "targeting/acquiring", targetID: OTHER_ID });
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  const state = store.targeting.get();
+  assert.deepEqual(state.lockedTargetIDs, [ROCK_ID]);
+  assert.deepEqual(state.acquiringTargetIDs, [OTHER_ID], "only the landed one is retired");
+});
+
+// ⚠ AND SO DOES A FAILURE. An abandoned or refused lock is not still being
+// acquired either, and the only other place the note is cleared is a successful
+// poll — which by definition never names a target that failed to lock.
+test("a pushed lock failure retires the acquiring note too", () => {
+  const store = createClientStore();
+  store.apply({ type: "targeting/acquiring", targetID: ROCK_ID });
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "lost", targetID: ROCK_ID, reason: "TargetingAttemptCancelled" },
+  });
+  const state = store.targeting.get();
+  assert.deepEqual(state.acquiringTargetIDs, []);
+  assert.deepEqual(state.lockedTargetIDs, []);
+});
+
+test("a pushed clear empties the locks and everything being acquired", () => {
+  const store = createClientStore();
+  store.apply({ type: "targeting/targets", targetIDs: [ROCK_ID, OTHER_ID] });
+  store.apply({ type: "targeting/acquiring", targetID: 50001250 });
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "cleared", targetID: null, reason: null },
+  });
+  const state = store.targeting.get();
+  assert.deepEqual(state.lockedTargetIDs, []);
+  assert.deepEqual(state.acquiringTargetIDs, []);
+});
+
+// ⚠ A PUSH IS NOT A LOAD. `loaded` says the list has been read from the server
+// at least once; a single push says one lock landed and nothing about the rest,
+// so a page that hid its panel until `loaded` must stay hidden.
+test("a pushed lock does not mark the slice loaded", () => {
+  const store = createClientStore();
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  assert.equal(store.targeting.get().loaded, false);
+});
+
+// The drain and the live stream are two paths into the same dispatch, so the
+// same push arriving twice is ordinary rather than exceptional.
+//
+// ⚠ THE WHOLE-STORE VERSION STILL BUMPS on every apply — that is the store's
+// standing contract and not this event's business. What the fold buys is that
+// the SLICE is not re-set, so a per-slice reader sees the same object and any
+// memo over it holds.
+test("the same pushed lock twice is one lock, and does not churn the slice", () => {
+  const store = createClientStore();
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  const before = store.targeting.get();
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  assert.deepEqual(store.targeting.get().lockedTargetIDs, [ROCK_ID]);
+  assert.equal(store.targeting.get(), before, "a fold that changed nothing must not re-set the slice");
+});
+
+// ⚠ THE POLL STILL WINS. Whatever a push folded, the next `GetTargets` answer
+// replaces wholesale — which is what makes a lost, doubled or out-of-order push
+// cost freshness and never correctness.
+test("the next poll overrides whatever a push folded", () => {
+  const store = createClientStore();
+  store.apply({
+    type: "targeting/lock-event",
+    event: { kind: "locked", targetID: ROCK_ID, reason: null },
+  });
+  store.apply({ type: "targeting/targets", targetIDs: [OTHER_ID] });
+  assert.deepEqual(store.targeting.get().lockedTargetIDs, [OTHER_ID]);
+});

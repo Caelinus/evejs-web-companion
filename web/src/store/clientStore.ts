@@ -100,6 +100,7 @@ import type {
 import type { NamesState } from "./names.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import { applyJamEvent, type ActiveJam } from "../bridge/jamNotifications.ts";
+import { applyTargetEvent } from "../bridge/targetNotifications.ts";
 
 // --- Typed state slices ----------------------------------------------------
 
@@ -1946,6 +1947,32 @@ export function createClientStore(): ClientStore {
       case "targeting/cleared":
         targeting.set(INITIAL_TARGETING);
         break;
+      // One `OnTarget` push, folded into the locked list so a lock is visible
+      // the moment it completes rather than on the next `GetTargets` poll.
+      //
+      // ⚠ THE ACQUIRING NOTE IS RETIRED HERE TOO, on exactly the same rule
+      // `targeting/targets` above applies: a lock that has ARRIVED is no longer
+      // being acquired. Without this the page would go on saying "Locking…" for
+      // a ship the server has just confirmed, until the next poll caught up --
+      // which is precisely the tick of lag this event exists to remove.
+      //
+      // ⚠ AND A `lost` RETIRES IT AS WELL. An abandoned or refused lock is not
+      // still being acquired either, and leaving the note would strand it: the
+      // only other place it is cleared is a successful `targeting/targets`,
+      // which by definition never names a target that failed to lock.
+      case "targeting/lock-event": {
+        const prev = targeting.get();
+        const locked = applyTargetEvent(prev.lockedTargetIDs, event.event);
+        const acquiring =
+          event.event.kind === "cleared"
+            ? []
+            : prev.acquiringTargetIDs.filter((id) => id !== event.event.targetID);
+        if (locked === prev.lockedTargetIDs && acquiring.length === prev.acquiringTargetIDs.length) {
+          break;
+        }
+        targeting.set({ ...prev, lockedTargetIDs: locked, acquiringTargetIDs: acquiring });
+        break;
+      }
       // --- R24 slice C: module cycle times ---------------------------------
       case "targeting/base-cycles": {
         // The base figure NEVER displaces one the server gave us. Attribute 73

@@ -18,6 +18,7 @@ import { createClientStore } from "../store/clientStore.ts";
 import {
   DEFAULT_COMPANION_SETUP,
   DEFAULT_FLEET_COMPANION_REQUEST,
+  FLEET_COMPANION_CADENCE_MS,
   type FleetCompanionRequest,
 } from "../nav/fleetCompanionLoop.ts";
 import { FLEET_BROADCAST_TTL_MS } from "../bridge/fleetBroadcasts.ts";
@@ -1514,4 +1515,200 @@ test("a grid with nothing lootable on it never asks — a read nobody could use 
     "same rule as the gated drone-bay read: a companion never pays for an answer no rung will read",
   );
   flow.stopFleetCompanion();
+});
+
+// --- waking the companion on a push -------------------------------------------
+//
+// ⚠ WHAT THIS PINS IS THE REACTION TIME ITSELF. Every fact a companion obeys --
+// a fleet broadcast, a commander's target tag, a landed lock, a tackle jam --
+// reaches the browser as a PUSH and lands in the store fully decoded the
+// instant the server sends it. The loop then sat out the remainder of its
+// cadence before it so much as looked, which is where "they take too long to
+// react to broadcasts" came from: the order was already here, and the pilot was
+// asleep on top of it. The sleep is a CEILING now rather than a fixed beat.
+//
+// ⚠ AND THE FLOOR IS PART OF THE CONTRACT, not an implementation detail. A
+// fleet fight pushes a great many of these -- every tag change, every cycle of
+// every tackle module -- and a wake that ran the tick outright on each one
+// would fire the tick's six round trips as fast as the wire could deliver them.
+// A wake brings the sleep's end forward TO the floor, never to zero.
+
+function makeFakeCompanionSource(): {
+  factory: (url: string) => {
+    onmessage: ((event: { data: string }) => void) | null;
+    onopen: (() => void) | null;
+    onerror: ((event?: unknown) => void) | null;
+    close(): void;
+  };
+  sources: { emit(frame: unknown): void }[];
+} {
+  const sources: { emit(frame: unknown): void }[] = [];
+  const factory = () => {
+    const source = {
+      onmessage: null as ((event: { data: string }) => void) | null,
+      onopen: null as (() => void) | null,
+      onerror: null as ((event?: unknown) => void) | null,
+      emit(frame: unknown) {
+        source.onmessage?.({ data: JSON.stringify(frame) });
+      },
+      close() {},
+    };
+    sources.push(source);
+    return source;
+  };
+  return { factory, sources };
+}
+
+/** The gateway's own push frame shape, as `fleetFlow.test.ts` builds it. */
+function companionPushFrame(method: string, sequence: number, args: readonly unknown[]) {
+  return {
+    source: "evejs-web-gateway",
+    apiVersion: 1,
+    type: "event",
+    cursor: { epoch: "companion-epoch", sequence },
+    event: {
+      kind: "notification",
+      notification: { kind: "client", service: null, method, args, kwargs: null },
+    },
+  };
+}
+
+/**
+ * A companion already past its first tick, with a live channel to push at and
+ * a record of when each tick's first read went out.
+ *
+ * ⚠ THE STREAM IS OPENED THROUGH `setLivePush`, because these tests seat their
+ * pilot straight into the store rather than through `selectCharacter` -- which
+ * is the only other thing that opens one.
+ */
+async function companionAwaitingOrders() {
+  const { factory, sources } = makeFakeCompanionSource();
+  const readsAtMs: number[] = [];
+  const fakeFetch = (async (input: unknown, init?: { body?: unknown }) => {
+    const path = String(input);
+    const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (path === "/api/bridge/flight/status") {
+      readsAtMs.push(Date.now());
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        // Docked, and in a fleet with a human in it: the ladder has nothing
+        // dramatic to do, so every tick ends in `wait` and sleeps the FULL
+        // cadence — which is exactly the baseline these tests measure against.
+        if (path === "/api/bridge/flight/status") return flightBody(true);
+        if (path === "/api/bridge/space/snapshot") return spaceBody();
+        if (path === "/api/bridge/fitting") return fittingBody({});
+        if (path === "/api/names") return namesBody(body as Record<string, unknown>);
+        if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+        if (path === "/api/bridge/bound-fleet") {
+          // ⚠ A HUMAN ON THE ROSTER, OR THE SUPERVISION GATE ENDS THE RUN. An
+          // unsupervised companion runs the abandonment protocol instead of the
+          // ladder, and these tests would be measuring a loop already stopped.
+          return readyFleet({
+            members: [
+              { charID: OWN_CHARACTER_ID, role: 4, job: 0 },
+              { charID: ALLOWED_CHAT_SENDER, role: 1 },
+            ],
+          });
+        }
+        if (path === "/api/bots/active") return { ok: true, characterIDs: [], bots: [] };
+        return { ok: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const store = createClientStore();
+  seatOnlineCharacter(store, OWN_CHARACTER_ID);
+  const flow = createAppFlow(store, {
+    fetch: fakeFetch,
+    eventSource: factory,
+    livePush: false,
+  });
+  flow.setLivePush(true);
+  await waitFor(() => sources.length > 0, "the live channel to open");
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
+  await waitForCompanionTick(() => store.get().companion.why);
+  // ⚠ ASSERTED, NOT ASSUMED. A REFUSED start also sets `why`, so without this
+  // the wake tests below would be measuring a loop that never ran and would
+  // report "the push did not wake it" for the wrong reason entirely.
+  assert.equal(
+    store.get().companion.status,
+    "running",
+    `the companion must actually be flying: ${String(store.get().companion.why)}`,
+  );
+  // The tick is done and the loop is now asleep on its cadence.
+  const ticksBefore = readsAtMs.length;
+  return { store, flow, readsAtMs, ticksBefore, source: sources[0]! };
+}
+
+/** Resolves once another tick's reads have gone out, or after `budgetMs`. */
+async function nextTickWithin(readsAtMs: number[], before: number, budgetMs: number) {
+  const startedAtMs = Date.now();
+  while (Date.now() - startedAtMs < budgetMs) {
+    if (readsAtMs.length > before) {
+      return Date.now() - startedAtMs;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return null;
+}
+
+test("a pushed fleet broadcast wakes the companion instead of waiting out its cadence", async () => {
+  const { flow, readsAtMs, ticksBefore, source } = await companionAwaitingOrders();
+
+  // The wire is positional: [name, scope, senderCharID, senderSolarSystemID,
+  // itemID, typeID] — see `decodeFleetBroadcastNotification`.
+  source.emit(
+    companionPushFrame("OnFleetBroadcast", 1, [
+      "Target",
+      3,
+      ALLOWED_CHAT_SENDER,
+      30000142,
+      9001,
+      null,
+    ]),
+  );
+
+  const wokeAfterMs = await nextTickWithin(readsAtMs, ticksBefore, 1_200);
+  flow.stopFleetCompanion();
+  assert.notEqual(wokeAfterMs, null, "the pushed broadcast never woke the loop");
+  assert.ok(
+    wokeAfterMs !== null && wokeAfterMs < FLEET_COMPANION_CADENCE_MS,
+    `a broadcast must not wait out the cadence, took ${String(wokeAfterMs)} ms`,
+  );
+});
+
+// ⚠ THE OTHER HALF OF THE FIGHT CHAIN. Obeying a target call is lock, then WAIT
+// FOR THE LOCK, then drones and guns -- and until `OnTarget` was decoded the
+// only way to learn the lock had landed was the next tick's GetTargets poll. So
+// the pilot paid a whole cadence between "the lock landed" and "anything used
+// it", every single fight.
+test("a pushed lock landing wakes the companion too", async () => {
+  const { flow, readsAtMs, ticksBefore, source } = await companionAwaitingOrders();
+
+  source.emit(companionPushFrame("OnTarget", 1, ["add", 9001]));
+
+  const wokeAfterMs = await nextTickWithin(readsAtMs, ticksBefore, 1_200);
+  flow.stopFleetCompanion();
+  assert.notEqual(wokeAfterMs, null, "the landed lock never woke the loop");
+  assert.ok(
+    wokeAfterMs !== null && wokeAfterMs < FLEET_COMPANION_CADENCE_MS,
+    `a landed lock must not wait out the cadence, took ${String(wokeAfterMs)} ms`,
+  );
+});
+
+// ⚠ AND A PUSH THE LADDER CANNOT ACT ON MUST NOT WAKE IT. `otheradd` says
+// somebody locked US; it changes no decision, so spending a tick's six round
+// trips on it would be pure cost. The same rule keeps a storm of them from
+// running the loop flat out.
+test("a push with nothing for the ladder to do leaves the cadence alone", async () => {
+  const { flow, readsAtMs, ticksBefore, source } = await companionAwaitingOrders();
+
+  source.emit(companionPushFrame("OnTarget", 1, ["otheradd", 9001]));
+
+  const wokeAfterMs = await nextTickWithin(readsAtMs, ticksBefore, 700);
+  flow.stopFleetCompanion();
+  assert.equal(wokeAfterMs, null, "a push the ladder cannot act on must not buy a tick");
 });

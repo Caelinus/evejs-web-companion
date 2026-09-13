@@ -258,6 +258,7 @@ import {
   scrammedByWarpScrambler,
   tacklersHolding,
 } from "../bridge/jamNotifications.ts";
+import { decodeTargetNotification } from "../bridge/targetNotifications.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -1510,11 +1511,32 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const fleetBroadcast = decodeFleetBroadcastNotification(method, args, receivedAtMs);
     if (fleetBroadcast !== null) {
       store.apply({ type: "fleet/broadcast", broadcast: fleetBroadcast });
+      wakeFleetCompanion();
       return;
     }
     const fleetTargetTags = decodeFleetStateChangeNotification(method, args);
     if (fleetTargetTags !== null) {
       store.apply({ type: "fleet/target-tags", tags: fleetTargetTags });
+      wakeFleetCompanion();
+      return;
+    }
+    // `OnTarget` — this ship's own lock landing, dropping, or being wiped.
+    //
+    // ⚠ NOT AN INVALIDATION, AND SO NOT IN THE SETS BELOW. It carries the id
+    // whose lock changed, and the fold is what makes a completed lock usable in
+    // the same instant instead of on the next tick's `GetTargets`. The poll is
+    // untouched and still overwrites this; see `targetNotifications.ts`.
+    const targetEvent = decodeTargetNotification(method, args);
+    if (targetEvent !== null) {
+      store.apply({ type: "targeting/lock-event", event: targetEvent });
+      // ⚠ ONLY A LANDED LOCK WAKES THE COMPANION. A `lost` or a `clear` gives
+      // its ladder nothing new to issue -- the rung that would re-lock is going
+      // to re-read the grid on its own beat anyway -- whereas an `add` is the
+      // exact fact rung 6 and rung 7 are both blocked on. Waking on all three
+      // would spend the burst floor on events that cannot produce an action.
+      if (targetEvent.kind === "locked") {
+        wakeFleetCompanion();
+      }
       return;
     }
     // Fleet-companion phase 7 — `OnJamStart` / `OnJamEnd`, the ONLY read
@@ -1525,6 +1547,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const jam = decodeJamNotification(method, args, receivedAtMs);
     if (jam !== null) {
       store.apply({ type: "space/jam", event: jam });
+      // A jam STARTING is rung 4's whole trigger: something has this pilot held
+      // down and the fleet has not been told. An END has nothing to issue.
+      if (jam.active) {
+        wakeFleetCompanion();
+      }
       return;
     }
     if (method !== null && fleetSnapshotNotifications.has(method)) {
@@ -5727,6 +5754,93 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     weaponChargeGroups: Readonly<Record<number, readonly number[]>> | null;
   } = { emptyWeaponModuleIDs: null, cargoCharges: null, weaponChargeGroups: null };
 
+  // --- waking the companion on a push ---------------------------------------
+  //
+  // ⚠ THIS IS THE FIX FOR THE COMPANION'S REACTION TIME, AND IT IS A CHANGE TO
+  // THE SLEEP, NOT TO THE CADENCE. Before it, `FLEET_COMPANION_CADENCE_MS` was
+  // an unconditional `setTimeout`: an order that arrived one millisecond after
+  // a tick finished sat in the store, fully decoded and completely unread,
+  // until the next tick came round -- and the measured tick interval is not the
+  // 2 s the constant names but ~4 s, because the tick's own reads cost the
+  // rest. So a fleet broadcast cost up to four seconds before the pilot so much
+  // as looked at it, and the lock it then issued cost another four before
+  // anything used it.
+  //
+  // Every one of those facts was ALREADY in the browser the instant the server
+  // sent it. `OnFleetBroadcast`, `OnFleetStateChange`, `OnTarget` and
+  // `OnJamStart` all land in `applyPushedNotification` and are applied to the
+  // store immediately; the loop simply was not awake to read them. This turns
+  // the cadence into a CEILING on how long the pilot may go without looking,
+  // and lets any of those four pushes end the wait early.
+  //
+  // ⚠ IT IS A CEILING AND A FLOOR, AND THE FLOOR IS WHAT MAKES IT SAFE. A fleet
+  // fight pushes a great many of these -- every fleet-mate's tag change, every
+  // cycle of every tackle module -- and a wake that fired on each one would run
+  // the ladder, and its six round trips, as fast as the wire could deliver.
+  // `COMPANION_WAKE_FLOOR_MS` is the shortest gap between two ticks that a push
+  // may produce: a wake that arrives sooner than that does not run the tick
+  // early, it only brings the sleep's end forward TO the floor. So a storm of
+  // pushes settles at the floor rather than at zero, and the pilot's read
+  // traffic is bounded no matter what the fleet is doing.
+  //
+  // ⚠ BROWSER-ONLY, AND THAT IS NOT A GAP IN THE FIX. `src/botHost.js` hands a
+  // headless companion `stubEventSource()`, so no push is ever pushed to one --
+  // it learns everything from `applyDrainedNotifications` off its own reads,
+  // which by definition happen at tick time and cannot be earlier. A headless
+  // companion therefore keeps exactly today's behaviour: the wake never fires,
+  // the sleep runs its full length, and nothing about it changes.
+  const COMPANION_WAKE_FLOOR_MS = 350;
+  /**
+   * Ends the current companion sleep early. Null whenever no sleep is pending —
+   * which is most of a tick, and every moment of a run that is not running at
+   * all — so a push that arrives then is simply dropped, as it should be: the
+   * tick about to start will read the store anyway.
+   */
+  let companionWake: (() => void) | null = null;
+
+  function wakeFleetCompanion(): void {
+    companionWake?.();
+  }
+
+  /**
+   * The companion's sleep: at most `ms`, at least `COMPANION_WAKE_FLOOR_MS`,
+   * ended early by a push that the ladder has something to do about.
+   *
+   * ⚠ THE LATCH IS CLEARED BEFORE THE PROMISE RESOLVES, not after, so a second
+   * push landing in the same turn cannot resolve an already-settled promise or
+   * — worse — resolve the NEXT sleep before it has begun.
+   */
+  function companionSleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const startedAtMs = Date.now();
+      let timer: ReturnType<typeof setTimeout> = setTimeout(finish, ms);
+      function finish(): void {
+        clearTimeout(timer);
+        companionWake = null;
+        resolve();
+      }
+      companionWake = (): void => {
+        const waited = Date.now() - startedAtMs;
+        if (waited >= COMPANION_WAKE_FLOOR_MS) {
+          finish();
+          return;
+        }
+        // Too soon. Bring the end forward to the floor rather than to now --
+        // and drop the latch so the pushes still arriving in that window do not
+        // each re-arm a timer. The shortened wait stands.
+        //
+        // ⚠ `Math.min` AGAINST THE ORIGINAL DEADLINE, so a wake can only ever
+        // SHORTEN a sleep. Without it, a caller sleeping for less than the floor
+        // -- which `FLEET_COMPANION_BURST_MS` is one tuning away from being --
+        // would have a push push its end LATER, which is the exact opposite of
+        // what waking is for.
+        companionWake = null;
+        clearTimeout(timer);
+        timer = setTimeout(finish, Math.min(COMPANION_WAKE_FLOOR_MS, ms) - waited);
+      };
+    });
+  }
+
   function makeFleetCompanionDeps(): FleetCompanionDeps {
     return {
       observe: async (): Promise<FleetCompanionObservation> => {
@@ -5754,7 +5868,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // answer nobody gave. What the snapshot gives free -- which drones are
         // out and how hurt they are -- is still built below without a call.
         const droneBayWanted = liveCompanionRequest !== null;
-        const [statusStep, spaceResult, targetsResult, botDriven, chatRaw, droneRaw] =
+        const [statusStep, spaceResult, targetsResult, botDriven, chatRaw, droneRaw, fleetRaw] =
           await Promise.all([
           api.getFlightStatus(callOptions),
           api.getSpaceSnapshot(callOptions),
@@ -5786,6 +5900,24 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             ? api.readChat("local", callOptions).catch(() => null)
             : Promise.resolve(null),
           droneBayWanted ? api.getDrones(callOptions).catch(() => null) : Promise.resolve(null),
+          // ⚠ THE ROSTER RIDES IN THE BATCH, AND IT USED TO QUEUE BEHIND IT.
+          // It is this loop's most load-bearing read (supervision, `inFleet`,
+          // the tagging verdict -- see where it is decoded below) and it is
+          // made on EVERY tick, so it was also this loop's most expensive
+          // mistake: awaited on its own after the batch had already resolved,
+          // it added a whole serial round trip to every tick a companion has
+          // ever run. It depends on nothing the batch produces, so there was
+          // never a reason for it to wait -- the awaits it sat behind were
+          // simply written in the order the facts were needed rather than in
+          // the order they could be fetched.
+          //
+          // ⚠ IT SWALLOWS ITS OWN FAILURE HERE FOR THE REASON THE TWO READS
+          // ABOVE DO: inside a `Promise.all` a rejection takes the whole tick
+          // down with it. The `catch` below used to be the thing that turned an
+          // unreadable roster into `inFleet: null`, and that contract is
+          // preserved exactly -- `null` here means the same thing and is
+          // decoded the same way.
+          api.loadBoundFleet(callOptions).catch(() => null),
         ]);
         // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
         // regular traffic, so on the bot host they are the ONLY chance a pushed
@@ -5800,6 +5932,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           ...statusStep.notifications,
           ...spaceResult.notifications,
           ...targetsResult.notifications,
+          // ⚠ THE ROSTER'S DRAIN WAS BEING THROWN AWAY, and it is the read most
+          // likely to be carrying a fleet push: the backlog is destructive, so
+          // whichever response happens to collect an `OnFleetBroadcast` is the
+          // only one that will ever have it. Until this read joined the batch
+          // it resolved AFTER this line and its notifications had nowhere to
+          // go; now it resolves with the rest and is drained with them.
+          ...(Array.isArray(fleetRaw?.notifications) ? fleetRaw.notifications : []),
         ]);
         // The same authority the Targeting panel reads, kept live while the
         // companion flies so the panel never shows a stale lock list.
@@ -5971,6 +6110,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // no fleet has nothing to obey — this is its most load-bearing read, not
         // an optional extra. A failure lands as null (unreadable), never as
         // "not in a fleet".
+        //
+        // ⚠ THE CALL ITSELF IS UP IN THE BATCH NOW; only the DECODE is here.
+        // See `api.loadBoundFleet` in the `Promise.all` above for why it moved.
+        // `fleetRaw === null` is the batch's own `catch`, and `decodeFleetCenter`
+        // throwing is the second way this read can fail -- both land in exactly
+        // the same place they always did.
         let inFleet: boolean | null = null;
         let fleetMemberCharacterIDs: readonly number[] | null = null;
         // Held past the try so the tagging verdict below can be answered from
@@ -5979,9 +6124,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // something the first read's own rows already say.
         let fleetSnapshot: FleetCenterSnapshot | null = null;
         try {
-          fleetSnapshot = decodeFleetCenter(await api.loadBoundFleet(callOptions));
-          inFleet = fleetSnapshot.availability === "ready";
-          fleetMemberCharacterIDs = authoritativeFleetMemberCharacterIDs(fleetSnapshot);
+          fleetSnapshot = fleetRaw === null ? null : decodeFleetCenter(fleetRaw);
+          inFleet = fleetSnapshot === null ? null : fleetSnapshot.availability === "ready";
+          fleetMemberCharacterIDs =
+            fleetSnapshot === null ? null : authoritativeFleetMemberCharacterIDs(fleetSnapshot);
         } catch {
           inFleet = null;
           fleetMemberCharacterIDs = null;
@@ -6400,7 +6546,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           }
         }
       },
-      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      // ⚠ NOT A PLAIN `setTimeout` -- see `companionSleep`. This is the one
+      // loop of the four whose inputs ARRIVE AS PUSHES rather than as reads, so
+      // it is the one loop for which sleeping out a fixed cadence means sitting
+      // on an order it already has.
+      sleep: companionSleep,
       onProgress: (progress) => {
         store.apply({
           type: "companion/progress",

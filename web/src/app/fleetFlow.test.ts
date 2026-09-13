@@ -519,3 +519,50 @@ test("a jam push triggers no fleet reread", async () => {
   // know it is being webbed does not have to re-plumb the wire.
   assert.equal(store.get().space.jams[0]?.jammingType, "webify");
 });
+
+// --- the pushed lock (`OnTarget`) -------------------------------------------
+//
+// The same channel and the same stub as the jam pushes above. It is the one
+// fact rung 6 and rung 7 are both blocked on — drones will not go onto a ship
+// this hull has not locked, and the guns will not come up until the lock is
+// observed — and before this it was only ever learned from a POLL, so it cost
+// a whole tick of the companion's cadence every fight.
+
+test("a pushed OnTarget add lands the lock without waiting for a GetTargets poll", async () => {
+  const { store, source } = await onlineFleetFlow();
+  assert.deepEqual(store.get().targeting.lockedTargetIDs, []);
+
+  source.emit(notificationFrame("OnTarget", 1, ["add", 9001]));
+
+  await waitFor(
+    () => store.get().targeting.lockedTargetIDs.length === 1,
+    "the pushed OnTarget never reached the targeting slice",
+  );
+  assert.deepEqual(store.get().targeting.lockedTargetIDs, [9001]);
+});
+
+test("a pushed OnTarget lost takes the lock off again", async () => {
+  const { store, source } = await onlineFleetFlow();
+
+  source.emit(notificationFrame("OnTarget", 1, ["add", 9001]));
+  await waitFor(() => store.get().targeting.lockedTargetIDs.length === 1, "the lock never landed");
+
+  source.emit(notificationFrame("OnTarget", 2, ["lost", 9001, "TargetingAttemptCancelled"]));
+  await waitFor(
+    () => store.get().targeting.lockedTargetIDs.length === 0,
+    "the lock was never released",
+  );
+});
+
+// ⚠ THE ONE THAT WOULD CORRUPT THE LIST. `otheradd` carries the id of a ship
+// that locked US. Folding it in would put another ship's id where this hull's
+// own locks live, and the drone rung would send drones onto it.
+test("somebody else locking this ship is not a lock of ours", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  source.emit(notificationFrame("OnTarget", 1, ["otheradd", 9001]));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(store.get().targeting.lockedTargetIDs, []);
+  assert.equal(state.fleetReads, 0, "and it is not a roster invalidation either");
+});

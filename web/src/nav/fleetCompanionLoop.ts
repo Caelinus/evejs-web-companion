@@ -1068,6 +1068,35 @@ export interface FleetCompanionController {
 export const FLEET_COMPANION_CADENCE_MS = 2000;
 
 /**
+ * The gap after a tick that ISSUED A CALL, rather than after one that waited.
+ *
+ * ⚠ THIS EXISTS BECAUSE THIS LADDER ANSWERS ONE ORDER OVER SEVERAL TICKS, AND
+ * A FLAT CADENCE CHARGED FULL PRICE FOR EVERY ONE OF THEM. Obeying a single
+ * `Target` call is: lock it, wait for the lock to land, put the drones on it,
+ * then bring the guns up ONE MODULE PER TICK (`decideOpenFire`). At a flat two
+ * seconds -- really nearer four, once the tick's own reads are counted -- a
+ * five-gun pilot was half a minute from "the FC called it" to "everything this
+ * hull owns is shooting it". None of those steps is waiting on the WORLD; each
+ * is waiting only for this loop to come round again.
+ *
+ * ⚠ IT IS KEYED ON "DID THIS TICK ISSUE SOMETHING", NOT ON "IS THERE A FIGHT",
+ * AND THAT IS WHAT KEEPS EVERY TICK-COUNTED BUDGET IN THIS FILE HONEST. A rung
+ * that is WAITING -- counting out a drone hold-off, watching for a recall to
+ * complete, sitting out a flee recovery -- returns no action, so the tick that
+ * carries it is a `wait` and still sleeps the full cadence. Only a tick that
+ * did something comes back early, and a loop that is doing something every
+ * ~350 ms is a loop with a queue of orders to work through, which is exactly
+ * the case this is for. The moment the queue empties the ladder returns `wait`
+ * and the beat goes back to two seconds.
+ *
+ * ⚠ AND IT IS NOT A LOWER BOUND ON THE READ TRAFFIC IT COSTS. The tick's own
+ * six round trips happen before this sleep, so a burst tick is ~350 ms PLUS the
+ * reads, not 350 ms total. The measured tick is ~4 s at a 2 s cadence, so a
+ * burst tick lands nearer 2 s -- twice as fast, not six times.
+ */
+export const FLEET_COMPANION_BURST_MS = 350;
+
+/**
  * How long an abandoned companion waits before giving up and releasing the
  * hull. Decision 5's number.
  *
@@ -1409,15 +1438,24 @@ export interface CompanionLadderMemory {
    */
   readonly fleeTripsSpent: number;
   /**
-   * Consecutive ticks since a flee ended with nothing wrong, against
-   * `FLEE_RECOVERY_HOLD_TICKS`. Reaching it puts the budget back to full.
+   * When this pilot last became well enough to count as recovered, against
+   * `FLEE_RECOVERY_HOLD_MS`. Null whenever it is not currently recovering --
+   * because it never fled, or because it has dropped back through its floor.
+   * Holding out the whole span puts the budget back to full.
    *
    * ⚠ THIS IS WHAT MAKES "A RETURN THAT HOLDS" CHECKABLE. A pilot that comes
-   * back and drops through its floor again before the count runs out never
+   * back and drops through its floor again before the span runs out never
    * reaches the reset, so its trips keep accumulating and it eventually stays
    * home -- which is the entire purpose of bounding them.
+   *
+   * ⚠ A TIMESTAMP AND NOT A TICK COUNT, for the reason `DroneCycle.stageSinceMs`
+   * carries one. The count advanced on EVERY tick, including the ticks that
+   * issue an action and now come back at `FLEET_COMPANION_BURST_MS` -- so "back
+   * on station with nothing wrong for a while" would have meant a different
+   * length of time for a pilot that happened to be shooting than for one
+   * sitting still.
    */
-  readonly fleeRecoveryTicks: number;
+  readonly fleeRecoverySinceMs: number | null;
   /**
    * The stand-off the newest `follow` order named, in metres.
    *
@@ -1573,8 +1611,20 @@ export interface DroneCycle {
    * unrelated drone came home.
    */
   readonly recalledIDs: readonly number[];
-  /** Ticks spent in the current stage. Bounded in both of them. */
-  readonly waited: number;
+  /**
+   * When the CURRENT stage began, on the ladder's injected clock. Both stages
+   * are bounded against it.
+   *
+   * ⚠ A TIMESTAMP, NOT A TICK COUNT, AND THE CHANGE WAS FORCED BY TWO THINGS.
+   * Both of this record's stages fall THROUGH to the rungs below rather than
+   * parking the tick, so the ticks they are counting are exactly the ones that
+   * may now come back at `FLEET_COMPANION_BURST_MS` instead of the cadence --
+   * a count would measure a different amount of time depending on whether the
+   * pilot happened to be shooting at the same moment. And the hold-off stage
+   * was never a count in the first place: it is the operator's own
+   * `droneRedeployHoldOffSeconds`, which is a duration.
+   */
+  readonly stageSinceMs: number;
 }
 
 export function freshLadderMemory(): CompanionLadderMemory {
@@ -1612,7 +1662,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastWarpedToID: null,
     flee: null,
     fleeTripsSpent: 0,
-    fleeRecoveryTicks: 0,
+    fleeRecoverySinceMs: null,
     // ⚠ THE DEFAULT RANGE, NOT NULL. Following is the standing behaviour, so a
     // companion nobody has typed `follow` at still has a distance to hold -- see
     // `followRangeM`. `followHeld` false for the same reason: it starts
@@ -1961,7 +2011,7 @@ export function decideCompanionAction(
     // hurt pilot sitting on the grid it was leaving.
     flee: memory.flee,
     fleeTripsSpent: memory.fleeTripsSpent,
-    fleeRecoveryTicks: memory.fleeRecoveryTicks,
+    fleeRecoverySinceMs: memory.fleeRecoverySinceMs,
     // Carried, every one of them. A human turning up says nothing about where
     // this pilot was told to fly or how close to hold: an order given while the
     // fleet was unsupervised was still given, and a `stop` typed a moment before
@@ -2043,7 +2093,7 @@ export function decideCompanionAction(
   // stop obeying its commander to keep its drones alive. Threaded like rung 3
   // because most of what it does - waiting out a recall, counting down a
   // hold-off - happens on ticks that issue NO action at all.
-  const drones = decideDrones(request, obs, fleeing.memory);
+  const drones = decideDrones(request, obs, fleeing.memory, nowMs);
   if (drones.decision !== null) {
     return drones.decision;
   }
@@ -4163,6 +4213,7 @@ function countTowardsRecovery(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
+  nowMs: number,
 ): CompanionLadderMemory {
   if (memory.fleeTripsSpent === 0) {
     return memory;
@@ -4172,13 +4223,18 @@ function countTowardsRecovery(
   // letting that count would hand the budget back to the pilot least able to
   // spend it well.
   if (!wellEnoughToReturn(request, obs)) {
-    return memory.fleeRecoveryTicks === 0 ? memory : { ...memory, fleeRecoveryTicks: 0 };
+    return memory.fleeRecoverySinceMs === null
+      ? memory
+      : { ...memory, fleeRecoverySinceMs: null };
   }
-  const held = memory.fleeRecoveryTicks + 1;
-  if (held < FLEE_RECOVERY_HOLD_TICKS) {
-    return { ...memory, fleeRecoveryTicks: held };
+  // The first well tick STARTS the span; every later one only reads it.
+  if (memory.fleeRecoverySinceMs === null) {
+    return { ...memory, fleeRecoverySinceMs: nowMs };
   }
-  return { ...memory, fleeRecoveryTicks: 0, fleeTripsSpent: 0 };
+  if (nowMs - memory.fleeRecoverySinceMs < FLEE_RECOVERY_HOLD_MS) {
+    return memory;
+  }
+  return { ...memory, fleeRecoverySinceMs: null, fleeTripsSpent: 0 };
 }
 
 /** What rung 5 hands back: a decision when it has one, and always its memory. */
@@ -4215,11 +4271,11 @@ function decideFlee(
   // decide nothing this tick and look again in two seconds.
   const health = obs.health ?? null;
   if (health === null || health >= request.fleeHealthFloor) {
-    return { decision: null, memory: countTowardsRecovery(request, obs, memory) };
+    return { decision: null, memory: countTowardsRecovery(request, obs, memory, nowMs) };
   }
 
   // Dropped through the floor, so whatever recovery was being counted is over.
-  const hurt: CompanionLadderMemory = { ...memory, fleeRecoveryTicks: 0 };
+  const hurt: CompanionLadderMemory = { ...memory, fleeRecoverySinceMs: null };
 
   // ⚠ THE BUDGET IS CHECKED BEFORE THE LATCH, NOT INSIDE THE LEG. A pilot that
   // has spent its round trips is a pilot the operator told to stay home
@@ -4273,17 +4329,21 @@ function decideFlee(
 const FLEE_RETURN_MARGIN = 0.2;
 
 /**
- * How many ticks back on station with nothing wrong before a round trip counts
- * as having WORKED and the budget goes back to full.
+ * How long back on station with nothing wrong before a round trip counts as
+ * having WORKED and the budget goes back to full.
  *
  * The spec's rule, in its words: "an attempt is spent when the same condition
  * re-fires shortly after a return; a return that holds resets the budget."
- * Counting ticks is how "holds" is made checkable -- a pilot that comes back
- * and immediately drops through its floor again never reaches this, so its
- * trips keep accumulating and it eventually stays home, which is the whole
- * point of the bound.
+ * A span is how "holds" is made checkable -- a pilot that comes back and
+ * immediately drops through its floor again never reaches this, so its trips
+ * keep accumulating and it eventually stays home, which is the whole point of
+ * the bound.
+ *
+ * Thirty seconds, which is the duration the fifteen ticks this replaces were
+ * written to mean. See `fleeRecoverySinceMs` for why a count could not keep
+ * meaning it.
  */
-const FLEE_RECOVERY_HOLD_TICKS = 15;
+const FLEE_RECOVERY_HOLD_MS = 30_000;
 
 /**
  * How many times the shop is asked before a hurt pilot gives up on repairing.
@@ -4408,7 +4468,7 @@ function recoverAndReturn(
   // ends the flee; holding the latch across it would leave this rung driving a
   // pilot that is already back out, and a ship that undocks hurt would then be
   // steered by a flee that thinks it is still going the other way.
-  const done: CompanionLadderMemory = { ...mem, flee: null, fleeRecoveryTicks: 0 };
+  const done: CompanionLadderMemory = { ...mem, flee: null, fleeRecoverySinceMs: null };
 
   if (obs.docked === true) {
     return {
@@ -4494,8 +4554,9 @@ function flyTheFlee(
 
 /**
  * How long a recall is believed to be in progress before the rung stops waiting
- * on it, in ticks. The same number, for the same reason, as the DSL's own
- * `RECALL_MAX_WAIT_TICKS` (`scriptMacros.ts:60`).
+ * on it. The same duration, for the same reason, as the DSL's own
+ * `RECALL_MAX_WAIT_TICKS` (`scriptMacros.ts:60`) -- which is fifteen of that
+ * loop's two-second ticks, i.e. the thirty seconds written here.
  *
  * ⚠ THE STUCK CASE IS REAL AND IT IS SILENT, so this bound is not defensive
  * padding. A drone that arrives at scoop range to find a FULL BAY is refused by
@@ -4504,8 +4565,17 @@ function flyTheFlee(
  * circles at 2500 m for ever, still on grid, still in `myDroneIDs`, with no
  * error anywhere. Without this bound the rung would wait on it until the run
  * ended.
+ *
+ * ⚠ MILLISECONDS, NOT TICKS, AND THAT CHANGED FOR A REASON. It used to be a
+ * count of ticks, which was only ever a proxy for elapsed time and was a bad
+ * one twice over. The measured tick was never the 2 s the cadence names -- it
+ * is ~4 s once the tick's own six reads are counted -- so fifteen of them was a
+ * minute, not the half-minute intended; and now that a tick which ISSUED
+ * something comes back at `FLEET_COMPANION_BURST_MS`, the tick is not even a
+ * fixed unit any more. This branch falls THROUGH to the rungs below it, so its
+ * ticks are exactly the ones that can be bursts. A clock says what it means.
  */
-const MAX_DRONE_RECALL_WAIT_TICKS = 15;
+const DRONE_RECALL_GIVE_UP_MS = 30_000;
 
 /**
  * How many recall-and-relaunch cycles one run will spend.
@@ -4520,15 +4590,23 @@ const MAX_DRONE_RECALL_WAIT_TICKS = 15;
  */
 const MAX_DRONE_REDEPLOY_CYCLES = 3;
 
-/** The hold-off, in ticks. See `droneCycleHoldTicks` for why ticks. */
-function droneCycleHoldTicks(request: FleetCompanionRequest): number {
-  // ⚠ TICKS, NOT A WALL CLOCK, and deliberately. The loop sleeps AT LEAST
-  // `FLEET_COMPANION_CADENCE_MS` between ticks, so N ticks is always a lower
-  // bound on elapsed time - and undershooting a hold-off is the only failure
-  // that matters here. The ladder carries no injected clock and threading one
-  // through for this would be a cross-cutting change for precision nobody
-  // needs. The operator sets SECONDS and this converts once.
-  return Math.max(1, Math.ceil((request.droneRedeployHoldOffSeconds * 1000) / FLEET_COMPANION_CADENCE_MS));
+/**
+ * The hold-off the operator asked for, in milliseconds.
+ *
+ * ⚠ THIS USED TO BE A TICK COUNT AND THE CONVERSION WAS WRONG IN PRACTICE. It
+ * divided the operator's seconds by `FLEET_COMPANION_CADENCE_MS`, on the stated
+ * grounds that a tick is AT LEAST that long so N ticks is a safe lower bound.
+ * The first half is true and the second half is the problem: the measured tick
+ * is ~4 s, not 2 s, so a ten-second hold-off was waiting twenty. "At least what
+ * you asked for" quietly meant "about double", every time.
+ *
+ * The ladder has had an injected clock all along -- `decideCompanionAction`
+ * takes `nowMs` and hands it to the abandonment protocol -- so the "threading
+ * one through would be cross-cutting" that justified the tick count is no
+ * longer true either. The operator sets seconds and gets seconds.
+ */
+function droneCycleHoldMs(request: FleetCompanionRequest): number {
+  return Math.max(0, request.droneRedeployHoldOffSeconds * 1000);
 }
 
 // ─── The `loot` order ────────────────────────────────────────────────────────
@@ -5833,6 +5911,7 @@ function decideDrones(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
+  nowMs: number,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
   // ⚠ NO `useDrones` FLAG. A pilot uses the drones it is carrying. What it does
@@ -5862,28 +5941,28 @@ function decideDrones(
         // the fact the hold-off is about.
         return {
           decision: null,
-          memory: { ...memory, droneCycle: { ...cycle, stage: "holding-off", waited: 0 } },
+          memory: {
+            ...memory,
+            droneCycle: { ...cycle, stage: "holding-off", stageSinceMs: nowMs },
+          },
         };
       }
-      if (cycle.waited >= MAX_DRONE_RECALL_WAIT_TICKS) {
-        // Given up on, not retried. See MAX_DRONE_RECALL_WAIT_TICKS: the
-        // commonest reason a recall never completes is a full bay, which the
-        // server refuses SILENTLY, and re-issuing the same call cannot fix a
-        // bay that has no room in it.
+      if (nowMs - cycle.stageSinceMs >= DRONE_RECALL_GIVE_UP_MS) {
+        // Given up on, not retried. See DRONE_RECALL_GIVE_UP_MS: the commonest
+        // reason a recall never completes is a full bay, which the server
+        // refuses SILENTLY, and re-issuing the same call cannot fix a bay that
+        // has no room in it.
         return { decision: null, memory: { ...memory, droneCycle: null } };
       }
-      return {
-        decision: null,
-        memory: { ...memory, droneCycle: { ...cycle, waited: cycle.waited + 1 } },
-      };
+      // ⚠ THE MEMORY IS RETURNED UNTOUCHED, which a tick count could not do:
+      // the stamp is set once when the stage begins and read on every tick
+      // after it, so waiting costs no write at all.
+      return nothing;
     }
 
     // holding-off
-    if (cycle.waited + 1 < droneCycleHoldTicks(request)) {
-      return {
-        decision: null,
-        memory: { ...memory, droneCycle: { ...cycle, waited: cycle.waited + 1 } },
-      };
+    if (nowMs - cycle.stageSinceMs < droneCycleHoldMs(request)) {
+      return nothing;
     }
     // The hold-off is over. Whether anything goes back out is the launch
     // branch's decision, taken below on the NEXT tick against a fresh bay
@@ -5957,7 +6036,7 @@ function decideDrones(
         memory: {
           ...memory,
           droneCyclesSpent: memory.droneCyclesSpent + 1,
-          droneCycle: { stage: "recalling", recalledIDs: [...out], waited: 0 },
+          droneCycle: { stage: "recalling", recalledIDs: [...out], stageSinceMs: nowMs },
         },
       },
       memory,
@@ -6794,7 +6873,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       // if it still needs to.
       flee: null,
       fleeTripsSpent: 0,
-      fleeRecoveryTicks: 0,
+      fleeRecoverySinceMs: null,
           // ⚠ A RESUMED RUN IS NOT FOLLOWING ANYBODY AND IS NOT ON A TRIP, and
           // that is the honest answer rather than a lossy one. Nothing about a
           // `keepAtRange` survives the process that sent it: the server may well
@@ -6872,11 +6951,20 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       const token = runToken;
       try {
         while (mem.status === "running" && token === runToken) {
-          await tick();
+          const action = await tick();
           if (mem.status !== "running" || token !== runToken) {
             break;
           }
-          await deps.sleep(FLEET_COMPANION_CADENCE_MS);
+          // ⚠ THE ONLY PLACE THE TWO BEATS ARE CHOSEN BETWEEN, and the test is
+          // the tick's own answer rather than any state this loop keeps: a tick
+          // that ISSUED something is mid-order and comes back at the burst, a
+          // tick that waited keeps the full cadence. See
+          // `FLEET_COMPANION_BURST_MS` for why that rule, and not "is there a
+          // fight", is what leaves every tick-counted wait in this file
+          // measuring what it always measured.
+          await deps.sleep(
+            action.kind === "wait" ? FLEET_COMPANION_CADENCE_MS : FLEET_COMPANION_BURST_MS,
+          );
         }
       } catch (error) {
         if (token !== runToken) {

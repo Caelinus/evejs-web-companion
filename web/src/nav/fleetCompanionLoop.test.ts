@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import {
   DEFAULT_FLEET_COMPANION_REQUEST,
   FLEET_COMPANION_ABANDONMENT_WAIT_MS,
+  FLEET_COMPANION_BURST_MS,
+  FLEET_COMPANION_CADENCE_MS,
   TANK_LAYER_HURT_THRESHOLD,
   createFleetCompanion,
   decideCompanionAction,
@@ -3350,7 +3352,7 @@ test("latching a flee drops any drone redeploy cycle in flight", () => {
   const request: FleetCompanionRequest = REQUEST;
   const mid: CompanionLadderMemory = {
     ...freshLadderMemory(),
-    droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], waited: 1 },
+    droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], stageSinceMs: 0 },
   };
   const decision = decideCompanionAction(request, fleeObs(), mid);
   assert.equal(decision.memory.droneCycle, null, "a live redeploy must not survive a flee latching");
@@ -3534,28 +3536,54 @@ test("a pilot that used its last trip stays docked even once it is whole", () =>
 // "A return that holds resets the budget", made checkable: a pilot that comes
 // back and stays well for long enough gets its trips back.
 test("a return that HOLDS puts the budget back", () => {
+  // Driven on a clock rather than by counting calls: the hold is a span now
+  // (`FLEE_RECOVERY_HOLD_MS`), so how many ticks fit inside it is neither fixed
+  // nor the thing being asserted.
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
   const well = fleeObs({ health: 1 });
-  for (let tick = 0; tick < 15; tick += 1) {
-    memory = decideCompanionAction(REQUEST, well, memory).memory;
+  for (let tick = 0; tick < 16; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 2_000;
   }
   assert.equal(memory.fleeTripsSpent, 0);
+});
+
+// ⚠ AND THE SPAN IS WALL CLOCK, NOT A CALL COUNT. This is what stops a pilot
+// whose ticks happen to be running fast -- a burst of orders to obey, see
+// `FLEET_COMPANION_BURST_MS` -- from earning its flee budget back sooner than
+// one sitting still.
+test("a return that holds for too SHORT a time does not put the budget back", () => {
+  let nowMs = 1_000_000;
+  let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 40; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 350;
+  }
+  assert.equal(
+    memory.fleeTripsSpent,
+    2,
+    "forty fast ticks are still only fourteen seconds, and must not count as a hold",
+  );
 });
 
 // ⚠ AND ONE THAT DOES NOT HOLD MUST NOT. This is the half that makes the bound
 // mean anything: a pilot being sent home over and over never reaches the reset,
 // so its trips accumulate and it eventually stays put.
 test("dropping through the floor again restarts the recovery count", () => {
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
   const well = fleeObs({ health: 1 });
   for (let tick = 0; tick < 14; tick += 1) {
-    memory = decideCompanionAction(REQUEST, well, memory).memory;
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 2_000;
   }
-  assert.notEqual(memory.fleeRecoveryTicks, 0, "the count should be part-way up");
+  assert.notEqual(memory.fleeRecoverySinceMs, null, "the span should be part-way through");
 
-  // One bad tick, and the count starts again rather than carrying on.
-  memory = decideCompanionAction(REQUEST, fleeObs({ health: 0.1 }), memory).memory;
-  assert.equal(memory.fleeRecoveryTicks, 0);
+  // One bad tick, and the span starts again rather than carrying on.
+  memory = decideCompanionAction(REQUEST, fleeObs({ health: 0.1 }), memory, nowMs).memory;
+  assert.equal(memory.fleeRecoverySinceMs, null);
   assert.equal(memory.fleeTripsSpent, 3, "and it costs another trip");
 });
 
@@ -3817,12 +3845,14 @@ test("an unreadable drone health recalls nothing", () => {
 // space, so the trigger reads null - and a rung that re-derived its state from
 // the observation would forget it was ever in a cycle.
 test("the cycle survives its own trigger disappearing, and relaunches after the hold-off", () => {
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = freshLadderMemory();
 
   const recall = decideCompanionAction(
     WITH_DRONES,
     droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 }),
     memory,
+    nowMs,
   );
   assert.equal(recall.action.kind, "recallDrones");
   memory = recall.memory;
@@ -3831,7 +3861,8 @@ test("the cycle survives its own trigger disappearing, and relaunches after the 
   const gone = droneObs({ myDroneIDs: [], lowestDroneHealth: null });
   const ticks: string[] = [];
   for (let tick = 0; tick < 12; tick += 1) {
-    const decision = decideCompanionAction(WITH_DRONES, gone, memory);
+    nowMs += 2_000;
+    const decision = decideCompanionAction(WITH_DRONES, gone, memory, nowMs);
     memory = decision.memory;
     ticks.push(decision.action.kind);
     if (decision.action.kind === "launchDrones") {
@@ -3904,29 +3935,42 @@ test("the recall is not finished while one of the recalled drones is still out",
 // no error anywhere. Without a bound the rung would wait on it until the run
 // ended.
 test("a recall that never completes is given up on rather than waited on for ever", () => {
+  // ⚠ THE CLOCK IS DRIVEN EXPLICITLY, because the bound is a DURATION and not a
+  // tick count any more (see `DRONE_RECALL_GIVE_UP_MS`). A loop that called the
+  // ladder twenty-five times inside one millisecond used to exhaust the bound;
+  // now it would prove nothing at all, so the test advances a clock by a
+  // plausible tick and asserts on the elapsed time it took to let go.
+  const TICK_MS = 2_000;
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = freshLadderMemory();
   const recall = decideCompanionAction(
     WITH_DRONES,
     droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 }),
     memory,
+    nowMs,
   );
   memory = recall.memory;
+  const startedAtMs = nowMs;
 
   // The drone never leaves the grid, because the bay it is trying to enter is
   // full and nothing will ever say so.
   const stuck = droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 });
   let letGo = false;
-  let longestWait = 0;
-  for (let tick = 0; tick < 25; tick += 1) {
-    memory = decideCompanionAction(WITH_DRONES, stuck, memory).memory;
+  let waitedMs = 0;
+  for (let tick = 0; tick < 40; tick += 1) {
+    nowMs += TICK_MS;
+    memory = decideCompanionAction(WITH_DRONES, stuck, memory, nowMs).memory;
     if (memory.droneCycle === null) {
       letGo = true;
+      waitedMs = nowMs - startedAtMs;
       break;
     }
-    longestWait = Math.max(longestWait, memory.droneCycle.waited);
   }
   assert.ok(letGo, "the stuck cycle must be let go of rather than waited on for ever");
-  assert.ok(longestWait <= 15, `the wait must be bounded, saw ${longestWait} ticks`);
+  assert.ok(
+    waitedMs <= 30_000 + TICK_MS,
+    `the wait must be bounded near half a minute, saw ${waitedMs} ms`,
+  );
 });
 
 // ⚠ THE SECOND CYCLE IS WORTH LESS THAN THE FIRST AND THE FOURTH IS WORTH
@@ -6806,4 +6850,66 @@ test("a mode is matched whole, not as a substring", () => {
     approachIssued(),
   );
   assert.equal(decision.action.kind, "approach");
+});
+
+// --- the two beats ------------------------------------------------------------
+//
+// ⚠ WHAT THIS PINS IS A REACTION TIME, NOT AN IMPLEMENTATION DETAIL. Obeying a
+// single `Target` call takes several ticks -- lock it, wait for the lock, put
+// the drones on it, then bring the guns up one module at a time -- and at a flat
+// cadence every one of those steps cost the full beat even though none of them
+// was waiting on the world. The rule is: a tick that ISSUED something comes back
+// at the burst, a tick that waited keeps the cadence.
+
+test("a tick that issued a call comes back at the burst, not the cadence", async () => {
+  const slept: number[] = [];
+  let ticks = 0;
+  const controller = createFleetCompanion({
+    // Hostiles on grid with drones aboard: rung 6 has something to launch, so
+    // the first tick issues a real call.
+    observe: async () => droneObs(),
+    issue: async () => {},
+    sleep: async (ms) => {
+      slept.push(ms);
+      ticks += 1;
+      if (ticks >= 1) {
+        controller.stop();
+      }
+    },
+  });
+  controller.start(WITH_DRONES);
+  await controller.run();
+  assert.deepEqual(slept, [FLEET_COMPANION_BURST_MS]);
+});
+
+// ⚠ AND THE OTHER HALF, WHICH IS WHAT KEEPS EVERY WAIT IN THIS FILE HONEST. A
+// rung that is merely waiting returns no action, so the tick is a `wait` and
+// still sleeps the full cadence -- which is why a burst cannot quietly shorten
+// a drone hold-off or a recall bound.
+test("a tick that decided nothing keeps the full cadence", async () => {
+  const slept: number[] = [];
+  let ticks = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs(),
+    issue: async () => {},
+    sleep: async (ms) => {
+      slept.push(ms);
+      ticks += 1;
+      if (ticks >= 1) {
+        controller.stop();
+      }
+    },
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  await controller.run();
+  assert.deepEqual(slept, [FLEET_COMPANION_CADENCE_MS]);
+});
+
+// The burst is a real saving only if it is well under the cadence; pinning the
+// relationship rather than the number keeps a later tuning honest.
+test("the burst is shorter than the cadence", () => {
+  assert.ok(
+    FLEET_COMPANION_BURST_MS > 0 && FLEET_COMPANION_BURST_MS < FLEET_COMPANION_CADENCE_MS,
+    "a burst that is not shorter than the cadence is not a burst",
+  );
 });
