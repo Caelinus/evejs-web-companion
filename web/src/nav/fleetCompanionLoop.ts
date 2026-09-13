@@ -130,6 +130,16 @@ export interface CompanionPropulsionModule {
  * routinely span accounts. A setup that were a REFERENCE into an account-scoped
  * library could not be shared by a mixed squad; a value can.
  */
+/**
+ * Which of a hull's two real tank layers it is built around.
+ *
+ * "hull" is deliberately not one of them: nothing is tanked in its hull, and a
+ * layer nothing is built around has no vote to cast. The hull layer is still
+ * COUNTED by `tankHealth` — it is beneath both of these, so it is in every
+ * slice — it just never names the tank.
+ */
+export type CompanionTankLayer = "shield" | "armor";
+
 export interface FleetCompanionRequest {
   /**
    * Fitted modules that DEFEND this ship -- hardeners and the like -- by item
@@ -254,6 +264,31 @@ export interface FleetCompanionRequest {
    * Empty is a real answer and a common one: plenty of hulls fly without one.
    */
   readonly propulsionModules: readonly CompanionPropulsionModule[];
+  /**
+   * Which layer this hull is BUILT to be hit in, when nothing it can cycle says
+   * so — read off the fit at start, `null` when the fit could not answer.
+   *
+   * ⚠ IT EXISTS FOR BUFFER FITS ALONE, AND IS CONSULTED LAST. `tankHealth`
+   * asks the self-repair lists first, because a module the ship can switch on
+   * is the strongest possible statement about where its tank is. A brick with
+   * no active repairer makes no such statement: plates and extenders are
+   * PASSIVE, so they never reach any list this loop cycles, and before this
+   * field such a hull fell back to the worst-layer fold — which on a plated ship
+   * means fleeing over a shield that was never its tank. The operator asked for
+   * exactly this split after the armour-repairer case was fixed.
+   *
+   * ⚠ IT IS A VOTE OVER GROUP NAMES, NOT A SINGLE MODULE'S SAY-SO, and a tie is
+   * `null` rather than a guess. Plates, coatings, membranes, extenders,
+   * rechargers, power relays, the hardeners of either layer AND the armour and
+   * shield RIGS all vote; a Damage Control does not, because it defends all
+   * three layers equally and so says nothing about which one matters. A hull
+   * carrying both kinds (a shield extender in the mids and a plate in the lows
+   * is a real, if unhappy, fit) says nothing either, and gets the old fold.
+   *
+   * ⚠ NEVER OVERRIDES A FITTED REPAIRER. A shield-boosted hull that also
+   * carries an armour plate is shield-tanked: the thing it can cycle wins.
+   */
+  readonly tankLayer: CompanionTankLayer | null;
   // ─── From here down: the stored setup. See `COMPANION_SETUP_KEYS`. ─────────
   //
   // ⚠ THE FIELDS BELOW ARE THE ONLY ONES AN OPERATOR EVER SETS, and the only
@@ -461,6 +496,8 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   weaponModuleIDs: Object.freeze([]),
   salvagerModuleIDs: Object.freeze([]),
   propulsionModules: Object.freeze([]),
+  // Nothing fitted is nothing to vote with, which is exactly what `null` says.
+  tankLayer: null,
 } satisfies FleetCompanionRequest);
 
 /**
@@ -4443,22 +4480,40 @@ const MAX_FLEE_REPAIR_ATTEMPTS = 3;
  * which is the behaviour asked for above. This is the same authority rung 3
  * already cycles the repairers from, so a ship flees on the layer it defends.
  *
- * ⚠ A HULL WITH NO SELF-REPAIRER AT ALL KEEPS THE OLD FOLD. A buffer fit says
- * nothing about where its hitpoints are — a shield-extender brick and a plated
- * one look identical from here, because plates and extenders are passive and
- * never reach these lists — so there is nothing to narrow with, and the worst
- * layer is the honest answer rather than a guess dressed up as one.
+ * ⚠ A HULL WITH NO SELF-REPAIRER FALLS BACK TO WHAT IT IS BUILT OF. A buffer fit
+ * cycles nothing, so it makes no statement this loop can read off an activation
+ * list — plates and extenders are PASSIVE and never reach one. `request.tankLayer`
+ * is that hull's answer, voted at start over the game's own group names (see the
+ * field), and it is consulted ONLY here, only when nothing repairable said so
+ * first. A fit that voted for neither keeps the old worst-layer fold, which is
+ * the honest answer for a hull that genuinely does not say.
  *
  * `null` when no counted layer could be read, which is never "well" and never
  * "dying" — the callers keep that three-state discipline themselves.
  */
 function tankHealth(request: FleetCompanionRequest, obs: FleetCompanionObservation): number | null {
   const layers = [
-    { ratio: obs.shieldRatio, repaired: request.shieldBoosterModuleIDs.length > 0 },
-    { ratio: obs.armorRatio, repaired: request.armorRepairerModuleIDs.length > 0 },
-    { ratio: obs.hullRatio, repaired: request.hullRepairerModuleIDs.length > 0 },
-  ];
-  const tank = layers.findIndex((layer) => layer.repaired);
+    {
+      name: "shield",
+      ratio: obs.shieldRatio,
+      repaired: request.shieldBoosterModuleIDs.length > 0,
+    },
+    {
+      name: "armor",
+      ratio: obs.armorRatio,
+      repaired: request.armorRepairerModuleIDs.length > 0,
+    },
+    { name: "hull", ratio: obs.hullRatio, repaired: request.hullRepairerModuleIDs.length > 0 },
+  ] as const;
+  const repaired = layers.findIndex((layer) => layer.repaired);
+  // The repairable layer outranks the vote: a hull that can switch something on
+  // has said where its tank is far more plainly than its plates can.
+  const tank =
+    repaired !== -1
+      ? repaired
+      : request.tankLayer === null
+        ? -1
+        : layers.findIndex((layer) => layer.name === request.tankLayer);
   const counted = tank === -1 ? layers : layers.slice(tank);
   const readable = counted
     .map((layer) => layer.ratio)

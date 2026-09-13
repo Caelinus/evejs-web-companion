@@ -3266,15 +3266,93 @@ test("a shield-tanked ship still leaves on its shield", () => {
   assert.equal(decision.phase, "Getting clear");
 });
 
-// A buffer fit says nothing about where its hitpoints are -- plates and
-// extenders are passive and never reach these lists -- so there is nothing to
-// narrow by and the worst layer stays the honest answer.
-test("a hull with no self-repairer keeps the worst-layer fold", () => {
+// A fit that voted for NEITHER layer says nothing about where its hitpoints
+// are, so the worst layer stays the honest answer.
+test("a hull that said nothing about its tank keeps the worst-layer fold", () => {
   const decision = decideCompanionAction(
     REQUEST,
     fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
   );
   assert.equal(decision.phase, "Getting clear");
+});
+
+// --- the buffer fit, which cycles nothing and had nothing to say -------------
+//
+// A brick's plates and extenders are PASSIVE, so they never reach a list this
+// loop can activate. `tankLayer` is voted off the hull's group names at start
+// (bots/tankLayer.ts) and is the only thing such a fit has to say.
+
+/** A plated brick: no repairer to cycle, and a fit that says so. */
+const ARMOUR_BRICK: FleetCompanionRequest = { ...REQUEST, tankLayer: "armor" };
+
+/** An extender brick. */
+const SHIELD_BRICK: FleetCompanionRequest = { ...REQUEST, tankLayer: "shield" };
+
+test("a plated brick does not run away over an empty shield either", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.equal(decision.memory.flee, null);
+});
+
+test("and it leaves when its armour goes", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 0.2, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+test("an extender brick still leaves on its shield", () => {
+  const decision = decideCompanionAction(
+    SHIELD_BRICK,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// ⚠ A FITTED REPAIRER OUTRANKS THE VOTE, and a hull that carries both is where
+// that matters: a shield-boosted ship with a plate in the lows is shield-tanked,
+// because the thing it can switch on is the plainer statement by far.
+test("what the ship can cycle beats what it is built of", () => {
+  const boostedAndPlated: FleetCompanionRequest = {
+    ...REQUEST,
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+    tankLayer: "armor",
+  };
+  const decision = decideCompanionAction(
+    boostedAndPlated,
+    fleeObsCycling(SHIELD_BOOSTER, {
+      health: 0.1,
+      shieldRatio: 0.1,
+      armorRatio: 1,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The way back is judged on the same layers, or a brick would wait at a safe
+// spot for a shield that is empty by design.
+test("a plated brick comes back once its ARMOUR is whole, whatever its shield says", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({
+      health: 0.05,
+      shieldRatio: 0.05,
+      armorRatio: 1,
+      hullRatio: 1,
+      docked: false,
+      // Somewhere else, so the return has a leg to fly and this asserts a move
+      // rather than the absence of one.
+      flightStatus: { solarSystemID: 30000144 } as FleetCompanionObservation["flightStatus"],
+    }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "travelTo", systemID: HOME_SYSTEM });
+  assert.equal(decision.phase, "Going back");
 });
 
 // Null is not "healthy" and it is not "dying" -- the same three-state discipline

@@ -141,6 +141,7 @@ import {
   requestForFit,
   type CompanionFitFacts,
 } from "../bots/companionFitCheck.ts";
+import { voteTankLayer } from "../bots/tankLayer.ts";
 import type { BotLogDraft, BotLogSink } from "../nav/botLog.ts";
 import {
   buildSystemGraph,
@@ -196,6 +197,7 @@ import {
   type CompanionAbandonmentRecord,
   type CompanionCargoCharge,
   type CompanionPropulsionModule,
+  type CompanionTankLayer,
 } from "../nav/fleetCompanionLoop.ts";
 import { highSlotMiningModules, isDockableKind, ungroupedHighSlotModules } from "../space/rowActions.ts";
 import {
@@ -7244,6 +7246,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     modules: [],
     droneBay: null,
     droneBayRoles: { combat: [], salvage: [], logistic: [], unknown: [] },
+    tankLayer: null,
     fitReadable: false,
   });
 
@@ -7398,6 +7401,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       await loadDogma().catch(() => {});
       const defense = resolveDefenseModuleIDs();
       const remote = resolveRemoteRepModuleIDs();
+      // The buffer fit's own answer to "where is this ship's tank", voted off
+      // the same already-resolved group names the classifiers above read. Only
+      // ever consulted when nothing repairable has already said so.
+      const tankLayer = resolveTankLayer();
       const modules = fit.slots
         .filter((slot) => slot.module !== null && slot.module.online)
         .map((slot) => {
@@ -7463,6 +7470,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         modules,
         droneBay,
         droneBayRoles,
+        tankLayer,
         fitReadable: true,
       };
     } catch {
@@ -7611,6 +7619,38 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * runs after resolveMiningModuleIDs so the names are already cached. Reps live
    * in mids/lows, so every family is scanned (not just high slots).
    */
+  /**
+   * Which layer this hull is BUILT around — the answer for a buffer fit, which
+   * cycles nothing and therefore says nothing through any of the lists
+   * `resolveDefenseModuleIDs` fills. The judging lives in `bots/tankLayer.ts`,
+   * where it can be tested against real SDE group names without a store; this
+   * half is the resolve, exactly as the drone-role split is arranged.
+   *
+   * ⚠ RIGS ARE INCLUDED, AND ARE EXCLUDED EVERYWHERE ELSE IN THIS FILE. A rig
+   * cannot be activated, so no cycling list may hold one — but "Rig Armor" on a
+   * hull is about as plain a statement of tank as this game makes. Their group
+   * names are already in the cache: `readCompanionFitFacts` warms `typeGroup`
+   * for every fitted slot, rigs included.
+   *
+   * ⚠ AN OFFLINE MODULE COUNTS TOO, unlike everywhere else here. What a hull
+   * CARRIES is the statement; whether it happens to be powered this minute is
+   * about capacitor and powergrid, not about where its tank was built.
+   * Subsystems are skipped because a T3's subsystem group names describe a
+   * hull role rather than a tank.
+   */
+  function resolveTankLayer(): CompanionTankLayer | null {
+    const fit = store.fitting.get();
+    if (fit.slotsError !== null) {
+      return null;
+    }
+    const resolved = store.names.get().resolved;
+    return voteTankLayer(
+      fit.slots
+        .filter((slot) => slot.module !== null && slot.family !== "subsystem")
+        .map((slot) => resolved[nameKey("typeGroup", slot.module!.typeID)] ?? null),
+    );
+  }
+
   function resolveDefenseModuleIDs(): {
     readonly shield: readonly number[];
     readonly armor: readonly number[];

@@ -28,6 +28,7 @@
 import type {
   CompanionPropulsionModule,
   CompanionSetup,
+  CompanionTankLayer,
   FleetCompanionRequest,
 } from "../nav/fleetCompanionLoop.ts";
 import type { DroneRoleIDs } from "../nav/droneRoles.ts";
@@ -98,6 +99,19 @@ export interface CompanionFitFacts {
    * then, since nothing here reads it in that case.
    */
   readonly droneBayRoles: DroneRoleIDs;
+  /**
+   * Which layer the hull is built around, for a fit with nothing to cycle.
+   *
+   * ⚠ THE ONLY FACT HERE THAT IS A VERDICT RATHER THAN A LIST, and it is one
+   * because the evidence for it is PASSIVE. Every list above names modules the
+   * ladder switches on, so a plate, a coating, an extender or a rig — the things
+   * that actually say "this hull expects to be hit in its armour" — can never
+   * appear in one. Counting them is the caller's resolve-then-judge pass, the
+   * same as `droneBayRoles`; what arrives here is the answer.
+   *
+   * `null` is "the fit did not say": no tank modules at all, or one of each.
+   */
+  readonly tankLayer: CompanionTankLayer | null;
   /** False when the fit itself could not be read; nothing is judged then. */
   readonly fitReadable: boolean;
 }
@@ -133,6 +147,7 @@ export function requestForFit(
     weaponModuleIDs: [...facts.weaponModuleIDs],
     salvagerModuleIDs: [...facts.salvagerModuleIDs],
     propulsionModules: [...facts.propulsionModules],
+    tankLayer: facts.tankLayer,
   };
 }
 
