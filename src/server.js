@@ -18,6 +18,7 @@ const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
+const { createLootMemory } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
 const {
   isBridgeWritePair,
@@ -115,6 +116,14 @@ app.locals.beltMemory = beltMemory;
 // browser supplies.
 const squadBoard = options.squadBoard || createSquadBoard();
 app.locals.squadBoard = squadBoard;
+// Shared, in-process (never persisted — see src/lootMemory.js) memory of the
+// wrecks and cans somebody has already emptied, keyed by solar-system id. A
+// wreck's contents cannot be read from further than 2,500 m and the one field
+// that says "this is empty" never reaches a web session, so the FIRST pilot to
+// fly to a wreck is the only one who can answer the question — this is where it
+// answers it for everybody else.
+const lootMemory = options.lootMemory || createLootMemory();
+app.locals.lootMemory = lootMemory;
 // The bot flight recorder's files (src/botLogStore.js): one log per character,
 // rotated when a run starts, so the current run and the one before it are
 // always readable. Under the web data dir — an operator artifact, never served
@@ -19305,6 +19314,59 @@ app.post("/api/bots/belt-memory", requireAuth, (req, res, next) => {
       groupID = numeric;
     }
     beltMemory.markDry(system, beltName, groupID);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Shared loot memory (goal: stop flying to wrecks with nothing in them) ────
+// In-process only, keyed by solar-system id then the can's own itemID (which,
+// unlike a belt, IS a stable handle for as long as the wreck exists). No
+// gateway call either way — BFF-local bookkeeping every account's pilots share.
+//
+// ⚠ WHY THIS CANNOT BE ANSWERED FROM A READ INSTEAD. The server refuses to list
+// a wreck's contents from beyond 2,500 m, and the slim item's `isEmpty` — the
+// field the retail client draws its hollow-wreck icon from — rides
+// `DoDestinyUpdate`, the one notification the web gateway suppresses. A pilot
+// therefore learns a wreck is empty by flying to it. This route is how it only
+// has to happen once per wreck instead of once per wreck per pilot.
+app.get("/api/bots/loot-memory", requireAuth, (req, res, next) => {
+  try {
+    const system = Number(req.query.system) || 0;
+    if (!Number.isSafeInteger(system) || system <= 0) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_SYSTEM",
+        message: "A solar system id is required.",
+      });
+      return;
+    }
+    res.json({ ok: true, system, itemIDs: lootMemory.emptiedItemIDs(system) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bots/loot-memory", requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const system = Number(body.system) || 0;
+    const itemID = Number(body.itemID) || 0;
+    if (
+      !Number.isSafeInteger(system) ||
+      system <= 0 ||
+      !Number.isSafeInteger(itemID) ||
+      itemID <= 0
+    ) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_CONTAINER",
+        message: "A solar system id and a container itemID are required.",
+      });
+      return;
+    }
+    lootMemory.markEmptied(system, itemID);
     res.json({ ok: true });
   } catch (error) {
     next(error);

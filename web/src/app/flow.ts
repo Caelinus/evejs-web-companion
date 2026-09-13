@@ -5592,6 +5592,57 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   const companionLootAttempts = new Map<number, number>();
   const companionLootFinished = new Set<number>();
   const MAX_LOOT_ATTEMPTS = 3;
+  /**
+   * What OTHER pilots have already emptied, from the BFF's shared loot memory
+   * (src/lootMemory.js), refreshed on a slow beat while there is anything
+   * lootable on the grid.
+   *
+   * ⚠ THIS IS THE HALF `companionLootFinished` CANNOT COVER. That set is this
+   * pilot's own record, and every companion keeps its own -- so a fleet of four
+   * sends four ships to the same wreck, three of them arriving at a hold that
+   * the first one already emptied. Nothing in the snapshot says a wreck is empty
+   * (the slim item's `isEmpty` never reaches a web session), so the only pilot
+   * who can answer is one that flew there, and this is where the answer is
+   * shared.
+   *
+   * ⚠ IT IS ONLY EVER ADDED TO, NEVER TRUSTED TO BE COMPLETE. A wreck missing
+   * from it is "nobody has said", never "it has loot" -- which is exactly how
+   * the ladder already treats an unknown can, so a failed read costs a wasted
+   * approach and never a skipped one.
+   */
+  const companionSharedEmpty = new Set<number>();
+  let companionSharedEmptyReadAtMs = 0;
+  // Slower than the tick, because a shared mark is worth having within a few
+  // seconds and never within one: at worst a pilot sets off for a can that was
+  // emptied while it was reading, notices on arrival, and marks it itself.
+  const COMPANION_LOOT_MEMORY_READ_MS = 6_000;
+
+  async function refreshCompanionSharedEmpty(
+    snapshot: SpaceSnapshot | null,
+    nowMs: number,
+  ): Promise<void> {
+    const solarSystemID = snapshot?.solarSystemID ?? null;
+    if (
+      solarSystemID === null ||
+      nowMs - companionSharedEmptyReadAtMs < COMPANION_LOOT_MEMORY_READ_MS ||
+      // No wreck and no can on this grid: nothing this answer could be used on,
+      // so the read is not made at all. Same rule as the gated drone-bay read.
+      !(snapshot?.entities ?? []).some(
+        (entity) => entity.kind === "wreck" || entity.kind === "container",
+      )
+    ) {
+      return;
+    }
+    companionSharedEmptyReadAtMs = nowMs;
+    try {
+      for (const itemID of await api.readEmptiedContainers(solarSystemID, callOptions)) {
+        companionSharedEmpty.add(itemID);
+      }
+    } catch {
+      // Unreadable is "nobody has said", which is what an empty set already
+      // means here. A companion never stops looting because the board is down.
+    }
+  }
 
   async function companionLootFrom(containerID: number): Promise<void> {
     // ⚠ COUNTED BEFORE ANYTHING CAN RETURN EARLY. Every path out of this
@@ -5800,6 +5851,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
         const ship = snapshot?.ship ?? null;
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
+
+        // What the OTHER pilots have already emptied. Gated on there being
+        // something lootable on this grid and rationed to a slow beat, so a
+        // companion that is not looting pays nothing for it. BFF-local: no
+        // gateway call, and a failure leaves the set as it was.
+        await refreshCompanionSharedEmpty(snapshot, Date.now());
 
         // ── The two grid reads the ladder shares with the DSL's own bots.
         //
@@ -6012,7 +6069,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // for itself: it issues one atomic call and never learns what came
           // back. A can is finished when it was emptied, or when it has been
           // tried enough times not to be worth another.
-          lootFinishedItemIDs: [...companionLootFinished],
+          // ⚠ TWO SOURCES, AND THE SECOND IS WHAT KEEPS A FLEET FROM DOING ONE
+          // PILOT'S WORK FOUR TIMES. `companionLootFinished` is what THIS pilot
+          // settled; `companionSharedEmpty` is what any other pilot on this BFF
+          // (or the hand-flown client, which loots through the same path) found
+          // empty and said so. Merged here rather than in the ladder because
+          // the ladder must stay a pure decider with no reads of its own.
+          lootFinishedItemIDs: [...companionLootFinished, ...companionSharedEmpty],
           combatDroneBayItemIDs: companionDroneRoles.bay?.combat ?? null,
           salvageDroneBayItemIDs: companionDroneRoles.bay?.salvage ?? null,
           logisticDroneBayItemIDs: companionDroneRoles.bay?.logistic ?? null,
@@ -7189,6 +7252,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // ignored the can for ever.
     companionLootAttempts.clear();
     companionLootFinished.clear();
+    // The shared marks go too, and are read back on the first tick that sees a
+    // can on the grid. Nothing is lost -- the board is the BFF's, not this
+    // run's -- and it keeps the promise above literally true: a new run starts
+    // out willing to try everything, then asks.
+    companionSharedEmpty.clear();
+    companionSharedEmptyReadAtMs = 0;
 
     const preflight = evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, await fleetCompanionReads());
     if (!preflight.canStart) {
@@ -7884,6 +7953,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     ]);
     const rows = decodeInventoryRows(contents.list, contents.volumes);
     if (rows.length === 0) {
+      // It held nothing — the one answer nobody could have had without flying
+      // here. Say so, so the next pilot does not make the same trip.
+      reportContainerEmptied(containerID);
       return { stacks: 0, planned: 0, moved: 0 };
     }
     const room = roomRead === null ? [] : decodeShipBays(roomRead.bays);
@@ -7897,7 +7969,49 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       bays,
       freeFor,
     );
+    if (outcome.moved >= rows.length) {
+      // Every stack it had, this ship took: it is empty NOW, which is the same
+      // fact as "it was empty" to every pilot still to come. A PARTIAL move is
+      // deliberately silent — what did not fit is a fact about this hull's
+      // holds, and a can somebody else has room for must stay on their list.
+      reportContainerEmptied(containerID);
+    }
     return { stacks: rows.length, planned: outcome.planned, moved: outcome.moved };
+  }
+
+  /**
+   * Tell the BFF's shared loot memory that a can came up empty (src/lootMemory.js).
+   *
+   * ⚠ THE ONE THING A COMPANION CANNOT LEARN BY LOOKING. A wreck's contents are
+   * unreadable past 2,500 m and the slim item's `isEmpty` -- the field the
+   * retail client draws its hollow-wreck bracket from -- rides `DoDestinyUpdate`,
+   * the single notification the web gateway suppresses. So "is there anything in
+   * that wreck" costs whoever asks it the flight there, every time, and the only
+   * way to stop N pilots each paying it is for the first one to say what it
+   * found. That is this call.
+   *
+   * ⚠ FIRE AND FORGET, AND IT MUST STAY THAT WAY. This rides the loot path of a
+   * bot that is mid-tick; a slow or failed POST must cost that tick nothing. The
+   * consequence of losing one is a wasted approach, which is what the memory was
+   * saving in the first place -- never a stuck pilot.
+   */
+  function reportContainerEmptied(containerID: number): void {
+    // ⚠ THE SNAPSHOT FIRST, AND THE FLIGHT STATUS ONLY AS A FALLBACK. Looting
+    // happens with a grid read in hand by definition -- the can was a row on it
+    // -- whereas the flight slice is filled by a DIFFERENT read that a looting
+    // bot need never have made. Asking the flight status alone reported nothing
+    // at all on exactly the path this exists for.
+    const solarSystemID =
+      store.space.get().snapshot?.solarSystemID ??
+      store.flight.get().status?.solarSystemID ??
+      null;
+    if (solarSystemID === null || containerID <= 0) {
+      return;
+    }
+    void api.rememberContainerEmptied(solarSystemID, containerID, callOptions).catch(() => {
+      // BFF-local bookkeeping. Nothing in the world changed and nothing here is
+      // worth a retry.
+    });
   }
 
   /**

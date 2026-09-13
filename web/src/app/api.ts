@@ -1749,6 +1749,44 @@ export async function rememberBeltDry(
   await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
 }
 
+/**
+ * Which wrecks and cans in `solarSystemID` somebody has already emptied, from
+ * the BFF's shared loot memory (src/lootMemory.js). In-process, never
+ * persisted, and shared by every pilot on this BFF — including the hand-flown
+ * client, whose own loot verb reports into it through the same path a bot uses.
+ *
+ * ⚠ THIS EXISTS BECAUSE "IS THERE ANYTHING IN THAT WRECK" CANNOT BE ASKED FROM
+ * ACROSS THE GRID. The server refuses to list a can's contents past 2,500 m and
+ * the slim item's `isEmpty` never reaches a web session, so the answer costs a
+ * pilot the flight there. Reading this is how the SECOND pilot gets it free.
+ */
+export async function readEmptiedContainers(
+  solarSystemID: number,
+  options: ApiOptions = {},
+): Promise<readonly number[]> {
+  const data = await getJson(
+    `/api/bots/loot-memory?system=${encodeURIComponent(String(solarSystemID))}`,
+    options,
+  );
+  return asNumberList(data.itemIDs);
+}
+
+/**
+ * Tell the shared loot memory that `itemID` came up empty — it held nothing, or
+ * everything in it was taken.
+ *
+ * ⚠ ONLY THOSE TWO OUTCOMES. "It did not all fit aboard" is a fact about the
+ * hull that looked, not about the can, and reporting it here would send a pilot
+ * with room straight past a full wreck.
+ */
+export async function rememberContainerEmptied(
+  solarSystemID: number,
+  itemID: number,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/bots/loot-memory", { system: solarSystemID, itemID }, options);
+}
+
 /** The fleet's standing call, from /api/bots/squad-board. */
 export interface SquadPrimary {
   readonly targetID: number;

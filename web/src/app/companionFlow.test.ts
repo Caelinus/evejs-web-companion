@@ -1456,3 +1456,62 @@ test("the LOOP is started on the derived request, not the one that came in", () 
     "the loop must never be handed the un-derived setup",
   );
 });
+
+// --- the shared loot memory ------------------------------------------------
+//
+// A wreck's contents are unreadable past 2,500 m and the slim item's `isEmpty`
+// -- the field the retail client draws its hollow-wreck bracket from -- rides
+// DoDestinyUpdate, the one notification the web gateway suppresses. So a pilot
+// learns a wreck is empty by FLYING TO IT, and the only saving available is that
+// the next pilot reads what the first one found. These pin the READ half: what
+// the observation asks for, and when it does not ask at all.
+
+/** A wreck row on the grid, as the snapshot projects one. */
+function wreckRow(itemID: number, distance: number): unknown {
+  return {
+    itemID,
+    kind: "wreck",
+    typeID: 26468,
+    radius: 0,
+    position: { x: distance, y: 0, z: 0 },
+    velocity: { x: 0, y: 0, z: 0 },
+    isSelf: false,
+    ownerID: null,
+  };
+}
+
+test("a grid with a wreck on it asks the BFF what other pilots have already emptied", async () => {
+  const { store, flow, calls } = gridHarness({ entities: [wreckRow(80020, 25_000)] });
+
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.ok(
+    calls.some((call) => call.path.startsWith("/api/bots/loot-memory?system=")),
+    "the shared board is what stops four pilots each flying to the same emptied wreck",
+  );
+  flow.stopFleetCompanion();
+});
+
+test("a grid with nothing lootable on it never asks — a read nobody could use is not made", async () => {
+  const { store, flow, calls } = gridHarness({
+    entities: [
+      rivalShip({
+        itemID: RIVAL_SHIP_ITEM_ID,
+        typeID: RIVAL_HULL_TYPE_ID,
+        characterID: RIVAL_CHARACTER_ID,
+        distance: 9000,
+      }),
+    ],
+  });
+
+  await flow.startFleetCompanion(DEFAULT_COMPANION_SETUP);
+  await waitForCompanionTick(() => store.get().companion.why);
+
+  assert.equal(
+    calls.filter((call) => call.path.startsWith("/api/bots/loot-memory")).length,
+    0,
+    "same rule as the gated drone-bay read: a companion never pays for an answer no rung will read",
+  );
+  flow.stopFleetCompanion();
+});

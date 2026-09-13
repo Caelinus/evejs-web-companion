@@ -947,3 +947,96 @@ test("a hull with no room refuses with the sentinel the panel translates, not wi
     "nothing was offered: there was nowhere for it to go",
   );
 });
+
+// ── WHAT THE TRIP FOUND OUT, SAID OUT LOUD ──────────────────────────────────
+//
+// A wreck's contents cannot be read from across the grid: the server refuses to
+// list one past 2,500 m, and the slim item's `isEmpty` -- the field the retail
+// client draws its hollow-wreck bracket from -- rides DoDestinyUpdate, the one
+// notification the web gateway suppresses. So "is there anything in that wreck"
+// costs whoever asks it the flight there. These pin the only fix available:
+// whoever pays it tells the BFF's shared loot memory, and the next pilot reads
+// the answer instead of flying for it.
+
+/** Let the fire-and-forget report leave the flow before looking for it. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+test("a wreck that held NOTHING is reported to the shared loot memory", async () => {
+  const CONTAINER_ID = 80013;
+  const store = onlineStore();
+  const { fetch, requests } = manualLootFetch({
+    containerID: CONTAINER_ID,
+    kind: "wreck",
+    bays: ["cargo"],
+    rows: [],
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.loadSpaceSnapshot();
+  await flow.lootContainer(CONTAINER_ID);
+  await settle();
+
+  const reported = requests.filter((r) => r.path === "/api/bots/loot-memory" && r.method === "POST");
+  assert.equal(reported.length, 1, "the one fact nobody else could have had");
+  assert.deepEqual(reported[0]?.body, { system: SOLAR_SYSTEM_ID, itemID: CONTAINER_ID });
+});
+
+test("a wreck this ship EMPTIED is reported too — empty now is empty for everybody", async () => {
+  const CONTAINER_ID = 80014;
+  const store = onlineStore();
+  const { fetch, requests } = manualLootFetch({
+    containerID: CONTAINER_ID,
+    kind: "wreck",
+    bays: ["cargo"],
+    rows: [
+      packedRow({ itemID: 90040, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 100, singleton: 0 }),
+    ],
+    volumes: { "34": 0.01 },
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.loadSpaceSnapshot();
+  const outcome = await flow.lootContainer(CONTAINER_ID);
+  await settle();
+
+  assert.deepEqual(outcome, { stacks: 1, planned: 1, moved: 1 });
+  const reported = requests.filter((r) => r.path === "/api/bots/loot-memory" && r.method === "POST");
+  assert.deepEqual(reported[0]?.body, { system: SOLAR_SYSTEM_ID, itemID: CONTAINER_ID });
+});
+
+test("a PARTIAL loot says NOTHING: what did not fit is a fact about this hull", async () => {
+  // ⚠ THE WHOLE DISCIPLINE OF THE SHARED BOARD. This can still has ore in it --
+  // this ship simply had no room for it. Reporting that would send a hauler with
+  // an empty hold straight past a full can.
+  const CONTAINER_ID = 80015;
+  const store = onlineStore();
+  const { fetch, requests } = manualLootFetch({
+    containerID: CONTAINER_ID,
+    kind: "container",
+    bays: ["cargo"],
+    used: { cargo: 349 }, // 1 m³ left of a 350 m³ hold
+    rows: [
+      // 50 m³ of ore: some of it moves, the rest stays in the can.
+      packedRow({ itemID: 90050, typeID: 1230, groupID: 462, categoryID: 25, flagID: null, quantity: 500, singleton: 0 }),
+      // And a second stack that has nowhere to go at all.
+      packedRow({ itemID: 90051, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 10000, singleton: 0 }),
+    ],
+    volumes: { "1230": 0.1, "34": 0.01 },
+  });
+
+  const flow = createAppFlow(store, { fetch });
+  await flow.loadSpaceSnapshot();
+  const outcome = await flow.lootContainer(CONTAINER_ID);
+  await settle();
+
+  assert.ok(outcome.moved < outcome.stacks, "it did not clear the can");
+  assert.equal(
+    requests.filter((r) => r.path === "/api/bots/loot-memory").length,
+    0,
+    "nothing was said about a can that still has loot in it",
+  );
+});

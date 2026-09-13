@@ -5012,6 +5012,35 @@ test("a can is finished by the OUTCOME, not by having been reached for", () => {
   assert.notEqual(done.action.kind, "lootContainer");
 });
 
+test("a wreck ANOTHER pilot already emptied is never flown to", () => {
+  // ⚠ THE FLEET'S WASTE, NOT THIS PILOT'S. Nothing in a snapshot says a wreck is
+  // empty -- the server refuses to list one past 2,500 m, and the slim item's
+  // `isEmpty` never reaches a web session -- so the question costs whoever asks
+  // it the flight there. Each companion keeps its OWN record of what it emptied,
+  // which is why a fleet of four used to send four ships to the same wreck, the
+  // last three arriving at a hold the first one had already cleared.
+  //
+  // `lootFinishedItemIDs` is now fed from the BFF's shared loot memory as well
+  // as from this pilot's own calls (flow.ts `companionSharedEmpty`), so what one
+  // trip found out answers for everybody. This pilot has never touched this
+  // wreck: the id arrives from somebody else, and the rung must treat it exactly
+  // as it treats its own emptied can.
+  const told = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ wreckOwner: COMPANION, wreckDistance: 30_000 }),
+      chatMessages: [areaOrder("loot")],
+      lootFinishedItemIDs: [WRECK],
+    }),
+  );
+  assert.notEqual(told.action.kind, "approach", "no trip is made for a wreck known to be empty");
+  assert.notEqual(told.action.kind, "lootWreck");
+  assert.equal(told.memory.lootTargetID, null, "and nothing is latched onto");
+  // With the one wreck accounted for there is no work left here, so the job
+  // stands down rather than holding a pilot on a picked-clean grid.
+  assert.equal(told.memory.areaJob, null);
+});
+
 test("a target that leaves the grid is dropped rather than waited on", () => {
   // A jetcan despawns when it is emptied -- by us or by anybody else. The rung
   // must notice it is gone and choose again, not hold a latch on nothing.
