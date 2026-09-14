@@ -372,3 +372,111 @@ change, and it is additive.
 * ammo: an unloaded gun is never activated; all-guns-unloaded still fights;
 * finishing: hostiles on grid but out of lock range -> approach, not done; budget
   spent -> recall and done.
+
+## 13. Giving up on a site — effort without progress
+
+The loop this section exists to close: the bot warps into a den it cannot beat,
+fights until a watch pulls it home, repairs perfectly, comes back to the same
+den, and does it again until somebody notices. Nothing in the runner stops that
+today, and the cap that looks like it should is fooled by it.
+
+### Why the existing trip cap does not catch it
+
+`MAX_RECOVER_TRIPS` bounds a dock-and-repair watch at three round trips — but
+`releaseRecoverTrips` (nav/scriptDecide.ts) drops the whole tally the moment the
+watched condition reads not-met. A trip that WORKS therefore resets the counter,
+which is right for the case it was written for ("a trip that DOES help puts the
+whole cap back") and exactly wrong here: every trip helps, the ship really is
+repaired each time, and the thing that is broken is not the ship but the site.
+The cap can only see a repair that fails.
+
+### The frame: spending without earning
+
+"Too hard" is not measurable — nothing on the wire rates a site's difficulty, and
+a bot that tried to guess one would be inventing a number to obey. What IS
+measurable is whether the ship is spending without earning. Three shapes, one
+ledger:
+
+1. **Nothing is dying.** The primary's health is not going down and no hostile
+   has left the grid.
+2. **The same site keeps sending us home.** Break off, recover, return, break off
+   again — counted per SITE, which is the count nobody keeps today.
+3. **The site outlives its budget.** `MAX_STEP_TICKS` already backstops this at
+   about an hour, which is far too late to be useful and is not a site verdict.
+
+### ⚠ THE STALL COUNTER MAY ONLY RUN WHILE DAMAGE IS ACTUALLY BEING APPLIED
+
+The dangerous version of this feature blames the site for faults at our own end:
+drones out of control range, drones never engaged, guns with nothing loaded,
+kiting at a distance the drones cannot work in. Every one of those produces "no
+damage" and NONE of them means the site is unwinnable — the honest response to
+each is to fix the position or the fit, not to leave.
+
+So the stall counter ticks only while the block is applying: drones engaged on
+the primary AND the primary inside drone control range. Any tick that fails that
+test is not evidence about the site and must not be counted. This is also why the
+ledger cannot be a generic watch: only the block knows whether it is currently
+applying.
+
+### Where the verdict lives, and why it is on the board
+
+The block that OBSERVES difficulty is the combat block. The block that must ACT
+on it is `warp-to-anomaly`, because the whole point is not coming back. They
+already have a channel: the run board, where `anomsVisited` keeps the site tour
+honest across laps. So the combat block writes a verdict keyed by the scan label
+and the anomaly block skips labels it finds there.
+
+⚠ THE LAP RESTART MUST NOT WIPE THE ABANDONED LIST. `warpToAnomalyOfKind` clears
+`anomsVisited` once every site has been worked, so the tour can start again —
+correct for "visited", fatal for "abandoned". An abandoned label that the lap
+restart forgets is a loop that closes again with extra steps.
+
+⚠ AND IT IS A RUN LEDGER, NOT STEP MEMORY. Step memory is wiped every time the
+step is left, so a per-visit budget hands every failing site a fresh allowance on
+every lap. This codebase has already paid for that lesson once: the note above
+`MacroMemory` records a bot that produced 227 consecutive refusals in repeating
+bursts of five for precisely that reason. "This site has been beating me" is the
+same shape as "this object has been refusing me" and belongs in the same place.
+
+### The response, graduated
+
+1. **Mark the site, take the next one.** Cheap and local; most of the time the
+   next anomaly is fine.
+2. **Every listed site abandoned -> the system is the problem.** The block reports
+   blocked with a sentence the player can act on, rather than touring the same
+   three dens all night.
+3. **Never come to rest in space.** The existing stop-from-a-station rule covers
+   it; nothing here needs its own version.
+
+The readout must name WHICH evidence fired, in player words — "Nothing here was
+dying and I had been at it a minute, so I am leaving this den" reads differently
+from "That is the third time this den has sent me home", and a player can act on
+the difference. A generic "site too hard" teaches them nothing.
+
+### The free diagnostic
+
+The rat's dogma is already fetched for the target ladder, and it says whether a
+rat repairs itself (`entityArmorRepairAmount` 631, `entityShieldBoostAmount` 637).
+When a stall fires against a rat carrying those, the readout can name the actual
+cause — "that one repairs itself faster than your drones hurt it" — instead of
+giving up anonymously. Diagnostic only: it explains a verdict already reached, it
+never reaches one on its own, because a self-repairing rat that dies anyway is not
+a problem.
+
+### Both combat blocks, not just the new one
+
+`fight-the-rats` has the identical hole and is the block most players are running
+today, so the ledger lives in a shared pure module (`nav/siteProgress.ts`) and
+BOTH blocks feed it. A bug fixed in one has to be fixed in the other, which is the
+same rule that put the propulsion policy in its own module.
+
+### Thresholds — constants, not knobs
+
+* `STALL_TICKS` — about 40 s of applying-without-progress. Long enough that a
+  cruiser rat's health bar moving slowly is never mistaken for a stall (the test
+  is "not going down at all", not "not dead yet"), short enough to matter.
+* `MAX_SITE_RETURNS` — 2 returns to the same label before it is abandoned.
+
+Both are constants with their reasoning written down rather than player settings.
+The block should simply behave; a knob here asks the player a question they have
+no way to answer, and every value they could pick is worse than the block knowing.
