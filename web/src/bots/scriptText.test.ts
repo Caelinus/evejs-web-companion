@@ -15,6 +15,7 @@ import {
   type RockPick,
 } from "./botScript.ts";
 import {
+  conditionAdvice,
   conditionSentence,
   interruptSentence,
   macroName,
@@ -43,6 +44,7 @@ function sampleCondition(kind: ConditionKind): Condition {
     case "hold-empty":
     case "hostile-on-grid":
     case "targeted-by-player":
+    case "tackled":
       return { kind };
   }
 }
@@ -247,6 +249,39 @@ test("a combat step flying with the fleet says which part it plays", () => {
     args: { squad: { kind: "squadRole", role: "off" } },
   };
   assert.doesNotMatch(stepSentence(alone), /fleet/, "flying alone is the default and says nothing");
+});
+
+test("a tackled watch names the consequence, so the wrong response reads wrong", () => {
+  // ⚠ THIS IS THE STEER, AND IT IS THE ONLY ONE THERE IS. The format does not
+  // police which response goes with which condition. What stops a player wiring
+  // the row that killed a ship on 2026-09-14 is that the whole sentence gives
+  // the game away: naming "cannot warp out" inside the condition makes a dock
+  // response contradict itself in the same breath.
+  const clause = conditionSentence({ kind: "tackled" });
+  assert.match(clause, /cannot warp out/);
+
+  const fights = interruptSentence({ id: "w1", when: { kind: "tackled" }, respond: "fight-back" });
+  assert.match(fights, /cannot warp out, harden up, fight back/);
+
+  // The pairing is still REPRESENTABLE — nothing here forbids it — and it reads
+  // as the contradiction it is.
+  const docks = interruptSentence({ id: "w2", when: { kind: "tackled" }, respond: "dock-and-repair" });
+  assert.match(docks, /cannot warp out, dock at home/);
+});
+
+test("only the tackled check carries advice, and it points at fighting back", () => {
+  const advice = conditionAdvice("tackled");
+  assert.ok(advice !== null);
+  assert.match(advice, /cannot warp/i);
+  assert.match(advice, /Fight back/);
+  // Plain ASCII, like every other player-facing string here: printable only, so
+  // no dash or quote a screen reader has to spell out sneaks in.
+  assert.doesNotMatch(advice, /[^ -~]/, "no decoration a screen reader has to spell out");
+  for (const kind of CONDITION_KINDS) {
+    if (kind !== "tackled") {
+      assert.equal(conditionAdvice(kind), null, `${kind} should need no advice`);
+    }
+  }
 });
 
 test("a fight-back watch says how it fights, and an ordinary one still does not", () => {

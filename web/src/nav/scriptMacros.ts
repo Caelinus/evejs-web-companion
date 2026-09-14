@@ -17,6 +17,7 @@ import type {
   ScriptBoard,
 } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
+import type { RatThreat } from "./ratThreat.ts";
 import { pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
@@ -78,6 +79,47 @@ const ORBIT_RANGE_M = 5000; // the operator's "orbit of 5km" — inside mining r
 // the orbit's normal wobble stay inside the range that matters.
 const MINING_RANGE_M = 10_000;
 const DOCK_RANGE_M = 2500; // dock once this close (retail's docking radius)
+/**
+ * Has the warp this step issued actually LANDED?
+ *
+ * ⚠ A MACRO CANNOT WATCH FOR `inWarp` AND MUST NOT TRY. `decideScriptAction`
+ * holds every watch and every macro while the ship is warping — its guard
+ * returns before the program is reached — so a macro is never called on a tick
+ * where `inWarp` is true. The three blocks that warp somewhere and then have to
+ * know they got there all used to watch for exactly that state, and from the day
+ * that guard landed (2026-09-11) none of them ever saw it again: each issued its
+ * warp, sat out the flight unasked, resumed on the far side having witnessed
+ * nothing, counted out its patience and reported that the warp had never started
+ * — while the ship sat on the destination grid taking fire, because the step
+ * never finished and the block after it never ran.
+ *
+ * So arrival is read from `obs.completedWarps`, a count the OBSERVATION keeps
+ * because the observation is the only layer read on every tick. The step records
+ * it when it issues; a higher count afterwards is a warp that finished.
+ *
+ * `sawWarp` is still honoured first, and is not dead code: it is what a macro
+ * sees if it is ever driven WITHOUT that guard (every pure test does exactly
+ * that), and it costs one flag to keep both paths true.
+ *
+ * ⚠ AN UNREADABLE COUNT IS NOT AN ARRIVAL. Null on either side answers false and
+ * the caller falls back to its own wait budget, which is the honest failure:
+ * waiting too long for a warp that did land costs a few seconds, while declaring
+ * an arrival that did not happen finishes a travel step onto the wrong grid.
+ */
+function warpLanded(obs: ScriptObservation, mem: MacroMemory): boolean {
+  if (flag(mem, "sawWarp")) {
+    return true;
+  }
+  const now = obs.completedWarps ?? null;
+  const atIssue = num(mem, "warpsAtIssue");
+  return now !== null && atIssue !== null && now > atIssue;
+}
+
+/** The memory a step writes when it ISSUES a warp, so `warpLanded` can answer later. */
+function warpIssuedMem(obs: ScriptObservation): MacroMemory {
+  return { issued: true, waited: 0, warpsAtIssue: obs.completedWarps ?? null };
+}
+
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
 
 function tick(
@@ -121,6 +163,57 @@ function targetPriorityOf(step: MacroStep): readonly TargetClass[] {
 function targetGroupOf(obs: ScriptObservation): (typeID: number) => string | null {
   const groups = obs.targetGroupNames ?? null;
   return (typeID: number): string | null => (groups === null ? null : (groups[typeID] ?? null));
+}
+
+/**
+ * What a rat's OWN dogma says it does — the NPC half of the classifier whose
+ * player half is `targetGroupOf` above. `nav/ratThreat.ts` reads the attributes;
+ * this only hands the decoded answer to the pick.
+ *
+ * ⚠ WITHOUT THIS THE PLAYER'S TARGET LADDER IS INERT AGAINST RATS, and that is
+ * not a theory about the code — it is what every ratting bot in this tree has
+ * been doing. Every NPC in the static data is an "Asteroid Serpentis Frigate" or
+ * a "Deadspace Angel Cartel Cruiser", and not one of those names is a group
+ * `targetClassForGroup` knows, so the whole grid classified as "other", every
+ * row tied, and the pick fell through to nearest-first no matter which classes
+ * the player dragged to the top of the picker. The picker was decoration.
+ *
+ * A type MISSING from the map answers null, which is "the dogma said nothing,
+ * ask the group name" and never "this rat is harmless" — the distinction
+ * `targetClassForThreat` exists to preserve. A null map says that about every
+ * type at once, which collapses the ordering back to exactly the group-only
+ * behaviour that shipped before.
+ */
+function targetThreatOf(obs: ScriptObservation): (typeID: number) => RatThreat | null {
+  const threats = obs.threatByTypeID ?? null;
+  return (typeID: number): RatThreat | null => (threats === null ? null : (threats[typeID] ?? null));
+}
+
+/**
+ * The ids the server says are scrambling, webbing or jamming THIS ship right
+ * now, or `undefined` when no jam fold was read at all.
+ *
+ * ⚠ THIS IS THE READ A HULL WAS LOST FOR. Live run, 2026-09-14: the armour
+ * watch fired at its threshold and did everything right — drones home, aligned
+ * out, course set — and the warp came back REFUSED, because the ship was
+ * scrammed. `fightTheWayOut` then borrowed this block to shoot its way free,
+ * which is the correct answer in principle, and the block shot the NEAREST rat,
+ * because the nearest rat was all the pick could see. The frigate with the point
+ * on it was never touched, and the ship spent its last forty seconds killing
+ * something whose death freed nothing. The server had been naming that frigate
+ * on the victim's own wire the entire time (its `OnJamStart` push, folded here)
+ * and this block never asked.
+ *
+ * ⚠ THE UNDEFINED MATTERS, AND AN EMPTY ARRAY IS A DIFFERENT ANSWER.
+ * `pickPrimary` skips the promotion entirely when the set is absent; handing it
+ * an empty Set instead would be the claim "we looked and nothing is on us",
+ * which is stronger than "nobody looked". An empty ARRAY on the observation is
+ * the first of those — the jam slice is a fold of pushes that always exists —
+ * and it is passed straight through as an empty Set.
+ */
+function jammingSourcesOf(obs: ScriptObservation): ReadonlySet<number> | undefined {
+  const ids = obs.jammingSourceIDs;
+  return ids === undefined ? undefined : new Set(ids);
 }
 
 // ── Flying with the fleet (the shared squad board) ───────────────────────────
@@ -2339,6 +2432,28 @@ function fightRatsLadder(
   verdict: SiteVerdict,
 ): MacroTick {
   if (hostiles.length === 0) {
+    // ⚠ AN EMPTY GRID IS READ THREE TIMES BEFORE IT IS BELIEVED, and the tick
+    // this protects is the one right after a warp lands. Caught live on
+    // 2026-09-14 in the drone-boat block, which shares the trap: the ship
+    // arrived in a den, read a grid that had not populated yet, called it clear,
+    // and the loop warped on to the next site while the rats it had just decided
+    // were not there shot its shields off. A grid that has not ARRIVED is
+    // byte-identical to a grid with nothing on it — the same lie the scanner
+    // tells, and it gets the same three reads (EMPTY_SCAN_CONFIRM_READS above).
+    //
+    // Consecutive: one hostile row puts the count straight back, so a fight that
+    // is still going can never creep toward finishing during a lull.
+    const emptyReads = (num(mem, "emptyGridReads") ?? 0) + 1;
+    if (emptyReads < EMPTY_GRID_CONFIRM_TICKS) {
+      return tick(
+        WAIT,
+        "Nothing on the grid yet — reading it again before calling this done.",
+        "Fighting",
+        ACTING,
+        false,
+        { ...mem, emptyGridReads: emptyReads },
+      );
+    }
     // Stand the fleet's call down BEFORE leaving: a call outlives the ship it
     // named for as long as its ttl, and a follower obeying one is a follower
     // holding its guns on a wreck.
@@ -2351,6 +2466,8 @@ function fightRatsLadder(
     }
     return tick(WAIT, "The grid is clear.", "Fighting", { kind: "done" });
   }
+
+  mem = num(mem, "emptyGridReads") === null ? mem : { ...mem, emptyGridReads: 0 };
 
   const weapons = obs.weaponModuleIDs ?? [];
   if (weapons.length === 0 && roster.roleOut.length === 0 && roster.roleBay.length === 0) {
@@ -2427,6 +2544,27 @@ function fightRatsLadder(
         (row) => row.distance,
         targetGroupOf(obs),
         targetPriorityOf(step),
+        // No `tagOf`: tags are resolved one rung up by `calledOnGrid`, and
+        // wiring them through here as well is how one of the two mechanisms
+        // silently stops mattering (see that function's own note).
+        //
+        // ⚠ AND THAT IS ALSO WHAT KEEPS THE FC'S TAG ABOVE THE JAM FEED. A tag
+        // makes `called` non-null, and `called` short-circuits this pick
+        // entirely — so a tagged ship is locked whatever the jam fold says. That
+        // precedence is deliberate and documented in targetPriority.ts: a tag is
+        // a human looking at the fight and saying "this one, now"; a jam is a
+        // fact about the grid. The human wins.
+        undefined,
+        // ⚠ THE TWO READS THAT MAKE THIS A PICK AND NOT A COIN TOSS, and the
+        // pair a hull was lost for on 2026-09-14 (see `jammingSourcesOf`). The
+        // dogma gives the player's ladder something to rank RATS by, which it
+        // has never had; the live jam feed puts whatever is actually holding
+        // this ship at the top of that ladder. Both matter most in the escape
+        // this block gets borrowed for — `fightTheWayOut` runs this exact pick,
+        // and the one target whose death frees a scrammed ship is the one the
+        // server already named.
+        targetThreatOf(obs),
+        jammingSourcesOf(obs),
       ) ??
       hostiles[0]!;
     return tick(
@@ -2620,6 +2758,9 @@ const WARP_START_WAIT_TICKS = 10; // ~20s for a warp to actually begin
 // lies.
 const EMPTY_SCAN_CONFIRM_READS = 3; // ~6s of agreeing before "this system is empty"
 
+/** The same rule for the GRID: an empty one right after a warp has not arrived yet. */
+const EMPTY_GRID_CONFIRM_TICKS = 3;
+
 /** The words each variant uses about its own sites — the only thing that differs. */
 interface AnomalyFlavour {
   /** The board slot holding this run's visited labels. Separate per kind so
@@ -2752,7 +2893,7 @@ function warpToAnomalyOfKind(
       if (obs.inWarp === true) {
         return tick(WAIT, `In warp to the ${flavour.noun}.`, flavour.flying, ACTING, false, { ...mem, sawWarp: true });
       }
-      if (flag(mem, "sawWarp")) {
+      if (warpLanded(obs, mem)) {
         return tick(WAIT, `Arrived at the ${flavour.noun}.`, "Arrived", { kind: "done" });
       }
       const waited = (num(mem, "waited") ?? 0) + 1;
@@ -2839,7 +2980,7 @@ function warpToAnomalyOfKind(
         flavour.flying,
         ACTING,
         false,
-        { issued: true, waited: 0 },
+        warpIssuedMem(obs),
       ),
       boardPatch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
@@ -3059,7 +3200,7 @@ const warpToBookmark: MacroDecider = (step, obs, mem) => {
     if (obs.inWarp === true) {
       return tick(WAIT, "In warp to the spot.", "Warping", ACTING, false, { ...mem, sawWarp: true });
     }
-    if (flag(mem, "sawWarp")) {
+    if (warpLanded(obs, mem)) {
       return tick(WAIT, "Arrived at the spot.", "Arrived", { kind: "done" });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
@@ -3092,10 +3233,7 @@ const warpToBookmark: MacroDecider = (step, obs, mem) => {
       reason: "That saved spot is in another system - put a travel block before this one.",
     });
   }
-  return tick({ kind: "warpBookmark", bookmarkID: match.bookmarkID }, "Warping to the spot.", "Warping", ACTING, false, {
-    issued: true,
-    waited: 0,
-  });
+  return tick({ kind: "warpBookmark", bookmarkID: match.bookmarkID }, "Warping to the spot.", "Warping", ACTING, false, warpIssuedMem(obs));
 };
 
 // ── fly-to-mission-site ──────────────────────────────────────────────────────
@@ -3116,7 +3254,7 @@ const flyToMissionSite: MacroDecider = (_step, obs, mem) => {
     if (obs.inWarp === true) {
       return tick(WAIT, "In warp to the mission site.", "Flying to the site", ACTING, false, { ...mem, sawWarp: true });
     }
-    if (flag(mem, "sawWarp")) {
+    if (warpLanded(obs, mem)) {
       return tick(WAIT, "Arrived at the mission site.", "Arrived", { kind: "done" });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
@@ -3150,10 +3288,7 @@ const flyToMissionSite: MacroDecider = (_step, obs, mem) => {
     });
   }
   const pick = inSystem.find((bm) => bm.hasSpot === true) ?? inSystem[0]!;
-  return tick({ kind: "warpBookmark", bookmarkID: pick.bookmarkID }, "Warping to the mission site.", "Flying to the site", ACTING, false, {
-    issued: true,
-    waited: 0,
-  });
+  return tick({ kind: "warpBookmark", bookmarkID: pick.bookmarkID }, "Warping to the mission site.", "Flying to the site", ACTING, false, warpIssuedMem(obs));
 };
 
 // ── restart-extractors ───────────────────────────────────────────────────────
@@ -3762,9 +3897,25 @@ const fleetTagTarget: MacroDecider = (step, obs, mem) => {
   if (hostiles.length === 0) {
     return tick(WAIT, "No hostile here to tag.", "Tagging", ACTING, false, mem);
   }
+  //
+  // ⚠ THE SAME LADDER AS THE FIGHT BLOCK, DOGMA AND JAM FEED INCLUDED, AND IT
+  // HAS TO BE. What this writes is read straight back by every follower's
+  // `calledByTag`, where a tag outranks everything — including the jam fold. So
+  // a tag block still picking nearest-first would not merely mis-tag: it would
+  // hand the squad a human-authority instruction to shoot the wrong rat and
+  // overrule the very feed that names the one holding them. Two ladders in one
+  // squad is one ladder too many.
   const primary =
-    pickPrimary(hostiles, (row) => row.typeID, (row) => row.distance, targetGroupOf(obs), targetPriorityOf(step)) ??
-    hostiles[0]!;
+    pickPrimary(
+      hostiles,
+      (row) => row.typeID,
+      (row) => row.distance,
+      targetGroupOf(obs),
+      targetPriorityOf(step),
+      undefined,
+      targetThreatOf(obs),
+      jammingSourcesOf(obs),
+    ) ?? hostiles[0]!;
 
   // Confirmed by SEEING the tag in a later `fleetTargetTags` read — never by the
   // write's own ack, which reads `{ok: true}` whether the server kept the tag or

@@ -10,6 +10,7 @@ import type { MacroMemory, MacroTick, ScriptBoard } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
 import {
   emptyLedger,
@@ -1177,6 +1178,36 @@ test("tackled: once the grid is clear the trip home is asked for again", () => {
   assert.equal(clear.nextMem["recalled"], false, "the drones are called in again before the next warp");
 });
 
+test("tackled: the way out is fought against the ship HOLDING it, not the nearest one", () => {
+  // ⚠ THE LOSS THIS PARCEL EXISTS FOR, END TO END. The watch fired, the drones
+  // came home, the warp was refused — and the escape shot the nearest rat while
+  // the one with the point sat at 30 km untouched. `fightTheWayOut` needed
+  // nothing of its own to fix: it borrows `fight-the-rats` whole, so repairing
+  // the pick repaired the escape. This asserts that the borrowing is real.
+  const near = entity({ itemID: 6661, typeID: 30100, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5_000, y: 0, z: 0 } });
+  const holding = entity({ itemID: 6662, typeID: 30100, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 30_000, y: 0, z: 0 } });
+  const held = scriptTravelHome(
+    obs({
+      snapshot: snapshot([near, holding]),
+      travel: scrambled,
+      homeStationID: HOME,
+      weaponModuleIDs: [500],
+      // The server's own OnJamStart fold: THAT frigate is the one on us.
+      jammingSourceIDs: [6662],
+    }),
+    {},
+  );
+  assert.equal(held.phase, "Fighting free");
+  assert.ok(held.action.kind === "lock" && held.action.targetID === 6662, "the one whose death frees the ship");
+
+  // And with nothing on the wire it is the old behaviour, unchanged.
+  const blind = scriptTravelHome(
+    obs({ snapshot: snapshot([near, holding]), travel: scrambled, homeStationID: HOME, weaponModuleIDs: [500] }),
+    {},
+  );
+  assert.ok(blind.action.kind === "lock" && blind.action.targetID === 6661);
+});
+
 test("tackled: the escape is bounded — a trip that keeps failing eventually stops", () => {
   const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
   const spent = scriptTravelHome(
@@ -1262,9 +1293,9 @@ test("fight: target died -> next rat; grid clear -> recall drones, then done", (
   assert.ok(next.action.kind === "lock" && next.action.targetID === 6662);
 
   // All dead, drones out -> recall; drones home -> done.
-  const recall = fight(s, obs({ snapshot: snapshot([drone]), dronesOut: true }), {}, {});
+  const recall = fightUntilClear(fight, s, obs({ snapshot: snapshot([drone]), dronesOut: true }));
   assert.ok(recall.action.kind === "recallDrones");
-  const done = fight(s, obs({ snapshot: snapshot([]) }), {}, {});
+  const done = fightUntilClear(fight, s, obs({ snapshot: snapshot([]) }));
   assert.equal(done.outcome.kind, "done");
 });
 
@@ -1287,11 +1318,10 @@ test("fight: a rat beyond the hull's targeting range is not a target at all", ()
   // Only the far one left: nothing is reachable, so the block FINISHES rather
   // than locking-and-giving-up forever. As a watch response, that hands the ship
   // back to the step under it.
-  const unreachable = fight(
+  const unreachable = fightUntilClear(
+    fight,
     s,
     obs({ snapshot: snapshot([far]), weaponModuleIDs: [500], maxTargetRangeM: 30_000 }),
-    {},
-    {},
   );
   assert.equal(unreachable.outcome.kind, "done");
 });
@@ -2388,6 +2418,184 @@ test("fight: the player's own ladder is followed", () => {
   assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "battleships first, because that is what was asked");
 });
 
+// ── the rat's own dogma, and the live jam feed ───────────────────────────────
+//
+// ⚠ THE PARCEL A HULL PAID FOR. Live run, 2026-09-14: the armour watch fired at
+// its threshold and did everything right — drones home, aligned out, course set
+// — and the warp came back REFUSED, because a frigate had the ship scrammed.
+// The escape borrowed `fight-the-rats`, which is the correct answer in
+// principle, and `fight-the-rats` shot the NEAREST rat. The frigate with the
+// point on it was never touched, and the ship died forty seconds later killing
+// something whose death freed nothing.
+//
+// Two reads were missing from the pick, and the server had both of them:
+//
+//   `threatByTypeID` — the rat's OWN dogma. Every NPC's group name is an
+//   "Asteroid Serpentis Frigate", which the group classifier calls "other", so
+//   without the dogma the WHOLE grid ties and the player's target priority is
+//   decoration. That is a second real bug this fixes, for every ratting bot and
+//   not only for the escape.
+//
+//   `jammingSourceIDs` — the server naming, on this ship's own wire, the exact
+//   entities whose hostile modules are landing on it RIGHT NOW. Not a guess
+//   about a type: ground truth about this fight.
+
+const PLAIN_RAT_TYPE = 30100; // a rat whose dogma says it does nothing to us
+const SCRAM_RAT_TYPE = 30101; // its sibling, one attribute apart, that holds us
+// Same faction, same size, same words in the name bar — and the group name the
+// game gives both of them is one the player-hull classifier has never heard of.
+const RAT_GROUPS = {
+  [PLAIN_RAT_TYPE]: "Asteroid Serpentis Frigate",
+  [SCRAM_RAT_TYPE]: "Asteroid Serpentis Frigate",
+};
+const SCRAMMER: RatThreat = { scram: true, scramRangeM: 20_000, web: false, ewar: false };
+const HARMLESS: RatThreat = { scram: false, scramRangeM: null, web: false, ewar: false };
+
+/** A rat at a distance, hostile the way `hostileRows` reads hostility. */
+function rat(itemID: number, metres: number, typeID = PLAIN_RAT_TYPE): SpaceEntity {
+  return entity({ itemID, typeID, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: metres, y: 0, z: 0 } });
+}
+
+test("fight: the rat that is HOLDING the ship is primary over a nearer one", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const world = {
+    snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+    weaponModuleIDs: [500],
+    targetGroupNames: RAT_GROUPS,
+    threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+  } satisfies Partial<ScriptObservation>;
+
+  // Same type, same class, same sub-rank: distance alone decides, so the near
+  // one is primary. This is the pick that killed a ship.
+  const quiet = fight(step, obs(world), {}, {});
+  assert.ok(quiet.action.kind === "lock" && quiet.action.targetID === 6661);
+
+  // Now the server says the FAR one is the thing actually holding us.
+  const held = fight(step, obs({ ...world, jammingSourceIDs: [6662] }), {}, {});
+  assert.ok(held.action.kind === "lock" && held.action.targetID === 6662, "shoot what is holding the ship");
+});
+
+test("fight: with no dogma and no jam fold the pick is exactly the old nearest-first", () => {
+  // ⚠ THE REGRESSION GUARD FOR EVERY BOT ALREADY FLYING. Both new readers are
+  // three-state and both default to "nobody looked": an observation that never
+  // resolved a dogma map and never folded a jam push must collapse the ordering
+  // back to (class, distance) and pick byte-for-byte what it picked before.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const blind = fight(step, obs({ snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]), weaponModuleIDs: [500] }), {}, {});
+  assert.ok(blind.action.kind === "lock" && blind.action.targetID === 6661);
+
+  // An EMPTY jam fold is a different statement — "we looked, nothing is on us"
+  // — and it must not move the pick either.
+  const looked = fight(
+    step,
+    obs({ snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]), weaponModuleIDs: [500], jammingSourceIDs: [] }),
+    {},
+    {},
+  );
+  assert.ok(looked.action.kind === "lock" && looked.action.targetID === 6661);
+});
+
+test("fight: a rat whose dogma says it scrams outranks one that does not, same group and same distance", () => {
+  // The two rows are indistinguishable to every other read on the grid: same
+  // faction group name, same distance, and the harmless one is listed FIRST so
+  // a tie would keep it. Only attribute 504 separates them.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const grid = snapshot([rat(6661, 10_000, PLAIN_RAT_TYPE), rat(6662, 10_000, SCRAM_RAT_TYPE)]);
+
+  const withoutDogma = fight(step, obs({ snapshot: grid, weaponModuleIDs: [500], targetGroupNames: RAT_GROUPS }), {}, {});
+  assert.ok(withoutDogma.action.kind === "lock" && withoutDogma.action.targetID === 6661, "the group name cannot tell them apart");
+
+  const withDogma = fight(
+    step,
+    obs({
+      snapshot: grid,
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS, [SCRAM_RAT_TYPE]: SCRAMMER },
+    }),
+    {},
+    {},
+  );
+  assert.ok(withDogma.action.kind === "lock" && withDogma.action.targetID === 6662, "the scrammer dies first");
+});
+
+test("fight: a class the player left off is still shot — the ladder RANKS, it never filters", () => {
+  // ⚠ THE RULE THAT MUST SURVIVE THE DOGMA READER. Now that a rat can actually
+  // be classified, a priority list that omits its class could plausibly be read
+  // as "do not shoot that" — and a combat block that refused to shoot would sit
+  // there being killed by the only thing on the grid. A list the scrammer is
+  // absent from ranks it LAST, never out.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = {
+    id: "f",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["logi"] } },
+  } as const;
+  const tick = fight(
+    step,
+    obs({
+      snapshot: snapshot([rat(6662, 10_000, SCRAM_RAT_TYPE)]),
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [SCRAM_RAT_TYPE]: SCRAMMER },
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "nothing on the list, so the tackle is still shot");
+});
+
+test("follow: the fleet's TAG still outranks the live jam feed", () => {
+  // ⚠ AUTHORITY, AND IT IS THE ONE PRECEDENCE THE JAM FOLD DOES NOT WIN. A jam
+  // source is a fact about the grid; a tag is a fleet commander LOOKING at the
+  // fight and saying "this one, now", and the server proves that authorship
+  // (setFleetTargetTag refuses any writer who is not a commander). So the human
+  // wins — the tagged near rat is locked even though the server says the far one
+  // is what is holding this ship.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+      fleetTargetTags: new Map([[6661, "A"]]),
+      jammingSourceIDs: [6662],
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "the FC's tag, not the jam feed");
+  assert.match(tick.why, /fleet called/i);
+});
+
+test("fleet-tag-target: the tag marks what the fight block would shoot, jam feed included", () => {
+  // Two ladders in one squad is one ladder too many: whatever this block writes
+  // is read straight back by every follower's `calledByTag`, where a tag
+  // outranks the jam fold. A tag block still picking nearest-first would hand
+  // the squad a commander-authority instruction to shoot the wrong rat.
+  const tagBlock = SCRIPT_MACROS["fleet-tag-target"]!;
+  const step = { id: "t", kind: "macro", macro: "fleet-tag-target", args: {} } as const;
+  const tick = tagBlock(
+    step,
+    obs({
+      snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+      canTag: true,
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+      jammingSourceIDs: [6662],
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "setFleetTargetTag" && tick.action.targetID === 6662);
+});
+
 // ── flying with the fleet (the shared squad board) ───────────────────────────
 //
 // `squad: follow` shoots what the fleet called WHEN that ship is here; `squad:
@@ -2459,11 +2667,11 @@ test("call: the fleet is told once per primary, then the fight goes on", () => {
 
 test("call: the call is stood down when the grid clears", () => {
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
-  const cleared = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: 6661 }, {});
+  const cleared = fightUntilClear(fight, fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: 6661 });
   assert.ok(cleared.action.kind === "callPrimary" && cleared.action.targetID === null);
 
   // …and once it is down, the block finishes as it always did.
-  const done = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: null }, {});
+  const done = fightUntilClear(fight, fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: null });
   assert.equal(done.outcome.kind, "done");
 });
 
@@ -2633,6 +2841,105 @@ test("off: a block not set to follow ignores tags, broadcasts, and the board ali
 // must behave exactly as it did before any of this existed.
 
 const GIVE_UP_STEP: MacroStep = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} };
+
+// ─── Arriving, when the macro is never told the ship warped ──────────────────
+//
+// ⚠ THE REGRESSION THAT COST A LIVE RUN. `decideScriptAction` holds every macro
+// while the ship is in warp, so a block is NOT CALLED AT ALL between the tick it
+// issues a warp and the tick the ship lands. These blocks used to decide they
+// had arrived by watching for `inWarp === true`, which they can therefore never
+// see: caught live on 2026-09-14 as a ratting bot that warped into a den, sat
+// there with its guns off reporting "the warp never started", took the damage,
+// went home on a watch, repaired, and did it again — the fight block after it
+// never once ran. The fix is `obs.completedWarps`, which the OBSERVATION counts
+// because the observation is read on every tick and a macro is not.
+//
+// The drive loop below is the guard's behaviour, and it is the whole point of
+// the test: while `inWarp` is true the macro is SKIPPED, exactly as the runner
+// skips it.
+
+test("⚠ warp-to-anomaly: it arrives even though it is never called during the warp", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  let warps = 0;
+  const fly = (inWarp: boolean): MacroTick | null => {
+    if (inWarp) {
+      return null; // the runner's in-warp guard: the macro is not called
+    }
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: warps }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+
+  const issued = fly(false);
+  assert.equal(issued?.action.kind, "warpScan", "it issues the warp");
+
+  // The flight: the macro is skipped for every tick of it, and the warp ends.
+  for (let i = 0; i < 12; i += 1) {
+    assert.equal(fly(true), null);
+  }
+  warps += 1;
+
+  const landed = fly(false);
+  assert.deepEqual(landed?.outcome, { kind: "done" }, "the tick after the warp ends is an arrival");
+  assert.equal(landed?.phase, "Arrived");
+});
+
+test("⚠ warp-to-anomaly: a warp that truly never starts is still reported, not waited on for ever", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  const still = () => {
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: 7 }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+  assert.equal(still().action.kind, "warpScan");
+  let last = still();
+  for (let i = 0; i < 20 && last.outcome.kind === "acting"; i += 1) {
+    last = still();
+  }
+  assert.equal(last.outcome.kind, "blocked", "the count never moved, so the warp never started");
+});
+
+test("an unreadable warp count is never an arrival — the block waits its budget out", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  const blind = () => {
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: null }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+  assert.equal(blind().action.kind, "warpScan");
+  const next = blind();
+  assert.equal(next.outcome.kind, "acting", "a null count decides nothing");
+  assert.notEqual(next.phase, "Arrived");
+});
+
+/**
+ * Hand `fight-the-rats` the same empty-grid answer until it believes it.
+ *
+ * ⚠ AN EMPTY GRID IS NOT BELIEVED ON THE FIRST READ. The tick just after a warp
+ * lands reads a grid that has not populated yet, and believing that one is what
+ * sent a live bot through three dens in ninety seconds calling each of them
+ * clear while the rats in them shot its shields off. Tests that want the FINISH
+ * have to pay the same confirmation a real arrival does.
+ */
+function fightUntilClear(
+  fight: (typeof SCRIPT_MACROS)["fight-the-rats"],
+  step: MacroStep,
+  observation: ScriptObservation,
+  startMem: MacroMemory = {},
+  board: ScriptBoard = {},
+): MacroTick {
+  let mem = startMem;
+  let last = fight!(step, observation, mem, board);
+  for (let read = 1; read < 3; read += 1) {
+    mem = last.nextMem;
+    last = fight!(step, observation, mem, board);
+  }
+  return last;
+}
+
 const ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-anomaly", args: {} } as MacroStep;
 const ORE_ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-ore-anomaly", args: {} } as MacroStep;
 const den = (label: string) => ({ label, kind: "combat" as const });
@@ -2854,7 +3161,7 @@ test("fight: a den the bot keeps CLEARING is never given up on, however many tim
 
     // The den dies: an empty grid with the drones aboard is the block's own
     // "I finished this site", and the only success it is able to observe.
-    const cleared = fight(GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, board);
+    const cleared = fightUntilClear(fight, GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, board);
     assert.equal(cleared.outcome.kind, "done", `visit ${visit} clears the den`);
     assert.equal(cleared.why, "The grid is clear.", "and it finishes the way it always did");
     board = { ...board, ...(cleared.boardPatch ?? {}) };
@@ -2904,7 +3211,7 @@ test("⚠ fight: a grid that clears with a stall already pending -> the clear wi
   assert.equal(stalled.board[LEDGER_KEYS.stall], STALL_TICKS, "the stall really is pending");
 
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
-  const clear = fight(GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, stalled.board);
+  const clear = fightUntilClear(fight, GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, stalled.board);
   assert.equal(clear.outcome.kind, "done");
   assert.equal(clear.why, "The grid is clear.", "not a leaving sentence — the bot won");
   const after: ScriptBoard = { ...stalled.board, ...clear.boardPatch };

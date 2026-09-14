@@ -955,6 +955,15 @@ function buildCondition(obj: Readonly<Record<string, unknown>>, kind: unknown, c
       };
     case "targeted-by-player":
       return { kind: "targeted-by-player" };
+    // "Something is holding this ship so it cannot warp" — no threshold and no
+    // argument, exactly like `hostile-on-grid` above, so nothing is read off the
+    // object and nothing can be defaulted into it. A `tackled` carrying junk
+    // fields loses them (they were never part of the shape); a document naming
+    // any OTHER kind still falls to the `default` below and is REFUSED, which is
+    // the property that matters: an unrecognised check never becomes a silent
+    // "false" that turns a safety row into decoration.
+    case "tackled":
+      return { kind: "tackled" };
     default:
       return refuse(SAY.unknownCondition);
   }

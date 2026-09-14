@@ -1,7 +1,9 @@
 # Fight with drones — the drone-boat combat block
 
-Status: **spec, not built**. Written 2026-09-14, after a review of what a Tristan
-actually does inside a 0.5 anomaly under the shipped `Ratting night` bot.
+Status: **built and registered**; corrected on 2026-09-14 by a live run that lost
+a ship. Written after a review of what a Tristan actually does inside a 0.5
+anomaly under the shipped `Ratting night` bot. Where a paragraph was WRONG it is
+marked as wrong rather than quietly rewritten — the mistakes are the useful part.
 
 ## 1. Why a new block and not a fix to Fight-the-rats
 
@@ -69,9 +71,10 @@ player's readout intact.
   among hostiles actually on this grid that actually scram. A rat that cannot
   scram contributes nothing to the floor. Re-computed every tick, so a new wave
   moves the band.
-* **Ceiling — the leash.** `min(drone control range, targeting range)`. Sitting
-  past drone control range means the drones stop answering; past lock range means
-  there is nothing to put them on. Whichever is smaller wins.
+* **Ceiling — the leash.** The smaller of the two leashes, each resolved on its
+  own (see the warning above — they never substitute for each other). Sitting
+  past drone control range means the drones stop answering; past lock range
+  means there is nothing to put them on.
 * **Hold at the FLOOR, not the ceiling.** Further out is not safer in any way
   that matters: the drones have to fly the distance, and every metre of stand-off
   is added to their travel time on every target switch. Sit just outside what can
@@ -94,11 +97,42 @@ guessed. A low-skill drone frigate therefore cannot outrange the thing that hold
 it while keeping its drones on it. That is a real fit, and the block must have an
 answer for it rather than producing a nonsense distance.
 
-**When the band is empty the block does not kite.** It holds at the ceiling and
-says so in the readout, in one sentence the player can act on ("Your drones only
-reach 27.5 km and that frigate scrams at 20 km, so there is no room to kite —
-fighting at 24.5 km instead"). Kiting at a range the drones cannot work in is
-worse than brawling, and fleeing is the watches' job, not this block's.
+**When the band is empty the block does not kite — and it does not CLOSE either.**
+
+⚠ THIS PARAGRAPH USED TO SAY "IT HOLDS AT THE CEILING", AND THAT SENTENCE COST A
+SHIP on 2026-09-14. Holding at the ceiling is only right when the ship is INSIDE
+it. That run's leash was unreadable, so the ceiling was 17 km against rats that
+scram at 20 km — and the ship was already 25 km out. "Hold at the ceiling" made
+it spend its prop mod closing 8.5 km, from outside the scram to inside it. It was
+pointed, and when the armour watch fired the warp was refused, because a scrammed
+ship cannot warp. The watch was the only part of the chain that worked.
+
+So the rule is general rather than a special case for the empty band: **a hold
+that sits inside the worst scram reach on grid is never closed toward.** In a
+band that is not empty the floor already guarantees it cannot happen; when the
+band IS empty the guard is what stops it. Concretely — hold at the ceiling only
+when that means OPENING range; otherwise keep the range you already have and
+fight whatever is in reach. Kiting at a range the drones cannot work in is worse
+than brawling, and fleeing is the watches' job, not this block's; but burning
+toward a point is worse than either.
+
+The one exception is a distance the PLAYER typed. An explicit `holdRangeKm` is
+obeyed, scram or no scram — §2 promises the override is the escape hatch, and a
+guard that refused to fly to it would make the readout's own advice a lie.
+
+The readout has to say which of the two shapes it is in, and where the ship
+actually is (a sentence reading "fighting at 17 km" while the ship sits at 25 km
+is how the log made this loss look correct):
+
+> "There is no room to kite here: my drones reach about 17 km and the worst thing
+> on grid scrams at 20 km. I am already 30 km out, so I am staying here and
+> fighting what I can reach rather than burning into that scram. I could not read
+> your drone control range, so that 17 km is only the no-skills guess: set the
+> hold range and I will use your number instead."
+
+with the last sentence appearing only when the leash was guessed, and the middle
+clause reading "So I am fighting at 24.5 km instead" when the ship is inside the
+ceiling and opening range is the right move.
 
 ### Hostiles on grid but none that scram
 
@@ -203,7 +237,12 @@ a microwarpdrive multiplies signature radius, and on a Tristan (sig 600) that
 turns it into a much easier target for exactly the rat guns it is trying to
 escape. So:
 
-* **Light it only to CLOSE A GAP**: `|currentRange - hold| > PROP_GAP_M` (5 km).
+* **Light it only to CLOSE A GAP**: `|currentRange - hold| > PROP_GAP_M` (5 km),
+  where `hold` is the distance the block ACTUALLY ASKED FOR and not the band's
+  raw answer. ⚠ Measuring the gap against the band instead is how a block
+  declines to close and then burns to close anyway — the two rungs disagreeing
+  about where the ship is going. And a closing gap toward a hold inside the
+  worst scram reach is never burned at all (§2).
 * **Kill it the moment the ship is inside the band** (within hysteresis). Holding
   station with a burner lit is pure signature for no distance.
 * **Scram kills a microwarpdrive and does nothing to an afterburner.** When the
@@ -360,7 +399,9 @@ change, and it is additive.
 
 * band: floor from the worst scrammer ON GRID, ceiling from the smaller of the two
   leashes, hold at the floor;
-* **empty band -> brawl at the ceiling** and say why (the low-skill Tristan case);
+* **empty band -> never CLOSE toward the ceiling; brawl where you are** and say
+  why, naming the hold override when the leash was guessed (the low-skill
+  Tristan case, and the one that cost a hull);
 * threat range comes from the grid, so a new wave with a longer-ranged scrammer
   moves the band;
 * no threat on grid -> hold at the ceiling;

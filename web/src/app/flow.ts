@@ -236,6 +236,13 @@ import {
   type RatThreat,
 } from "../nav/ratThreat.ts";
 import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
+import {
+  DRONE_RANGE_BONUS_ATTRIBUTE_ID,
+  DRONE_RANGE_SKILL_TYPE_IDS,
+  droneControlRangeFromSkills,
+  resolveDroneControlRangeM,
+  type DroneRangeSkillReading,
+} from "../nav/droneControlRange.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
 import { decodeFormations } from "../bridge/formations.ts";
 import { scannerStateFromBoundRead } from "../scanner/scannerCenter.ts";
@@ -1277,6 +1284,26 @@ export function foregroundCallPriority(active: boolean): RequestPriority | undef
  * six attributes", which is a real reading and not a failure.
  */
 const ratThreatByTypeID = new Map<number, RatThreat>();
+
+/**
+ * Metres of drone control range each drone-range SKILL buys per level, off that
+ * skill type's own dogma attribute 459 (`droneRangeBonus`).
+ *
+ * ⚠ MODULE-LEVEL AND PERMANENT, FOR EXACTLY THE REASONS `ratThreatByTypeID`
+ * ABOVE IS. This is the SDE, read through /api/types/dogma, which takes no
+ * bridge session and cannot vary by player: what Drone Avionics is worth per
+ * level has one answer for every pilot on this tab and cannot change while the
+ * client is running. Two skills, one round trip, once per session, shared.
+ *
+ * ⚠ `null` IS A CACHED ANSWER AND MEANS "THE TABLES CARRY NO 459 FOR THIS SKILL",
+ * WHICH IS NOT ZERO. A skill with no readable per-level bonus makes the whole
+ * sum unanswerable the moment it is trained (nav/droneControlRange.ts), and that
+ * is deliberate: quietly treating the missing bonus as 0 would shorten the leash
+ * and walk the ship back toward the scram that killed one. A typeID the response
+ * OMITTED entirely is a different thing — the read never arrived — and is left
+ * out of this map so the next ask tries again.
+ */
+const droneRangeBonusByTypeID = new Map<number, number | null>();
 
 export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}): AppFlow {
   // R107 — in per-session mode the `token` key is present (starting null) so
@@ -7944,6 +7971,35 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * flight, so this costs one round trip per NEW ship type, not one per tick,
    * and nothing at all on an empty grid.
    */
+  /**
+   * How many warps this pilot has COMPLETED since the app loaded — a count that
+   * only ever goes up, bumped on the tick a warp ends.
+   *
+   * ⚠ IT EXISTS BECAUSE A MACRO CANNOT SEE A WARP AT ALL. The script runner's
+   * orchestrator holds everything — watches and macros alike — while `inWarp`
+   * is true, and returns before the program is reached, so no macro is ever
+   * called on a tick where the ship is warping. A block that needs to know it
+   * ARRIVED therefore cannot watch for the warp; it has to compare a count taken
+   * across the flight, and this is the only layer that is read on every tick.
+   *
+   * ⚠ AN UNREADABLE `inWarp` NEVER MOVES THE COUNT, in either direction. A null
+   * is "the ship mode did not read", and treating it as "not in warp" would book
+   * a completed warp on the first blind tick of a flight — which is exactly the
+   * false ARRIVED a block would act on by finishing a step it never finished.
+   * The count only moves on a true that is followed by a false.
+   */
+  let completedWarps = 0;
+  let wasInWarp: boolean | null = null;
+  function countCompletedWarps(inWarp: boolean | null): number {
+    if (wasInWarp === true && inWarp === false) {
+      completedWarps += 1;
+    }
+    if (inWarp !== null) {
+      wasInWarp = inWarp;
+    }
+    return completedWarps;
+  }
+
   async function classifyTargetGroups(
     snapshot: ReturnType<typeof decodeSpaceSnapshot>,
     origin: SpaceVector,
@@ -8073,6 +8129,203 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return threats;
   }
 
+  // --- the drone leash, from the PILOT --------------------------------------
+  //
+  // ⚠ THIS IS THE ROOT CAUSE OF A LOST SHIP, AND THE WHOLE REASON THE FIELD
+  // BELOW IS NO LONGER FILLED FROM THE FIT ALONE. A live run logged:
+  //
+  //     "I could not read your drone control range, so I assumed the
+  //      no-skills 20 km"
+  //
+  // held at the 17 km ceiling that guess produces, and sat inside the 20 km
+  // scram reach of the rats it was fighting. `fit.stats.bays.droneControlRange`
+  // reads dogma attribute 458 off the FITTING and a hull does not carry 458 —
+  // checked against the local SDE, the Tristan's own typeDogma row has no such
+  // attribute — so that read was not stumbling, it was structurally incapable
+  // of answering, for every pilot, on every tick. The fallback was the only
+  // path. See nav/droneControlRange.ts for the arithmetic and the argument.
+  //
+  // What follows reconstructs the number from the SKILLS, which is where it
+  // actually comes from, and leaves the fit stat as the preferred source for
+  // the day it ever answers.
+
+  /**
+   * The trained levels of the two drone-range skills, cached.
+   *
+   * ⚠ CACHED BECAUSE THE READ IS THIRTEEN BRIDGE CALLS AND THE ANSWER MOVES ON
+   * A TRAINING TIMER. `/api/bridge/bound-skills` fires the whole R73 batch
+   * (sheet, queue, history, boosters, implants, SP scalars, an injector probe
+   * that legitimately refuses) — far too much to spend on a ~2s bot tick, and
+   * pointless to repeat: Drone Avionics takes hours to gain a level, so a value
+   * read once is right for the rest of a bot's run and then some. The capability
+   * cache above deliberately does NOT own this, because that one re-resolves on
+   * the FIT SIGNATURE and a refit does not retrain a pilot; hanging thirteen
+   * calls off every module swap would be paying repeatedly for a fact that did
+   * not change.
+   *
+   * ⚠ A FAILED READ IS CACHED TOO, BUT ONLY BRIEFLY. Not caching it at all would
+   * re-fire thirteen calls every tick against a session that is refusing them;
+   * caching it as long as a success would freeze an honest `null` in place long
+   * after the session recovered. So a failure is remembered for a minute and
+   * then retried, and in the meantime the leash reports unreadable — which is
+   * the correct thing to report and not a guess.
+   */
+  const DRONE_SKILL_CACHE_MS = 10 * 60 * 1000;
+  const DRONE_SKILL_RETRY_MS = 60 * 1000;
+  let droneSkillLevelCache:
+    | { readonly at: number; readonly levels: ReadonlyMap<number, number> | null }
+    | null = null;
+
+  /**
+   * What level this pilot has in each drone-range skill, or `null` when the
+   * sheet could not be read.
+   *
+   * ⚠ ABSENT FROM THE SHEET IS LEVEL 0, BUT ONLY WHEN THE SHEET ITSELF READ. An
+   * untrained skill does not appear in a skill sheet at all, so "not listed"
+   * genuinely means zero — and zero is a real reading worth 20 km exactly. That
+   * inference is only safe once the read has proved itself, which is why a read
+   * carrying an error, or answering with an EMPTY sheet (no character has zero
+   * skills), is treated as unreadable rather than as a pilot with nothing
+   * trained. Getting that backwards is how you tell a 60 km pilot they have 20.
+   */
+  async function readDroneRangeSkillLevels(): Promise<ReadonlyMap<number, number> | null> {
+    const now = Date.now();
+    if (droneSkillLevelCache !== null) {
+      const age = now - droneSkillLevelCache.at;
+      const ttl = droneSkillLevelCache.levels === null ? DRONE_SKILL_RETRY_MS : DRONE_SKILL_CACHE_MS;
+      if (age < ttl) {
+        return droneSkillLevelCache.levels;
+      }
+    }
+    let levels: ReadonlyMap<number, number> | null = null;
+    try {
+      // ⚠ THE ONE-CALL READ, NOT THE THIRTEEN-CALL ONE. `/api/bridge/skills` is a
+      // single `gateway.getSkills`; the bound-skills route answers the same
+      // trained levels but pays for the sheet, the queue, the history, boosters,
+      // implants, three SP scalars and an injector probe to do it. This wants two
+      // integers, it runs on a timer behind a bot that is already paying for a
+      // grid read every tick, and the gateway is the shared thing everything else
+      // on this account is queued behind.
+      const answer = await api.getSkills(callOptions);
+      const rows =
+        answer.skills === null ? [] : decodeSkillSheet(answer.skills, Date.now()).skills;
+      if (rows.length > 0) {
+        const byTypeID = new Map<number, number>();
+        for (const typeID of DRONE_RANGE_SKILL_TYPE_IDS) {
+          const row = rows.find((entry) => entry.typeID === typeID);
+          // A skill ABSENT from a sheet that did read is genuinely untrained —
+          // level 0, a real 20 km answer — while a sheet that did not read at all
+          // is caught by the `rows.length > 0` gate above and reported as
+          // unreadable. Those are different facts and only one of them is a
+          // reading.
+          byTypeID.set(typeID, row?.level ?? 0);
+        }
+        levels = byTypeID;
+      }
+    } catch {
+      // Unreadable, which is reported as unreadable. See the ⚠ on the cache.
+      levels = null;
+    }
+    droneSkillLevelCache = { at: now, levels };
+    return levels;
+  }
+
+  /**
+   * Metres per level for each drone-range skill, off the SDE through
+   * /api/types/dogma — one round trip per session for both skills, shared by
+   * every pilot on the tab (`droneRangeBonusByTypeID`).
+   *
+   * ⚠ THE BONUS IS READ, NEVER WRITTEN DOWN. The values this build's tables
+   * carry are 5000 and 3000 metres per level, and neither number appears in the
+   * client: a server content pack that retunes a skill has to be able to move
+   * the leash, because a hardcoded bonus would keep the ship at a distance the
+   * drones no longer reach with nothing anywhere reporting a fault — the same
+   * silent-and-confident failure as the 20 km guess.
+   */
+  async function readDroneRangeBonuses(): Promise<ReadonlyMap<number, number | null>> {
+    const missing = DRONE_RANGE_SKILL_TYPE_IDS.filter(
+      (typeID) => !droneRangeBonusByTypeID.has(typeID),
+    );
+    if (missing.length > 0) {
+      try {
+        const attributes = await api.fetchTypeDogma(
+          missing,
+          [DRONE_RANGE_BONUS_ATTRIBUTE_ID],
+          callOptions,
+        );
+        for (const typeID of missing) {
+          const row = attributes[typeID];
+          // ⚠ ONLY WHAT THE ROUTE ANSWERED FOR, exactly as `classifyRatThreats`
+          // does it: an ABSENT key means the read never arrived and must not
+          // become a permanent verdict, while an EMPTY object is the tables
+          // saying this type carries no 459 — cached as `null`, which is
+          // "cannot say", not zero.
+          if (row !== undefined) {
+            const bonus = row[DRONE_RANGE_BONUS_ATTRIBUTE_ID];
+            droneRangeBonusByTypeID.set(
+              typeID,
+              typeof bonus === "number" && Number.isFinite(bonus) ? bonus : null,
+            );
+          }
+        }
+      } catch {
+        // Left uncached on purpose: the next ask tries again.
+      }
+    }
+    return droneRangeBonusByTypeID;
+  }
+
+  /**
+   * How far the drones still answer, in metres — THE PRECEDENCE, in one place:
+   *
+   *   1. THE FIT STAT, whenever it is `known`. It is the authority when present:
+   *      it is the server's own post-dogma number and already accounts for
+   *      anything the reconstruction below does not model.
+   *   2. OTHERWISE THE VALUE COMPUTED FROM THE PILOT'S SKILLS — which today is
+   *      the one that ever answers, because no hull carries attribute 458.
+   *   3. OTHERWISE `null`, which still means "unreadable". The band's own 20 km
+   *      fallback then stands and says so in the run log. ⚠ A COMPUTED VALUE IS
+   *      NEVER REPORTED AS THOUGH IT WERE MEASURED when the skills could not be
+   *      read either: `null` is the honest answer, and a confident wrong leash
+   *      is what killed the ship.
+   *
+   * ⚠ GATED ON BOTH HALVES BEING WORTH ASKING. Nothing is read when the fit
+   * already answered (case 1 wins outright), and nothing is read for a hull with
+   * no drone bay — a Retriever pilot's Drone Avionics level cannot change where
+   * a mining bot sits, so it does not pay thirteen bridge calls to find it out.
+   * `droneCapacity` is an ordinary hull attribute and is on the fit read that is
+   * already in hand, so the gate itself costs nothing.
+   */
+  async function resolveDroneControlRange(
+    fit: ReturnType<typeof store.fitting.get>,
+  ): Promise<number | null> {
+    const fitStatM = fit.stats.bays.droneControlRange.known
+      ? fit.stats.bays.droneControlRange.value
+      : null;
+    if (fitStatM !== null) {
+      return resolveDroneControlRangeM(fitStatM, null).rangeM;
+    }
+    const bay = fit.stats.bays.droneCapacity;
+    if (!bay.known || bay.value <= 0) {
+      // No drone bay, no leash to want. Not "unreadable" as a verdict about the
+      // pilot — simply a question this hull never asks.
+      return null;
+    }
+    const [levels, bonuses] = await Promise.all([
+      readDroneRangeSkillLevels(),
+      readDroneRangeBonuses(),
+    ]);
+    const readings: DroneRangeSkillReading[] | null =
+      levels === null
+        ? null
+        : DRONE_RANGE_SKILL_TYPE_IDS.map((typeID) => ({
+            typeID,
+            level: levels.get(typeID) ?? 0,
+            bonusPerLevelM: bonuses.get(typeID) ?? null,
+          }));
+    return resolveDroneControlRangeM(null, droneControlRangeFromSkills(readings)).rangeM;
+  }
+
   function resolveSalvageModuleIDs(): readonly number[] {
     const fit = store.fitting.get();
     if (fit.slotsError !== null) {
@@ -8190,18 +8443,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      */
     readonly maxTargetRangeM: number | null;
     /**
-     * How far the DRONES still answer, in metres (attribute 458) — the second
-     * of the stand-off band's two leashes, and NOT interchangeable with the
-     * first (see `ScriptObservation.droneControlRangeM`). It rides this cache
-     * for exactly the reason `maxTargetRangeM` does: it comes off the same fit
-     * read the module lists come off, so it costs no extra call and refreshes
-     * on the same fit-changed signature.
+     * How far the DRONES still answer, in metres — the second of the stand-off
+     * band's two leashes, and NOT interchangeable with the first (see
+     * `ScriptObservation.droneControlRangeM`).
      *
-     * ⚠ NULL IS EXPECTED, AND A `Stat` THAT IS NOT `known` MUST ARRIVE AS NULL
-     * RATHER THAN AS 0. Control range is skill-derived and absent from a hull's
-     * own SDE row, so this reads unknown far more often than the lock range
-     * does — which is precisely why `kiteBand` carries a fallback path and why
-     * a 0 here would be a lie the band could not recover from.
+     * ⚠ IT IS THE ONE FIELD ON THIS CACHE THAT IS NOT PURELY OFF THE FIT READ,
+     * BECAUSE IT COULD NOT BE. It used to be attribute 458 off the fitting, for
+     * the same "no extra call" reason `maxTargetRangeM` still is — and a hull
+     * DOES NOT CARRY 458. Drone control range is a CHARACTER number, from Drone
+     * Avionics and Advanced Drone Avionics, so the fit read answered `null` for
+     * every pilot on every tick, the band fell back to its 20 km no-skills
+     * guess, and a live run held at the resulting 17 km ceiling inside the rats'
+     * 20 km scram and lost the ship. `resolveDroneControlRange` keeps the fit
+     * stat as the preferred source and otherwise computes the pilot's real leash
+     * from their skills; its reads are cached OUTSIDE this cache, because skills
+     * move on a training timer and a refit cannot change them.
+     *
+     * ⚠ NULL IS STILL A REAL OUTCOME AND MUST NEVER ARRIVE AS 0 OR AS A GUESS.
+     * Null here means neither source could be read — the band's own fallback
+     * then applies and says so in the log, which is the honest failure. A 0, or
+     * a computed number reported when the skills were unreadable, would be a lie
+     * the band could not recover from.
      */
     readonly droneControlRangeM: number | null;
     /**
@@ -8306,6 +8568,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
     const fit = store.fitting.get();
     const defense = resolveDefenseModuleIDs();
+    // ⚠ AWAITED HERE, AND IT IS THE ONLY FIELD ON THIS OBJECT THAT CAN COST A
+    // CALL. It is gated twice over (see `resolveDroneControlRange`): a hull with
+    // no drone bay pays nothing, and a fit stat that ever answers short-circuits
+    // it. What is left is at most one skill read and one static dogma read per
+    // session — the reads are cached OUTSIDE this capability cache, so a refit
+    // re-resolves every list above without re-asking a question whose answer a
+    // module swap cannot have changed.
+    const droneControlRangeM = await resolveDroneControlRange(fit);
     return {
       shipID: fit.activeShipID,
       mining,
@@ -8319,9 +8589,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // field's own comment. `Stat` has exactly two states on purpose so that a
       // caller cannot render a missing value as a zero, and this is the line
       // where that discipline either holds or is thrown away.
-      droneControlRangeM: fit.stats.bays.droneControlRange.known
-        ? fit.stats.bays.droneControlRange.value
-        : null,
+      //
+      // ⚠ AND THE `Stat` IS NO LONGER THE ONLY SOURCE, BECAUSE IT COULD NEVER
+      // ANSWER. It reads dogma 458 off the FIT and no hull carries 458 — drone
+      // control range is a CHARACTER number, from skills — so this field was
+      // null for every pilot on every tick, the band fell back to its 20 km
+      // no-skills guess, and a live run held inside the rats' scram range and
+      // lost the ship. `resolveDroneControlRange` keeps the fit stat as the
+      // preferred source and computes the pilot's real leash from their skills
+      // when (as always) it says nothing, still answering null when neither can
+      // be read. See its own comment for the precedence and the costs.
+      droneControlRangeM,
       // ⚠ THE SAME `Stat` DISCIPLINE, THIRD TIME: unknown becomes `null`, never
       // 0 and never a plausible guess. The pre-lock rung this feeds does nothing
       // at all while this is null, which is exactly right for a count nobody
@@ -9273,6 +9551,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           }
         }
 
+        // ⚠ THE ONE READ THAT HAS TO BE TAKEN HERE RATHER THAN IN A MACRO.
+        // `decideScriptAction` holds every watch AND every macro while the ship
+        // is in warp (its `inWarp === true` guard returns before the program is
+        // reached), so a macro is never called on a tick where `inWarp` is true
+        // and CANNOT witness a warp for itself. Three blocks used to try —
+        // warp-to-anomaly, warp-to-bookmark and fly-to-mission-site all watched
+        // for that state to know they had arrived — and from the day the guard
+        // landed they never saw it again: each one issued its warp, sat out the
+        // flight, resumed on the far side having witnessed nothing, and reported
+        // "the warp never started" while the ship sat on the destination grid.
+        // The observation is the only layer that sees every tick, so the count
+        // is taken here and the macros compare it instead of watching for a
+        // state they are structurally prevented from reaching.
+        const scriptInWarp = status.shipMode === null ? null : /warp/i.test(status.shipMode);
         return {
           conversation,
           briefing,
@@ -9304,7 +9596,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           damagedItemIDs,
           inSpace: status.inSpace,
           docked: status.docked,
-          inWarp: status.shipMode === null ? null : /warp/i.test(status.shipMode),
+          inWarp: scriptInWarp,
+          completedWarps: countCompletedWarps(scriptInWarp),
           shieldRatio: ship?.shieldRatio ?? null,
           armorRatio: ship?.armorRatio ?? null,
           hullRatio: ship?.hullRatio ?? null,
@@ -9347,10 +9640,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           maxTargetRangeM: capabilities.maxTargetRangeM,
           // ⚠ THE SECOND LEASH, AND IT IS NEVER THE SAME NUMBER AS THE ONE
           // ABOVE. Lock range says how far this hull can TARGET; control range
-          // says how far the drones still ANSWER. They ride the same cache and
-          // the same fit read, which is exactly why it would be so easy to let
-          // one stand in for the other -- see nav/kiteBand.ts's header for what
-          // that costs a pilot who cannot read the second one.
+          // says how far the drones still ANSWER. They ride the same cache,
+          // which is exactly why it would be so easy to let one stand in for the
+          // other -- see nav/kiteBand.ts's header for what that costs a pilot
+          // who cannot read the second one.
+          //
+          // ⚠ AND THEY NO LONGER COME FROM THE SAME PLACE. Lock range is a HULL
+          // attribute off the fit; control range is a CHARACTER one, off the
+          // pilot's drone skills, because no hull carries attribute 458 and the
+          // fit read therefore never once answered -- which is how a live run
+          // ended up holding inside the rats' scram on the band's 20 km guess.
           droneControlRangeM: capabilities.droneControlRangeM,
           // How many targets this hull holds at once -- the drone boat's
           // pre-lock rung, which fills the SPARE slots so the next primary is

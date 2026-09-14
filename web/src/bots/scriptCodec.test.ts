@@ -1030,6 +1030,32 @@ test("a fleet role this app does not know refuses the file", () => {
   );
 });
 
+test("a tackled watch round-trips as a bare, argument-free check", () => {
+  const doc = withWatch({ id: "w9", when: { kind: "tackled" }, respond: "fight-back" }) as BotScript;
+  const { doc: round, warnings } = mustAccept(decodeScriptText(encodeScriptDoc(doc)));
+  assert.deepStrictEqual(round, doc);
+  assert.deepStrictEqual([...warnings], []);
+  assert.deepStrictEqual(Object.keys(lastWatch(round).when), ["kind"], "no threshold is invented");
+});
+
+test("a tackled check is refused as an until — it is a grid read like the rest", () => {
+  const bad = clone();
+  const loop = bad.program[0];
+  assert.ok(loop && loop.kind === "loop");
+  (loop.body[0] as Record<string, unknown>)["until"] = { kind: "tackled" };
+  assert.match(mustRefuse(decodeScriptValue(bad)), /out in space/i);
+});
+
+test("a near-miss of the tackled kind is REFUSED, never defaulted into it", () => {
+  // ⚠ THE PROPERTY THAT MATTERS FOR A SAFETY ROW. A file naming a check this app
+  // cannot evaluate must be turned away at the door: decoded to "false" instead,
+  // the row would sit in the ladder looking like protection and never fire.
+  assert.match(
+    mustRefuse(decodeScriptValue(withWatch({ id: "w9", when: { kind: "tackled?" }, respond: "fight-back" }))),
+    /does not have/i,
+  );
+});
+
 test("a target class this app does not know is dropped from a watch, with a warning", () => {
   const { doc, warnings } = mustAccept(
     decodeScriptValue(withWatch({ id: "w9", when: { kind: "hostile-on-grid" }, respond: "fight-back", targets: ["tackle", "capitals"] })),

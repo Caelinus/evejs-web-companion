@@ -484,7 +484,32 @@ export type Condition =
   /** A player's ship on this grid has THIS ship locked — you are being hunted. */
   | { readonly kind: "targeted-by-player" }
   /** One of your drones out in space has dropped below this health. */
-  | { readonly kind: "drone-health-below"; readonly fraction: number };
+  | { readonly kind: "drone-health-below"; readonly fraction: number }
+  /**
+   * SOMETHING ON THIS GRID IS HOLDING THE SHIP SO IT CANNOT WARP.
+   *
+   * ⚠ IT EXISTS BECAUSE A HEALTH THRESHOLD CANNOT SAY "GO WHILE YOU STILL CAN".
+   * A run was lost on 2026-09-14 to the most sensible watch a player can write:
+   * `armor-below 0.25 -> dock-and-repair`. It fired exactly when it was asked
+   * to, called the drones in, aligned, set course — and the warp was REFUSED,
+   * because by then a rat had the ship scrammed. The bot fought to break free
+   * and died doing it. Armour is a LAGGING indicator of whether leaving is
+   * still possible: by the time it moves, the moment that decided the question
+   * has already gone. Being pointed is the fact that decides it, and it is
+   * knowable the instant it becomes true.
+   *
+   * It takes no threshold, like `hostile-on-grid`: "held" is not a quantity.
+   *
+   * ⚠ THE RESPONSE THAT HELPS IS `fight-back`, NOT A DOCK. A tackled ship
+   * cannot dock-and-pause or dock-and-repair — the warp is the very thing being
+   * prevented — so `tackled -> dock-and-pause` is a watch that can only ever
+   * fail. Killing the thing holding the ship is what frees it. The FORMAT does
+   * not police that (no condition here forbids a response, and none should
+   * start: a player may legitimately want an `alert`, and a row that merely
+   * tries and fails costs a tick, not a ship). The steering is done where it
+   * belongs — in the words the player reads (`scriptText.ts`).
+   */
+  | { readonly kind: "tackled" };
 
 export type ConditionKind = Condition["kind"];
 
@@ -503,6 +528,7 @@ export const CONDITION_KINDS: readonly ConditionKind[] = Object.freeze<Condition
   "cargo-full",
   "targeted-by-player",
   "drone-health-below",
+  "tackled",
 ]);
 
 /** Where a condition may legally appear. */
@@ -520,9 +546,15 @@ export function conditionSites(kind: ConditionKind): readonly ConditionSite[] {
   // wrong moment (the belt-empty-on-tick-one trap). As an always-armed watch they
   // fail safe by simply not firing.
   //   • hostile-on-grid / targeted-by-player / drone-health-below — grid reads.
+  //   • tackled — a grid read too, and the sharpest case of the trap: nothing can
+  //     hold a ship that is already in warp, so "do this step until I am tackled"
+  //     would read not-met for the whole flight and the one tick it matters would
+  //     arrive with the program on a step that never asked. It is a watch, and
+  //     only a watch, exactly like the pirate it is usually about.
   return kind === "hostile-on-grid" ||
     kind === "targeted-by-player" ||
-    kind === "drone-health-below"
+    kind === "drone-health-below" ||
+    kind === "tackled"
     ? ["interrupt"]
     : ["until", "interrupt"];
 }

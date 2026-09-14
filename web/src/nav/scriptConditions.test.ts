@@ -304,6 +304,43 @@ test("scrammed is three-state and the jam list is every jam, not just tackle", (
   assert.deepEqual(droneBoatObs({ jammingSourceIDs: [] }).jammingSourceIDs, [], "a real 'nothing on us'");
 });
 
+test("tackled reads the SCRAM, tri-state, and never fires on an unreadable jam fold", () => {
+  const held: Condition = { kind: "tackled" };
+  assert.equal(evaluateCondition(held, obs({ scrammed: true })), "met");
+  assert.equal(evaluateCondition(held, obs({ scrammed: false })), "not-met", "read, and clear");
+  assert.equal(evaluateCondition(held, obs({ scrammed: null })), "cannot-tell");
+  // Absent entirely (an observation nobody filled) is unreadable, never "loose".
+  assert.equal(evaluateCondition(held, obs()), "cannot-tell");
+});
+
+test("tackled does NOT fire on a web, a damp or any other jam", () => {
+  // ⚠ THE WHOLE REASON IT READS `scrammed` AND NOT `jammingSourceIDs`. That list
+  // is every hostile cycle landing on this ship — a webbing frigate names itself
+  // on it, and a webbed ship can still warp. A watch called "cannot warp out"
+  // that fired on a web is a watch a player deletes after the second false
+  // alarm, taking the row that would have saved the ship with it.
+  const held: Condition = { kind: "tackled" };
+  const webbed = obs({ hostileOnGrid: true, jammingSourceIDs: [900_100, 900_101], scrammed: false });
+  assert.equal(evaluateCondition(held, webbed), "not-met");
+  // And the narrow read still fires on its own, with no jam list at all.
+  assert.equal(evaluateCondition(held, obs({ scrammed: true })), "met");
+});
+
+test("a tackled watch fires before a health floor that would try to warp home", () => {
+  // The 2026-09-14 loss, as a ladder: the armour row fired on time and asked for
+  // a warp the scram refused. Ordered above it, the tackle row wins the tick and
+  // answers with something a held ship can actually do.
+  const tackle: InterruptRow = { id: "t", when: { kind: "tackled" }, respond: "fight-back" };
+  const armor: InterruptRow = { id: "a", when: { kind: "armor-below", fraction: 0.25 }, respond: "dock-and-repair" };
+  const pinned = obs({ hostileOnGrid: true, scrammed: true, armorRatio: 0.2, health: 0.2 });
+  const fired = resolveInterrupt([tackle, armor], pinned);
+  assert.equal(fired.kind, "fire");
+  assert.equal(fired.kind === "fire" ? fired.row.id : null, "t");
+  // Loose again, the armour row is exactly the row it always was.
+  const loose = resolveInterrupt([tackle, armor], obs({ scrammed: false, armorRatio: 0.2, health: 0.2 }));
+  assert.equal(loose.kind === "fire" ? loose.row.id : null, "a");
+});
+
 test("releaseSpentAlerts: released when the check passes, kept while it holds or is blind", () => {
   const alertRow: InterruptRow = { id: "a", when: { kind: "shield-below", fraction: 0.6 }, respond: "alert" };
   assert.deepEqual(releaseSpentAlerts([alertRow], obs({ shieldRatio: 1 }), ["a"]), [], "recovered - re-arm");

@@ -16,6 +16,7 @@ import type {
   BoardSlot,
   BranchBlock,
   Condition,
+  ConditionKind,
   InterruptResponse,
   InterruptRow,
   MacroID,
@@ -260,6 +261,50 @@ export function conditionSentence(condition: Condition): string {
       return "another player locks onto your ship";
     case "drone-health-below":
       return `one of your drones drops below ${pct(condition.fraction)} health`;
+    // ⚠ THE CLAUSE SAYS "AND IT CANNOT WARP OUT" ON PURPOSE, AND THAT IS THE
+    // WHOLE STEER. A watch reads back as one sentence ("If <this>, <that>"), so
+    // naming the consequence inside the condition makes the wrong pairing
+    // audible the moment a player picks it: "If something has your ship
+    // scrambled and it cannot warp out, dock at home and stop" contradicts
+    // itself out loud, while "...harden up, fight back, and stand down when it
+    // is over" reads like the answer it is. Nothing is forbidden — the format
+    // does not police which response goes with which condition and must not
+    // start — the words simply stop hiding the contradiction.
+    //
+    // "something", not "a pirate": the jam pushes this rides name whoever is
+    // holding the ship, and in low-sec that is as likely to be another player.
+    case "tackled":
+      return "something has your ship scrambled and it cannot warp out";
+  }
+}
+
+/**
+ * The extra line a condition needs a player to read BEFORE they pick a response
+ * — null for every kind that needs none, which is nearly all of them.
+ *
+ * ⚠ IT EXISTS FOR EXACTLY ONE PROBLEM: A WATCH THAT CAN ONLY EVER FAIL. Most
+ * conditions pair sensibly with most responses, so the editor rightly offers
+ * every combination. `tackled` is the exception a run was lost to on
+ * 2026-09-14: the obvious response to trouble is "go home", and going home is
+ * the one thing a held ship cannot do, because the warp is what is being
+ * prevented. A player who wires `tackled -> dock-and-pause` has written a row
+ * that will fire on time, try the impossible, and change nothing.
+ *
+ * ⚠ IT ADVISES, IT DOES NOT REFUSE. A blocking rule here would be the codec's
+ * job and the codec has no business ranking responses: `alert` on a tackle is a
+ * perfectly sane row for a player watching their screen, and a row that tries
+ * and fails costs a tick, not a ship. So this is a sentence, not a gate.
+ */
+export function conditionAdvice(kind: ConditionKind): string | null {
+  switch (kind) {
+    case "tackled":
+      return (
+        "A scrambled ship cannot warp, so it cannot reach home either - the trip a dock response asks for " +
+        "is the exact thing being prevented. Fight back is the response that frees it: it kills what is " +
+        "holding you, and it shoots the tackler first. Once you are loose, a health watch can take you home."
+      );
+    default:
+      return null;
   }
 }
 

@@ -25,7 +25,7 @@ import type {
 import type { MacroMemory, ScriptBoard } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { RatThreat } from "./ratThreat.ts";
-import { decideDroneBoat, type DroneBoatInputs } from "./droneBoatLadder.ts";
+import { decideDroneBoat, EMPTY_GRID_CONFIRM_TICKS, type DroneBoatInputs } from "./droneBoatLadder.ts";
 import { decodeLedger, encodeLedger, enterSite, emptyLedger, visitsTo, MAX_SITE_RETURNS } from "./siteProgress.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
@@ -96,6 +96,27 @@ function run(over: Partial<DroneBoatInputs> & { obs: ScriptObservation }) {
   };
   return decideDroneBoat(inputs);
 }
+
+/**
+ * Drive the block over an EMPTY grid until it believes it.
+ *
+ * ⚠ AN EMPTY GRID IS NOT BELIEVED ON THE FIRST READ, and these tests would be
+ * asserting the bug if they pretended otherwise: the tick just after a warp
+ * lands reads a grid that has not populated yet, which is why a live run warped
+ * through three dens in ninety seconds declaring each one clear while the rats
+ * in them shot the ship. The block re-reads before it finishes; a caller that
+ * wants the FINISH has to hand it the same empty answer that many times.
+ */
+function runUntilClear(over: Partial<DroneBoatInputs> & { obs: ScriptObservation }) {
+  let mem: MacroMemory = over.mem ?? {};
+  let last = run({ ...over, mem });
+  for (let read = 1; read < EMPTY_GRID_CONFIRM_TICKS; read += 1) {
+    mem = last.nextMem;
+    last = run({ ...over, mem });
+  }
+  return last;
+}
+
 
 /** A rat type that scrams at `rangeM`. */
 function scrammer(rangeM: number): RatThreat {
@@ -196,23 +217,138 @@ test("rung order: the drones go on the primary before the guns do", () => {
 
 // ─── The band ────────────────────────────────────────────────────────────────
 
-test("the empty band brawls at the ceiling and says why", () => {
-  // The spec's own low-skill Tristan: 27.5 km of control range against a 20 km
-  // scrammer. Ceiling 24.5 km, floor 25 km — no room to kite.
+// ─── The empty band never closes ─────────────────────────────────────────────
+//
+// ⚠ THESE ARE THE TESTS FOR A SHIP THAT WAS LOST ON 2026-09-14, and the one
+// they replaced asserted the behaviour that lost it. §2 said an empty band is
+// answered by "holding at the ceiling and saying so"; the ship was 25.5 km out
+// with a 17 km ceiling, so holding at the ceiling meant CLOSING 8.5 km, into a
+// 20 km scram, on a prop mod. It got pointed and could not warp when the armour
+// watch fired. The band being empty says there is no room to kite — it says
+// nothing whatever in favour of flying closer.
+
+/** The spec's low-skill Tristan world: 20 km scram, and a leash argued below. */
+function emptyBandWorld(over: Partial<ScriptObservation> = {}): Partial<ScriptObservation> {
+  return {
+    combatDroneIDs: [7001],
+    myDrones: [{ itemID: 7001, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }],
+    maxTargetRangeM: 40_000,
+    // 27.5 km of control range: ceiling 24.5 km under a floor of 25 km. Empty,
+    // and empty on a MEASURED leash, so nothing here depends on the guess.
+    droneControlRangeM: 27_500,
+    threatByTypeID: { 100: scrammer(20_000) },
+    ...over,
+  };
+}
+
+test("⚠ an empty band with the ship OUTSIDE the ceiling never issues a closing hold", () => {
   const out = run({
-    obs: obs({
-      snapshot: snapshot([rat(1, 30_000), myDrone(7001)]),
-      combatDroneIDs: [7001],
-      myDrones: [{ itemID: 7001, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }],
-      maxTargetRangeM: 40_000,
-      droneControlRangeM: 27_500,
-      threatByTypeID: { 100: scrammer(20_000) },
-    }),
+    obs: obs(emptyBandWorld({ snapshot: snapshot([rat(1, 30_000), myDrone(7001)]) })),
+  });
+  assert.equal(out.action.kind, "keepAtRange");
+  // The band's own answer is 24.5 km and the ship is at 30 km. Asking for 24.5
+  // would be an order to burn 5.5 km into a 20 km scram, so the hold is pinned
+  // where the ship already is.
+  assert.equal((out.action as { range: number }).range, 30_000);
+  assert.match(out.why, /no room to kite/i);
+  assert.match(out.why, /staying here/i);
+});
+
+test("⚠ an empty band never lights the prop mod to close", () => {
+  const out = run({
+    // The hold is already pinned where the ship is, so rung 2 falls through and
+    // rung 3 gets the tick. Against the band's 24.5 km there is a 5.5 km gap
+    // here, which is over PROP_GAP_M — the old code burned exactly this.
+    mem: { holdM: 30_000, anchorID: 1 },
+    obs: obs(
+      emptyBandWorld({
+        snapshot: snapshot([rat(1, 30_000), myDrone(7001)], { activeModuleIDs: [] }),
+        propulsionModules: [{ itemID: 6001, typeID: 434, kind: "microwarpdrive" }],
+        capacitorRatio: 1,
+      }),
+    ),
+  });
+  assert.notEqual(out.action.kind, "activate");
+  assert.equal(out.action.kind, "lock");
+});
+
+test("⚠ an empty band still fights — the rungs below are not starved", () => {
+  const out = run({
+    mem: { holdM: 30_000, anchorID: 1, targetID: 1, lockIssued: true },
+    obs: obs(
+      emptyBandWorld({
+        snapshot: snapshot([rat(1, 30_000), myDrone(7001)]),
+        lockedTargetIDs: [1],
+        weaponModuleIDs: [5001],
+      }),
+    ),
+  });
+  // Not `done`, not `blocked`, not a wait: an unkitable band is a reason to
+  // brawl, never a reason to stop shooting or to leave the site.
+  assert.equal(out.action.kind, "engageDrones");
+  assert.equal(out.outcome.kind, "acting");
+});
+
+test("an empty band with the ship INSIDE the ceiling may still open range outward", () => {
+  const out = run({
+    // 8 km out, ceiling 24.5 km: opening to the ceiling moves AWAY from the
+    // scram, which is the one direction the guard does not touch.
+    obs: obs(emptyBandWorld({ snapshot: snapshot([rat(1, 8_000), myDrone(7001)]) })),
   });
   assert.equal(out.action.kind, "keepAtRange");
   assert.equal((out.action as { range: number }).range, 24_500);
-  assert.match(out.why, /no room to kite/i);
-  assert.match(out.why, /24\.5 km/);
+  assert.match(out.why, /fighting at 24\.5 km/i);
+});
+
+test("a NON-empty band still closes normally", () => {
+  const out = run({
+    // 45 km of control range: ceiling 37 km over a floor of 25 km. There IS room
+    // to kite, the ship is 38 km out, and closing to 25 km is the whole point of
+    // the block. The fix must not disarm ordinary kiting.
+    obs: obs(
+      emptyBandWorld({
+        snapshot: snapshot([rat(1, 38_000), myDrone(7001)]),
+        droneControlRangeM: 45_000,
+      }),
+    ),
+  });
+  assert.equal(out.action.kind, "keepAtRange");
+  assert.equal((out.action as { range: number }).range, 25_000);
+});
+
+test("⚠ the empty-band readout names the hold override when the leash was GUESSED", () => {
+  const out = run({
+    // The live fit: no drone control range at all, so the leash is the 20 km
+    // no-skills guess and the ceiling is 17 km. The player cannot fix a leash
+    // they are never told was invented.
+    obs: obs(
+      emptyBandWorld({
+        snapshot: snapshot([rat(1, 30_000), myDrone(7001)]),
+        droneControlRangeM: null,
+      }),
+    ),
+  });
+  assert.equal(out.action.kind, "keepAtRange");
+  assert.equal((out.action as { range: number }).range, 30_000);
+  assert.match(out.why, /could not read your drone control range/i);
+  assert.match(out.why, /set the hold range/i);
+});
+
+test("a hold the PLAYER asked for is still flown to, scram or no scram", () => {
+  const out = run({
+    // §2 is explicit that someone who types a brawling range may have one, and
+    // the override is the fix the readout above points at. The guard forbids the
+    // block closing into a point of its OWN accord, not obeying an instruction.
+    holdRangeM: 15_000,
+    obs: obs(
+      emptyBandWorld({
+        snapshot: snapshot([rat(1, 30_000), myDrone(7001)]),
+        droneControlRangeM: null,
+      }),
+    ),
+  });
+  assert.equal(out.action.kind, "keepAtRange");
+  assert.equal((out.action as { range: number }).range, 15_000);
 });
 
 test("hysteresis: a sub-2 km change does not spend a second keepAtRange", () => {
@@ -560,8 +696,30 @@ test("the close-in budget runs out: the drones come home and the block finishes"
   assert.equal(done.outcome.kind, "done");
 });
 
+test("⚠ an empty grid on the tick a warp LANDS is not believed", () => {
+  // THE LIVE BUG, 2026-09-14. The block arrived in a den, read a grid that had
+  // not populated yet, called it clear, and the loop warped straight on — three
+  // dens in ninety seconds while the pilot watched the ship take shield damage
+  // from the rats it had just decided were not there. A grid that has not
+  // arrived is byte-identical to a grid with nothing on it, so the first empty
+  // read is not evidence of anything.
+  const first = run({ obs: obs({ snapshot: snapshot([]) }) });
+  assert.equal(first.outcome.kind, "acting", "the first empty read decides nothing");
+  assert.equal(first.action.kind, "wait");
+  assert.notEqual(first.outcome.kind, "done");
+
+  // And the rats turning up on the very next read puts the count straight back,
+  // so a fight that is genuinely still going never creeps toward finishing.
+  const fighting = run({ obs: obs({ snapshot: snapshot([rat(1, 5_000)]) }), mem: first.nextMem });
+  assert.notEqual(fighting.outcome.kind, "done");
+  const again = run({ obs: obs({ snapshot: snapshot([]) }), mem: fighting.nextMem });
+  assert.equal(again.outcome.kind, "acting", "the count restarted when the grid came back");
+});
+
 test("a cleared grid calls the drones home and then finishes", () => {
-  const recall = run({
+  // The recall waits on the same confirmation the finish does: pulling the
+  // drones in on an unpopulated grid is the same mistake one rung earlier.
+  const recall = runUntilClear({
     obs: obs({
       snapshot: snapshot([myDrone(7001)]),
       combatDroneIDs: [7001],
@@ -570,7 +728,7 @@ test("a cleared grid calls the drones home and then finishes", () => {
   });
   assert.equal(recall.action.kind, "recallDrones");
 
-  const done = run({ obs: obs({ snapshot: snapshot([]) }) });
+  const done = runUntilClear({ obs: obs({ snapshot: snapshot([]) }) });
   assert.equal(done.outcome.kind, "done");
   assert.match(done.why, /grid is clear/i);
 });
@@ -762,7 +920,7 @@ test("⚠ a cleared grid hands this den's tally back, so a den that keeps paying
   const before = enterSite(enterSite(emptyLedger(), label), label);
   assert.equal(visitsTo(before, label), 2);
 
-  const out = run({ board: encodeLedger(before), obs: obs({ snapshot: snapshot([]) }) });
+  const out = runUntilClear({ board: encodeLedger(before), obs: obs({ snapshot: snapshot([]) }) });
   assert.equal(out.outcome.kind, "done");
   assert.equal(visitsTo(decodeLedger(out.boardPatch), label), 0);
 });
@@ -796,7 +954,7 @@ test("⚠ a wave merely out of REACH is not a clear, and keeps the tally it earn
 test("a clear at a den the ledger is not tracking publishes no tally for it", () => {
   // A belt spawn has no scan label: there is nothing to count and nothing to
   // forgive, and the block must not invent a row for a den it was never at.
-  const out = run({ board: {}, obs: obs({ snapshot: snapshot([]) }) });
+  const out = runUntilClear({ board: {}, obs: obs({ snapshot: snapshot([]) }) });
   assert.equal(out.outcome.kind, "done");
   assert.deepEqual(decodeLedger(out.boardPatch).sites, []);
 });

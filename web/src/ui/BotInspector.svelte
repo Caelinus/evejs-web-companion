@@ -60,7 +60,7 @@
   } from "../bots/editorOptions.ts";
   import { MACRO_CATALOG_LIST, macroEntry } from "../bots/macroCatalogView.ts";
   import { MAX_WORLD_NAME_LEN } from "../bots/scriptCodec.ts";
-  import { interruptSentence, targetClassWord } from "../bots/scriptText.ts";
+  import { conditionAdvice, interruptSentence, targetClassWord } from "../bots/scriptText.ts";
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
   import StationPicker from "./StationPicker.svelte";
@@ -1041,6 +1041,14 @@
     {@const watch = target.watch}
     <p class="note">{interruptSentence(watch)}</p>
     {@render conditionEditor(`watch-${watch.id}`, "Watch for", WATCH_CONDITION_KINDS, CONDITION_NOUN_LABEL, null)}
+    <!-- The one condition whose obvious response cannot work (a held ship cannot
+         warp, so it cannot dock either) says so HERE, between the check and the
+         response picker, rather than in a rule that refuses the pairing.
+         `conditionAdvice` is null for every other kind, so no other watch grows
+         a line. -->
+    {#if conditionAdvice(watch.when.kind) !== null}
+      <p class="note">{conditionAdvice(watch.when.kind)}</p>
+    {/if}
     <label class="inspector-field" for={`watch-${watch.id}-respond`}>
       <span class="inspector-label">Then</span>
       <select

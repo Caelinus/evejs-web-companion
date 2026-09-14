@@ -130,6 +130,27 @@ export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
   readonly inWarp: boolean | null;
+  /**
+   * How many warps this pilot has COMPLETED since the run's app session began —
+   * monotonic, bumped on the tick a warp ends.
+   *
+   * ⚠ READ IT INSTEAD OF WATCHING FOR `inWarp`, because a macro cannot watch for
+   * `inWarp`. The orchestrator holds every watch and every macro while the ship
+   * is warping (`decideScriptAction`'s guard returns before the program), so no
+   * macro is ever called on a tick where `inWarp` is true. Three blocks tried
+   * anyway and each one silently lost its arrival check the day that guard
+   * landed: they issued a warp, sat out the flight unasked, resumed having
+   * witnessed nothing, and reported that the warp had never started while the
+   * ship sat on the destination grid. A block records this count when it issues
+   * its warp and compares it afterwards; a count that has gone up is an arrival,
+   * and one that has not, after a generous wait, is a warp that truly never
+   * began. Those two were indistinguishable before.
+   *
+   * Optional and nullable like every other read here: `null`/absent is "nobody
+   * counted", and a block must fall back to its own wait budget rather than
+   * treat it as zero.
+   */
+  readonly completedWarps?: number | null;
   readonly shieldRatio: number | null;
   readonly armorRatio: number | null;
   readonly hullRatio: number | null;
@@ -614,6 +635,46 @@ export function evaluateCondition(condition: Condition, obs: ScriptObservation):
       // No drones out reads as null (nothing to judge), NOT as "healthy" — the
       // same rule as everywhere: a missing reading is never a verdict.
       return below(obs.lowestDroneHealth ?? null, condition.fraction);
+    case "tackled":
+      // ⚠ IT READS `scrammed`, NOT `jammingSourceIDs`, AND THE CHOICE IS THE
+      // WHOLE CONDITION. Both halves are on the observation and they answer two
+      // different questions:
+      //
+      //   • `jammingSourceIDs` is EVERY hostile cycle landing on this ship —
+      //     scrams, disruptors, webs, damps, neuts, paints, tracking and
+      //     guidance disruptors alike (its own header says so). A watch named
+      //     "cannot leave" wired to that list fires on a webbing frigate, which
+      //     slows a ship and does not stop it warping off. That is a watch that
+      //     cries wolf, and a player who has been woken by one twice deletes it
+      //     — taking the one row that would have saved the ship with it.
+      //   • `scrammed` is the fold of the server's own `OnJamStart` pushes
+      //     narrowed to a live WARP SCRAMBLER (`scrammedByWarpScrambler`). It is
+      //     the jam that actually pins a ship to the grid, which is the fact the
+      //     2026-09-14 loss turned on.
+      //
+      // ⚠ SO THIS ERRS SILENT, NEVER LOUD, AND THAT IS DELIBERATE. A pure warp
+      // DISRUPTOR (a "point") also stops a warp, and it is NOT in `scrammed` —
+      // the server's two names are the wrong way round and only
+      // `warpScramblerMWD` is the scram (see bridge/jamNotifications.ts). So a
+      // ship held by a disruptor alone reads not-met here: a MISS, not a false
+      // alarm. That is the cheap direction to be wrong in for a watch a player
+      // has to trust, and the fix when it is wanted is to widen the OBSERVATION
+      // with a disruptor-or-scram read — never to widen this to every jam.
+      //
+      // ⚠ AND AGAINST RATS THAT MISS CANNOT HAPPEN, which is checked rather than
+      // hoped: the server maps an NPC's `entityWarpScrambleChance` (504) to its
+      // "scram" family, and that family is the one that sends `warpScramblerMWD`
+      // (space/npc/npcEntityEwarCatalog.js -> `warpscrambleforentity`, and the
+      // `scram` definition in space/modules/hostileModuleRuntime.js). Every rat
+      // that can pin a ship therefore trips this watch. The gap above is a PvP
+      // one — only another player can hold you with a disruptor — so a ratting
+      // bot gets the honest answer and a PvP bot gets a watch that is quiet
+      // about half of what could be holding it. Worth knowing before this is
+      // leaned on for the second thing.
+      //
+      // Three-state like every other read here: `null`/absent is "no jam fold
+      // was read at all", which never fires the watch.
+      return fromBool(obs.scrammed ?? null);
   }
 }
 

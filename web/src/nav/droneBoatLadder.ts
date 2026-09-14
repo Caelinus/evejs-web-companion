@@ -64,6 +64,7 @@ import {
   kiteBand,
   resolveDroneLeash,
   shouldReissueHold,
+  THREAT_BUFFER_M,
   type BandThreat,
   type KiteBand,
 } from "./kiteBand.ts";
@@ -120,6 +121,17 @@ const MAX_LOCK_WAIT_TICKS = 8;
  * that has not closed in two minutes is a chase, not an approach.
  */
 const MAX_CLOSE_TICKS = 60;
+
+/**
+ * Consecutive empty grid reads before "there is nothing here" is believed.
+ *
+ * ⚠ THREE, AND THE TICK IT EXISTS FOR IS THE ONE JUST AFTER A WARP LANDS — the
+ * grid has not populated, the read succeeds, and it LIES. Same shape as the
+ * scanner's own empty-state lie and answered with the same three reads
+ * (`EMPTY_SCAN_CONFIRM_READS`, scriptMacros.ts). Six seconds at the end of a
+ * finished fight against losing the entire site.
+ */
+export const EMPTY_GRID_CONFIRM_TICKS = 3;
 
 /**
  * How big the gap between where the ship IS and where it wants to be has to get
@@ -302,14 +314,44 @@ function bandThreats(rows: readonly OverviewRow[], threat: (typeID: number) => R
   });
 }
 
-/** The band, in one sentence the player can act on. §2 insists on this. */
-function bandWhy(band: KiteBand): string {
-  if (band.empty) {
-    const scramM = Math.max(0, band.floorM - 5000);
-    return (
+/**
+ * The band, in one sentence the player can act on. §2 insists on this.
+ *
+ * `issuedHoldM` is the range the block is ACTUALLY asking for, which is not
+ * always `band.holdM`: when the band's answer sits inside the scram and the ship
+ * is already further out than that, the hold rung pins the ship where it is
+ * instead (see `holdInsideTheScram` below). A readout that reported the band's
+ * number there would describe a manoeuvre the block deliberately did not make —
+ * and "brawling at 17 km" while sitting at 25.5 km is exactly the sentence that
+ * made the live loss look like correct behaviour in the log.
+ *
+ * ⚠ THE GUESSED-LEASH HALF OF THE SENTENCE IS THE PLAYER'S ONLY WAY OUT. When
+ * the ceiling is the 20 km no-skills guess (`reason: "fallback"`), the block has
+ * no route to a better number: control range is skill-derived and nothing on the
+ * wire carries it. The fix is the hold override, and the player cannot reach for
+ * it if the readout never says the leash was invented. Plain ASCII, because this
+ * is a player-facing string.
+ */
+function bandWhy(band: KiteBand, issuedHoldM: number): string {
+  // The general form, not `band.empty` — see the hold rung's own warning. An
+  // override is excluded here for the same reason it is excluded there: a player
+  // who typed a brawling range is not being told their own number is a mistake.
+  if (band.holdM < band.floorM && band.reason !== "override") {
+    const scramM = Math.max(0, band.floorM - THREAT_BUFFER_M);
+    const room =
       `There is no room to kite here: my drones reach about ${km(band.ceilingM)} and the worst thing on grid` +
-      ` scrams at ${km(scramM)}, so I am brawling at ${km(band.holdM)} instead.`
-    );
+      ` scrams at ${km(scramM)}.`;
+    const where =
+      issuedHoldM > band.holdM
+        ? ` I am already ${km(issuedHoldM)} out, so I am staying here and fighting what I can reach rather than` +
+          ` burning into that scram.`
+        : ` So I am fighting at ${km(issuedHoldM)} instead.`;
+    const fix =
+      band.reason === "fallback"
+        ? ` I could not read your drone control range, so that ${km(band.ceilingM)} is only the no-skills guess:` +
+          ` set the hold range and I will use your number instead.`
+        : "";
+    return room + where + fix;
   }
   switch (band.reason) {
     case "fallback":
@@ -639,9 +681,38 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
   const role = squad;
 
   // ─── FINISHING, PART ONE: the grid really is empty ────────────────────────
+  //
+  // ⚠ AN EMPTY GRID IS READ THREE TIMES BEFORE IT IS BELIEVED, and the tick this
+  // protects is the one right after a warp lands. Caught live on 2026-09-14: the
+  // block arrived in a den, read a grid that had not populated yet, declared it
+  // clear, and the loop warped straight on to the next site — three dens in a row
+  // in ninety seconds, while the pilot watched the ship take shield damage from
+  // the rats it had just decided were not there.
+  //
+  // It is the same lie the scanner tells, answered the same way (see
+  // `EMPTY_SCAN_CONFIRM_READS` in scriptMacros.ts): a grid that has not arrived
+  // yet is byte-identical to a grid with nothing on it, so the first empty read
+  // is not evidence. Believing it costs the whole site; re-reading costs six
+  // seconds at the end of a fight that is already over.
+  //
+  // Consecutive is the whole of it — one hostile row resets the count, so a
+  // fight that is genuinely still going never creeps toward finishing, and the
+  // counter cannot accumulate across a lull.
   if (onGrid.length === 0) {
+    const emptyReads = (num(mem, "emptyGridReads") ?? 0) + 1;
+    if (emptyReads < EMPTY_GRID_CONFIRM_TICKS) {
+      return tick(
+        WAIT,
+        "Nothing on the grid yet — reading it again before calling this done.",
+        PHASE_FIGHT,
+        ACTING,
+        false,
+        { ...mem, emptyGridReads: emptyReads },
+      );
+    }
     return leaveGrid(role, mem, roster, "The grid is clear.", PHASE_FIGHT);
   }
+  mem = num(mem, "emptyGridReads") === null ? mem : { ...mem, emptyGridReads: 0 };
 
   // ─── Can this hull fight at all? ──────────────────────────────────────────
   //
@@ -774,16 +845,74 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
     overrideHoldM: input.holdRangeM,
   });
   const anchorID = band.anchorID;
-  if (anchorID !== null) {
+  const anchorRow = anchorID === null ? undefined : onGrid.find((row) => row.itemID === anchorID);
+  const currentRangeM = anchorRow === undefined ? null : Math.round(anchorRow.distance);
+
+  // ⚠ A HOLD THAT SITS INSIDE THE WORST SCRAM ON GRID IS NEVER SOMETHING TO
+  // CLOSE TOWARD. THIS COST A SHIP ON 2026-09-14 AND IT IS THE REASON THIS
+  // GUARD EXISTS.
+  //
+  // What happened, in the order it happened: the fit did not report a drone
+  // control range, so the band fell back to the no-skills 20 km guess and the
+  // ceiling came out at 17 km. The rats scrammed at 20 km, so the floor was
+  // 25 km and the band was EMPTY — and §2 as written answered an empty band
+  // with "hold at the ceiling and say so". The ship was already 25.5 km out,
+  // OUTSIDE the scram, so "hold at the ceiling" was an order to close 8.5 km.
+  // It spent its prop mod doing exactly that, crossed into the scram, got
+  // pointed, and could not warp when the armour watch fired. The watch worked;
+  // the readout was truthful ("Burning to close 8.5 km of gap"); the ship died
+  // because the block flew it into a point on purpose.
+  //
+  // THE GENERAL FORM, AND WHY THE TEST IS NOT `band.empty`. Burning toward a
+  // hold that lies inside the reach of the worst scrammer on grid is wrong
+  // whenever it happens — an empty band is simply the ordinary way to arrive
+  // there, not a special case deserving its own rule. In a band that is NOT
+  // empty the floor already guarantees it cannot happen: with a scrammer on
+  // grid the wanted hold IS the floor (scram reach plus `THREAT_BUFFER_M`) and
+  // the ceiling is above it, so `holdM < floorM` is unreachable. Writing the
+  // test as the thing that is actually wrong means a future change to how the
+  // band is clamped cannot quietly reopen this by producing some other hold
+  // below the floor.
+  //
+  // ⚠ AN OVERRIDE IS EXCLUDED, AND THAT IS NOT A LOOPHOLE. §2 is explicit that
+  // a player who types a hold range may deliberately brawl inside scram range;
+  // the override is also the one fix offered by the readout below, and a guard
+  // that refused to fly to the player's own number would make that advice a
+  // lie. What the block must never do is fly into a point of its OWN accord.
+  const holdInsideTheScram = band.holdM < band.floorM && band.reason !== "override";
+
+  // Where to actually ask to sit. Normally the band's answer; under the guard,
+  // never nearer than where the ship already is. Further out is the one
+  // direction that is always safe here, so:
+  //
+  //   • the ship OUTSIDE the band's hold is pinned where it is — the order stops
+  //     the inward burn (a standing `approach` from the closing rung above, or a
+  //     hold issued before a new wave raised the floor) without asking for a
+  //     single metre of closing;
+  //   • the ship INSIDE the ceiling still gets the ceiling, because opening out
+  //     to it moves AWAY from the scram;
+  //   • an anchor whose distance cannot be read issues nothing at all. The null
+  //     wins: if the block cannot tell which way the order would move the ship,
+  //     it does not give the order, and the rungs below still fight.
+  //
+  // The hysteresis does the rest — a pin re-issued only when the ship has been
+  // dragged more than `RANGE_HYSTERESIS_M` off it, never below where it is.
+  const holdTargetM = holdInsideTheScram
+    ? currentRangeM === null
+      ? null
+      : Math.max(band.holdM, currentRangeM)
+    : band.holdM;
+
+  if (anchorID !== null && holdTargetM !== null) {
     const anchorChanged = num(mem, "anchorID") !== anchorID;
-    if (shouldReissueHold(num(mem, "holdM"), band.holdM, anchorChanged)) {
+    if (shouldReissueHold(num(mem, "holdM"), holdTargetM, anchorChanged)) {
       return tick(
-        { kind: "keepAtRange", targetID: anchorID, range: band.holdM },
-        bandWhy(band),
+        { kind: "keepAtRange", targetID: anchorID, range: holdTargetM },
+        bandWhy(band, holdTargetM),
         PHASE_FIGHT,
         ACTING,
         true,
-        { ...mem, holdM: band.holdM, anchorID },
+        { ...mem, holdM: holdTargetM, anchorID },
       );
     }
   }
@@ -818,12 +947,30 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
   const activeModuleIDs = snapshot.ship?.activeModuleIDs ?? null;
   const props = obs.propulsionModules ?? [];
   if (activeModuleIDs !== null && props.length > 0) {
-    const anchorRow = anchorID === null ? undefined : onGrid.find((row) => row.itemID === anchorID);
     // A null gap never decides: with no anchor, or no measurable distance to it,
     // the block does not know whether it is closing, so it does not burn. It can
     // still STOP, which is the half that is always safe.
-    const gapM = anchorRow === undefined ? null : Math.abs(anchorRow.distance - band.holdM);
-    const wantBurn = input.propMode === "auto" && gapM !== null && gapM > PROP_GAP_M;
+    //
+    // ⚠ THE GAP IS MEASURED AGAINST THE HOLD THE BLOCK ACTUALLY ASKED FOR, NOT
+    // AGAINST `band.holdM`. Under the guard above those two differ, and it is
+    // this line that turned the guard's live counterpart into a dead ship: the
+    // hold rung's order and the burner's reason for lighting have to come from
+    // one number, or the block declines to close and then burns to close anyway.
+    const gapM =
+      currentRangeM === null || holdTargetM === null ? null : Math.abs(currentRangeM - holdTargetM);
+    // Which way the burn would take the ship. Opening is always allowed — it is
+    // the direction away from whatever can hold us.
+    const closingTheGap = currentRangeM !== null && holdTargetM !== null && currentRangeM > holdTargetM;
+    // The second clause is belt and braces rather than a second opinion: pinning
+    // the hold at the current range already leaves no closing gap to burn. It is
+    // written out at the burn site anyway because "Burning to close 8.5 km of
+    // gap" is the line the 2026-09-14 log ended on, and the rule that forbids it
+    // should be legible exactly where that line is produced.
+    const wantBurn =
+      input.propMode === "auto" &&
+      gapM !== null &&
+      gapM > PROP_GAP_M &&
+      !(closingTheGap && holdInsideTheScram);
     const decision = decidePropulsionModule({
       modules: props,
       activeModuleIDs: new Set(activeModuleIDs),
@@ -837,7 +984,9 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
       // the same call the hardener rung makes.
       return tick(
         { kind: "activate", moduleID: decision.module.itemID, targetID: 0 },
-        `Burning to close ${km(gapM ?? 0)} of gap.`,
+        closingTheGap
+          ? `Burning to close ${km(gapM ?? 0)} of gap.`
+          : `Burning to open ${km(gapM ?? 0)} of gap.`,
         PHASE_FIGHT,
         ACTING,
         true,
