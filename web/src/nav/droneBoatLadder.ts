@@ -58,15 +58,21 @@
 // registers it as a macro lives in `nav/scriptMacros.ts` and is a few lines.
 
 import type { SquadRoleArg } from "../bots/botScript.ts";
-import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
+import { hostileRows, type OverviewRow } from "../space/overview.ts";
 import type { SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import {
-  FALLBACK_CONTROL_RANGE_M,
   kiteBand,
+  resolveDroneLeash,
   shouldReissueHold,
   type BandThreat,
   type KiteBand,
 } from "./kiteBand.ts";
+import {
+  droneRoster,
+  launchRoleDrones,
+  launchStalled,
+  type DroneRoster,
+} from "./droneLaunch.ts";
 import { decidePropulsionModule } from "./propulsion.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import {
@@ -80,6 +86,7 @@ import {
   decodeLedger,
   describeVerdict,
   encodeLedger,
+  forgetSite,
   observeTick,
   type SiteLedger,
   type SiteVerdict,
@@ -96,12 +103,6 @@ import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./target
  * two different answers to it would only ever mean one of them is wrong.
  */
 const MAX_LOCK_WAIT_TICKS = 8;
-
-/** A launch the server keeps refusing is not retried forever. */
-const LAUNCH_MAX_TRIES = 3;
-
-/** ~30 s waiting for the other role's drones to come home before launching anyway. */
-const RECALL_MAX_WAIT_TICKS = 15;
 
 /**
  * How long the block may spend CLOSING on a wave that landed outside lock range
@@ -233,130 +234,13 @@ function km(metres: number): string {
 
 // ─── Drones by role ──────────────────────────────────────────────────────────
 //
-// ⚠ DUPLICATED FROM `fight-the-rats`, KNOWINGLY, AND IT MUST NOT STAY THAT WAY.
-// `droneRoster` and `launchRoleDrones` are private to `nav/scriptMacros.ts` and
-// cannot be imported from here; the behaviour they carry is not optional (a
-// Hobgoblin ordered to salvage is refused by the server, and the wrong drones
-// then hold the slots the right ones needed, so the block waits on them for
-// ever), so it is reproduced rather than dropped.
-//
-// THE LATER PARCEL THAT REGISTERS THIS BLOCK SHOULD EXTRACT THE SHARED HELPER
-// into a leaf module both callers import, rather than letting two copies drift.
-// The drift that matters is not cosmetic: if one copy learns about a new drone
-// role and the other does not, the block with the older copy launches drones it
-// cannot use into slots the usable ones needed, and the symptom is a fight that
-// never starts.
-
-type DroneRoster = {
-  /** Every drone this ship can order, whatever it is — what a recall takes. */
-  readonly out: readonly number[];
-  /** The COMBAT drones out in space, and the combat stacks still in the bay. */
-  readonly roleOut: readonly number[];
-  readonly roleBay: readonly number[];
-  /** Drones out that are not combat drones — they hold the slots combat needs. */
-  readonly othersOut: readonly number[];
-  /**
-   * The combat drones out, as rotation rows, or null when the per-drone fold was
-   * not readable. ⚠ NULL IS "NOBODY LOOKED" AND NOT "NO DRONES ARE OUT" — the
-   * rotation machine reads the distinction and would otherwise write a live
-   * drone off as dead.
-   */
-  readonly roleRows: readonly {
-    readonly itemID: number;
-    readonly shieldRatio: number | null;
-    readonly armorRatio: number | null;
-    readonly hullRatio: number | null;
-  }[] | null;
-};
-
-function combatRoster(obs: ScriptObservation, snapshot: SpaceSnapshot | null): DroneRoster {
-  const shipID = snapshot?.ship?.itemID ?? null;
-  const out = (snapshot?.entities ?? [])
-    .filter((entity) => canMyShipOrderDrone(entity, shipID) === true)
-    .map((entity) => entity.itemID);
-  const combat = obs.combatDroneIDs ?? null;
-  const combatSet = new Set(combat ?? []);
-  const mine = obs.myDrones ?? null;
-  return {
-    out,
-    roleOut: out.filter((id) => combatSet.has(id)),
-    roleBay: obs.combatDroneBayItemIDs ?? [],
-    othersOut: out.filter((id) => !combatSet.has(id)),
-    // Both halves must be readable for a rotation row to exist: the per-drone
-    // health fold AND the role split. Without the role split a salvage drone
-    // losing shield would be rotated by the COMBAT block, which is a recall of
-    // something this block never launched and never wanted.
-    roleRows:
-      mine === undefined || mine === null || combat === null
-        ? null
-        : mine.filter((row) => combatSet.has(row.itemID)),
-  };
-}
-
-/**
- * Put the COMBAT drones out, or null when there is nothing to do right now.
- *
- * Reproduced from `launchRoleDrones` (see the block comment above). The three
- * behaviours that matter, each with the failure it prevents:
- *
- *   • Nothing to do when the combat drones are already out, or when the bay
- *     holds none — otherwise this rung wins every tick and the ship never fires.
- *   • Drones of ANOTHER role hold the slots, so they are called in ONCE and the
- *     launch waits for them, bounded by `RECALL_MAX_WAIT_TICKS` and then tried
- *     anyway. Unbounded, a drone that never comes home ends the fight.
- *   • `LAUNCH_MAX_TRIES`, because a launch the server keeps refusing (bandwidth,
- *     most often) is not fixed by asking a fourth time, and every refusal is
- *     booked in the ledger where enough of them on one key END THE RUN.
- */
-function launchCombatDrones(
-  obs: ScriptObservation,
-  mem: MacroMemory,
-  roster: DroneRoster,
-  phase: string,
-): { readonly tick: MacroTick | null; readonly mem: MacroMemory } {
-  if (roster.roleOut.length > 0 || roster.roleBay.length === 0) {
-    return { tick: null, mem };
-  }
-  if (roster.othersOut.length > 0) {
-    if (!flag(mem, "othersRecalled")) {
-      return {
-        tick: tick(
-          { kind: "recallDrones", droneIDs: roster.othersOut },
-          "Calling the other drones in to make room for the combat drones.",
-          phase,
-          ACTING,
-          true,
-          { ...mem, othersRecalled: true, recallWaited: 0 },
-        ),
-        mem,
-      };
-    }
-    const waited = (num(mem, "recallWaited") ?? 0) + 1;
-    if (waited <= RECALL_MAX_WAIT_TICKS) {
-      return { tick: null, mem: { ...mem, recallWaited: waited } };
-    }
-  }
-  const tries = num(mem, "launchTries") ?? 0;
-  if (tries >= LAUNCH_MAX_TRIES) {
-    return { tick: null, mem };
-  }
-  return {
-    tick: tick(
-      { kind: "launchDrones", droneItemIDs: roster.roleBay },
-      "Launching the combat drones.",
-      phase,
-      ACTING,
-      true,
-      { ...mem, launchTries: tries + 1 },
-    ),
-    mem,
-  };
-}
-
-/** True once the launch has spent its budget and still nothing is out. */
-function launchStalled(mem: MacroMemory): boolean {
-  return (num(mem, "launchTries") ?? 0) >= LAUNCH_MAX_TRIES;
-}
+// `nav/droneLaunch.ts` owns the roster and the launch for every block that puts
+// drones out, this one and the gun ladders in `nav/scriptMacros.ts` alike. This
+// file used to carry its own copy of both, because `scriptMacros.ts` imports
+// `decideDroneBoat` from here and so cannot be imported back; the leaf is what
+// broke that cycle. `roster.roleRows` is the half this block alone reads — the
+// rotation machine's per-drone rows, three-state, and a null there means NOBODY
+// LOOKED rather than no drones are out.
 
 // ─── The grid, and what each rat on it does ──────────────────────────────────
 
@@ -418,33 +302,6 @@ function bandThreats(rows: readonly OverviewRow[], threat: (typeID: number) => R
   });
 }
 
-/**
- * How far this ship's drones still answer, resolved the way `kiteBand` resolves
- * its DRONE leash — measured control range, else the player's override at face
- * value, else the no-skills 20 km guess.
- *
- * ⚠ IT MIRRORS `kiteBand`'S RULE BECAUSE `kiteBand` DOES NOT EXPORT IT, and the
- * mirroring is the whole risk: `band.ceilingM` is NOT this number (it is the
- * smaller of the two leashes, minus a buffer, and it is frequently the LOCK
- * leash) so it cannot be used in its place. If the drone-leash rule ever moves,
- * this function has to move with it — the later parcel that extracts the shared
- * drone helper should take this out of `kiteBand` as a named export and delete
- * this copy.
- *
- * ⚠ AND THE LOCK RANGE IS NOT A SUBSTITUTE. The warning at the top of
- * `kiteBand.ts` records what substituting one for the other cost: a hull
- * reporting 40 km of lock and no control range would be held at 37 km with its
- * drones deaf from 27.5 km out.
- */
-function droneLeashM(obs: ScriptObservation, overrideHoldM: number | null): number {
-  const control = obs.droneControlRangeM ?? null;
-  if (typeof control === "number" && Number.isFinite(control) && control > 0) return control;
-  if (typeof overrideHoldM === "number" && Number.isFinite(overrideHoldM) && overrideHoldM > 0) {
-    return overrideHoldM;
-  }
-  return FALLBACK_CONTROL_RANGE_M;
-}
-
 /** The band, in one sentence the player can act on. §2 insists on this. */
 function bandWhy(band: KiteBand): string {
   if (band.empty) {
@@ -474,23 +331,6 @@ function bandWhy(band: KiteBand): string {
 }
 
 // ─── The ledger (§13) ────────────────────────────────────────────────────────
-
-/**
- * A visit that ENDED IN SUCCESS: drop everything the ledger was holding against
- * this label.
- *
- * Reproduced from `fight-the-rats`'s `forgetSite`, which is private to that
- * file. It is one row leaving a plain-data list and re-implements nothing out of
- * `siteProgress.ts` — but it is a second copy of a RULE, and the rule is the
- * whole feature: the count is consecutive bad visits, not arrivals. Counting
- * arrivals retires a den the bot is successfully farming after two clears, which
- * is a bot that stops working for the mirror image of the reason the unfixed bug
- * makes a bot never stop. The later parcel should share one copy.
- */
-function forgetSite(ledger: SiteLedger, label: string | null): SiteLedger {
-  const sites = label === null ? ledger.sites : ledger.sites.filter((row) => row.label !== label);
-  return { ...ledger, primaryID: null, bestHealth: null, stallTicks: 0, hostiles: null, sites };
-}
 
 /** The board patch for a ledger that moved, or null when nothing changed. */
 function ledgerPatch(before: SiteLedger, after: SiteLedger): ScriptBoard | null {
@@ -724,9 +564,9 @@ export function decideDroneBoat(inputs: DroneBoatInputs): MacroTick {
   // ever. The bug was FINISHING on an empty in-reach grid; the fix is the
   // closing rung below, not a removed filter.
   const inReach = lockRangeM === null ? onGrid : onGrid.filter((row) => row.distance <= lockRangeM);
-  const roster = combatRoster(obs, snapshot);
+  const roster = droneRoster(obs, "combat");
   const threat = threatReader(obs);
-  const leashM = droneLeashM(obs, holdRangeM);
+  const leashM = resolveDroneLeash(obs.droneControlRangeM ?? null, holdRangeM).leashM;
 
   // ─── §13: is this site worth another minute? ──────────────────────────────
   //
@@ -896,7 +736,14 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
   // and every one of its phases is bounded, so this can never wedge.
   const rotating = readRotationMemory(mem["rotation"]).active !== null;
   if (!rotating) {
-    const launch = launchCombatDrones(obs, mem, roster, PHASE_FIGHT);
+    const launch = launchRoleDrones(
+      obs,
+      mem,
+      PHASE_FIGHT,
+      "combat",
+      "Launching the combat drones.",
+      roster,
+    );
     if (launch.tick !== null) return launch.tick;
     mem = launch.mem;
     if (weapons.length === 0 && roster.roleOut.length === 0 && launchStalled(mem)) {

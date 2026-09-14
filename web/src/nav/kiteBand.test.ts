@@ -25,10 +25,12 @@ import {
   RANGE_HYSTERESIS_M,
   THREAT_BUFFER_M,
   kiteBand,
+  resolveDroneLeash,
   shouldReissueHold,
   type BandInputs,
   type BandThreat,
 } from "./kiteBand.ts";
+import { MAX_DISTANCE_KM_ARG, MIN_DISTANCE_KM_ARG } from "../bots/botScript.ts";
 
 /** A grid row, with the fields a test does not care about filled in. */
 function threat(
@@ -482,4 +484,119 @@ test("no combination of nulls, zeros, junk or negatives yields a NaN, a negative
     }
   }
   assert.equal(cases, GRIDS.length * NASTY.length ** 3);
+});
+
+// ─── The drone leash, now that it is exported ────────────────────────────────
+//
+// `resolveDroneLeash` was lifted out of the middle of `kiteBand` so
+// `nav/droneBoatLadder.ts` could stop keeping its own copy of the rule. That
+// copy is reproduced below as `refDroneLeashM`, VERBATIM as it stood when it was
+// deleted, and the first test is the differential against it.
+//
+// ⚠ THE TWO DID NOT AGREE EVERYWHERE, AND THE TEST SAYS WHERE. The copy treated
+// a leash of zero or less as "unreadable, try the next source"; `metres()` reads
+// it as a real measurement and clamps it to 0. Neither input is reachable —
+// `readPositive` in `bridge/shipStats.ts` turns a non-positive control range
+// into an UNAVAILABLE stat, so `flow.ts` publishes null rather than 0, and the
+// codec clamps `holdRangeKm` to MIN_DISTANCE_KM_ARG..MAX_DISTANCE_KM_ARG before
+// it is ever multiplied into metres. The differential therefore sweeps the
+// reachable inputs and the disagreement is pinned separately, so that if either
+// of those two guards is ever loosened the second test is the one that has
+// already written down what would start happening.
+
+/** Was `droneLeashM` in `nav/droneBoatLadder.ts`, before the export existed. */
+function refDroneLeashM(control: number | null, overrideHoldM: number | null): number {
+  if (typeof control === "number" && Number.isFinite(control) && control > 0) return control;
+  if (typeof overrideHoldM === "number" && Number.isFinite(overrideHoldM) && overrideHoldM > 0) {
+    return overrideHoldM;
+  }
+  return FALLBACK_CONTROL_RANGE_M;
+}
+
+test("the exported leash answers what the drone boat's own copy answered", () => {
+  // Every shape either source can actually arrive in: unreadable (both spellings
+  // of it), and the positive values a hull or a player can produce. The bounds
+  // are the codec's own, so the override column is exactly the set of numbers
+  // `holdRangeKm` can survive into metres as.
+  const CONTROLS: readonly (number | null | undefined)[] = [
+    null,
+    undefined,
+    1,
+    500,
+    FALLBACK_CONTROL_RANGE_M,
+    27_500,
+    45_000,
+    300_000,
+  ];
+  const OVERRIDES: readonly (number | null | undefined)[] = [
+    null,
+    undefined,
+    MIN_DISTANCE_KM_ARG * 1000,
+    25_000,
+    MAX_DISTANCE_KM_ARG * 1000,
+  ];
+  let cases = 0;
+  for (const control of CONTROLS) {
+    for (const override of OVERRIDES) {
+      const where = JSON.stringify({ control: String(control), override: String(override) });
+      assert.equal(
+        resolveDroneLeash(control, override).leashM,
+        refDroneLeashM(control ?? null, override ?? null),
+        `leash disagreed for ${where}`,
+      );
+      cases += 1;
+    }
+  }
+  assert.equal(cases, CONTROLS.length * OVERRIDES.length);
+});
+
+test("⚠ a leash of zero is a measurement, not a missing reading", () => {
+  // This is the one place the deleted copy disagreed, and the direction matters.
+  // The copy fell through to the 20 km guess, which would park a drone boat at
+  // 20 km on the strength of a number that said its drones reach nothing. Here a
+  // zero is believed: the leash is 0, the band's ceiling collapses, and the
+  // block brawls instead of kiting — the honest answer to a hull that says its
+  // drones do not reach.
+  //
+  // Unreachable today (see the section header), so this test is a record of what
+  // the code does rather than of something a player can hit.
+  assert.deepEqual(resolveDroneLeash(0, 25_000), { leashM: 0, source: "measured" });
+  assert.deepEqual(resolveDroneLeash(-5, 25_000), { leashM: 0, source: "measured" });
+  assert.deepEqual(resolveDroneLeash(null, 0), { leashM: 0, source: "override" });
+  // And the band built on it is empty for any real scrammer, holding at 0 rather
+  // than at a distance nothing can be reached from.
+  const band = kiteBand(inputs({ droneControlRangeM: 0, overrideHoldM: null, threats: [threat(1, 8000, 9000)] }));
+  assert.equal(band.ceilingM, 0);
+  assert.equal(band.empty, true);
+  assert.equal(band.holdM, 0);
+});
+
+test("the leash names which source decided it, and never reads lock range", () => {
+  // The source is what lets the readout say "I could not read your drone control
+  // range" instead of a bare number, and `reason: "fallback"` upstream is built
+  // on it. The third case is the whole reason this resolves separately: a hull
+  // with plenty of LOCK range and no control range still falls back, because a
+  // readable lock range is never allowed to stand in for an unreadable one.
+  assert.deepEqual(resolveDroneLeash(45_000, 25_000), { leashM: 45_000, source: "measured" });
+  assert.deepEqual(resolveDroneLeash(null, 25_000), { leashM: 25_000, source: "override" });
+  assert.deepEqual(resolveDroneLeash(null, null), {
+    leashM: FALLBACK_CONTROL_RANGE_M,
+    source: "fallback",
+  });
+  // The signature has no lock-range parameter at all, so the substitution the
+  // module's header warns about cannot be made by a caller either.
+  assert.equal(resolveDroneLeash.length, 2);
+});
+
+test("⚠ the override is taken at face value and the measured leash is not", () => {
+  // The buffer protects against drift around a MEASURED edge. There is no
+  // measured edge behind a number the player typed, so subtracting it would be
+  // silently correcting them by LEASH_BUFFER_M against a figure we never had.
+  const measured = kiteBand(inputs({ droneControlRangeM: 40_000, overrideHoldM: null, maxTargetRangeM: null }));
+  assert.equal(measured.ceilingM, 40_000 - LEASH_BUFFER_M);
+  const stated = kiteBand(inputs({ droneControlRangeM: null, overrideHoldM: 40_000, maxTargetRangeM: null }));
+  assert.equal(stated.ceilingM, 40_000);
+  // Both went through the same resolver, so the difference is the CEILING rule
+  // and not two different readings of the leash.
+  assert.equal(resolveDroneLeash(40_000, null).leashM, resolveDroneLeash(null, 40_000).leashM);
 });

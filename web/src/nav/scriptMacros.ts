@@ -43,12 +43,21 @@ import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
+import {
+  LAUNCH_MAX_TRIES,
+  RECALL_MAX_WAIT_TICKS,
+  droneRoster,
+  launchRoleDrones,
+  launchStalled,
+  type DroneRoster,
+} from "./droneLaunch.ts";
 import { decideDroneBoat } from "./droneBoatLadder.ts";
 import {
   decodeLedger,
   describeVerdict,
   encodeLedger,
   enterSite,
+  forgetSite,
   isAbandoned,
   observeTick,
   type SiteLedger,
@@ -70,7 +79,6 @@ const ORBIT_RANGE_M = 5000; // the operator's "orbit of 5km" — inside mining r
 const MINING_RANGE_M = 10_000;
 const DOCK_RANGE_M = 2500; // dock once this close (retail's docking radius)
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
-const RECALL_MAX_WAIT_TICKS = 15; // ~30s waiting for drones home before we leave anyway
 
 function tick(
   action: MacroTick["action"],
@@ -274,93 +282,13 @@ function myDroneIDs(snapshot: SpaceSnapshot | null): readonly number[] {
 }
 
 // ── Drones by ROLE ───────────────────────────────────────────────────────────
-// A block launches and orders drones for the job they can do: the combat blocks
-// take the combat drones, the salvage block the salvage drones, and neither
-// touches the rest. The whole bay used to go out for either job — a Hobgoblin
-// ordered to salvage is refused by the server, and the wrong drones then held
-// the slots the right ones needed, so the block waited on them forever. The
-// roles come off the observation (flow.ts classifies bay stacks and drones in
-// space by the game's own group name — see nav/droneRoles.ts). Recalls stay
-// role-blind: every drone this hull can order comes home.
-type DroneRole = "combat" | "salvage";
-
-interface DroneRoster {
-  /** Every drone this ship can order, whatever it is — what a recall takes. */
-  readonly out: readonly number[];
-  /** The role's drones out in space, and its stacks still in the bay. */
-  readonly roleOut: readonly number[];
-  readonly roleBay: readonly number[];
-  /** Drones out that are NOT this role — they hold the slots the role needs. */
-  readonly othersOut: readonly number[];
-}
-
-function droneRoster(obs: ScriptObservation, role: DroneRole): DroneRoster {
-  const out = myDroneIDs(obs.snapshot ?? null);
-  const roleSet = new Set((role === "combat" ? obs.combatDroneIDs : obs.salvageDroneIDs) ?? []);
-  return {
-    out,
-    roleOut: out.filter((id) => roleSet.has(id)),
-    roleBay: (role === "combat" ? obs.combatDroneBayItemIDs : obs.salvageDroneBayItemIDs) ?? [],
-    othersOut: out.filter((id) => !roleSet.has(id)),
-  };
-}
-
-const LAUNCH_MAX_TRIES = 3; // a launch the server keeps refusing is not retried forever
-
-/**
- * Put THIS role's drones out, or a null tick when there is nothing to do right
- * now (they are out already, the bay has none, or the launch has been tried
- * enough). Drones of another role hold the slots, so they are called in ONCE
- * first and the launch waits for them to be gone — bounded by
- * RECALL_MAX_WAIT_TICKS, after which it is tried anyway. While waiting the
- * caller carries on with its own work: a fight keeps shooting while the
- * salvage drones come home. The returned memory carries the bookkeeping
- * whichever way it went, so callers must take it.
- */
-function launchRoleDrones(
-  obs: ScriptObservation,
-  mem: MacroMemory,
-  phase: string,
-  role: DroneRole,
-  why: string,
-): { readonly tick: MacroTick | null; readonly mem: MacroMemory } {
-  const roster = droneRoster(obs, role);
-  if (roster.roleOut.length > 0 || roster.roleBay.length === 0) {
-    return { tick: null, mem };
-  }
-  if (roster.othersOut.length > 0) {
-    if (!flag(mem, "othersRecalled")) {
-      return {
-        tick: tick(
-          { kind: "recallDrones", droneIDs: roster.othersOut },
-          `Calling the other drones in to make room for the ${role} drones.`,
-          phase,
-          ACTING,
-          true,
-          { ...mem, othersRecalled: true, recallWaited: 0 },
-        ),
-        mem,
-      };
-    }
-    const waited = (num(mem, "recallWaited") ?? 0) + 1;
-    if (waited <= RECALL_MAX_WAIT_TICKS) {
-      return { tick: null, mem: { ...mem, recallWaited: waited } };
-    }
-  }
-  const tries = num(mem, "launchTries") ?? 0;
-  if (tries >= LAUNCH_MAX_TRIES) {
-    return { tick: null, mem };
-  }
-  return {
-    tick: tick({ kind: "launchDrones", droneItemIDs: roster.roleBay }, why, phase, ACTING, true, { ...mem, launchTries: tries + 1 }),
-    mem,
-  };
-}
-
-/** True once the role's launch has been tried its full budget and still nothing is out. */
-function launchStalled(mem: MacroMemory): boolean {
-  return (num(mem, "launchTries") ?? 0) >= LAUNCH_MAX_TRIES;
-}
+// The roster and the launch both live in `nav/droneLaunch.ts` now, a leaf this
+// file and `nav/droneBoatLadder.ts` both import. They used to be a copy each,
+// because this file imports `decideDroneBoat` FROM that one and the dependency
+// cannot run the other way round; see that module's header for what the drift
+// would have cost. The role-BLIND half stays here: `myDroneIDs` above is every
+// drone this hull can order, which is what a recall takes, and what
+// `recallBeforeLeaving` below is written against.
 
 /**
  * Before a block warps AWAY from the grid, don't abandon the drones. The standard
@@ -2199,47 +2127,6 @@ const hardenersOn: MacroDecider = (_step, obs, mem) => {
  * a block that decided nothing this tick (in warp, waiting on a lock) does not
  * publish a board write per tick for the readout to churn through.
  */
-/**
- * A visit that ENDED IN SUCCESS: drop everything the ledger was holding against
- * this label.
- *
- * ⚠ THE COUNT IS CONSECUTIVE BAD VISITS, NOT ARRIVALS, AND THE DIFFERENCE IS THE
- * WHOLE FEATURE. §13's words for what is being counted are "the same site keeps
- * SENDING US HOME" — and arrivals and send-homes differ in exactly one case,
- * which happens to be the case a working bot spends all of its time in: a visit
- * that ended with the den CLEARED. Counting arrivals retires a den the bot is
- * successfully farming after two clears, which is a bot that stops working for
- * the mirror image of the reason the unfixed bug makes a bot never stop.
- *
- * Arriving somewhere for the third time is not evidence of anything. Being
- * driven off it for the third time IN A ROW is. So a clear zeroes the tally and
- * the next visit starts from one.
- *
- * ⚠ DO NOT REST THIS ON "a cleared anomaly despawns and comes back under a new
- * label". That is retail behaviour; this is an emulator whose anomaly respawn is
- * its own code and nobody in this tree has verified it. The correctness of a
- * ratting bot not quietly retiring the only den in its system must not depend on
- * a respawn detail — so the ledger is made to say the right thing directly.
- *
- * The per-primary tracking goes with it (baseline, stall counter, grid count): a
- * cleared grid ends the visit clean, and carrying a spent stall counter out of a
- * fight that was WON is how the next fight — a belt spawn with no scan label to
- * reset it, say — would inherit a verdict it never earned.
- *
- * Nothing here re-implements siteProgress.ts: `SiteLedger` is plain data that
- * module exports, and this is one row leaving a list.
- */
-function forgetSite(ledger: SiteLedger, label: string | null): SiteLedger {
-  const sites = label === null ? ledger.sites : ledger.sites.filter((row) => row.label !== label);
-  return {
-    ...ledger,
-    primaryID: null,
-    bestHealth: null,
-    stallTicks: 0,
-    hostiles: null,
-    sites,
-  };
-}
 
 function ledgerPatch(before: SiteLedger, after: SiteLedger): ScriptBoard | null {
   const next = encodeLedger(after);

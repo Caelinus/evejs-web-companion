@@ -246,6 +246,57 @@ function nearest(rows: readonly BandThreat[]): BandThreat | null {
   return best;
 }
 
+/** Which input decided the drone leash — the readout blames one of these three. */
+export type DroneLeashSource = "measured" | "override" | "fallback";
+
+export interface DroneLeash {
+  /** How far the drones still answer, in metres. Always finite, never negative. */
+  readonly leashM: number;
+  readonly source: DroneLeashSource;
+}
+
+/**
+ * How far this ship's drones still answer: the measured control range, else the
+ * player's override at face value, else the 20 km no-skills guess.
+ *
+ * ⚠ `band.ceilingM` IS NOT THIS NUMBER AND CANNOT BE USED IN ITS PLACE. The
+ * ceiling is the SMALLER OF THE TWO LEASHES minus `LEASH_BUFFER_M`, and on the
+ * common path it is the LOCK one — so a block that asks the ceiling "are my
+ * drones reaching that rat?" is handed an answer about TARGETING, and every
+ * conclusion it draws from it is about the wrong leash.
+ *
+ * ⚠ AND THE LOCK RANGE IS NOT A SUBSTITUTE EITHER — see the warning in the
+ * ceiling half of `kiteBand` for what substituting one for the other cost: a
+ * hull reporting 40 km of lock and no control range held at 37 km with its
+ * drones deaf from 27.5 km out.
+ *
+ * Exported because `nav/droneBoatLadder.ts` needs this exact number for its own
+ * "is this block actually applying damage?" test, and it had been keeping a copy
+ * of the rule. Two copies of a leash rule are two answers to "where do the
+ * drones stop working", and the block left holding the stale one flies a
+ * distance its own drones cannot cross while its readout reports a fight in
+ * progress.
+ */
+export function resolveDroneLeash(
+  droneControlRangeM: number | null | undefined,
+  overrideHoldM: number | null | undefined,
+): DroneLeash {
+  const controlM = metres(droneControlRangeM);
+  if (controlM !== null) {
+    return { leashM: controlM, source: "measured" };
+  }
+  const overrideM = metres(overrideHoldM);
+  if (overrideM !== null) {
+    // The player typing a number IS them stating the leash — they know their own
+    // skills, and we do not. Taken at FACE VALUE, with no buffer off it: the
+    // leash buffer protects against drift around a MEASURED edge, and there is
+    // no measured edge here, so subtracting it would be silently correcting the
+    // player by 3 km against a number we never had.
+    return { leashM: overrideM, source: "override" };
+  }
+  return { leashM: FALLBACK_CONTROL_RANGE_M, source: "fallback" };
+}
+
 /**
  * The three numbers, from the grid as it is this tick.
  *
@@ -281,7 +332,6 @@ export function kiteBand(inputs: BandInputs): KiteBand {
   const floorM = scrammers.length === 0 ? 0 : worstScramM + THREAT_BUFFER_M;
 
   // ─── CEILING ──────────────────────────────────────────────────────────────
-  const controlM = metres(inputs?.droneControlRangeM);
   const overrideM = metres(inputs?.overrideHoldM);
   const lockM = metres(inputs?.maxTargetRangeM);
 
@@ -295,24 +345,10 @@ export function kiteBand(inputs: BandInputs): KiteBand {
   // exists to protect, quietly routed around the protection. So: the drone leash
   // is resolved from drone-leash sources only, and a readable lock range is
   // never allowed to stand in for an unreadable control range.
-  type LeashSource = "measured" | "override" | "fallback";
-  let droneLeashM: number;
-  let droneSource: LeashSource;
-  if (controlM !== null) {
-    droneLeashM = controlM;
-    droneSource = "measured";
-  } else if (overrideM !== null) {
-    // The player typing a number IS them stating the leash — they know their own
-    // skills, and we do not. Taken at FACE VALUE, with no buffer off it: the
-    // leash buffer protects against drift around a MEASURED edge, and there is
-    // no measured edge here, so subtracting it would be silently correcting the
-    // player by 3 km against a number we never had.
-    droneLeashM = overrideM;
-    droneSource = "override";
-  } else {
-    droneLeashM = FALLBACK_CONTROL_RANGE_M;
-    droneSource = "fallback";
-  }
+  const { leashM: droneLeashM, source: droneSource } = resolveDroneLeash(
+    inputs?.droneControlRangeM,
+    inputs?.overrideHoldM,
+  );
 
   // Clamped at 0: a leash shorter than the buffer (a badly damaged sensor, a
   // stub row reporting 500 m) yields a ceiling of 0 rather than a negative hold.

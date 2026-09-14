@@ -496,6 +496,54 @@ export function enterSite(ledger: SiteLedger, label: string | null): SiteLedger 
 }
 
 /**
+ * A visit that ENDED IN SUCCESS: drop everything the ledger was holding against
+ * this label.
+ *
+ * ⚠ THE COUNT IS CONSECUTIVE BAD VISITS, NOT ARRIVALS, AND THE DIFFERENCE IS THE
+ * WHOLE FEATURE. §13's words for what is being counted are "the same site keeps
+ * SENDING US HOME" — and arrivals and send-homes differ in exactly one case,
+ * which happens to be the case a working bot spends all of its time in: a visit
+ * that ended with the den CLEARED. Counting arrivals retires a den the bot is
+ * successfully farming after two clears, which is a bot that stops working for
+ * the mirror image of the reason the unfixed bug makes a bot never stop.
+ *
+ * Arriving somewhere for the third time is not evidence of anything. Being
+ * driven off it for the third time IN A ROW is. So a clear zeroes the tally and
+ * the next visit starts from one. `enterSite` above is the other half of the
+ * pair: one counts the arrival, this one forgives it.
+ *
+ * ⚠ DO NOT REST THIS ON "a cleared anomaly despawns and comes back under a new
+ * label". That is retail behaviour; this is an emulator whose anomaly respawn is
+ * its own code and nobody in this tree has verified it. The correctness of a
+ * ratting bot not quietly retiring the only den in its system must not depend on
+ * a respawn detail — so the ledger is made to say the right thing directly.
+ *
+ * The per-primary tracking goes with it (baseline, stall counter, grid count): a
+ * cleared grid ends the visit clean, and carrying a spent stall counter out of a
+ * fight that was WON is how the next fight — a belt spawn with no scan label to
+ * reset it, say — would inherit a verdict it never earned.
+ *
+ * ⚠ IT IS A RULE, AND A SECOND COPY OF A RULE IS A SECOND ANSWER. This lived
+ * twice — private to `fight-the-rats` in `nav/scriptMacros.ts`, and copied into
+ * `nav/droneBoatLadder.ts` — and those two blocks fight the same rats over the
+ * same ledger. One of them counting arrivals while the other counted send-homes
+ * gives the player two bots that disagree about which dens are worth flying to,
+ * with nothing in either readout admitting it. It lives here because it is one
+ * row leaving a `SiteLedger`, and `SiteLedger` is this module's.
+ */
+export function forgetSite(ledger: SiteLedger, label: string | null): SiteLedger {
+  const sites = label === null ? ledger.sites : ledger.sites.filter((row) => row.label !== label);
+  return {
+    ...ledger,
+    primaryID: null,
+    bestHealth: null,
+    stallTicks: 0,
+    hostiles: null,
+    sites,
+  };
+}
+
+/**
  * One tick of evidence in, a verdict and the next ledger out.
  *
  * The order of the tests below is the whole module, so it is worth reading as

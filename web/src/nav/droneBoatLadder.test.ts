@@ -26,7 +26,7 @@ import type { MacroMemory, ScriptBoard } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { decideDroneBoat, type DroneBoatInputs } from "./droneBoatLadder.ts";
-import { encodeLedger, enterSite, emptyLedger, MAX_SITE_RETURNS } from "./siteProgress.ts";
+import { decodeLedger, encodeLedger, enterSite, emptyLedger, visitsTo, MAX_SITE_RETURNS } from "./siteProgress.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
 
@@ -741,4 +741,62 @@ test("a caller publishes its primary once, not every tick", () => {
     obs: obs(world),
   });
   assert.notEqual(second.action.kind, "callPrimary");
+});
+
+// ─── A den that pays out (§13, the half that keeps a working bot working) ────
+//
+// The give-up ledger has two directions and this block wires up both, but only
+// the retiring one was tested here. These two cover the other: a visit that ends
+// with the grid CLEAR hands the label's tally back, and — the part unique to
+// this block — the clear is judged on the TRUE grid and never on the in-reach
+// one. `fight-the-rats` has no such distinction to get wrong, because it has no
+// rung that closes on a wave it cannot reach.
+
+test("⚠ a cleared grid hands this den's tally back, so a den that keeps paying out is never retired", () => {
+  // The count is CONSECUTIVE bad visits. Two visits already stand against this
+  // label and the third would spend it — but the grid came up clear, so the
+  // tally goes rather than the den. Counting arrivals instead retires the only
+  // anomaly in the system after two successful clears, and the player sees a bot
+  // that stops working with nothing in the readout to explain it.
+  const label = "QEE-288";
+  const before = enterSite(enterSite(emptyLedger(), label), label);
+  assert.equal(visitsTo(before, label), 2);
+
+  const out = run({ board: encodeLedger(before), obs: obs({ snapshot: snapshot([]) }) });
+  assert.equal(out.outcome.kind, "done");
+  assert.equal(visitsTo(decodeLedger(out.boardPatch), label), 0);
+});
+
+test("⚠ a wave merely out of REACH is not a clear, and keeps the tally it earned", () => {
+  // A wave landing at 50 km reads as an empty IN-REACH grid, which is the bug
+  // this block's closing rung exists for. Reading it as a success here would be
+  // the same bug wearing the ledger's clothes: a den that drives the bot off
+  // every time would hand its tally back on every trip and could never be
+  // retired, so the give-up feature would quietly never fire on the one shape it
+  // was written for.
+  const label = "QEE-288";
+  const before = enterSite(enterSite(emptyLedger(), label), label);
+
+  const out = run({
+    board: encodeLedger(before),
+    obs: obs({
+      snapshot: snapshot([rat(1, 50_000)]),
+      maxTargetRangeM: 40_000,
+      droneControlRangeM: 45_000,
+      combatDroneBayItemIDs: [7001],
+      threatByTypeID: { 100: HARMLESS },
+    }),
+  });
+  assert.notEqual(out.outcome.kind, "done");
+  // Either nothing was published this tick, or what was published still counts
+  // both visits — the one thing that must not happen is the tally going away.
+  assert.equal(visitsTo(decodeLedger(out.boardPatch ?? encodeLedger(before)), label), 2);
+});
+
+test("a clear at a den the ledger is not tracking publishes no tally for it", () => {
+  // A belt spawn has no scan label: there is nothing to count and nothing to
+  // forgive, and the block must not invent a row for a den it was never at.
+  const out = run({ board: {}, obs: obs({ snapshot: snapshot([]) }) });
+  assert.equal(out.outcome.kind, "done");
+  assert.deepEqual(decodeLedger(out.boardPatch).sites, []);
 });

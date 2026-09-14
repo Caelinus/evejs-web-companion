@@ -38,6 +38,7 @@ import {
   emptyLedger,
   encodeLedger,
   enterSite,
+  forgetSite,
   isAbandoned,
   observeTick,
   visitsTo,
@@ -462,4 +463,87 @@ test("no sequence of evidence produces a NaN counter or a verdict nobody can act
     }
   }
   assert.equal(cases, 5 * NASTY.length ** 3 * LABELS.length);
+});
+
+// ─── forgetSite: the other half of the visit pair ────────────────────────────
+//
+// `enterSite` counts an arrival, `forgetSite` forgives one. It was private to
+// `fight-the-rats` and copied into the drone boat until the extraction made it
+// an export, and being private is how it came to be half-tested: the tally it
+// drops is exercised through both blocks, but the PER-PRIMARY reset that goes
+// with it was covered by nothing in either of them. Taking those four fields
+// away broke no test in this tree, which is why they have their own below.
+
+test("⚠ the count is consecutive bad visits, not arrivals", () => {
+  // The whole feature in one loop. A bot farming a den it clears every time must
+  // never retire it, however many times it flies there — counting arrivals would
+  // stop a working bot for the mirror image of the reason the unfixed bug makes
+  // a bot never stop.
+  let farmed = emptyLedger();
+  for (let lap = 0; lap < MAX_SITE_RETURNS * 3; lap += 1) {
+    farmed = enterSite(farmed, SITE);
+    assert.equal(isAbandoned(farmed, SITE), false, `a cleared den was retired on lap ${lap}`);
+    farmed = forgetSite(farmed, SITE); // the grid came up clear: the visit paid out
+  }
+  // And without the clears, the same arrivals do spend the allowance.
+  let driven = emptyLedger();
+  for (let lap = 0; lap <= MAX_SITE_RETURNS; lap += 1) driven = enterSite(driven, SITE);
+  assert.equal(isAbandoned(driven, SITE), true);
+});
+
+test("a clear drops this label's tally and leaves every other label alone", () => {
+  let ledger = enterSite(enterSite(emptyLedger(), SITE), SITE);
+  ledger = enterSite(ledger, "ABC-123");
+  assert.equal(visitsTo(ledger, SITE), 2);
+
+  const after = forgetSite(ledger, SITE);
+  assert.equal(visitsTo(after, SITE), 0);
+  assert.equal(visitsTo(after, "ABC-123"), 1, "another den's tally is not this den's business");
+});
+
+test("⚠ a clear carries no per-primary tracking into the next fight", () => {
+  // This is the half nothing covered. A fight that was WON must not hand its
+  // spent stall counter on: the next fight may be a belt spawn with no scan
+  // label to reset it, and it would inherit a verdict it never earned — told
+  // "this den is too hard" about a den it has not thrown a drone at yet.
+  const spent = repeat(enterSite(emptyLedger(), SITE), ev(), STALL_TICKS);
+  assert.ok(spent.ledger.stallTicks > 0, "the fixture needs a counter to hand back");
+  assert.notEqual(spent.ledger.primaryID, null);
+
+  const after = forgetSite(spent.ledger, SITE);
+  assert.equal(after.stallTicks, 0, "the stall counter");
+  assert.equal(after.primaryID, null, "the primary it was counting against");
+  assert.equal(after.bestHealth, null, "the health baseline, which belongs to that primary");
+  assert.equal(after.hostiles, null, "and the grid count it was comparing against");
+});
+
+test("a clear with no label still ends the visit clean", () => {
+  // A belt spawn or a gate camp has no scan label, so there is no tally to drop
+  // — but the per-primary tracking is not about the label and must go anyway.
+  // A null label must also not be read as "drop everything": the dens this run
+  // HAS been driven off are still worth remembering.
+  const withSites = enterSite(enterSite(emptyLedger(), SITE), SITE);
+  const spent = repeat(withSites, ev({ siteLabel: SITE }), STALL_TICKS);
+  const after = forgetSite(spent.ledger, null);
+  assert.equal(after.stallTicks, 0);
+  assert.equal(after.primaryID, null);
+  assert.deepEqual(after.sites, spent.ledger.sites, "a null label drops no tally at all");
+});
+
+test("forgetting a label the ledger never heard of changes no tally", () => {
+  const ledger = enterSite(emptyLedger(), SITE);
+  const after = forgetSite(ledger, "NEVER-BEEN");
+  assert.equal(visitsTo(after, SITE), 1);
+  assert.deepEqual(after.sites, ledger.sites);
+});
+
+test("a forgotten ledger still round-trips through the board", () => {
+  // Everything this module hands a block ends up on the run board, so a shape
+  // that cannot survive the trip is a shape that silently loses the tally.
+  const spent = repeat(enterSite(emptyLedger(), SITE), ev(), STALL_TICKS);
+  const after = forgetSite(spent.ledger, SITE);
+  const round = decodeLedger(encodeLedger(after) as ProgressBoard);
+  assert.equal(round.stallTicks, 0);
+  assert.equal(visitsTo(round, SITE), 0);
+  assert.deepEqual(round.sites, after.sites);
 });
