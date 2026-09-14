@@ -696,6 +696,80 @@ test("the close-in budget runs out: the drones come home and the block finishes"
   assert.equal(done.outcome.kind, "done");
 });
 
+// ─── The anchor is sticky ────────────────────────────────────────────────────
+//
+// ⚠ CAUGHT LIVE ON 2026-09-14, one run after the loss. `kiteBand` answers "the
+// nearest thing that can grab you", which is a fresh answer every tick, and on a
+// live grid the nearest rat changes constantly. The log was five consecutive
+// cycles of "keep range off 225 / 226 / 227 / 228 / 229 at 17000m" — a new
+// keepAtRange at a different rat every few seconds, each one stopping the ship,
+// turning it and burning it somewhere new. It never settled at any range and the
+// drones were dragged along behind it. The pilot's words: "it constantly loses
+// target and needs to reapproach".
+//
+// ⚠ EVERY FIXTURE HERE FIGHTS. Written without drones, the block answers "No way
+// to fight" ABOVE the band rung and an assertion that no re-aim happened passes
+// for the wrong reason — which is exactly what the first draft of these tests
+// did.
+
+/** A world where the block can actually fight, so the band rung is reached. */
+function anchorWorld(rats: readonly SpaceEntity[], threats: Record<number, RatThreat>) {
+  return obs({
+    snapshot: snapshot([...rats, myDrone(7001)]),
+    combatDroneIDs: [7001],
+    myDrones: [{ itemID: 7001, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }],
+    threatByTypeID: threats,
+    droneControlRangeM: 45_000,
+    maxTargetRangeM: 40_000,
+  });
+}
+
+/** The target of a keepAtRange this tick, or null when it issued none. */
+function reAimedAt(out: ReturnType<typeof run>): number | null {
+  return out.action.kind === "keepAtRange" ? out.action.targetID : null;
+}
+
+test("⚠ the anchor is KEPT while it is still a threat on grid, however the grid shuffles", () => {
+  // Rat 2 is nearer, so a FRESH band would anchor on it. The block is already
+  // holding off rat 1, and rat 1 is still here and still a scrammer.
+  const out = run({
+    mem: { holdM: 25_000, anchorID: 1 },
+    obs: anchorWorld([rat(1, 24_000), rat(2, 12_000)], { 100: scrammer(20_000) }),
+  });
+  assert.notEqual(out.why, "No way to fight.", "the fixture must reach the band rung");
+  assert.notEqual(reAimedAt(out), 2, "a nearer rat is not a reason to re-aim");
+});
+
+test("⚠ a new anchor is picked when the held one leaves the grid", () => {
+  const out = run({
+    mem: { holdM: 25_000, anchorID: 1 },
+    obs: anchorWorld([rat(2, 12_000)], { 100: scrammer(20_000) }),
+  });
+  assert.equal(reAimedAt(out), 2, "rat 1 died, so the hold moves to what is left");
+});
+
+test("⚠ a SCRAMMER takes the anchor from a webber — the one upgrade worth a re-aim", () => {
+  const out = run({
+    mem: { holdM: 25_000, anchorID: 1 },
+    obs: anchorWorld([rat(1, 10_000, 101), rat(2, 24_000, 100)], {
+      100: scrammer(20_000),
+      101: WEBBER,
+    }),
+  });
+  assert.equal(reAimedAt(out), 2, "a scram stops the ship leaving and a web does not");
+});
+
+test("a held anchor that stops being a threat at all is dropped", () => {
+  const out = run({
+    mem: { holdM: 25_000, anchorID: 1 },
+    obs: anchorWorld([rat(1, 24_000, 102), rat(2, 12_000, 100)], {
+      100: scrammer(20_000),
+      102: HARMLESS,
+    }),
+  });
+  assert.equal(reAimedAt(out), 2);
+});
+
 test("⚠ an empty grid on the tick a warp LANDS is not believed", () => {
   // THE LIVE BUG, 2026-09-14. The block arrived in a den, read a grid that had
   // not populated yet, called it clear, and the loop warped straight on — three

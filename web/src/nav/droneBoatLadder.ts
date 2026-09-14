@@ -97,6 +97,19 @@ import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./target
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /**
+ * Is this rat one the band would anchor on at all — something that can hold the
+ * ship or slow it?
+ *
+ * ⚠ IT MUST AGREE WITH `bandThreats`, because the sticky anchor uses it to
+ * decide whether the rat it is holding station off STILL counts. Two different
+ * answers to "is that a threat" would let the anchor be kept on a rat the band
+ * itself no longer considers one, which is a ship holding range off a hauler.
+ */
+function isBandThreat(dogma: RatThreat | null): boolean {
+  return dogma !== null && (dogma.scram || dogma.web);
+}
+
+/**
  * How long to wait for ONE lock before giving up on that target and re-picking.
  *
  * Eight ticks, ~16 s — the same bound `fight-the-rats` uses, and the same number
@@ -844,7 +857,49 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
     maxTargetRangeM: obs.maxTargetRangeM ?? null,
     overrideHoldM: input.holdRangeM,
   });
-  const anchorID = band.anchorID;
+  // ⚠ THE ANCHOR IS STICKY, AND WITHOUT THAT THE SHIP NEVER HOLDS ANYTHING.
+  // `kiteBand` answers "the nearest thing that can grab you", which is a fresh
+  // answer every tick — and on a live grid the nearest rat changes constantly as
+  // they die and close. Caught live on 2026-09-14: the log is five consecutive
+  // cycles of "keep range off 225 / 226 / 227 / 228 / 229 at 17000m", each one a
+  // fresh keepAtRange at a different rat. Every re-aim stops the ship, turns it
+  // and burns it somewhere new, so it never settles at any range at all and the
+  // drones are dragged along behind it — the pilot's words were "it constantly
+  // loses target and needs to reapproach".
+  //
+  // This is the same lesson the PRIMARY already carries two rungs down ("fire is
+  // CONCENTRATED — spread damage kills nothing"): a decision re-taken every tick
+  // is not a decision. So the anchor is kept while it is still worth keeping and
+  // re-picked only when it stops being:
+  //
+  //   • it left the grid (died, warped, despawned), or
+  //   • it is no longer a threat at all, or
+  //   • the band now names a SCRAMMER and the one being held is not one — the
+  //     only upgrade worth paying a re-aim for, because a scram is what stops
+  //     the ship leaving and a web is not.
+  //
+  // Anything else — a closer rat, a new wave, a shuffled sort order — leaves the
+  // anchor exactly where it is.
+  const heldAnchorID = num(mem, "anchorID");
+  const heldAnchorRow =
+    heldAnchorID === null ? undefined : onGrid.find((row) => row.itemID === heldAnchorID);
+  const heldIsThreat =
+    heldAnchorRow !== undefined && heldAnchorRow.typeID !== null
+      ? isBandThreat(threat(heldAnchorRow.typeID))
+      : false;
+  const bandNamesAScrammer =
+    band.anchorID !== null &&
+    onGrid.some(
+      (row) =>
+        row.itemID === band.anchorID && row.typeID !== null && threat(row.typeID)?.scram === true,
+    );
+  const heldIsScrammer =
+    heldAnchorRow !== undefined &&
+    heldAnchorRow.typeID !== null &&
+    threat(heldAnchorRow.typeID)?.scram === true;
+  const keepHeldAnchor =
+    heldAnchorRow !== undefined && heldIsThreat && !(bandNamesAScrammer && !heldIsScrammer);
+  const anchorID = keepHeldAnchor ? heldAnchorID : band.anchorID;
   const anchorRow = anchorID === null ? undefined : onGrid.find((row) => row.itemID === anchorID);
   const currentRangeM = anchorRow === undefined ? null : Math.round(anchorRow.distance);
 

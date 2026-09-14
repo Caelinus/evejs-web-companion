@@ -8306,9 +8306,24 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return resolveDroneControlRangeM(fitStatM, null).rangeM;
     }
     const bay = fit.stats.bays.droneCapacity;
-    if (!bay.known || bay.value <= 0) {
-      // No drone bay, no leash to want. Not "unreadable" as a verdict about the
-      // pilot — simply a question this hull never asks.
+    // ⚠ ONLY A KNOWN ZERO BAILS, AND THE DIFFERENCE IS THE WHOLE FEATURE. This
+    // gate used to read `!bay.known || bay.value <= 0`, which treats UNREADABLE
+    // as "no drone bay" — and the fitting stats are unreadable on almost every
+    // bot run, because the fit read is not forced by one (`maxTargetRangeM`'s
+    // own comment in nav/scriptConditions.ts says so in as many words: "it rides
+    // the fitting read, which a bot run does not force, so it is frequently
+    // unreadable"). So the gate fired every single time, the skills were never
+    // asked for, and the leash stayed the no-skills guess that had just cost a
+    // ship — the fix silently gated out by a guard meant to save thirteen calls
+    // on a hull that has no drones. Caught live on 2026-09-14, one run after the
+    // loss, by a log still saying "I could not read your drone control range".
+    //
+    // Unreadable never decides. A hull whose bay we cannot see is asked about;
+    // the answer costs one skills read on a timer, and being wrong the other way
+    // costs the ship.
+    if (bay.known && bay.value <= 0) {
+      // A hull with genuinely no drone bay: a Retriever pilot's Drone Avionics
+      // level cannot change where a mining bot sits, so do not go and find it out.
       return null;
     }
     const [levels, bonuses] = await Promise.all([
