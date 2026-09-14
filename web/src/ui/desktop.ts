@@ -10,7 +10,7 @@
 // model (App drops them; loadLayout filters them out).
 
 import { TABS, type TabID } from "./tabs.ts";
-import { isGlobalTab } from "./globalWindow.ts";
+import { CLEAR_OF_GLOBAL_POS, isGlobalTab } from "./globalWindow.ts";
 
 export interface WinState {
   readonly id: TabID;
@@ -93,6 +93,25 @@ function cascadeAt(n: number): number {
 }
 
 /**
+ * Windows a GLOBAL window opens, which must not open underneath it.
+ *
+ * The Bot Builder has no launcher entry at all: the only way to it is the Bot
+ * Manager's Edit or New bot, and the Manager is a global window painting over
+ * this desktop. At the default sizes the cascade's first spot is entirely
+ * behind it — the panel opened, drew, and could not be seen, which reads as the
+ * button having done nothing. See `CLEAR_OF_GLOBAL_POS`.
+ */
+const OPENED_BY_A_GLOBAL_WINDOW: ReadonlySet<TabID> = new Set<TabID>(["botBuilder"]);
+
+/** Where a window lands the first time it is opened. */
+function firstSpot(id: TabID, openCount: number): { readonly x: number; readonly y: number } {
+  if (OPENED_BY_A_GLOBAL_WINDOW.has(id)) {
+    return CLEAR_OF_GLOBAL_POS;
+  }
+  return { x: cascadeAt(openCount), y: cascadeAt(openCount) };
+}
+
+/**
  * Open a panel as a window, or focus it if already open. New windows land at a
  * cascade position with the default size and on top. Focusing raises z and
  * un-collapses (opening from the launcher should always reveal the panel).
@@ -118,10 +137,11 @@ export function openWindow(
     // happen because the window was minimized is the whole bug this prevents.
     return wins.map((w) => (w.id === id ? { ...w, z, minimized: false } : w));
   }
+  const spot = firstSpot(id, wins.length);
   const next: WinState = {
     id,
-    x: cascadeAt(wins.length),
-    y: cascadeAt(wins.length),
+    x: spot.x,
+    y: spot.y,
     w: size?.w ?? DEFAULT_W,
     h: size?.h ?? DEFAULT_H,
     z,
