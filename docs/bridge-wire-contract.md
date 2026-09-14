@@ -1143,7 +1143,10 @@ allowlisted in R4:
 
 **Decoder rule:** amounts decode long-aware (`unwrapLong`, never
 `typeof === "number" ? … : 0`); ISK/LP are decimal strings, standings numbers
-(`web/src/bridge/rewards.ts`).
+(`web/src/bridge/rewards.ts`). eve.js also sends ISK money as a marshalled real,
+`{type:"real", value}` (character selection's `balance`, `GetCharacterInfo`'s
+`balance`/`bounty`/`aurBalance`), so decoders read it real-aware too:
+`unwrapReal` for a number, `toAmountString` for a decimal string.
 
 Proven in-process end to end by `eve.js server/tests/webGatewayCourierComplete.test.js`:
 in-person accept → deliver the package to the dropoff → `DoAction(Complete)` actually

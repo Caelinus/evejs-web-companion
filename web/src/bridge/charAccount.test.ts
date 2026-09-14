@@ -56,7 +56,8 @@ const CHARACTER_INFO: JsonValue = {
       ["allianceID", null],
       ["allianceMemberStartDate", null],
       ["shortName", "none"],
-      ["bounty", 0.0],
+      // eve.js sends ISK money (bounty, balance, aurBalance) as a marshalled real.
+      ["bounty", { type: "real", value: 0 }],
       ["skillQueueEndTime", { type: "long", value: "134285151537020000" }],
       ["skillPoints", 5500000],
       ["shipTypeID", 606],
@@ -64,8 +65,8 @@ const CHARACTER_INFO: JsonValue = {
       ["securityRating", 0.14],
       ["securityStatus", 0.14],
       ["title", ""],
-      ["balance", 100000.0],
-      ["aurBalance", 0.0],
+      ["balance", { type: "real", value: 100000 }],
+      ["aurBalance", { type: "real", value: 0 }],
       ["plexBalance", 2222],
       ["daysLeft", 365],
       ["userType", 30],
@@ -97,8 +98,26 @@ test("decodeCharacterInfo decodes the account's OWN character selection data", (
   assert.equal(decoded.securityStatus, 0.14);
   // ISK amounts are bigint-safe strings; FILETIMEs are bigints.
   assert.equal(decoded.balance, "100000");
+  assert.equal(decoded.bounty, "0");
   assert.equal(decoded.createDateTime, 132000000000000000n);
   assert.equal(decoded.skillQueueEndTime, 134285151537020000n);
+});
+
+test("decodeCharacterInfo still reads ISK money sent as a bare number", () => {
+  const info = decodeCharacterInfo({
+    type: "object",
+    name: "util.KeyVal",
+    args: {
+      type: "dict",
+      entries: [
+        ["characterID", 140000005],
+        ["balance", 100000.5],
+        ["bounty", 2500000],
+      ],
+    },
+  });
+  assert.equal(info?.balance, "100000.5");
+  assert.equal(info?.bounty, "2500000");
 });
 
 test("decodeCharacterInfo returns null for a FOREIGN/unknown charID (the ownership guard)", () => {

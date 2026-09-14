@@ -26,7 +26,8 @@ function keyVal(entries: readonly (readonly [string, JsonValue])[]): KeyValValue
 
 // Mirrors the handler's characterDetails row: plain numbers/strings, a
 // number-valued long wrapper (logoffDate), a decimal-string long wrapper
-// (BigInt trainingStartTime after gateway encoding), and a null training end.
+// (BigInt trainingStartTime after gateway encoding), a real wrapper (the ISK
+// balance, which eve.js sends as a marshalled real), and a null training end.
 const pilotRow = keyVal([
   ["characterID", 91000001],
   ["characterName", "Test Pilot"],
@@ -37,7 +38,7 @@ const pilotRow = keyVal([
   ["stationID", 60000004],
   ["solarSystemID", 30000142],
   ["regionID", 10000002],
-  ["balance", 100000.5],
+  ["balance", { type: "real", value: 100000.5 }],
   ["skillPoints", 512345],
   ["shipTypeID", 606],
   ["shipName", "Velator"],
@@ -145,5 +146,19 @@ test("getCharacterSelectionData drives the reference tuple through the bridge an
   assert.equal(selection.characters.length, 1);
   assert.equal(selection.characters[0]?.characterName, "Test Pilot");
   assert.equal(selection.characters[0]?.trainingStartTime, 157469184000000000n);
+  // The real-wrapped balance survives the JSON hop and still decodes.
+  assert.equal(selection.characters[0]?.balance, 100000.5);
   assert.deepEqual(selection.notifications, []);
+});
+
+test("decodeCharacterRow reads the ISK balance from a real wrapper or a bare number", () => {
+  // The trap: reading only bare numbers turned eve.js's real-wrapped balance into "0 ISK".
+  const real = decodeCharacterRow(keyVal([["characterID", 1], ["balance", { type: "real", value: 1000001000 }]]));
+  assert.equal(real?.balance, 1000001000);
+  const bare = decodeCharacterRow(keyVal([["characterID", 1], ["balance", 42]]));
+  assert.equal(bare?.balance, 42);
+  const absent = decodeCharacterRow(keyVal([["characterID", 1]]));
+  assert.equal(absent?.balance, null);
+  const garbage = decodeCharacterRow(keyVal([["characterID", 1], ["balance", { type: "real", value: "lots" }]]));
+  assert.equal(garbage?.balance, null);
 });

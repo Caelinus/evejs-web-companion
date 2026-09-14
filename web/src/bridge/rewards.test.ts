@@ -30,6 +30,14 @@ test("toAmountString never zeroes a long-encoded amount", () => {
   assert.equal(toAmountString({ type: "long", value: 250 } as JsonValue), "250");
 });
 
+test("toAmountString reads a real-wrapped amount exactly like the plain number", () => {
+  // The trap: reading only bare numbers turns eve.js's real-wrapped ISK into null.
+  assert.equal(toAmountString({ type: "real", value: 1000001000 } as JsonValue), "1000001000");
+  assert.equal(toAmountString({ type: "real", value: 100000.5 } as JsonValue), "100000.5");
+  assert.equal(toAmountString({ type: "real", value: 0 } as JsonValue), "0");
+  assert.equal(toAmountString({ type: "real", value: "lots" } as JsonValue), null);
+});
+
 // LPSvc.GetAllMyCharacterWalletLPBalances marshals as a CRowset (objectex2)
 // whose `list` is packed rows [issuerCorpID, loyaltyPoints].
 const LP_DESCRIPTOR: JsonValue = {

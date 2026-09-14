@@ -387,3 +387,26 @@ export function unwrapLong(value: unknown): bigint | null {
   }
   return null;
 }
+
+/**
+ * Unwrap a retail real (a double) to a number. Accepts the {type:"real"}
+ * wrapper with a finite number value and bare finite numbers; null for
+ * anything else (including absent/null fields). eve.js sends ISK money this
+ * way (buildMarshalRealMoney), and the gateway forwards the wrapper as JSON.
+ */
+export function unwrapReal(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "real"
+  ) {
+    const inner = (value as { value?: unknown }).value;
+    if (typeof inner === "number" && Number.isFinite(inner)) {
+      return inner;
+    }
+  }
+  return null;
+}

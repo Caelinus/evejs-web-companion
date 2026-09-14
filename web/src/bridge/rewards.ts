@@ -9,25 +9,28 @@
 // ISK and LP are kept as bigint-safe decimal strings; standings are small
 // floats kept as numbers.
 
-import { readKeyVal, readPlainJsonField, unwrapLong, type JsonValue } from "./wire.ts";
+import { readKeyVal, readPlainJsonField, unwrapLong, unwrapReal, type JsonValue } from "./wire.ts";
 import type { CharStanding, WalletLPBalance } from "../store/types.ts";
 
 /**
  * A bigint-safe decimal string for an integer-ish amount (ISK/LP), or a float
  * formatted as a plain decimal; null when absent/malformed. Handles a plain
- * number, a numeric string, and a {type:"long"} wrapper (number OR decimal
- * string value), so a long-encoded amount never silently reads as 0.
+ * number, a numeric string, a {type:"long"} wrapper (number OR decimal string
+ * value), and a {type:"real"} wrapper (eve.js sends ISK money as a real), so a
+ * wrapped amount never silently reads as 0.
  */
 export function toAmountString(value: JsonValue | undefined): string | null {
-  const long = unwrapLong(value);
+  // A real reads exactly like the plain number it wraps.
+  const amount = unwrapReal(value) ?? value;
+  const long = unwrapLong(amount);
   if (long !== null) {
     return long.toString();
   }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value);
+  if (typeof amount === "number" && Number.isFinite(amount)) {
+    return String(amount);
   }
-  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value)) {
-    return value;
+  if (typeof amount === "string" && /^-?\d+(\.\d+)?$/.test(amount)) {
+    return amount;
   }
   return null;
 }

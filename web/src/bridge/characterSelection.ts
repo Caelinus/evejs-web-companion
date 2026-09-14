@@ -15,6 +15,7 @@ import {
   isListValue,
   readKeyVal,
   unwrapLong,
+  unwrapReal,
   type JsonValue,
   type KeyValValue,
   type ListValue,
@@ -71,7 +72,8 @@ export function decodeCharacterRow(row: unknown): CharacterSummary | null {
     stationID: asNumber(readKeyVal(row, "stationID")),
     solarSystemID: asNumber(readKeyVal(row, "solarSystemID")),
     regionID: asNumber(readKeyVal(row, "regionID")),
-    balance: asNumber(readKeyVal(row, "balance")),
+    // eve.js sends ISK money as a {type:"real"} wrapper; a bare number also reads.
+    balance: unwrapReal(readKeyVal(row, "balance")),
     skillPoints: asNumber(readKeyVal(row, "skillPoints")),
     shipTypeID: asNumber(readKeyVal(row, "shipTypeID")),
     shipName: asString(readKeyVal(row, "shipName")),
