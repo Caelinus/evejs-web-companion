@@ -1,0 +1,1240 @@
+// Fight with drones — the decision core of the drone-boat combat block
+// (docs/drone-boat-block-spec.md §§1-7, §12, §13).
+//
+// `fight-the-rats` is a GUN ladder that also happens to send drones. Three of
+// its assumptions are wrong for a drone boat and none of them can be changed in
+// place without breaking the gunship it was written for:
+//
+//   • IT NEVER MOVES THE SHIP. There is no approach, orbit or keep-at-range
+//     anywhere in it, and a drone boat's whole tactic is RANGE. A block that
+//     cannot express range cannot fly one.
+//   • "DONE WHEN THE GRID IS CLEAR" MEANS "CLEAR INSIDE LOCK RANGE", so a wave
+//     landing at 50 km reads as an empty grid: the block finishes and the bot
+//     starts looting with rats inbound. That filter is load-bearing — it is what
+//     stops a lock-retry spin on a rat parked 300 km out — so the answer is a
+//     rung that CLOSES, not a removed filter. See the finishing section below.
+//   • ITS TARGET LADDER IS INERT AGAINST RATS. `tackle`/`ewar`/`logi` match
+//     PLAYER hull group names; every NPC is an "Asteroid Serpentis Frigate" and
+//     falls through to `other`, so the real order is nearest-first wearing a
+//     priority list. `nav/ratThreat.ts` + `pickPrimary`'s dogma reader is the
+//     other half of that answer and this block passes both.
+//
+// ─── THIS FILE COMPOSES, IT DOES NOT DECIDE ──────────────────────────────────
+//
+// Every hard question already has a module that owns it, and each of them is
+// pure, tested and committed. Nothing here re-derives any of their arithmetic:
+//
+//   nav/kiteBand.ts      the stand-off band (floor, ceiling, the empty band)
+//   nav/ratThreat.ts     what a rat TYPE does, read from its own dogma
+//   nav/targetPriority.ts which hostile to shoot first, live jams included
+//   nav/propulsion.ts    when a prop mod goes on and — harder — when it comes off
+//   nav/droneRotation.ts pulling a drone that has started losing shield
+//   nav/siteProgress.ts  the give-up ledger: effort without progress
+//
+// What is left for this file is the LADDER: one action per tick, first rung with
+// something to do wins, and every rung written so it has something to do only
+// while the world disagrees with what is wanted — the `decidePropulsionModule`
+// idiom, "issues one call and then falls through".
+//
+// ⚠ A RUNG THAT RETURNS AN ACTION EVERY TICK STARVES EVERY RUNG BELOW IT. That
+// is not a style note, it is the failure mode of the whole design: a block that
+// re-issues its keep-at-range every tick because the band wobbled 200 m is a
+// block that never fires a gun, and from the outside it looks like a bot that
+// has decided to fly in circles. `shouldReissueHold`, `dronesOn`, `lockIssued`,
+// `preLocked` and the propulsion policy's own "the rack already agrees" answer
+// are each one half of that guarantee, and none of them is optional.
+//
+// ─── TRI-STATE, AND THE NULL ALWAYS WINS ─────────────────────────────────────
+//
+// Unreadable is `null`, and a null never decides. Where the spec and a null
+// disagree the null wins and the block does the SAFE thing — which for this
+// block means, over and over: do not shoot, do not burn, do not pre-lock, do not
+// count the tick as damage going in. Every one of those refusals costs the
+// player a few seconds. Every one of the opposite guesses costs them a hull, an
+// anomaly, or a diagnosis they will never make.
+//
+// This module is PURE. No store, no bridge, no loop, no clock, no randomness —
+// an observation and a memory record in, one `MacroTick` out. The adapter that
+// registers it as a macro lives in `nav/scriptMacros.ts` and is a few lines.
+
+import type { SquadRoleArg } from "../bots/botScript.ts";
+import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
+import type { SpaceSnapshot, SpaceVector } from "../store/types.ts";
+import {
+  FALLBACK_CONTROL_RANGE_M,
+  kiteBand,
+  shouldReissueHold,
+  type BandThreat,
+  type KiteBand,
+} from "./kiteBand.ts";
+import { decidePropulsionModule } from "./propulsion.ts";
+import type { RatThreat } from "./ratThreat.ts";
+import {
+  decideDroneRotation,
+  readRotationMemory,
+  type DroneRotationStep,
+} from "./droneRotation.ts";
+import type { MacroMemory, MacroTick, ScriptAction, ScriptBoard } from "./scriptDecide.ts";
+import type { ScriptObservation } from "./scriptConditions.ts";
+import {
+  decodeLedger,
+  describeVerdict,
+  encodeLedger,
+  observeTick,
+  type SiteLedger,
+  type SiteVerdict,
+} from "./siteProgress.ts";
+import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./targetPriority.ts";
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/**
+ * How long to wait for ONE lock before giving up on that target and re-picking.
+ *
+ * Eight ticks, ~16 s — the same bound `fight-the-rats` uses, and the same number
+ * on purpose: a target that will not lock is the same problem in both blocks and
+ * two different answers to it would only ever mean one of them is wrong.
+ */
+const MAX_LOCK_WAIT_TICKS = 8;
+
+/** A launch the server keeps refusing is not retried forever. */
+const LAUNCH_MAX_TRIES = 3;
+
+/** ~30 s waiting for the other role's drones to come home before launching anyway. */
+const RECALL_MAX_WAIT_TICKS = 15;
+
+/**
+ * How long the block may spend CLOSING on a wave that landed outside lock range
+ * before it writes the site off and leaves.
+ *
+ * ⚠ THIS BUDGET IS THE ONLY THING BETWEEN THE FIX AND A NEW BUG. Approaching an
+ * out-of-reach grid is what stops the block finishing on a wave inbound at 50 km
+ * — but a rat that is FLEEING at 400 m/s will happily tow a 315 m/s Tristan
+ * across the system for as long as the block is willing to chase it, and a bot
+ * that leaves the grid it was sent to is worse than a bot that finished early.
+ *
+ * 60 ticks is about two minutes at the 2 s cadence. A frigate closing at its
+ * base speed covers roughly 38 km in that time, which catches the wave the wave
+ * fix exists for (a spawn landing at 30-50 km) with room to spare, and a chase
+ * that has not closed in two minutes is a chase, not an approach.
+ */
+const MAX_CLOSE_TICKS = 60;
+
+/**
+ * How big the gap between where the ship IS and where it wants to be has to get
+ * before lighting a prop mod is worth the signature.
+ *
+ * §5's number, and the reasoning is the signature bloom: a microwarpdrive
+ * multiplies signature radius, and on a Tristan (sig 600) that turns the hull
+ * into a much easier target for exactly the rat guns it is trying to outrange.
+ * So the burner is for CLOSING A GAP and nothing else — five kilometres of gap
+ * is worth a few seconds of being easy to hit; two hundred metres of drift is
+ * not.
+ */
+const PROP_GAP_M = 5000;
+
+/**
+ * The capacitor floor below which a prop mod is not LIT (it may always be
+ * stopped — see `decidePropulsionModule`, which is emphatic about the
+ * asymmetry).
+ *
+ * An MWD eats roughly ninety per cent of a frigate's capacitor per cycle, so a
+ * boat that lights one at a fifth of its cap is a boat that caps itself out and
+ * then cannot warp. 0.3 leaves enough in the bank for the align-and-go a watch
+ * is about to ask for. A constant rather than an arg: §13's argument applies
+ * here too — a player asked to tune this is being asked to guess at a number
+ * whose right value is "enough to leave on".
+ */
+const PROP_CAP_FLOOR = 0.3;
+
+/**
+ * How many ids the pre-lock rung remembers having already asked for.
+ *
+ * ⚠ THE CAP IS WHAT MAKES THE RUNG BOUNDED. Pre-locking has no bounded wait of
+ * its own (see the rung), so "we have already asked for this one" is the entire
+ * stop condition, and an unbounded list in step memory is a leak on a grid that
+ * keeps spawning. Sixteen is comfortably more than any hull's lock count and
+ * small enough that the record stays a handful of numbers.
+ */
+const MAX_PRELOCK_MEMORY = 16;
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+
+export interface DroneBoatInputs {
+  readonly obs: ScriptObservation;
+  readonly mem: MacroMemory;
+  readonly board: ScriptBoard;
+  /** The player's ordered class list, or the shipped default. */
+  readonly targets: readonly TargetClass[];
+  /** The player's hold override in METRES, null when unset. */
+  readonly holdRangeM: number | null;
+  readonly propMode: "auto" | "off";
+  readonly squad: SquadRoleArg;
+  /**
+   * The ship the FLEET has called, when this block is set to follow one.
+   *
+   * ⚠ RESOLVED BY THE ADAPTER, NOT HERE, AND THAT IS DELIBERATE. Which ship the
+   * fleet called is a three-source question — the in-game target tags first
+   * (provably a commander's, because the server refuses the write to anybody
+   * else), then a `Target` broadcast, then the shared squad board — and
+   * `scriptMacros.ts` already owns that precedence in `calledOnGrid`, along with
+   * the rule that a source naming a ship this pilot cannot shoot falls through
+   * to the NEXT source rather than to null. Re-deriving it here would be a
+   * second copy of a precedence that has already been argued out once, and the
+   * two would drift the first time somebody added a fourth source.
+   *
+   * So the adapter passes `calledOnGrid(obs, rows, ...)?.itemID ?? null` and
+   * this block only obeys. Absent or null means "nobody called", which is what
+   * every `squad: "off"` caller passes and what a follower with a silent fleet
+   * gets — and a follower with a silent fleet picks for itself, which is a
+   * working bot rather than a stopped one.
+   */
+  readonly calledTargetID?: number | null;
+}
+
+// ─── Tick plumbing (the shape every block in this tree returns) ──────────────
+
+const WAIT: ScriptAction = { kind: "wait" };
+const ACTING: MacroTick["outcome"] = { kind: "acting" };
+const PHASE_FIGHT = "Fighting";
+const PHASE_CLOSE = "Closing";
+
+function tick(
+  action: MacroTick["action"],
+  why: string,
+  phase: string,
+  outcome: MacroTick["outcome"],
+  armed = true,
+  nextMem: MacroMemory = {},
+): MacroTick {
+  return { action, why, phase, armed, outcome, nextMem };
+}
+
+function num(mem: MacroMemory, key: string): number | null {
+  const value = mem[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function flag(mem: MacroMemory, key: string): boolean {
+  return mem[key] === true;
+}
+
+/** A list of ids out of untyped step memory, defensively — anything else is []. */
+function idList(mem: MacroMemory, key: string): readonly number[] {
+  const value = mem[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
+}
+
+/** Metres for a readout, in the units a player thinks in. Plain ASCII. */
+function km(metres: number): string {
+  return `${Math.round(metres / 100) / 10} km`;
+}
+
+// ─── Drones by role ──────────────────────────────────────────────────────────
+//
+// ⚠ DUPLICATED FROM `fight-the-rats`, KNOWINGLY, AND IT MUST NOT STAY THAT WAY.
+// `droneRoster` and `launchRoleDrones` are private to `nav/scriptMacros.ts` and
+// cannot be imported from here; the behaviour they carry is not optional (a
+// Hobgoblin ordered to salvage is refused by the server, and the wrong drones
+// then hold the slots the right ones needed, so the block waits on them for
+// ever), so it is reproduced rather than dropped.
+//
+// THE LATER PARCEL THAT REGISTERS THIS BLOCK SHOULD EXTRACT THE SHARED HELPER
+// into a leaf module both callers import, rather than letting two copies drift.
+// The drift that matters is not cosmetic: if one copy learns about a new drone
+// role and the other does not, the block with the older copy launches drones it
+// cannot use into slots the usable ones needed, and the symptom is a fight that
+// never starts.
+
+type DroneRoster = {
+  /** Every drone this ship can order, whatever it is — what a recall takes. */
+  readonly out: readonly number[];
+  /** The COMBAT drones out in space, and the combat stacks still in the bay. */
+  readonly roleOut: readonly number[];
+  readonly roleBay: readonly number[];
+  /** Drones out that are not combat drones — they hold the slots combat needs. */
+  readonly othersOut: readonly number[];
+  /**
+   * The combat drones out, as rotation rows, or null when the per-drone fold was
+   * not readable. ⚠ NULL IS "NOBODY LOOKED" AND NOT "NO DRONES ARE OUT" — the
+   * rotation machine reads the distinction and would otherwise write a live
+   * drone off as dead.
+   */
+  readonly roleRows: readonly {
+    readonly itemID: number;
+    readonly shieldRatio: number | null;
+    readonly armorRatio: number | null;
+    readonly hullRatio: number | null;
+  }[] | null;
+};
+
+function combatRoster(obs: ScriptObservation, snapshot: SpaceSnapshot | null): DroneRoster {
+  const shipID = snapshot?.ship?.itemID ?? null;
+  const out = (snapshot?.entities ?? [])
+    .filter((entity) => canMyShipOrderDrone(entity, shipID) === true)
+    .map((entity) => entity.itemID);
+  const combat = obs.combatDroneIDs ?? null;
+  const combatSet = new Set(combat ?? []);
+  const mine = obs.myDrones ?? null;
+  return {
+    out,
+    roleOut: out.filter((id) => combatSet.has(id)),
+    roleBay: obs.combatDroneBayItemIDs ?? [],
+    othersOut: out.filter((id) => !combatSet.has(id)),
+    // Both halves must be readable for a rotation row to exist: the per-drone
+    // health fold AND the role split. Without the role split a salvage drone
+    // losing shield would be rotated by the COMBAT block, which is a recall of
+    // something this block never launched and never wanted.
+    roleRows:
+      mine === undefined || mine === null || combat === null
+        ? null
+        : mine.filter((row) => combatSet.has(row.itemID)),
+  };
+}
+
+/**
+ * Put the COMBAT drones out, or null when there is nothing to do right now.
+ *
+ * Reproduced from `launchRoleDrones` (see the block comment above). The three
+ * behaviours that matter, each with the failure it prevents:
+ *
+ *   • Nothing to do when the combat drones are already out, or when the bay
+ *     holds none — otherwise this rung wins every tick and the ship never fires.
+ *   • Drones of ANOTHER role hold the slots, so they are called in ONCE and the
+ *     launch waits for them, bounded by `RECALL_MAX_WAIT_TICKS` and then tried
+ *     anyway. Unbounded, a drone that never comes home ends the fight.
+ *   • `LAUNCH_MAX_TRIES`, because a launch the server keeps refusing (bandwidth,
+ *     most often) is not fixed by asking a fourth time, and every refusal is
+ *     booked in the ledger where enough of them on one key END THE RUN.
+ */
+function launchCombatDrones(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  roster: DroneRoster,
+  phase: string,
+): { readonly tick: MacroTick | null; readonly mem: MacroMemory } {
+  if (roster.roleOut.length > 0 || roster.roleBay.length === 0) {
+    return { tick: null, mem };
+  }
+  if (roster.othersOut.length > 0) {
+    if (!flag(mem, "othersRecalled")) {
+      return {
+        tick: tick(
+          { kind: "recallDrones", droneIDs: roster.othersOut },
+          "Calling the other drones in to make room for the combat drones.",
+          phase,
+          ACTING,
+          true,
+          { ...mem, othersRecalled: true, recallWaited: 0 },
+        ),
+        mem,
+      };
+    }
+    const waited = (num(mem, "recallWaited") ?? 0) + 1;
+    if (waited <= RECALL_MAX_WAIT_TICKS) {
+      return { tick: null, mem: { ...mem, recallWaited: waited } };
+    }
+  }
+  const tries = num(mem, "launchTries") ?? 0;
+  if (tries >= LAUNCH_MAX_TRIES) {
+    return { tick: null, mem };
+  }
+  return {
+    tick: tick(
+      { kind: "launchDrones", droneItemIDs: roster.roleBay },
+      "Launching the combat drones.",
+      phase,
+      ACTING,
+      true,
+      { ...mem, launchTries: tries + 1 },
+    ),
+    mem,
+  };
+}
+
+/** True once the launch has spent its budget and still nothing is out. */
+function launchStalled(mem: MacroMemory): boolean {
+  return (num(mem, "launchTries") ?? 0) >= LAUNCH_MAX_TRIES;
+}
+
+// ─── The grid, and what each rat on it does ──────────────────────────────────
+
+/** The rat's own dogma for a type, or null when nobody has read it. */
+function threatReader(obs: ScriptObservation): (typeID: number) => RatThreat | null {
+  const map = obs.threatByTypeID ?? null;
+  return (typeID) => (map === null ? null : (map[typeID] ?? null));
+}
+
+/** The game's own group name for a type, for the PLAYER half of the classifier. */
+function groupReader(obs: ScriptObservation): (typeID: number) => string | null {
+  const groups = obs.targetGroupNames ?? null;
+  return (typeID) => (groups === null ? null : (groups[typeID] ?? null));
+}
+
+/**
+ * The ids the server says are holding THIS ship right now, or `undefined` when
+ * no jam fold was read.
+ *
+ * ⚠ THE UNDEFINED MATTERS. `pickPrimary` takes the promotion set as an optional
+ * argument and skips the whole comparison when it is absent; handing it an empty
+ * Set instead would be the claim "we looked and nothing is on us", which is a
+ * different and stronger statement than "nobody looked". An empty ARRAY on the
+ * observation is the first of those and is passed through as an empty Set.
+ */
+function jamSources(obs: ScriptObservation): ReadonlySet<number> | undefined {
+  const ids = obs.jammingSourceIDs;
+  return ids === undefined ? undefined : new Set(ids);
+}
+
+/**
+ * The grid as the stand-off band reads it: every hostile ON GRID, crossed with
+ * what its type's dogma says it does.
+ *
+ * ⚠ ON GRID, NOT IN REACH. The floor answers "how far out does the thing that
+ * can hold me reach?", and a scrammer that is on the grid but currently outside
+ * this hull's lock range will still be inside its own scram range in twenty
+ * seconds. Computing the band off the in-reach rows would let the floor rise
+ * under the ship exactly when it was too late to act on it.
+ *
+ * A type missing from the map contributes nothing rather than a guess: no scram
+ * range, no web. That is `UNKNOWN_THREAT`'s own rule — "the dogma said nothing,
+ * ask something else" — and it is the safe direction only because the band's
+ * other half (the leash) is computed from the fit and not from the grid.
+ */
+function bandThreats(rows: readonly OverviewRow[], threat: (typeID: number) => RatThreat | null): readonly BandThreat[] {
+  return rows.map((row) => {
+    const dogma = row.typeID === null ? null : threat(row.typeID);
+    return {
+      itemID: row.itemID,
+      distanceM: row.distance,
+      // Only a rat that ACTUALLY scrams carries a reach. `threatFromAttributes`
+      // already reports `scramRangeM: null` for a type whose chance is 0 (the
+      // `Pithum Silencer` case, which carries the range and never uses it), so
+      // the `scram` test here is belt and braces rather than a second opinion.
+      scramRangeM: dogma !== null && dogma.scram ? dogma.scramRangeM : null,
+      webs: dogma?.web === true,
+    };
+  });
+}
+
+/**
+ * How far this ship's drones still answer, resolved the way `kiteBand` resolves
+ * its DRONE leash — measured control range, else the player's override at face
+ * value, else the no-skills 20 km guess.
+ *
+ * ⚠ IT MIRRORS `kiteBand`'S RULE BECAUSE `kiteBand` DOES NOT EXPORT IT, and the
+ * mirroring is the whole risk: `band.ceilingM` is NOT this number (it is the
+ * smaller of the two leashes, minus a buffer, and it is frequently the LOCK
+ * leash) so it cannot be used in its place. If the drone-leash rule ever moves,
+ * this function has to move with it — the later parcel that extracts the shared
+ * drone helper should take this out of `kiteBand` as a named export and delete
+ * this copy.
+ *
+ * ⚠ AND THE LOCK RANGE IS NOT A SUBSTITUTE. The warning at the top of
+ * `kiteBand.ts` records what substituting one for the other cost: a hull
+ * reporting 40 km of lock and no control range would be held at 37 km with its
+ * drones deaf from 27.5 km out.
+ */
+function droneLeashM(obs: ScriptObservation, overrideHoldM: number | null): number {
+  const control = obs.droneControlRangeM ?? null;
+  if (typeof control === "number" && Number.isFinite(control) && control > 0) return control;
+  if (typeof overrideHoldM === "number" && Number.isFinite(overrideHoldM) && overrideHoldM > 0) {
+    return overrideHoldM;
+  }
+  return FALLBACK_CONTROL_RANGE_M;
+}
+
+/** The band, in one sentence the player can act on. §2 insists on this. */
+function bandWhy(band: KiteBand): string {
+  if (band.empty) {
+    const scramM = Math.max(0, band.floorM - 5000);
+    return (
+      `There is no room to kite here: my drones reach about ${km(band.ceilingM)} and the worst thing on grid` +
+      ` scrams at ${km(scramM)}, so I am brawling at ${km(band.holdM)} instead.`
+    );
+  }
+  switch (band.reason) {
+    case "fallback":
+      return (
+        `I could not read your drone control range, so I assumed the no-skills 20 km and am holding at` +
+        ` ${km(band.holdM)}. Set the hold range if that is wrong.`
+      );
+    case "override":
+      return `Holding at the ${km(band.holdM)} you asked for.`;
+    case "no-tackle":
+      return `Nothing here can point me, so I am sitting at the far end of my leash, ${km(band.holdM)}.`;
+    case "no-threat":
+      return `Nothing on grid to stand off from — holding at ${km(band.holdM)}.`;
+    case "ceiling":
+      return `Holding at ${km(band.holdM)} — that is as far out as my leash goes.`;
+    default:
+      return `Holding at ${km(band.holdM)}, just outside what can hold me here.`;
+  }
+}
+
+// ─── The ledger (§13) ────────────────────────────────────────────────────────
+
+/**
+ * A visit that ENDED IN SUCCESS: drop everything the ledger was holding against
+ * this label.
+ *
+ * Reproduced from `fight-the-rats`'s `forgetSite`, which is private to that
+ * file. It is one row leaving a plain-data list and re-implements nothing out of
+ * `siteProgress.ts` — but it is a second copy of a RULE, and the rule is the
+ * whole feature: the count is consecutive bad visits, not arrivals. Counting
+ * arrivals retires a den the bot is successfully farming after two clears, which
+ * is a bot that stops working for the mirror image of the reason the unfixed bug
+ * makes a bot never stop. The later parcel should share one copy.
+ */
+function forgetSite(ledger: SiteLedger, label: string | null): SiteLedger {
+  const sites = label === null ? ledger.sites : ledger.sites.filter((row) => row.label !== label);
+  return { ...ledger, primaryID: null, bestHealth: null, stallTicks: 0, hostiles: null, sites };
+}
+
+/** The board patch for a ledger that moved, or null when nothing changed. */
+function ledgerPatch(before: SiteLedger, after: SiteLedger): ScriptBoard | null {
+  const next = encodeLedger(after);
+  const prev = encodeLedger(before);
+  for (const key of Object.keys(next)) {
+    if (prev[key] !== next[key]) return next;
+  }
+  return null;
+}
+
+/**
+ * ⚠ IS THIS BLOCK ACTUALLY APPLYING DAMAGE RIGHT NOW? — the one input
+ * `nav/siteProgress.ts` refuses to compute for itself, and the single thing here
+ * most likely to be got wrong.
+ *
+ * The dangerous version of the give-up feature blames the SITE for faults at OUR
+ * end: drones sitting in the bay, drones ordered on nothing, a lock that never
+ * landed, a rat parked outside the drone leash, guns chattering with an empty
+ * charge bay, a kite flown at a distance the drones cannot work in. Every one of
+ * those reads as "nothing is dying" and NOT ONE of them means the den is
+ * unwinnable — the honest answer to each is to fix the position or the fit. A
+ * stall counter that ticked through them would throw away good anomalies AND
+ * hide the real bug behind a plausible verdict, because a pilot told "this den
+ * is too hard" never goes looking for the drones that were 40 km out doing
+ * nothing.
+ *
+ * So every clause below is something this block can positively SEE, and all of
+ * them must hold:
+ *
+ *   1. There is a primary we have been holding (`targetID` in step memory) and
+ *      it is still on the REACHABLE grid. A target that died or drifted out of
+ *      lock range leaves here.
+ *   2. This block's own COMBAT drones are out — `roleOut`, not `out`: a flight
+ *      of salvage drones is not damage.
+ *   3. They were ordered onto THIS primary (`dronesOn`), not onto the last one.
+ *      The tick that ISSUES the engage therefore does not count — it has ordered
+ *      damage, not applied any — because `dronesOn` is written into the NEXT
+ *      tick's memory and this evidence is read off the memory as it arrived.
+ *   4. The primary is LOCKED. Waiting on a lock is our problem, not the site's,
+ *      and §13 names it explicitly.
+ *   5. The primary is inside the DRONE leash — a different and usually shorter
+ *      leash than the lock range in clause 1.
+ *
+ * ⚠ THIS BLOCK CAN BE PRECISE WHERE `fight-the-rats` CANNOT, AND IT STILL
+ * GUESSES LOW. Unlike the gun ladder, this one knows its own hold range and its
+ * own control range — but an unreadable control range still falls back to the
+ * 20 km no-skills base and never to infinity, for the reason `kiteBand` gives:
+ * control range is skill-derived, rides a fitting read a bot run does not force,
+ * and so null is the COMMON case. An assumed-short leash only ever refuses to
+ * count ticks, so the stall fires late or not at all, which costs the player
+ * minutes. Guessing high costs them the anomaly AND the diagnosis. When in
+ * doubt, false.
+ *
+ * ⚠ GUNS ARE DELIBERATELY NOT A CLAUSE. This block cannot see a turret's
+ * optimal, its falloff, its tracking, or whether the shot landed, so the only
+ * honest thing it could say about a gun is "I pressed the button" — and a site
+ * abandoned on the strength of a pressed button is exactly the verdict §13
+ * forbids. A gun boat flying this block accrues no stall, which is the
+ * conservative half of being wrong.
+ */
+function boatEvidence(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  inReach: readonly OverviewRow[],
+  onGrid: readonly OverviewRow[],
+  roster: DroneRoster,
+  leashM: number,
+  siteLabel: string | null,
+) {
+  const held = num(mem, "targetID");
+  const primary = held === null ? undefined : inReach.find((row) => row.itemID === held);
+  const applying =
+    held !== null &&
+    primary !== undefined &&
+    roster.roleOut.length > 0 &&
+    num(mem, "dronesOn") === held &&
+    (obs.lockedTargetIDs ?? []).includes(held) &&
+    primary.distance <= leashM;
+  return {
+    applying,
+    // The health rows are facts about the RAT and are handed over whether or not
+    // we are applying: the ledger keeps the lowest reading ever seen, and a
+    // reading taken while the drones were flying home is still a reading.
+    primaryID: primary?.itemID ?? null,
+    primaryShieldRatio: primary?.shieldRatio ?? null,
+    primaryArmorRatio: primary?.armorRatio ?? null,
+    primaryHullRatio: primary?.hullRatio ?? null,
+    // ⚠ THE ON-GRID COUNT, NOT THE IN-REACH ONE, AND THIS BLOCK DIFFERS FROM
+    // `fight-the-rats` HERE ON PURPOSE. That block finishes on an empty in-reach
+    // grid, so the in-reach count is the count it acts on. This one CLOSES on an
+    // out-of-reach wave instead, so an in-reach count would read a wave landing
+    // at 50 km as an empty grid — the very bug the closing rung exists to fix,
+    // reintroduced in the ledger where nobody would look for it.
+    hostileCount: onGrid.length,
+    siteLabel,
+  };
+}
+
+// ─── The fleet's call ────────────────────────────────────────────────────────
+//
+// Two small halves of the same rule, reproduced from `fight-the-rats`: a call
+// costs the tick's one action, so it is sent only when the primary CHANGES, and
+// it is stood DOWN before the block leaves. A call outlives the ship it named
+// for as long as its ttl, and a follower obeying a stale one is a follower
+// holding its guns on a wreck.
+
+function callPrimary(
+  role: SquadRoleArg,
+  mem: MacroMemory,
+  targetID: number,
+  why: string,
+  phase: string,
+): MacroTick | null {
+  if (role !== "call" || num(mem, "calledTargetID") === targetID) return null;
+  return tick({ kind: "callPrimary", targetID }, why, phase, ACTING, true, {
+    ...mem,
+    calledTargetID: targetID,
+  });
+}
+
+function standCallDown(role: SquadRoleArg, mem: MacroMemory, why: string, phase: string): MacroTick | null {
+  if (role !== "call" || num(mem, "calledTargetID") === null) return null;
+  return tick({ kind: "callPrimary", targetID: null }, why, phase, ACTING, true, {
+    ...mem,
+    calledTargetID: null,
+  });
+}
+
+/**
+ * Leave this grid: stand the call down, call the drones home, then `done`.
+ *
+ * ⚠ NEVER LEAVE DRONES IN SPACE, whatever the reason for leaving — a cleared
+ * grid, a spent chase budget, or a site the ledger has given up on. Abandoned
+ * drones answer a recall with a 200 and do not move, so a flight left behind is
+ * a flight lost, and §13 is explicit that giving up on a site must never do it.
+ */
+function leaveGrid(
+  role: SquadRoleArg,
+  mem: MacroMemory,
+  roster: DroneRoster,
+  sentence: string,
+  phase: string,
+): MacroTick {
+  const standDown = standCallDown(role, mem, `${sentence} Standing the fleet's call down.`, phase);
+  if (standDown !== null) return standDown;
+  if (roster.out.length > 0) {
+    return tick(
+      { kind: "recallDrones", droneIDs: roster.out },
+      `${sentence} Calling the drones home.`,
+      phase,
+      ACTING,
+      true,
+      mem,
+    );
+  }
+  return tick(WAIT, sentence, phase, { kind: "done" });
+}
+
+/**
+ * How many targets this hull can hold at once, or null when nothing said.
+ *
+ * ⚠ READ OFF THE OBSERVATION DEFENSIVELY BECAUSE THE FIELD IS NOT PLUMBED YET.
+ * `maxLockedTargets` is dogma attribute 192 and `bridge/shipStats.ts` already
+ * reads it, but it does not reach `ScriptObservation` — so today this always
+ * answers null and the pre-lock rung never fires. That is the correct behaviour
+ * for an unreadable count and not a placeholder: §7's tri-state rule is that
+ * unreadable means DO NOT, and a pre-lock rung that guessed "five, everything
+ * holds five" would spend a lock slot a Tristan has and a destroyer does not,
+ * every tick, on a hull nobody had measured. When the field is plumbed this
+ * function starts returning a number and the rung starts working, with no other
+ * change.
+ */
+function maxLocksOf(obs: ScriptObservation): number | null {
+  const raw = (obs as { readonly maxLockedTargets?: unknown }).maxLockedTargets;
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : null;
+}
+
+// ─── The ladder ──────────────────────────────────────────────────────────────
+
+/**
+ * One tick of the drone boat.
+ *
+ * The rungs, in order, each with the one thing it is allowed to do:
+ *
+ *   0. GUARDS — docked, in warp, not in space.
+ *   -. FINISHING — an empty grid, a site given up on, or a wave out of reach
+ *      that has to be CLOSED rather than finished on.
+ *   1. DRONES OUT (combat role only).
+ *   2. HOLD THE RANGE — the stand-off band, past the hysteresis.
+ *   3. PROPULSION — on to close a gap, off the moment the gap is closed.
+ *   4. PRIMARY — pick by dogma and live jam, lock it, bounded wait.
+ *   5. DRONES ONTO THE PRIMARY, once per target.
+ *   6. ROTATE A HURT DRONE — below the engage rung, never at the cost of the
+ *      primary being unattended.
+ *   7. PRE-LOCK the next targets, so the next primary is already locked.
+ *   8. GUNS — every idle gun that is actually loaded.
+ *
+ * ⚠ THE ORDER IS THE DESIGN. Rung 6 above rung 5 would pull a drone off a
+ * primary nobody else is shooting; rung 2 below rung 4 would fight from a
+ * distance the drones cannot work in and then blame the site for it; rung 8
+ * above rung 5 would spend the opening seconds of every fight on guns while the
+ * drones sat idle. None of these is a preference.
+ */
+export function decideDroneBoat(inputs: DroneBoatInputs): MacroTick {
+  const { obs, board, targets, holdRangeM, propMode, squad } = inputs;
+  const mem = inputs.mem;
+
+  // ─── Rung 0: guards ───────────────────────────────────────────────────────
+  if (obs.docked === true) {
+    return tick(WAIT, "Docked.", PHASE_FIGHT, {
+      kind: "blocked",
+      reason: "Undock first — this block fights on a grid.",
+    }, false, mem);
+  }
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp — nothing decided mid-warp.", PHASE_FIGHT, ACTING, false, mem);
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", PHASE_FIGHT, ACTING, false, mem);
+  }
+
+  // ─── The grid, read once ──────────────────────────────────────────────────
+  const origin: SpaceVector = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
+  const onGrid = hostileRows(snapshot, origin);
+  const lockRangeM = obs.maxTargetRangeM ?? null;
+  // ⚠ THE IN-REACH FILTER STAYS, AND IT IS NOT THE BUG. Without it one rat
+  // parked 300 km out is still "the nearest hostile", so the ladder locks it,
+  // waits out `MAX_LOCK_WAIT_TICKS`, gives up, picks the same rat again, for
+  // ever. The bug was FINISHING on an empty in-reach grid; the fix is the
+  // closing rung below, not a removed filter.
+  const inReach = lockRangeM === null ? onGrid : onGrid.filter((row) => row.distance <= lockRangeM);
+  const roster = combatRoster(obs, snapshot);
+  const threat = threatReader(obs);
+  const leashM = droneLeashM(obs, holdRangeM);
+
+  // ─── §13: is this site worth another minute? ──────────────────────────────
+  //
+  // The verdict is computed BEFORE the ladder runs and from the state the ladder
+  // is standing in at the top of the tick (the primary the LAST tick's orders
+  // were aimed at), so every rung below is judged by what it actually achieved
+  // rather than by what it is about to order.
+  //
+  // WHICH SITE THIS IS comes off the board and is never guessed here:
+  // `warp-to-anomaly` publishes the label on the tick it commits to a site,
+  // being the only block that KNOWS an arrival happened. A fight that is not at
+  // a scanned site at all — a belt spawn, a gate camp — has a null label, which
+  // `siteProgress.ts` already handles: the stall counter still runs, there is
+  // simply no per-site count to keep.
+  const ledger = decodeLedger(board);
+  const verdict: SiteVerdict = observeTick(
+    ledger,
+    boatEvidence(obs, mem, inReach, onGrid, roster, leashM, ledger.siteLabel),
+  );
+
+  // ⚠ A CLEARED GRID IS A SUCCESS AND WIPES THIS LABEL'S TALLY. An empty grid is
+  // the strongest evidence obtainable that the den was winnable after all, so it
+  // outranks anything the ledger was about to say — including a stall whose
+  // budget ran out on this very tick. And it is the TRUE grid here, not the
+  // in-reach one: this block does not finish on a wave it can still see.
+  const after = onGrid.length === 0 ? forgetSite(verdict.ledger, verdict.ledger.siteLabel) : verdict.ledger;
+  const patch = ledgerPatch(ledger, after);
+  const decided = droneBoatLadder({
+    obs,
+    mem,
+    snapshot,
+    onGrid,
+    inReach,
+    roster,
+    threat,
+    targets,
+    holdRangeM,
+    propMode,
+    squad,
+    calledTargetID: inputs.calledTargetID ?? null,
+    verdict,
+  });
+  return patch === null ? decided : { ...decided, boardPatch: patch };
+}
+
+type LadderInputs = {
+  readonly obs: ScriptObservation;
+  readonly mem: MacroMemory;
+  readonly snapshot: SpaceSnapshot;
+  readonly onGrid: readonly OverviewRow[];
+  readonly inReach: readonly OverviewRow[];
+  readonly roster: DroneRoster;
+  readonly threat: (typeID: number) => RatThreat | null;
+  readonly targets: readonly TargetClass[];
+  readonly holdRangeM: number | null;
+  readonly propMode: "auto" | "off";
+  readonly squad: SquadRoleArg;
+  readonly calledTargetID: number | null;
+  readonly verdict: SiteVerdict;
+};
+
+/**
+ * The ladder itself, split out only so the caller can wrap whatever it decides
+ * in the ledger's board patch without every rung having to know the ledger
+ * exists.
+ */
+function droneBoatLadder(input: LadderInputs): MacroTick {
+  const { obs, snapshot, onGrid, inReach, roster, threat, squad, verdict } = input;
+  let mem = input.mem;
+  const role = squad;
+
+  // ─── FINISHING, PART ONE: the grid really is empty ────────────────────────
+  if (onGrid.length === 0) {
+    return leaveGrid(role, mem, roster, "The grid is clear.", PHASE_FIGHT);
+  }
+
+  // ─── Can this hull fight at all? ──────────────────────────────────────────
+  //
+  // ⚠ THIS COMES BEFORE THE GIVE-UP VERDICT, DELIBERATELY. A hull with no guns
+  // and no combat drones is a FIT fault at our end, and §13's whole argument is
+  // that our own faults must never be reported as the site's. The player needs
+  // that sentence, not a tour of dens being "given up on" by a ship that could
+  // never have cleared any of them.
+  const weapons = obs.weaponModuleIDs ?? [];
+  if (weapons.length === 0 && roster.roleOut.length === 0 && roster.roleBay.length === 0) {
+    return tick(WAIT, "No way to fight.", PHASE_FIGHT, {
+      kind: "blocked",
+      reason: "This ship has no guns fitted and no combat drones in the bay.",
+    }, true, mem);
+  }
+
+  // ─── FINISHING, PART TWO: §13 says leave ──────────────────────────────────
+  //
+  // ⚠ `done`, NEVER `blocked`. This is a verdict about ONE site and not about
+  // the run: pausing here would strand a bot that has another five perfectly
+  // good dens on the scanner. `warp-to-anomaly` is the block that decides when
+  // the whole SYSTEM has run out.
+  if (verdict.abandon) {
+    const leaving = describeVerdict(verdict) ?? "I am leaving this site.";
+    return leaveGrid(role, mem, roster, leaving, PHASE_FIGHT);
+  }
+
+  // ─── FINISHING, PART THREE: THE WAVE FIX ──────────────────────────────────
+  //
+  // Hostiles on grid, none of them inside lock range. `fight-the-rats` reads
+  // this as an empty grid and FINISHES, which is how a bot ends up looting with
+  // a wave inbound at 50 km. A drone boat can move, so it closes instead.
+  //
+  // ⚠ AND IT IS BOUNDED, BECAUSE THE FIX HAS ITS OWN FAILURE MODE. A rat
+  // fleeing at 400 m/s will tow a 315 m/s frigate across the system for as long
+  // as the block is willing to follow; `MAX_CLOSE_TICKS` is what turns "close on
+  // the wave" into something other than "leave the grid you were sent to".
+  //
+  // ⚠ THE DRONES STAY IN THE BAY WHILE CLOSING (this rung sits above the launch
+  // rung). A flight launched at a wave outside its own leash flies out of
+  // control range chasing it, which is the one position from which drones stop
+  // answering — and drones already in space are left alone, because they are
+  // shooting and pulling them in costs the only damage on the grid.
+  if (inReach.length === 0) {
+    const closeTicks = (num(mem, "closeTicks") ?? 0) + 1;
+    if (closeTicks > MAX_CLOSE_TICKS) {
+      return leaveGrid(
+        role,
+        mem,
+        roster,
+        "I have been chasing this lot for two minutes without getting in range, so I am leaving them.",
+        PHASE_CLOSE,
+      );
+    }
+    // `hostileRows` is nearest-first, so row 0 is the nearest hostile — and
+    // `approach` is a STANDING order, so it is issued once per target and then
+    // this rung waits rather than re-issuing it every tick.
+    const nearest = onGrid[0]!;
+    if (num(mem, "approachID") !== nearest.itemID) {
+      return tick(
+        { kind: "approach", targetID: nearest.itemID },
+        `Nothing is in lock range yet — closing on the nearest, ${km(nearest.distance)} out.`,
+        PHASE_CLOSE,
+        ACTING,
+        true,
+        { ...mem, approachID: nearest.itemID, closeTicks },
+      );
+    }
+    return tick(
+      WAIT,
+      `Closing on the wave — ${km(nearest.distance)} to go.`,
+      PHASE_CLOSE,
+      ACTING,
+      true,
+      { ...mem, closeTicks },
+    );
+  }
+
+  // Something is in reach: the chase is over and the budget goes back, so a
+  // SECOND wave later in the same site gets its own full allowance. A budget
+  // that only ever counted down would retire a site the ship is winning.
+  mem = { ...mem, closeTicks: 0, approachID: null };
+
+  // ─── Rung 1: the combat drones out ────────────────────────────────────────
+  //
+  // ⚠ NOT WHILE A ROTATION IS IN FLIGHT. Rung 6 recalls one drone at a time, so
+  // mid-rotation the bay holds a combat stack and space may hold none of them —
+  // which is exactly the shape this rung fires on. Launching then would put the
+  // whole bay out on top of the rotation's own relaunch, spending bandwidth the
+  // returning drone needs and leaving the rotation waiting for a launch it can
+  // no longer tell apart from ours. The rotation owns the bay until it is done,
+  // and every one of its phases is bounded, so this can never wedge.
+  const rotating = readRotationMemory(mem["rotation"]).active !== null;
+  if (!rotating) {
+    const launch = launchCombatDrones(obs, mem, roster, PHASE_FIGHT);
+    if (launch.tick !== null) return launch.tick;
+    mem = launch.mem;
+    if (weapons.length === 0 && roster.roleOut.length === 0 && launchStalled(mem)) {
+      return tick(WAIT, "No way to fight.", PHASE_FIGHT, {
+        kind: "blocked",
+        reason: "The combat drones could not be launched, and there are no guns to fall back on.",
+      }, true, mem);
+    }
+  }
+
+  // ─── Rung 2: hold the range ───────────────────────────────────────────────
+  //
+  // The band is recomputed every tick from the grid as it is, so a fresh wave
+  // carrying a longer-ranged scrammer moves the floor under the block's feet
+  // mid-fight — and `shouldReissueHold` is what stops that becoming an order
+  // every tick. Re-issue only when the ANCHOR changed (the old order measures
+  // against a different object, so the distance it maintains is nobody's) or
+  // when the wanted hold moved more than the hysteresis.
+  //
+  // ⚠ THE ANCHOR IS ONE ROCK IN A FIELD OF THEM. Holding 25 km off the nearest
+  // scrammer says precisely nothing about the scrammer behind you. This is an
+  // approximation and it is the same approximation a player makes at the
+  // keyboard; nothing here maintains a distance from the whole grid.
+  const band = kiteBand({
+    threats: bandThreats(onGrid, threat),
+    droneControlRangeM: obs.droneControlRangeM ?? null,
+    maxTargetRangeM: obs.maxTargetRangeM ?? null,
+    overrideHoldM: input.holdRangeM,
+  });
+  const anchorID = band.anchorID;
+  if (anchorID !== null) {
+    const anchorChanged = num(mem, "anchorID") !== anchorID;
+    if (shouldReissueHold(num(mem, "holdM"), band.holdM, anchorChanged)) {
+      return tick(
+        { kind: "keepAtRange", targetID: anchorID, range: band.holdM },
+        bandWhy(band),
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        { ...mem, holdM: band.holdM, anchorID },
+      );
+    }
+  }
+
+  // ─── Rung 3: propulsion ───────────────────────────────────────────────────
+  //
+  // `wantBurn` is this block's ONE contribution to the shared policy; everything
+  // else (the scram rule, the capacitor floor gating only the lighting, the
+  // unknown kind treated as a microwarpdrive, which module to name) belongs to
+  // `decidePropulsionModule` and is not re-decided here.
+  //
+  // §5: light it ONLY to close a gap, and kill it the moment the ship is inside
+  // the band — holding station with a burner lit is pure signature for no
+  // distance, and on a Tristan (sig 600) that signature is what the rat guns are
+  // tracking. One threshold does both halves: the burner is wanted while the gap
+  // is bigger than `PROP_GAP_M` and unwanted as soon as it is not, which is well
+  // inside the band's own 2 km hysteresis.
+  //
+  // ⚠ `propMode: "off"` MEANS NEVER LIGHT ONE — IT DOES NOT MEAN IGNORE THE
+  // RACK. A module already running must always be stoppable (that is the
+  // asymmetry the policy's capacitor rule is built on), so "off" is expressed as
+  // `wantBurn: false` and the policy's stop half still runs. Skipping the rung
+  // entirely would strand a burner lit by the previous block, burning signature
+  // and capacitor for the rest of the site.
+  //
+  // ⚠ AN UNREADABLE ACTIVE-MODULE LIST SKIPS THE RUNG ENTIRELY. `activeModuleIDs`
+  // is null for "the read could not answer", and `decidePropulsionModule` says in
+  // as many words that a caller whose snapshot cannot say must not call at all:
+  // reading null as "nothing is running" re-activates a lit burner every tick for
+  // as long as the read stays down, and every one of those is a refusal in the
+  // ledger.
+  const activeModuleIDs = snapshot.ship?.activeModuleIDs ?? null;
+  const props = obs.propulsionModules ?? [];
+  if (activeModuleIDs !== null && props.length > 0) {
+    const anchorRow = anchorID === null ? undefined : onGrid.find((row) => row.itemID === anchorID);
+    // A null gap never decides: with no anchor, or no measurable distance to it,
+    // the block does not know whether it is closing, so it does not burn. It can
+    // still STOP, which is the half that is always safe.
+    const gapM = anchorRow === undefined ? null : Math.abs(anchorRow.distance - band.holdM);
+    const wantBurn = input.propMode === "auto" && gapM !== null && gapM > PROP_GAP_M;
+    const decision = decidePropulsionModule({
+      modules: props,
+      activeModuleIDs: new Set(activeModuleIDs),
+      capacitorRatio: obs.capacitorRatio ?? null,
+      scrammed: obs.scrammed ?? null,
+      wantBurn,
+      capFloor: PROP_CAP_FLOOR,
+    });
+    if (decision.kind === "light") {
+      // `targetID: 0` is this tree's "no target" for a self-activating module —
+      // the same call the hardener rung makes.
+      return tick(
+        { kind: "activate", moduleID: decision.module.itemID, targetID: 0 },
+        `Burning to close ${km(gapM ?? 0)} of gap.`,
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        mem,
+      );
+    }
+    if (decision.kind === "stop") {
+      // ⚠ THE ISSUER MUST NAME THE PROPULSION EFFECT ON THIS DEACTIVATE. The
+      // server infers a prop mod's default effect on ACTIVATE and not on
+      // deactivate, so a bare Deactivate returns success with the burner still
+      // cycling (see `PropulsionModule.typeID`, which exists for this reason).
+      // `ScriptAction`'s deactivate carries only the module id, so the effect
+      // name has to be resolved from the fit at the issue site — the adapter
+      // parcel owns that, and a stop that silently does nothing is what it costs
+      // to get wrong.
+      return tick(
+        { kind: "deactivate", moduleID: decision.module.itemID },
+        input.propMode === "off"
+          ? "Shutting the prop mod down — you asked me not to use one."
+          : "In the band now, so the prop mod goes out rather than blooming my signature for nothing.",
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        mem,
+      );
+    }
+  }
+
+  // ─── Rung 4: the primary ──────────────────────────────────────────────────
+  //
+  // What the FLEET called when this block follows one and that ship is here,
+  // otherwise the hostile the ladder ranks first. Remembered either way so fire
+  // is CONCENTRATED — spread damage kills nothing, which is the whole reason
+  // both halves of this exist.
+  const called =
+    role === "follow" && input.calledTargetID !== null
+      ? (inReach.find((row) => row.itemID === input.calledTargetID) ?? null)
+      : null;
+  let targetID = num(mem, "targetID");
+  if (targetID !== null && !inReach.some((row) => row.itemID === targetID)) {
+    targetID = null; // it died, or it drifted out of reach — next
+  }
+  if (called !== null && targetID !== called.itemID) {
+    // The fleet called something else. Switching mid-fight is the POINT of
+    // following: an FC re-calls when the first primary stops being the problem.
+    targetID = null;
+  }
+  if (targetID === null) {
+    const primary =
+      called ??
+      pickPrimary(
+        inReach,
+        (row) => row.typeID,
+        (row) => row.distance,
+        groupReader(obs),
+        input.targets.length > 0 ? input.targets : DEFAULT_TARGET_PRIORITY,
+        // Tags are resolved one rung up, by the adapter, and are never passed
+        // into `pickPrimary` as well — two mechanisms ranking the same thing is
+        // how one of them silently stops mattering.
+        undefined,
+        threat,
+        jamSources(obs),
+      ) ??
+      inReach[0]!;
+    return tick(
+      { kind: "lock", targetID: primary.itemID },
+      called !== null ? "Locking what the fleet called." : "Locking the one at the top of the list.",
+      PHASE_FIGHT,
+      ACTING,
+      true,
+      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
+    );
+  }
+  const call = callPrimary(role, mem, targetID, "Calling it for the fleet.", PHASE_FIGHT);
+  if (call !== null) return call;
+
+  const lockedIDs = obs.lockedTargetIDs ?? [];
+  if (!lockedIDs.includes(targetID)) {
+    if (!flag(mem, "lockIssued")) {
+      return tick({ kind: "lock", targetID }, "Locking it.", PHASE_FIGHT, ACTING, true, {
+        ...mem,
+        lockIssued: true,
+        waited: 0,
+      });
+    }
+    const waited = (num(mem, "waited") ?? 0) + 1;
+    if (waited > MAX_LOCK_WAIT_TICKS) {
+      // ⚠ THE WHOLE MEMORY GOES, not just the target: the launch budget, the
+      // standing hold and the rotation record all belong to a fight that is
+      // being restarted, and carrying a spent lock wait into the next pick is
+      // how a block gives up on every target in turn after the first bad one.
+      return tick(WAIT, "That one would not lock — picking another.", PHASE_FIGHT, ACTING, true, {});
+    }
+    return tick(WAIT, "Waiting for the lock.", PHASE_FIGHT, ACTING, true, { ...mem, waited });
+  }
+
+  // ─── Rung 5: the drones onto it ───────────────────────────────────────────
+  //
+  // Once per target, which is what `dronesOn` is for. Re-issuing an engage every
+  // tick would starve every rung below and buy nothing: the order is standing.
+  if (roster.roleOut.length > 0 && num(mem, "dronesOn") !== targetID) {
+    return tick(
+      { kind: "engageDrones", droneIDs: roster.roleOut, targetID },
+      "Setting the drones on it.",
+      PHASE_FIGHT,
+      ACTING,
+      true,
+      { ...mem, dronesOn: targetID },
+    );
+  }
+
+  // ─── Rung 6: rotate a hurt drone ──────────────────────────────────────────
+  //
+  // ⚠ BELOW THE ENGAGE RUNG, AND THAT PLACEMENT IS HALF THE RULE. §4: never at
+  // the cost of the primary being unattended. Reaching here means the primary is
+  // locked and the flight is already on it, so a rotation costs one drone's
+  // flight time and nothing else.
+  //
+  // ⚠ THE OTHER HALF IS EXPLICIT, BECAUSE PLACEMENT ALONE DOES NOT COVER IT. A
+  // boat with ONE combat drone out has a flight of one; pulling it leaves the
+  // primary completely unattended however far down the ladder the rung sits. So
+  // a rotation is not STARTED with a single drone out — but one already in
+  // flight is always allowed to finish, or the recall that emptied the flight
+  // would wedge the machine for the rest of the site.
+  //
+  // ⚠ THE MACHINE ONLY TICKS ON THE TICKS THIS RUNG IS REACHED, and its wait
+  // counters are therefore counted in those ticks. That is the right semantics:
+  // every bound it carries is about an ORDER THAT NEVER LANDED, and an order
+  // cannot fail to land on a tick where the block was doing something else.
+  // Advancing it from a higher rung would mean recording a recall we never
+  // issued, which is the one input that can wedge it.
+  const rotationMemory = readRotationMemory(mem["rotation"]);
+  const rotationAllowed = rotationMemory.active !== null || roster.roleOut.length > 1;
+  if (rotationAllowed) {
+    const step: DroneRotationStep = decideDroneRotation({
+      dronesInSpace: roster.roleRows,
+      droneIDsInBay: obs.combatDroneBayItemIDs ?? null,
+      memory: mem["rotation"],
+    });
+    // A completed rotation puts a drone back in space with no orders, so the
+    // engage rung has to be told to run again — that is what droneRotation's own
+    // header means by "the block's engage rung picks it up again".
+    mem = {
+      ...mem,
+      rotation: step.memory,
+      ...(step.reason === "complete" ? { dronesOn: null } : {}),
+    };
+    if (step.action === "recall" && step.itemID !== null) {
+      return tick(
+        { kind: "recallDrones", droneIDs: [step.itemID] },
+        "That drone has started losing shield — pulling it before the rats finish it.",
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        mem,
+      );
+    }
+    if (step.action === "relaunch" && step.itemID !== null) {
+      return tick(
+        { kind: "launchDrones", droneItemIDs: [step.itemID] },
+        "Sending the repaired drone back out.",
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        mem,
+      );
+    }
+  }
+
+  // ─── Rung 7: pre-lock the next ones ───────────────────────────────────────
+  //
+  // Tristan holds five targets; `fight-the-rats` uses one and pays a fresh lock
+  // every kill, which is 8-16 s of a dead grid after every rat dies. Filling the
+  // spare slots in priority order means the next primary is already locked when
+  // this one dies.
+  //
+  // ⚠ UNREADABLE MEANS DO NOT PRE-LOCK, NOT "GUESS A NUMBER". A hull's lock
+  // count is a real limit and the server refuses the lock past it — a refusal
+  // booked in the ledger, where enough on one key end the run. Guessing five
+  // because a Tristan holds five would spend that refusal on every destroyer.
+  //
+  // ⚠ AND IT ASKS FOR EACH TARGET AT MOST ONCE. This rung has no bounded wait of
+  // its own (a bounded wait here would have to compete with the primary's, and
+  // whichever lost would spin), so "we have already asked for this one" is the
+  // entire stop condition. A pre-lock that does not land is simply not retried:
+  // it is an optimisation, and the target gets a proper bounded lock the moment
+  // it becomes the primary.
+  const maxLocks = maxLocksOf(obs);
+  const locksReadable = obs.lockedTargetIDs !== undefined && obs.lockedTargetIDs !== null;
+  if (maxLocks !== null && locksReadable && lockedIDs.length < maxLocks) {
+    const asked = idList(mem, "preLocked");
+    const spare = inReach.filter((row) => !lockedIDs.includes(row.itemID) && !asked.includes(row.itemID));
+    if (spare.length > 0) {
+      const next =
+        pickPrimary(
+          spare,
+          (row) => row.typeID,
+          (row) => row.distance,
+          groupReader(obs),
+          input.targets.length > 0 ? input.targets : DEFAULT_TARGET_PRIORITY,
+          undefined,
+          threat,
+          jamSources(obs),
+        ) ?? spare[0]!;
+      return tick(
+        { kind: "lock", targetID: next.itemID },
+        "Locking the next one up while this one dies.",
+        PHASE_FIGHT,
+        ACTING,
+        true,
+        { ...mem, preLocked: [...asked, next.itemID].slice(-MAX_PRELOCK_MEMORY) },
+      );
+    }
+  }
+
+  // ─── Rung 8: guns ─────────────────────────────────────────────────────────
+  //
+  // ⚠ AN UNLOADED GUN IS NEVER ACTIVATED. A gun with no charge will not fire,
+  // and the attempt is booked in the refusal ledger where `MAX_CONSECUTIVE_
+  // REFUSALS` on one key ENDS THE RUN — so an empty rack does not merely waste
+  // ticks, it stops the bot. `unloadedWeaponIDs` is already the narrow answer
+  // (demonstrably takes a charge AND has none loaded); a gun whose charge state
+  // could not be read is not in it and is still fired, which is the right
+  // direction: a false positive here silences a working weapon for the whole run.
+  //
+  // A drone boat whose guns are ALL empty fights with its drones and says so,
+  // rather than stopping. That is §7, and it is why this rung falls through
+  // instead of blocking.
+  if (activeModuleIDs !== null) {
+    const unloaded = new Set(obs.unloadedWeaponIDs ?? []);
+    const running = new Set(activeModuleIDs);
+    const idleGun = weapons.find((id) => !running.has(id) && !unloaded.has(id));
+    if (idleGun !== undefined) {
+      return tick({ kind: "activate", moduleID: idleGun, targetID }, "Guns on it.", PHASE_FIGHT, ACTING, true, mem);
+    }
+  }
+
+  const allGunsEmpty = weapons.length > 0 && weapons.every((id) => (obs.unloadedWeaponIDs ?? []).includes(id));
+  return tick(
+    WAIT,
+    allGunsEmpty ? "Fighting it with the drones — every gun aboard is empty." : "Fighting it.",
+    PHASE_FIGHT,
+    ACTING,
+    true,
+    mem,
+  );
+}
