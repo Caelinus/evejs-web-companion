@@ -65,6 +65,13 @@ export type ScriptAction =
   | { readonly kind: "dock"; readonly stationID: number }
   | { readonly kind: "warp"; readonly targetID: number }
   | { readonly kind: "approach"; readonly targetID: number }
+  /**
+   * Cut the engines (api.stopShip). The one action here that UNDOES a standing
+   * order rather than issuing one, and the only order eve.js does not gate on a
+   * pending warp landing — see scriptMacros' `travelStall`, which emits this to
+   * free a hull whose approach the server is silently refusing.
+   */
+  | { readonly kind: "stopShip" }
   | { readonly kind: "align"; readonly targetID: number }
   | { readonly kind: "orbit"; readonly targetID: number; readonly range: number }
   /** Hold off a target at a set distance (api.keepAtRange) — "stand off", not "circle". */

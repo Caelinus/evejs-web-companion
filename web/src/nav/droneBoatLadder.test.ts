@@ -667,6 +667,46 @@ test("the approach is a standing order: it is not re-issued every tick", () => {
   assert.equal(out.outcome.kind, "acting");
 });
 
+// ⚠ THE SILENT-REFUSAL RUNG ON THE HOT PATH. This block reaches its site by
+// WARP, which is precisely when eve.js still has the hull landingPending and
+// throws the first approach away with a 200. GOTO is the signature — the
+// SetSpeedFraction that precedes every approach took, the approach did not.
+test("⚠ an approach the server accepted and ignored -> re-order, then STOP, and never a silent two-minute wait", () => {
+  const world = obs({
+    snapshot: snapshot([rat(1, 50_000)], { mode: "GOTO" }),
+    maxTargetRangeM: 40_000,
+    combatDroneBayItemIDs: [7001],
+    threatByTypeID: { 100: HARMLESS },
+  });
+  let mem: MacroMemory = { approachID: 1, closeTicks: 0 };
+  const script: string[] = [];
+  for (let i = 0; i < 12; i += 1) {
+    const out = run({ mem, obs: world });
+    script.push(out.action.kind);
+    mem = out.nextMem;
+  }
+  assert.deepEqual(
+    script.filter((kind) => kind !== "wait"),
+    ["approach", "stopShip", "approach"],
+    "the order goes back in, the engines are cut — which frees a stuck landing — and the order goes in again",
+  );
+});
+
+test("a hull that IS following is left to close — the standing-order bound still holds", () => {
+  const world = obs({
+    snapshot: snapshot([rat(1, 50_000)], { mode: "FOLLOW" }),
+    maxTargetRangeM: 40_000,
+    combatDroneBayItemIDs: [7001],
+    threatByTypeID: { 100: HARMLESS },
+  });
+  let mem: MacroMemory = { approachID: 1, closeTicks: 0 };
+  for (let i = 0; i < 12; i += 1) {
+    const out = run({ mem, obs: world });
+    assert.equal(out.action.kind, "wait", `tick ${i} disturbed an approach that was running`);
+    mem = out.nextMem;
+  }
+});
+
 test("the close-in budget runs out: the drones come home and the block finishes", () => {
   // ⚠ A gun is fitted on purpose. "No guns and no drones" is a FIT fault and is
   // answered above the closing rung with `blocked`, which is the right answer to

@@ -20,6 +20,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "dock", stationID: 60003760 },
   { kind: "warp", targetID: 1001 },
   { kind: "approach", targetID: 1001 },
+  { kind: "stopShip" },
   { kind: "align", targetID: 1001 },
   { kind: "orbit", targetID: 1001, range: 5000 },
   { kind: "keepAtRange", targetID: 1001, range: 2000 },

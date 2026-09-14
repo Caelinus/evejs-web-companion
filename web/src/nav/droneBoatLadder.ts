@@ -74,6 +74,13 @@ import {
   launchStalled,
   type DroneRoster,
 } from "./droneLaunch.ts";
+import {
+  clearCloseInStall,
+  closeInStall,
+  hullMode,
+  STALL_REORDER_WHY,
+  STALL_UNSTICK_WHY,
+} from "./closeInStall.ts";
 import { decidePropulsionModule } from "./propulsion.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import {
@@ -791,8 +798,33 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
         PHASE_CLOSE,
         ACTING,
         true,
-        { ...mem, approachID: nearest.itemID, closeTicks },
+        clearCloseInStall({ ...mem, approachID: nearest.itemID, closeTicks }),
       );
+    }
+    // ⚠ "ONCE PER TARGET" HOLDS ONLY FOR AN ORDER THE SERVER ACTUALLY TOOK, and
+    // the whole point of this block is that it arrives by WARP — which is
+    // exactly when eve.js has the hull `landingPending` and throws the first
+    // approach of the site away without saying so. `closeInStall.ts` carries
+    // the deadlock in full; the short version is that the stop below is the one
+    // order that frees it.
+    //
+    // ⚠ THE TWO-MINUTE BUDGET ABOVE IS NOT A SUBSTITUTE FOR THIS RUNG. It does
+    // end the wait, but it ends it by LEAVING THE GRID — and leaving means
+    // warping, which the same pending landing refuses, so the run stops on a
+    // problem one `CmdStop` would have cleared.
+    const stall = closeInStall(hullMode(snapshot), mem);
+    if (stall.step === "reorder") {
+      return tick(
+        { kind: "approach", targetID: nearest.itemID },
+        STALL_REORDER_WHY,
+        PHASE_CLOSE,
+        ACTING,
+        true,
+        { ...stall.mem, closeTicks },
+      );
+    }
+    if (stall.step === "unstick") {
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, PHASE_CLOSE, ACTING, true, { ...stall.mem, closeTicks });
     }
     return tick(
       WAIT,
@@ -800,7 +832,10 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
       PHASE_CLOSE,
       ACTING,
       true,
-      { ...mem, closeTicks },
+      // "stuck" restarts the ladder rather than ending the block: the budget
+      // above already owns "give up on this wave", and it is the rung that
+      // knows what leaving costs.
+      { ...(stall.step === "stuck" ? clearCloseInStall(stall.mem) : stall.mem), closeTicks },
     );
   }
 

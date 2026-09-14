@@ -36,6 +36,15 @@ import {
   packageAboard,
 } from "./missionBotLoop.ts";
 import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotLoop.ts";
+import {
+  clearCloseInStall,
+  closeInStall,
+  hullMode,
+  STALL_REORDER_WHY,
+  STALL_STUCK_REASON,
+  STALL_STUCK_WHY,
+  STALL_UNSTICK_WHY,
+} from "./closeInStall.ts";
 import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } from "./targetPriority.ts";
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
@@ -881,7 +890,7 @@ function mineWithRocks(
       "Approaching a rock",
       ACTING,
       true,
-      { rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID },
+      clearCloseInStall({ rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID }),
     );
   }
 
@@ -923,15 +932,38 @@ function mineWithRocks(
         "Approaching a rock",
         ACTING,
         true,
-        { rockID, lockIssued: true, waited: 0, approachedRockID: rockID },
+        clearCloseInStall({ rockID, lockIssued: true, waited: 0, approachedRockID: rockID }),
       );
     }
-    return tick(WAIT, "Closing in — too far out to mine yet.", "Approaching a rock", ACTING, true, {
+    // ⚠ AN ORBIT IS REFUSED THE SAME SILENT WAY AN APPROACH IS, and a belt is
+    // where it bites hardest: this ladder's FIRST order after the warp to the
+    // belt is the orbit above, which is exactly the tick eve.js still has the
+    // hull `landingPending`. See `closeInStall.ts` for the deadlock and why a stop
+    // is what breaks it. Without this rung the miner says "closing in" while
+    // flying a straight line away from the belt for the rest of the night.
+    //
+    // ⚠ THE COUNTERS ARE CARRIED BY HAND because this block REBUILDS its memory
+    // on every return rather than spreading it — spreading here would quietly
+    // resurrect keys the rebuild exists to drop.
+    const stall = closeInStall(measurement?.shipMode ?? null, mem);
+    const closing: MacroMemory = {
       rockID,
       lockIssued: true,
       waited: 0,
       approachedRockID: rockID,
-    });
+      stallTicks: num(stall.mem, "stallTicks") ?? 0,
+      stallStage: num(stall.mem, "stallStage") ?? 0,
+    };
+    if (stall.step === "reorder") {
+      return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, "Approaching a rock", ACTING, true, closing);
+    }
+    if (stall.step === "unstick") {
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Approaching a rock", ACTING, true, closing);
+    }
+    if (stall.step === "stuck") {
+      return tick(WAIT, STALL_STUCK_WHY, "Approaching a rock", { kind: "blocked", reason: STALL_STUCK_REASON });
+    }
+    return tick(WAIT, "Closing in — too far out to mine yet.", "Approaching a rock", ACTING, true, closing);
   }
 
   // Locked and in range — switch on any mining module that is not already cycling.
@@ -1850,11 +1882,27 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
       "Salvaging",
       ACTING,
       true,
-      { ...mem, wreckID: pick.itemID, lockIssued: false, waited: 0 },
+      clearCloseInStall({ ...mem, wreckID: pick.itemID, lockIssued: false, waited: 0 }),
     );
   }
   const dist = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
   if (dist > SALVAGE_RANGE_M) {
+    // ⚠ NEVER A BARE WAIT HERE. Until this rung existed, an approach the server
+    // accepted and ignored left this block saying "flying to the wreck" for as
+    // long as the wreck was on grid — the hull motionless (or flying a straight
+    // line away from the site), the salvager never in range, and the operator
+    // reading a flight that was not happening. See `closeInStall.ts`.
+    const stall = closeInStall(measurement?.shipMode ?? null, mem);
+    mem = stall.mem;
+    if (stall.step === "reorder") {
+      return tick({ kind: "approach", targetID: wreckID }, STALL_REORDER_WHY, "Salvaging", ACTING, true, mem);
+    }
+    if (stall.step === "unstick") {
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Salvaging", ACTING, true, mem);
+    }
+    if (stall.step === "stuck") {
+      return tick(WAIT, STALL_STUCK_WHY, "Salvaging", { kind: "blocked", reason: STALL_STUCK_REASON });
+    }
     return tick(WAIT, "Flying to the wreck.", "Salvaging", ACTING, true, mem);
   }
   const locked = (obs.lockedTargetIDs ?? []).includes(wreckID);
@@ -1951,7 +1999,19 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
   const unreachable = isUnreachable(obs.refusals, step.id, "lootWreck", target.itemID);
   if (dist > LOOT_RANGE_M || unreachable) {
     if (!unreachable && num(memBase, "approaching") === target.itemID) {
-      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, memBase);
+      // The same stall ladder the salvage block runs, for the same reason: an
+      // approach the bridge reported `ok` for is not evidence the hull moved.
+      const stall = closeInStall(measurement?.shipMode ?? null, memBase);
+      if (stall.step === "reorder") {
+        return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem);
+      }
+      if (stall.step === "unstick") {
+        return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem);
+      }
+      if (stall.step === "stuck") {
+        return tick(WAIT, STALL_STUCK_WHY, "Looting", { kind: "blocked", reason: STALL_STUCK_REASON });
+      }
+      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, stall.mem);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
@@ -1959,7 +2019,7 @@ const lootWrecks: MacroDecider = (step, obs, mem) => {
       "Looting",
       ACTING,
       true,
-      { ...memBase, approaching: target.itemID },
+      clearCloseInStall({ ...memBase, approaching: target.itemID }),
     );
   }
   // In range: empty it, and remember only that it was ATTEMPTED. Whether it is
@@ -2063,7 +2123,17 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   const unreachable = isUnreachable(obs.refusals, step.id, "lootContainer", target.itemID);
   if (dist > LOOT_RANGE_M || unreachable) {
     if (!unreachable && num(memClean, "approaching") === target.itemID) {
-      return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, memClean);
+      const stall = closeInStall(measurement?.shipMode ?? null, memClean);
+      if (stall.step === "reorder") {
+        return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem);
+      }
+      if (stall.step === "unstick") {
+        return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem);
+      }
+      if (stall.step === "stuck") {
+        return tick(WAIT, STALL_STUCK_WHY, "Looting", { kind: "blocked", reason: STALL_STUCK_REASON });
+      }
+      return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, stall.mem);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
@@ -2071,7 +2141,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
       "Looting",
       ACTING,
       true,
-      { ...memClean, approaching: target.itemID },
+      clearCloseInStall({ ...memClean, approaching: target.itemID }),
     );
   }
   // No `tries` counter here any more: the ledger counts, across laps, and
@@ -3620,15 +3690,28 @@ function repHurtMate(
   // do not spend an attempt on a module we can see cannot reach.
   const rangeToMate = measureSpace(snapshot)?.distances.get(target.itemID) ?? null;
   const outOfReach = rangeToMate !== null && rangeToMate > REMOTE_ASSIST_RANGE_M;
-  if (outOfReach && mayApproach && num(mem, "repApproached") !== target.itemID) {
-    return tick(
-      { kind: "approach", targetID: target.itemID },
-      "Closing in — too far out for the reps to reach.",
-      phase,
-      ACTING,
-      true,
-      { ...mem, repApproached: target.itemID },
-    );
+  if (outOfReach && mayApproach) {
+    if (num(mem, "repApproached") !== target.itemID) {
+      return tick(
+        { kind: "approach", targetID: target.itemID },
+        "Closing in — too far out for the reps to reach.",
+        phase,
+        ACTING,
+        true,
+        clearCloseInStall({ ...mem, repApproached: target.itemID }),
+      );
+    }
+    // The same silent-refusal rung the engage runs, for the same reason and with
+    // the same restraint: re-order, then stop to free a stuck landing, and never
+    // block — a logi ship that cannot close is still locked and still watching.
+    const stall = closeInStall(hullMode(snapshot), mem);
+    if (stall.step === "reorder") {
+      return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, phase, ACTING, true, stall.mem);
+    }
+    if (stall.step === "unstick") {
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, phase, ACTING, true, stall.mem);
+    }
+    mem = stall.step === "stuck" ? clearCloseInStall(stall.mem) : stall.mem;
   }
   const active = new Set(snapshot.ship?.activeModuleIDs ?? []);
   // ⚠ CONSECUTIVE failures only. A rep that HAS come on refills the budget, so
@@ -4348,15 +4431,26 @@ const remoteCap: MacroDecider = (_step, obs, mem) => {
   // and an activation that will not land has to be bounded.
   const rangeToMate = measureSpace(snapshot)?.distances.get(target.itemID) ?? null;
   const outOfReach = rangeToMate !== null && rangeToMate > REMOTE_ASSIST_RANGE_M;
-  if (outOfReach && num(mem, "capApproached") !== target.itemID) {
-    return tick(
-      { kind: "approach", targetID: target.itemID },
-      "Closing in — too far out to pass them cap.",
-      "Feeding cap",
-      ACTING,
-      true,
-      { ...mem, capApproached: target.itemID },
-    );
+  if (outOfReach) {
+    if (num(mem, "capApproached") !== target.itemID) {
+      return tick(
+        { kind: "approach", targetID: target.itemID },
+        "Closing in — too far out to pass them cap.",
+        "Feeding cap",
+        ACTING,
+        true,
+        clearCloseInStall({ ...mem, capApproached: target.itemID }),
+      );
+    }
+    // The silent-refusal rung again — see repHurtMate's note.
+    const stall = closeInStall(hullMode(snapshot), mem);
+    if (stall.step === "reorder") {
+      return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Feeding cap", ACTING, true, stall.mem);
+    }
+    if (stall.step === "unstick") {
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Feeding cap", ACTING, true, stall.mem);
+    }
+    mem = stall.step === "stuck" ? clearCloseInStall(stall.mem) : stall.mem;
   }
   const active = new Set(snapshot.ship?.activeModuleIDs ?? []);
   // Consecutive failures only — see the note in repHurtMate.

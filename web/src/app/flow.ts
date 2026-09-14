@@ -9705,6 +9705,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "approach":
             await api.approach(action.targetID, 0, callOptions);
             return;
+          // Straight to `api.stopShip` and NOT through `flow.stopShip()`: that
+          // wrapper also aborts the browser autopilot, which is right for an
+          // operator saying "stop" and wrong here — this is one rung of a
+          // running block freeing a hull the server will not fly, and the
+          // program is meant to carry on afterwards.
+          case "stopShip":
+            await api.stopShip(callOptions);
+            return;
           case "align":
             await api.alignTo(action.targetID, callOptions);
             return;
