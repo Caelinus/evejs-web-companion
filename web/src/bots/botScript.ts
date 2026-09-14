@@ -524,8 +524,10 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
  *   • "fight-back"     — TANK UP AND ACTUALLY FIGHT the pirate, then keep
- *                        working. Every fitted hardener and damage control goes
- *                        on first — one tick each, the instant self-targeted
+ *                        working. Every fitted hardener that HAS a cycle goes
+ *                        on first (an ordinary damage control has none — it is
+ *                        already working, and is never reached for) — one tick
+ *                        each, the instant self-targeted
  *                        move a player makes before they touch the guns — and
  *                        then the fight: drones out, lock the nearest hostile
  *                        inside targeting range, drones onto it, every idle gun

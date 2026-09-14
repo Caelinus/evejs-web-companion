@@ -8078,9 +8078,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return { shipID, fittingSignature: fittingCapabilitySignature() };
   }
 
-  /** Re-read the fit, wait for its group names, then classify every bot module. */
+  /** Re-read the fit, wait for its group names AND its dogma, then classify every bot module. */
   async function resolveScriptModuleCapabilities(): Promise<ScriptModuleCapabilities> {
     const mining = await resolveMiningModuleIDs();
+    // ⚠ AWAITED, EXACTLY AS `readCompanionFitFacts` AWAITS IT, AND FOR THE SAME
+    // REASON. `loadFitting` (which `resolveMiningModuleIDs` just called) kicks
+    // dogma off with `void loadDogma().catch(...)` so a stumbling dogma read
+    // cannot hold the fit up -- which means that after awaiting the fit alone
+    // the dogma slice is still whatever it was, and on a fresh session that is
+    // NOTHING. `resolveDefenseModuleIDs` drops passive modules on dogma
+    // attribute 73, and its unreadable case FAILS OPEN (a dogma that did not
+    // arrive must never quietly disarm a ship) -- so without this await the
+    // passive Damage Control every fit carries landed in `hardeners` on every
+    // run, and the Hardeners-on block spent its whole attempt budget switching
+    // on a module that has nothing to switch, then stopped the bot with "a
+    // hardener kept refusing to switch on".
+    //
+    // ⚠ AND IT HAS TO BE HERE, NOT LEFT TO THE NEXT TICK TO CORRECT. The
+    // capability cache re-resolves on the FIT SIGNATURE (hull + modules), which
+    // a late-arriving dogma snapshot does not change -- so a list classified
+    // before dogma landed is the list the whole run uses.
+    await loadDogma().catch(() => {});
     const fit = store.fitting.get();
     return {
       shipID: fit.activeShipID,

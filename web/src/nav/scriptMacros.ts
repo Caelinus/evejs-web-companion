@@ -2093,14 +2093,23 @@ const refineOre: MacroDecider = (_step, obs, mem) => {
 };
 
 // ── hardeners-on ─────────────────────────────────────────────────────────────
-// One press at the top of a fight or a trip: switch every fitted hardener and
-// damage control on, one per tick, and finish once they are all running.
+// One press at the top of a fight or a trip: switch every fitted hardener on,
+// one per tick, and finish once they are all running.
+//
+// ⚠ THE LIST IT IS HANDED HOLDS ONLY MODULES THAT CYCLE, and that is the
+// caller's work, not this block's (flow.ts `resolveDefenseModuleIDs`, which
+// drops anything with no dogma cycle). What arrives here is therefore hardeners
+// and the damage controls that really do burst — never the ordinary damage
+// control, which is already working the moment it is online. Every message
+// below is worded for that: a ship can carry a damage control and still have
+// nothing this block can switch.
 const hardenersOn: MacroDecider = (_step, obs, mem) => {
   const hardeners = obs.hardenerModuleIDs ?? [];
   if (hardeners.length === 0) {
     return tick(WAIT, "Nothing to harden with.", "Hardening", {
       kind: "blocked",
-      reason: "This ship has no hardener or damage control fitted.",
+      reason:
+        "This ship has no hardener that can be switched on. A damage control does not need switching on - it works the moment it is online.",
     });
   }
   if (obs.inSpace !== true) {

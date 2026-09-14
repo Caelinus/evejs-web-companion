@@ -493,7 +493,14 @@ function macroPhrase(step: MacroStep): string {
         : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone${kept}`;
     }
     case "hardeners-on":
-      return "Switch every hardener and damage control on";
+      // ⚠ "AND DAMAGE CONTROL" USED TO BE IN THIS LINE, AND IT PROMISED
+      // SOMETHING THE BLOCK CANNOT DO. An ordinary damage control has no cycle:
+      // it works the moment it is online and there is no switch to press, so a
+      // player who read that line watched the block reach for it and reasonably
+      // called that a bug. The block still runs a damage control that DOES
+      // cycle (the assault kind) -- it just does not advertise a module most
+      // fits carry as something it will switch on.
+      return "Switch every hardener on";
     case "fight-the-rats":
       return `Fight the rats until the grid is clear${targetPhrase(step)}${squadPhrase(step)}`;
     case "warp-to-anomaly":

@@ -106,8 +106,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   "loot-containers": { args: [], untilRequired: false },
   // Docked: run every ore stack in the station hangar through the refinery.
   "refine-ore": { args: [], untilRequired: false },
-  // One press at the top of a fight/mine: switch every fitted hardener and
-  // damage control on. Done when they are all running.
+  // One press at the top of a fight/mine: switch on every fitted hardener that
+  // has a cycle (an ordinary damage control has none — it works the moment it
+  // is online). Done when they are all running.
   "hardeners-on": { args: [], untilRequired: false },
   // Guns + drones on the rat the priority list ranks first, next rat when it
   // dies; done when the grid is clear and the drones are home. Its own end, so
