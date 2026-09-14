@@ -94,6 +94,26 @@ export function noteLibraryChanged(): void {
   libraryChanges.update((count) => count + 1);
 }
 
+/**
+ * Is the bot the builder has open still in the library?
+ *
+ * ⚠ ONLY ASK THIS OF A READ THAT SUCCEEDED. The builder empties its list when
+ * the read throws, and an empty list run through here would report every open
+ * bot as deleted — the same "a failed read is never zero" rule the Manager's
+ * library states, at the one place where getting it wrong silently unpicks a
+ * player's bot from the row it belongs to.
+ *
+ * A draft that has never been saved (`null`) is not deleted; it was never
+ * there.
+ */
+export function isStillSaved(
+  currentID: string | null,
+  rows: readonly { readonly scriptID: string }[],
+): boolean {
+  if (currentID === null) return true;
+  return rows.some((row) => row.scriptID === currentID);
+}
+
 /** Convenience: the Bot Manager's Edit button. */
 export function editInBuilder(scriptID: string): void {
   builderTarget.ask(scriptID);

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   createBuilderTarget,
   decideHandoff,
+  isStillSaved,
   libraryChanged,
   noteLibraryChanged,
   waitingSentence,
@@ -144,4 +145,20 @@ test("a reader seeded at mount does not read the library twice for one open", ()
   assert.equal(libraryChanged.get(), seeded, "mounting alone must not look like a change");
   noteLibraryChanged();
   assert.notEqual(libraryChanged.get(), seeded);
+});
+
+test("the bot open in the builder is noticed when it leaves the library", () => {
+  const rows = [{ scriptID: "bot-a" }, { scriptID: "bot-b" }];
+  assert.equal(isStillSaved("bot-a", rows), true);
+  assert.equal(isStillSaved("bot-c", rows), false, "a deleted bot must not still count as saved");
+  // A draft that was never saved has not been deleted — there was no row.
+  assert.equal(isStillSaved(null, rows), true);
+  assert.equal(isStillSaved(null, []), true);
+});
+
+test("an empty list from a FAILED read would condemn every open bot", () => {
+  // Pinning the caller's obligation: this predicate cannot tell "the library is
+  // empty" from "the read failed and the list was emptied", so the builder only
+  // asks it on the success path. If that ever changes, this is the cost.
+  assert.equal(isStillSaved("bot-a", []), false);
 });
