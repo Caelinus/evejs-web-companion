@@ -2864,6 +2864,15 @@ interface AnomalyFlavour {
    * §13 is about the two COMBAT blocks and this flag keeps it there.
    */
   readonly givesUpOnSites: boolean;
+  /**
+   * Is the ship ALREADY standing in a site of this kind? TRI-STATE, and `null`
+   * — cannot tell — is the answer this must give whenever the reading is not
+   * one the block genuinely holds.
+   *
+   * It is consulted only after the server has refused the warp, to separate the
+   * two refusals that arrive in identical words (see `warpRefusedHere`).
+   */
+  readonly alreadyHere: (obs: ScriptObservation) => boolean | null;
 }
 
 const COMBAT_FLAVOUR: AnomalyFlavour = {
@@ -2874,6 +2883,9 @@ const COMBAT_FLAVOUR: AnomalyFlavour = {
   emptyScannerHint:
     "Rats on a belt or a gate are not a den: a den is a site the scanner lists.",
   givesUpOnSites: true,
+  // Rats on this grid ARE the den's content: a refused warp with them already
+  // in front of the ship means it is standing in the thing it tried to fly to.
+  alreadyHere: (obs) => obs.hostileOnGrid,
 };
 
 const ORE_FLAVOUR: AnomalyFlavour = {
@@ -2884,6 +2896,11 @@ const ORE_FLAVOUR: AnomalyFlavour = {
   emptyScannerHint:
     "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
   givesUpOnSites: false,
+  // ⚠ CANNOT TELL, DELIBERATELY. Rock on the grid is not evidence of an ore
+  // SITE — a plain asteroid belt looks identical from here, and the whole point
+  // of `emptyScannerHint` is that the two get confused. There is no reading this
+  // block holds that separates them, so it makes none and reports the refusal.
+  alreadyHere: () => null,
 };
 
 // ── Why the dead end is THREE sentences and not one ──────────────────────────
@@ -2952,7 +2969,7 @@ function warpToAnomalyOfKind(
   wanted: ExplorationSiteKind,
   flavour: AnomalyFlavour,
 ): MacroDecider {
-  return (_step, obs, mem, board) => {
+  return (step, obs, mem, board) => {
     if (obs.flightStatus?.docked === true) {
       return tick(WAIT, "Docked — there is no scanner to fly on from here.", "Scanning", {
         kind: "blocked",
@@ -2965,6 +2982,36 @@ function warpToAnomalyOfKind(
       }
       if (warpLanded(obs, mem)) {
         return tick(WAIT, `Arrived at the ${flavour.noun}.`, "Arrived", { kind: "done" });
+      }
+      // ⚠ A REFUSED WARP IS NOT A SLOW ONE, AND THIS BLOCK USED TO CALL IT ONE.
+      // It issued the warp, never looked at what came back, and waited out
+      // WARP_START_WAIT_TICKS before stopping the bot with "the warp never
+      // started" — a sentence that sends the reader looking at the ship when the
+      // server had already said no, in the log, on the first tick.
+      //
+      // It happened for real: four pilots were parked INSIDE the den they had
+      // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
+      // — already there — and all four stopped rather than fighting the rats in
+      // front of them.
+      const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
+      if (refusal !== null) {
+        // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
+        // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
+        // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
+        // right now." Standing in the site and the site having gone arrive in the
+        // SAME WORDS, so the wording is no help and the grid has to answer.
+        if (flavour.alreadyHere(obs) === true) {
+          return tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", {
+            kind: "done",
+          });
+        }
+        // Cannot tell, or told no. Stop — but with what the SERVER said, not
+        // with a guess about the warp never starting.
+        return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
+            "If the ship is already sitting in it, there was nothing left to fly to.",
+        });
       }
       const waited = (num(mem, "waited") ?? 0) + 1;
       if (waited > WARP_START_WAIT_TICKS) {

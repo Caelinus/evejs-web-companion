@@ -3051,6 +3051,104 @@ test("an unreadable warp count is never an arrival — the block waits its budge
   assert.notEqual(next.phase, "Arrived");
 });
 
+// ─── A refused warp to a site is not a slow one ──────────────────────────────
+//
+// Four pilots parked INSIDE the den they had been stranded in each started a
+// run, and each stopped at this block: "warp to the den" came back
+// WARP_DISTANCE_TOO_CLOSE — already there — and the block, which never looked at
+// what came back, waited out its budget and reported that the warp never
+// started. They sat docked while rats floated in front of them.
+
+/** The ledger row the runner leaves after the server turns a site warp down. */
+const warpRefused = (words: string) => [{
+  key: "w:warpScan:-",
+  count: 1,
+  firstAt: 0,
+  lastAt: 0,
+  words,
+  kind: "refused" as const,
+}];
+
+const CANNOT_WARP = "You cannot warp there right now.";
+
+test("warp-to-anomaly: refused with rats already on the grid is an ARRIVAL, not a stop", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  assert.equal(issued.action.kind, "warpScan", "it still issues the warp");
+
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({
+      anomalies: [den("QEE-288")],
+      completedWarps: 3,          // no warp ever happened
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: true,        // ...because the den is already underfoot
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.deepEqual(out.outcome, { kind: "done" }, "standing in the den is arriving at it");
+  assert.equal(out.phase, "Arrived");
+});
+
+test("warp-to-anomaly: refused with nothing on the grid stops, carrying the SERVER's words", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({
+      anomalies: [den("QEE-288")],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: false,
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  assert.match(reason, /cannot warp there right now/i, "what the server said must survive");
+  assert.doesNotMatch(reason, /never started/i, "it was refused, not ignored — do not send the reader at the ship");
+});
+
+test("warp-to-anomaly: a refusal is read on the NEXT tick, not after the whole wait budget", () => {
+  // The point of reading the ledger at all: the answer was already on the wire.
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({ anomalies: [den("QEE-288")], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), hostileOnGrid: null }),
+    issued.nextMem,
+    {},
+  );
+  assert.notEqual(out.outcome.kind, "acting", "one tick, not WARP_START_WAIT_TICKS of them");
+});
+
+test("warp-to-ore-anomaly: cannot tell it is standing in an ore site, so it never claims to be", () => {
+  // ⚠ Rock on the grid is NOT evidence of an ore site — a plain belt looks the
+  // same from here. A reading the block cannot make is one it must not act on,
+  // however convenient the shortcut would be.
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [rocks("ABC-123")], completedWarps: 3 }), {}, {});
+
+  const out = oreMacro(
+    ORE_ANOM_STEP,
+    obs({
+      anomalies: [rocks("ABC-123")],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: true,   // even this must not be read as "in the ore site"
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked", "no shortcut without a reading to justify it");
+});
+
 /**
  * Hand `fight-the-rats` the same empty-grid answer until it believes it.
  *
