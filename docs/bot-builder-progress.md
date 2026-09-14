@@ -331,3 +331,15 @@ The every-minute cron was deleted at the natural finish. 412 tests green at clos
   each mark = dry entirely or dry of one ore family, one-hour expiry so respawned rock gets found again. Routes
   `GET/POST /api/bots/belt-memory`; the decider reads `obs.dryBelts` (10 s runner cache, cleared on write) and reports
   with the `rememberBeltDry` action. The ore TIER stays per-pilot on the run board.
+- **2026-09-14** — **A watch that does nothing no longer silences the watches under it.** Interrupts are
+  first-match-wins, and several responses can fire and then have no work: a `repair` row for a layer with no
+  repairer fitted (or whose repairers are all already running), a `launch-drones` row whose drones are out, a
+  `fight-back` row with nothing in reach to shoot. Each of those answered by running the program, which won the
+  scan every tick and left every row BELOW it unreachable for as long as its condition held — so the most
+  ordinary safety layout there is (`shield-below 0.10 -> repair` above `armor-below 0.45 -> dock-and-pause`, an
+  armour boat with no shield booster) was a flee rule that never fired. The shipped `Ratting night` example had
+  exactly that shape. Such a row is now TRANSPARENT, the same way a spent alert row already was: `fallThrough`
+  (nav/scriptDecide) carries the scan on from the row BELOW it and only reaches the program when nothing under
+  it fires, which is also why it cannot loop. `firstArmedInterrupt` (nav/scriptConditions) is the shared,
+  index-taking scan behind both halves. The sealed acute pause is deliberately unchanged: a row that fired still
+  counts as fired for it. 5 tests, 4 of which fail without the fix.

@@ -51,6 +51,7 @@ import {
   bumpCannotTellStreak,
   cannotTellStreakExhausted,
   evaluateCondition,
+  firstArmedInterrupt,
   releaseSpentAlerts,
   resolveInterrupt,
   type ScriptObservation,
@@ -587,7 +588,7 @@ export function decideScriptAction(
     return stopSafely(res.reason, scanMem, null, obs, travelHome);
   }
   if (res.kind === "fire") {
-    return fireInterrupt(script, res.row.id, obs, scanMem, travelHome, registry, false);
+    return fireInterrupt(script, res.row.id, obs, scanMem, travelHome, registry);
   }
 
   // 2.5 The repair thermostat's OFF half: a repair watch whose condition has
@@ -873,6 +874,52 @@ function standDownAfterFight(script: BotScript, obs: ScriptObservation, mem: Scr
 
 // ─── Interrupts ──────────────────────────────────────────────────────────────
 
+/**
+ * THIS ROW DID NOTHING, SO IT IS TRANSPARENT: carry the scan on below it, and
+ * run the program only when no lower row fires either.
+ *
+ * ⚠ WHY THIS EXISTS. Interrupts are first-match-wins, and several responses can
+ * fire and then have no work: a repair watch whose layer has no repairer fitted
+ * (or whose repairers are all already running), a launch-drones watch whose
+ * drones are out, a fight-back watch with nothing in reach to shoot. Before this,
+ * each of those answered by running the program — which quietly silenced every
+ * row UNDER it for as long as its condition held. The shape that costs a ship:
+ *
+ *     shield-below 0.10 -> repair          (an armour-tanked hull: no shield booster)
+ *     armor-below  0.45 -> dock-and-pause
+ *
+ * Shields under 10% is exactly when the second row is the one that matters, and
+ * it never fired, because the first row won the scan every tick and did nothing
+ * with it. The player wrote a flee rule and watched it not happen.
+ *
+ * It is the same rule a spent alert row already lived by (scriptConditions
+ * `firstArmedInterrupt`), generalised from "said its piece" to "has nothing to
+ * do": a row only holds the ship while it is actually acting on it.
+ *
+ * ⚠ IT CANNOT LOOP. The scan resumes strictly BELOW the row that fell through,
+ * so each hop moves down a bounded list (MAX_INTERRUPTS) and the bottom is
+ * `runProgram` — the very thing every one of these branches used to do
+ * immediately.
+ */
+function fallThrough(
+  script: BotScript,
+  rowID: string,
+  obs: ScriptObservation,
+  mem: ScriptMemory,
+  travelHome: HomeTravelDecider,
+  registry: MacroRegistry,
+): ScriptTickResult {
+  const below = firstArmedInterrupt(
+    script.interrupts,
+    obs,
+    mem.spentAlerts ?? [],
+    script.interrupts.findIndex((r) => r.id === rowID) + 1,
+  );
+  return below === null
+    ? runProgram(script, obs, mem, registry, travelHome)
+    : fireInterrupt(script, below.id, obs, mem, travelHome, registry);
+}
+
 function fireInterrupt(
   script: BotScript,
   rowID: string,
@@ -880,7 +927,6 @@ function fireInterrupt(
   mem: ScriptMemory,
   travelHome: HomeTravelDecider,
   registry: MacroRegistry,
-  _reentry: boolean,
 ): ScriptTickResult {
   const row = script.interrupts.find((r) => r.id === rowID);
   if (row === undefined) {
@@ -937,11 +983,11 @@ function fireInterrupt(
       // Satisfied once they are out. Nothing to do either when the bay holds no
       // combat drones (a bay of salvage drones defends nothing) or when OTHER
       // drones hold the slots: a launch into full slots is refused every tick
-      // and would starve the step under it, so the program keeps working.
+      // and would starve the step under it, so the watch stands aside.
       const combatOut = obs.combatDroneIDs ?? [];
       const combatBay = obs.combatDroneBayItemIDs ?? [];
       if (combatOut.length > 0 || combatBay.length === 0 || obs.dronesOut === true) {
-        return runProgram(script, obs, mem, registry, travelHome);
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       return {
         action: { kind: "launchDrones", droneItemIDs: combatBay },
@@ -964,7 +1010,7 @@ function fireInterrupt(
       // apart — a fix to one is a fix to both.
       const fight = registry["fight-the-rats"];
       if (fight === undefined) {
-        return runProgram(script, obs, mem, registry, travelHome);
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       // THE TANK GOES UP FIRST. A hardener is instant and self-targeted, so it
       // costs one tick and buys the whole fight — the same thing a player reaches
@@ -1024,7 +1070,7 @@ function fireInterrupt(
         // of which hardeners this watch switched on, and it is read after the
         // condition clears, which is long after this row stops being consulted.
         const { [row.id]: _spent, ...rest } = mem.macroMem;
-        return runProgram(script, obs, { ...mem, macroMem: rest }, registry, travelHome);
+        return fallThrough(script, row.id, obs, { ...mem, macroMem: rest }, travelHome, registry);
       }
       // The ladder is ACTING, so this watch has now committed the ship to a
       // fight — write the stand-down record even when there was no hardener to
@@ -1073,12 +1119,14 @@ function fireInterrupt(
             memory: mem,
           };
         }
-        return runProgram(script, obs, mem, registry, travelHome);
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       const idle = reps.find((id) => !active.has(id));
       if (idle === undefined) {
-        // Nothing to switch on (all running, or none fitted) — keep working.
-        return runProgram(script, obs, mem, registry, travelHome);
+        // Nothing to switch on (all running, or none fitted) — stand aside, so a
+        // flee row under this one is reached instead of being silenced by a
+        // thermostat that is already doing all it can.
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       return {
         action: { kind: "activate", moduleID: idle, targetID: 0 },
