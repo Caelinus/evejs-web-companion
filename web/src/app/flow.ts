@@ -230,6 +230,11 @@ import {
   type SurveyMemory,
 } from "../nav/surveyScan.ts";
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
+import {
+  THREAT_ATTRIBUTE_IDS,
+  threatFromAttributes,
+  type RatThreat,
+} from "../nav/ratThreat.ts";
 import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
 import { decodeFormations } from "../bridge/formations.ts";
@@ -257,6 +262,7 @@ import {
 } from "../bridge/fleetBroadcasts.ts";
 import {
   decodeJamNotification,
+  isJamLive,
   scrammedByWarpScrambler,
   tacklersHolding,
 } from "../bridge/jamNotifications.ts";
@@ -1245,6 +1251,32 @@ const sayRefusal = sayRefusalWords;
 export function foregroundCallPriority(active: boolean): RequestPriority | undefined {
   return active ? undefined : "poll";
 }
+
+/**
+ * What each ship TYPE does to a ship it fights, classified once and kept for
+ * the life of the tab (docs/drone-boat-block-spec.md §6).
+ *
+ * ⚠ PERMANENT, AND THAT IS THE DIFFERENCE FROM A NAME CACHE. `resolveNames`
+ * expires because a character or a corporation can be renamed under us; TYPE
+ * DOGMA IS STATIC REFERENCE DATA and cannot change while the client is running,
+ * so a type is fetched exactly ONCE per session however many hundred times its
+ * hull is seen on a grid. There is no TTL here on purpose, and adding one would
+ * buy nothing but round trips.
+ *
+ * ⚠ MODULE-LEVEL, SO EVERY PILOT ON THIS TAB SHARES IT. Four companions in one
+ * anomaly are looking at the same rats, and "what does a Dire Pithi Arrogator
+ * do" has one answer for all of them. Nothing in it is per-character, per-fit or
+ * per-session — it is the SDE, read through a route that takes no session.
+ *
+ * ⚠ A FAILED FETCH LEAVES THE TYPE OUT OF THE MAP RATHER THAN PUTTING A GUESS
+ * IN IT. A permanent cache poisoned with `UNKNOWN_THREAT` for a type whose read
+ * merely stumbled would classify a tackle frigate as harmless for the rest of
+ * the session, with nothing anywhere able to tell that apart from a rat that
+ * really is harmless. An EMPTY attribute object is a different thing and IS
+ * cached: it is the static tables answering "this type carries none of those
+ * six attributes", which is a real reading and not a failure.
+ */
+const ratThreatByTypeID = new Map<number, RatThreat>();
 
 export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}): AppFlow {
   // R107 — in per-session mode the `token` key is present (starting null) so
@@ -6060,6 +6092,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           true,
           ship?.itemID ?? null,
         );
+        // ⚠ PAID FOR HERE TOO, UNDER THE SAME GATE, because `pickPrimary` is the
+        // second reader of it: the companion ranks the ships shooting at its
+        // fleet with the same ladder a script bot does, and a group name cannot
+        // tell a tackle frigate from its harmless sibling for either of them.
+        // The cost is the same as the line above and smaller: one round trip per
+        // NEW rat type EVER SEEN on this tab (the cache is permanent, since type
+        // dogma is static), nothing per tick, and nothing at all on a grid with
+        // no NPCs on it -- so a companion escorting a miner does not start
+        // paying for reads its ladder will not use.
+        const threatByTypeID = await classifyRatThreats(snapshot, origin);
 
         // ── The drone reads (rung 6). Two of the three are free: they come off
         // the snapshot already in hand. Only the bay costs a call, and it is
@@ -6181,6 +6223,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           hostileOnGrid: snapshot === null ? null : hostileRows(snapshot, origin).length > 0,
           targetedByPlayer,
           targetGroupNames,
+          threatByTypeID,
           dronesOut:
             snapshot === null
               ? null
@@ -7946,6 +7989,90 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return groups;
   }
 
+  /**
+   * What each HOSTILE TYPE on this grid does to a ship it fights, from the
+   * type's own dogma — the other half of `classifyTargetGroups` above, and
+   * deliberately built to the same shape: gather the typeIDs actually on grid,
+   * resolve only the ones nobody has looked up yet, hand back a per-typeID map.
+   *
+   * ⚠ IT IS A SECOND CLASSIFIER AND NOT A SECOND COPY. The group name answers
+   * "what KIND of hull is this" and cannot answer "will it hold me here":
+   * `Pithi Arrogator` and `Dire Pithi Arrogator` share a group, a faction and a
+   * size, and only attribute 504 separates the one that lets you leave from the
+   * one that does not. See nav/ratThreat.ts, which carries that whole argument.
+   *
+   * ⚠ NPC ROWS ONLY, UNLIKE `classifyTargetGroups`. Every attribute in
+   * `THREAT_ATTRIBUTE_IDS` is an ENTITY attribute — a player hull carries none
+   * of them and never will — so asking about player types would spend a round
+   * trip to cache `UNKNOWN_THREAT` under a typeID that can never say anything
+   * else. `hostileRows` is already the NPC-or-not filter the rest of this file
+   * ranks on, so this simply uses it and takes no flag.
+   *
+   * ⚠ GATED EXACTLY AS `classifyTargetGroups` IS: on hostiles being on the
+   * grid, and on nothing else. Not on a combat block, because the fight-back
+   * watch runs over whatever step is active and prioritising matters most in
+   * the moment a mining bot is jumped; and not on a macro name, because the
+   * companion has no macros at all. The cost to a mining bot with no rats in
+   * front of it is zero calls, and to one that meets a new wave it is one
+   * round trip per NEW rat type EVER SEEN — not per tick, and not per wave:
+   * the cache above is permanent for the session.
+   *
+   * ⚠ A FETCH FAILURE IS NOT CACHED AND DOES NOT STOP THE TICK. The types that
+   * did not resolve are simply left out of the returned map, the next tick asks
+   * again, and everything already known is still reported. Caching a guess
+   * would make one stumbling round trip decide a rat's classification for the
+   * rest of the session.
+   */
+  async function classifyRatThreats(
+    snapshot: ReturnType<typeof decodeSpaceSnapshot>,
+    origin: SpaceVector,
+  ): Promise<Readonly<Record<number, RatThreat>> | null> {
+    if (snapshot === null) {
+      return null;
+    }
+    const typeIDs = new Set<number>();
+    for (const row of hostileRows(snapshot, origin)) {
+      if (row.typeID !== null) {
+        typeIDs.add(row.typeID);
+      }
+    }
+    if (typeIDs.size === 0) {
+      return null;
+    }
+    const missing = [...typeIDs].filter((typeID) => !ratThreatByTypeID.has(typeID));
+    if (missing.length > 0) {
+      try {
+        const attributes = await api.fetchTypeDogma(missing, THREAT_ATTRIBUTE_IDS, callOptions);
+        for (const typeID of missing) {
+          const row = attributes[typeID];
+          // ⚠ ONLY WHAT THE ROUTE ACTUALLY ANSWERED FOR. A typeID the response
+          // omitted entirely is left uncached — `fetchTypeDogma` keeps an empty
+          // object for a type it was asked about and found nothing for, so an
+          // ABSENT key means the answer never arrived rather than "nothing
+          // there", and those two must not both become a permanent verdict.
+          if (row !== undefined) {
+            ratThreatByTypeID.set(typeID, threatFromAttributes(row));
+          }
+        }
+      } catch {
+        // Left uncached on purpose: the next tick asks again, and this tick
+        // proceeds with whatever was already known. See the ⚠ above.
+      }
+    }
+    const threats: Record<number, RatThreat> = {};
+    for (const typeID of typeIDs) {
+      const threat = ratThreatByTypeID.get(typeID);
+      // A type still missing is one whose read has not landed. It is LEFT OUT
+      // rather than filled with `UNKNOWN_THREAT`, so a reader sees "not told"
+      // as an absence and cannot mistake it for a rat that was read and found
+      // harmless.
+      if (threat !== undefined) {
+        threats[typeID] = threat;
+      }
+    }
+    return threats;
+  }
+
   function resolveSalvageModuleIDs(): readonly number[] {
     const fit = store.fitting.get();
     if (fit.slotsError !== null) {
@@ -8031,6 +8158,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     readonly hull: readonly number[];
     readonly hardeners: readonly number[];
     readonly weapons: readonly number[];
+    /**
+     * Afterburners and microwarpdrives (SDE group 46), each with the `kind` the
+     * SDE's own dogma effects supply — `resolveDefenseModuleIDs` has always
+     * filled this list, and until now only the fleet companion's fit read
+     * carried it out of there. Declared here so the SCRIPT runner can hand the
+     * same list to the same shared policy (nav/propulsion.ts) rather than a
+     * second resolution being grown beside it.
+     */
+    readonly propulsion: readonly CompanionPropulsionModule[];
   }
   interface RemoteRepModuleIDs {
     readonly shield: readonly number[];
@@ -8053,6 +8189,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      * Null when the ship does not report it; the ladder then does not gate.
      */
     readonly maxTargetRangeM: number | null;
+    /**
+     * How far the DRONES still answer, in metres (attribute 458) — the second
+     * of the stand-off band's two leashes, and NOT interchangeable with the
+     * first (see `ScriptObservation.droneControlRangeM`). It rides this cache
+     * for exactly the reason `maxTargetRangeM` does: it comes off the same fit
+     * read the module lists come off, so it costs no extra call and refreshes
+     * on the same fit-changed signature.
+     *
+     * ⚠ NULL IS EXPECTED, AND A `Stat` THAT IS NOT `known` MUST ARRIVE AS NULL
+     * RATHER THAN AS 0. Control range is skill-derived and absent from a hull's
+     * own SDE row, so this reads unknown far more often than the lock range
+     * does — which is precisely why `kiteBand` carries a fallback path and why
+     * a 0 here would be a lie the band could not recover from.
+     */
+    readonly droneControlRangeM: number | null;
+    /**
+     * Fitted weapons that take a charge and have none in them — the three-state
+     * `takesCharge && !hasCharge` pair, computed off the very fit read this
+     * cache is built from.
+     *
+     * ⚠ ITS FRESHNESS IS THE CACHE'S, AND THE CACHE RE-RESOLVES ON THE FIT
+     * SIGNATURE, WHICH DOES NOT INCLUDE THE CHARGE. So this answers "did this
+     * ship undock with an empty launcher", not "has that gun run dry in the
+     * last thirty seconds". That is the question the block asks — the ledger
+     * ends a run over a gun that was never loadable in the first place — and
+     * paying a `loadFitting` every tick to answer the sharper one is exactly
+     * the cost this file exists to refuse. The fleet companion pays for the
+     * live answer on its own slow beat (`readCompanionAmmoFacts`); if a script
+     * block ever needs that, it wants that read and not this field.
+     */
+    readonly unloadedWeaponIDs: readonly number[];
   }
 
   /** A stable fit identity: active hull + every module fact used by classifiers. */
@@ -8099,17 +8266,88 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // a late-arriving dogma snapshot does not change -- so a list classified
     // before dogma landed is the list the whole run uses.
     await loadDogma().catch(() => {});
+    // ⚠ WARMED HERE OR THE PROPULSION SPLIT SILENTLY COLLAPSES ON THE SCRIPT
+    // SIDE. `resolveMiningModuleIDs` warms `type` and `typeGroup` and nothing
+    // else, so SDE group 46 would answer "this is a prop mod" and the effect
+    // lookup in `resolveDefenseModuleIDs` would find an empty cache and hand
+    // back `kind: null` for EVERY module, on every run, for ever. The companion
+    // already warms this in `readCompanionFitFacts` (with the same ⚠); a script
+    // bot got the classifier without the warm, which is a fail-open that never
+    // once fails closed and so would never have been noticed from the outside —
+    // every prop mod would simply be treated as scram-vulnerable.
+    //
+    // Cached after the first look, like every other name kind, so this is one
+    // batched round trip per NEW module type and nothing at all on a re-resolve.
+    const warmFit = store.fitting.get();
+    if (warmFit.slotsError === null) {
+      try {
+        await resolveNamesNow(
+          warmFit.slots
+            .filter((slot) => slot.module !== null)
+            .map((slot) => ({ kind: "propulsionEffect" as const, id: slot.module!.typeID })),
+        );
+      } catch {
+        // An unresolved effect is `kind: null`, which the policy fails open on.
+      }
+    }
     const fit = store.fitting.get();
+    const defense = resolveDefenseModuleIDs();
     return {
       shipID: fit.activeShipID,
       mining,
       salvage: resolveSalvageModuleIDs(),
-      defense: resolveDefenseModuleIDs(),
+      defense,
       remoteReps: resolveRemoteRepModuleIDs(),
       maxTargetRangeM: fit.stats.targeting.maxTargetRange.known
         ? fit.stats.targeting.maxTargetRange.value
         : null,
+      // ⚠ THE UNKNOWN HALF OF THE `Stat` BECOMES `null`, NEVER 0 — see the
+      // field's own comment. `Stat` has exactly two states on purpose so that a
+      // caller cannot render a missing value as a zero, and this is the line
+      // where that discipline either holds or is thrown away.
+      droneControlRangeM: fit.stats.bays.droneControlRange.known
+        ? fit.stats.bays.droneControlRange.value
+        : null,
+      unloadedWeaponIDs: resolveUnloadedWeaponIDs(fit, defense.weapons),
     };
+  }
+
+  /**
+   * The fitted weapons that take a charge and have none loaded, off the fit
+   * slice already in hand — no call of its own.
+   *
+   * ⚠ THREE-STATE, AND ONLY AN EXPLICIT "TAKES A CHARGE" COUNTS. This is the
+   * same pair `readCompanionFitFacts` computes and it keeps the same rule:
+   * `decodeChargeFits` answers `{}` both for a module that takes no charge and
+   * for a fit whose charge data never arrived, so a MISSING fitment is "cannot
+   * say" and must not be reported as empty. Getting that backwards silences a
+   * working gun for the rest of the run, which is a far worse outcome than the
+   * refusal this list exists to avoid.
+   *
+   * The weapon set is the caller's, because nothing here can tell a turret from
+   * any other module that happens to take a charge — that answer comes from the
+   * group classifier, exactly as it does for the companion.
+   */
+  function resolveUnloadedWeaponIDs(
+    fit: ReturnType<typeof store.fitting.get>,
+    weaponModuleIDs: readonly number[],
+  ): readonly number[] {
+    if (fit.slotsError !== null || weaponModuleIDs.length === 0) {
+      return [];
+    }
+    const guns = new Set(weaponModuleIDs);
+    const empty: number[] = [];
+    for (const slot of fit.slots) {
+      const module = slot.module;
+      if (module === null || !module.online || !guns.has(module.itemID)) {
+        continue;
+      }
+      const fitment = fit.chargeFits[module.typeID];
+      if (module.charge === null && (fitment?.groups.length ?? 0) > 0) {
+        empty.push(module.itemID);
+      }
+    }
+    return empty;
   }
   // Market orders a bot places rest the retail maximum, so a resting order does
   // not quietly expire under a long-running bot.
@@ -8543,6 +8781,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           false,
           ship?.itemID ?? null,
         );
+        // The dogma half of the same question, under the same gate: what each
+        // rat type on this grid will DO to us, which no group name can say. Free
+        // on an empty grid and one round trip per NEW rat type per session --
+        // see `classifyRatThreats`, which carries the whole argument.
+        const threatByTypeID = await classifyRatThreats(snapshot, origin);
+        // ── The live jam reads. Both come off the store slice the shared
+        //    notification drain already fills, so neither costs a call and
+        //    neither is gated -- and both are answered from ONE clock read, so a
+        //    tick cannot believe a jam is live for one field and expired for the
+        //    other. Narrowing and freshness are the READER's job by design
+        //    (`isJamLive`'s own header), and this is that reader.
+        //
+        // ⚠ `jammingSourceIDs` IS EVERY JAM TYPE, NOT ONLY TACKLE. A rat that is
+        // webbing, damping or neuting this ship is naming itself on the same
+        // wire, and the drone-boat block ranks a demonstrated aggressor above
+        // any static guess about its type -- which is the whole reason this is
+        // wider than the companion's `tackledBy`.
+        //
+        // ⚠ `scrammed` IS THE NARROW ONE AND IT IS NOT `tacklersHolding`. Only
+        // `warpScramblerMWD` (the SCRAM -- the server's two names are the wrong
+        // way round) turns a microwarpdrive off; reading a disruptor as an MWD
+        // kill would strip the speed off a ship that still had it.
+        const jamNowMs = Date.now();
+        const jams = store.space.get().jams;
+        const jammingSourceIDs: number[] = [];
+        for (const jam of jams) {
+          if (isJamLive(jam, jamNowMs) && !jammingSourceIDs.includes(jam.sourceBallID)) {
+            jammingSourceIDs.push(jam.sourceBallID);
+          }
+        }
+        const scrammed = scrammedByWarpScrambler(jams, jamNowMs);
         // The fleet's called primary, for a block that asked to follow one. Every
         // failure — no fleet, no call, a stale call, a refused read — lands as
         // null, which reads as "pick for yourself" rather than as a fault: a
@@ -8683,12 +8952,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // `lowestDroneHealth` is null with no drones out (nothing to judge).
         const myShipID = snapshot?.ship?.itemID ?? null;
         const targetedByPlayer = isTargetedByPlayer(snapshot, myShipID);
+        // ⚠ ONE WALK, TWO ANSWERS, AND THE OLD ONE IS UNCHANGED. `myDrones` is
+        // the per-drone list the drone-boat block needs (it decides which drone
+        // to pull, not merely whether the rack is hurt); `lowestDroneHealth` is
+        // the fold an existing watch is armed on and it keeps its exact former
+        // behaviour, including staying null when nothing readable is out. A
+        // second pass over the same entities would be a second place for the
+        // "can this ship ORDER it" test to drift.
+        //
+        // ⚠ A DRONE WITH NO READABLE LAYER IS LISTED ANYWAY, and only skips the
+        // HEALTH fold. It is out and it can still be recalled, so leaving it off
+        // the list would hide a drone from the block that has to bring it home;
+        // counting its unreadable layers as zero would be the other, worse
+        // mistake, which is why the fold keeps skipping it.
+        const myDrones: {
+          itemID: number;
+          shieldRatio: number | null;
+          armorRatio: number | null;
+          hullRatio: number | null;
+        }[] = [];
         let lowestDroneHealth: number | null = null;
         if (snapshot !== null) {
           for (const entity of snapshot.entities) {
             if (canMyShipOrderDrone(entity, myShipID) !== true) {
               continue;
             }
+            myDrones.push({
+              itemID: entity.itemID,
+              shieldRatio: entity.shieldRatio,
+              armorRatio: entity.armorRatio,
+              hullRatio: entity.hullRatio,
+            });
             const ratios = [entity.shieldRatio, entity.armorRatio, entity.hullRatio].filter(
               (r): r is number => r !== null,
             );
@@ -8974,6 +9268,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           dryBelts,
           targetedByPlayer,
           lowestDroneHealth,
+          // ⚠ `undefined` RATHER THAN `[]` WHEN THE SNAPSHOT DID NOT READ. An
+          // empty list is a real answer ("nothing of mine is out") and a block
+          // may act on it; absent is "nobody looked", which no block may act on.
+          // The walk above cannot tell the two apart on its own -- it produces
+          // an empty array either way -- so the distinction is made here, at the
+          // one place that knows whether there was a snapshot at all.
+          myDrones: snapshot === null ? undefined : myDrones,
           cargoFraction,
           savedFittings,
           activeShipID,
@@ -9018,10 +9319,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           canTag,
           fleetBroadcast,
           targetGroupNames,
+          threatByTypeID,
           squadPrimaryTargetID,
           hardenerModuleIDs: capabilities.defense.hardeners,
           weaponModuleIDs: capabilities.defense.weapons,
           maxTargetRangeM: capabilities.maxTargetRangeM,
+          // ⚠ THE SECOND LEASH, AND IT IS NEVER THE SAME NUMBER AS THE ONE
+          // ABOVE. Lock range says how far this hull can TARGET; control range
+          // says how far the drones still ANSWER. They ride the same cache and
+          // the same fit read, which is exactly why it would be so easy to let
+          // one stand in for the other -- see nav/kiteBand.ts's header for what
+          // that costs a pilot who cannot read the second one.
+          droneControlRangeM: capabilities.droneControlRangeM,
+          // The shared policy's input (nav/propulsion.ts) -- the SAME list the
+          // fleet companion's ladder runs on, resolved once by
+          // `resolveDefenseModuleIDs` rather than a second time here.
+          propulsionModules: capabilities.defense.propulsion,
+          unloadedWeaponIDs: capabilities.unloadedWeaponIDs,
+          jammingSourceIDs,
+          scrammed,
           capacitorRatio: ship?.capacitorRatio ?? null,
           walletBalance,
           startingStationID,

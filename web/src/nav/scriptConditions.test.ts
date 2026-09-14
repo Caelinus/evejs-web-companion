@@ -203,6 +203,107 @@ test("resolveInterrupt: only ALERT rows are ever skipped — a real response kee
   assert.equal(res.kind === "fire" && res.row.id, "d");
 });
 
+// ── The drone-boat observation fields (docs/drone-boat-block-spec.md §8) ─────
+//
+// Nothing in `scriptMacros.ts` reads these yet — the block arrives in a later
+// parcel — so what there is to pin here is the CONTRACT and the INERTNESS, and
+// both are worth pinning precisely because nothing else can catch them going
+// wrong. A field renamed or retyped breaks the block that has not been written;
+// a field that quietly changed a verdict would break every bot that has.
+
+/** A drone boat mid-fight, with every one of the seven reads answered. */
+function droneBoatObs(over: Partial<ScriptObservation> = {}): ScriptObservation {
+  return obs({
+    hostileOnGrid: true,
+    droneControlRangeM: 27_500,
+    maxTargetRangeM: 37_000,
+    threatByTypeID: {
+      // The pair from nav/ratThreat.ts's header: same family, same size, and
+      // only the dogma separates the one that will hold the ship on the field.
+      1001: { scram: true, scramRangeM: 20_000, web: true, ewar: false },
+      1002: { scram: false, scramRangeM: null, web: false, ewar: false },
+    },
+    jammingSourceIDs: [900_100, 900_101],
+    myDrones: [
+      { itemID: 700_001, shieldRatio: 1, armorRatio: 1, hullRatio: 1 },
+      { itemID: 700_002, shieldRatio: 0.1, armorRatio: null, hullRatio: null },
+    ],
+    unloadedWeaponIDs: [800_001],
+    propulsionModules: [{ itemID: 800_500, typeID: 12_056, kind: "microwarpdrive" }],
+    scrammed: true,
+    ...over,
+  });
+}
+
+test("the drone-boat reads are all optional: an observation without one of them is legal", () => {
+  // The type is built in two places and the pure tests build it by hand, so the
+  // minimal observation above must stay constructible — this test compiles or
+  // it does not, and that is the assertion.
+  const bare = obs();
+  assert.equal(bare.droneControlRangeM, undefined);
+  assert.equal(bare.threatByTypeID, undefined);
+  assert.equal(bare.jammingSourceIDs, undefined);
+  assert.equal(bare.myDrones, undefined);
+  assert.equal(bare.unloadedWeaponIDs, undefined);
+  assert.equal(bare.propulsionModules, undefined);
+  assert.equal(bare.scrammed, undefined);
+});
+
+test("the drone-boat reads decide NOTHING yet — every verdict is what it was without them", () => {
+  // ⚠ THE POINT OF THIS TEST. Adding fields to the observation must not move a
+  // single existing verdict; a decider that started reading one of these
+  // without being asked would show up here and nowhere else.
+  const calm = { hostileOnGrid: false, health: 1, shieldRatio: 1 } as const;
+  assert.equal(resolveInterrupt([floor], droneBoatObs(calm)).kind, "none");
+  assert.equal(resolveInterrupt([floor], obs(calm)).kind, "none");
+  // The acute rule is unchanged too: a pirate plus unreadable health still
+  // pauses, however much the drone boat can say about the rest of the grid.
+  const blind = resolveInterrupt([floor], droneBoatObs({ health: null }));
+  assert.equal(blind.kind, "safety-override");
+  // And a readable ship next to the same pirate still does not pause.
+  assert.equal(resolveInterrupt([floor], droneBoatObs({ health: 1 })).kind, "none");
+  // The drone-health watch keeps reading `lowestDroneHealth` and NOT `myDrones`:
+  // the per-drone list carries a drone at 0.1 and the fold is deliberately not
+  // set here, so a watch that had started folding it itself would fire.
+  const hurt = { kind: "drone-health-below", fraction: 0.5 } as const;
+  assert.equal(evaluateCondition(hurt, droneBoatObs({ health: 1 })), "cannot-tell");
+});
+
+test("a type missing from threatByTypeID is ABSENT, not a harmless rat", () => {
+  // The permanent per-type cache in flow.ts leaves a failed fetch UNCACHED, so
+  // "not told" has to arrive as a missing key. It must never be filled with
+  // UNKNOWN_THREAT, which reads as a rat that was looked at and found safe.
+  const threats = droneBoatObs().threatByTypeID;
+  assert.ok(threats !== null && threats !== undefined);
+  assert.equal(threats[9999], undefined, "an unfetched type is absent, never a verdict");
+  assert.equal(threats[1001]?.scram, true);
+  assert.equal(threats[1002]?.scram, false, "a read that says 'no scram' IS a verdict");
+});
+
+test("the two leashes are separate fields and neither stands in for the other", () => {
+  // ⚠ THE MISTAKE THIS PINS was made once already (see nav/kiteBand.ts): the
+  // drone leash is usually unreadable and the lock leash usually is not, so a
+  // collapse of the two is invisible except on a fit that reports both.
+  const both = droneBoatObs();
+  assert.equal(both.droneControlRangeM, 27_500);
+  assert.equal(both.maxTargetRangeM, 37_000);
+  // The ordinary case: control range unknown, lock range fine. Unknown must
+  // arrive as null and never as 0 — a 0 would say "the drones answer nowhere".
+  const usual = droneBoatObs({ droneControlRangeM: null });
+  assert.equal(usual.droneControlRangeM, null);
+  assert.notEqual(usual.droneControlRangeM, 0);
+  assert.equal(usual.maxTargetRangeM, 37_000, "the lock leash must not have moved");
+});
+
+test("scrammed is three-state and the jam list is every jam, not just tackle", () => {
+  assert.equal(droneBoatObs().scrammed, true);
+  assert.equal(droneBoatObs({ scrammed: false }).scrammed, false, "read, and clear");
+  assert.equal(droneBoatObs({ scrammed: null }).scrammed, null, "nobody looked");
+  // An array, matching lockedTargetIDs — the consumer builds its own Set.
+  assert.ok(Array.isArray(droneBoatObs().jammingSourceIDs));
+  assert.deepEqual(droneBoatObs({ jammingSourceIDs: [] }).jammingSourceIDs, [], "a real 'nothing on us'");
+});
+
 test("releaseSpentAlerts: released when the check passes, kept while it holds or is blind", () => {
   const alertRow: InterruptRow = { id: "a", when: { kind: "shield-below", fraction: 0.6 }, respond: "alert" };
   assert.deepEqual(releaseSpentAlerts([alertRow], obs({ shieldRatio: 1 }), ["a"]), [], "recovered - re-arm");
