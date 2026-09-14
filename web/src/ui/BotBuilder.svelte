@@ -53,8 +53,17 @@
     toEditorState,
     toScript,
     hasSubBot as planHasSubBot,
+    type EditorState,
     type RepeatMode,
   } from "../bots/editorDoc.ts";
+  import {
+    builderTarget,
+    decideHandoff,
+    noteLibraryChanged,
+    waitingSentence,
+    wantedLabel,
+    type BuilderRequest,
+  } from "../bots/builderTarget.ts";
   import {
     CONDITION_NOUN_LABEL,
     WATCH_CONDITION_KINDS,
@@ -86,7 +95,6 @@
   import { decodeScriptText, decodeScriptValue, encodeScriptDoc } from "../bots/scriptCodec.ts";
   import {
     createBotScript,
-    deleteBotScript,
     getBotScript,
     listBotScripts,
     updateBotScript,
@@ -178,10 +186,30 @@
   let insertNote = $state<string | null>(null);
   let saveConflict = $state<string | null>(null);
 
+  // The saved bots are still read here, but ONLY to fill the two pickers that
+  // compose one bot out of another (the by-value step insert, and the sub-bot
+  // node's chooser). The library itself — every saved bot, with Edit, Export
+  // and Delete — belongs to the Bot Manager, which is the window that lists
+  // them; a second list here with a Load button beside every row is what made
+  // the Manager's own Edit button unable to open anything.
   let savedList = $state<BotScriptSummary[]>([]);
   let currentSavedId = $state<string | null>(null);
   let currentRev = $state(0);
   let libraryError = $state<string | null>(null);
+  /**
+   * The name of the saved bot being edited, or null when this draft has never
+   * been saved.
+   *
+   * ⚠ IT FALLS BACK TO THE NAME FIELD, because the list is not what says a bot
+   * is open — `currentSavedId` is. The library read can be in flight, can have
+   * failed, and does not yet hold a row this pilot's other tab saved a second
+   * ago; reading "New bot" off a missing row would say the flatly wrong thing
+   * about a bot that Save is about to overwrite.
+   */
+  const openedName = $derived(
+    currentSavedId === null ? null : (savedList.find((meta) => meta.scriptID === currentSavedId)?.name ?? name),
+  );
+
 
   const pickerCategories = categoriesInUse();
 
@@ -206,6 +234,19 @@
   // The header badge counts what a player has to go and fix; Save reads
   // `hasBlocking`. An advisory is in neither — it never stops a save.
   const blockingCount = $derived(problems.filter((p) => p.severity === "blocking").length);
+
+  // ── Has this draft been changed since it was last loaded or saved? ──────────
+  //
+  // ⚠ IT IS COMPARED, NOT FLAGGED. A boolean set by every edit path is a
+  // boolean that one edit path forgets to set, and the cost of it being wrong
+  // here is a player's unsaved bot silently replaced when the Bot Manager asks
+  // for another one. The document already has one canonical text form
+  // (`encodeScriptDoc` — the same form Export writes and a saved record holds),
+  // so "changed" is that text differing from what was last loaded or saved,
+  // which also makes a change typed and then undone by hand honestly not a
+  // change.
+  let baselineText = $state(encodeScriptDoc(buildScript()));
+  const dirty = $derived(encodeScriptDoc(builtDoc) !== baselineText);
 
   // The rows of "the plan". A preserved advanced program renders its real
   // structure — loop headers and branch sides — rather than a flattened guess.
@@ -680,7 +721,10 @@
    * loop, or something the flat list cannot hold — is `toEditorState`'s call,
    * and it is tested there. */
   function loadFrom(doc: BotScript): void {
-    const state = toEditorState(doc);
+    applyState(toEditorState(doc));
+  }
+  /** Put an editor state on the bench — the one way anything gets opened. */
+  function applyState(state: EditorState): void {
     name = state.name;
     notes = state.notes;
     home = state.home;
@@ -694,6 +738,14 @@
     selection = null;
     menuFor = null;
     saveConflict = null;
+    // ⚠ THE ONE PLACE THE BASELINE IS SET ON THE WAY IN — every opener (a saved
+    // bot, a pasted one, an example, the post-conflict reload) goes through
+    // here, so none of them can leave the draft looking changed the moment it
+    // appears. It is taken from `buildScript()` and not from `doc`, because a
+    // document that round-trips through the editor's own state is the thing
+    // later comparisons are against; encoding `doc` instead would make any
+    // normalisation the editor applies read as an unsaved edit.
+    baselineText = encodeScriptDoc(buildScript());
   }
 
   // ── The saved-bot library (platform-wide, on the web server) ────────────────
@@ -712,6 +764,11 @@
   }
   async function saveBot(): Promise<void> {
     saveConflict = null;
+    // ⚠ WHAT WAS SENT, CAPTURED BEFORE THE AWAIT. The baseline says "this text
+    // is on the server now", and a player can type while the request is in
+    // flight; taking the text afterwards would count those keystrokes as saved
+    // and let a handoff discard them.
+    const sent = encodeScriptDoc(builtDoc);
     try {
       if (currentSavedId !== null) {
         const { rev } = await updateBotScript(currentSavedId, builtDoc, currentRev, botOpts());
@@ -723,6 +780,10 @@
         currentRev = rev;
         importNote = `Saved "${name}".`;
       }
+      baselineText = sent;
+      // The Bot Manager's library is the list this bot just joined or changed,
+      // and it does not poll — see builderTarget.ts.
+      noteLibraryChanged();
       await refreshSaved();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not save.";
@@ -769,22 +830,99 @@
       loadFrom(decoded.doc);
       currentSavedId = record.scriptID;
       currentRev = record.rev;
-      importNote = "Loaded a saved bot.";
+      // It names the bot. The window this opens in is titled "Bot Builder" and
+      // may have been showing a different bot a moment ago, so "Loaded a saved
+      // bot" left the one question a player actually has — which one? —
+      // unanswered on a screen that had just changed underneath them.
+      importNote = `Editing “${decoded.doc.name}”.`;
     } catch {
       importNote = "Could not load that bot.";
     }
   }
-  async function deleteSaved(id: string): Promise<void> {
-    try {
-      await deleteBotScript(id, botOpts());
-      if (currentSavedId === id) {
-        currentSavedId = null;
-        currentRev = 0;
-      }
-      await refreshSaved();
-    } catch {
-      importNote = "Could not delete that bot.";
+
+  // ── The Bot Manager's Edit / New bot button ─────────────────────────────────
+  //
+  // The library, and every action on it, belongs to the Manager; this is the
+  // end of the wire that carries WHICH bot (bots/builderTarget.ts). The
+  // decision is pure and tested there — load it, ignore it (it is already the
+  // one open), or wait because the draft here has unsaved changes that opening
+  // it would destroy.
+  //
+  // ⚠ IT DEPENDS ON `dirty` ON PURPOSE, AND THAT IS THE WHOLE PROTOCOL. A
+  // waiting request is not a dialog holding the app hostage: it stays pending
+  // while the player deals with what is in the way, and because this effect
+  // re-reads `dirty`, pressing Save — which makes the draft clean — completes
+  // the handoff by itself, with no second button to find. Discard does the same
+  // by other means. Nothing else in here is blocked in the meantime.
+  const builderRequest = builderTarget.pending;
+  /** The request being held off, so the panel can say so and offer the exits. */
+  let waitingFor = $state<BuilderRequest | null>(null);
+  const waitingText = $derived.by(() => {
+    const request = waitingFor;
+    if (request === null) return null;
+    const wanted = savedList.find((meta) => meta.scriptID === request.scriptID)?.name ?? null;
+    return waitingSentence(name, wantedLabel(request.scriptID, wanted));
+  });
+  $effect(() => {
+    const request = $builderRequest;
+    if (request === null) {
+      waitingFor = null;
+      return;
     }
+    const decision = decideHandoff(request, { currentID: currentSavedId, dirty });
+    if (decision.kind === "wait") {
+      waitingFor = request;
+      return;
+    }
+    // Taken off the queue BEFORE the read below, never after: an unserved
+    // request is replayed on the next mount, and the mounts here are not rare
+    // (putting the window away unmounts it).
+    waitingFor = null;
+    builderTarget.served(request.n);
+    if (decision.kind === "ignore") {
+      return;
+    }
+    if (decision.scriptID === null) {
+      startNewBot();
+    } else {
+      void loadSaved(decision.scriptID);
+    }
+  });
+
+  /** Clear the bench: a bot that does not exist yet — the same starting
+   * document a freshly opened builder shows. */
+  function startNewBot(): void {
+    applyState(newEditorState());
+    currentSavedId = null;
+    currentRev = 0;
+    importNote = "Started a new bot. Give it a name, build its plan, then Save.";
+  }
+
+  /**
+   * Give up the unsaved changes and serve the waiting request.
+   *
+   * The only button in here that destroys work, so it says what is lost rather
+   * than "OK" — and it is the second of two exits, beside a Save that is
+   * always in reach in the strip above.
+   */
+  function discardAndOpen(): void {
+    const request = waitingFor;
+    if (request === null) return;
+    waitingFor = null;
+    builderTarget.served(request.n);
+    if (request.scriptID === null) {
+      startNewBot();
+    } else {
+      void loadSaved(request.scriptID);
+    }
+  }
+
+  /** Stay where you are: the request is dropped and the draft is untouched. */
+  function keepEditing(): void {
+    const request = waitingFor;
+    if (request === null) return;
+    waitingFor = null;
+    builderTarget.served(request.n);
   }
   /**
    * Copy another saved bot's steps onto the end of this one — a BY-VALUE
@@ -902,7 +1040,16 @@
 <section class="panel">
   <header class="panel-head">
     <h2 class="panel-title">Bot builder</h2>
+    <!-- ⚠ WHICH BOT, IN THE STRIP. This window is opened from the Bot Manager's
+         Edit button and its title bar says only "Bot Builder", so without this
+         the one thing a player has just asserted — WHICH bot — is nowhere on
+         screen except pre-filled in a text field that looks like any other.
+         "New bot" is said out loud for the same reason: it is the difference
+         between writing a new bot and overwriting a saved one, and Save cannot
+         ask which was meant. -->
     <p class="stat-line">
+      <span class="badge">{openedName === null ? "New bot" : `Editing “${openedName}”`}</span>
+      {#if dirty}<span class="badge warn">Unsaved changes</span>{/if}
       {#if blockingCount === 0}
         <span class="badge good">Ready</span>
       {:else}
@@ -958,6 +1105,22 @@
         <div class="controls">
           <button type="button" onclick={reloadAfterConflict}>Reload the saved one</button>
           <button type="button" class="primary" onclick={saveAsCopy}>Save mine as a copy</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if waitingFor !== null}
+      <!-- ⚠ A CONDITION AND A WAY OUT, NOT A MODAL. The Bot Manager asked for
+           another bot while this one has unsaved changes. Nothing here is
+           blocked: Save is in the strip above and finishes the handoff by
+           itself the moment the draft is clean, and the two buttons are the
+           other two answers. A dialog would have had to be answered before the
+           player could even look at what they were about to lose. -->
+      <div class="save-conflict">
+        <p class="note error">{waitingText}</p>
+        <div class="controls">
+          <button type="button" onclick={keepEditing}>Keep editing this one</button>
+          <button type="button" class="danger" onclick={discardAndOpen}>Discard my changes and open it</button>
         </div>
       </div>
     {/if}
@@ -1235,47 +1398,16 @@
     {#if insertNote !== null}<p class="note">{insertNote}</p>{/if}
   </section>
 
-  <!-- ─── The shared library ───────────────────────────────────────────────── -->
-  <section class="panel">
-    <header class="panel-head">
-      <h2>Saved bots</h2>
-    </header>
-    <p class="note">
-      Kept on the server and shared by every account — anyone here can load, edit or delete a bot saved here.
-    </p>
-    {#if libraryError !== null}
-      <p class="note error">{libraryError}</p>
-    {:else if savedList.length === 0}
-      <p class="empty">No saved bots yet. Press Save above to keep one.</p>
-    {:else}
-      <div class="table-wrap overflow-x-auto">
-        <table class="guests reflow">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each savedList as meta (meta.scriptID)}
-              <tr>
-                <td data-label="Name">
-                  {meta.name}
-                  {#if meta.scriptID === currentSavedId}<span class="badge accent">open</span>{/if}
-                </td>
-                <td data-label="Actions">
-                  <span class="row-actions">
-                    <button type="button" onclick={() => loadSaved(meta.scriptID)}>Load</button>
-                    <button type="button" class="danger" onclick={() => deleteSaved(meta.scriptID)}>Delete</button>
-                  </span>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-  </section>
+  <!-- ⚠ THE LIBRARY IS NOT HERE ANY MORE, AND ITS ABSENCE IS THE FEATURE. A
+       "Saved bots" table with Load and Delete on every row used to sit at this
+       point in the window — a second copy of the Bot Manager's own library,
+       one window away from it. It was not a duplicate by accident: the
+       Manager's Edit button could only open this window and not tell it which
+       bot, so finding the bot again in THIS list was the only way to actually
+       edit it. Now Edit brings the bot with it, and one window lists the bots
+       while the other edits one. The two pickers above stay, because they are
+       not the library: they compose one bot out of another, and neither can
+       open, rename or delete anything. -->
 
   <!-- ─── Import / export ──────────────────────────────────────────────────── -->
   <section class="panel">

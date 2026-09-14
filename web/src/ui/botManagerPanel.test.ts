@@ -196,3 +196,18 @@ test("the empty library points at the button, not at a launcher entry that is go
   assert.doesNotMatch(empty[0], /in the Bot Builder/i);
   assert.match(empty[0], /New bot/);
 });
+
+test("Edit opens the builder ON THAT ROW'S BOT, and New bot says it is new", () => {
+  // ⚠ THE BUG THIS PINS IS THE WHOLE FEATURE. `edit` used to open the builder's
+  // window and drop the script id on the floor, so the builder appeared showing
+  // whatever it had last — and the bot whose Edit button had just been pressed
+  // had to be found AGAIN in a second copy of this library that the builder
+  // carried for exactly that reason. Opening the window is only half the
+  // button; which bot is the other half.
+  const source = readFileSync(new URL("./BotManager.svelte", import.meta.url), "utf8");
+  assert.match(source, /editInBuilder\(scriptID\)/, "Edit no longer names the bot it was pressed on");
+  assert.match(source, /newInBuilder\(\)/, "New bot no longer asks for a NEW bot");
+  // A discarded parameter is how the old bug read in the source, and it is
+  // exactly what would come back if someone re-wired this by hand.
+  assert.doesNotMatch(source, /function edit\(_scriptID/, "Edit is ignoring its argument again");
+});

@@ -117,7 +117,7 @@ test("still has a name field and a notes field, so documentation is not discarde
   assert.ok(body.includes('id="bot-notes"'), "no notes field rendered");
 });
 
-test("keeps the examples, the shared library, the by-value insert and the import box", () => {
+test("keeps the examples, the by-value insert and the import box", () => {
   const text = visibleText(renderPanel());
   for (const label of ["Mining day", "Fleet medic", "Anomaly expedition", "Operations closeout"]) {
     assert.ok(text.includes(label), `${label} example is missing`);
@@ -131,10 +131,43 @@ test("keeps the examples, the shared library, the by-value insert and the import
   // phrase, so a future rewording has to actually drop the FACT to fail.
   assert.match(text, /copies the steps once/i, "the by-value insert no longer says it copies rather than links");
   assert.match(text, /will not change this one/i, "the by-value insert no longer says the copy stops tracking");
-  assert.match(text, /Saved bots/);
   assert.match(text, /Import or export/);
-  // onMount does not run under SSR, so both library lists start empty and say so.
+  // onMount does not run under SSR, so the picker's list starts empty and says so.
   assert.match(text, /No saved bots yet/);
+});
+
+// ⚠ THE LIBRARY BELONGS TO THE BOT MANAGER, AND ONLY TO IT. This window used
+// to carry a second "Saved bots" table with Load and Delete on every row —
+// which existed because the Manager's Edit button could open this window but
+// not tell it which bot, so a player who pressed Edit had to find the same bot
+// again HERE. Edit now brings the bot with it (bots/builderTarget.ts), and a
+// list of every saved bot in the editor is the disconnect coming back.
+test("the builder does not list the library, and offers no Load or Delete on one", () => {
+  const body = renderPanel();
+  const text = visibleText(body);
+  // "Load from box" is the IMPORT box and stays; a bare Load is a library row.
+  assert.doesNotMatch(body, />\s*Load\s*</, "a per-row Load button is back in the builder");
+  assert.doesNotMatch(text, /shared by every account/i, "the library blurb is back in the builder");
+  const source = readFileSync(new URL("./BotBuilder.svelte", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /deleteBotScript/, "the builder can delete from the library again");
+});
+
+// The two pickers that remain are NOT the library: neither opens, renames or
+// deletes anything. They compose one bot out of another, which is the editor's
+// own business.
+test("composing one bot out of another stays here", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /Insert steps from a saved bot/);
+  assert.match(text, /\+ Saved bot/, "the sub-bot block is gone from the picker");
+});
+
+// The window's title bar says "Bot Builder" and nothing else, so the strip is
+// the only place the answer to "which bot am I editing?" can appear — and a
+// fresh builder is editing none.
+test("the strip says which bot is open", () => {
+  const text = visibleText(renderPanel());
+  assert.match(text, /New bot/, "a builder holding no saved bot does not say so");
+  assert.doesNotMatch(text, /Unsaved changes/, "an untouched draft claims to have unsaved changes");
 });
 
 test("renders against an empty store without throwing (R18)", () => {
