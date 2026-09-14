@@ -42,6 +42,17 @@ import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
+import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
+import {
+  decodeLedger,
+  describeVerdict,
+  encodeLedger,
+  enterSite,
+  isAbandoned,
+  observeTick,
+  type SiteLedger,
+  type SiteVerdict,
+} from "./siteProgress.ts";
 
 const WAIT = { kind: "wait" } as const;
 const ACTING = { kind: "acting" } as const;
@@ -2156,6 +2167,90 @@ const hardenersOn: MacroDecider = (_step, obs, mem) => {
   );
 };
 
+// ── the site ledger, on the board (docs/drone-boat-block-spec.md §13) ────────
+//
+// The loop these two helpers close: the bot warps into a den it cannot beat,
+// fights until a watch pulls it home, repairs PERFECTLY, comes back to the same
+// den, and does it again until somebody notices. `MAX_RECOVER_TRIPS` cannot see
+// it — `releaseRecoverTrips` drops the whole tally the moment the watched
+// condition reads not-met, so a repair that WORKS resets the cap, and every one
+// of these repairs works. The ship is fine every time. The site is the problem.
+//
+// The arithmetic all lives in nav/siteProgress.ts and none of it is repeated
+// here: this file only FEEDS it (what the fight block saw this tick) and OBEYS
+// it (leave, and stop touring the label). Two blocks talk to it — `fight-the-
+// rats` writes the verdict, `warp-to-anomaly` acts on it — and they talk over
+// the RUN BOARD, which is the channel they already share for `anomsVisited`.
+//
+// ⚠ NONE OF IT MAY LIVE IN STEP MEMORY. Step memory is wiped every time a step
+// is left, so a per-visit budget hands every failing site a fresh allowance on
+// every lap; this codebase has already paid for that lesson once (the note above
+// `MacroMemory`: 227 consecutive refusals in bursts of five). "This site has been
+// beating me" is the same shape as "this object has been refusing me" and belongs
+// in the same place.
+
+/**
+ * The board patch that carries a changed ledger, or null when nothing moved.
+ *
+ * `encodeLedger` is documented as an ALL-KEYS patch, so this is a whole-ledger
+ * write or nothing at all — never a partial one, which would leave last site's
+ * primary id on the board next to this site's baseline. The null case exists so
+ * a block that decided nothing this tick (in warp, waiting on a lock) does not
+ * publish a board write per tick for the readout to churn through.
+ */
+/**
+ * A visit that ENDED IN SUCCESS: drop everything the ledger was holding against
+ * this label.
+ *
+ * ⚠ THE COUNT IS CONSECUTIVE BAD VISITS, NOT ARRIVALS, AND THE DIFFERENCE IS THE
+ * WHOLE FEATURE. §13's words for what is being counted are "the same site keeps
+ * SENDING US HOME" — and arrivals and send-homes differ in exactly one case,
+ * which happens to be the case a working bot spends all of its time in: a visit
+ * that ended with the den CLEARED. Counting arrivals retires a den the bot is
+ * successfully farming after two clears, which is a bot that stops working for
+ * the mirror image of the reason the unfixed bug makes a bot never stop.
+ *
+ * Arriving somewhere for the third time is not evidence of anything. Being
+ * driven off it for the third time IN A ROW is. So a clear zeroes the tally and
+ * the next visit starts from one.
+ *
+ * ⚠ DO NOT REST THIS ON "a cleared anomaly despawns and comes back under a new
+ * label". That is retail behaviour; this is an emulator whose anomaly respawn is
+ * its own code and nobody in this tree has verified it. The correctness of a
+ * ratting bot not quietly retiring the only den in its system must not depend on
+ * a respawn detail — so the ledger is made to say the right thing directly.
+ *
+ * The per-primary tracking goes with it (baseline, stall counter, grid count): a
+ * cleared grid ends the visit clean, and carrying a spent stall counter out of a
+ * fight that was WON is how the next fight — a belt spawn with no scan label to
+ * reset it, say — would inherit a verdict it never earned.
+ *
+ * Nothing here re-implements siteProgress.ts: `SiteLedger` is plain data that
+ * module exports, and this is one row leaving a list.
+ */
+function forgetSite(ledger: SiteLedger, label: string | null): SiteLedger {
+  const sites = label === null ? ledger.sites : ledger.sites.filter((row) => row.label !== label);
+  return {
+    ...ledger,
+    primaryID: null,
+    bestHealth: null,
+    stallTicks: 0,
+    hostiles: null,
+    sites,
+  };
+}
+
+function ledgerPatch(before: SiteLedger, after: SiteLedger): ScriptBoard | null {
+  const next = encodeLedger(after);
+  const prev = encodeLedger(before);
+  for (const key of Object.keys(next)) {
+    if (prev[key] !== next[key]) {
+      return next;
+    }
+  }
+  return null;
+}
+
 // ── fight-the-rats ───────────────────────────────────────────────────────────
 /**
  * The hostiles this ship can actually shoot at: nearest first, and — when the
@@ -2183,7 +2278,7 @@ function hostilesInReach(obs: ScriptObservation, snapshot: SpaceSnapshot, origin
 // one is picked. Done when the grid is clear AND the drones are back aboard.
 // Players on grid are FRIENDLY in this world (operator decision) — only NPC
 // hostiles (hostileRows) are ever engaged.
-const fightTheRats: MacroDecider = (step, obs, mem) => {
+const fightTheRats: MacroDecider = (step, obs, mem, board) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Fighting", ACTING, false, mem);
@@ -2197,6 +2292,164 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
 
   const role = squadRoleOf(step);
 
+  // ── §13: is this site worth another minute? ────────────────────────────────
+  //
+  // Read the ledger off the board, hand it what this tick saw, publish it back
+  // if anything moved. The verdict is computed BEFORE the ladder runs and from
+  // the state the ladder is standing in at the top of the tick (the primary the
+  // LAST tick's orders were aimed at), so every rung below is judged by what it
+  // actually achieved rather than by what it is about to order.
+  //
+  // WHICH SITE THIS IS comes off the board too, and this block never guesses it:
+  // `warp-to-anomaly` publishes the label on the tick it commits to a site (it
+  // is the only block that KNOWS an arrival happened, having issued the warp),
+  // and the ledger carries it here. A fight that is not at a scanned site at all
+  // — a belt spawn, a gate camp, a mission pocket — has a null label, which is
+  // a case siteProgress.ts already handles: the stall counter still runs, there
+  // is simply no per-site count to keep and nothing for the tour to skip.
+  //
+  // ⚠ THE LABEL IS ONLY EVER REPLACED BY `warp-to-anomaly`, so a script that
+  // flies to a den, fights, and then fights somewhere else WITHOUT an anomaly
+  // block in between carries the den's label to the second fight. The cost is
+  // bounded and lands in the safe direction — at worst one stall is booked
+  // against a label the ship has genuinely been beaten at before — and the
+  // alternative (this block inventing a label from the grid) is the guess §13
+  // spends its length arguing against.
+  const ledger = decodeLedger(board);
+  const verdict = observeTick(ledger, fightEvidence(obs, mem, hostiles, roster, ledger.siteLabel));
+
+  // ⚠ A CLEARED GRID IS A SUCCESS AND WIPES THIS LABEL'S TALLY. `hostiles` being
+  // empty is the ladder's own definition of having finished a site (its very
+  // first rung, below), and an empty grid is the strongest evidence obtainable
+  // that the den was winnable after all — so it outranks anything the ledger was
+  // about to say, including a stall whose budget ran out on this very tick.
+  //
+  // It wins twice over, deliberately, because either alone would be enough:
+  // siteProgress reads the hostile count going down as PROGRESS and clears the
+  // stall itself, and the ladder checks "grid clear" before it checks the
+  // verdict, so the block finishes with "The grid is clear." and never with a
+  // leaving sentence. The give-up path is not this path and never resets
+  // anything — that is the difference between "I won" and "I left".
+  //
+  // The one soft edge, noted rather than papered over: `hostilesInReach` drops
+  // rows past the hull's targeting range, so a grid whose rats are all parked at
+  // 300 km reads as clear here. That is already how this block FINISHES today —
+  // out of range reads as an empty grid — and a visit that ends without a shot
+  // fired is not a visit that should count against the den either.
+  const after = hostiles.length === 0 ? forgetSite(verdict.ledger, verdict.ledger.siteLabel) : verdict.ledger;
+  const patch = ledgerPatch(ledger, after);
+  const decided = fightRatsLadder(step, obs, mem, snapshot, hostiles, roster, role, verdict);
+  return patch === null ? decided : withBoardPatch(decided, patch);
+};
+
+/**
+ * ⚠ IS `fight-the-rats` ACTUALLY APPLYING DAMAGE RIGHT NOW? — the one input
+ * nav/siteProgress.ts refuses to compute for itself, and the single thing in
+ * this parcel most likely to be got wrong.
+ *
+ * The dangerous version of this feature blames the SITE for faults at OUR end:
+ * drones sitting in the bay, drones ordered on nothing, a lock that never
+ * landed, a rat parked outside the drone leash, guns chattering with an empty
+ * bay. Every one of those reads as "nothing is dying" and NOT ONE of them means
+ * the den is unwinnable — the honest answer to each is to fix the fit or the
+ * position. A stall counter that ticked through them would throw away good
+ * anomalies AND hide the real bug behind a plausible verdict, because a pilot
+ * told "this den is too hard" never goes looking for the drones that were 40 km
+ * out doing nothing.
+ *
+ * So every rung below is a rung this block can positively SEE, and every one of
+ * them must hold:
+ *
+ *   1. There is a primary we have been holding (step memory's `targetID`) and it
+ *      is STILL on the reachable grid — `hostiles` is already gated by the
+ *      hull's targeting range where that reads, so a row that survives it is a
+ *      row the ship can lock. A target that died or drifted out leaves here.
+ *   2. This block's own COMBAT drones are out. `roleOut` and not `out`: a flight
+ *      of salvage drones is not damage.
+ *   3. They were ordered onto THIS primary (`dronesOn`), not onto the last one.
+ *      The tick that issues `engageDrones` therefore does NOT count — it has
+ *      ordered damage, not applied any — and nor does the tick after a target
+ *      switch, which clears `dronesOn` on its way past.
+ *   4. The primary is LOCKED. Waiting on a lock is our problem and not the
+ *      site's, and §13 names it explicitly.
+ *   5. The primary is inside the DRONE leash, which is a different and usually
+ *      shorter leash than the lock range in rung 1 (see nav/kiteBand.ts, which
+ *      records what substituting one for the other cost). `fight-the-rats` has
+ *      NO range control at all — it never repositions — so a rat that lands at
+ *      the far edge of lock range simply sits there out of reach of the drones,
+ *      which is exactly the "no damage that is our own fault" case.
+ *
+ * ⚠ AN UNREADABLE DRONE LEASH FALLS BACK TO THE 20 km NO-SKILLS BASE, NOT TO
+ * INFINITY. Control range is skill-derived and rides a fitting read a bot run
+ * does not force, so null is the COMMON case and reading it as "no limit" would
+ * count every long-range tick as damage going in. Guessing LOW is the cheap half
+ * of being wrong here in the same way it is in `kiteBand`: an assumed-short leash
+ * only ever refuses to count ticks, so the stall fires late or not at all, which
+ * costs the player minutes. Guessing high costs them the anomaly AND the
+ * diagnosis. When in doubt, false.
+ *
+ * Guns are deliberately not a rung of their own: a gun boat with no drones
+ * reports `false` on every tick and never accrues a stall. That is the
+ * conservative reading and it is on purpose — this block cannot see a turret's
+ * optimal, its falloff, its tracking or whether the charge bay is empty, so the
+ * only honest thing it could say about a gun is "I pressed the button".
+ */
+function fightEvidence(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  hostiles: readonly OverviewRow[],
+  roster: DroneRoster,
+  siteLabel: string | null,
+) {
+  const held = num(mem, "targetID");
+  const primary = held === null ? undefined : hostiles.find((row) => row.itemID === held);
+  const leashM = obs.droneControlRangeM ?? FALLBACK_CONTROL_RANGE_M;
+  const applying =
+    held !== null &&
+    primary !== undefined &&
+    roster.roleOut.length > 0 &&
+    num(mem, "dronesOn") === held &&
+    (obs.lockedTargetIDs ?? []).includes(held) &&
+    primary.distance <= leashM;
+  return {
+    applying,
+    // The health rows are facts about the RAT and are handed over whether or not
+    // we are applying — the ledger keeps the lowest reading ever seen, and a
+    // reading taken while the drones were flying home is still a reading.
+    primaryID: primary?.itemID ?? null,
+    primaryShieldRatio: primary?.shieldRatio ?? null,
+    primaryArmorRatio: primary?.armorRatio ?? null,
+    primaryHullRatio: primary?.hullRatio ?? null,
+    // ⚠ THE COUNT IS THE IN-REACH COUNT, and that is safe in exactly one
+    // direction. `hostilesInReach` drops rows beyond the hull's targeting range,
+    // so this can UNDERSTATE the grid — and an understatement can only ever look
+    // like a hostile LEAVING, which the ledger reads as progress and which
+    // RESETS the stall counter. It can never manufacture a stall. The reverse
+    // (a fresh wave landing) only moves the baseline, which is the same thing
+    // the true count would have done.
+    hostileCount: hostiles.length,
+    siteLabel,
+  };
+}
+
+/**
+ * The ladder itself — unchanged from the day it shipped, save for the one new
+ * rung that leaves a site the ledger has given up on.
+ *
+ * It is a separate function only so the caller can wrap whatever it decides in
+ * the ledger's board patch without every rung below having to know the ledger
+ * exists.
+ */
+function fightRatsLadder(
+  step: MacroStep,
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  snapshot: SpaceSnapshot,
+  hostiles: readonly OverviewRow[],
+  roster: DroneRoster,
+  role: SquadRoleArg,
+  verdict: SiteVerdict,
+): MacroTick {
   if (hostiles.length === 0) {
     // Stand the fleet's call down BEFORE leaving: a call outlives the ship it
     // named for as long as its ttl, and a follower obeying one is a follower
@@ -2217,6 +2470,35 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
       kind: "blocked",
       reason: "This ship has no guns fitted and no combat drones in the bay.",
     });
+  }
+
+  // ── §13: the site has been given up on ─────────────────────────────────────
+  //
+  // Nothing here was dying while the drones were on it, or this label has sent
+  // the bot home its allowance of times. Either way the fight is over: leave the
+  // way a CLEARED grid leaves — call down, drones home, `done`.
+  //
+  // ⚠ `done`, NEVER `blocked`. This is a verdict about ONE site and not about
+  // the run: pausing here would strand a bot that has another five perfectly
+  // good dens on the scanner, and `warp-to-anomaly` is the block that decides
+  // when the whole SYSTEM has run out (it reads the same ledger and says so in
+  // words a player can act on).
+  //
+  // ⚠ AND IT COMES AFTER "no way to fight", DELIBERATELY. A hull with no guns
+  // and no combat drones is a FIT fault at our end, and §13's whole argument is
+  // that our own faults must never be reported as the site's. The player needs
+  // that sentence, not a tour of dens being "given up on" by a ship that could
+  // never have cleared any of them.
+  if (verdict.abandon) {
+    const leaving = describeVerdict(verdict) ?? "I am leaving this site.";
+    const standDown = standCallDown(role, mem, `${leaving} Standing the fleet's call down.`, "Fighting");
+    if (standDown !== null) {
+      return standDown;
+    }
+    if (roster.out.length > 0) {
+      return tick({ kind: "recallDrones", droneIDs: roster.out }, `${leaving} Calling the drones home.`, "Fighting", ACTING);
+    }
+    return tick(WAIT, leaving, "Fighting", { kind: "done" });
   }
 
   // The COMBAT drones out first — they defend on their own the moment they
@@ -2308,7 +2590,7 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
     );
   }
   return tick(WAIT, "Fighting it.", "Fighting", ACTING, true, mem);
-};
+}
 
 // ── warp-to-anomaly / warp-to-ore-anomaly ────────────────────────────────────
 // Read the onboard scanner, warp to the next anomaly OF THE WANTED KIND this run
@@ -2354,6 +2636,25 @@ interface AnomalyFlavour {
   /** Appended when the scanner listed NOTHING AT ALL — the thing a player of
    *  THIS block reliably mistakes for one of its sites. See the note below. */
   readonly emptyScannerHint: string;
+  /**
+   * Does this tour keep the §13 site ledger?
+   *
+   * ⚠ ONLY THE COMBAT TOUR DOES, AND THIS IS NOT A TIDINESS FLAG. This block
+   * only ever ADDS to the tally; the thing that takes it back down to zero is a
+   * cleared grid, reported by `fight-the-rats` (see `forgetSite`). A tour with no
+   * combat block behind it therefore feeds a counter nothing can ever reset, and
+   * would retire perfectly good sites on their third lap.
+   *
+   * That is exactly the ore tour: `warp-to-ore-anomaly` hands its sites to
+   * Mine-at-a-belt, which never fights, never clears a grid and never feeds the
+   * ledger, and whose whole documented behaviour is that a completed lap starts
+   * another one ("one miner does not empty an asteroid cluster in one hold").
+   * Retiring ore sites after three laps would stop a mining bot that was working
+   * perfectly.
+   *
+   * §13 is about the two COMBAT blocks and this flag keeps it there.
+   */
+  readonly givesUpOnSites: boolean;
 }
 
 const COMBAT_FLAVOUR: AnomalyFlavour = {
@@ -2363,6 +2664,7 @@ const COMBAT_FLAVOUR: AnomalyFlavour = {
   flying: "Flying to the den",
   emptyScannerHint:
     "Rats on a belt or a gate are not a den: a den is a site the scanner lists.",
+  givesUpOnSites: true,
 };
 
 const ORE_FLAVOUR: AnomalyFlavour = {
@@ -2372,6 +2674,7 @@ const ORE_FLAVOUR: AnomalyFlavour = {
   flying: "Flying to the ore site",
   emptyScannerHint:
     "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
+  givesUpOnSites: false,
 };
 
 // ── Why the dead end is THREE sentences and not one ──────────────────────────
@@ -2411,6 +2714,29 @@ function noSiteReason(flavour: AnomalyFlavour, total: number, unreadable: number
         ? "One of them did not say"
         : `${unreadable} of them did not say`;
   return `${head} ${which} what kind of site it is, and this block will not warp on a guess.`;
+}
+
+/**
+ * The FOURTH dead end, and the one §13 added: every site of this kind is one the
+ * run has already given up on.
+ *
+ * It wears its own sentence for the same reason the other three do — it is a
+ * different problem with a different fix. "There is no den here" is answered by
+ * moving the bot; "every den here has beaten me" is answered by moving the bot
+ * OR by flying something that can clear them, and the player cannot choose
+ * between those if the block says the same words for both. §13's rule for the
+ * whole feature: name which evidence fired, because a generic "site too hard"
+ * teaches the player nothing.
+ *
+ * It is deliberately not silent. The alternative to stopping here is touring the
+ * same three dens all night, which is the loop the feature exists to close.
+ */
+function allGivenUpReason(flavour: AnomalyFlavour, total: number): string {
+  const listed =
+    total === 1
+      ? `The only ${flavour.noun} the scanner lists in this system is one I have given up on`
+      : `All ${total} ${flavour.noun}s the scanner lists in this system are ones I have given up on`;
+  return `${listed} — nothing was dying in there, or it kept sending the ship home. Move the bot to another system, or fly something that can clear them.`;
 }
 
 function warpToAnomalyOfKind(
@@ -2461,6 +2787,21 @@ function warpToAnomalyOfKind(
       .split(",")
       .filter((label) => label.length > 0);
     const ofKind = anomalies.filter((site) => site.kind === wanted);
+    // ── §13: the sites this run has given up on ────────────────────────────
+    //
+    // ⚠ THIS IS WHERE THE ARRIVAL COUNT BELONGS, AND IT IS NOT A STYLE CHOICE.
+    // The obvious home for "have I already counted this visit?" is the combat
+    // block's own step memory — and it is WRONG, provably so: after a
+    // dock-and-repair the runner resumes at the very step it was interrupted on
+    // and carries `macroMem` across (scriptDecide.ts keeps every key but the
+    // home/repair ones), so the flag SURVIVES the round trip and the return is
+    // never counted. Zero returns recorded, for precisely the loop the feature
+    // exists to catch. This block has no such problem: it is the thing that
+    // issued the warp, so an arrival is simply the tick it commits to a label —
+    // the same tick it already writes that label into `anomsVisited`.
+    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
+    const workable =
+      ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
     // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
     // situations and the old code answered both by stopping: there is no site of
     // this kind here (a real dead end), or every one of them has been flown to
@@ -2471,9 +2812,19 @@ function warpToAnomalyOfKind(
     // wipes the list and starts the next one, and the run now ends where it
     // should: at Mine-at-a-belt, which is the block that can actually see there
     // is no rock left and says so.
-    const fresh = ofKind.find((site) => !visited.includes(site.label));
-    const next = fresh ?? ofKind[0];
+    const fresh = workable.find((site) => !visited.includes(site.label));
+    const next = fresh ?? workable[0];
     if (next === undefined) {
+      // Two different dead ends now share this branch, and they must not share a
+      // sentence: "there is no site of this kind here" (the scanner's fault, or
+      // the system's) and "there are, and the run has given up on every one of
+      // them" (§13's stop).
+      if (ofKind.length > 0) {
+        return tick(WAIT, `Every ${flavour.noun} here is one I have given up on.`, "Scanning", {
+          kind: "blocked",
+          reason: allGivenUpReason(flavour, ofKind.length),
+        });
+      }
       const unreadable = anomalies.filter((site) => site.kind === "unknown").length;
       return tick(WAIT, `Nothing on the scanner is ${flavour.oneNoun}.`, "Scanning", {
         kind: "blocked",
@@ -2493,7 +2844,26 @@ function warpToAnomalyOfKind(
         { issued: true, waited: 0 },
       ),
       boardPatch: {
+        // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
+        // LIST. The two lists answer two different questions — "have I worked
+        // this site on THIS lap?" (which is meant to be forgotten, because one
+        // pass does not finish a site) and "has this site beaten me?" (which is
+        // meant to be remembered for the whole run). §13 calls a lap restart
+        // that forgets the second one "the same loop closing again with extra
+        // steps", and it is right: the tour would fly straight back into the den
+        // it walked out of an hour ago.
+        //
+        // They are kept apart by LIVING APART: the lap list is this line, the
+        // given-up list is inside the ledger's own `sites` key, and
+        // `encodeLedger` below rewrites that key in full on every arrival —
+        // counts and all — whether or not the lap restarted.
         [flavour.boardKey]: (lapRestart ? [next.label] : [...visited, next.label]).join(","),
+        // Count the arrival, and publish WHICH SITE THIS IS: the combat block
+        // has no other way to know. It reads this same ledger off the board at
+        // the top of every tick and takes `siteLabel` from it, which is how a
+        // verdict earned on this grid ends up attached to a scanner label
+        // rather than to nobody.
+        ...(ledger === null ? {} : encodeLedger(enterSite(ledger, next.label))),
       },
     };
   };
