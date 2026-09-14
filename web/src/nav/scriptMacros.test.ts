@@ -1091,7 +1091,7 @@ test("loot-wrecks: a wreck is marked emptied only once the attempt was NOT refus
   assert.ok(refused.action.kind === "lootWreck", "it tries again");
 });
 
-test("hardeners-on: switches idle hardeners on one per tick; all running -> done; none fitted -> blocked", () => {
+test("hardeners-on: switches idle hardeners on one per tick; all running -> done; none fitted -> skipped", () => {
   const hardeners = SCRIPT_MACROS["hardeners-on"]!;
   const s = { id: "hd", kind: "macro", macro: "hardeners-on", args: {} } as const;
 
@@ -1101,8 +1101,16 @@ test("hardeners-on: switches idle hardeners on one per tick; all running -> done
   const done = hardeners(s, obs({ snapshot: snapshot([], { activeModuleIDs: [900, 901] }), hardenerModuleIDs: [900, 901] }), {}, {});
   assert.equal(done.outcome.kind, "done");
 
+  // ⚠ A BARE RACK IS SKIPPED, IT DOES NOT STOP THE BOT. Nothing a stop could
+  // achieve is available here: a hull either carries a hardener or it does not,
+  // and hardening is done on the way to the work rather than being the work.
+  // The orchestrator says so once and carries on to the block underneath.
   const none = hardeners(s, obs({ snapshot: snapshot([]), hardenerModuleIDs: [] }), {}, {});
-  assert.equal(none.outcome.kind, "blocked");
+  assert.equal(none.outcome.kind, "skipped");
+  assert.ok(
+    none.outcome.kind === "skipped" && none.outcome.reason.length > 0,
+    "the one notice a skipped step gets has to say why",
+  );
 });
 
 // ─── Fighting the way out of a tackle ────────────────────────────────────────

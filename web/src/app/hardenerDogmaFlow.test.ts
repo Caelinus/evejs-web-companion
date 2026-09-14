@@ -32,6 +32,7 @@ import assert from "node:assert/strict";
 import { createAppFlow } from "./flow.ts";
 import { createClientStore } from "../store/clientStore.ts";
 import type { BotScript } from "../bots/botScript.ts";
+import type { CustomBotState } from "../store/types.ts";
 
 const CHARACTER_ID = 90000001; // ESI's own documented example CharacterID — synthetic, not a real pilot.
 const STATION_ID = 60003760; // Jita IV - Moon 4 (static SDE data).
@@ -358,10 +359,15 @@ const HARDEN_SCRIPT: BotScript = {
   program: [{ id: "harden", kind: "macro", macro: "hardeners-on", args: {} }],
 };
 
-/** Start the real runner, let its first tick land, stop it, and return every
- * `activate` call it issued — the observable proof of what the Hardeners-on
- * block reached for. */
-async function activateCalls(modules: readonly TestModule[]): Promise<readonly Recorded[]> {
+/**
+ * Start the real runner, let its first tick land, read the run off the store,
+ * and stop it. The `activate` calls are the observable proof of what the
+ * Hardeners-on block reached for; the readout is the proof of what the RUN did
+ * about it.
+ */
+async function runBot(
+  modules: readonly TestModule[],
+): Promise<{ activated: readonly Recorded[]; readout: CustomBotState }> {
   const store = onlineStore();
   const { fetch, requests } = makeFakeFetch(modules);
   const flow = createAppFlow(store, { fetch });
@@ -369,8 +375,16 @@ async function activateCalls(modules: readonly TestModule[]): Promise<readonly R
   // One tick is all this needs (the runner's cadence is seconds), but the start
   // itself now waits out the dogma read before it classifies anything.
   await new Promise((resolve) => setTimeout(resolve, 300));
+  // ⚠ READ BEFORE THE STOP. `stopCustomBot` is what the player pressing Stop
+  // does, and it leaves the slice saying "stopped" whatever the run was doing —
+  // which would hide the very state these tests are about.
+  const readout = store.customBot.get();
   flow.stopCustomBot();
-  return requests.filter((r) => r.path === "/api/bridge/modules/activate");
+  return { activated: requests.filter((r) => r.path === "/api/bridge/modules/activate"), readout };
+}
+
+async function activateCalls(modules: readonly TestModule[]): Promise<readonly Recorded[]> {
+  return (await runBot(modules)).activated;
 }
 
 test("a passive Damage Control is never switched on by the Hardeners-on block — the fix", async () => {
@@ -390,6 +404,23 @@ test("a fit whose only defense is a passive Damage Control asks the server for n
     0,
     "a Damage Control is already working the moment it is online — there is nothing to switch",
   );
+});
+
+test("a ship with nothing to harden with is SKIPPED past, not stopped", async () => {
+  // ⚠ THE SECOND HALF OF THE SAME REPORT, and the worse half: the block used to
+  // STOP THE BOT over a rack it can do nothing about. A hull either carries a
+  // hardener or it does not — no waiting, retrying or player attention changes
+  // that — and hardening is done on the way to the work, never the work itself.
+  const { activated, readout } = await runBot([DAMAGE_CONTROL]);
+  assert.equal(activated.length, 0);
+  assert.equal(readout.status, "running", "pre-fix the run was over: stopped, with the missing hardener as the reason");
+  assert.equal(readout.pauseReason, null, "nothing here is worth pausing for either");
+  assert.match(
+    readout.lastAlert?.message ?? "",
+    /^Skipped /,
+    "a skipped step is still SAID — once — so a player who was away knows the ship went out unhardened",
+  );
+  assert.match(readout.lastAlert?.message ?? "", /no hardener that can be switched on/);
 });
 
 test("an ASSAULT Damage Control — same group name, a real cycle — is still switched on", async () => {

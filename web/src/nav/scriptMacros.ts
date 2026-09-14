@@ -2103,13 +2103,32 @@ const refineOre: MacroDecider = (_step, obs, mem) => {
 // control, which is already working the moment it is online. Every message
 // below is worded for that: a ship can carry a damage control and still have
 // nothing this block can switch.
+//
+// ⚠ NOTHING TO HARDEN WITH IS `skipped`, NOT `blocked`. It used to STOP THE
+// BOT, and that was the wrong shape of answer twice over. A hardener is
+// something a hull HAS or has not: no amount of waiting, retrying or player
+// attention turns a bare rack into a full one, so there is nothing a stop could
+// achieve. And hardening is done ON THE WAY to the work — a mining trip, a den
+// — never the work itself, so a ship without one still has everything under
+// this block to get on with. Exactly the salvager-on-a-ratting-hull case two
+// thousand lines up, and it takes the same answer: the orchestrator says so
+// ONCE (through the alert path, so a player who was away still sees it) and
+// moves on, silently on every later lap.
+//
+// ⚠ AN UNREADABLE FIT FALLS DOWN THIS SAME BRANCH, and skipping is right for it
+// too. `resolveDefenseModuleIDs` hands back empty lists when the fit could not
+// be read, which is indistinguishable here from a bare rack — and a bot that
+// stops because one read stumbled is worse than a bot that goes without one
+// optimisation and keeps flying.
 const hardenersOn: MacroDecider = (_step, obs, mem) => {
   const hardeners = obs.hardenerModuleIDs ?? [];
   if (hardeners.length === 0) {
-    return tick(WAIT, "Nothing to harden with.", "Hardening", {
-      kind: "blocked",
+    return tick(WAIT, "Nothing to harden with — moving on.", "Hardening", {
+      kind: "skipped",
+      // Read after the orchestrator's own `Skipped "<the step>": ` prefix, so
+      // it says what is missing and nothing about being skipped.
       reason:
-        "This ship has no hardener that can be switched on. A damage control does not need switching on - it works the moment it is online.",
+        "This ship has no hardener that can be switched on. A damage control needs no switching on - it works the moment it is online.",
     });
   }
   if (obs.inSpace !== true) {

@@ -264,8 +264,8 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "hardeners-on": entry(
     "hardeners-on",
     "combat",
-    "Switches every fitted hardener on — one block at the top of a fight or a mining trip. Finishes once they are all running. An ordinary damage control is left alone: it works the moment it is online, so there is nothing to switch.",
-    "A hardener fitted that can be switched on",
+    "Switches every fitted hardener on — one block at the top of a fight or a mining trip. Finishes once they are all running. An ordinary damage control is left alone: it works the moment it is online, so there is nothing to switch. A ship with no hardener at all is not stopped — the block says so once and the bot carries on.",
+    "Nothing — a ship with no hardener carries on without one",
   ),
   "fight-the-rats": entry(
     "fight-the-rats",
