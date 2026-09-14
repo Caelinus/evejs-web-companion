@@ -8,7 +8,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { TARGET_CLASS_ARGS } from "../bots/botScript.ts";
-import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, targetClassForGroup } from "./targetPriority.ts";
+import { UNKNOWN_THREAT, threatFromAttributes } from "./ratThreat.ts";
+import {
+  DEFAULT_TARGET_PRIORITY,
+  fleetTagRank,
+  pickPrimary,
+  tackleSubRank,
+  targetClassForGroup,
+  targetClassForThreat,
+} from "./targetPriority.ts";
 
 test("the game's own ship groups map to the jobs a fight is decided by", () => {
   for (const group of ["Interceptor", "Interdictor", "Heavy Interdiction Cruiser"]) {
@@ -219,4 +227,234 @@ test("the no-tag-accessor call path is unchanged", () => {
   const battleship = { id: 1, typeID: 645, distance: 2_000 };
   const interceptor = { id: 2, typeID: 11176, distance: 40_000 };
   assert.equal(pick([battleship, interceptor])?.id, pickTagged([battleship, interceptor])?.id);
+});
+
+// ── the rat's own dogma ──────────────────────────────────────────────────────
+//
+// The NPC half of the ladder. The rows here are rats, whose GROUP is always
+// something like "Asteroid Serpentis Frigate" — a name the group classifier has
+// never heard of and answers "other" for — so every one of these tests would
+// come out nearest-first without the dogma being read.
+
+const SCRAM_RAT = 1; // entityWarpScrambleChance 0.25, warpScrambleRange 20 km
+const WEB_RAT = 2; // speedFactor -50, no scramble chance
+const DAMP_RAT = 3; // entitySensorDampenDurationChance 0.05
+const PLAIN_RAT = 4; // carries the attributes, all of them zero
+
+const RAT_ATTRIBUTES: Record<number, Record<number, number>> = {
+  [SCRAM_RAT]: { 20: -50, 103: 20_000, 504: 0.25 },
+  [WEB_RAT]: { 20: -50, 103: 0, 504: 0 },
+  [DAMP_RAT]: { 20: 0, 103: 0, 504: 0, 932: 0.05 },
+  [PLAIN_RAT]: { 20: 0, 103: 0, 504: 0 },
+};
+
+// Every rat resolves to an NPC group name, exactly as the live read would —
+// the point being that it tells the classifier nothing.
+const RAT_GROUPS: Record<number, string> = {
+  [SCRAM_RAT]: "Asteroid Guristas Frigate",
+  [WEB_RAT]: "Asteroid Angel Cartel Frigate",
+  [DAMP_RAT]: "Asteroid Serpentis Cruiser",
+  [PLAIN_RAT]: "Asteroid Guristas Frigate",
+};
+
+function ratThreatOf(typeID: number) {
+  const attributes = RAT_ATTRIBUTES[typeID];
+  return attributes === undefined ? null : threatFromAttributes(attributes);
+}
+
+/** The full call: dogma, group fallback, and the live jam list. */
+function pickRats(
+  rows: readonly Row[],
+  priority = DEFAULT_TARGET_PRIORITY,
+  jamming?: ReadonlySet<number>,
+): Row | null {
+  return pickPrimary(
+    rows,
+    (row) => row.typeID,
+    (row) => row.distance,
+    (typeID) => RAT_GROUPS[typeID] ?? GROUPS[typeID] ?? null,
+    priority,
+    (row) => row.tag,
+    ratThreatOf,
+    jamming,
+    (row) => row.id,
+  );
+}
+
+test("a rat's dogma puts it in a class; nothing about it is a hull name", () => {
+  assert.equal(targetClassForThreat(threatFromAttributes(RAT_ATTRIBUTES[SCRAM_RAT])), "tackle");
+  assert.equal(targetClassForThreat(threatFromAttributes(RAT_ATTRIBUTES[WEB_RAT])), "tackle");
+  assert.equal(targetClassForThreat(threatFromAttributes(RAT_ATTRIBUTES[DAMP_RAT])), "ewar");
+});
+
+test("a dogma that says nothing is NULL, not 'other' — the group classifier still gets its turn", () => {
+  // ⚠ If this returned "other" it would win the fallback race in pickPrimary
+  // and every player hull would flatten to "other" forever.
+  assert.equal(targetClassForThreat(threatFromAttributes(RAT_ATTRIBUTES[PLAIN_RAT])), null);
+  assert.equal(targetClassForThreat(UNKNOWN_THREAT), null, "'not told' is not 'ordinary'");
+  assert.equal(targetClassForThreat(null), null);
+  assert.equal(targetClassForThreat(undefined), null);
+});
+
+test("a scrammer sub-ranks ahead of a webber — a scram shuts the exit, a web only narrows it", () => {
+  assert.equal(tackleSubRank(threatFromAttributes(RAT_ATTRIBUTES[SCRAM_RAT])), 0);
+  assert.equal(tackleSubRank(threatFromAttributes(RAT_ATTRIBUTES[WEB_RAT])), 1);
+  // Everything else ties at a finite rank, so the comparison never reorders
+  // rows it has no opinion about.
+  assert.equal(tackleSubRank(threatFromAttributes(RAT_ATTRIBUTES[DAMP_RAT])), 2);
+  assert.equal(tackleSubRank(UNKNOWN_THREAT), 2);
+  assert.equal(tackleSubRank(null), 2);
+  assert.equal(tackleSubRank(undefined), 2);
+});
+
+test("the dogma beats the group for an NPC — the whole reason the classifier was split", () => {
+  const tackleRat = { id: 11, typeID: SCRAM_RAT, distance: 50_000 };
+  const plainRat = { id: 12, typeID: PLAIN_RAT, distance: 2_000 };
+  // Both groups read "other". Nearest-first would take the plain one; the
+  // dogma says the far one is holding the exit shut.
+  assert.equal(pickRats([plainRat, tackleRat])?.id, 11);
+  assert.equal(pick([plainRat, tackleRat])?.id, 12, "and without the dogma it is nearest-first, as before");
+});
+
+test("a scrammer dies before a webber, even when the webber is closer", () => {
+  const webRat = { id: 21, typeID: WEB_RAT, distance: 3_000 };
+  const scramRat = { id: 22, typeID: SCRAM_RAT, distance: 45_000 };
+  assert.equal(pickRats([webRat, scramRat])?.id, 22);
+});
+
+test("the rat ladder keeps the shipped order: tackle, then ewar, then the rest", () => {
+  const plainRat = { id: 31, typeID: PLAIN_RAT, distance: 1_000 };
+  const dampRat = { id: 32, typeID: DAMP_RAT, distance: 40_000 };
+  const webRat = { id: 33, typeID: WEB_RAT, distance: 60_000 };
+  assert.equal(pickRats([plainRat, dampRat, webRat])?.id, 33);
+  assert.equal(pickRats([plainRat, dampRat])?.id, 32);
+});
+
+test("nearest still breaks the tie between rats the dogma reads the same way", () => {
+  const far = { id: 41, typeID: SCRAM_RAT, distance: 30_000 };
+  const near = { id: 42, typeID: SCRAM_RAT, distance: 6_000 };
+  assert.equal(pickRats([far, near])?.id, 42);
+  const tiedFirst = { id: 43, typeID: SCRAM_RAT, distance: 6_000 };
+  assert.equal(pickRats([near, tiedFirst])?.id, 42, "a tie is not a reshuffle");
+});
+
+test("the group still decides when the dogma says nothing — no regression for player hulls", () => {
+  // A player Interceptor has no entity dogma at all: ratThreatOf answers null
+  // for it, and the group classifier must still call it tackle.
+  const battleship = { id: 51, typeID: 645, distance: 2_000 };
+  const interceptor = { id: 52, typeID: 11176, distance: 40_000 };
+  assert.equal(pickRats([battleship, interceptor])?.id, 52);
+  assert.equal(
+    pickRats([battleship, interceptor])?.id,
+    pick([battleship, interceptor])?.id,
+    "the same answer the group classifier gave before the dogma existed",
+  );
+  // And the whole player ladder is unchanged through the new call path.
+  const logi = { id: 53, typeID: 11985, distance: 50_000 };
+  const recon = { id: 54, typeID: 11995, distance: 60_000 };
+  assert.equal(pickRats([battleship, logi, recon])?.id, 54);
+});
+
+test("a rat whose dogma says 'ordinary' is ranked with 'other', never dropped", () => {
+  const plainRat = { id: 61, typeID: PLAIN_RAT, distance: 9_000 };
+  assert.equal(pickRats([plainRat])?.id, 61);
+  const scramRat = { id: 62, typeID: SCRAM_RAT, distance: 90_000 };
+  assert.equal(pickRats([plainRat, scramRat])?.id, 62);
+});
+
+// ── the live jam feed ────────────────────────────────────────────────────────
+
+test("a rat the server says is holding us now outranks a statically-equal one", () => {
+  // Same type, so the same dogma, the same class and the same sub-rank; the
+  // only difference is OnJamStart naming this itemID. Ground truth beats the
+  // static read.
+  const holding = { id: 71, typeID: WEB_RAT, distance: 40_000 };
+  const identical = { id: 72, typeID: WEB_RAT, distance: 3_000 };
+  assert.equal(pickRats([identical, holding], DEFAULT_TARGET_PRIORITY, new Set([71]))?.id, 71);
+  assert.equal(pickRats([identical, holding])?.id, 72, "without the live feed, nearest wins");
+});
+
+test("the live feed beats the dogma, including for a type this client read as harmless", () => {
+  // The failure it exists for: a rat whose attributes we never fetched (or
+  // read wrong) is actually pointing the ship. The server said so by name.
+  const plainRat = { id: 81, typeID: PLAIN_RAT, distance: 20_000 };
+  const scramRat = { id: 82, typeID: SCRAM_RAT, distance: 20_000 };
+  assert.equal(pickRats([scramRat, plainRat], DEFAULT_TARGET_PRIORITY, new Set([81]))?.id, 81);
+});
+
+test("the FC's tag still beats the live feed — the human is looking at the fight", () => {
+  const jamming = { id: 91, typeID: SCRAM_RAT, distance: 5_000 };
+  const tagged = { id: 92, typeID: PLAIN_RAT, distance: 90_000, tag: "1" };
+  assert.equal(pickRats([jamming, tagged], DEFAULT_TARGET_PRIORITY, new Set([91]))?.id, 92);
+});
+
+test("an empty jam list changes nothing, and an unknown source id is simply not there", () => {
+  const near = { id: 101, typeID: PLAIN_RAT, distance: 4_000 };
+  const far = { id: 102, typeID: PLAIN_RAT, distance: 40_000 };
+  assert.equal(pickRats([far, near], DEFAULT_TARGET_PRIORITY, new Set())?.id, 101);
+  assert.equal(pickRats([far, near], DEFAULT_TARGET_PRIORITY, new Set([999]))?.id, 101);
+});
+
+test("the jam promotion reads the row's own itemID when no accessor is handed in", () => {
+  // ⚠ The gap `defaultItemIDOf` covers: `jammingSources` holds item ids and
+  // pickPrimary is generic over the row. Every call site in this tree names the
+  // field `itemID`, and a caller that forgets the accessor must not silently
+  // lose the live feed.
+  const rows = [
+    { itemID: 111, typeID: WEB_RAT, distance: 3_000 },
+    { itemID: 112, typeID: WEB_RAT, distance: 40_000 },
+  ];
+  const picked = pickPrimary(
+    rows,
+    (row) => row.typeID,
+    (row) => row.distance,
+    (typeID) => RAT_GROUPS[typeID] ?? null,
+    DEFAULT_TARGET_PRIORITY,
+    () => null,
+    ratThreatOf,
+    new Set([112]),
+  );
+  assert.equal(picked?.itemID, 112);
+});
+
+test("a class left off the list is STILL last-not-filtered when the dogma named it", () => {
+  // ⚠ The ranking-not-filtering rule, restated for the NPC half: "kill the
+  // ewar" alone does not make a scrambling rat unshootable, it makes it last.
+  // A block that refused everything off its list would sit there being held.
+  const scramRat = { id: 121, typeID: SCRAM_RAT, distance: 10_000 };
+  assert.equal(pickRats([scramRat], ["ewar"])?.id, 121, "the only rat on the grid is still the primary");
+  const dampRat = { id: 122, typeID: DAMP_RAT, distance: 90_000 };
+  assert.equal(pickRats([scramRat, dampRat], ["ewar"])?.id, 122, "but the listed class goes first");
+  // Unlisted classes keep the shipped order among themselves: tackle still
+  // outranks the plain rat even though neither was named.
+  const plainRat = { id: 123, typeID: PLAIN_RAT, distance: 1_000 };
+  assert.equal(pickRats([plainRat, scramRat], ["ewar"])?.id, 121);
+});
+
+test("the player's own order is followed for rats too", () => {
+  const scramRat = { id: 131, typeID: SCRAM_RAT, distance: 30_000 };
+  const dampRat = { id: 132, typeID: DAMP_RAT, distance: 30_000 };
+  assert.equal(pickRats([scramRat, dampRat], ["ewar", "tackle", "logi", "other"])?.id, 132);
+});
+
+test("passing the dogma reader alone leaves every old call path where it was", () => {
+  // No jam list, no tags: the (class, distance) answer for player hulls must be
+  // bit-for-bit what the four-argument call gave.
+  const rows: Row[] = [
+    { id: 141, typeID: 645, distance: 2_000 },
+    { id: 142, typeID: 11176, distance: 40_000 },
+    { id: 143, typeID: 11985, distance: 10_000 },
+    { id: 144, typeID: 99999, distance: 500 },
+    { id: 145, typeID: null, distance: 100 },
+  ];
+  const withDogma = pickPrimary(
+    rows,
+    (row) => row.typeID,
+    (row) => row.distance,
+    (typeID) => GROUPS[typeID] ?? null,
+    DEFAULT_TARGET_PRIORITY,
+    () => null,
+    ratThreatOf,
+  );
+  assert.equal(withDogma?.id, pick(rows)?.id);
 });

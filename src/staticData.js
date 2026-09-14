@@ -552,6 +552,111 @@ function getTypeDogmaAttribute(typeID, attributeID, fallback = null) {
   return fallback;
 }
 
+// --- Raw dogma attribute values for a set of types --------------------------
+//
+// The read behind POST /api/types/dogma, and the static half of the drone-boat
+// block's NPC target priority (docs/drone-boat-block-spec.md section 6):
+// whether a rat on the grid scrams, webs, damps, neuts or paints is written on
+// its TYPE, in the very typeDogma table getTypeDogma already indexes. So this
+// costs ZERO bridge calls and needs no live session — reference data that
+// cannot vary by player, exactly like resolveNames and listOreFamilies.
+//
+// ⚠ VALUES, NEVER A VERDICT. This hands back numbers and stops. The
+// classification ("this one is tackle, sub-rank scram") lives in ONE pure
+// browser module; if this function held an opinion too there would be two
+// places that could disagree about the same rat, and the spec's table would
+// stop being the single authority it was written to be. A convenience
+// `isTackle` here would be the bug, not a shortcut.
+//
+// ⚠ ZERO IS AN ANSWER, NOT AN ABSENCE. `Pithi Arrogator` carries
+// entityWarpScrambleChance (504) = 0 and `Dire Pithi Arrogator` carries 0.25 —
+// same faction, same size, and ONLY that number tells them apart. A
+// present-but-zero attribute must survive the trip as 0; dropping it as falsy
+// would erase the exact difference the feature exists to see.
+//
+// Absent means absent, in both directions and for opposite reasons:
+//   * a type the static tables do not know -> an EMPTY OBJECT, never a missing
+//     key and never null, so a caller can cache "asked, got nothing" per id the
+//     same way it caches a null out of resolveNames;
+//   * an attribute the type does not carry -> simply not in that type's object.
+//
+// The caps: 500 types matches NAMES_MAX_ITEMS and the route's own
+// CYCLE_TIME_TYPE_LIMIT — the bound every other batched static read already
+// uses, and far more distinct NPC types than a grid ever holds. 32 attributes
+// is deliberately tight: the spec's whole classifier vocabulary is six (20,
+// 103, 504, 931, 932, 935), so 32 leaves room to grow it several times over
+// while keeping the worst case ~16k lookups into a Map that is already built
+// and cached.
+const TYPE_ATTRIBUTES_MAX_TYPES = 500;
+const TYPE_ATTRIBUTES_MAX_ATTRIBUTES = 32;
+
+// ⚠ A SENTINEL, and it has to be an unforgeable one. The obvious "pass
+// undefined and test for undefined" does NOT work here: getTypeDogmaAttribute
+// declares `fallback = null`, so an explicitly-passed undefined hits the
+// DEFAULT PARAMETER and comes back as null — and Number(null) is 0, which
+// would forge a "scramble chance 0" reading for a type carrying no such
+// attribute at all. That is precisely the confusion this whole read exists to
+// avoid, so the miss marker is a value the table cannot contain.
+const ATTRIBUTE_ABSENT = Symbol("typeDogma.attributeAbsent");
+
+/**
+ * Raw dogma readings for a set of types: `{ attributes: { "<typeID>":
+ * { "<attributeID>": value } }, capped, typeLimit, attributeLimit }`.
+ *
+ * Every requested typeID is echoed — an object of the attributes it carries,
+ * or an empty one — so the caller can cache an outcome for every id it asked
+ * about. Duplicate ids and duplicate attribute ids are read once.
+ *
+ * Both arrays are sliced at the caps above, so a direct call can never scan
+ * more of the table than it should. The ROUTE in front of this rejects an
+ * oversized body outright instead of leaning on that slice, because a silently
+ * SHORT answer here is indistinguishable from a true one: the types past the
+ * cap would come back carrying nothing, which a classifier reads as "harmless".
+ */
+function readTypeAttributes(input = {}) {
+  const requestedTypes = Array.isArray(input.typeIDs) ? input.typeIDs : [];
+  const requestedAttributes = Array.isArray(input.attributeIDs) ? input.attributeIDs : [];
+  const capped =
+    requestedTypes.length > TYPE_ATTRIBUTES_MAX_TYPES ||
+    requestedAttributes.length > TYPE_ATTRIBUTES_MAX_ATTRIBUTES;
+
+  const attributeIDs = [];
+  for (const raw of requestedAttributes.slice(0, TYPE_ATTRIBUTES_MAX_ATTRIBUTES)) {
+    const attributeID = Number(raw) || 0;
+    if (attributeID > 0 && !attributeIDs.includes(attributeID)) {
+      attributeIDs.push(attributeID);
+    }
+  }
+
+  const attributes = {};
+  for (const rawTypeID of requestedTypes.slice(0, TYPE_ATTRIBUTES_MAX_TYPES)) {
+    const typeID = Number(rawTypeID) || 0;
+    if (typeID <= 0 || Object.prototype.hasOwnProperty.call(attributes, String(typeID))) {
+      continue;
+    }
+    const values = {};
+    for (const attributeID of attributeIDs) {
+      // ATTRIBUTE_ABSENT, never null/undefined — see the sentinel above.
+      const value = getTypeDogmaAttribute(typeID, attributeID, ATTRIBUTE_ABSENT);
+      if (value === ATTRIBUTE_ABSENT || value === null || value === undefined) {
+        continue;
+      }
+      const numeric = Number(value);
+      // Number.isFinite, never a truthiness test — see the zero warning above.
+      if (Number.isFinite(numeric)) {
+        values[String(attributeID)] = numeric;
+      }
+    }
+    attributes[String(typeID)] = values;
+  }
+  return {
+    attributes,
+    capped,
+    typeLimit: TYPE_ATTRIBUTES_MAX_TYPES,
+    attributeLimit: TYPE_ATTRIBUTES_MAX_ATTRIBUTES,
+  };
+}
+
 function getStation(stationID) {
   return buildIndex("stations", "stations", "stationID").get(Number(stationID) || 0) || null;
 }
@@ -1455,6 +1560,12 @@ module.exports = {
   getTypeCategoryName,
   getTypeDogma,
   getTypeDogmaAttribute,
+  readTypeAttributes,
+  // Exported as numbers, not just enforced inside readTypeAttributes: the
+  // route in front of it has to REJECT an oversized body before the read
+  // happens, and duplicating the bound there would let the two drift.
+  TYPE_ATTRIBUTES_MAX_TYPES,
+  TYPE_ATTRIBUTES_MAX_ATTRIBUTES,
   getTypeGroupName,
   getTypeIconCachePath,
   getTypeIconUrl,

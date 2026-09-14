@@ -28,8 +28,18 @@
 // anchors its patterns: "Prototype Exploration Ship" and "Industrial Command
 // Ship" are neither of those things, and a substring match against a localised
 // name is how a hauler ends up primaried.
+//
+// ⚠ THE GROUP LIST ABOVE IS PLAYER HULLS, AND A RAT IS NOT ONE. Every NPC in
+// the static data is an "Asteroid Serpentis Frigate" or a "Deadspace Angel
+// Cartel Cruiser", so against rats the group classifier answers "other" for the
+// whole grid and the player's ordering does nothing at all — nearest-first,
+// wearing a priority list. That is what `targetClassForThreat` below is for: a
+// rat's OWN dogma says what it does, and `nav/ratThreat.ts` reads it. The dogma
+// is asked first and the group answers only when the dogma said nothing, so
+// player hulls keep exactly the classification they had.
 
 import type { TargetClassArg } from "../bots/botScript.ts";
+import type { RatThreat } from "./ratThreat.ts";
 
 /**
  * The job a hull was built for, as far as a grid read can tell. The vocabulary
@@ -74,6 +84,66 @@ export function targetClassForGroup(groupName: string | null | undefined): Targe
     return "logi";
   }
   return "other";
+}
+
+// ── the rat's own dogma ──────────────────────────────────────────────────────
+
+/**
+ * The class a rat's own dogma puts it in, or null when the dogma says nothing.
+ *
+ * ⚠ NULL IS NOT "other". "other" is a verdict — this hull was read and it is an
+ * ordinary thing to shoot. Null is "the dogma did not classify it", which is
+ * what a caller needs in order to fall back to `targetClassForGroup` for a
+ * PLAYER hull, whose threat map is empty for a reason that has nothing to do
+ * with being harmless. Answering "other" here would win that fallback race and
+ * flatten every player hull to "other" — the old classifier would never be
+ * asked again.
+ *
+ * Scram and web both land in `tackle` because the class vocabulary is the
+ * player's and it is closed: both of them are the thing that stops the ship
+ * leaving. `tackleSubRank` is where the two are separated.
+ *
+ * A rat that both holds and damps is tackle, not ewar — the worse of the two
+ * jobs decides, the same way the shipped order puts tackle above ewar.
+ */
+export function targetClassForThreat(threat: RatThreat | null | undefined): TargetClass | null {
+  if (threat === null || threat === undefined) {
+    return null;
+  }
+  if (threat.scram || threat.web) {
+    return "tackle";
+  }
+  if (threat.ewar) {
+    return "ewar";
+  }
+  return null;
+}
+
+/**
+ * Within `tackle`: a scrammer dies before a webber. 0 = first.
+ *
+ * ⚠ A SCRAM STOPS YOU LEAVING; A WEB ONLY SLOWS YOU DOWN. That is the whole of
+ * the reason this sub-rank exists. A webbed ship can still align out, still
+ * warp, still leave a fight it is losing — slowly, and it still leaves. A
+ * scrammed one cannot, so every other problem on the grid is survivable while
+ * the scrammer is not. Killing the webber first is the ordering that gets a
+ * ship killed with its exit still shut.
+ *
+ * Anything that is not tackle (and anything unknown) answers 2: a finite rank
+ * that ties every non-tackle row against every other, so this can be compared
+ * unconditionally without reordering rows it has no opinion about.
+ */
+export function tackleSubRank(threat: RatThreat | null | undefined): number {
+  if (threat === null || threat === undefined) {
+    return 2;
+  }
+  if (threat.scram) {
+    return 0;
+  }
+  if (threat.web) {
+    return 1;
+  }
+  return 2;
 }
 
 /**
@@ -148,24 +218,63 @@ export function fleetTagRank(tag: string | null | undefined): number {
 }
 
 /**
- * The row to shoot first: the fleet's tag wins, class breaks that tie,
- * nearest breaks what's left.
+ * The itemID a row carries when the caller did not say how to read one.
+ *
+ * ⚠ A GAP IN THE SHAPE, NOT A CONVENTION TO LEAN ON. `pickPrimary` is generic
+ * over the row on purpose — the caller hands in how to read a type and a
+ * distance — but `jammingSources` is a set of ITEM ids, and there was no
+ * accessor for a row's identity to match them against. Every call site in this
+ * tree (overview rows and snapshot entities alike) names that field `itemID`,
+ * so that is what this reads, and a caller whose row calls it something else
+ * passes `itemIDOf` explicitly. The alternative was to have the live jam feed
+ * silently do nothing for a caller that forgot an accessor, which is the worst
+ * failure available here: the server told us which rat is holding this ship and
+ * we ignored it.
+ */
+function defaultItemIDOf<T>(row: T): number | null {
+  const id = (row as { readonly itemID?: unknown }).itemID;
+  return typeof id === "number" && Number.isFinite(id) ? id : null;
+}
+
+/**
+ * The row to shoot first: the fleet's tag wins, the live jam feed breaks that,
+ * class breaks that, and nearest breaks what's left.
  *
  * Shaped like `splitDroneRoles` — the caller hands in how to read a row's type
  * and distance and how to resolve a group name, so this stays pure and both
  * combat call sites (overview rows with a measured distance, snapshot entities
  * measured against the ship) can use the one ordering.
  *
- * ⚠ TAG OUTRANKS CLASS, DELIBERATELY. Class priority is this client's own
+ * ⚠ TAG OUTRANKS EVERYTHING, DELIBERATELY. Class priority is this client's own
  * guess at what matters most on a grid it cannot see modules on (see the
  * file-header note). A tag is not a guess — it is the fleet commander looking
  * at the fight and saying "this one, now". When the two disagree the human
- * wins, so tag is compared FIRST, class second, distance last.
+ * wins, so tag is compared FIRST.
  *
- * `tagOf` is optional and defaults to "nothing is tagged" (every row ties at
- * POSITIVE_INFINITY), which collapses the ordering back to exactly the old
- * (class, distance) behaviour — every caller that does not pass it keeps its
- * current result unchanged.
+ * ⚠ A LIVE JAM SOURCE IS NOT A GUESS EITHER, SO IT OUTRANKS THE CLASS. A
+ * typeID in `threat` is a statement about what a hull of that type CAN do; an
+ * itemID in `jammingSources` is the server's own `OnJamStart` push naming THIS
+ * specific rat as holding THIS specific ship right now. Ground truth beats the
+ * static read, including for a type whose dogma this client read wrong or
+ * never fetched — so a jamming row is promoted above every row it is not
+ * already ahead of on tag, class or dogma alike. It still loses to the FC's
+ * tag, for the same reason class does: the human is looking at the fight.
+ *
+ * The class itself comes from the rat's dogma FIRST (`targetClassForThreat`)
+ * and falls back to the group name (`targetClassForGroup`) when the dogma said
+ * nothing — the NPC half and the player half of the same ladder, in the one
+ * order that lets each answer the rows it can actually see.
+ *
+ * ⚠ AND IT IS STILL A RANKING, NOT A FILTER. None of the four comparisons ever
+ * removes a row: a class the player left off ranks last, a rat nobody could
+ * classify ranks with "other", and an unmeasurable distance sorts last inside
+ * its group. The worst thing that happens to any row here is being shot second.
+ *
+ * Every new parameter is optional and defaults to "nothing is known", which
+ * collapses the ordering back to exactly the old (class, distance) behaviour —
+ * `tagOf` to "nothing is tagged", `threat` to "no dogma was read" (so the group
+ * classifier decides alone, as it did), `jammingSources` to "nothing is holding
+ * us". Every existing caller keeps its current result unchanged.
  *
  * A row whose distance is unreadable sorts last WITHIN its tag-and-class
  * group rather than being dropped: an unmeasurable ship is still a ship, and
@@ -180,25 +289,44 @@ export function pickPrimary<T>(
   groupOf: (typeID: number) => string | null,
   priority: readonly TargetClass[] = DEFAULT_TARGET_PRIORITY,
   tagOf: (row: T) => string | null | undefined = () => null,
+  threat?: (typeID: number) => RatThreat | null,
+  jammingSources?: ReadonlySet<number>,
+  itemIDOf: (row: T) => number | null = defaultItemIDOf,
 ): T | null {
   let best: T | null = null;
   let bestTagRank = Number.POSITIVE_INFINITY;
+  let bestJamRank = Number.POSITIVE_INFINITY;
   let bestClassRank = Number.POSITIVE_INFINITY;
+  let bestSubRank = Number.POSITIVE_INFINITY;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const row of rows) {
     const typeID = typeIDOf(row);
-    const cls = targetClassForGroup(typeID === null ? null : groupOf(typeID));
+    // The dogma answers for rats, the group name for player hulls, and the
+    // dogma is asked first — a rat has no group this file knows, and a player
+    // hull has no entity dogma to read, so the two never argue in practice.
+    const rowThreat = threat !== undefined && typeID !== null ? threat(typeID) : null;
+    const cls =
+      targetClassForThreat(rowThreat) ?? targetClassForGroup(typeID === null ? null : groupOf(typeID));
     const classRank = rankOf(cls, priority);
+    const subRank = tackleSubRank(rowThreat);
     const tagRank = fleetTagRank(tagOf(row));
+    const itemID = jammingSources === undefined ? null : itemIDOf(row);
+    const jamRank = itemID !== null && jammingSources?.has(itemID) === true ? 0 : 1;
     const distance = distanceOf(row) ?? Number.POSITIVE_INFINITY;
     const better =
       tagRank < bestTagRank ||
       (tagRank === bestTagRank &&
-        (classRank < bestClassRank || (classRank === bestClassRank && distance < bestDistance)));
+        (jamRank < bestJamRank ||
+          (jamRank === bestJamRank &&
+            (classRank < bestClassRank ||
+              (classRank === bestClassRank &&
+                (subRank < bestSubRank || (subRank === bestSubRank && distance < bestDistance)))))));
     if (better) {
       best = row;
       bestTagRank = tagRank;
+      bestJamRank = jamRank;
       bestClassRank = classRank;
+      bestSubRank = subRank;
       bestDistance = distance;
     }
   }

@@ -3591,6 +3591,63 @@ export async function loadBaseCycleTimes(
   return { baseCycleMs };
 }
 
+// --- NPC threat dogma (static reference data) --------------------------------
+// POST /api/types/dogma takes { typeIDs, attributeIDs } and answers the raw
+// attribute values each of those types carries — the static half of the
+// drone-boat block's target priority (docs/drone-boat-block-spec.md section 6):
+// 504 entityWarpScrambleChance / 103 warpScrambleRange (scram), 20 speedFactor
+// (web, negative), 931 neut / 932 damp / 935 paint (ewar). Read-only, like
+// resolveNames and loadBaseCycleTimes: NOT a gateway/bridge call, so it costs
+// nothing but a round trip and works with no character in space.
+//
+// ⚠ NUMBERS, NOT A CLASS. The BFF deliberately has no opinion about what a
+// value means; turning 504 > 0 into "tackle" belongs to the one pure
+// classifier module and must stay in exactly one place.
+//
+// ⚠ ZERO IS A READING. A Pithi Arrogator carries 504 = 0 and a Dire Pithi
+// Arrogator carries 0.25 — same family, and only that number separates the one
+// that lets you leave from the one that does not. Never treat a 0 here as
+// "absent".
+//
+// ⚠ NO CACHE IN THIS FUNCTION, ON PURPOSE. The caller owns the per-type cache,
+// because only it knows which typeIDs it has already seen on the grid. An
+// EMPTY object for a typeID is a real answer ("the static tables do not know
+// this type") and is cached the same way a null from resolveNames is.
+
+export async function fetchTypeDogma(
+  typeIDs: readonly number[],
+  attributeIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<Readonly<Record<number, Readonly<Record<number, number>>>>> {
+  const data = await postJson("/api/types/dogma", { typeIDs, attributeIDs }, options);
+  const raw =
+    typeof data.attributes === "object" &&
+    data.attributes !== null &&
+    !Array.isArray(data.attributes)
+      ? (data.attributes as Record<string, JsonValue>)
+      : {};
+  const attributes: Record<number, Record<number, number>> = {};
+  for (const [typeKey, values] of Object.entries(raw)) {
+    const typeID = Number(typeKey) || 0;
+    if (typeID <= 0) {
+      continue;
+    }
+    const byAttribute: Record<number, number> = {};
+    if (typeof values === "object" && values !== null && !Array.isArray(values)) {
+      for (const [attributeKey, value] of Object.entries(values as Record<string, JsonValue>)) {
+        const attributeID = Number(attributeKey) || 0;
+        // Number.isFinite, never a truthiness test — see the zero warning above.
+        if (attributeID > 0 && typeof value === "number" && Number.isFinite(value)) {
+          byAttribute[attributeID] = value;
+        }
+      }
+    }
+    // Kept even when empty: "asked and got nothing" is what the caller caches.
+    attributes[typeID] = byAttribute;
+  }
+  return attributes;
+}
+
 // --- R25 slice A: drones -----------------------------------------------------
 //
 // Four routes, and NOT ONE of them can be trusted on its own return value. The

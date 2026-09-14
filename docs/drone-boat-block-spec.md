@@ -37,9 +37,33 @@ ceiling, and the interesting case is when the band is empty.
 
 ```
   floor   = (largest threat range among hostiles ON GRID) + THREAT_BUFFER
-  ceiling = min(droneControlRangeM, maxTargetRangeM) - LEASH_BUFFER
+  ceiling = min(drone leash, lock leash) - LEASH_BUFFER
   hold    = floor, clamped into [.., ceiling]
 ```
+
+⚠ **THE TWO LEASHES ARE RESOLVED SEPARATELY AND NEVER SUBSTITUTE FOR EACH OTHER.**
+This was got wrong once during implementation, so it earns the warning. Lock range
+is how far the ship can TARGET; drone control range is how far the drones still
+ANSWER. Taking `min` over "whichever are readable" quietly swaps one for the other —
+and because control range is skill-derived and usually absent from the fit read
+while lock range is usually present, the common case would take its ceiling from
+the lock range, hold at 37 km, and leave the drones deaf from 27.5 km out. The
+empty-band protection below would still sit in the code, looking like it worked,
+and would never once run for the pilot it was written for.
+
+So: the **drone leash** is the control range when readable, else the player's
+override AT FACE VALUE (typing a number is the player stating their own leash, and
+they know their skills better than our guess), else a 20 km no-skills guess. The
+**lock leash** is the targeting range when readable and drops out of the arithmetic
+entirely when not. A readable lock range can only ever LOWER the ceiling.
+
+The deliberate consequence: a pilot whose real control range is 27.5 km, on a fit
+that does not report it, is told to brawl at 17 km — closer than they needed to fly.
+That is the right direction to be wrong in, because drones that answer while the
+ship sits too close beat drones that go silent at a range we invented and that
+nobody can diagnose from the readout. The way out is the override, not a cleverer
+guess, so the "I could not read your drone control range" reason has to reach the
+player's readout intact.
 
 * **Floor — what can grab you.** Not a constant: the largest `warpScrambleRange`
   among hostiles actually on this grid that actually scram. A rat that cannot
@@ -75,6 +99,21 @@ says so in the readout, in one sentence the player can act on ("Your drones only
 reach 27.5 km and that frigate scrams at 20 km, so there is no room to kite —
 fighting at 24.5 km instead"). Kiting at a range the drones cannot work in is
 worse than brawling, and fleeing is the watches' job, not this block's.
+
+### Hostiles on grid but none that scram
+
+A third case, and the formula above gets it wrong on its own: with rats present but
+none of them carrying a scramble chance, the floor is 0, and "hold at the floor"
+becomes an order to fly ONTO them. The drone-travel-time argument for sitting close
+only outranks safety while something out there can actually hold the ship. Nothing
+can, so the ship sits at the FAR end of its leash instead — hold at the ceiling,
+anchored on the nearest threat so there is still an object to keep station against,
+with the floor honestly reported as 0.
+
+That is a different fact from an empty grid and therefore gets a different word:
+`no-tackle` ("they are here and none of them can point you") against `no-threat`
+("there is nobody here"). The readout can only say either one truthfully if they
+do not share a name.
 
 ### Which rat is the anchor
 
@@ -195,6 +234,17 @@ For an NPC row, classify from the type's own dogma:
 |---|---|---|
 | `tackle`, sub-rank 1 | `entityWarpScrambleChance` (504) > 0, with `warpScrambleRange` (103) as its reach | 402 entity types |
 | `tackle`, sub-rank 2 | `speedFactor` (20) < 0 — the attribute the server's own web definition uses as its strength | 990 entity types |
+
+(Counts are ENTITY types only. A sweep over the whole of `typeDogma.jsonl` gives
+larger numbers — 408 / 1070 — because `speedFactor` in particular is not
+entity-exclusive: a player's stasis webifier module carries it too. That is why the
+classifier is documented as reading a TYPE'S OWN dogma rather than "the web
+attribute".)
+
+⚠ **THE CHANCE IS THE GATE, NOT THE RANGE.** A type can carry a scramble RANGE and
+a scramble STRENGTH and still never scram, because its `entityWarpScrambleChance` is
+0 — `Pithum Silencer` is exactly that (range 15000, strength 1, chance 0). Keying
+the classifier on the range would have bots fleeing harmless rats.
 | `ewar` | `entitySensorDampenDurationChance` (932), `energyNeutralizerEntityChance` (931), `entityTargetPaintDurationChance` (935) | 98 / 212 / 66 |
 | `other` | everything else | the rest |
 
@@ -216,6 +266,12 @@ NAMES THE SOURCE (`sourceBallID`) and the `jammingType` — `webify`,
 holding this ship right now is ground truth and beats any static guess, including
 for a type whose dogma we read wrong. Feed it in as a promotion: a source id in
 the live jam list ranks at the top of its class regardless of what its dogma said.
+
+Order, worst-first: **fleet tag, then live jam, then class, then tackle sub-rank,
+then distance.** The tag stays above the jam deliberately — a tag is a human
+commander's instruction and a jam is a fact about the grid, and the existing rule
+that the FC's call beats this client's own guesses does not stop applying because
+the guesses got better.
 
 ## 7. Guns that have nothing loaded
 
