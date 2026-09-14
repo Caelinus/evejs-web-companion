@@ -315,6 +315,27 @@ export const AUTOPILOT_CADENCE_MS = 2000;
 const SETTLE_WARP = 2;
 const SETTLE_APPROACH = 2;
 const SETTLE_DOCK_REFUSAL = 2;
+/**
+ * How long to sit STILL after a warp refusal that did not name a blocker.
+ *
+ * ⚠ LONGER THAN THE OTHER SETTLES, AND THE REASON IS NOT POLITENESS. The
+ * condition this waits out — the pilot warp visibility handoff still holding
+ * `landingPending` — is retired by a reconcile that only considers a ship whose
+ * mode is already STOP. Re-issuing straight away is worse than doing nothing,
+ * because the ship is moving again (or being aligned by the block above this
+ * one) on the very tick the server was willing to let go, and the flag survives
+ * another lap. Waiting is the active part of this retry.
+ */
+const SETTLE_WARP_REFUSAL = 3;
+/**
+ * How many unnamed warp refusals to sit through before calling it.
+ *
+ * Four at SETTLE_WARP_REFUSAL is a little under half a minute of patience —
+ * generous for a handoff that normally retires in a tick or two, and cheap for
+ * the fatal half of that bucket (TARGET_NOT_FOUND and friends), which pays the
+ * same half-minute once and then pauses with the server's own words.
+ */
+const MAX_WARP_REFUSALS = 4;
 const MAX_DOCK_ATTEMPTS = 30;
 const MAX_JUMP_ATTEMPTS = 6;
 // R24 slice A — BOUND THE WARP BRANCH. The jump branch has had a counter since
@@ -406,6 +427,14 @@ interface LoopMemory {
   warpTargetID: number | null;
   /** Consecutive warp decisions for `warpTargetID` with nothing in between. */
   warpAttempts: number;
+  /**
+   * Consecutive warp REFUSALS that named no blocker — the retry budget spent
+   * against `warpTargetID`. Separate from `warpAttempts`, which counts warps
+   * the server ACCEPTED (200) and then quietly did not fly; these are the ones
+   * it turned down out loud. A route that mixes the two should not have one
+   * bound eat the other's budget.
+   */
+  warpRefusals: number;
   /** Consecutive dock decisions with nothing in between (the silent-decline bound). */
   silentDockAttempts: number;
   statusReadFailures: number;
@@ -437,6 +466,7 @@ function freshMemory(): LoopMemory {
     jumpAttempts: 0,
     warpTargetID: null,
     warpAttempts: 0,
+    warpRefusals: 0,
     silentDockAttempts: 0,
     statusReadFailures: 0,
     actionTransportFailures: 0,
@@ -733,6 +763,48 @@ function classifyJumpRefusal(reason: string): "approach" | "pause" {
     : "pause";
 }
 
+/**
+ * How to answer a warp the server turned down.
+ *
+ * ⚠ THE RETRYABLE CASE HAS NO WORDING OF ITS OWN, AND THAT IS THE WHOLE
+ * DIFFICULTY. `_throwWarpFailureUserError` gives CRIMINAL_TIMER_ACTIVE,
+ * WARP_DISRUPTED_BY_BUBBLE, WARP_SCRAMBLED, WARP_BLOCKED_BY_CLOAK,
+ * SHIP_IMMOBILE and DUNGEON_INSTANCE_NOT_AUTHORIZED a sentence each, and drops
+ * EVERY other reason into one generic "You cannot warp there right now." So the
+ * transient one we actually care about — WARP_LANDING_PENDING, the previous
+ * warp's visibility handoff not yet retired (see the runtime's
+ * `hasPendingPilotWarpLanding`) — arrives wearing the same words as the fatal
+ * ones it shares that bucket with: TARGET_NOT_FOUND, SHIP_NOT_FOUND,
+ * WARP_ACTIVATION_FAILED, UNSUPPORTED_WARP_TARGET.
+ *
+ * Matching the generic sentence is therefore NOT "this is landing-pending" — it
+ * is only "the server did not name a blocker it knows how to name". That is
+ * still the right thing to retry on, because the named blockers are exactly the
+ * ones no amount of waiting fixes, and the bound below is what keeps the fatal
+ * half of the bucket from costing more than a few seconds.
+ *
+ * `retry` deliberately does NOT re-issue at once — see SETTLE_WARP_REFUSAL.
+ */
+function classifyWarpRefusal(reason: string): "arrived" | "retry" | "pause" {
+  // Already inside warp distance of the target: not a failure at all — the
+  // ladder should treat the hop as flown and move on to approach/jump.
+  if (/already within warp|within warp distance|already in warp|too close to warp/i.test(reason)) {
+    return "arrived";
+  }
+  // A blocker the server was willing to name. None of these clear by waiting:
+  // they need the pilot to do something (decloak, wait out a timer, break the
+  // scram, scan the site down), so stopping and saying so is the honest move.
+  if (
+    /scrambl|disrupt|bubble|criminal|cloak|immobile|cannot move|scanned that site|within complex/i.test(
+      reason,
+    )
+  ) {
+    return "pause";
+  }
+  // Everything else, generic sentence included.
+  return "retry";
+}
+
 /** True when a dock refusal is the normal out-of-range docking-approach. */
 function isDockingApproach(reason: string): boolean {
   return /dockingapproach|docking approach|approach|not in range|too far|range/i.test(reason);
@@ -800,6 +872,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
       memory.jumpAttempts = 0;
       memory.warpTargetID = null;
       memory.warpAttempts = 0;
+      memory.warpRefusals = 0;
       memory.pendingApproachGate = null;
       memory.approachingTargetID = null;
       memory.approachCycles = 0;
@@ -1017,11 +1090,39 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
     }
 
     if (action.kind === "warp") {
-      if (/already within warp|within warp distance|already in warp|too close to warp/i.test(reason)) {
+      const verdict = classifyWarpRefusal(reason);
+      if (verdict === "arrived") {
         // Already within warp range of the target gate (e.g. sitting near it):
         // treat as arrived at the gate and proceed to approach/jump.
         memory.warpedInSystem = sys;
         memory.settleTicks = SETTLE_APPROACH;
+        return;
+      }
+      if (verdict === "retry") {
+        // ⚠ THIS BRANCH EXISTS BECAUSE THE SHIP USED TO DIE HERE. Every warp
+        // refusal paused the run outright — alone among the four move kinds,
+        // where jump, approach and dock have each had a bound since R5b/R24 —
+        // so one unnamed refusal on the trip home left the pilot stopped in the
+        // site it had just cleared: drones in, engines off, nothing running,
+        // indefinitely. Resume could not help, because resuming re-entered the
+        // same step and met the same refusal on the next tick.
+        // The server REFUSED and said so, which is not the silent-decline case
+        // MAX_WARP_ATTEMPTS exists for — and slice A counts DECISIONS, so a
+        // refusal we intend to retry would otherwise trip that bound (at three)
+        // before this one (at four) and pause with the wrong sentence entirely.
+        // Hand the counting over, exactly as the dock branch hands it from
+        // `silentDockAttempts` to `dockAttempts` above.
+        memory.warpAttempts = 0;
+        memory.warpRefusals += 1;
+        if (memory.warpRefusals > MAX_WARP_REFUSALS) {
+          setPause(
+            `The warp was turned down ${memory.warpRefusals} times running and the ship has not moved: ${words}`,
+          );
+          return;
+        }
+        // Sit still and let it retire. No pause: the run stays live, and the
+        // ladder re-decides the same warp once the settle runs out.
+        memory.settleTicks = SETTLE_WARP_REFUSAL;
         return;
       }
       setPause(`Warp refused: ${words}`);
@@ -1191,6 +1292,11 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
     } else if (action.kind !== "wait") {
       memory.warpTargetID = null;
       memory.warpAttempts = 0;
+      // Any other move getting issued means the last warp is behind us — either
+      // it flew, or the ladder has moved on — so the refusal budget starts over.
+      // `wait` is excluded for the same reason it is above: the settle this
+      // very branch schedules must not clear the count it is settling for.
+      memory.warpRefusals = 0;
     }
 
     // R24 slice B — and the same bound on dock, for the same reason. Arrival is
@@ -1345,6 +1451,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
         memory.jumpAttempts = 0;
         memory.warpTargetID = null;
         memory.warpAttempts = 0;
+        memory.warpRefusals = 0;
         memory.silentDockAttempts = 0;
         memory.approachCycles = 0;
         memory.approachWaitCycles = 0;

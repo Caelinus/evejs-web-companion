@@ -1269,6 +1269,51 @@ test("tackled: once the grid is clear the trip home is asked for again", () => {
   assert.equal(clear.nextMem["recalled"], false, "the drones are called in again before the next warp");
 });
 
+// ─── The last door: a trip home that cannot fly ──────────────────────────────
+//
+// `stopSafely` is explicit that docked is the only place a bot may come to rest,
+// and it flies the ship home to get there. When THAT flight is blocked and there
+// is nothing to shoot, the old code paused anyway — in space, guns off — which
+// is the exact state the doctrine exists to prevent. Home being unreachable
+// says nothing about the station on this grid.
+
+/** The autopilot's leftovers when the route home failed for a non-combat reason. */
+const routeDead = {
+  status: "paused" as const,
+  destinationStationID: HOME,
+  remainingJumps: 2,
+  failureReason: "The warp was turned down 5 times running and the ship has not moved.",
+};
+
+test("stranded: a trip home that cannot fly docks at the station on THIS grid", () => {
+  const station = entity({ itemID: 7001, kind: "station", position: { x: 1_000, y: 0, z: 0 } });
+
+  const out = scriptTravelHome(
+    obs({ snapshot: snapshot([station]), travel: routeDead, homeStationID: HOME }),
+    {},
+  );
+
+  assert.notEqual(out.outcome.kind, "blocked", "stopping in space is the bug, not the answer");
+  assert.ok(
+    out.action.kind === "dock" && out.action.stationID === 7001,
+    `it must take the door on this grid (got ${out.action.kind})`,
+  );
+});
+
+test("stranded: with no door in sight it stops, and the reason names BOTH failures", () => {
+  const out = scriptTravelHome(
+    obs({ snapshot: snapshot([]), travel: routeDead, homeStationID: HOME }),
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked", "nowhere to go really is a stop");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  // Both halves, because "the trip home failed" alone sends a reader looking at
+  // the route when the ship could not have docked ten metres away either.
+  assert.match(reason, /turned down 5 times running/i, "the trip's own failure survives");
+  assert.match(reason, /could not dock here either/i, "and the fallback says it tried");
+});
+
 test("tackled: the way out is fought against the ship HOLDING it, not the nearest one", () => {
   // ⚠ THE LOSS THIS PARCEL EXISTS FOR, END TO END. The watch fired, the drones
   // came home, the warp was refused — and the escape shot the nearest rat while

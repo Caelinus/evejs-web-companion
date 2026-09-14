@@ -4863,6 +4863,57 @@ const MAX_ESCAPE_ATTEMPTS = 3;
 /** The synthetic step the escape borrows the combat blocks under. */
 const ESCAPE_STEP: MacroStep = { id: "__escape__", kind: "macro", macro: "fight-the-rats", args: {} };
 
+/** The synthetic step the last-resort dock borrows `dock-at-nearest` under. */
+const HARBOUR_STEP: MacroStep = { id: "__harbour__", kind: "macro", macro: "dock-at-nearest", args: {} };
+
+/** Nested memory slot for that dock, so its close-in and recall bookkeeping
+ *  cannot collide with the trip's own in the shared home-memory slot. */
+const HARBOUR_MEM_KEY = "harbourDock";
+
+/**
+ * THE TRIP HOME CANNOT FLY — SO TAKE ANY DOOR, NOT NO DOOR.
+ *
+ * ⚠ THIS IS THE LINE BETWEEN "STOPPED" AND "STRANDED". `stopSafely` in
+ * scriptDecide.ts is explicit that docked is the only place a bot may come to
+ * rest, and it flies the ship home to get there — but when that flight is itself
+ * blocked, `continueHeadingHome` simply paused, and the ship came to rest in
+ * space anyway: guns off, drones in, exactly the unattended wreck-in-waiting the
+ * doctrine exists to prevent.
+ *
+ * Home being unreachable says nothing about the station on this grid. A route
+ * that cannot be plotted, a destination that no longer resolves, a warp the
+ * server will not take to THERE — none of them stop a ship docking HERE, and
+ * `dock-at-nearest` is grid-local by construction.
+ *
+ * ⚠ IT IS NOT A CURE FOR A SHIP THAT CANNOT MOVE AT ALL, and must not pretend to
+ * be. A hold that blocks warping usually blocks docking too (the server checks
+ * the same pilot-warp landing handoff in `acceptDocking` as in `warpToEntity`),
+ * so this genuinely rescues the "home specifically is unreachable" half and
+ * reports the other half honestly instead of dressing it up as a plan.
+ */
+function dockLastResort(obs: ScriptObservation, mem: MacroMemory, blockedReason: string): MacroTick {
+  const harbourMem = (mem[HARBOUR_MEM_KEY] as MacroMemory | undefined) ?? {};
+  const dock = dockAtNearest(HARBOUR_STEP, obs, harbourMem, {});
+  const carried = { ...mem, [HARBOUR_MEM_KEY]: dock.nextMem };
+
+  if (dock.outcome.kind === "done") {
+    // Inside something. That is the whole goal of a safe stop.
+    return tick(WAIT, "Home could not be reached, so the ship docked here instead.", "Heading home", {
+      kind: "done",
+    });
+  }
+  if (dock.outcome.kind === "blocked") {
+    // Nowhere to go and no way to get there: stop, and say BOTH halves, because
+    // "the trip home failed" alone sends a reader looking at the route when the
+    // ship could not have docked ten metres away either.
+    return tick(WAIT, dock.why, "Heading home", {
+      kind: "blocked",
+      reason: `${blockedReason} The ship could not dock here either: ${dock.outcome.reason}`,
+    });
+  }
+  return { ...dock, phase: "Heading home", nextMem: carried };
+}
+
 /**
  * ⚠ THE TRIP HOME FAILED, WHICH USUALLY MEANS SOMETHING IS HOLDING THE SHIP.
  * A scrambled warp comes back as a plain refusal, the autopilot pauses with it,
@@ -4961,6 +5012,9 @@ export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
     if (escape !== null) {
       return escape;
     }
+    // Nothing holding the ship that shooting would fix, and the trip still will
+    // not fly. Before giving up in space, try the door on this grid.
+    return dockLastResort(obs, mem, ride.outcome.reason);
   }
   const onGrid = (obs.snapshot?.entities ?? []).some((e) => e.itemID === target);
   const recall = recallBeforeLeaving(obs, mem, "Heading home", onGrid ? target : null);
