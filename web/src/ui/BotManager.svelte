@@ -34,7 +34,7 @@
   import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
   import { lastSavedPhrase, libraryView, savedByLabel } from "../bots/libraryView.ts";
-  import { editInBuilder, libraryChanged, newInBuilder } from "../bots/builderTarget.ts";
+  import { editInBuilder, libraryChanged, newInBuilder, noteLibraryChanged } from "../bots/builderTarget.ts";
   import {
     serverBotFor,
     serverOnlyBots,
@@ -331,6 +331,15 @@
         exportError = null;
       }
       error = null;
+      // ⚠ THE BUILDER'S PICKERS HOLD THIS ROW TOO. Deleting used to happen in
+      // the builder as well, where it re-read its own list; this panel is the
+      // only place it happens now, so without this the builder goes on offering
+      // a bot that is gone — and "+ Saved bot" would point a sub-bot node at a
+      // script id nothing can resolve.
+      noteLibraryChanged();
+      // Its own change, already accounted for: `refresh()` runs below either
+      // way, and without this the effect above would read the same list twice.
+      servedLibraryWrite = libraryChanged.get();
     } catch {
       error = "Could not delete that bot — it may have already been removed.";
     } finally {

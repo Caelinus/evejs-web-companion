@@ -59,6 +59,7 @@
   import {
     builderTarget,
     decideHandoff,
+    libraryChanged,
     noteLibraryChanged,
     waitingSentence,
     wantedLabel,
@@ -753,6 +754,21 @@
   // flow's complete options — token, base URL and injected fetch — exactly like
   // calls made inside flow.ts.
   const botOpts = () => flow.requestOptions();
+  // ⚠ AND BACK THE OTHER WAY. Deleting is the Manager's now and only the
+  // Manager's, so a bot can leave the library while this window is open — and
+  // the two pickers below would go on offering it, with "+ Saved bot" able to
+  // point a sub-bot node at a script id nothing can resolve. Same seeded mark
+  // as the Manager's watcher, for the same reason: a save here bumps the
+  // counter itself and must not make this read the list twice.
+  const libraryWrites = libraryChanged;
+  let servedLibraryWrite = libraryChanged.get();
+  $effect(() => {
+    const count = $libraryWrites;
+    if (count === servedLibraryWrite) return;
+    servedLibraryWrite = count;
+    void refreshSaved();
+  });
+
   async function refreshSaved(): Promise<void> {
     try {
       savedList = await listBotScripts(botOpts());
@@ -784,6 +800,9 @@
       // The Bot Manager's library is the list this bot just joined or changed,
       // and it does not poll — see builderTarget.ts.
       noteLibraryChanged();
+      // Its own change: `refreshSaved()` is the very next line, and without
+      // this the watcher below would read the same list a second time.
+      servedLibraryWrite = libraryChanged.get();
       await refreshSaved();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not save.";
