@@ -1130,8 +1130,9 @@ panel issues after payout. Three are new top-level (non-bound) server-tier reads
 (added to the allowlist above); the fourth (the mission journal) was already
 allowlisted in R4:
 
-- `account.GetCashBalance(0)` → the personal ISK balance (a plain number, or a
-  `{type:"long"}`). Decoded to a bigint-safe decimal string.
+- `account.GetCashBalance(0)` → the personal ISK balance, which eve.js sends as a
+  `{type:"real"}` (a plain number or a `{type:"long"}` also decodes). Decoded to a
+  bigint-safe decimal string.
 - `LPSvc.GetAllMyCharacterWalletLPBalances()` → a CRowset (`objectex2`) of packed
   rows `[issuerCorpID, loyaltyPoints]`. LP kept as decimal strings.
 - `standingMgr.GetCharStandings()` → a header/lines Rowset of `[fromID, standing]`

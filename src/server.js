@@ -3964,6 +3964,10 @@ function marketAmountString(value) {
   if (value && typeof value === "object" && value.type === "long") {
     return String(value.value);
   }
+  // eve.js sends the wallet balance as a marshalled real, rounded to cents.
+  if (value && typeof value === "object" && value.type === "real") {
+    return Number.isFinite(value.value) ? value.value.toFixed(2) : null;
+  }
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
   }

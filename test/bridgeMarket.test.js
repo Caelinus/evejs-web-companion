@@ -621,7 +621,10 @@ function fakeWriteGateway(options = {}) {
     async callMethod(service, method, args, kwargs, sessionFields, bridgeSessionID) {
       calls.topLevel.push({ service, method, args, kwargs, bridgeSessionID });
       if (service === "account" && method === "GetCashBalance") {
-        return { service, method, result: String(state.balance.toFixed(2)), notifications: [] };
+        const result = options.realBalance
+          ? { type: "real", value: state.balance }
+          : String(state.balance.toFixed(2));
+        return { service, method, result, notifications: [] };
       }
       if (service === "marketProxy" && method === "GetCharOrders") {
         return { service, method, result: cached(ownOrderRowset(state.orders)), notifications: [] };
@@ -929,6 +932,26 @@ test("the wallet delta is EXACT at magnitudes where a float would drift", async 
   });
   // 10 + 137.50 = 147.50, computed through BigInt hundredths.
   assert.equal(payload.charged, "147.50");
+});
+
+test("the charge stays exact when eve.js sends the wallet as a marshalled real", async () => {
+  // eve.js sends GetCashBalance as {type:"real", value}. Reading only strings
+  // and longs would leave `charged` null after every write.
+  const gateway = fakeWriteGateway({ balance: 1000000, realBalance: true });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { payload } = await postMarket(baseUrl, "/api/bridge/market/buy", {
+    typeID: TYPE_ID,
+    price: 10,
+    quantity: 100,
+    durationDays: 30,
+    confirm: true,
+  });
+
+  assert.equal(payload.charged, "1137.50");
+  assert.equal(payload.balanceBefore, "1000000.00");
+  assert.equal(payload.balanceAfter, "998862.50");
 });
 
 test("a CANCEL reports the refund as a NEGATIVE charge — ISK came back", async () => {
