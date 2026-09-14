@@ -430,6 +430,26 @@ export interface ScriptObservation {
    */
   readonly droneControlRangeM?: number | null;
   /**
+   * How many targets this hull can hold at once — dogma attribute 192, off the
+   * fit's own `stats.targeting.maxLockedTargets`. The drone boat's pre-lock rung
+   * fills the SPARE slots so the next primary is already locked when this one
+   * dies (a Tristan holds five; the gun ladder uses one and pays a fresh lock
+   * after every kill).
+   *
+   * ⚠ NULL IS "DO NOT PRE-LOCK", NEVER A GUESSED FIVE. A hull's lock count is a
+   * real limit and the server REFUSES the lock past it — and a refusal is booked
+   * in the ledger, where enough of them on one key END THE RUN. Guessing five
+   * because a frigate holds five would spend that refusal every tick on every
+   * destroyer nobody had measured. The rung reads unreadable as "do not", which
+   * costs a few seconds a kill and nothing else.
+   *
+   * ⚠ AND AN UNKNOWN `Stat` ARRIVES AS `null`, NEVER AS 0 — the same discipline
+   * the two range fields above keep. A zero here is the claim "this ship cannot
+   * lock anything", which is a different and much worse statement than "nobody
+   * looked".
+   */
+  readonly maxLockedTargets?: number | null;
+  /**
    * What each ship TYPE on this grid does to a ship it has decided to fight,
    * from the type's own dogma (nav/ratThreat.ts). Keyed by typeID because a
    * threat belongs to a type, not to a hull sitting in space — the same shape

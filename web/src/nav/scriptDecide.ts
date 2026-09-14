@@ -80,7 +80,27 @@ export type ScriptAction =
   | { readonly kind: "lock"; readonly targetID: number }
   | { readonly kind: "unlock"; readonly targetID: number }
   | { readonly kind: "activate"; readonly moduleID: number; readonly targetID: number }
-  | { readonly kind: "deactivate"; readonly moduleID: number }
+  /**
+   * Switch a fitted module OFF. No target: deactivation always names the
+   * caster's own fit.
+   *
+   * ⚠ `typeID` IS NOT DECORATION, AND LEAVING IT OFF A PROPULSION MODULE IS A
+   * CALL THAT RETURNS SUCCESS AND DOES NOTHING. The server stops an afterburner
+   * or a microwarpdrive only when the Deactivate NAMES that module's propulsion
+   * effect, and the BFF resolves that effect name from the typeID alone (see
+   * `api.deactivateModule`'s own header, the route in src/server.js, and
+   * nav/propulsion.ts's warning). Without it the burner keeps cycling, the
+   * signature stays bloomed, the capacitor keeps draining, and the block that
+   * issued the stop falls through happily believing the rack now agrees with it
+   * — so it never tries again.
+   *
+   * ⚠ IT IS OPTIONAL BECAUSE AN ORDINARY MODULE STOPS WITHOUT IT. Every existing
+   * emitter — the repair thermostat, the fight-back stand-down, the mine-at-belt
+   * step exit — switches off a repairer or a hardener, which needs no effect
+   * name and behaves identically whether the key is present or absent. Only a
+   * prop mod cares, and only the rung that names one fills this in.
+   */
+  | { readonly kind: "deactivate"; readonly moduleID: number; readonly typeID?: number }
   | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[] }
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }

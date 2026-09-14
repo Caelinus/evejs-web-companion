@@ -117,6 +117,11 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   destination: "Destination",
   pick: "Which rock first",
   ores: "Ore priority",
+  // The drone boat's two overrides. Both say their unit or their choice in the
+  // label, because both are things a player only reaches for when the block's
+  // own answer looked wrong on screen.
+  holdRangeKm: "Hold this far off (km)",
+  propulsion: "Prop mod",
 };
 
 function paramView(arg: MacroArgSpec): MacroParamView {
@@ -272,6 +277,15 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "combat",
     "Locks the nearest pirate, runs your guns on it and sets the drones on it too, then moves to the next. Finishes when the grid is clear and the drones are back aboard.",
     "Guns fitted, or combat drones in the bay",
+  ),
+  // The drone boat's own block, beside Fight the rats rather than replacing it:
+  // that one is the gunship's ladder and never moves the ship, which is the one
+  // thing a drone boat has to do.
+  "fight-with-drones": entry(
+    "fight-with-drones",
+    "combat",
+    "Fights a pirate den the way a drone boat has to. Puts your combat drones out, holds the ship at a stand-off distance worked out from what the pirates on grid can actually reach you with, and moves the drones from one target to the next. It pulls a drone that has started taking damage and sends it back out, burns in on a wave that lands too far away to lock onto, and walks away from a den that will not die rather than grinding at it. Finishes when the grid is clear and the drones are back aboard.",
+    "Combat drones in the bay",
   ),
   "warp-to-anomaly": entry(
     "warp-to-anomaly",

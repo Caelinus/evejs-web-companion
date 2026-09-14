@@ -20,6 +20,7 @@ import type {
   InterruptRow,
   MacroID,
   MacroStep,
+  PropModeArg,
   Repeat,
   TargetClassArg,
   SquadRoleArg,
@@ -108,6 +109,8 @@ export function macroName(macro: MacroID): string {
       return "Hardeners on";
     case "fight-the-rats":
       return "Fight the rats";
+    case "fight-with-drones":
+      return "Fight with drones";
     case "warp-to-anomaly":
       return "Fly to a pirate den";
     case "warp-to-ore-anomaly":
@@ -376,6 +379,50 @@ export function targetClassWord(cls: TargetClassArg): string {
   return TARGET_CLASS_WORD[cls];
 }
 
+/** What each prop-mod setting is called on screen. */
+const PROP_MODE_WORD: Readonly<Record<PropModeArg, string>> = {
+  auto: "using the prop mod to close the distance",
+  off: "leaving the prop mod alone",
+};
+
+/** The prop-mod words, for the picker. "auto" is the default and says nothing. */
+export function propModeWord(mode: PropModeArg): string {
+  return PROP_MODE_WORD[mode];
+}
+
+/**
+ * ", leaving the prop mod alone" — empty on the default, so an untouched drone
+ * boat still reads as one plain sentence.
+ *
+ * ⚠ "off" NEVER READS AS "IGNORES THE PROP MOD". It means the block will not
+ * LIGHT one; a burner an earlier block left running is still shut down, because
+ * a ship holding station with its signature bloomed is being shot for nothing.
+ * "Leaving it alone" is the honest short way to say "will not reach for it".
+ */
+function propPhrase(step: MacroStep): string {
+  const arg = step.args["propulsion"];
+  if (arg === undefined || arg.kind !== "propMode" || arg.mode === "auto") {
+    return "";
+  }
+  return `, ${PROP_MODE_WORD[arg.mode]}`;
+}
+
+/**
+ * ", holding at 25 km off" — empty when the block works its own band out, which
+ * is the case a player should normally be in.
+ *
+ * ⚠ THE NUMBER IS PRINTED IN THE UNIT IT WAS TYPED IN. The stored value is
+ * kilometres; nothing here converts, because a sentence that quietly showed
+ * metres would teach the player the wrong unit for the box they typed into.
+ */
+function holdRangePhrase(step: MacroStep): string {
+  const arg = step.args["holdRangeKm"];
+  if (arg === undefined || arg.kind !== "distanceKm") {
+    return "";
+  }
+  return `, holding at ${arg.value} km off`;
+}
+
 /**
  * ", tacklers then jammers first" — the same shape the ore priority reads in,
  * and empty when the step leaves the ladder at its default, so an untouched
@@ -503,6 +550,16 @@ function macroPhrase(step: MacroStep): string {
       return "Switch every hardener on";
     case "fight-the-rats":
       return `Fight the rats until the grid is clear${targetPhrase(step)}${squadPhrase(step)}`;
+    // ⚠ THE SENTENCE SAYS "FROM A DISTANCE", WHICH IS THE WHOLE DIFFERENCE FROM
+    // THE LINE ABOVE. Two combat blocks sitting side by side in the palette have
+    // to be told apart by their sentences or a player picks the wrong one and
+    // watches a drone boat sit inside a scram it could have stayed out of. The
+    // band, the give-up verdict and the fit fault get their own sentences from
+    // the block itself while it runs (nav/droneBoatLadder.ts); this line is the
+    // STILL one, read in the editor before anything is on grid, so it says what
+    // the block will do and never guesses a number it has not computed yet.
+    case "fight-with-drones":
+      return `Fight the rats with your drones from a distance${holdRangePhrase(step)}${propPhrase(step)}${targetPhrase(step)}${squadPhrase(step)}`;
     case "warp-to-anomaly":
       return "Warp to the next pirate den the scanner shows";
     case "warp-to-ore-anomaly":

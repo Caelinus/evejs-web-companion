@@ -43,6 +43,7 @@ import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
+import { decideDroneBoat } from "./droneBoatLadder.ts";
 import {
   decodeLedger,
   describeVerdict,
@@ -2592,6 +2593,116 @@ function fightRatsLadder(
   return tick(WAIT, "Fighting it.", "Fighting", ACTING, true, mem);
 }
 
+// ── fight-with-drones ────────────────────────────────────────────────────────
+//
+// The drone boat's block. Everything it decides lives in `nav/droneBoatLadder.ts`
+// — pure, tested, and composed out of six leaf modules that each own one hard
+// question (the stand-off band, what a rat type does, which one to shoot, when a
+// prop mod comes off, when to rotate a hurt drone, when to give a site up). What
+// is left HERE is the adapter, and it owns exactly three things the ladder
+// deliberately refused to own from where it sits:
+//
+//   1. THE PLAYER'S ARGUMENTS, read off the step.
+//   2. THE FLEET'S CALL, resolved through the existing three-source precedence
+//      rather than a second copy of it.
+//   3. THE PROPULSION EFFECT NAME on a stop, which needs the fit and not the
+//      grid.
+//
+// ⚠ AND ONE UNIT CONVERSION, WHICH IS THE THING MOST LIKELY TO BE GOT WRONG
+// HERE. The player types KILOMETRES; every range under this line is METRES.
+
+/**
+ * The player's hold override, IN METRES, or null when they left it computed.
+ *
+ * ⚠ THIS MULTIPLICATION IS THE ONLY ONE, AND SKIPPING IT IS A THOUSANDFOLD
+ * ERROR IN THE DIRECTION THAT LOOKS LIKE NOTHING. `distanceKm` stores what the
+ * player typed, because that is the number their overview shows them; `kiteBand`
+ * and every leash in `droneBoatLadder` are metres. Hand 25 straight through and
+ * the band resolves a 25-METRE hold — the ship flies into the middle of the rats
+ * — and hand 25000 to a box bounded 1..300 and the codec clamps it to 300 km,
+ * which parks the boat outside its own drone leash where nothing dies and the
+ * give-up ledger blames the SITE for it. Neither failure announces itself.
+ */
+function holdRangeMOf(step: MacroStep): number | null {
+  const arg = step.args["holdRangeKm"];
+  return arg !== undefined && arg.kind === "distanceKm" ? arg.value * 1000 : null;
+}
+
+/** Whether this step may light a prop mod. Absent = "auto", the shipped answer. */
+function propModeOf(step: MacroStep): "auto" | "off" {
+  const arg = step.args["propulsion"];
+  return arg !== undefined && arg.kind === "propMode" ? arg.mode : "auto";
+}
+
+/**
+ * Fill in the propulsion effect on a `deactivate` the ladder emitted, from the
+ * fit.
+ *
+ * ⚠ WITHOUT THIS THE STOP RETURNS SUCCESS AND THE BURNER KEEPS CYCLING. The
+ * server stops a prop mod only when the Deactivate NAMES its propulsion effect,
+ * and the BFF resolves that name from the module's typeID (nav/propulsion.ts,
+ * `api.deactivateModule`, and the route in src/server.js all say so). The ladder
+ * cannot supply it: it is a FIT fact, and a pure decision core that reached into
+ * the fit for it would be re-deriving what `obs.propulsionModules` already
+ * carries. So the ladder names the module and this names the effect.
+ *
+ * ⚠ IT IS A LOOKUP AND NEVER A GUESS. A `deactivate` whose module is not in the
+ * propulsion list is some other module — a repairer, a hardener — and those stop
+ * without an effect name, so it passes through untouched. Attaching a typeID
+ * from the wrong module would ask the server to end a cycle that module is not
+ * running.
+ */
+function nameThePropulsionEffect(decided: MacroTick, obs: ScriptObservation): MacroTick {
+  const action = decided.action;
+  if (action.kind !== "deactivate") {
+    return decided;
+  }
+  const module = (obs.propulsionModules ?? []).find((row) => row.itemID === action.moduleID);
+  if (module === undefined) {
+    return decided;
+  }
+  return { ...decided, action: { ...action, typeID: module.typeID } };
+}
+
+/**
+ * Fight from a distance with drones — the registration of `decideDroneBoat`.
+ *
+ * ⚠ THE CALLED SHIP IS RESOLVED OVER THE IN-REACH ROWS, NOT THE WHOLE GRID, and
+ * that is the same rule `fight-the-rats` follows. `calledOnGrid`'s precedence is
+ * "tag, then broadcast, then board, and a source naming a ship this pilot cannot
+ * act on falls through to the NEXT source rather than to null" — which only
+ * works if the rows handed in are the ones this pilot can actually shoot. Hand
+ * it the raw grid and an FC's tag on a rat 80 km out would blind a follower to a
+ * broadcast it could have obeyed. `hostilesInReach` is exactly the filter the
+ * ladder's own `inReach` applies, so the two agree by construction.
+ */
+const fightWithDrones: MacroDecider = (step, obs, mem, board) => {
+  const snapshot = obs.snapshot ?? null;
+  const role = squadRoleOf(step);
+  // A called ship can only be resolved off a grid, and the ladder's own guards
+  // are what answer "there is no grid" — so with no snapshot this is simply
+  // null, which is what every `squad: "off"` caller passes anyway.
+  const called =
+    snapshot === null || role !== "follow"
+      ? null
+      : calledOnGrid(
+          obs,
+          hostilesInReach(obs, snapshot, snapshot.ship?.position ?? { x: 0, y: 0, z: 0 }),
+          (row) => row.itemID,
+        );
+  const decided = decideDroneBoat({
+    obs,
+    mem,
+    board,
+    targets: targetPriorityOf(step),
+    holdRangeM: holdRangeMOf(step),
+    propMode: propModeOf(step),
+    squad: role,
+    calledTargetID: called?.itemID ?? null,
+  });
+  return nameThePropulsionEffect(decided, obs);
+};
+
 // ── warp-to-anomaly / warp-to-ore-anomaly ────────────────────────────────────
 // Read the onboard scanner, warp to the next anomaly OF THE WANTED KIND this run
 // has not visited (visited labels live on the BOARD so a repeat loop walks the
@@ -4571,6 +4682,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "refine-ore": refineOre,
   "hardeners-on": hardenersOn,
   "fight-the-rats": fightTheRats,
+  "fight-with-drones": fightWithDrones,
   "warp-to-anomaly": warpToAnomaly,
   "warp-to-ore-anomaly": warpToOreAnomaly,
   "refit-ship": refitShip,

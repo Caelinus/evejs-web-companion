@@ -36,15 +36,18 @@ import {
   INTERRUPT_RESPONSES,
   MAX_CONDITION_FRACTION,
   MAX_COUNT_ARG,
+  MAX_DISTANCE_KM_ARG,
   MAX_ISK_ARG,
   MAX_QTY_ARG,
   MIN_CONDITION_FRACTION,
   MIN_COUNT_ARG,
+  MIN_DISTANCE_KM_ARG,
   MIN_ISK_ARG,
   MIN_QTY_ARG,
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
   ROCK_PICKS,
+  PROP_MODE_ARGS,
   TARGET_CLASS_ARGS,
   SQUAD_ROLE_ARGS,
   type ItemMatchArg,
@@ -60,6 +63,7 @@ import {
   countProgramNode,
   type Arg,
   type RockPick,
+  type PropModeArg,
   type TargetClassArg,
   type SquadRoleArg,
   type OreFamilyArg,
@@ -545,6 +549,40 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       ctx.warn(WARN.clampCount(label, clamped));
     }
     return { kind: "count", value: clamped };
+  }
+  if (expected === "distanceKm") {
+    // ⚠ THE SAME RULE AS `count` ABOVE, AND FOR THE SAME REASON: an out-of-range
+    // distance CLAMPS with a warning rather than refusing the whole document
+    // over one editable number. A refusal here would make a bot a player typed
+    // 500 into unopenable, including for the player who typed it.
+    //
+    // ⚠ AND THE UNIT IS KILOMETRES ON BOTH SIDES OF THIS LINE. The bound is
+    // 1..300 KM; the runtime multiplies by a thousand exactly once, in the
+    // block's adapter. Clamping a metre value against a kilometre bound would
+    // silently turn "hold at 25 km" into "hold at 300 km", which is a ship
+    // parked outside its own drone leash and a fight that never starts.
+    const value = obj["value"];
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+      refuse(SAY.badArg(label));
+    }
+    const clamped = Math.min(MAX_DISTANCE_KM_ARG, Math.max(MIN_DISTANCE_KM_ARG, value));
+    if (clamped !== value) {
+      ctx.warn(WARN.clampCount(label, clamped));
+    }
+    return { kind: "distanceKm", value: clamped };
+  }
+  if (expected === "propMode") {
+    // A CLOSED VOCABULARY, checked here rather than trusted — the same rule as
+    // `place`, `rockPick` and `squadRole`. An unrecognised mode is REFUSED and
+    // never quietly defaulted to "auto": defaulting would turn a document that
+    // says "never light the burner" into one that lights it, and the player
+    // would only find out from the signature bloom on a ship they had told not
+    // to bloom.
+    const mode = obj["mode"];
+    if (typeof mode !== "string" || !PROP_MODE_ARGS.includes(mode as PropModeArg)) {
+      refuse(SAY.badArg(label));
+    }
+    return { kind: "propMode", mode: mode as PropModeArg };
   }
   if (expected === "isk") {
     const value = obj["value"];
@@ -1302,6 +1340,10 @@ function orderArg(arg: Arg): unknown {
       return { kind: "targetList", classes: [...arg.classes] };
     case "squadRole":
       return { kind: "squadRole", role: arg.role };
+    case "distanceKm":
+      return { kind: "distanceKm", value: arg.value };
+    case "propMode":
+      return { kind: "propMode", mode: arg.mode };
     case "bayList":
       return { kind: "bayList", bays: [...arg.bays] };
     case "itemList":

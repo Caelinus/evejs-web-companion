@@ -206,6 +206,41 @@ export const MAX_QTY_ARG = 10_000_000;
  */
 export const MAX_TEXT_ARG_LEN = 200;
 
+/**
+ * A stand-off distance a player types, IN KILOMETRES.
+ *
+ * ⚠ THE UNIT IS IN THE KIND'S NAME BECAUSE THE MIX-UP IS A THOUSANDFOLD ERROR.
+ * Every range inside the runtime is in METRES — `maxTargetRangeM`,
+ * `droneControlRangeM`, `kiteBand`'s whole arithmetic — and a player types
+ * kilometres, because that is the number the overview shows them. One `* 1000`
+ * lives between the two, in the block's adapter (`nav/scriptMacros.ts`), and a
+ * value that skips it parks the ship a thousand times too far out: the drones
+ * go deaf, nothing dies, and the give-up ledger blames the site for it.
+ *
+ * 1..300 km. The floor is 1 because zero is "sit on top of it", which is what
+ * NOT setting this already means; the ceiling is comfortably past any hull's
+ * lock range, so it bounds a typo without ever refusing a real fit.
+ */
+export const MIN_DISTANCE_KM_ARG = 1;
+export const MAX_DISTANCE_KM_ARG = 300;
+
+/**
+ * What a block does about a fitted afterburner or microwarpdrive.
+ *
+ *   • "auto" — the shipped behaviour, and the default: light it to close a gap,
+ *              and kill it the moment the gap is closed. Holding station with a
+ *              burner lit is pure signature bloom for no distance gained.
+ *   • "off"  — never LIGHT one. It does not mean "ignore the rack": a module
+ *              already running must always remain stoppable, or a burner lit by
+ *              an earlier block burns capacitor and signature for the rest of
+ *              the site.
+ *
+ * A closed vocabulary, like the place and rock ones above, so the codec can
+ * refuse anything else rather than carry a third state nothing knows how to fly.
+ */
+export type PropModeArg = "auto" | "off";
+export const PROP_MODE_ARGS: readonly PropModeArg[] = Object.freeze<PropModeArg[]>(["auto", "off"]);
+
 export type Arg =
   | { readonly kind: "belt"; readonly belt: BeltArg }
   | { readonly kind: "station"; readonly ref: WorldRef }
@@ -272,6 +307,20 @@ export type Arg =
   | { readonly kind: "targetList"; readonly classes: readonly TargetClassArg[] }
   /** Whether this block calls the fleet's primary, follows it, or neither. */
   | { readonly kind: "squadRole"; readonly role: SquadRoleArg }
+  /**
+   * A distance the player types, in KILOMETRES — the drone boat's hold-range
+   * override. Absent = the block computes the band for itself, which is the
+   * shipped behaviour and the one a player should normally leave alone.
+   *
+   * ⚠ `value` IS KILOMETRES AND EVERYTHING DOWNSTREAM IS METRES. The field is
+   * called `value` (not `km`) so it shares the shape of every other numeric arg
+   * and the editor's one number widget can edit it; the UNIT lives in the kind's
+   * name and in `MIN/MAX_DISTANCE_KM_ARG` above. The conversion happens exactly
+   * once, in the block's adapter.
+   */
+  | { readonly kind: "distanceKm"; readonly value: number }
+  /** Whether a block may light a prop mod at all — a closed vocabulary. */
+  | { readonly kind: "propMode"; readonly mode: PropModeArg }
   /**
    * Bays the block must LEAVE ALONE. Empty or absent = leave nothing alone,
    * which is the shipped behaviour.
@@ -667,6 +716,14 @@ export type MacroID =
   | "refine-ore"
   | "hardeners-on"
   | "fight-the-rats"
+  // The drone boat's own combat block, beside `fight-the-rats` rather than a
+  // switch on it (docs/drone-boat-block-spec.md §1). That block is a GUN ladder:
+  // it never moves the ship, it finishes on a grid that is merely out of LOCK
+  // range, and its target classes match player hull groups no NPC ever carries.
+  // A drone boat's whole tactic is range, so the block that cannot express range
+  // cannot fly one — and none of those three could be changed in place without
+  // breaking the gunship `fight-the-rats` was written for.
+  | "fight-with-drones"
   | "warp-to-anomaly"
   // The mining twin of warp-to-anomaly: the same scanner list, filtered to ore
   // sites instead of dens. Two blocks rather than one with a switch, because
@@ -745,6 +802,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "refine-ore",
   "hardeners-on",
   "fight-the-rats",
+  "fight-with-drones",
   "warp-to-anomaly",
   "warp-to-ore-anomaly",
   "refit-ship",

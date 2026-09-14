@@ -8205,6 +8205,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      */
     readonly droneControlRangeM: number | null;
     /**
+     * How many targets the hull can hold at once (attribute 192) — the drone
+     * boat's pre-lock rung fills the spare slots so the next primary is already
+     * locked when this one dies. It rides this cache for the same reason the two
+     * ranges above do: it comes off the very fit read they come off, so it costs
+     * no extra call and refreshes on the same fit-changed signature.
+     *
+     * ⚠ NULL IS EXPECTED AND A `Stat` THAT IS NOT `known` MUST ARRIVE AS NULL
+     * RATHER THAN AS 0. The rung reads null as "do not pre-lock", which is the
+     * safe answer; a 0 would read as a hull that can lock nothing, and a guessed
+     * number would spend a server refusal — the ledger's run-ending kind — on
+     * every tick of every hull whose count nobody had measured.
+     */
+    readonly maxLockedTargets: number | null;
+    /**
      * Fitted weapons that take a charge and have none in them — the three-state
      * `takesCharge && !hasCharge` pair, computed off the very fit read this
      * cache is built from.
@@ -8307,6 +8321,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // where that discipline either holds or is thrown away.
       droneControlRangeM: fit.stats.bays.droneControlRange.known
         ? fit.stats.bays.droneControlRange.value
+        : null,
+      // ⚠ THE SAME `Stat` DISCIPLINE, THIRD TIME: unknown becomes `null`, never
+      // 0 and never a plausible guess. The pre-lock rung this feeds does nothing
+      // at all while this is null, which is exactly right for a count nobody
+      // read — see the field's own comment for what a guess costs.
+      maxLockedTargets: fit.stats.targeting.maxLockedTargets.known
+        ? fit.stats.targeting.maxLockedTargets.value
         : null,
       unloadedWeaponIDs: resolveUnloadedWeaponIDs(fit, defense.weapons),
     };
@@ -9331,6 +9352,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // one stand in for the other -- see nav/kiteBand.ts's header for what
           // that costs a pilot who cannot read the second one.
           droneControlRangeM: capabilities.droneControlRangeM,
+          // How many targets this hull holds at once -- the drone boat's
+          // pre-lock rung, which fills the SPARE slots so the next primary is
+          // already locked when this one dies.
+          //
+          // ⚠ IT IS THE PLUMBING THAT MAKES THAT RUNG REAL. The rung was written
+          // reading this field defensively off the observation and, while it was
+          // absent, correctly did nothing at all -- a pre-lock that never fired,
+          // on every hull, silently. Null still means "do not", which is the
+          // right answer for a count nobody read; what changed is that a fit
+          // that DOES report it now reaches the block.
+          maxLockedTargets: capabilities.maxLockedTargets,
           // The shared policy's input (nav/propulsion.ts) -- the SAME list the
           // fleet companion's ladder runs on, resolved once by
           // `resolveDefenseModuleIDs` rather than a second time here.
@@ -9397,8 +9429,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               callOptions,
             );
             return;
+          // ⚠ THE typeID IS WHAT MAKES A PROP-MOD STOP ACTUALLY STOP, and its
+          // absence here USED TO RETURN SUCCESS AND DO NOTHING. The server stops
+          // an afterburner or a microwarpdrive only when the Deactivate names
+          // that module's propulsion effect, and the BFF resolves that name from
+          // the typeID — so a bare call left the burner cycling while the block
+          // that issued it fell through believing the rack now agreed. The
+          // fleet companion's own issue path has always passed it; this one
+          // never did, which is why a script bot could not switch a burner off
+          // at all. An ordinary module (a repairer, a hardener) needs no effect
+          // name and behaves identically with the key omitted, which is why the
+          // field is optional and the body simply leaves it out.
           case "deactivate":
-            await api.deactivateModule(action.moduleID, {}, callOptions);
+            await api.deactivateModule(
+              action.moduleID,
+              action.typeID === undefined ? {} : { typeID: action.typeID },
+              callOptions,
+            );
             return;
           case "launchDrones":
             if (action.droneItemIDs.length > 0) {

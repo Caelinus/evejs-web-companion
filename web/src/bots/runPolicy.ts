@@ -112,6 +112,12 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "refine-ore": policy(["financial", "inventory"], false),
   "hardeners-on": policy(["combat"]),
   "fight-the-rats": policy(["combat"]),
+  // The drone boat fights with the same authority the gun ladder does: drones
+  // out, guns on, and — unlike that block — the ship itself moved and a prop mod
+  // lit. Same class, and restart-safe for the same reason: every rung re-reads
+  // the grid, so starting the block over re-derives the whole fight from what is
+  // actually out there rather than replaying anything.
+  "fight-with-drones": policy(["combat"]),
   "warp-to-anomaly": policy(["combat"]),
   // Flying to a rock field arms nothing — the ore block is as safe as any other
   // trip, which is exactly why it should not have been riding the combat one.
