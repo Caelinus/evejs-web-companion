@@ -272,6 +272,81 @@ test("ordinary writes still settle before deciding again", async () => {
   assert.equal(h.runner.getStatus(), "stopped");
 });
 
+// ── The per-kind settle (scriptDecide `settleTicksFor`) ──────────────────────
+//
+// The runner used to charge every action the same flat two ticks of
+// not-deciding, so at a 2 s cadence EVERY action cost six seconds — 20-35 s
+// between landing on a grid and the first point of drone damage. These pin the
+// three buckets from the runner's side: the table is consulted, it is consulted
+// per KIND, and the one entry a future reader is most likely to "tidy" is not
+// in it.
+
+/** A macro that issues `action` for ever — so a settle is the ONLY thing that gates it. */
+function alwaysIssues(action: ScriptAction): MacroDecider {
+  return () => mt(action, { kind: "acting" });
+}
+
+test("a 0-settle action can issue again on the very next tick", async () => {
+  // `lock` is guard-(a) at every real call site, so the runner owes it nothing.
+  const h = harness({ registry: { undock: alwaysIssues({ kind: "lock", targetID: 4001 }) } });
+  h.runner.start(script([macroStep("a", "undock")]));
+
+  await h.runner.tick();
+  assert.deepEqual(h.issued.map((a) => a.kind), ["lock"]);
+
+  await h.runner.tick();
+  assert.deepEqual(
+    h.issued.map((a) => a.kind),
+    ["lock", "lock"],
+    "no settle at all — the next tick decides",
+  );
+});
+
+test("a 1-settle action waits exactly one tick, then can issue", async () => {
+  // `activate` pays one tick because its guard is the observation's running-module
+  // list, and a duplicate comes back as EffectAlreadyActive2 — a refusal the
+  // ledger books, and ten on one key end the run.
+  const h = harness({
+    registry: { undock: alwaysIssues({ kind: "activate", moduleID: 7, targetID: 4001 }) },
+  });
+  h.runner.start(script([macroStep("a", "undock")]));
+
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1);
+
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1, "exactly one tick of not-deciding");
+
+  await h.runner.tick();
+  assert.equal(h.issued.length, 2, "and then it decides again — not two ticks, not three");
+});
+
+test("⚠ warp still pays the FULL settle — it is the one movement action that is not idempotent", async () => {
+  // THE REGRESSION TEST. Every other movement action (approach/align/orbit/
+  // keepAtRange) is a standing server-side order and sits at 0, which makes warp
+  // look like an oversight. It is not: re-sending a warp is "at worst a second
+  // warp the moment the first lands", and travelToBelt / mineNoTargetRocks /
+  // dockAtNearest / compressOre all emit it with NO memory guard whatsoever. The
+  // flat settle is the only thing preventing a double warp at those sites.
+  const h = harness({ registry: { undock: alwaysIssues({ kind: "warp", targetID: 4002 }) } });
+  h.runner.start(script([macroStep("a", "undock")]));
+
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1);
+
+  for (let i = 0; i < SETTLE_TICKS; i += 1) {
+    await h.runner.tick();
+    assert.equal(h.issued.length, 1, `a warp must not be re-issued ${i + 1} tick(s) after the first`);
+  }
+
+  await h.runner.tick();
+  assert.equal(h.issued.length, 2, "and after the full settle it may warp again");
+});
+
+// These four used to be served by the runner's own
+// `returnsAuthoritativeSessionReadiness`; they are now simply the first four
+// entries of `settleTicksFor`'s table. The behaviour they pin must be identical,
+// which is the point of leaving the tests exactly as they were.
 const READY_RETURNING_SESSION_ACTIONS: readonly ScriptAction[] = [
   { kind: "undock" },
   { kind: "dock", stationID: 60003760 },

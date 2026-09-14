@@ -17,6 +17,8 @@ import {
   activeMacroID,
   activeSquadRole,
   watchSquadRole,
+  DEFAULT_SETTLE_TICKS,
+  settleTicksFor,
   type HomeTravelDecider,
   type MacroDecider,
   type MacroMemory,
@@ -1183,4 +1185,41 @@ test("the ordinary program issues nothing in warp either", () => {
   const r = decideScriptAction(s, obs({ inWarp: true }), initialMemory(s), registry, home);
   assert.deepEqual(r.action, { kind: "wait" });
   assert.equal(r.stepPath, null);
+});
+
+// ─── The per-kind settle ─────────────────────────────────────────────────────
+
+test("settleTicksFor is an ALLOWLIST: a kind it does not name keeps the default", () => {
+  // ⚠ THE PROPERTY THE WHOLE TABLE RESTS ON. The map is deliberately PARTIAL, so
+  // silence means "unchanged" and an action kind added later by somebody who
+  // never read the table inherits today's safe behaviour without doing anything.
+  // `unlock` and the asset-moving group are named in the table's own comment as
+  // never-cut entries; `createFleet` is simply one it has never heard of. All three
+  // must come back the same.
+  assert.equal(settleTicksFor({ kind: "unlock", targetID: 4001 }), DEFAULT_SETTLE_TICKS);
+  assert.equal(settleTicksFor({ kind: "jettison", itemIDs: [1] }), DEFAULT_SETTLE_TICKS);
+  assert.equal(
+    settleTicksFor({ kind: "createFleet" }),
+    DEFAULT_SETTLE_TICKS,
+    "a kind with no entry at all is not a special case — it is the default",
+  );
+});
+
+test("settleTicksFor cuts the guarded actions to nothing and the unconfirmed ones to one", () => {
+  // 0: `lock` is guard-(a) at every call site (`lockIssued` written in the tick
+  // the lock goes out), so a duplicate is structurally impossible and the runner
+  // owes it no waiting at all.
+  assert.equal(settleTicksFor({ kind: "lock", targetID: 4001 }), 0);
+  // 1: `activate` has only an observation-derived guard, and a duplicate comes
+  // back as EffectAlreadyActive2 — a refusal the ledger books, ten of which on
+  // one key end the run. One tick, not zero, and not two.
+  assert.equal(settleTicksFor({ kind: "activate", moduleID: 7, targetID: 4001 }), 1);
+});
+
+test("⚠ warp is NOT in the table — the one movement action that is not idempotent", () => {
+  // Its neighbours in the 0 bucket are standing server-side orders; a warp is a
+  // one-shot, and travelToBelt / mineNoTargetRocks / dockAtNearest / compressOre
+  // all emit it with no memory guard at all. If this assertion ever fails,
+  // somebody has tidied warp in for symmetry and bought a double warp with it.
+  assert.equal(settleTicksFor({ kind: "warp", targetID: 4002 }), DEFAULT_SETTLE_TICKS);
 });

@@ -210,6 +210,266 @@ export function isWorldCall(action: ScriptAction): boolean {
   return action.kind !== "wait";
 }
 
+// ─── How long to not-decide after a world call landed ────────────────────────
+//
+// The runner issues at most ONE action per tick and sleeps SCRIPT_CADENCE_MS
+// (2 s) between ticks. A SETTLE TICK is a tick spent not-deciding: it returns
+// BEFORE observe, so it costs two seconds of wall clock and buys no fresh read
+// in exchange. Flat at 2, every single action therefore cost SIX seconds. On
+// grid that is 20-35 s between landing and the first point of drone damage,
+// because locking, launching, engaging and switching the guns on are four
+// separate actions and each one paid the full toll.
+//
+// ⚠ THIS IS AN ALLOWLIST OF REDUCTIONS, NOT A TABLE OF SETTLES. An action kind
+// that is not named below keeps DEFAULT_SETTLE_TICKS, so today's behaviour is
+// unchanged BY CONSTRUCTION and a kind added later — by somebody who never read
+// this comment — inherits the safe value without having to do anything. Do not
+// "complete" this into an exhaustive Record<ScriptAction["kind"], number>:
+// silence has to go on meaning "unchanged". Several kinds are silent on purpose
+// (the fleet-forming set, `startSystemRoute`, the scanner trio), and
+// being silent is how they stay safe.
+//
+// ─── THE ONLY QUESTION THAT DECIDES AN ENTRY ─────────────────────────────────
+//
+// If the runner decided AGAIN two seconds later, on an observation that may not
+// yet reflect the action it just issued, what stops it re-issuing the same
+// thing? Exactly two answers count:
+//
+//   (a) STEP MEMORY written in the SAME tick the action is issued, and checked
+//       before issuing again. This is immune to a stale read: the macro never
+//       consults the world to know it already asked.
+//   (b) A READ-BACK THE SERVER (or the BFF) UPDATES SYNCHRONOUSLY, so the next
+//       tick's observation cannot be behind the call that was just made.
+//
+// ⚠ "THE SERVER WILL JUST REFUSE THE DUPLICATE" IS NOT AN ANSWER. It is the
+// cheap-looking third option and it is the one that loses runs — see `activate`
+// below, where the refusal is real, is booked in the ledger, and where ten of
+// them on one key END THE RUN.
+//
+// ⚠ CUTTING SETTLE RAISES THE READ RATE, DELIBERATELY. Settle ticks skip observe
+// entirely, so a block whose actions all sit at 0 now reads the world on every
+// tick instead of every third. That is the trade being made on purpose: reads
+// are cheap and a fight is not.
+
+/** What an action kind costs in not-deciding unless the table below says less. */
+export const DEFAULT_SETTLE_TICKS = 2;
+
+const SETTLE_TICKS_BY_KIND: Partial<Record<ScriptAction["kind"], number>> = {
+  // ═══ 0 — decide again on the very next tick ════════════════════════════════
+
+  // SESSION CHANGES WHOSE PROMISE ALREADY CARRIES READINESS. These four were the
+  // runner's only exception before this table existed (its
+  // `returnsAuthoritativeSessionReadiness`), and the reasoning is kept whole:
+  // the BFF route behind each of them resolves ONLY after authoritative location
+  // plus ship/scene readiness can be re-read. So the successful return is itself
+  // the proof, and the next tick should consume that truth rather than wait two
+  // more ticks for it to become true a second time. Guard (b) in its strongest
+  // form — the promise is the read-back.
+  undock: 0,
+  dock: 0,
+  jump: 0,
+  boardShip: 0,
+
+  // GUARD (a) AT EVERY SINGLE CALL SITE — a duplicate is structurally
+  // impossible, because the memory that stops it is written in the same tick the
+  // action goes out and is read before the next one can be.
+  //   • lock — `lockIssued` (scriptMacros mine-at-belt ~858, salvage ~1830,
+  //     fight ~2278, defend-player ~3844; the remote-rep ~3119 and remote-cap
+  //     ~4372 rungs park the target id in memory the same way).
+  //   • engageDrones — `dronesOn` / `engaged` (~1087, ~2288, ~3928).
+  //   • callPrimary — `calledTargetID` (~227/~238; the block only speaks when
+  //     its primary CHANGES, which is that guard).
+  //   • setFleetTargetTag — `taggedTargetID` (~3424/~3449).
+  lock: 0,
+  engageDrones: 0,
+  callPrimary: 0,
+  setFleetTargetTag: 0,
+
+  // GUARD (a), BUT WITH A DELIBERATE RE-ISSUE BUILT IN. Salvage drones go idle
+  // once their wreck is gone, so the block re-points them every
+  // SALVAGE_REISSUE_TICKS (5) using `sinceIssue` (~1751-1764). Its own comment
+  // says "re-point idle salvage drones every ~10 s" — which was never true under
+  // a flat settle, because each of those five decide-ticks cost six seconds, not
+  // two. At 0 the comment becomes true again; the guard itself is unchanged.
+  salvageDrones: 0,
+
+  // NOT GUARDED EVERYWHERE, AND SAFE ANYWAY BECAUSE A REPEAT IS A NO-OP. Three
+  // of the recall sites decide purely from the observation ("the drones are out
+  // and the grid is clear" — scriptMacros ~1059, ~1741, ~2209), so a stale read
+  // can genuinely ask twice. It costs nothing: see the comment in app/flow.ts
+  // around 6443 — no scoop follows a recall because "the server flies them home
+  // at full speed and scoops them itself" inside 2500 m. A second recall of
+  // drones already flying home changes nothing about what they are doing.
+  recallDrones: 0,
+
+  // NOT GUARDED ANYWHERE, AND SAFE ON A MEASUREMENT RATHER THAN AN ARGUMENT.
+  // Every deactivate site picks a module out of the observation's running list
+  // (~603, ~860, ~1114, ~1528 in this file), so a stale read does re-send it.
+  // ⚠ THE IDEMPOTENCE IS MEASURED, NOT ASSUMED: app/flow.ts around 4920 records
+  // a live test on a 1MN Civilian Afterburner — a Deactivate inside the lag
+  // window is ACCEPTED again with `stopped:false`, because retail stops a module
+  // at the END of its current cycle; only ~12 s later, once it had really
+  // stopped, did a repeat refuse with "is not active". The window this settle
+  // opens is two seconds, which is squarely in the accepted half.
+  deactivate: 0,
+
+  // STANDING SERVER-SIDE ORDERS, NOT ONE-SHOT COMMANDS. `approach` is
+  // CmdSetSpeedFraction + CmdFollowBall (see scriptMacros ~3859), `keepAtRange`
+  // is CmdFollowBall with a non-zero range (see fleetCompanionLoop ~1051),
+  // `orbit` is CmdOrbit and `align` is CmdAlignTo. The ship goes on obeying with
+  // nothing further sent, so re-issuing at an UNCHANGED target and range is
+  // wasteful-but-safe: the worst case is one bridge call spent on an order
+  // already in force. Every call site is memory-guarded on top of that
+  // (`approached`/`approaching`/`closingOn`, `aligned`, `orbiting`,
+  // `following`), so the waste is mostly theoretical too.
+  //
+  // ⚠ approach / orbit / keepAtRange are what a drone boat positions with, and
+  // they are the three entries a forthcoming drone-boat block leans on: holding
+  // range while the drones work is a sequence of these, and six seconds apiece
+  // is the difference between holding station and being caught.
+  approach: 0,
+  align: 0,
+  orbit: 0,
+  keepAtRange: 0,
+
+  // GUARD (b), AS GOOD AS IT GETS. `rideAutopilotTo` (~1171) re-issues only when
+  // `travel.status` is not already "running" for this destination — and that
+  // status is `autopilot.snapshot().status`, which `startRoute()` sets
+  // SYNCHRONOUSLY (`autopilot.start(plan)`) before the promise the runner awaits
+  // resolves. app/flow.ts around 6245 says it outright of that very read:
+  // "Synchronous, no gateway call". The next tick cannot see a stale status,
+  // so there is nothing for a settle to wait for.
+  startRoute: 0,
+
+  // GUARD (a) — AND THEY ARE WARPS, WHICH IS THE POINT. Both write
+  // `issued: true, waited: 0` in the same tick and both deciders test `issued`
+  // at the top before anything else (~2486 scan sites, ~2727 saved spot, ~2785
+  // mission site). Bare `warp` below stays at 2; the entire difference between
+  // it and these two is the guard, not the call.
+  warpScan: 0,
+  warpBookmark: 0,
+
+  // GUARD (a): `applied: true` (~2575) and `stacked: true` (~4542), each written
+  // in the issuing tick. Stacking is additionally idempotent — running it over an
+  // already-stacked hangar moves nothing.
+  applyFitting: 0,
+  stackHangar: 0,
+
+  // IT TOUCHES NOTHING IN THE WORLD. An alert is carried as an action only so it
+  // rides the same one-thing-per-tick path every real effect rides; there is no
+  // ship state that could be observed late, so there is nothing to settle FOR.
+  // (What stops an alert repeating is `releaseSpentAlerts` in the interrupt
+  // path, and that is unaffected by any of this.)
+  alert: 0,
+
+  // A SET ON SHARED MEMORY, KEYED BY NAME. It is honestly unguarded at its site
+  // (~793) — but it is a set, not an increment: writing "this belt is dry" twice
+  // leaves exactly the same value in the BFF's shared belt memory. Nothing on
+  // the ship moves and nothing is waiting to become observable.
+  rememberBeltDry: 0,
+
+  // ═══ 1 — one tick, then decide ═════════════════════════════════════════════
+
+  // ⚠ THE ENTRY THAT EXISTS TO SAY WHY "THE SERVER WILL REFUSE IT" IS NOT A
+  // GUARD. Every activate site picks an IDLE module out of the observation's
+  // running-module list (scriptMacros ~925, ~1842, ~2150, ~2302, ~3159, ~3904,
+  // ~3918, ~3940, ~4407; this file ~1026 and ~1134) — an observation-derived
+  // test, so a read that has not caught up re-fires a module already running.
+  // That duplicate IS refused, with `EffectAlreadyActive2` (bridge/refusals.ts
+  // :159), and a refusal is NOT free: the runner books every non-session-change
+  // refusal in the run's ledger, and MAX_CONSECUTIVE_REFUSALS on ONE KEY ENDS
+  // THE RUN. Leaning on the refusal would therefore spend a ship's whole run
+  // budget on the runner's own impatience. One tick is enough for the module
+  // list to catch up, and it still cuts the cost of putting the guns on by a
+  // third.
+  activate: 1,
+
+  // THE LAUNCH HAS NO SYNCHRONOUS CONFIRMATION AT ALL. app/flow.ts around 6427
+  // says it in as many words: the server's launch handler answers 200 with an
+  // EMPTY DICT even when it refuses, the wrapper's return value is therefore not
+  // read, and "the grid on the next tick is the only authority either way". The
+  // site is counter-guarded rather than fact-guarded — `launchTries` against
+  // LAUNCH_MAX_TRIES (3, scriptMacros ~296-350) — so a stale-read repeat does
+  // not double-launch, it burns a THIRD of the only budget the block has. One
+  // tick buys the grid read that settles it.
+  launchDrones: 1,
+
+  // ATTEMPTED IS NOT EMPTIED. Both loot sites remember only that a wreck or can
+  // was attempted (~1935, ~2047); whether it actually came up empty is settled
+  // by the next tick's grid read. A stale read re-loots — harmless in the world,
+  // but it arrives back as a refusal, and the loot pair is the ONE thing the
+  // ledger keys per target (the runner's `actionTargetID`), so the duplicate is
+  // spent out of that specific can's own budget rather than a shared one.
+  lootWreck: 1,
+  lootContainer: 1,
+
+  // GUARD (a) IS PRESENT, AND THE ENTRY IS STILL 1 ON PURPOSE. `buy-item` writes
+  // `placed: true` in the issuing tick (~2914), so by the letter of the rule
+  // this could be 0. It is not, because the failure being settled against is
+  // spent ISK plus a broker fee: a market write is not worth two seconds. Same
+  // reasoning for a restart (~2830 — `restarted` holds the pin id, but the
+  // confirmation the block walks on is the colony re-read pushing the expiry
+  // into the future) and for compression (~4652 — `triedItemIDs` holds the
+  // stack, but compressing CONSUMES it).
+  placeBuyOrder: 1,
+  restartExtractor: 1,
+  compressOre: 1,
+};
+
+// ═══ WHAT STAYS AT THE DEFAULT, AND WHY IT IS NOT AN OVERSIGHT ═══════════════
+//
+// These are named here so the next reader can see they were weighed and kept,
+// rather than forgotten. Do not tidy them into the table above.
+//
+// ⚠ `warp` IS THE ONE WHERE THE OBVIOUS SYMMETRY IS WRONG. Every other movement
+// action in the 0 bucket is a standing order the server keeps re-reading; a warp
+// is not. It is not idempotent — fleetCompanionLoop around 1500, on that loop's
+// own `lastWarpedToID`, puts it plainly: re-sending it while the ship is already
+// on its way is "at worst a second warp the moment the first lands". And unlike
+// every other movement action, SEVERAL OF THE DECIDERS THAT EMIT IT CARRY NO
+// MEMORY GUARD WHATSOEVER: `travelToBelt` (scriptMacros ~577) and the pinned
+// `mineNoTargetRocks` rung (~740) both warp with a next-memory of `{}`;
+// `dockAtNearest` (~4327) warps with `mem` untouched; the compression block
+// (~4637) likewise. The hunt rung is worse than unguarded — having excluded the
+// vantage point it just used, a second decision picks a DIFFERENT one and warps
+// there mid-warp (~4126). THE FLAT SETTLE IS CURRENTLY THE ONLY THING PREVENTING
+// A DOUBLE WARP AT THOSE SITES, which is exactly the bug this whole table is
+// trying not to ship.
+//
+// `agentButton` — THE ACCEPT PRESS HAS NO "PRESSED" FLAG AT ANY SITE. The three
+// sites count instead: `asked` (~1291), `rounds` (~1422/~1434/~1448) and
+// `attempts` (~1571). A counter bounds how many times the block may TRY; it does
+// not stop the same press going out twice off a stale conversation read, and a
+// duplicate Accept accepts a SECOND MISSION — a real change in the player's
+// journal, not a wasted packet.
+//
+// `placeSellOrder` — THE ASYMMETRY WITH `placeBuyOrder` IS REAL AND WORTH
+// KEEPING. `buy-item` writes a `placed` flag; `sell-item` has only an `attempts`
+// counter (~2964) and re-picks `stacks[0]` out of the hangar read each tick, so
+// a hangar that has not caught up lists the same stack twice.
+//
+// `unlock` — dropping a lock the ship still needs is not something a tick can
+// undo, and nothing is waiting on it.
+//
+// `reprocessOre`, `repairItems`, `loadMissionCargo` — each consumes items or
+// spends ISK against a hangar read, and none of them is on a hot path where two
+// seconds matter.
+//
+// THE ASSET-MOVING GROUP — `unloadOre`, `unloadHolds`, `unloadMissionCargo`,
+// `moveItems`, `jettison`. A move is confirmed ONLY by re-reading the place the
+// items left and the place they arrived in, and those are exactly the reads a
+// short settle outruns. `jettison` additionally puts cargo into space where
+// anybody may take it; there is no version of that worth hurrying.
+
+/**
+ * Ticks of not-deciding the runner should spend after this action landed.
+ *
+ * Unlisted kinds get DEFAULT_SETTLE_TICKS — see the allowlist reasoning above.
+ */
+export function settleTicksFor(action: ScriptAction): number {
+  return SETTLE_TICKS_BY_KIND[action.kind] ?? DEFAULT_SETTLE_TICKS;
+}
+
 const WAIT: ScriptAction = { kind: "wait" };
 
 // ─── The macro contract (concrete macros land in A4c) ────────────────────────
