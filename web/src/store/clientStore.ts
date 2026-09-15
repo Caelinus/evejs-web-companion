@@ -1128,6 +1128,16 @@ export function createClientStore(): ClientStore {
           // free of I/O; the panels that care watch `loaded` and refill.
           fitting.set(INITIAL_FITTING);
           dogma.set(INITIAL_DOGMA);
+          // ⚠ AND SO DOES THE DRONE BAY — it was missed when R88 drew this
+          // list, and the miss is the reported bug: the Drones window read the
+          // bay ONCE per session (its effect is guarded on `loaded`, and the
+          // guard survives the window being closed and reopened), so a pilot
+          // who boarded a drone boat afterwards saw "Nothing in the drone bay"
+          // for the rest of the session while Inventory & Ship listed the
+          // drones plainly. Every field in the slice is hull-keyed: the bay's
+          // stacks, the two launch limits (ship dogma), and whether a drone in
+          // space is under THIS hull's control.
+          drones.set(INITIAL_DRONES);
         }
         // A reload drops any selection whose item is no longer in the hangar or
         // cargo: acting on a stale tick would move something the player can no

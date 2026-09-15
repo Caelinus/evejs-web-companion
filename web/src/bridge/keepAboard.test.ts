@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { movableRows, staysAboard, type KeepRule } from "./keepAboard.ts";
+import { movableRows, pickedRows, staysAboard, type KeepRule } from "./keepAboard.ts";
 
 const CRYSTAL = { typeID: 3389, groupID: 483 };
 const VELDSPAR = { typeID: 1230, groupID: 462 };
@@ -60,4 +60,51 @@ test("movableRows holds back exactly what the rules protect", () => {
   const rows = [CRYSTAL, VELDSPAR, UNCLASSIFIED];
   assert.deepEqual(movableRows(rows, keep, "move"), [VELDSPAR, UNCLASSIFIED]);
   assert.deepEqual(movableRows(rows, keep, "keep"), [VELDSPAR]);
+});
+
+// ─── name patterns, and the load side ───────────────────────────────────────
+
+const COMMAND_CENTER = { typeID: 2524, groupID: 1027, name: "Temperate Command Center" };
+const BARREN_CENTER = { typeID: 2525, groupID: 1027, name: "Barren Command Center" };
+const PASTE = { typeID: 28668, groupID: 536, name: "Nanite Repair Paste" };
+const UNNAMED = { typeID: 4242, groupID: 1027, name: null };
+
+test("a name pattern matches on the resolved name, case-insensitively", () => {
+  const rules: KeepRule[] = [{ match: "name", pattern: "command center" }];
+  assert.equal(staysAboard(COMMAND_CENTER, rules, "move"), true);
+  assert.equal(staysAboard(BARREN_CENTER, rules, "move"), true);
+  assert.equal(staysAboard(PASTE, rules, "move"), false);
+});
+
+test("a name pattern nobody resolved a name for is UNDECIDABLE, not false", () => {
+  // Same rule a group match follows for an unreadable groupID: "we could not
+  // tell" is its own answer, and which way it falls is the caller's to choose.
+  const rules: KeepRule[] = [{ match: "name", pattern: "command center" }];
+  assert.equal(staysAboard(UNNAMED, rules, "keep"), true);
+  assert.equal(staysAboard(UNNAMED, rules, "move"), false);
+  assert.deepEqual(pickedRows([UNNAMED], rules, "skip"), []);
+  assert.deepEqual(pickedRows([UNNAMED], rules, "pick"), [UNNAMED]);
+});
+
+test("a blank pattern matches NOTHING, never everything", () => {
+  // A half-typed rule must not turn a load block into "take the whole hangar".
+  const rules: KeepRule[] = [{ match: "name", pattern: "   " }];
+  assert.deepEqual(pickedRows([COMMAND_CENTER, PASTE], rules, "skip"), []);
+  assert.equal(staysAboard(COMMAND_CENTER, rules, "keep"), false);
+});
+
+test("pickedRows takes nothing when nothing is asked for — the OPPOSITE of an empty keep list", () => {
+  // An unload with no keep rules empties the ship (recoverable); a load with no
+  // rules must not carry a station hangar's entire contents away.
+  assert.deepEqual(pickedRows([COMMAND_CENTER, PASTE], [], "skip"), []);
+  assert.deepEqual(movableRows([COMMAND_CENTER, PASTE], [], "move"), [COMMAND_CENTER, PASTE]);
+});
+
+test("one GROUP rule covers every planet's command centre", () => {
+  // The reason a group is still the rule to reach for: it survives a rename.
+  const rules: KeepRule[] = [{ match: "group", groupID: 1027 }];
+  assert.deepEqual(pickedRows([COMMAND_CENTER, BARREN_CENTER, PASTE], rules, "skip"), [
+    COMMAND_CENTER,
+    BARREN_CENTER,
+  ]);
 });

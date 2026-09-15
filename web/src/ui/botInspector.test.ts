@@ -115,6 +115,17 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
     expect: /search a station or system by name/,
     why: "destination-picker, which also accepts a system",
   },
+  // The corporation hangar picker has to ASK the bridge which stations have an
+  // office before it can offer anything, and SSR runs no effects — so what a
+  // server render proves is that it draws its waiting state rather than a blank
+  // where a control should be. The choosing itself is covered where it can be:
+  // the codec, the sentence, and the block's own decider.
+  {
+    macro: "deliver-ore",
+    key: "into",
+    expect: /Checking your corporation's offices/,
+    why: "corp-division-select, before its read has landed",
+  },
   { macro: "wait", key: "seconds", expect: /1 to 500/, why: "count-input shows its range" },
   { macro: "buy-item", key: "price", expect: /1 to 100000000000/, why: "isk-input shows its range" },
   { macro: "buy-item", key: "quantity", expect: /1 to 10000000/, why: "qty-input shows its range" },

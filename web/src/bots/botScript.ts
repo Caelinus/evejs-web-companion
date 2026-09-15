@@ -262,6 +262,22 @@ export type Arg =
   /** A PLACE items can sit while docked: the station hangar, the ship's cargo
    * hold, or its ore hold. A closed vocabulary, validated by the codec. */
   | { readonly kind: "place"; readonly place: ItemPlace }
+  /**
+   * A CORPORATION HANGAR DIVISION to deliver into, addressed by its ordinal
+   * (1-7) and labelled by the corporation's own name for it.
+   *
+   * The ORDINAL is what travels: a director can rename a division at any time,
+   * and a script that named "Ore Buffer" would then deliver nowhere. The name
+   * is a display hint, exactly as it is for `corp`, `fitting` and `bookmark` —
+   * saved so the sentence still reads in words after a session where no office
+   * has been read yet, and re-labelled from the live office when one has.
+   *
+   * ⚠ IT IS A REQUEST, NOT A DESTINATION. Whether this division can be
+   * delivered into is decided by the server at the office, per pilot, at the
+   * moment of the deposit — so a block carrying one still has to be able to
+   * finish its lap when the answer is no. See `deliver-ore`.
+   */
+  | { readonly kind: "corpDivision"; readonly division: number; readonly name: string | null }
   /** A saved BOOKMARK. The id is a same-world hint; the NAME (its label) is what
    * the block matches at run time, so an imported script still finds "Safe spot". */
   | { readonly kind: "bookmark"; readonly bookmarkID: number | null; readonly name: string | null }
@@ -356,7 +372,22 @@ export type Arg =
  */
 export type ItemMatchArg =
   | { readonly match: "type"; readonly typeID: number; readonly name: string }
-  | { readonly match: "group"; readonly groupID: number; readonly name: string };
+  | { readonly match: "group"; readonly groupID: number; readonly name: string }
+  /**
+   * A NAME PATTERN — "everything whose name contains this", matched
+   * case-insensitively against the name the client resolved for the row's type.
+   *
+   * ⚠ THE ONE MATCH THAT IS NOT THE GAME'S OWN CLASSIFICATION, and the one that
+   * can go stale: names are localised and renamed, so a pattern is a rule a
+   * patch can quietly empty where a group rule holds. It exists because a group
+   * is not always the line a player wants to draw, and listing a dozen types by
+   * hand is the alternative. `name` carries what the player typed so the
+   * sentence can read it back; `pattern` is what is matched.
+   */
+  | { readonly match: "name"; readonly pattern: string; readonly name: string };
+
+/** A name pattern past this is not a pattern, it is a paragraph. */
+export const MAX_ITEM_PATTERN_LEN = 60;
 
 /**
  * One ORE FAMILY the mine block prefers — Veldspar, Kernite, … — identified by
@@ -383,6 +414,14 @@ export const MAX_ITEM_LIST = 12;
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";
 export const ITEM_PLACES: readonly ItemPlace[] = Object.freeze<ItemPlace[]>(["hangar", "cargo", "ore-hold"]);
+
+/**
+ * A corporation office has exactly seven hangar divisions, always — it is the
+ * shape of an office, not a per-corporation setting, so the bounds are a
+ * constant here rather than something read off a live office.
+ */
+export const MIN_CORP_DIVISION = 1;
+export const MAX_CORP_DIVISION = 7;
 
 /**
  * Which rock the mine block reaches for first.
@@ -742,6 +781,12 @@ export type MacroID =
   | "return-to-agent"
   | "wait"
   | "unload-cargo"
+  // unload-cargo's mirror image: fill the ship from the station hangar, each
+  // stack into whichever bay this hull wants it in. The two are a pair by
+  // design — the bays a bot may FILL are exactly the ones it can EMPTY — and a
+  // hauler that had only the emptying half could unload a command centre hold
+  // it had no way to fill.
+  | "load-cargo"
   | "salvage-wrecks"
   | "loot-wrecks"
   | "loot-containers"
@@ -828,6 +873,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "return-to-agent",
   "wait",
   "unload-cargo",
+  "load-cargo",
   "salvage-wrecks",
   "loot-wrecks",
   "loot-containers",

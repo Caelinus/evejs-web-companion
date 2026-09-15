@@ -65,6 +65,8 @@ interface Harness {
   registry?: MacroRegistry;
   /** Throw from `issue` — the refusal path. Return null to let the call pass. */
   issueThrows?: (action: ScriptAction) => unknown | null;
+  /** A NOTE from `issue` — the call landed, but not as asked. */
+  issueNote?: (action: ScriptAction) => string | null;
   /** A flight recorder to hand the runner (nav/botLog.ts). */
   log?: BotLogSink;
 }
@@ -86,6 +88,7 @@ function harness(opts: Harness = {}) {
       if (thrown !== null) {
         throw thrown;
       }
+      return opts.issueNote?.(a) ?? null;
     },
     sleep: async () => {},
     onProgress: (s) => progress.push(s),
@@ -556,6 +559,31 @@ test("a refusal is logged as a result that did NOT land, with the server's words
   assert.ok(result !== undefined);
   assert.equal(result.ok, false);
   assert.match(result.refusal ?? "", /FakeItemNotFound/);
+});
+
+test("a note from a landed call is recorded WITHOUT being counted as a refusal", async () => {
+  // The delivery that went into the pilot's own hangar because the corporation
+  // refused it. The ore is ashore, so there is nothing to retry and no streak to
+  // count — but a run that said nothing would leave the player to discover it
+  // from an empty corporation hangar.
+  const { sink, lines } = recordingSink();
+  const h = harness({
+    log: sink,
+    issueNote: (a) => (a.kind === "unloadOre" ? "corp division 3 refused; the load went into your own hangar" : null),
+  });
+  h.setObs(calm({ holdEmpty: false, docked: true, inSpace: false }));
+  h.runner.start(script([macroStep("d", "deliver-ore")]));
+  await h.runner.tick();
+
+  const result = lines.find((l) => l.kind === "result");
+  assert.ok(result !== undefined);
+  assert.equal(result.ok, true, "a note is not a failure");
+  assert.match(result.status ?? "", /went into your own hangar/);
+  assert.equal(result.refusal, undefined, "and it is not the server refusing the call");
+
+  const latest = h.progress[h.progress.length - 1]!;
+  assert.deepEqual([...latest.refusals], [], "nothing to retry, so nothing is counted");
+  assert.equal(h.runner.getStatus(), "running");
 });
 
 test("only CHANGES are written — a bot repeating itself does not fill a disk", async () => {

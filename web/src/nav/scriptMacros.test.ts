@@ -489,6 +489,27 @@ test("deliver: docked with ore -> unload; docked empty -> done", () => {
   assert.equal(done.outcome.kind, "done");
 });
 
+test("deliver: a corporation division is carried on the action; without one the key is ABSENT", () => {
+  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null }];
+  const docked = obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre });
+
+  const corpStep: MacroStep = {
+    ...haulStep,
+    args: { ...haulStep.args, into: { kind: "corpDivision", division: 5, name: "Ore Buffer" } },
+  };
+  const aimed = deliver(corpStep, docked, NM, {});
+  assert.ok(aimed.action.kind === "unloadOre" && aimed.action.division === 5);
+  // It is still an ordinary unload otherwise: the block is done when the holds
+  // are empty, whoever ends up holding the ore.
+  assert.equal(aimed.outcome.kind, "acting");
+
+  // A block nobody aimed issues exactly what it always did — no division key at
+  // all, not a null one.
+  const plain = deliver(haulStep, docked, NM, {});
+  assert.ok(plain.action.kind === "unloadOre");
+  assert.deepEqual(plain.action, { kind: "unloadOre", itemIDs: [8] });
+});
+
 test("deliver: the ore hold goes ashore, the CARGO hold stays aboard", () => {
   // A barge carrying spare mining crystals in cargo. Before this, the delivery
   // took them too — the mining-holds route reports cargo as a fallback entry on

@@ -104,6 +104,10 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "return-to-agent": policy(["mission"]),
   wait: SAFE,
   "unload-cargo": policy(["inventory"]),
+  // Restart-safe for the same reason unload-cargo is: every tick re-reads the
+  // hangar and the holds and re-plans from what is actually there, so starting
+  // the block over loads what still fits rather than replaying a move.
+  "load-cargo": policy(["inventory"]),
   "salvage-wrecks": policy(["combat", "inventory"]),
   "loot-wrecks": policy(["inventory"]),
   "loot-containers": policy(["inventory"]),

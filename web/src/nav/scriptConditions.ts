@@ -373,6 +373,15 @@ export interface ScriptObservation {
   readonly refusals?: readonly RefusalRecord[] | null;
   /** The docked station's hangar rows (the mission package is picked from here). */
   readonly stationHangar?: readonly InventoryItemRow[] | null;
+  /**
+   * The resolved NAME of each type in the rows above and in the ship's holds,
+   * for the one thing a classification cannot answer: "everything called
+   * Command Center". Only read while a block that carries a name pattern is
+   * active — a decider that matches on types and groups never needs it, and a
+   * missing entry makes a pattern undecidable rather than false (see
+   * bridge/keepAboard.ts).
+   */
+  readonly typeNames?: Readonly<Record<number, string | null>> | null;
   /** What the shared autopilot is doing (mission travel rides it). */
   readonly travel?: TravelReading | null;
   /**

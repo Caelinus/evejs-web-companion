@@ -58,6 +58,7 @@ export type WidgetKind =
   | "fitting-picker"
   | "item-type-picker"
   | "place-select"
+  | "corp-division-select"
   | "bookmark-picker"
   | "isk-input"
   | "qty-input"
@@ -85,6 +86,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   fitting: "fitting-picker",
   itemType: "item-type-picker",
   place: "place-select",
+  corpDivision: "corp-division-select",
   bookmark: "bookmark-picker",
   isk: "isk-input",
   qty: "qty-input",
@@ -115,6 +117,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   fitting: "Saved fitting",
   itemType: "Item",
   place: "Place",
+  corpDivision: "Corporation hangar",
   bookmark: "Saved spot",
   isk: "ISK amount",
   qty: "Quantity",
@@ -141,6 +144,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
 const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   exceptBays: "Bays to leave alone",
   keepItems: "Items to keep aboard",
+  items: "What to load",
   targets: "Shoot first",
   squad: "With the fleet",
   belt: "Belt",
@@ -165,6 +169,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   system: "Solar system",
   fleetName: "Fleet name",
   pick: "Which rock first",
+  into: "Unload into",
   // ⚠ THE UNIT IS PART OF THE LABEL, NOT A SUFFIX SOMEBODY MIGHT DROP. The
   // number a player types here is kilometres and everything under it is metres;
   // a box labelled just "Hold range" invites the metres, and a drone boat told
@@ -185,6 +190,27 @@ const TEXT_ARG_PLACEHOLDER: Readonly<Record<string, string>> = {
 /** The invitation for one text box; a plain one for a key with no entry. */
 export function textPlaceholder(key: string): string {
   return TEXT_ARG_PLACEHOLDER[key] ?? "type it here";
+}
+
+/**
+ * The sentence under an item-list box, keyed by argument.
+ *
+ * ⚠ THE SAME WIDGET EDITS TWO OPPOSITE THINGS. `keepItems` is a list of what
+ * stays behind; `items` is a list of what comes aboard. One hint for both said
+ * "anything listed here stays on the ship" over the load block's box, which is
+ * the exact opposite of what that list does — the key decides, same reason
+ * `ARG_KEY_LABEL` and `TEXT_ARG_PLACEHOLDER` exist.
+ */
+const ITEM_LIST_HINT: Readonly<Record<string, string>> = {
+  keepItems:
+    'Anything listed here stays on the ship. "All like this" keeps every variant, which is usually what you want for crystals or ammunition.',
+  items:
+    "Anything listed here gets loaded, each into whichever hold your ship keeps it in. \"All like this\" takes every variant — one entry covers every planet's command centre — and \"everything matching\" takes anything whose name contains what you typed.",
+};
+
+/** The hint for one item-list box; the keep-aboard wording for an unknown key. */
+export function itemListHint(key: string): string {
+  return ITEM_LIST_HINT[key] ?? ITEM_LIST_HINT["keepItems"]!;
 }
 
 function argLabel(arg: MacroArgSpec): string {

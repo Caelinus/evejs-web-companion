@@ -182,5 +182,66 @@ Verify with `node --test` (pure modules run natively on the host) and
   rebuilt against a settled store rather than a moving one, with the audit gaps fixed by construction.
   M1 also carries the starter-bot import: the six `blockSnippets` sequences become library records
   (see [bot-builder-interface.md](bot-builder-interface.md) §6).
-- Whether region A should offer "run this on all idle pilots" — powerful, and the fastest way to
-  discover that a script was never safe to run unattended on three hulls at once.
+- ~~Whether region A should offer "run this on all idle pilots" — powerful, and the fastest way to
+  discover that a script was never safe to run unattended on three hulls at once.~~
+  **Decided: yes, but never "all idle pilots".** See §10.
+
+## 10. Groups — launching one bot for several pilots
+
+The caution above is the whole design. "Run this on all idle pilots" is a button whose blast radius is
+whatever happens to be logged in, which is not a set anybody chose. **A group is a set somebody chose**:
+it is a hangar squad (`app/hangarPrefs.ts`), the same one the Pilot Hangar shows, named and coloured and
+filled by the player on the landing screen. The Bot Manager adds no second grouping model — a panel that
+invented "bot groups" beside squads would ask the same player to arrange the same pilots twice and then
+keep both in step by hand.
+
+The **Groups** region sits above Pilots, because launching for a group is the coarse action and
+launching for one pilot is the exception to it.
+
+| File | What it owns |
+| --- | --- |
+| `web/src/bots/groupStart.ts` | **pure.** the sequential runner: one pilot at a time, one refusal never strands the rest |
+| `web/src/bots/pilotGroups.ts` | **pure.** the group list, each member's state, who a start can actually reach, every sentence |
+| `web/src/bots/startRun.ts` | `startGroupOnServer` / `startGroupHere` — one approval, one fetch, one grant |
+| `web/src/ui/BotManagerGroupRow.svelte` | one group: its pilots, its picker, its two start buttons, its progress |
+
+**Decisions worth not re-opening.**
+
+**Companions is a group, and it is the only one without a bot picker.** It is assembled from the
+companion ticks in the squads (`companionGroupRoster`), and it always flies the fleet companion, because
+that is what its membership *means*. Giving it a picker would offer to run a mining script on a list of
+pilots assembled to answer a fleet's orders. It is present even when empty — it is the group a player
+cannot make for themselves, so a row that vanished when empty would disappear exactly when somebody was
+looking for where to switch it on.
+
+**One approval for the group, and the prompt says how many hulls the yes covers.** Six confirms in a row
+is not six times the consent; it is a dialog that gets clicked through. One fetch, too: re-fetching per
+pilot would let the library change underneath a run approved once, so pilot six would fly something
+nobody agreed to. A group of one keeps the existing single-pilot wording exactly.
+
+**One grant for a saved bot, a grant per pilot for companions.** A group start runs one script, so its
+rev and risk classes are the same for everyone. A companion squad has no script and a setup per pilot, so
+`bots/squadStart.ts` builds each grant from that pilot's own setup and the host re-derives and compares.
+
+**A pilot already flying is skipped, not queued to refuse** (`planGroupLaunch`) — the same rule the
+hangar's `targetsFor` states for bringing pilots online. Starting a group when two of it are up must
+bring the other four, not print two red rows for a normal state of affairs.
+
+**Two buttons, reaching different sets, and the row says so.** "Run on server" starts every free member,
+including pilots no tab here holds — the host mints its own session, which is the whole point of
+launching for a group. "Run here" flies ships this tab already controls, so it reaches only the members
+with a session open; `runHereReachWords` prints the shortfall, because a disabled button with no sentence
+beside it reads as broken.
+
+**The built-ins are not in the group picker.** A built-in is set up against one pilot's own ship — which
+belt, which station, which agent — so in a group list it would be a choice with no button under it. The
+row says why, so the absence reads as deliberate.
+
+**A member with no session here rides the panel's own token**, which is the active pilot's, and the
+gateway refuses a character that account does not own. So a group spanning accounts starts only the
+members of the account signed in here; the rest come back as the server's own sentence on their own rows
+and the group keeps going. Same limit as the hangar's squad start.
+
+**Groups are re-read on the roster's own 3s beat.** Squads are edited on the Pilot Hangar while this
+panel can be left open, and localStorage fires no change event in the tab that owns it — so the only
+honest options are to re-read or to show an arrangement the player has already changed.

@@ -116,6 +116,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   message: "Message",
   destination: "Destination",
   pick: "Which rock first",
+  into: "Unload into",
   ores: "Ore priority",
   // The drone boat's two overrides. Both say their unit or their choice in the
   // label, because both are things a player only reaches for when the block's
@@ -176,7 +177,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "deliver-ore": entry(
     "deliver-ore",
     "hauling",
-    "Flies to a station and unloads the ore into your hangar.",
+    "Flies to a station and unloads the ore into your hangar — or into one of your corporation's hangars there, when you pick one and the corporation rents an office.",
     "A station to unload at",
   ),
   "defend-with-drones": entry(
@@ -241,6 +242,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "hauling",
     "Moves everything in your ship's cargo hold into the station hangar, and checks the hold really is empty. Handy before accepting a delivery, so the cargo is sure to fit.",
     "Being docked",
+  ),
+  "load-cargo": entry(
+    "load-cargo",
+    "hauling",
+    "Takes what you name out of the station hangar and puts each stack where it belongs — command centres into the command centre hold, planetary goods into the planetary hold, ore into the mining hold, everything else into cargo. It loads as much as will fit and leaves the rest for the next trip, so a loop of this, a flight and an unload moves a whole hangar a shipload at a time.",
+    "Being docked, with room somewhere aboard",
   ),
   "salvage-wrecks": entry(
     "salvage-wrecks",

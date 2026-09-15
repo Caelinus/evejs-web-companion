@@ -111,7 +111,17 @@ export type ScriptAction =
   | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[] }
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
-  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[] }
+  /**
+   * Put the freight ashore at the station the ship is docked at.
+   *
+   * `division` aims it at a CORPORATION hangar division instead of the pilot's
+   * own hangar. It is OPTIONAL because the personal hangar is what every
+   * emitter but one means, and because it is a REQUEST rather than a
+   * destination: the office may not be there, the pilot may not hold the role,
+   * and the bridge then lands the load in the pilot's own hangar and reports
+   * which happened. A block that named a division still finishes its lap.
+   */
+  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number }
   // ── Mission actions (the distribution blocks). Each is one proven mission-bot
   //    operation: a labeled button press in the agent conversation, a handoff to
   //    the shared autopilot, or a package move confirmed by re-read next tick.
@@ -129,6 +139,25 @@ export type ScriptAction =
   | {
       readonly kind: "unloadHolds";
       readonly groups: readonly { readonly bay: string | null; readonly itemIDs: readonly number[] }[];
+    }
+  /**
+   * Fill the ship FROM the station hangar — `unloadHolds` run backwards, one
+   * group per destination because a bay is a different place from the cargo
+   * hold. `bay: null` is the cargo hold.
+   *
+   * ⚠ `qty` IS WHY THE GROUPS CARRY ONE MORE FIELD THAN THE UNLOAD'S DO. A
+   * transfer is all-or-nothing per stack, so a hangar stack of twenty command
+   * centres bound for a hold with room for six has to be SPLIT — and the bridge
+   * refuses a quantity when more than one item is named, so a split group is
+   * always exactly one stack (`planLootTransfers` guarantees both).
+   */
+  | {
+      readonly kind: "loadHolds";
+      readonly groups: readonly {
+        readonly bay: string | null;
+        readonly itemIDs: readonly number[];
+        readonly qty: number | null;
+      }[];
     }
   /** Order salvage drones onto a wreck; targetID 0 = the runtime auto-picks. */
   | { readonly kind: "salvageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
@@ -756,6 +785,30 @@ export function activeMacroID(script: BotScript, mem: ScriptMemory): string | nu
   }
   const step = activeStep(script, mem.position);
   return step?.macro ?? null;
+}
+
+/**
+ * Does the active block match items by NAME? The one thing type ids and group
+ * ids cannot answer, and the only reason to pay for a name lookup on a tick.
+ *
+ * Asked of the STEP rather than of the macro, because it is an argument and not
+ * a property of the block: the same load block matching on a group needs no
+ * names at all (see `ScriptObservation.typeNames`).
+ */
+export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): boolean {
+  if (mem.position.kind === "done" || mem.latched !== null) {
+    return false;
+  }
+  const step = activeStep(script, mem.position);
+  if (step === undefined || step === null) {
+    return false;
+  }
+  return Object.values(step.args).some(
+    (arg) =>
+      arg !== undefined &&
+      arg.kind === "itemList" &&
+      arg.items.some((item) => item.match === "name" && item.pattern.trim().length > 0),
+  );
 }
 
 // ─── The decision returned each tick ─────────────────────────────────────────

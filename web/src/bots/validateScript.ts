@@ -66,6 +66,7 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   bookmark: "a saved bookmark to warp to",
   from: "where to move items from",
   to: "where to move items to",
+  items: "something to load",
 };
 
 /** Every fixable problem in a draft, in reading order. Empty means ready to start. */
@@ -183,6 +184,20 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     // entirely is fine — the step then uses the agent the find block remembered.
     if (arg.kind === "bookmark" && arg.bookmarkID === null && (arg.name === null || arg.name === "")) {
       problems.push(blocking(step.id, "Pick the saved spot for this step."));
+    }
+    // A list the player ADDED but left empty. Only a REQUIRED one is a problem:
+    // an empty "keep aboard" list means "keep nothing", which is the shipped
+    // default, but an empty "what to load" list means a block that can only ever
+    // load nothing.
+    if (arg.kind === "itemList" && argSpec.required && arg.items.length === 0) {
+      problems.push(
+        blocking(step.id, "Pick what this step loads - an item, everything of its kind, or a name to match."),
+      );
+    }
+    // A name pattern that is only whitespace matches nothing, so a step carrying
+    // one would quietly do less than its sentence says.
+    if (arg.kind === "itemList" && arg.items.some((item) => item.match === "name" && item.pattern.trim().length === 0)) {
+      problems.push(blocking(step.id, "One of this step's name matches is blank - type what to match, or remove it."));
     }
     if (arg.kind === "itemType" && arg.typeID === null) {
       problems.push(blocking(step.id, "Pick the item for this step."));

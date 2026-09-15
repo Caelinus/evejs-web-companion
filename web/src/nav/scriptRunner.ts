@@ -27,6 +27,7 @@ import type { BotScript, SquadRoleArg } from "../bots/botScript.ts";
 import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
+  activeStepNeedsTypeNames,
   activeSquadRole,
   watchSquadRole,
   decideScriptAction,
@@ -60,6 +61,12 @@ import { isSessionChangeSettling, refusalWords } from "../bridge/refusals.ts";
  */
 export interface ObserveHint {
   readonly activeMacro: string | null;
+  /**
+   * Whether the active block matches items by NAME, and so needs the type names
+   * resolved for what it is looking at. Optional: a caller that does not say
+   * means "no", which is what every block but a name-matching one wants.
+   */
+  readonly needsTypeNames?: boolean;
   /** Whether that block follows the fleet's called primary (see activeSquadRole). */
   readonly squadRole: SquadRoleArg;
   /**
@@ -147,7 +154,18 @@ export interface ScriptRunnerSnapshot {
  */
 export interface ScriptRunnerDeps {
   observe(hint: ObserveHint): Promise<ScriptObservation>;
-  issue(action: ScriptAction): Promise<void>;
+  /**
+   * Perform one world call.
+   *
+   * A returned STRING is a note: the call landed, but not entirely as the
+   * action asked — a corporation hangar that refused a delivery, say, with the
+   * load put ashore in the pilot's own hangar instead. It goes on the result
+   * line and nowhere else: it is not a refusal (nothing to retry, no streak to
+   * count) and it must never change what the run does next. Returning nothing,
+   * which is what every performer did before this existed and what nearly all
+   * still do, means "exactly as asked".
+   */
+  issue(action: ScriptAction): Promise<void | string | null>;
   sleep(ms: number): Promise<void>;
   onProgress(snapshot: ScriptRunnerSnapshot): void;
   isSessionLost(error: unknown): boolean;
@@ -326,6 +344,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     try {
       obs = await deps.observe({
         activeMacro: activeMacroID(script, memory),
+        needsTypeNames: activeStepNeedsTypeNames(script, memory),
         squadRole: activeSquadRole(script, memory),
         watchSquadRole: watchSquadRole(script),
         board: memory.board,
@@ -424,10 +443,13 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
       });
       try {
-        await deps.issue(result.action);
+        const note = await deps.issue(result.action);
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
-        record({ t: now(), kind: "result", run: runID, ok: true, says: describeAction(result.action) });
+        record({
+          t: now(), kind: "result", run: runID, ok: true, says: describeAction(result.action),
+          status: typeof note === "string" && note.length > 0 ? note : undefined,
+        });
         // It worked: the streak is over. Without this a key that failed twice
         // and then recovered would carry those two forever and stop the run
         // early on an unrelated blip much later.

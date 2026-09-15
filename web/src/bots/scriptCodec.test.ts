@@ -191,6 +191,15 @@ function everyArgKind(): BotScript {
         args: { fleetName: { kind: "text", text: "Mining Op" } },
       },
       {
+        id: "a14",
+        kind: "macro",
+        macro: "deliver-ore",
+        args: {
+          station: { kind: "station", ref: { entity: "station", id: 60000004, name: "Home", systemName: null } },
+          into: { kind: "corpDivision", division: 3, name: "Ore Buffer" },
+        },
+      },
+      {
         id: "a11",
         kind: "macro",
         macro: "mine-at-belt",
@@ -204,6 +213,61 @@ function everyArgKind(): BotScript {
     ],
   };
 }
+
+test("a corporation division is refused outside 1-7, never clamped into range", () => {
+  // The one number in this file that is an ADDRESS rather than a quantity.
+  // Clamping 9 to 7 would land a hold of ore in a corporation hangar nobody
+  // chose, and the player would learn it from the wrong division filling up.
+  const withDivision = (division: unknown): unknown => ({
+    format: SCRIPT_FORMAT,
+    version: SCRIPT_VERSION,
+    name: "t",
+    notes: "",
+    home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+    interrupts: [],
+    program: [
+      {
+        id: "d1",
+        kind: "macro",
+        macro: "deliver-ore",
+        args: {
+          station: { kind: "station", ref: { entity: "station", id: 60000004, name: "Home", systemName: null } },
+          into: { kind: "corpDivision", division, name: null },
+        },
+      },
+    ],
+  });
+  for (const division of [0, 8, 9, -1, 1.5, "3", null]) {
+    assert.equal(decodeScriptValue(withDivision(division)).ok, false, `division ${String(division)} must refuse`);
+  }
+  for (const division of [1, 7]) {
+    mustAccept(decodeScriptValue(withDivision(division)));
+  }
+});
+
+test("a delivery with no corporation division stays absent, not null", () => {
+  // Absence is what "the pilot's own hangar" IS. A block that saved an explicit
+  // null would export differently from the one the player never touched.
+  const doc = decodeScriptValue({
+    format: SCRIPT_FORMAT,
+    version: SCRIPT_VERSION,
+    name: "t",
+    notes: "",
+    home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+    interrupts: [],
+    program: [
+      {
+        id: "d1",
+        kind: "macro",
+        macro: "deliver-ore",
+        args: { station: { kind: "station", ref: { entity: "station", id: 60000004, name: "Home", systemName: null } } },
+      },
+    ],
+  });
+  const accepted = mustAccept(doc);
+  const step = accepted.doc.program[0] as { args: Record<string, unknown> };
+  assert.ok(!("into" in step.args));
+});
 
 test("every rock order the editor can offer survives a round trip", () => {
   // The codec validates the pick against ROCK_PICKS, so this is what stops a new
@@ -1062,4 +1126,61 @@ test("a target class this app does not know is dropped from a watch, with a warn
   );
   assert.deepStrictEqual(lastWatch(doc).targets, ["tackle"]);
   assert.ok(warnings.some((w) => /kinds of target/i.test(w)), warnings.join(" | "));
+});
+
+test("every ITEM MATCH survives a round trip — a pattern must never come back as a group", () => {
+  // ⚠ WHAT THIS PINS. The encoder used to be "type ? … : group", which was
+  // total until a third match arrived — at which point a name pattern would
+  // have been written out as a group id and read back as one, silently turning
+  // "everything called Command Center" into "everything in group NaN".
+  const doc: BotScript = {
+    format: SCRIPT_FORMAT,
+    version: SCRIPT_VERSION,
+    name: "Hauler",
+    notes: "",
+    home: { entity: "station", id: 60000004, name: "Home Station", systemName: "Aunia" },
+    interrupts: [],
+    program: [
+      {
+        id: "l1",
+        kind: "macro",
+        macro: "load-cargo",
+        args: {
+          items: {
+            kind: "itemList",
+            items: [
+              { match: "type", typeID: 2254, name: "Temperate Command Center" },
+              { match: "group", groupID: 1027, name: "items like Temperate Command Center" },
+              { match: "name", pattern: "Command Center", name: 'everything matching "Command Center"' },
+            ],
+          },
+          exceptBays: { kind: "bayList", bays: ["ammo"] },
+        },
+      },
+    ],
+  };
+  const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+  const step = round.program[0];
+  assert.ok(step !== undefined && step.kind === "macro");
+  const arg = step.args["items"];
+  assert.ok(arg !== undefined && arg.kind === "itemList");
+  assert.deepEqual(arg.items, [
+    { match: "type", typeID: 2254, name: "Temperate Command Center" },
+    { match: "group", groupID: 1027, name: "items like Temperate Command Center" },
+    { match: "name", pattern: "Command Center", name: 'everything matching "Command Center"' },
+  ]);
+  assert.deepEqual(validateScript(round), [], "a fully-set load step has nothing left to fix");
+});
+
+test("a load step with an EMPTY selection is a fixable problem, not a refusal", () => {
+  // The list is required, so a step carrying none can only ever load nothing —
+  // but a half-made draft must still save and open, like every other unset arg.
+  const doc = JSON.parse(encodeScriptDoc(golden())) as Record<string, unknown>;
+  doc["program"] = [
+    { id: "l1", kind: "macro", macro: "load-cargo", args: { items: { kind: "itemList", items: [] } } },
+  ];
+  const round = mustAccept(decodeScriptText(JSON.stringify(doc))).doc;
+  const problems = validateScript(round);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0]!.sentence, /Pick what this step loads/);
 });

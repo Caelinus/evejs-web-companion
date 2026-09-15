@@ -92,8 +92,18 @@ test("every macro has a category with a label, and the filter offers no empty bu
 test("travel and deliver both take a station picker", () => {
   for (const id of ["travel-to-station", "deliver-ore"] as const) {
     const params = macroEntry(id).params;
-    assert.equal(params.length, 1);
     assert.equal(params[0]?.picker, "station");
     assert.equal(params[0]?.required, true);
   }
+});
+
+test("deliver's corporation hangar is an OPTIONAL second parameter", () => {
+  // Optional is the load-bearing half: a hauling block that could not run
+  // without naming a corporation division would have broken every script
+  // written before offices existed.
+  const params = macroEntry("deliver-ore").params;
+  assert.equal(params.length, 2);
+  assert.equal(params[1]?.picker, "corpDivision");
+  assert.equal(params[1]?.required, false);
+  assert.equal(macroEntry("travel-to-station").params.length, 1);
 });

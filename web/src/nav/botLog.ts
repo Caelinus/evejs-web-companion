@@ -149,7 +149,9 @@ export function describeAction(action: ScriptAction): string {
     case "recallDrones":
       return `recall drones ${action.droneIDs.join(",")}`;
     case "unloadOre":
-      return `unload ore ${action.itemIDs.join(",")}`;
+      return action.division === undefined
+        ? `unload ore ${action.itemIDs.join(",")}`
+        : `unload ore ${action.itemIDs.join(",")} into corp division ${action.division}`;
     case "agentButton":
       return `agent ${action.agentID}: press "${action.label}" (${action.actionID})`;
     case "startRoute":
@@ -160,6 +162,10 @@ export function describeAction(action: ScriptAction): string {
       return `unload mission cargo ${action.itemIDs.join(",")}`;
     case "unloadHolds":
       return `empty holds ${action.groups.map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}`).join(" ")}`;
+    case "loadHolds":
+      return `load holds ${action.groups
+        .map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}${g.qty === null ? "" : `x${g.qty}`}`)
+        .join(" ")}`;
     case "salvageDrones":
       return `salvage drones ${action.droneIDs.join(",")} onto ${action.targetID === 0 ? "any wreck" : action.targetID}`;
     case "lootWreck":

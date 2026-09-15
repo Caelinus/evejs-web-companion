@@ -50,6 +50,11 @@ const FLAG_ICE_HOLD = 181;
 const FLAG_ASTEROID_HOLD = 182;
 const FLAG_CARGO = 5;
 const FLAG_HANGAR = 4;
+// flagCorpSAG1..7. Here for the same reason the hold flags are: to prove the
+// BFF asks for them, and to prove none of them ever reaches a response body.
+const FLAG_CORP_DIVISION_1 = 115;
+const FLAG_CORP_DIVISION_7 = 121;
+const OFFICE_ID = 7000001;
 
 const ORIGINAL_FETCH = global.fetch;
 const activeServers = new Set();
@@ -127,6 +132,13 @@ function fakeGateway(overrides = {}) {
     compression: [ORE_STACK_ID, 1230, 5000, ORE_STACK_ID, 62516, 5000],
     refuse: new Map(),
     inert: new Set(),
+    // The corporation's offices, as officeManager.GetMyCorporationsOffices
+    // reports them: corporation-wide, one row per station.
+    offices: [],
+    // The office refusing a deposit — a division this character holds no role
+    // for. Scoped to the CORP flags so the hangar fallback still works, which
+    // is the whole behaviour under test.
+    refuseCorpAdd: null,
   };
   function flightSnapshot() {
     return {
@@ -199,6 +211,14 @@ function fakeGateway(overrides = {}) {
         error.statusCode = 409;
         throw error;
       }
+      if (service === "officeManager" && method === "GetMyCorporationsOffices") {
+        return {
+          service,
+          method,
+          result: { list: state.offices.map((office) => packedRow(office)) },
+          notifications: [],
+        };
+      }
       if (service === "miningScanMgr" && method === "perform_scan") {
         return { service, method, result: state.scan, notifications: [] };
       }
@@ -246,6 +266,13 @@ function fakeGateway(overrides = {}) {
         };
       }
       if (service === "invbroker" && method === "Add") {
+        const flag = Number((kwargs && kwargs.flag) || FLAG_HANGAR);
+        if (state.refuseCorpAdd && flag >= FLAG_CORP_DIVISION_1 && flag <= FLAG_CORP_DIVISION_7) {
+          const error = new Error(state.refuseCorpAdd);
+          error.code = "CALL_REFUSED";
+          error.statusCode = 409;
+          throw error;
+        }
         if (!inert) {
           state.placement.set(Number(args[0]), Number((kwargs && kwargs.flag) || FLAG_HANGAR));
         }
@@ -539,6 +566,140 @@ test("an unload the server ignores reports the stack as NOT moved", async () => 
   assert.equal(payload.ok, true, "the call itself succeeded");
   assert.deepEqual(payload.moved, [], "but nothing moved, and the re-read says so");
   assert.deepEqual(payload.remaining, [ORE_STACK_ID]);
+});
+
+// ── Delivering into a CORPORATION hangar ────────────────────────────────────
+// The same Add, a different bound object and a division flag. What these four
+// pin down is not that the happy path works — it is that every way the deposit
+// can be refused still ends with the ore ashore in the pilot's own hangar, at
+// the station they flew to, and says so. A hauler that strands a full hold
+// because a role changed overnight is the failure this feature must not have.
+
+test("a corporation delivery binds the OFFICE and Adds under the division flag", async () => {
+  const { gateway, baseUrl } = await docked();
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: ORIGIN_STATION_ID }];
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [ORE_STACK_ID], division: 4 },
+  });
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.deepEqual(payload.moved, [ORE_STACK_ID]);
+  assert.deepEqual(payload.movedToCorp, [ORE_STACK_ID]);
+  assert.equal(payload.corpDivision, 4);
+  assert.equal(payload.fellBack, null);
+
+  // The office is bound by its PUBLISHED id through GetInventoryFromId — the
+  // same two-step the corp hangar READ uses, not a route of its own. (The ship
+  // binds through the same method, so the office is picked out by its id.)
+  const binds = gateway.calls.bind.filter(
+    (c) => c.method === "GetInventoryFromId" && Number(c.args[0]) === OFFICE_ID,
+  );
+  assert.equal(binds.length, 1);
+
+  const adds = boundOf(gateway, "invbroker", "Add");
+  assert.equal(adds.length, 1);
+  assert.deepEqual(adds[0].args, [ORE_STACK_ID, SHIP_ID]);
+  // Division 4 is flag 118, and the browser is never told that.
+  assert.equal(adds[0].kwargs.flag, FLAG_CORP_DIVISION_1 + 3);
+  assert.ok(
+    !JSON.stringify(payload).includes("118"),
+    "a division flag must never reach the browser",
+  );
+});
+
+test("a division the pilot has no role for lands the ore in their OWN hangar", async () => {
+  const { gateway, baseUrl } = await docked();
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: ORIGIN_STATION_ID }];
+  gateway.state.refuseCorpAdd = "CrpAccessDenied";
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [ORE_STACK_ID], division: 2 },
+  });
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  // The delivery still HAPPENED — that is the contract. It just happened
+  // somewhere else, and the answer names both facts.
+  assert.deepEqual(payload.moved, [ORE_STACK_ID]);
+  assert.deepEqual(payload.movedToCorp, []);
+  assert.equal(payload.corpDivision, null);
+  // The server's own word, untranslated: "CALL_REFUSED" would tell a player
+  // nothing, and the browser owns the wording.
+  assert.equal(payload.fellBack, "CrpAccessDenied");
+  assert.equal(gateway.state.placement.get(ORE_STACK_ID), FLAG_HANGAR);
+
+  const adds = boundOf(gateway, "invbroker", "Add");
+  assert.equal(adds.length, 2, "the refused corp Add, then the hangar one");
+  assert.equal(adds[1].kwargs.flag, FLAG_HANGAR);
+});
+
+test("no office at this station never attempts a corporation Add at all", async () => {
+  const { gateway, baseUrl } = await docked();
+  // An office somewhere else is not an office here. The rows are corporation-
+  // wide, so filtering them by station is the BFF's job and this proves it does
+  // not simply bind the first row it sees.
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: 60000004 }];
+
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [ORE_STACK_ID], division: 1 },
+  });
+  assert.deepEqual(payload.moved, [ORE_STACK_ID]);
+  assert.equal(payload.corpDivision, null);
+  assert.equal(payload.fellBack, "NO_CORP_OFFICE");
+  assert.equal(
+    gateway.calls.bind.filter((c) => Number(c.args[0]) === OFFICE_ID).length,
+    0,
+    "no office here, so no office was bound",
+  );
+  const adds = boundOf(gateway, "invbroker", "Add");
+  assert.equal(adds.length, 1);
+  assert.equal(adds[0].kwargs.flag, FLAG_HANGAR);
+});
+
+test("a division outside 1-7 is REFUSED, never quietly unloaded to the hangar", async () => {
+  const { gateway, baseUrl } = await docked();
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: ORIGIN_STATION_ID }];
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [ORE_STACK_ID], division: 9 },
+  });
+  assert.equal(response.status, 400);
+  assert.equal(payload.error, "INVALID_DIVISION");
+  // A bad address is a caller bug. Unloading "somewhere sensible" instead would
+  // put a hold of ore ashore that nobody asked to be put ashore.
+  assert.equal(boundOf(gateway, "invbroker", "Add").length, 0);
+});
+
+test("the offices route answers for EVERY station, and names the divisions", async () => {
+  const { gateway, baseUrl } = await docked();
+  gateway.state.offices = [
+    { officeID: OFFICE_ID, stationID: ORIGIN_STATION_ID },
+    { officeID: OFFICE_ID + 1, stationID: 60000004 },
+  ];
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/corp-offices");
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  // Both stations — this is the read that lets the Bot Builder offer a
+  // corporation hangar for a station the ship is not docked at.
+  assert.deepEqual(payload.stationIDs, [ORIGIN_STATION_ID, 60000004]);
+  assert.equal(payload.divisions.length, 7);
+  assert.deepEqual(
+    payload.divisions.map((d) => d.division),
+    [1, 2, 3, 4, 5, 6, 7],
+  );
+  assert.equal(payload.error, null);
+  // No office ids, and no contents: this route answers "where", not "what is in it".
+  assert.ok(!JSON.stringify(payload).includes(String(OFFICE_ID)));
+});
+
+test("a corporation with no offices is an ANSWER, not an error", async () => {
+  const { baseUrl } = await docked();
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/corp-offices");
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.stationIDs, []);
+  assert.equal(payload.error, null);
 });
 
 test("unload refuses in space and refuses an empty selection", async () => {

@@ -49,9 +49,10 @@ import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } 
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
-import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
+import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
+import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
-import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
+import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
 import {
   LAUNCH_MAX_TRIES,
@@ -1002,6 +1003,19 @@ function mineWithRocks(
 // Fly to the station — same system or across the map, on the SHARED autopilot —
 // and unload; done once the hold is empty AT THE TARGET (an unload anywhere
 // else would scatter the ore across stations).
+//
+// The optional `into` argument aims the load at a CORPORATION hangar division.
+// It changes nothing about when this block is done: the block's contract is
+// that the freight holds end up empty at the target, and they do whether the
+// corporation took the load or the pilot's own hangar did. The bridge decides
+// which — an office that is not rented here any more, or a division this pilot
+// has no role for, lands the ore in their own hangar rather than stranding it
+// aboard — and says which in its answer, so the run's own log can tell the
+// player the corporation refused without the block having to stop the bot over
+// it. Asking HERE instead (read the offices, check a role, then unload) would
+// be two more round trips per lap to arrive at an answer the deposit itself
+// gives away for free, and it would still be a guess: the role is checked at
+// the office, at the moment of the move.
 const deliverOre: MacroDecider = (step, obs, mem, board) => {
   const target = stationTarget(step, obs, board);
   if (target === null) {
@@ -1016,7 +1030,21 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
     // crystals and ammunition ashore every lap — see freightHoldItemIDs.
     const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
-      return tick({ kind: "unloadOre", itemIDs: items }, "Unloading the ore into the hangar.", "Unloading", ACTING);
+      const into = step.args["into"];
+      const division = into !== undefined && into.kind === "corpDivision" ? into.division : null;
+      // The key is left OFF for an ordinary hangar unload rather than sent as
+      // null, so a block nobody aimed at a corporation issues byte-for-byte the
+      // action it always did.
+      return tick(
+        division === null
+          ? { kind: "unloadOre", itemIDs: items }
+          : { kind: "unloadOre", itemIDs: items, division },
+        division === null
+          ? "Unloading the ore into the hangar."
+          : "Unloading the ore into the corporation hangar.",
+        "Unloading",
+        ACTING,
+      );
     }
     return tick(WAIT, "The ore is unloaded.", "Done hauling", { kind: "done" });
   }
@@ -1168,17 +1196,46 @@ const defendWithDrones: MacroDecider = (_step, obs, mem) => {
 // packageAboard / gateOffer). Cross-block facts (the agent, the mission) ride
 // the run BOARD; each block confirms by re-read, one action per tick.
 
-/** The "leave this aboard" rules on a step, or none. */
-function keepRules(step: MacroStep): readonly KeepRule[] {
-  const arg = step.args["keepItems"];
+/**
+ * The item rules in one `itemList` argument — the saved form (which carries the
+ * player's display names) stripped down to what the matcher tests on.
+ */
+function itemRules(step: MacroStep, key: string): readonly KeepRule[] {
+  const arg = step.args[key];
   if (arg === undefined || arg.kind !== "itemList") {
     return [];
   }
-  return arg.items.map((item) =>
-    item.match === "type"
-      ? ({ match: "type", typeID: item.typeID } as const)
-      : ({ match: "group", groupID: item.groupID } as const),
-  );
+  const rules: KeepRule[] = [];
+  for (const item of arg.items) {
+    switch (item.match) {
+      case "type":
+        rules.push({ match: "type", typeID: item.typeID });
+        break;
+      case "group":
+        rules.push({ match: "group", groupID: item.groupID });
+        break;
+      case "name":
+        // A pattern that is only whitespace matches nothing rather than
+        // everything; the matcher enforces that too, but dropping it here keeps
+        // "has this step been given any rules at all" honest.
+        if (item.pattern.trim().length > 0) {
+          rules.push({ match: "name", pattern: item.pattern });
+        }
+        break;
+    }
+  }
+  return rules;
+}
+
+/** The "leave this aboard" rules on a step, or none. */
+function keepRules(step: MacroStep): readonly KeepRule[] {
+  return itemRules(step, "keepItems");
+}
+
+/** The bay keys one `bayList` argument names, or none. */
+function bayListArg(step: MacroStep, key: string): readonly string[] {
+  const arg = step.args[key];
+  return arg !== undefined && arg.kind === "bayList" ? arg.bays : [];
 }
 
 const MAX_BLOCK_ATTEMPTS = 5; // presses/moves per block before it says so and stops
@@ -1749,6 +1806,127 @@ const unloadCargo: MacroDecider = (step, obs, mem) => {
     });
   }
   return tick(WAIT, "The ship is empty.", "Emptying the hold", { kind: "done" });
+};
+
+// ── load-cargo ───────────────────────────────────────────────────────────────
+// Docked: unload-cargo run backwards. Take the named items out of the station
+// hangar and put each stack where THIS hull wants it — the command centre hold,
+// the planetary hold, the mining hold — with the cargo hold as the fallback for
+// a stack no bay claims.
+//
+// ⚠ IT LOADS WHAT FITS AND THEN IT IS DONE. That is the whole block, and it is
+// what makes a ten-trip haul a four-block loop instead of ten hand-written
+// programs: an Epithal whose command centre hold takes six of the twenty in the
+// hangar loads six, says so, and finishes. The fourteen left are not a failure
+// and must never read as one — the next lap comes back for them.
+//
+// ⚠ IT SHARES THE LOOT SIDE'S PLANNER ON PURPOSE (`planLootTransfers`). The
+// question "what of these rows can this hull take, and into which bay" is the
+// same question whether the rows are in a jetcan or in a station hangar, and it
+// is the question with all the sharp edges: the per-stack all-or-nothing rule
+// that needs a SPLIT, the operator's "a full specialised bay does not fall
+// through to cargo" rule, and the room-tracking that stops two stacks being
+// promised the same cubic metre. A second copy would get one of those wrong.
+//
+// ⚠ A BAY NAMED IN `exceptBays` IS NOT A DESTINATION, AND ITS CARGO STAYS HOME.
+// Treating it as merely absent would send the ammo a Hoarder was told to leave
+// alone into the cargo hold instead, which is the fall-through the operator's
+// rule forbids — so a row whose bays are ALL excluded is skipped entirely. A row
+// that never had a specialised bay still goes to cargo, as it always did.
+const loadCargo: MacroDecider = (step, obs, mem) => {
+  if (obs.flightStatus?.docked !== true) {
+    return tick(WAIT, "Not docked - there is no hangar to load from.", "Loading the ship", {
+      kind: "blocked",
+      reason: "Dock at a station first - this block loads your ship from its hangar.",
+    });
+  }
+  const rules = itemRules(step, "items");
+  if (rules.length === 0) {
+    return tick(WAIT, "This step has nothing to load.", "Loading the ship", {
+      kind: "blocked",
+      reason: "Pick what this step loads - an item, everything of its kind, or a name to match.",
+    });
+  }
+  const hangar = obs.stationHangar ?? null;
+  const bays = obs.shipBays ?? null;
+  const names = obs.typeNames ?? null;
+  // ⚠ A NAME RULE WITH NO NAMES READ IS "COULD NOT TELL", NOT "NOTHING MATCHED".
+  // Without this the lookup failing would hand the block an empty selection, and
+  // an empty selection is indistinguishable from a hangar that genuinely has
+  // none of what was asked for — so the ship would fly the lap empty and the
+  // player would be told the load was finished.
+  const needsNames = rules.some((rule) => rule.match === "name");
+  // "Could not read" is never "nothing to load". A hangar or a bay list that
+  // failed to read leaves the ship sailing empty and the player none the wiser,
+  // so it waits and then says so, exactly as the unload side does.
+  if (hangar === null || bays === null || (needsNames && names === null)) {
+    const blindChecks = (num(mem, "blindChecks") ?? 0) + 1;
+    if (blindChecks > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The hangar or the holds could not be read.", "Loading the ship", {
+        kind: "blocked",
+        reason:
+          needsNames && names === null
+            ? "The names of what is in the hangar could not be read, so the bot cannot tell what matches."
+            : "The hangar or the ship's holds could not be read, so the bot cannot tell what to load.",
+      });
+    }
+    return tick(WAIT, "Reading what is in the hangar.", "Loading the ship", ACTING, false, {
+      ...mem,
+      blindChecks,
+    });
+  }
+  const named = hangar.map((row) => ({ ...row, name: names?.[row.typeID] ?? null }));
+  // "skip": a row nobody could classify stays in the hangar, where it already
+  // safely is. The opposite of the unload side's "move", and for the same
+  // reason — which way a shrug is safe depends on where the stack ends up.
+  const wanted = pickedRows(named, rules, "skip");
+  const except = new Set<string>(bayListArg(step, "exceptBays"));
+  // An excluded bay is no longer a destination, so the planner must not see it
+  // as present; a row whose whole chain is excluded is dropped here rather than
+  // being allowed to fall through to cargo.
+  const usableBays = bays.map((bay) =>
+    except.has(bay.key) ? { ...bay, present: false as boolean | null } : bay,
+  );
+  const rows = wanted.filter((row) => {
+    const preferred = preferredBays(row);
+    return preferred.length === 0 || preferred.some((key) => !except.has(key));
+  });
+  const cargoFree = holdFreeM3(obs.cargo?.capacity ?? null);
+  const freeFor = (key: string | null): number | null => {
+    if (key === null) {
+      return cargoFree;
+    }
+    const bay = usableBays.find((entry) => entry.key === key) ?? null;
+    return bay === null ? null : holdFreeM3(bay.capacity);
+  };
+  const groups = planLootTransfers(rows, usableBays, freeFor);
+  if (groups.length === 0) {
+    // Three different worlds end here and the words have to tell them apart, or
+    // a player watching a bot fly off empty cannot tell a finished load from a
+    // selection that matched nothing.
+    const said =
+      wanted.length === 0
+        ? "None of that is in the hangar."
+        : rows.length === 0
+          ? "What is here only belongs in a hold this step was told to leave alone."
+          : "The ship is as full as it can get.";
+    return tick(WAIT, said, "Loading the ship", { kind: "done" });
+  }
+  const attempts = (num(mem, "attempts") ?? 0) + 1;
+  if (attempts > MAX_BLOCK_ATTEMPTS) {
+    return tick(WAIT, "The cargo would not load.", "Loading the ship", {
+      kind: "blocked",
+      reason: "The station kept refusing to load that cargo, so the bot stopped.",
+    });
+  }
+  return tick(
+    { kind: "loadHolds", groups },
+    "Loading the ship from the hangar.",
+    "Loading the ship",
+    ACTING,
+    false,
+    { ...mem, attempts },
+  );
 };
 
 // ── return-to-agent ──────────────────────────────────────────────────────────
@@ -4855,6 +5033,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "return-to-agent": returnToAgent,
   wait: waitBlock,
   "unload-cargo": unloadCargo,
+  "load-cargo": loadCargo,
   "salvage-wrecks": salvageWrecks,
   "loot-wrecks": lootWrecks,
   "loot-containers": lootContainers,

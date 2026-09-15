@@ -76,6 +76,30 @@ test("region A (pilots) heading is present", () => {
   assert.match(text, /Pilots/i);
 });
 
+test("the Groups region renders on first mount, ahead of Pilots", () => {
+  // ⚠ IT HAS NO LOADING STATE AND MUST NOT GROW ONE. Unlike every other list
+  // here, groups are not fetched: squads live in localStorage, so the first
+  // render already has the true answer.
+  const body = renderPanel();
+  const text = visibleText(body);
+  assert.match(text, /Groups/);
+  assert.ok(
+    body.indexOf(">Groups<") < body.indexOf(">Pilots<"),
+    "Pilots came before Groups — launching for a group is the coarse action",
+  );
+  assert.doesNotMatch(text, /Loading groups/i);
+});
+
+test("THE COMPANIONS GROUP IS THERE WITH NOTHING IN IT", () => {
+  // It is the group a player cannot make for themselves, so a row that
+  // vanishes when empty disappears exactly when somebody is looking for where
+  // to switch it on. With no storage under SSR the prefs are empty, which is
+  // the case this pins.
+  const text = visibleText(renderPanel());
+  assert.match(text, /Companions/);
+  assert.match(text, /Pilot Hangar/);
+});
+
 test("region A reads as loading on first mount, never as 'no pilots'", () => {
   // The SSR harness never runs onMount, so the server roster fetch has not
   // fired — the panel must not guess "No pilots online" before it knows.

@@ -1,5 +1,16 @@
 <script lang="ts">
-  // BOT MANAGER — regions A, B and C (docs/bot-manager-brainstorm.md §4).
+  // BOT MANAGER — regions A, B and C (docs/bot-manager-brainstorm.md §4), plus
+  // a GROUPS region above them.
+  //
+  // Groups (top): one row per pilot group — the built-in Companions group and
+  // every squad the player made on the Pilot Hangar — each able to start one
+  // bot on all of its free members at once. It sits ABOVE Pilots on purpose:
+  // launching for a group is the coarse action and launching for one pilot is
+  // the exception to it, and a player with six pilots arranged into two ops
+  // should meet the two ops first. The membership is NOT this panel's to
+  // invent — it is `app/hangarPrefs.ts`, the same squads the landing screen
+  // shows — and every rule about who can be started lives in
+  // `bots/pilotGroups.ts`.
   //
   // Region A (pilots, top): one row per held session in THIS browser tab, plus
   // one row per character with a live server bot and no held session here
@@ -45,6 +56,10 @@
     lastAlertPhrase,
     RECENT_RUNS_ARE_NOT_DURABLE,
   } from "../bots/pilotRoster.ts";
+  import { loadHangarPrefs } from "../app/hangarPrefs.ts";
+  import { loadKnownCharacters } from "../app/knownCharacters.ts";
+  import { companionGroupRoster, pilotGroups } from "../bots/pilotGroups.ts";
+  import BotManagerGroupRow from "./BotManagerGroupRow.svelte";
   import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
   import ActionButton from "./ActionButton.svelte";
 
@@ -131,6 +146,54 @@
   );
   const extraServerBots = $derived(serverOnlyBots(serverBots, heldCharacterIDs));
 
+  // --- groups ---------------------------------------------------------------
+  //
+  // ⚠ RE-READ ON THE ROSTER'S OWN BEAT, NOT ONCE AT MOUNT. Squads are edited on
+  // the Pilot Hangar and companion ticks are set there too; this panel can be
+  // left open across both. localStorage gives no change event to this tab (the
+  // `storage` event fires only in OTHER tabs), so the only honest options are
+  // to re-read or to show an arrangement the player has already changed. A
+  // parse of a few hundred bytes beside a network poll is not a cost worth
+  // being clever about.
+  let prefs = $state(loadHangarPrefs());
+  let known = $state(loadKnownCharacters());
+
+  function refreshGroups(): void {
+    prefs = loadHangarPrefs();
+    known = loadKnownCharacters();
+  }
+
+  const groups = $derived(pilotGroups(prefs));
+  /** Each companion's saved setup, so the Companions row can start them. */
+  const companionSetups = $derived(
+    new Map(companionGroupRoster(prefs).map((member) => [member.characterID, member.setup])),
+  );
+
+  /**
+   * A pilot's name from whichever source knows it.
+   *
+   * ⚠ THREE SOURCES BECAUSE A GROUP MEMBER NEED NOT BE ANYWHERE NEAR THIS TAB.
+   * A held session knows its own pilot; a server bot carries the name the host
+   * resolved; and a member that is neither — signed into nothing, flying
+   * nothing — is known only to this browser's own roster. Without the third, a
+   * group of six with one tab open would print five "Unknown pilot" rows, and
+   * a raw id in their place is not an option (R7d).
+   *
+   * ⚠ A PLAIN FUNCTION, NOT A `$derived` HOLDING ONE — see the house sweep in
+   * ui/panelFirstMount.test.ts. Its reads of `heldSessions`, `serverBots` and
+   * `known` are tracked wherever it is called, including inside the group
+   * row's own `$derived`, so nothing is lost by not wrapping it.
+   */
+  function nameOf(characterID: number): string | null {
+    for (const session of heldSessions) {
+      const online = session.store.station.get().online;
+      if (online?.characterID === characterID) return online.characterName ?? null;
+    }
+    const bot = serverBots.find((entry) => entry.characterID === characterID);
+    if (bot?.characterName) return bot.characterName;
+    return known.find((entry) => entry.characterID === characterID)?.characterName ?? null;
+  }
+
   // --- region C: recent runs ---------------------------------------------
   // Same fetch as region A (`serverBots`), just the ended slice of it — no
   // second call. 20 matches MAX_ENDED_RUNS in src/botHost.js, the server's
@@ -183,7 +246,10 @@
     void refresh();
     // Guarded, like every other periodic read — see app/skipWhileBusy.ts. Only
     // the roster repeats; the library is not a self-changing list.
-    const beat = skipWhileBusy(refreshPilots);
+    const beat = skipWhileBusy(async () => {
+      refreshGroups();
+      await refreshPilots();
+    });
     void beat();
     const timer = setInterval(() => void beat(), SERVER_ROSTER_POLL_MS);
     return () => clearInterval(timer);
@@ -357,6 +423,49 @@
       <p class="stat-line">{summary}</p>
     {/if}
   </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Groups</h2>
+  </header>
+
+  <!-- ⚠ NO LOADING STATE, AND NO ERROR ONE. Unlike every other list in this
+       window, this one is not fetched: squads live in localStorage, so the
+       first render already has the true answer. A "Loading groups…" here would
+       be a state that never happens. -->
+  <p class="note">
+    Start one bot on a whole group at once. Groups are the squads you make on
+    the Pilot Hangar; Companions is built in and always flies the fleet
+    companion.
+  </p>
+
+  <div class="table-wrap overflow-x-auto">
+    <table class="guests reflow">
+      <thead>
+        <tr>
+          <th>Group</th>
+          <th>Pilots</th>
+          <th>Launch</th>
+          <th>Progress</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each groups as group (group.id)}
+          <BotManagerGroupRow
+            {group}
+            {scripts}
+            {serverBots}
+            {flow}
+            {companionSetups}
+            {nameOf}
+            sessions={heldSessions}
+            onChanged={refreshPilots}
+          />
+        {/each}
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="panel">

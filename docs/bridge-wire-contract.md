@@ -729,6 +729,20 @@ browser names a **place**, never a flag:
   never blanks the rest. **No office here is `available: false` with
   `reason: "NO_CORP_OFFICE"` — an ordinary state, not an error.** A division
   descriptor exposes an **ordinal and a name, never a flag**.
+- `GET /api/bridge/corp-offices` → `{ ok, stationIDs, divisions: [{ division, name }], error }`.
+  The **planning** read next to the docked-station one above: `officeManager.
+  GetMyCorporationsOffices` answers from the session's corporation alone, so this
+  says **where the corporation has offices at all** — every station at once,
+  readable in space and from the far side of the map — plus what the seven
+  divisions are called (`corpRegistry.GetCorporation`). No office ids and no
+  contents leave the BFF. An empty `stationIDs` with `error: null` is the
+  ordinary "rents none anywhere"; a failed read says so in `error` instead, so a
+  caller never reads a timeout as "there is no office".
+
+  **No role check.** Divisions are listed whether or not the character holds the
+  query role for them, because the role is only enforceable where it is enforced
+  — at the office, at the deposit — and hiding a division a pilot does hold
+  would cost more than offering one they do not.
 
 ## Industry — blueprints, jobs, facilities (R15)
 
@@ -2553,10 +2567,32 @@ a player straight past a full belt. Only asteroid rows grow the fields.
 **BFF routes:**
 
 - `GET  /api/bridge/ship/ore-hold` → `{ ok, activeShipID, stationID, holds }`
-- `POST /api/bridge/ship/ore-hold/unload` `{ itemIDs }` → `{ ok, requested, moved, remaining }`
+- `POST /api/bridge/ship/ore-hold/unload` `{ itemIDs, division? }` →
+  `{ ok, requested, moved, remaining, corpDivision, movedToCorp, fellBack }`
 - `GET  /api/bridge/mining/scan` → `{ ok, results }` (in space only)
 - `GET  /api/bridge/reprocessing/quote?itemIDs=…` → `{ ok, stationID, taxRate, quotes }` (docked only)
 - `POST /api/bridge/reprocessing/reprocess` `{ itemIDs, confirm }` → `{ ok, requested, processed, remaining }` (docked only)
+
+**`division` delivers into a CORPORATION hangar instead — and falls back.** The
+same `invbroker.Add`, with the corporation's office at the docked station as the
+bound object and the division's flag (`114 + N`, never sent by the browser) as
+the destination. It is a **request, not a destination**: no office here any more,
+no role for that division, an impounded office — each ends with the load in the
+**pilot's own hangar**, at the station they already flew to, and `fellBack`
+carrying the server's own untranslated word (`CrpAccessDenied` for a missing
+role, `NO_CORP_OFFICE` when the corporation rents none here, `CORP_REFUSED` when
+it declined silently). A bot that stalled with a full hold because a director
+changed a role overnight would be worse than one that lands the ore somewhere
+the pilot can still reach — and the fallback only ever runs **towards** the
+pilot, never towards the corporation, because ore in a division belongs to the
+corporation and needs a take role to get back.
+
+**The fallback is judged by the RE-READ, never by the absence of a throw** — the
+same rule as `/inventory/transfer`: what is retried into the hangar is whatever
+the holds still say is aboard. `corpDivision` names the division that actually
+took something (null when none did), `movedToCorp` which stacks it took. A
+`division` outside 1-7 is **refused with 400 `INVALID_DIVISION`**, never clamped:
+a division is an address, and there is no nearest right answer to a wrong one.
 
 **⚠ The ore-hold flag ladder never leaves the BFF.** The holds are read in order
 — **134** ore, **135** gas, **181** ice, **182** asteroid, falling back to **5**
@@ -2810,8 +2846,10 @@ the browser would get a cheerful 200 for an order that was never given, and a
 player would believe drones were guarding them while nothing was. Deny-by-default
 is what keeps that from being buildable, and a test refuses all three BY NAME.
 `CmdAbandonDrone` (PERMANENTLY DISOWNS a player's drones), `CmdReturnHome`,
-`CmdSalvage` and `CmdReconnectToDrones` are real handlers on the same service and
-are deliberately absent for the same reason a service-granular allowlist is.
+`CmdSalvage` and `CmdReconnectToDrones` were deliberately absent for the same
+reason a service-granular allowlist is. **R102 allowlisted all four as BOUND
+entity writes**, every one confirm-gated; only `CmdReconnectToDrones` has a panel
+behind it (drone recovery), and it is the one that answers with the snapshot.
 
 **The limits add NO pair.** `maxActiveDrones` (attr **352**) and `droneBandwidth`
 (attr **1271**) are ordinary ship dogma and ride back in `dogmaIM.ShipGetInfo`,
@@ -2844,8 +2882,29 @@ mutations refuse while docked with 409):
   reachable abandoned/uncontrolled drones. The acting hull is pinned from the
   held live session and EveJS validates that each target is a local,
   uncontrolled drone within scoop range.
+- `POST /api/bridge/entity/drones/reconnect` `{ droneIDs, confirm: true }` takes
+  control of an orphaned drone this character owns. It rides the entity bind
+  (R102) rather than the top-level seam, but it answers like a drone route, not
+  like its three bound siblings — see below.
 
-all three orders → `{ ok, droneIDs, targetID, inSpace, notifications }`.
+the three orders → `{ ok, droneIDs, targetID, inSpace, result, notifications }`;
+scoop → `{ ok, applied, droneIDs, inSpace, result, notifications }`; reconnect →
+`{ ok, applied, inSpace, result, notifications }`.
+
+**⚠ EVERY DRONE VERB THE PANEL DRIVES MUST CARRY `inSpace`, INCLUDING THE TWO
+RECOVERY ONES.** `ScoopDrone` and `CmdReconnectToDrones` answer the same
+empty-on-success dict the three orders do, so the page judges them by the
+snapshot and by nothing else: a scoop by the drone LEAVING space, a reconnect by
+it becoming `controlled`. Both routes were written to the generic write shape
+(`{ ok, applied, result, notifications }`) and therefore shipped without
+`inSpace` at all — which the page reads as `null`, i.e. "we could not look", so
+**every** scoop and **every** reconnect reported "the … was accepted, but space
+could not be re-read", the ones that worked included. `answerWithDronesInSpace`
+is the shared tail; a drone route that does not call it is the bug.
+
+The other three bound entity writes (`return-home`, `salvage`, `abandon`) are
+plumbing with no panel behind them and keep the bare
+`{ ok, applied, result, notifications }` ack — they re-read nothing.
 
 **⚠ `null` vs `[]` is load-bearing here in a way it is nowhere else in this
 client.** "You have no drones in space" and "we could not look" are the same
@@ -3084,6 +3143,7 @@ and already had a route:
 | run the lasers | `POST /api/bridge/modules/activate` (R23 slice A) — **no `effect`**, so the server resolves the module's own default |
 | see the ore | `GET /api/bridge/ship/ore-hold` (R23 slice B) |
 | put the ore in the hangar | `POST /api/bridge/ship/ore-hold/unload` (R23 slice B) |
+| put the ore in a **corporation** hangar | the same route with `division: 1..7` — see the fallback rule above |
 | defend itself | `GET /api/bridge/drones` + `POST /api/bridge/drones/launch` (R25 slice A) |
 | fly | `POST /api/bridge/flight/undock` / `warp` / `approach` / `dock` (R5a, with R24 slice A's `minRange: 0`) |
 
