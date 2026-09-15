@@ -25,7 +25,11 @@ const STATION = 60000004;
 // its own command centre type; they all share this group, which is exactly why a
 // group rule is the one entry a player should need.
 const GROUP_COMMAND_CENTER = 1027;
-const CATEGORY_PLANETARY = 43;
+// ⚠ 41 IS PLANETARY INTERACTION (the structures), NOT 43. A command centre is
+// group 1027 in category 41, which is precisely why the planetary commodities
+// hold — categories 42 and 43 — refuses it. This fixture said 43 while the
+// table still named that hold as the overflow, and so agreed with the bug.
+const CATEGORY_PLANETARY_INTERACTION = 41;
 const TEMPERATE_CC = 2254;
 const BARREN_CC = 2256;
 const CC_M3 = 1000;
@@ -53,7 +57,7 @@ function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
 
 function row(over: Partial<InventoryItemRow> & { itemID: number }): InventoryItemRow {
   return {
-    typeID: TEMPERATE_CC, groupID: GROUP_COMMAND_CENTER, categoryID: CATEGORY_PLANETARY,
+    typeID: TEMPERATE_CC, groupID: GROUP_COMMAND_CENTER, categoryID: CATEGORY_PLANETARY_INTERACTION,
     flagID: null, quantity: 1, singleton: false, volume: CC_M3, ...over,
   };
 }
@@ -169,6 +173,31 @@ test("a full SPECIALISED bay does not spill into the cargo hold", () => {
   assert.equal(tick.action.kind, "wait");
 });
 
+test("the PLANETARY hold is never offered a command centre, full hold or not", () => {
+  // ⚠ THE LIVE FAILURE, 2026-09-15. An Epithal loaded six into its command
+  // centre hold and the router sent the seventh next door, where the server
+  // answered "Only planetary resources and commodities can be placed in the
+  // Planetary Commodities Hold" — a command centre is category 41, and that
+  // hold takes 42 and 43. With a PI hold present and empty, and a command centre
+  // hold that is full, the right answer is to load NOTHING and come back.
+  const tick = loadCargo(
+    step([BY_GROUP]),
+    obs({
+      stationHangar: [row({ itemID: 101, quantity: 14 })],
+      shipBays: [
+        bay("cargo", { capacity: { capacity: 500, used: 0 } }),
+        bay("commandCenter", { capacity: { capacity: 6000, used: 6000 } }),
+        bay("planetary", { capacity: { capacity: 45_000, used: 0 } }),
+      ],
+      cargo: { rows: [], capacity: { capacity: 500, used: 0 } },
+    }),
+    {},
+    NB,
+  );
+  assert.equal(tick.action.kind, "wait", "no transfer at all, least of all into the planetary hold");
+  assert.equal(tick.outcome.kind, "done");
+});
+
 test("a hull with NO bay for it falls back to the cargo hold, as it always did", () => {
   const tick = loadCargo(
     step([BY_GROUP]),
@@ -224,8 +253,9 @@ test("a NAME pattern matches what the client resolved, and needs the names to do
 test("a bay named in `exceptBays` is not filled, and its cargo stays in the hangar", () => {
   // Excluding a bay must not push what belongs in it into the cargo hold — that
   // is the fall-through the rule above forbids, arrived at from the other side.
+  // One bay is the whole chain for a command centre, so naming it is enough.
   const tick = loadCargo(
-    step([BY_GROUP], { exceptBays: { kind: "bayList", bays: ["commandCenter", "planetary"] } }),
+    step([BY_GROUP], { exceptBays: { kind: "bayList", bays: ["commandCenter"] } }),
     obs({
       stationHangar: [row({ itemID: 101, quantity: 2 })],
       shipBays: hauler({ piFree: 45_000, cargoFree: 10_000 }),

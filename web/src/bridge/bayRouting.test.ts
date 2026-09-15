@@ -185,6 +185,40 @@ test("ammunition goes to the ammo hold, and jump fuel to the fuel bay", () => {
   assert.deepEqual(preferredBays(row(4, 4, 1136)), ["fuel"], "fuel blocks too");
 });
 
+test("a command centre is NEVER offered the planetary hold — the server refuses it", () => {
+  // ⚠ THIS IS A LIVE REFUSAL, NOT A THEORY. A hauler loading command centres was
+  // told "Only planetary resources and commodities can be placed in the
+  // Planetary Commodities Hold", because a command centre is group 1027 in
+  // CATEGORY 41 (Planetary Interaction) — the structures — while that hold takes
+  // categories 42 and 43. The table used to name it as the overflow behind the
+  // command centre hold, which reads as obviously right and is wrong.
+  assert.deepEqual(preferredBays(row(1, 41, 1027)), ["commandCenter"]);
+  assert.equal(preferredBays(row(1, 41, 1027)).includes("planetary"), false);
+});
+
+test("the planetary hold takes raw resources as well as refined commodities", () => {
+  // The server's own check is category 42 OR 43; only 43 was listed here.
+  assert.deepEqual(preferredBays(row(1, 42, 1033)), ["planetary"], "raw resources");
+  assert.deepEqual(preferredBays(row(2, 43, 1034)), ["planetary"], "refined commodities");
+});
+
+test("a FULL command centre hold leaves the rest in the hangar, not in cargo", () => {
+  // With the chain one bay long there is nowhere else specialised to go, and
+  // cargo is not a backstop for a full bay. Six of the twenty this trip; the
+  // loop comes back for the rest.
+  const out = planLootTransfers(
+    [vrow(1, 41, 1027, 20, 1000)],
+    [bay("commandCenter", true)],
+    FREE({ commandCenter: 6000, cargo: 10_000 }),
+  );
+  assert.deepEqual(out, [{ bay: "commandCenter", itemIDs: [1], qty: 6 }]);
+});
+
+test("a hull with NO command centre hold carries them in cargo", () => {
+  const out = planLootTransfers([vrow(1, 41, 1027, 2, 1000)], [bay("cargo", true)], FREE({ cargo: 10_000 }));
+  assert.deepEqual(out, [{ bay: null, itemIDs: [1], qty: null }]);
+});
+
 test("raw ice and its refined product are told apart", () => {
   // Checked against live static data: Clear Icicle is group 465 in category 25;
   // group 423 in category 4 is the refined output. This file had them swapped.
