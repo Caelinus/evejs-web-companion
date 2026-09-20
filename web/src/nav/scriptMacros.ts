@@ -489,6 +489,21 @@ function isChosenBelt(step: MacroStep): boolean {
 }
 
 /**
+ * True when a step is the ANOMALY MINER'S mode — tour the scanner's ore sites,
+ * never a belt. See the `BeltArg` header (botScript.ts) for the incident this
+ * mode exists to close: NEAREST-mode's belt rotation is the right fallback for
+ * a belt-mining bot and the wrong one for an anomaly-mining bot, because it
+ * hands the ship a destination ("the nearest belt") that a wanted anomaly ore
+ * can never spawn at. `mineAtBelt` checks this FIRST, before either the belt
+ * regex or the tier ladder, so a "site" step never reaches code written for
+ * the other two modes.
+ */
+function isSiteMode(step: MacroStep): boolean {
+  const arg = step.args["belt"];
+  return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "site";
+}
+
+/**
  * The belt a mine-at-belt step should head for when no rocks are in range.
  * "chosen" pins one belt by NAME (never id — unlike a station, a belt's id is
  * grid-local, not globally stable, so it can only be re-resolved against what
@@ -665,6 +680,25 @@ const travelToBelt: MacroDecider = (step, obs) => {
 //     noticed — the tour already moved on, and chasing respawns mid-tier is
 //     not worth the extra state for how rarely a rock resource turnover
 //     matters here.
+//   • SITE mode (the `BeltArg` variant the anomaly miner uses) REPLACES all of
+//     the above rather than layering on it. It is a hard fork at the top of
+//     `mineAtBelt`, dispatched to `mineAtBeltSite` below, and it never falls
+//     through to the belt regex, `beltTarget`, `nearestUnworkedBelt` or
+//     `MINE_ORE_TIER_KEY` — see the `isSiteMode` and `BeltArg` (botScript.ts)
+//     comments for the incident a belt-rotation fallback silently caused. Two
+//     things differ from NEAREST/CHOSEN because a scanner site is a different
+//     kind of place than a belt:
+//       - "dry" is per-SITE, not per-belt, and is tracked on THIS pilot's own
+//         run board (`oreSitesBarren`) rather than the belts' shared,
+//         name-keyed BFF memory — a scanner site's label is already unique to
+//         this run (`warp-to-ore-anomaly` mints it), so there is no cross-
+//         pilot belt-name collision to solve here the way there is for belts.
+//       - ore priority is evaluated FRESH ON EVERY GRID rather than climbing a
+//         ladder that never comes back down. A belt system has one shared pool
+//         of rock that a tier ladder drains in order; an anomaly system hands
+//         out a NEW rock field every site, so a ladder would retire Arkonor
+//         forever the first time one site happened to lack it. See
+//         `mineAtBeltSite`.
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
@@ -676,10 +710,21 @@ const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
 
   const measurement = measureSpace(snapshot);
   const allRocks = snapshot.entities.filter(isMineableRock);
-  const pinned = isChosenBelt(step);
 
   const oresArg = step.args["ores"];
   const ores = oresArg !== undefined && oresArg.kind === "oreList" ? oresArg.ores : [];
+
+  // ⚠ THIS CHECK COMES BEFORE `pinned`, THE BELT REGEX AND THE TIER LADDER,
+  // AND MUST GO ON COMING FIRST. Every line below this branch was written for
+  // a grid that might have an asteroid belt on it; a site step's grid never
+  // does, and letting it reach `mineNoTargetRocks` (nearest/chosen's own
+  // barren handling) would re-introduce the exact belt-tour bug this mode
+  // exists to close.
+  if (isSiteMode(step)) {
+    return mineAtBeltSite(step, obs, mem, board, snapshot, allRocks, ores, measurement);
+  }
+
+  const pinned = isChosenBelt(step);
 
   if (ores.length > 0) {
     const tier = boardNum(board, MINE_ORE_TIER_KEY) ?? 0;
@@ -861,6 +906,210 @@ function dryBeltNames(dryBelts: readonly DryBelt[] | null, family: OreFamilyArg 
     }
   }
   return names;
+}
+
+// ── mine-at-belt, SITE mode ─────────────────────────────────────────────────
+// See the `mineAtBelt` header and `isSiteMode` for why this is a hard fork
+// rather than a third branch woven through the belt logic above: a scanner
+// site has no belt regex to match, no shared cross-pilot memory to consult
+// (its label is already unique to this run — `warp-to-ore-anomaly` mints it),
+// and — the whole reason this mode exists — no rotation destination that
+// could ever be wrong the way "the nearest belt" was.
+
+/** Where SITE mode keeps ITS OWN barren-site memory. Deliberately not the
+ *  belts' `obs.dryBelts` (BFF-shared, belt-name-keyed) and deliberately not
+ *  `MINE_ORE_TIER_KEY` (system-wide, one-way) — see the `mineAtBelt` header. */
+const ORE_SITES_BARREN_KEY = "oreSitesBarren";
+
+/**
+ * Which ore site the ship is standing on, read off `warp-to-ore-anomaly`'s own
+ * board key rather than kept by this block. That step already publishes every
+ * label it has warped to, as a CSV, oldest first (`ORE_FLAVOUR.boardKey`,
+ * encoded in `warpToAnomalyOfKind` below) — the LAST one is wherever the ship
+ * last warped to, which is this grid, because nothing else in an anomaly
+ * script issues a scan warp. Reusing that key instead of a label of our own
+ * is also what keeps the two blocks from ever disagreeing about which site
+ * this is.
+ *
+ * Null when the key is unset or empty — a site block run with no
+ * `warp-to-ore-anomaly` in front of it, which `mineAtBeltSiteBarren` turns
+ * into "ask for a tour block" rather than a guessed label.
+ */
+function currentOreSiteLabel(board: ScriptBoard): string | null {
+  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+    .split(",")
+    .filter((label) => label.length > 0);
+  return visited.length > 0 ? visited[visited.length - 1]! : null;
+}
+
+/** The labels THIS pilot's site tour has already found barren — same CSV encoding as every other board list in this file. */
+function barrenOreSiteLabels(board: ScriptBoard): ReadonlySet<string> {
+  return new Set(
+    String(board[ORE_SITES_BARREN_KEY] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0),
+  );
+}
+
+/** Append one label to `warp-to-ore-anomaly`'s own visited CSV — see requirement 3 on why this block writes into a key it does not own: without it, that step's next tick would warp the ship right back to the site this one just walked away from. */
+function appendOreVisited(board: ScriptBoard, label: string): string {
+  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+    .split(",")
+    .filter((existing) => existing.length > 0);
+  return [...visited, label].join(",");
+}
+
+/**
+ * SITE mode's rock pick: the highest-priority family from the step's `ores`
+ * list that is actually present ON THIS GRID, evaluated fresh every time —
+ * never a ladder that only advances. A belt system has one pool of rock a
+ * tier ladder drains in visiting order; an anomaly system hands the ship a
+ * BRAND NEW rock field at every site, so a ladder that only ever climbs would
+ * retire Arkonor for the rest of the run the first time one site's field
+ * happened not to have any, even though the very next site might be full of
+ * it. `ores.find` keeps the player's ordering (first = most wanted, same as
+ * every other ore-priority read in this file) and answers null when nothing
+ * on the list is here — which is this grid's barren, not the whole system's.
+ *
+ * An empty `ores` list (player wrote no priority) mines whatever is richest
+ * here, via `richestRocks` — identical to NEAREST/CHOSEN's own no-list
+ * behaviour, because "no preference" means the same thing in every mode.
+ */
+function mineAtBeltSite(
+  step: MacroStep,
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  board: ScriptBoard,
+  snapshot: SpaceSnapshot,
+  allRocks: readonly SpaceEntity[],
+  ores: readonly OreFamilyArg[],
+  measurement: SpaceMeasurement | null,
+): MacroTick {
+  if (ores.length === 0) {
+    if (allRocks.length === 0) {
+      return mineAtBeltSiteBarren(obs, mem, board, ores);
+    }
+    return mineWithRocks(step, obs, mem, snapshot, richestRocks(allRocks, num(mem, "rockID")), measurement);
+  }
+
+  const family = ores.find((candidate) => allRocks.some((rock) => rock.groupID === candidate.groupID)) ?? null;
+  if (family === null) {
+    return mineAtBeltSiteBarren(obs, mem, board, ores);
+  }
+  const familyRocks = allRocks.filter((rock) => rock.groupID === family.groupID);
+  return mineWithRocks(step, obs, mem, snapshot, highestGradeRocks(familyRocks), measurement);
+}
+
+/**
+ * This grid has none of the wanted ore. Mark the site barren, and either move
+ * on to the next one or, once every site the scanner knows about is barren,
+ * report `blocked` and let `stopSafely` fly the ship home — the same end
+ * state the belt modes reach when every belt is dry, reached over sites
+ * instead of belts.
+ *
+ * ⚠ AN EMPTY GRID RIGHT AFTER A WARP HAS NOT ARRIVED YET, and this block used
+ * to believe it on the very first read. `fightRatsLadder` above already tells
+ * the live incident this is the mining side of: a snapshot that has not
+ * caught up reads byte-identical to a grid with nothing on it, and a ship
+ * that lands on a full ore anomaly can see zero rocks for a tick or two
+ * before the entity list fills in. For the combat side that costs one wasted
+ * "grid clear" read; here it is far worse, because the very next thing this
+ * function does with "no rock here" is write a label into `oreSitesBarren`
+ * FOR THE REST OF THE RUN. Without the same confirmation `fightRatsLadder`
+ * already earns with `EMPTY_GRID_CONFIRM_TICKS`, a bot warping into a site
+ * full of ore strikes it off the list before the snapshot ever showed it the
+ * rock — and with several pilots landing on sites within the same few
+ * seconds of each other, a whole system can read "mined out" while every
+ * site in it is still full. So the SAME constant, reused rather than
+ * reinvented, gates every path below: no barren mark, no `warpScan`, and no
+ * "every site is barren" verdict until the grid has read empty on
+ * `EMPTY_GRID_CONFIRM_TICKS` CONSECUTIVE ticks. The count lives in this
+ * step's own macro memory (`oreGridEmptyReads`) and needs no explicit reset
+ * on the rock-found path: `mineWithRocks` REBUILDS its memory on every return
+ * rather than spreading it (see its own "COUNTERS ARE CARRIED BY HAND"
+ * comment), so the moment a rock is seen and mining resumes, this key is
+ * simply not among the ones it carries forward.
+ *
+ * `obs.anomalies` (the onboard scanner) is read again here rather than
+ * carried from an earlier block, because it is the only source that can name
+ * "the next ore site" at all — `warp-to-ore-anomaly` does not hand this block
+ * a list, only a label per warp. Unread yet (`null`) waits rather than
+ * guessing; `warpToAnomalyOfKind` above earns that same patience with its own
+ * `EMPTY_SCAN_CONFIRM_READS`, but this read only ever feeds a WARP THIS BLOCK
+ * IS ABOUT TO ISSUE, never a "give up" verdict, so one null tick is enough —
+ * there is no stale board state written before it that a slow scanner could
+ * strand.
+ */
+function mineAtBeltSiteBarren(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  board: ScriptBoard,
+  ores: readonly OreFamilyArg[],
+): MacroTick {
+  // Consecutive: any tick this function is even reached means the current
+  // read found no wanted rock, so there is no separate "saw a rock, reset
+  // the count" branch to write here — that reset already happened for free,
+  // on the mineWithRocks path, before this function was ever called.
+  const emptyReads = (num(mem, "oreGridEmptyReads") ?? 0) + 1;
+  if (emptyReads < EMPTY_GRID_CONFIRM_TICKS) {
+    // ⚠ THIS IS NOT THE TOUR'S "The scanner came back empty — reading it
+    // again." sentence, and must never borrow it. That one means the SCANNER
+    // found no anomalies at all; this one means the GRID (rocks in local
+    // space) has not shown the wanted ore yet. Telling the player the wrong
+    // one of those two would send them looking at the wrong panel — the same
+    // reason `noSiteReason` above keeps the scanner and the overview apart.
+    return tick(
+      WAIT,
+      "Nothing of the wanted ore on the grid yet — reading it again before calling this site barren.",
+      "Scanning",
+      ACTING,
+      false,
+      { ...mem, oreGridEmptyReads: emptyReads },
+    );
+  }
+
+  const anomalies = obs.anomalies ?? null;
+  if (anomalies === null) {
+    return tick(WAIT, "Reading the scanner for the next ore site.", "Scanning", ACTING, false, { ...mem, oreGridEmptyReads: emptyReads });
+  }
+
+  const currentLabel = currentOreSiteLabel(board);
+  if (currentLabel === null) {
+    // No `warp-to-ore-anomaly` ahead of this block ever wrote a label, so
+    // there is nothing to mark barren and nothing safe to guess. Reported as
+    // `blocked` rather than an endless wait: a grid that never gets more rock
+    // is exactly as stuck as a system with none left, and the player needs
+    // to know WHY, not just that nothing is moving.
+    const reason = "This block needs a Fly-to-an-ore-site block ahead of it, so it knows which site just went barren.";
+    return tick(WAIT, "This grid has no rock of the wanted ore, and no tour block named which site this is.", "Nothing to mine", {
+      kind: "blocked",
+      reason,
+    });
+  }
+
+  const oreNames = ores.length > 0 ? ores.map((family) => family.name).join(" and ") : null;
+  const barren = new Set(barrenOreSiteLabels(board));
+  barren.add(currentLabel);
+  const barrenPatch = { [ORE_SITES_BARREN_KEY]: [...barren].join(",") };
+
+  const next = anomalies.find((site) => site.kind === "ore" && !barren.has(site.label));
+  if (next === undefined) {
+    const reason = oreNames !== null
+      ? `Every ore site in this system is out of ${oreNames}.`
+      : "Every ore site in this system is mined out.";
+    return withBoardPatch(
+      tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason }),
+      barrenPatch,
+    );
+  }
+
+  const why = oreNames !== null
+    ? `No ${oreNames} left here, moving to the next ore site.`
+    : "This ore site is mined out, moving to the next one.";
+  return withBoardPatch(
+    tick({ kind: "warpScan", target: next.label }, why, "Flying to the ore site", ACTING, false, {}),
+    { ...barrenPatch, [ORE_FLAVOUR.boardKey]: appendOreVisited(board, next.label) },
+  );
 }
 
 /** We have rocks (of the current tier, when there is one) — the core lock-and-mine loop. */

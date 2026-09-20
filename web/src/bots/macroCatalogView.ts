@@ -171,8 +171,8 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "mine-at-belt": entry(
     "mine-at-belt",
     "mining",
-    "Warps to a belt, locks rocks, and runs your mining equipment — moving belt to belt as each one runs dry, and following an ore priority list when you set one.",
-    "A belt and mining equipment fitted",
+    "Warps to wherever you tell it — the nearest belt, a belt you name, or the scanner's ore sites — locks rocks, and runs your mining equipment. On a belt it moves belt to belt as each one runs dry; sent to the scanner's ore sites it tours those instead and never sits down on a belt at all. Follows an ore priority list when you set one.",
+    "Somewhere to mine, and mining equipment fitted",
   ),
   "deliver-ore": entry(
     "deliver-ore",
@@ -303,7 +303,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "warp-to-ore-anomaly": entry(
     "warp-to-ore-anomaly",
     "mining",
-    "Reads your ship's scanner and warps to the next ore site it shows — asteroid clusters and ice belts, never a pirate den — skipping the ones this run has already visited. Pair it with Mine at a belt in a repeat loop.",
+    "Reads your ship's scanner and warps to the next ore site it shows — asteroid clusters and ice belts, never a pirate den — skipping the ones this run has already visited. Pair it with Mine at a belt or an ore site in a repeat loop.",
     "Being in space, with an ore site on the scanner",
   ),
   "refit-ship": entry(

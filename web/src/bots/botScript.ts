@@ -164,9 +164,21 @@ export function startingStation(): WorldRef {
  * operator's "warp to nearest asteroid belt", and it is what lets a script be
  * written while docked (no grid to read) and shared across worlds (no baked id).
  * "chosen" pins one belt for a player who is out in space and wants that one.
+ *
+ * ⚠ "site" IS THE ANOMALY MINER'S MODE, AND IT EXISTS BECAUSE THE OTHER TWO
+ * COST A NIGHT'S MINING. An anomaly script has only one mining block to reach
+ * for, and that block's "nearest" rotation tours the system's asteroid BELTS
+ * the moment the grid it is standing on runs out of the wanted ore — so a bot
+ * told to mine the scanner's ore sites quietly became a belt bot, then a
+ * repair trip moved that belt tour into the home system, where the wanted ore
+ * cannot spawn at all, and every pilot stopped. "site" tours the scanner's ore
+ * sites instead and never looks at a belt: a barren site is a cue to fly to the
+ * next one, and a system whose sites are all barren ends the run the way the
+ * player asked for — home, docked, stopped.
  */
 export type BeltArg =
   | { readonly mode: "nearest" }
+  | { readonly mode: "site" }
   | { readonly mode: "chosen"; readonly ref: WorldRef };
 
 /**

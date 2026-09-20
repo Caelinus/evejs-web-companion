@@ -74,6 +74,16 @@ function beltPhrase(belt: BeltArg): string {
   if (belt.mode === "nearest") {
     return "the nearest belt";
   }
+  // ⚠ THE WORD "BELT" NEVER APPEARS BELOW THIS LINE. "site" mode exists because
+  // "nearest" silently toured the system's asteroid BELTS the moment the ore
+  // anomaly a mining bot was parked in ran dry (see `BeltArg`'s own comment in
+  // botScript.ts) — a bot whose blurb read "the scanner's ore sites, not the
+  // belts" was a belt bot in practice, and a repair trip that relocated it to
+  // its highsec home system killed the run outright. A sentence that let
+  // "belt" slip back in here would hide the exact confusion that cost a run.
+  if (belt.mode === "site") {
+    return "the ore site the scanner shows";
+  }
   return worldRefPhrase(belt.ref, "belt");
 }
 
@@ -89,7 +99,11 @@ export function macroName(macro: MacroID): string {
     case "travel-to-belt":
       return "Fly to a belt";
     case "mine-at-belt":
-      return "Mine at a belt";
+      // Three ways to pick where, now that BeltArg has grown a "site" mode
+      // beside "nearest" and a belt named by hand — the nearest asteroid belt,
+      // one the player typed, or the scanner's ore sites — so the palette
+      // name can no longer promise just a belt (see `beltPhrase` above).
+      return "Mine at a belt or an ore site";
     case "deliver-ore":
       return "Haul the ore home";
     case "defend-with-drones":

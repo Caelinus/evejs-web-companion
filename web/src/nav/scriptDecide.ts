@@ -634,6 +634,47 @@ type Position =
   | { readonly kind: "done" };
 
 /**
+ * A "which solar system" reading, taken once and compared against a later one.
+ * `id` is the live runner's own numeric read (`FlightStatus.solarSystemID`,
+ * backed up by the space snapshot's copy of the same field); `name` is
+ * `obs.systemName`, the read used elsewhere in the engine for the same
+ * question (it is the shared belt memory's key). Both null means the ship
+ * could not be placed in a system at all that tick — a docked session reports
+ * no ship (`docs/bridge-wire-contract.md`), and `systemName` goes dark with
+ * it — which is exactly the reading a station stop produces.
+ */
+interface SystemReading {
+  readonly id: number | null;
+  readonly name: string | null;
+}
+
+function readSystem(obs: ScriptObservation): SystemReading {
+  return {
+    id: obs.flightStatus?.solarSystemID ?? obs.snapshot?.solarSystemID ?? null,
+    name: obs.systemName ?? null,
+  };
+}
+
+/**
+ * Did the ship land somewhere DIFFERENT from where a reading was taken
+ * earlier? An id beats a name when both readings have one, matching
+ * `readSystem`'s own preference; two name-only readings compare by name; and
+ * anything the two readings cannot honestly compare — either side unreadable,
+ * or one side id-only against the other name-only — answers "no", never
+ * "yes". A mismatch this function cannot confirm is not grounds to rewind a
+ * working program; see `continueRecovering`'s step 3, the only caller.
+ */
+function systemsDiffer(fired: SystemReading, landed: SystemReading): boolean {
+  if (fired.id !== null && landed.id !== null) {
+    return fired.id !== landed.id;
+  }
+  if (fired.name !== null && landed.name !== null) {
+    return fired.name !== landed.name;
+  }
+  return false;
+}
+
+/**
  * A "dock at home and repair" trip in progress — the one latch that ENDS IN THE
  * PROGRAM rather than in a stop, so it has to remember how to get back.
  *
@@ -642,9 +683,13 @@ type Position =
  * watch that fired while already docked leaves the ship docked — undocking a bot
  * whose next step is a station step (unload, refine, sell) would break a program
  * that was working perfectly well.
+ *
+ * `firedSystem` is the system reading taken the same tick the latch was made —
+ * see `continueRecovering`'s step 3 for what it is compared against, and why.
  */
 interface Recovery {
   readonly undock: boolean;
+  readonly firedSystem: SystemReading;
 }
 
 interface Latched {
@@ -1304,7 +1349,7 @@ function fireInterrupt(
         // left docked: the program's next step then says what it needs (a space
         // step waits for space, a station step gets on with it), which is a
         // better answer than undocking a bot that was working in the hangar.
-        recover: { undock: obs.inSpace === true },
+        recover: { undock: obs.inSpace === true, firedSystem: readSystem(obs) },
       };
       return continueRecovering(
         script,
@@ -1645,14 +1690,75 @@ function continueRecovering(
     // watch fires again on the next lap and the trip cap ends the run properly.
   }
 
-  // 3. BACK OUT, and the program carries on from the step it was interrupted
-  // on. The latch is dropped on this same tick, which re-arms every watch: the
-  // ship is whole (or as whole as the shop could make it), so the row that fired
-  // should be free to fire again on the next real reading.
+  // 3. BACK OUT, and the program carries on — from the step it was interrupted
+  // on, UNLESS the trip put the ship down in a different solar system than the
+  // one the interrupt fired in, in which case it carries on from the START OF
+  // THE ENCLOSING LOOP instead. The latch is dropped on this same tick, which
+  // re-arms every watch: the ship is whole (or as whole as the shop could make
+  // it), so the row that fired should be free to fire again on the next real
+  // reading.
+  //
+  // THE INCIDENT THIS GUARDS: a five-pilot mining run working a nullsec system
+  // had its shields dip mid mine-at-belt. dock-and-repair flew the ship home,
+  // patched it up — at a station in a DIFFERENT, HIGHSEC system, the bot's
+  // designated home — and sent it back out, where the program resumed
+  // mine-at-belt exactly where it had left off. Every runtime binding that step
+  // had resolved (`belt: nearest`, chosen off the ship's grid at the moment it
+  // was interrupted) belonged to the nullsec work system, not the highsec
+  // system the ship now sat in. The wanted ore cannot spawn in a mission hub.
+  // Every pilot mined the only belts actually in reach, marked them all dry,
+  // and the run died — nobody had ever gone back to where the mining was
+  // supposed to happen.
+  //
+  // A SYSTEM MISMATCH, SPECIFICALLY, IS THE TRIGGER. A trip that lands back in
+  // the SAME system invalidates nothing — every binding the step resolved is
+  // still good, so resuming it is correct and restarting the loop would only
+  // repeat travel already done. Only a DIFFERENT system stales those bindings,
+  // and only the loop the interrupted step sits in knows how to re-derive them
+  // cleanly: its first element runs again exactly as any ordinary pass would
+  // (an undock that is already undocked, a travel-to-system already AT that
+  // system — both no-ops, both self-correcting), which is what walks the ship
+  // back to the work system with no travel logic of its own. A step that is
+  // NOT inside a loop has no body to restart, so it keeps today's behaviour —
+  // see `enclosingLoopRestart`.
+  const restart = systemsDiffer(latched.recover.firedSystem, readSystem(obs))
+    ? enclosingLoopRestart(script, mem.position)
+    : null;
+  const clearedMacroMem = omit(omit(macroMem, HOME_MEM_KEY), REPAIR_MEM_KEY);
+  // The abandoned step's own memory goes with it — a cached "nearest belt" (or
+  // any other binding a macro cached against the wrong grid) must not survive
+  // into the loop's fresh first pass, or the rewind would restart the SHAPE of
+  // the step while still running on the STALE binding that caused the trouble.
+  const abandonedStepID = restart !== null ? committedStepID(script, mem.position) : null;
+  const rewoundMacroMem = abandonedStepID !== null ? omit(clearedMacroMem, abandonedStepID) : clearedMacroMem;
   const settled: ScriptMemory = {
     ...mem,
     latched: null,
-    macroMem: omit(omit(macroMem, HOME_MEM_KEY), REPAIR_MEM_KEY),
+    position: restart ?? mem.position,
+    // ⚠ `loopPass` IS LEFT EXACTLY WHERE IT WAS, and that is the whole of the
+    // rule. It counts passes the loop has COMPLETED (`advanceLoopBody` reads it
+    // as `donePasses = loopPass + 1`), and the pass this rewind lands back at
+    // the start of is the one that never finished — so nothing has completed
+    // that had not completed a moment ago, and the counter has nothing to say
+    // about it. Resetting it to 0 here would be a quiet gift of a whole extra
+    // run to every `times`-bounded loop: a `repeat 23 times` interrupted on its
+    // twentieth pass would go back to zero and fly another twenty-three, and a
+    // hauling script told to make a fixed number of trips would make almost
+    // twice as many because its shields once dipped in the wrong system. The
+    // rewind changes WHERE the program is, never HOW MUCH of the loop it has
+    // already been paid for.
+    //
+    // ⚠ THE REWIND CANNOT TRIP THE LIVELOCK GUARD. `wraps` in `runProgram` is a
+    // per-call counter that only increments when the SCAN ITSELF walks off the
+    // end of a loop body and back to its start (`advanceLoopBody`'s own
+    // `wrapped` flag); it does not exist yet when this function returns, and a
+    // rewind reached by ASSIGNING `position` directly — never by advancing —
+    // never sets it. The very next `runProgram` call (this tick, or next tick
+    // after an undock) starts `wraps` at zero exactly as it would after any
+    // other kind of tick, so a rewound loop gets its usual two free wraps
+    // before the guard would even consider it a runaway.
+    loopPass: mem.loopPass,
+    macroMem: rewoundMacroMem,
   };
   if (latched.recover.undock && obs.docked === true) {
     return {
@@ -2056,6 +2162,34 @@ function activeStep(script: BotScript, position: Position): MacroStep {
   }
   // position.kind === "step"
   return script.program[(position as { node: number }).node] as MacroStep;
+}
+
+/**
+ * Where a system-mismatch rewind sends the program: the first element of the
+ * loop body `position` sits inside, or null when `position` has no enclosing
+ * loop at all — a top-level step or a top-level branch, neither of which has a
+ * body to restart (`continueRecovering`'s step 3, the only caller, keeps
+ * `position` exactly as it was in that case). "Loop", "loop-branch" and
+ * "loop-branch-enter" all carry the loop's own node index no matter how far
+ * into the body they have gotten, so restarting is always the same move:
+ * re-enter that node at body slot 0, exactly as a fresh pass would.
+ */
+function enclosingLoopRestart(script: BotScript, position: Position): Position | null {
+  if (position.kind === "loop" || position.kind === "loop-branch" || position.kind === "loop-branch-enter") {
+    return startOfLoopBody(script, position.node, 0);
+  }
+  return null;
+}
+
+/**
+ * The step id whose per-step macro memory a rewind must forget — the step
+ * `position` had actually reached and run a macro against, or null when it had
+ * not reached one yet. A "loop-branch-enter" never ran a macro (its `when` is
+ * read fresh on the very next tick, which the rewind already forces), so it
+ * has nothing bound to a stale grid to clear.
+ */
+function committedStepID(script: BotScript, position: Position): string | null {
+  return position.kind === "loop" || position.kind === "loop-branch" ? activeStep(script, position).id : null;
 }
 
 function positionKey(position: Position): string {

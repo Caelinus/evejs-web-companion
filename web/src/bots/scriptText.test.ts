@@ -112,6 +112,47 @@ test("a mining step reads with its belt and its until", () => {
   assert.match(sentence, /until the ore hold is 90% full/);
 });
 
+// ⚠ THIS IS THE REGRESSION TEST FOR THE 2026-09-19 RUN. `BeltArg`'s "site"
+// mode exists because "nearest" toured the system's asteroid BELTS the moment
+// a mining bot's anomaly ran dry, contradicting a blurb that promised ore
+// sites — so the one thing these sentences must never do is say "belt".
+test("a site-mode mining step never says the word belt", () => {
+  const step: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "site" } } },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  const sentence = stepSentence(step);
+  assert.match(sentence, /Mine at the ore site the scanner shows/);
+  assert.doesNotMatch(sentence, /\bbelt\b/i);
+});
+
+test("a site-mode travel-to-belt step reads as a trip, not an arrival, and never says belt", () => {
+  // travel-to-belt only ever WARPS somewhere and stops; it never mines, so a
+  // site-mode sentence has to say where the ship is headed, not where it
+  // already is — "the ship is in" would be a lie for a block that has not
+  // arrived yet.
+  const step: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "travel-to-belt",
+    args: { belt: { kind: "belt", belt: { mode: "site" } } },
+  };
+  const sentence = stepSentence(step);
+  assert.match(sentence, /Fly to the ore site the scanner shows/);
+  assert.doesNotMatch(sentence, /\bbelt\b/i);
+});
+
+test("mine-at-belt's palette name no longer promises just a belt", () => {
+  // It used to read "Mine at a belt" — accurate when "nearest" and "chosen"
+  // were the only two modes, and a lie of omission now that "site" tours the
+  // scanner's ore sites and never sits down on a belt at all.
+  assert.match(macroName("mine-at-belt"), /belt/i);
+  assert.match(macroName("mine-at-belt"), /ore site/i);
+});
+
 test("each rock order says which one it is, in the player's own words", () => {
   const mine = (pick: RockPick): string =>
     stepSentence({

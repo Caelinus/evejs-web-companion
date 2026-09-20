@@ -26,6 +26,27 @@ test("the expanded examples cover fleet, exploration, and operations play", () =
   }
 });
 
+test("anomaly mining tours ore sites with its own mine-at-belt step, never nearest", () => {
+  // The regression this example exists to fix: with `mode: "nearest"`,
+  // mine-at-belt's own rotation tours the system's asteroid BELTS the moment
+  // the anomaly it is parked in runs dry, quietly turning a bot whose blurb
+  // promises "the scanner's ore sites, not the belts" into a belt bot. Pin
+  // the fix so a future edit cannot silently revert the belt argument back to
+  // "nearest" and reintroduce the bug this preset was named to avoid.
+  const example = EXAMPLE_BOTS.find((row) => row.key === "anomaly-mining");
+  assert.ok(example, "missing anomaly-mining");
+  if (example === undefined) return;
+  const loop = example.doc.program[0];
+  assert.ok(loop !== undefined && loop.kind === "loop");
+  if (loop === undefined || loop.kind !== "loop") return;
+  const mineStep = loop.body.find((node) => node.kind === "macro" && node.macro === "mine-at-belt");
+  assert.ok(mineStep !== undefined && mineStep.kind === "macro");
+  if (mineStep === undefined || mineStep.kind !== "macro") return;
+  const belt = mineStep.args["belt"];
+  assert.ok(belt !== undefined && belt.kind === "belt");
+  assert.equal(belt?.kind === "belt" ? belt.belt.mode : undefined, "site");
+});
+
 test("anomaly presets loot wrecks before salvaging removes them", () => {
   for (const key of ["ratting", "anomaly-expedition"]) {
     const example = EXAMPLE_BOTS.find((row) => row.key === key);

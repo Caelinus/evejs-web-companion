@@ -70,6 +70,20 @@ test("undock needs nothing; mine-at-belt needs a belt, equipment, and an until",
   assert.equal(mine.untilRequired, true);
 });
 
+test("mine-at-belt's blurb covers all three ways to pick where, not just a belt", () => {
+  // The belt argument grew a "site" mode (tour the scanner's ore sites,
+  // never a belt) beside "nearest" and a belt named by hand, and the catalog
+  // card used to promise only belt-to-belt rotation — which undersold two of
+  // the block's three ways to run.
+  const mine = macroEntry("mine-at-belt");
+  assert.match(mine.does, /nearest belt/i);
+  assert.match(mine.does, /ore site/i);
+  // "locks rocks" is load-bearing for editorView.test.ts's search-by-does-text
+  // coverage (filterMacroPicker("locks rocks", ...)) — pinned here too so a
+  // future rewrite of this blurb notices it before that test does.
+  assert.match(mine.does, /locks rocks/);
+});
+
 test("every macro has a category with a label, and the filter offers no empty bucket", () => {
   for (const e of MACRO_CATALOG_LIST) {
     assert.ok(CATEGORY_LABEL[e.category], `${e.id} has category "${e.category}" with no label`);

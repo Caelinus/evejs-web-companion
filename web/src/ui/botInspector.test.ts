@@ -239,12 +239,25 @@ test("no ore group id reaches the screen (R7d)", () => {
 // the editor can see is a list of the wrong belts. The name is what the runtime
 // matches on anyway — belt ids are grid-local — so nothing is lost by typing it.
 
-test("a belt step offers the nearest belt, and naming one, and nothing else", () => {
+test("a belt step offers the nearest belt, the scanner's ore sites, and naming one", () => {
   const html = renderInspector({ kind: "step", step: step("mine-at-belt") });
   const text = visibleText(html);
   assert.match(text, /the nearest belt/);
+  assert.match(text, /the scanner's ore sites/);
   assert.match(text, /a belt I name/);
   // Taking the nearest belt needs nothing typed, so no field is in the way.
+  assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
+});
+
+test("a belt step set to the scanner's ore sites offers no name field either", () => {
+  // "site" carries no ref, same as "nearest" — the scanner is read fresh
+  // wherever the block runs, so there is nothing here for a player to type.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", { args: { belt: { kind: "belt", belt: { mode: "site" } } } }),
+  });
+  const text = visibleText(html);
+  assert.match(text, /the scanner's ore sites/);
   assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
 });
 

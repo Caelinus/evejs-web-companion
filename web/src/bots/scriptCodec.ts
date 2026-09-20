@@ -877,6 +877,9 @@ function readBelt(raw: unknown, label: string, ctx: Ctx): BeltArg {
   if (mode === "nearest") {
     return { mode: "nearest" };
   }
+  if (mode === "site") {
+    return { mode: "site" };
+  }
   if (mode === "chosen") {
     return { mode: "chosen", ref: readWorldRef(obj["ref"], "belt", ctx, SAY.badArg(label)) };
   }
@@ -1351,9 +1354,9 @@ function orderInterrupt(row: InterruptRow): unknown {
 function orderArg(arg: Arg): unknown {
   switch (arg.kind) {
     case "belt":
-      return arg.belt.mode === "nearest"
-        ? { kind: "belt", belt: { mode: "nearest" } }
-        : { kind: "belt", belt: { mode: "chosen", ref: orderRef(arg.belt.ref) } };
+      return arg.belt.mode === "chosen"
+        ? { kind: "belt", belt: { mode: "chosen", ref: orderRef(arg.belt.ref) } }
+        : { kind: "belt", belt: { mode: arg.belt.mode } };
     case "station":
       return { kind: "station", ref: orderRef(arg.ref) };
     case "agent":

@@ -182,9 +182,24 @@
   // it re-matches the name against whatever belts are on the grid it arrives at
   // (`beltTarget` in nav/scriptMacros.ts). The name a player types is exactly
   // what a picked belt would have stored.
-  function beltMode(step: MacroStep, key: string): "nearest" | "named" {
+  //
+  // "site" is the third choice, and it is not a belt at all: it points the
+  // block at the scanner's ore sites instead, and its whole reason to exist is
+  // that "nearest" quietly toured the wrong grid the moment a mining site ran
+  // dry (see `BeltArg` in botScript.ts). Nothing to type for it, same as
+  // "nearest" — the scanner is read fresh each time the block needs a target.
+  function beltMode(step: MacroStep, key: string): "nearest" | "named" | "site" {
     const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? "named" : "nearest";
+    if (arg === undefined || arg.kind !== "belt") {
+      return "nearest";
+    }
+    if (arg.belt.mode === "chosen") {
+      return "named";
+    }
+    if (arg.belt.mode === "site") {
+      return "site";
+    }
+    return "nearest";
   }
   function beltName(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -327,16 +342,18 @@
   function beltSlotKey(step: MacroStep, key: string): string {
     return `${step.id}::${key}`;
   }
-  /** Switch between "the nearest belt" and one the player names, keeping any
-   * name already typed so flipping back and forth does not lose it. */
+  /** Switch between "the nearest belt", one the player names, and the
+   * scanner's ore sites — keeping any name already typed so flipping back and
+   * forth does not lose it. */
   function setBeltMode(step: MacroStep, key: string, mode: string): void {
-    if (mode !== "named") {
-      // Catch the name on the way out — this is the last moment it exists.
-      typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
-      onArg(key, { kind: "belt", belt: { mode: "nearest" } });
+    if (mode === "named") {
+      setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
       return;
     }
-    setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
+    // Leaving "named" for "nearest" or "site" — catch the typed name on the
+    // way out, the last moment it exists (see the comment on typedBeltNames).
+    typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
+    onArg(key, { kind: "belt", belt: { mode: mode === "site" ? "site" : "nearest" } });
   }
   /**
    * The typed belt name.
@@ -899,6 +916,7 @@
           onchange={(e) => setBeltMode(step, arg.key, e.currentTarget.value)}
         >
           <option value="nearest">the nearest belt</option>
+          <option value="site">the scanner's ore sites</option>
           <option value="named">a belt I name</option>
         </select>
         {#if beltMode(step, arg.key) === "named"}

@@ -480,6 +480,185 @@ test("mine: the ore-priority list running out entirely -> blocked, never a silen
   assert.equal(t.outcome.kind === "blocked" ? t.outcome.reason : "", "None of the ores on your list are left in this system.");
 });
 
+// ── mine: SITE mode (the anomaly miner) ──────────────────────────────────────
+// `mine-at-belt` with `belt.mode === "site"` never looks at a belt at all — it
+// tours the scanner's ore sites via `oreAnomsVisited` (the same board key
+// `warp-to-ore-anomaly` publishes) and its own `oreSitesBarren`, per-pilot,
+// per-run list. See the `mineAtBelt`/`mineAtBeltSite` header comments in
+// scriptMacros.ts for the belt-tour incident this mode exists to close.
+
+const ARKONOR = { groupID: 601, name: "Arkonor" };
+const BISTOT = { groupID: 602, name: "Bistot" };
+
+function siteStep(ores: { groupID: number; name: string }[] = []): MacroStep {
+  return {
+    id: "ms",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: {
+      belt: { kind: "belt", belt: { mode: "site" } },
+      ...(ores.length > 0 ? { ores: { kind: "oreList", ores } } : {}),
+    },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+}
+
+/**
+ * Feed `mine-at-belt` (site mode) the SAME barren grid until it stops just
+ * confirming and actually acts — EMPTY_GRID_CONFIRM_TICKS (3) consecutive
+ * reads, the same rule `fightUntilClear` below drives for the combat side of
+ * the identical "a grid right after a warp has not arrived yet" guard. Tests
+ * that only care about the eventual verdict (not the confirmation itself)
+ * use this instead of spelling out all three ticks by hand.
+ */
+function mineUntilBarren(step: MacroStep, observation: ScriptObservation, board: ScriptBoard = {}): MacroTick {
+  let mem: MacroMemory = {};
+  let last = mine(step, observation, mem, board);
+  for (let read = 1; read < 3; read += 1) {
+    mem = last.nextMem;
+    last = mine(step, observation, mem, board);
+  }
+  return last;
+}
+
+test("mine (site mode): rocks present on the grid -> mine them, exactly like any other mode", () => {
+  const rock = entity({ itemID: 50001, name: "Veldspar", miningYieldTypeID: 1230, position: { x: 8000, y: 0, z: 0 } });
+  const t = mine(siteStep(), obs({ snapshot: snapshot([rock]) }), NM, { oreAnomsVisited: "QEE-100" });
+  assert.equal(t.action.kind, "orbit");
+  assert.ok(t.action.kind === "orbit" && t.action.targetID === 50001);
+});
+
+test("mine (site mode): a belt on the overview is never a target — site mode never evaluates the belt regex", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 500000, y: 0, z: 0 } });
+  const sites = [
+    { label: "QEE-100", kind: "ore" as const },
+    { label: "QEE-200", kind: "ore" as const },
+  ];
+  const t = mineUntilBarren(siteStep(), obs({ snapshot: snapshot([belt]), anomalies: sites }), { oreAnomsVisited: "QEE-100" });
+  assert.notEqual(t.action.kind, "warp", "warping to the belt is the NEAREST-mode bug this mode exists to close");
+  assert.equal(t.action.kind, "warpScan");
+  assert.ok(t.action.kind === "warpScan" && t.action.target === "QEE-200");
+});
+
+test("mine (site mode): barren grid with another ore site left -> warpScan to it, and the barren label is recorded", () => {
+  const sites = [
+    { label: "QEE-100", kind: "ore" as const },
+    { label: "QEE-200", kind: "ore" as const },
+  ];
+  const t = mineUntilBarren(siteStep(), obs({ snapshot: snapshot([]), anomalies: sites }), { oreAnomsVisited: "QEE-100" });
+  assert.equal(t.action.kind, "warpScan");
+  assert.ok(t.action.kind === "warpScan" && t.action.target === "QEE-200");
+  assert.equal(t.boardPatch?.["oreSitesBarren"], "QEE-100");
+  // §3's other requirement: the label also lands in the TOUR's own visited
+  // list, so `warp-to-ore-anomaly`'s next tick does not send the ship right
+  // back to the site this block just walked away from.
+  assert.equal(t.boardPatch?.["oreAnomsVisited"], "QEE-100,QEE-200");
+});
+
+test("mine (site mode): every ore site barren, an ore list configured -> blocked, naming the ores", () => {
+  const board = { oreAnomsVisited: "QEE-100", oreSitesBarren: "QEE-050" };
+  const sites = [
+    { label: "QEE-100", kind: "ore" as const },
+    { label: "QEE-050", kind: "ore" as const },
+  ];
+  const t = mineUntilBarren(siteStep([ARKONOR, BISTOT]), obs({ snapshot: snapshot([]), anomalies: sites }), board);
+  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(
+    t.outcome.kind === "blocked" ? t.outcome.reason : "",
+    "Every ore site in this system is out of Arkonor and Bistot.",
+  );
+  assert.equal(t.boardPatch?.["oreSitesBarren"], "QEE-050,QEE-100");
+});
+
+test("mine (site mode): every ore site barren, no ore list configured -> the plain reason", () => {
+  const sites = [{ label: "QEE-100", kind: "ore" as const }];
+  const t = mineUntilBarren(siteStep(), obs({ snapshot: snapshot([]), anomalies: sites }), { oreAnomsVisited: "QEE-100" });
+  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(t.outcome.kind === "blocked" ? t.outcome.reason : "", "Every ore site in this system is mined out.");
+});
+
+test("mine (site mode): a barren grid with no ore-site tour ahead of it -> blocked asking for one, never a guessed label", () => {
+  const sites = [{ label: "QEE-100", kind: "ore" as const }];
+  const t = mineUntilBarren(siteStep(), obs({ snapshot: snapshot([]), anomalies: sites }), {});
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(
+    t.outcome.kind === "blocked" ? t.outcome.reason : "",
+    /Fly-to-an-ore-site/i,
+  );
+  assert.equal(t.boardPatch, undefined, "nothing to mark barren without a label");
+});
+
+// ── mine (site mode): the empty-grid confirmation guard ─────────────────────
+// A ship fresh off a warp reads its own new grid as empty for a tick or two
+// before the snapshot catches up — `fightRatsLadder`'s own
+// EMPTY_GRID_CONFIRM_TICKS comment names the live incident. For site mode
+// believing that first read would strike a full ore site off `oreSitesBarren`
+// for the rest of the run before anyone ever saw the rock, so the same
+// constant gates every barren mark and every `warpScan` this block issues.
+
+test("mine (site mode): a grid that reads empty on tick one but has rock by tick two is mined, never marked barren", () => {
+  const board = { oreAnomsVisited: "QEE-100" };
+
+  // Tick 1: freshly arrived, the snapshot has not filled in yet -> reads empty.
+  const t1 = mine(siteStep(), obs({ snapshot: snapshot([]) }), NM, board);
+  assert.equal(t1.outcome.kind, "acting", "still confirming, not a verdict yet");
+  assert.equal(t1.boardPatch, undefined, "nothing marked barren on a single unconfirmed read");
+  assert.equal(t1.nextMem["oreGridEmptyReads"], 1);
+  assert.match(t1.why, /reading it again/i, "still checking, not a decision — see the tour's own EMPTY_SCAN_CONFIRM_READS sentence this must not borrow");
+
+  // Tick 2: the snapshot has caught up and the rock is there — mined outright,
+  // and the confirm count is simply not among what `mineWithRocks` carries
+  // forward (it rebuilds its own memory on every return).
+  const rock = entity({ itemID: 50001, name: "Veldspar", miningYieldTypeID: 1230, position: { x: 8000, y: 0, z: 0 } });
+  const t2 = mine(siteStep(), obs({ snapshot: snapshot([rock]) }), t1.nextMem, board);
+  assert.equal(t2.action.kind, "orbit");
+  assert.ok(t2.action.kind === "orbit" && t2.action.targetID === 50001);
+  assert.equal(t2.nextMem["oreGridEmptyReads"], undefined, "the confirm count did not survive a rock being found");
+});
+
+test("mine (site mode): a grid empty for the full confirm count is marked barren and left", () => {
+  const sites = [
+    { label: "QEE-100", kind: "ore" as const },
+    { label: "QEE-200", kind: "ore" as const },
+  ];
+  const world = obs({ snapshot: snapshot([]), anomalies: sites });
+  const board = { oreAnomsVisited: "QEE-100" };
+
+  let mem: MacroMemory = {};
+  let last = mine(siteStep(), world, mem, board);
+  assert.equal(last.outcome.kind, "acting", "read 1 of 3 — not yet confirmed");
+  assert.equal(last.boardPatch, undefined);
+
+  mem = last.nextMem;
+  last = mine(siteStep(), world, mem, board);
+  assert.equal(last.outcome.kind, "acting", "read 2 of 3 — still not confirmed");
+  assert.equal(last.boardPatch, undefined);
+
+  mem = last.nextMem;
+  last = mine(siteStep(), world, mem, board);
+  assert.equal(last.action.kind, "warpScan", "read 3 of 3 — now it acts on the confirmed barren grid");
+  assert.ok(last.action.kind === "warpScan" && last.action.target === "QEE-200");
+  assert.equal(last.boardPatch?.["oreSitesBarren"], "QEE-100");
+});
+
+test("mine (site mode): ore priority is evaluated PER GRID — Arkonor is mineable again at a later site after an earlier site had none", () => {
+  const step = siteStep([ARKONOR, BISTOT]);
+
+  // Site 1: only Bistot is on this grid. Arkonor being absent HERE must not
+  // read as "Arkonor is gone for the run" the way the system-wide ladder
+  // (`mineOreTier`) would have made it.
+  const bistotOnly = entity({ itemID: 50001, name: "Bistot", groupID: BISTOT.groupID, miningYieldTypeID: 1240, position: { x: 8000, y: 0, z: 0 } });
+  const t1 = mine(step, obs({ snapshot: snapshot([bistotOnly]) }), NM, { oreAnomsVisited: "QEE-100" });
+  assert.ok(t1.action.kind === "orbit" && t1.action.targetID === 50001, "Bistot mined because Arkonor is not on this grid, not because it ran out");
+
+  // Site 2: a fresh grid where Arkonor IS present, and closer competing
+  // Bistot must not win — Arkonor is still the higher-priority family.
+  const arkonor = entity({ itemID: 50002, name: "Arkonor", groupID: ARKONOR.groupID, miningYieldTypeID: 1241, position: { x: 9000, y: 0, z: 0 } });
+  const bistot2 = entity({ itemID: 50003, name: "Bistot", groupID: BISTOT.groupID, miningYieldTypeID: 1240, position: { x: 3000, y: 0, z: 0 } });
+  const t2 = mine(step, obs({ snapshot: snapshot([arkonor, bistot2]) }), NM, { oreAnomsVisited: "QEE-100,QEE-200" });
+  assert.ok(t2.action.kind === "orbit" && t2.action.targetID === 50002, "Arkonor wins over the closer Bistot rock — the ladder never retired it");
+});
+
 test("deliver: docked with ore -> unload; docked empty -> done", () => {
   const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null }];
   const unload = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre }), NM, {});
