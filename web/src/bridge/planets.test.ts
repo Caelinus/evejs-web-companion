@@ -60,6 +60,12 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
         commandCenterLevel: 3,
         lastSimulatedAtMs: Date.UTC(2026, 6, 21, 11, 59, 0),
         linkCount: 4,
+        links: [
+          { endpoint1: 1, endpoint2: 2, level: 0 },
+          { endpoint1: 1, endpoint2: 4, level: 1 },
+          { endpoint1: 4, endpoint2: 5, level: 0 },
+          { endpoint1: 1, endpoint2: 6, level: 0 },
+        ],
         pins: [
           {
             pinID: 1,
@@ -67,6 +73,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
             typeName: "Temperate Command Center",
             kind: "command",
             contents: [],
+            usedM3: 0,
+            capacityM3: 500,
+            schematicID: null,
+            schematicName: null,
+            hasReceivedInputs: null,
+            receivedInputsLastCycle: null,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: null,
           },
           {
@@ -75,6 +89,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
             typeName: "Temperate Extractor Control Unit",
             kind: "extractor-control",
             contents: [],
+            usedM3: 0,
+            capacityM3: null,
+            schematicID: null,
+            schematicName: null,
+            hasReceivedInputs: null,
+            receivedInputsLastCycle: null,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: {
               resourceTypeID: AQUEOUS,
               resourceTypeName: "Aqueous Liquids",
@@ -91,6 +113,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
             typeName: "Temperate Extractor Control Unit",
             kind: "extractor-control",
             contents: [],
+            usedM3: 0,
+            capacityM3: null,
+            schematicID: null,
+            schematicName: null,
+            hasReceivedInputs: null,
+            receivedInputsLastCycle: null,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: {
               resourceTypeID: 2073,
               resourceTypeName: "Microorganisms",
@@ -107,6 +137,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
             typeName: "Temperate Basic Industry Facility",
             kind: "factory",
             contents: [{ typeID: AQUEOUS, typeName: "Aqueous Liquids", quantity: 900 }],
+            usedM3: 4.5,
+            capacityM3: null,
+            schematicID: 65,
+            schematicName: "Superconductors",
+            hasReceivedInputs: true,
+            receivedInputsLastCycle: true,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: null,
           },
           {
@@ -118,6 +156,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
               { typeID: WATER, typeName: "Water", quantity: 4200 },
               { typeID: BACTERIA, typeName: "Bacteria", quantity: 300 },
             ],
+            usedM3: 855,
+            capacityM3: 10000,
+            schematicID: null,
+            schematicName: null,
+            hasReceivedInputs: null,
+            receivedInputsLastCycle: null,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: null,
           },
           {
@@ -126,6 +172,14 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
             typeName: "Temperate Storage Facility",
             kind: "storage",
             contents: [{ typeID: AQUEOUS, typeName: "Aqueous Liquids", quantity: 12000 }],
+            usedM3: 60,
+            capacityM3: 12000,
+            schematicID: null,
+            schematicName: null,
+            hasReceivedInputs: null,
+            receivedInputsLastCycle: null,
+            lastRunAtMs: SERVER_NOW - 60_000,
+            lastLaunchAtMs: null,
             program: null,
           },
         ],
@@ -270,6 +324,93 @@ test("an instant the server did not give stays null, never 0", () => {
   // Null expiry is NOT "expired" — we simply do not know.
   assert.equal(programHasExpired(program, SERVER_NOW), false);
   assert.equal(programProgress(program, SERVER_NOW), null);
+});
+
+test("a pin's fill decodes in m³, where 0 is a fact and absent is not", () => {
+  const colony = decoded().colonies[0]!;
+  const byID = new Map(colony.pins.map((pin) => [pin.pinID, pin]));
+
+  assert.equal(byID.get(6)!.usedM3, 60);
+  assert.equal(byID.get(6)!.capacityM3, 12000);
+  assert.equal(byID.get(5)!.usedM3, 855);
+  assert.equal(byID.get(5)!.capacityM3, 10000);
+
+  // ⚠ 0 IS AN ANSWER AND NULL IS NOT. An empty command centre really holds
+  // 0 m³, and that must survive; a pin whose capacity the static table could
+  // not give is null, because the panel divides by it.
+  assert.equal(byID.get(1)!.usedM3, 0);
+  assert.equal(byID.get(1)!.capacityM3, 500);
+  assert.equal(byID.get(2)!.capacityM3, null);
+
+  // A payload from before the BFF answered any of this decodes to null rather
+  // than to 0 — an old server must not make every pin look empty.
+  const raw = rawReport() as unknown as {
+    colonies: { pins: Record<string, unknown>[] }[];
+  };
+  for (const pin of raw.colonies[0]!.pins) {
+    delete pin.usedM3;
+    delete pin.capacityM3;
+  }
+  const older = decodeColonyReport(raw as unknown as JsonValue, SERVER_NOW).colonies[0]!;
+  assert.equal(older.pins.find((pin) => pin.pinID === 6)!.usedM3, null);
+  assert.equal(older.pins.find((pin) => pin.pinID === 6)!.capacityM3, null);
+
+  // Nonsense is not a volume either.
+  const negative = rawReport() as unknown as {
+    colonies: { pins: { usedM3: number }[] }[];
+  };
+  negative.colonies[0]!.pins[5]!.usedM3 = -1;
+  const fromNegative = decodeColonyReport(negative as unknown as JsonValue, SERVER_NOW)
+    .colonies[0]!;
+  assert.equal(fromNegative.pins.find((pin) => pin.pinID === 6)!.usedM3, null);
+});
+
+test("a factory keeps what it makes, and an absent feed flag stays null", () => {
+  const colony = decoded().colonies[0]!;
+  const factory = colony.pins.find((pin) => pin.pinID === 4)!;
+
+  assert.equal(factory.schematicName, "Superconductors");
+  assert.equal(factory.schematicID, 65);
+  assert.equal(factory.receivedInputsLastCycle, true);
+
+  // ⚠ THREE STATES, NOT TWO. false means the emulator fed this factory nothing
+  // last cycle — a real alarm. null means the pin has no such state at all,
+  // which every extractor answers. Collapsing them starves every colony.
+  const extractor = colony.pins.find((pin) => pin.pinID === 2)!;
+  assert.equal(extractor.receivedInputsLastCycle, null);
+  assert.equal(extractor.hasReceivedInputs, null);
+  assert.equal(extractor.schematicID, null);
+
+  const starved = rawReport() as unknown as {
+    colonies: { pins: { pinID: number; receivedInputsLastCycle: boolean }[] }[];
+  };
+  starved.colonies[0]!.pins.find((pin) => pin.pinID === 4)!.receivedInputsLastCycle = false;
+  const dry = decodeColonyReport(starved as unknown as JsonValue, SERVER_NOW).colonies[0]!;
+  assert.equal(dry.pins.find((pin) => pin.pinID === 4)!.receivedInputsLastCycle, false);
+  assert.equal(dry.pins.find((pin) => pin.pinID === 4)!.hasReceivedInputs, true);
+});
+
+test("links decode with their upgrade level beside the count", () => {
+  const colony = decoded().colonies[0]!;
+
+  assert.equal(colony.linkCount, 4);
+  assert.deepEqual(colony.links, [
+    { endpoint1: 1, endpoint2: 2, level: 0 },
+    { endpoint1: 1, endpoint2: 4, level: 1 },
+    { endpoint1: 4, endpoint2: 5, level: 0 },
+    { endpoint1: 1, endpoint2: 6, level: 0 },
+  ]);
+
+  // A link missing an endpoint is not half a link — it is dropped, the way a
+  // colony with no planetID is, rather than rendered as a link to pin 0.
+  const broken = rawReport() as unknown as {
+    colonies: { links: Record<string, unknown>[] }[];
+  };
+  delete broken.colonies[0]!.links[1]!.endpoint2;
+  const kept = decodeColonyReport(broken as unknown as JsonValue, SERVER_NOW).colonies[0]!;
+  assert.equal(kept.links.length, 3);
+  // The count is the SERVER's own and is not recomputed from what survived.
+  assert.equal(kept.linkCount, 4);
 });
 
 test("a summary counts what is there and when the next program runs out", () => {

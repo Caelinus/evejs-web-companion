@@ -250,13 +250,46 @@ const TYPE_GROUPS = new Map([
   [PLANET_TEMPERATE_TYPE_ID, 7],
 ]);
 
+// The capacity of a pin and the volume of a commodity, both off the gameStore's
+// own itemTypes table — the same field planetRuntimeStore.getPinCapacity reads.
+// ⚠ An extractor control unit and an industry facility really do carry capacity
+// 0: they are not holds, and the emulator treats a non-finite capacity as no
+// limit at all. The route must answer null for them, never 0.
+const TYPE_CAPACITIES = new Map([
+  [COMMAND_CENTER_TYPE_ID, 500],
+  [ECU_TYPE_ID, 0],
+  [FACTORY_TYPE_ID, 0],
+  [LAUNCHPAD_TYPE_ID, 10000],
+  [STORAGE_TYPE_ID, 12000],
+]);
+
+const TYPE_VOLUMES = new Map([
+  [COMMAND_CENTER_TYPE_ID, 1000],
+  [AQUEOUS_LIQUIDS_TYPE_ID, 0.005],
+  [MICROORGANISMS_TYPE_ID, 0.005],
+  [WATER_TYPE_ID, 0.19],
+  [BACTERIA_TYPE_ID, 0.19],
+]);
+
+// planetSchematics row 65, as the gameStore carries it.
+const SCHEMATIC_NAMES = new Map([[65, "Superconductors"]]);
+
 function fakeStaticData() {
   return {
     getType(id) {
       const numeric = Number(id) || 0;
       return TYPE_GROUPS.has(numeric)
-        ? { typeID: numeric, name: TYPE_NAMES.get(numeric), groupID: TYPE_GROUPS.get(numeric) }
+        ? {
+          typeID: numeric,
+          name: TYPE_NAMES.get(numeric),
+          groupID: TYPE_GROUPS.get(numeric),
+          capacity: TYPE_CAPACITIES.get(numeric) ?? 0,
+          volume: TYPE_VOLUMES.get(numeric) ?? 0,
+        }
         : null;
+    },
+    getPlanetSchematicName(id) {
+      return SCHEMATIC_NAMES.get(Number(id) || 0) || null;
     },
     getTypeName(id) {
       return TYPE_NAMES.get(Number(id) || 0) || `Type ${id}`;
@@ -527,6 +560,113 @@ test("routes name what they carry", async () => {
     colony.routes.map((route) => [route.commodityTypeName, route.commodityQuantity]),
     [["Aqueous Liquids", 2841], ["Water", 20]],
   );
+});
+
+// --- What a pin holds, and how close it is to full -------------------------
+// The panel cannot work this out for itself: it would need every commodity's
+// volume and every structure's capacity, which is static data the browser does
+// not have. So the BFF answers both in m³ and the browser does one division.
+
+test("a pin says how full it is, and an unreadable capacity is null, not zero", async () => {
+  const { baseUrl } = await selected();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const pins = new Map(payload.colonies[0].pins.map((pin) => [pin.pinID, pin]));
+
+  // 12,000 Aqueous Liquids at 0.005 m³ = 60 m³ of a 12,000 m³ storage facility:
+  // nearly empty, though the unit count is the largest on the planet. This is
+  // exactly the reading a count of units gets WRONG.
+  assert.equal(pins.get(6).usedM3, 60);
+  assert.equal(pins.get(6).capacityM3, 12000);
+
+  // 300 Bacteria + 4,200 Water, both 0.19 m³ = 855 m³ of a 10,000 m³ pad.
+  assert.equal(pins.get(5).usedM3, 855);
+  assert.equal(pins.get(5).capacityM3, 10000);
+
+  // An empty command centre: 0 used is a FACT, and stays 0.
+  assert.equal(pins.get(1).usedM3, 0);
+  assert.equal(pins.get(1).capacityM3, 500);
+
+  // ⚠ An extractor control unit and an industry facility carry capacity 0 in
+  // the static table — they are not holds. That must arrive as null, because a
+  // 0 would be divided into and report every one of them as full.
+  assert.equal(pins.get(2).capacityM3, null);
+  assert.equal(pins.get(4).capacityM3, null);
+  assert.equal(pins.get(4).usedM3, 4.5);
+});
+
+test("one commodity with no volume makes the whole used volume unknown", async () => {
+  // A partial sum is not a smaller number, it is a wrong one — and it would be
+  // shown as a fill percentage. The storage pin holds a type the static table
+  // has never heard of, so the honest answer for the pin is "we cannot say".
+  const UNKNOWN_TYPE_ID = 9999999;
+  const { baseUrl } = await selected({
+    async getSnapshot() {
+      const colony = capturedColony();
+      const storage = colony.pins.find((pin) => pin.pinID === 6);
+      storage.contents = { [AQUEOUS_LIQUIDS_TYPE_ID]: 12000, [UNKNOWN_TYPE_ID]: 1 };
+      return {
+        planetRuntimeState: {
+          schemaVersion: 1,
+          coloniesByKey: { [`${PLANET_ID}:${colony.ownerID}`]: colony },
+        },
+      };
+    },
+  });
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const storage = payload.colonies[0].pins.find((pin) => pin.pinID === 6);
+
+  assert.equal(storage.usedM3, null);
+  // The capacity is still perfectly readable, and still answered.
+  assert.equal(storage.capacityM3, 12000);
+});
+
+test("a factory arrives named by what it makes and whether it was fed", async () => {
+  const { baseUrl } = await selected();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const pins = new Map(payload.colonies[0].pins.map((pin) => [pin.pinID, pin]));
+  const factory = pins.get(4);
+
+  assert.equal(factory.schematicName, "Superconductors");
+  assert.equal(factory.hasReceivedInputs, true);
+  assert.equal(factory.receivedInputsLastCycle, true);
+
+  // ⚠ THE FLAGS EXIST ON PROCESS PINS ONLY. The emulator's normalizePin writes
+  // them onto factories and nothing else, so an extractor must answer null —
+  // "this pin has no such state" — and never false, which reads as starved.
+  assert.equal(pins.get(2).receivedInputsLastCycle, null);
+  assert.equal(pins.get(2).hasReceivedInputs, null);
+  assert.equal(pins.get(2).schematicName, null);
+  assert.equal(pins.get(2).schematicID, null);
+});
+
+test("a pin's own instants arrive as epoch ms, and \"never\" stays nothing", async () => {
+  const { baseUrl } = await selected();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const pins = new Map(payload.colonies[0].pins.map((pin) => [pin.pinID, pin]));
+
+  assert.equal(pins.get(1).lastRunAtMs, Date.UTC(2026, 6, 21, 18, 45, 59) + 723);
+  assert.equal(pins.get(5).lastRunAtMs, Date.UTC(2026, 6, 21, 18, 45, 59) + 724);
+
+  // lastLaunchTime is the string "0" on both the pad and the command centre —
+  // EveJS's "never". Null, not an instant in 1601.
+  assert.equal(pins.get(1).lastLaunchAtMs, null);
+  // A pin the emulator gives no lastLaunchTime at all answers the same way.
+  assert.equal(pins.get(6).lastLaunchAtMs, null);
+});
+
+test("links arrive with their upgrade level, not just a count", async () => {
+  const { baseUrl } = await selected();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const colony = payload.colonies[0];
+
+  // The count stays what it was; the links are new beside it.
+  assert.equal(colony.linkCount, 4);
+  assert.deepEqual(colony.links, [
+    { endpoint1: 1, endpoint2: 2, level: 0 },
+    { endpoint1: 1, endpoint2: 4, level: 1 },
+    { endpoint1: 4, endpoint2: 5, level: 0 },
+    { endpoint1: 1, endpoint2: 6, level: 0 },
+  ]);
 });
 
 test("\"you have no colonies\" is a different answer from \"colonies could not be read\"", async () => {

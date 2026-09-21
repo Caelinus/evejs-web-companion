@@ -3597,6 +3597,9 @@ the character; it is not used to *call* anything). Answers:
       "commandCenterLevel": 5,
       "lastSimulatedAtMs": 1784233384726,
       "linkCount": 3,
+      "links": [                   // endpoints are pin ids, for matching, not display
+        { "endpoint1": 1, "endpoint2": 4, "level": 1 }
+      ],
       "pins": [
         {
           "pinID": 1054656331522,
@@ -3604,6 +3607,14 @@ the character; it is not used to *call* anything). Answers:
           "typeName": "Barren Launchpad",
           "kind": "launchpad",     // command | extractor-control | extractor | factory | storage | launchpad | other
           "contents": [ { "typeID": 2396, "typeName": "Biofuels", "quantity": 40 } ],
+          "usedM3": 7.6,           // null when ANY content type has no volume — see below
+          "capacityM3": 10000,     // null when the static table cannot say — NEVER 0
+          "schematicID": null,     // a factory's recipe; the id is for the name beside it
+          "schematicName": null,   // "Superconductors"
+          "hasReceivedInputs": null,        // three-state; null on every non-factory pin
+          "receivedInputsLastCycle": null,  // false = starved last cycle, a real alarm
+          "lastRunAtMs": 1784659559723,
+          "lastLaunchAtMs": null,  // "0" on the wire is "never", not 1601
           "program": null          // only ever set on an extractor control unit
         }
       ],
@@ -3647,12 +3658,41 @@ caught it. The BFF now converts, and a test drives that exact live value.
 `"0"` is EveJS's **"never"** (a launchpad that has never launched), not the year
 1601: every instant leaves the BFF as epoch ms **or null**, never 0.
 
+### ⚠ A FILL IS A VOLUME, AND UNKNOWN IS NULL BECAUSE THE BROWSER DIVIDES
+
+`usedM3 / capacityM3` is the only arithmetic the panel does with these, so both
+follow the same rule as the instants: **absent is null, never 0.**
+
+- `capacityM3` comes from the gameStore's `itemTypes.capacity` — the same field
+  `planetRuntimeStore.getPinCapacity` reads, which treats a non-finite one as no
+  limit at all. A storage facility is 12,000, a launchpad 10,000, a command
+  centre 500. An **extractor control unit and an industry facility really carry
+  0**: they are not holds, and the BFF answers `null` for them so nothing
+  divides by zero and reports every one of them as full.
+- `usedM3` is all-or-nothing. One commodity the static table has no volume for
+  makes the **whole pin's** used volume `null`, because a partial sum is not a
+  smaller number — it is a wrong one, and it would be shown as a percentage.
+- `0` itself survives: an empty command centre really holds 0 m³.
+
+Unit counts cannot answer "nearly full". 12,000 Aqueous Liquids at 0.005 m³ is
+60 m³ of a 12,000 m³ facility — the largest unit count on the planet, and 0.5%
+of the hold.
+
+### ⚠ THE TWO PROCESSOR FLAGS ARE THREE-STATE
+
+`normalizePin` writes `hasReceivedInputs` / `receivedInputsLastCycle` onto
+**process pins only**. So `false` means the emulator fed this factory nothing
+last cycle — a real alarm worth showing — while `null` means the pin has no such
+state, which every extractor, launchpad and storage facility answers.
+Collapsing the two starves every colony on screen.
+
 ### Client modules
 
 | File | What it holds |
 | --- | --- |
 | `web/src/bridge/planets.ts` | Decoder + pure arranging: `decodeColonyReport`, `summarizeColony`, `programProgress`, `programHasExpired`, `pooledContents`, `colonyPlaceWords`, `formatDuration`. Nothing simulates a colony. |
-| `web/src/store/types.ts` | `Colony`, `ColonyPin`, `ColonyExtractionProgram`, `ColonyRoute`, `ColonyStoredItem`, `PlanetsState`. |
+| `web/src/bridge/colonyAttention.ts` | The monitor's judgement: `colonyFindings`, `attentionByColony`, `colonyAttentionWords`, `attentionSummaryWords`, `pinFill`. Raises a finding only from a fact the server stated — a null raises nothing, so a quiet colony is genuinely quiet. |
+| `web/src/store/types.ts` | `Colony`, `ColonyPin`, `ColonyLink`, `ColonyExtractionProgram`, `ColonyRoute`, `ColonyStoredItem`, `PlanetsState`. |
 | `web/src/store/clientStore.ts` | `planets` slice; `hasNoColonies` is set **only** from `coloniesReadable && colonies.length === 0`. |
 | `web/src/app/flow.ts` | `loadPlanets()`, `selectColony()`. One GET, no write. |
 | `web/src/ui/Planets.svelte` | The panel. Four outcomes, four sentences. |

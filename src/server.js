@@ -18399,6 +18399,55 @@ function projectPinContents(staticDataSource, contents) {
 }
 
 /**
+ * How much this pin can hold, in m³ — or NULL when the static table cannot say.
+ *
+ * The emulator asks the same question of the same field: planetRuntimeStore's
+ * getPinCapacity reads `type.capacity` and treats a non-finite one as no limit
+ * at all. A storage facility is 12,000, a launchpad 10,000, a command centre
+ * 500, and a commodity 0 (it holds nothing).
+ *
+ * ⚠ NULL, NEVER 0. "We could not read the capacity" and "this pin holds
+ * nothing" are different statements, and only the second one may ever be
+ * divided into. A 0 here would make every unknown pin read as full.
+ */
+function pinCapacityM3(staticDataSource, typeID) {
+  const type = staticDataSource.getType(typeID);
+  const capacity = Number(type && type.capacity);
+  return Number.isFinite(capacity) && capacity > 0 ? capacity : null;
+}
+
+/**
+ * How much this pin's contents occupy, in m³ — or NULL when any one of them has
+ * no volume in the static table.
+ *
+ * All-or-nothing on purpose: a partial sum is not a smaller number, it is a
+ * WRONG one, and it would be divided by the capacity and shown as a fill
+ * percentage. One unnameable commodity makes the whole answer "we cannot say".
+ */
+function pinUsedM3(staticDataSource, contents) {
+  if (!contents || typeof contents !== "object" || Array.isArray(contents)) {
+    return null;
+  }
+  let total = 0;
+  for (const [typeIDText, quantity] of Object.entries(contents)) {
+    const typeID = Number(typeIDText) || 0;
+    const count = Number(quantity) || 0;
+    if (typeID <= 0 || count <= 0) {
+      continue;
+    }
+    const type = staticDataSource.getType(typeID);
+    const volume = Number(type && type.volume);
+    if (!Number.isFinite(volume) || volume <= 0) {
+      return null;
+    }
+    total += volume * count;
+  }
+  // Rounded to the millilitre: the sum of 0.005 m³ units is otherwise a float
+  // with a tail no player wants to see and no caller wants to compare against.
+  return Math.round(total * 1000) / 1000;
+}
+
+/**
  * One extraction program, or null when this pin has none.
  *
  * NOTHING IS SIMULATED HERE. The cycle time, the quantity per cycle and both
@@ -18431,12 +18480,37 @@ function projectColony(staticDataSource, colony) {
   const pins = (Array.isArray(colony && colony.pins) ? colony.pins : []).map((pin) => {
     const typeID = Number(pin && pin.typeID) || 0;
     const kind = planetPinKind(staticDataSource, typeID);
+    // ⚠ A FLAG THE EMULATOR DID NOT SET IS NOT `false`. normalizePin only
+    // writes hasReceivedInputs / receivedInputsLastCycle onto PROCESS pins, so
+    // reading them off an extractor would turn "this pin has no such state"
+    // into "this pin is starved". Undefined stays null all the way to the
+    // panel, which then says nothing rather than raising a false alarm.
+    const flag = (value) => (value === true ? true : value === false ? false : null);
+    const schematicID = Number(pin && pin.schematicID) || 0;
     return {
       pinID: Number(pin && pin.pinID) || 0,
       typeID,
       typeName: staticDataSource.getTypeName(typeID),
       kind,
       contents: projectPinContents(staticDataSource, pin && pin.contents),
+      // What it can hold and what is in it, so the browser can say "nearly
+      // full" without knowing a single type's volume. Either may be null.
+      capacityM3: pinCapacityM3(staticDataSource, typeID),
+      usedM3: pinUsedM3(staticDataSource, pin && pin.contents),
+      // A factory's recipe: the id is for nothing but the name beside it.
+      schematicID: schematicID > 0 ? schematicID : null,
+      schematicName: schematicID > 0
+        ? staticDataSource.getPlanetSchematicName(schematicID)
+        : null,
+      // Whether the emulator's last simulated cycle fed this processor. The
+      // second one is the interesting one: a factory that ran once and has
+      // been dry since carries hasReceivedInputs true and this false.
+      hasReceivedInputs: flag(pin && pin.hasReceivedInputs),
+      receivedInputsLastCycle: flag(pin && pin.receivedInputsLastCycle),
+      // Instants, epoch ms against the same serverNowMs as everything else.
+      // "0" — a pad that has never launched — comes back null, not 1601.
+      lastRunAtMs: fileTimeToEpochMs(pin && pin.lastRunTime),
+      lastLaunchAtMs: fileTimeToEpochMs(pin && pin.lastLaunchTime),
       program: kind === "extractor-control"
         ? projectExtractionProgram(staticDataSource, pin)
         : null,
@@ -18465,6 +18539,16 @@ function projectColony(staticDataSource, colony) {
     lastSimulatedAtMs: fileTimeToEpochMs(colony && colony.currentSimTime),
     pins,
     linkCount: (Array.isArray(colony && colony.links) ? colony.links : []).length,
+    // The links themselves, not just how many. `level` is the upgrade level the
+    // emulator multiplies the link's bandwidth by (getLinkBandwidthCapacity:
+    // logisticalCapacity × 2^level), so a colony whose routes outgrow their
+    // links can be told apart from one that is merely busy. Endpoints are pin
+    // ids — for matching against `pins`, never for display.
+    links: (Array.isArray(colony && colony.links) ? colony.links : []).map((link) => ({
+      endpoint1: Number(link && link.endpoint1) || 0,
+      endpoint2: Number(link && link.endpoint2) || 0,
+      level: Number(link && link.level) || 0,
+    })).filter((link) => link.endpoint1 > 0 && link.endpoint2 > 0),
     routes,
   };
 }

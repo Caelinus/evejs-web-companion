@@ -742,6 +742,31 @@ function getPlanetName(planetID) {
   return numeral ? `${systemName} ${numeral}` : systemName;
 }
 
+/**
+ * One planetary production schematic, or null when the table has no such row.
+ *
+ * A colony's factory pin stores only a `schematicID`; what that factory MAKES
+ * lives here, in the gameStore's own `planetSchematics` table (bucket
+ * `schematics`, 68 rows: schematicID, name, cycleTime, pinTypeIDs, inputs,
+ * outputs). Nothing about production is computed from it — the emulator runs
+ * the colony and stores the result. This only names what the player is looking
+ * at, so a starved factory can be described as the thing it makes rather than
+ * as a number (R7d).
+ */
+function getPlanetSchematic(schematicID) {
+  const numericID = Number(schematicID) || 0;
+  return numericID > 0
+    ? buildIndex("planetSchematics", "schematics", "schematicID").get(numericID) || null
+    : null;
+}
+
+/** "Superconductors", or null. Never a stringified id — R7d. */
+function getPlanetSchematicName(schematicID) {
+  const schematic = getPlanetSchematic(schematicID);
+  const name = schematic && schematic.name;
+  return typeof name === "string" && name.length > 0 ? name : null;
+}
+
 // --- System-adjacency graph (goal R5b) -------------------------------------
 // The browser autopilot's route solver is client-side (retail solves routes
 // locally from its static map DB; there is no wire call to the game server for
@@ -1543,6 +1568,8 @@ module.exports = {
   getNpcIndustryFacility,
   getPlanetCelestial,
   getPlanetName,
+  getPlanetSchematic,
+  getPlanetSchematicName,
   getRegion,
   getRegionName,
   getSolarSystem,

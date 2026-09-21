@@ -2756,8 +2756,36 @@ export interface ColonyPin {
   readonly typeName: string;
   readonly kind: ColonyPinKind;
   readonly contents: readonly ColonyStoredItem[];
+  /**
+   * What this pin holds and what it can hold, in m³ — EITHER may be null when
+   * the static table could not say. Null is never 0: an unknown capacity that
+   * read as 0 would make every pin look full.
+   */
+  readonly usedM3: number | null;
+  readonly capacityM3: number | null;
+  /** A factory's recipe. The id is for the name beside it, nothing else. */
+  readonly schematicID: number | null;
+  readonly schematicName: string | null;
+  /**
+   * Whether the emulator's last simulated cycles fed this processor. Null on
+   * every pin that is not a factory — the emulator sets these flags only on
+   * process pins, so null means "no such state", NOT "starved".
+   */
+  readonly hasReceivedInputs: boolean | null;
+  readonly receivedInputsLastCycle: boolean | null;
+  /** When this pin last ran, and (launchpads, command centres) last launched. */
+  readonly lastRunAtMs: number | null;
+  readonly lastLaunchAtMs: number | null;
   /** Only ever set on an extractor control unit. */
   readonly program: ColonyExtractionProgram | null;
+}
+
+/** One link between two pins. Endpoints are pin ids, for matching, not display. */
+export interface ColonyLink {
+  readonly endpoint1: number;
+  readonly endpoint2: number;
+  /** The upgrade level the emulator multiplies the link's bandwidth by. */
+  readonly level: number;
 }
 
 /** One route moving a commodity between two pins. */
@@ -2784,6 +2812,7 @@ export interface Colony {
   readonly lastSimulatedAtMs: number | null;
   readonly pins: readonly ColonyPin[];
   readonly linkCount: number;
+  readonly links: readonly ColonyLink[];
   readonly routes: readonly ColonyRoute[];
 }
 

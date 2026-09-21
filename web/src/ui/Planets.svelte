@@ -21,7 +21,19 @@
   //
   // READ ONLY. The emulator does expose a write (restart the expired
   // extractors); this slice ships looking before it ships acting.
+  //
+  // ⚠ THE MONITOR IS ALLOWED TO SAY NOTHING. Every "needs you" line comes from
+  // bridge/colonyAttention.ts, which raises a finding only from a fact the
+  // server actually stated — never from a null. A colony with nothing to say
+  // gets no line, and that silence is the part a player has to be able to
+  // trust: it is what lets them close the tab.
   import { onMount } from "svelte";
+  import {
+    attentionByColony,
+    attentionSummaryWords,
+    colonyAttentionWords,
+    pinFill,
+  } from "../bridge/colonyAttention.ts";
   import {
     colonyPlaceWords,
     formatDuration,
@@ -52,6 +64,15 @@
 
   const colonies = $derived($planets.colonies ?? []);
   const nowMs = $derived(serverNow($planets.clockOffsetMs, browserNowMs));
+
+  // Only the colonies with something to say, loudest first. Recomputed as the
+  // clock ticks, because an expiry passing is exactly what turns a quiet
+  // colony into a loud one.
+  const attention = $derived(attentionByColony(colonies, nowMs));
+  const summaryWords = $derived(attentionSummaryWords(attention));
+  const findingsByPlanetID = $derived(
+    new Map(attention.map((entry) => [entry.colony.planetID, entry.findings])),
+  );
 
   const openColony = $derived<Colony | null>(
     $planets.selectedPlanetID === null
@@ -110,8 +131,31 @@
     return heads === 1 ? "1 head" : `${heads} heads`;
   }
 
-  /** The one-line state of a colony in the list. */
+  /** "9,900 of 10,000 m3 - 99% full", or "" when either half is unreadable. */
+  function fillWords(pin: ColonyPin): string {
+    const fill = pinFill(pin);
+    if (fill === null || typeof pin.usedM3 !== "number" || typeof pin.capacityM3 !== "number") {
+      return "";
+    }
+    const used = Math.round(pin.usedM3).toLocaleString();
+    const capacity = Math.round(pin.capacityM3).toLocaleString();
+    return `${used} of ${capacity} m3 - ${Math.min(100, Math.floor(fill * 100))}% full`;
+  }
+
+  /**
+   * The one-line state of a colony in the list.
+   *
+   * What NEEDS the player wins the line when there is any: the old sentence
+   * below can only describe extractors, so a colony with a full launchpad and
+   * a healthy extractor used to read as simply "Extracting". When nothing is
+   * waiting, the old sentence is still the better one and is kept word for
+   * word (colonyAttentionWords answers null in exactly that case).
+   */
   function colonyWords(colony: Colony): string {
+    const waiting = colonyAttentionWords(findingsByPlanetID.get(colony.planetID) ?? []);
+    if (waiting !== null) {
+      return waiting;
+    }
     const summary = summarizeColony(colony, nowMs);
     if (summary.expiredProgramCount > 0) {
       return summary.expiredProgramCount === 1
@@ -205,6 +249,47 @@
       You have {colonies.length === 1 ? "one colony" : `${colonies.length} colonies`}.
     </p>
 
+    <!-- The whole point of the panel: where to go, before any planet is
+         opened. Absent entirely when every colony is quiet — no "all good"
+         banner, because an empty space says it without being read. -->
+    {#if summaryWords}
+      <section class="attention">
+        <h3>{summaryWords}</h3>
+        <ul class="plain-list">
+          {#each attention as entry (entry.colony.planetID)}
+            <li>
+              <span class="asset-place">
+                <TypeIcon
+                  typeID={entry.colony.planetTypeID}
+                  name={entry.colony.planetTypeName ?? colonyPlaceWords(entry.colony)}
+                />
+                <strong>{colonyPlaceWords(entry.colony)}</strong>
+                <span class="muted">{entry.needsYouNow ? "now" : "coming up"}</span>
+              </span>
+              <ul class="plain-list reasons">
+                {#each entry.findings as finding (finding.pinID ?? finding.kind)}
+                  <li>
+                    {finding.words}{#if finding.dueAtMs !== null && finding.dueAtMs > nowMs}
+                      — in {formatDuration(finding.dueAtMs - nowMs)}
+                    {:else if finding.dueAtMs !== null}
+                      — {formatDuration(nowMs - finding.dueAtMs)} ago
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              <div class="row-actions">
+                <button type="button" disabled={busy} onclick={() => toggle(entry.colony)}>
+                  {$planets.selectedPlanetID === entry.colony.planetID
+                    ? "Hide this colony"
+                    : "See this colony"}
+                </button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     <!-- R8: the record table scrolls inside its OWN box and reflows to labelled
          cards below 640px, so the page body never scrolls sideways. -->
     <div class="table-wrap overflow-x-auto">
@@ -260,6 +345,15 @@
           </p>
         </header>
 
+        {#if (findingsByPlanetID.get(openColony.planetID) ?? []).length}
+          <h4>What needs you here</h4>
+          <ul class="plain-list">
+            {#each findingsByPlanetID.get(openColony.planetID) ?? [] as finding (finding.pinID ?? finding.kind)}
+              <li>{finding.words}</li>
+            {/each}
+          </ul>
+        {/if}
+
         <h4>What is on this planet</h4>
         <ul class="plain-list">
           {#each openColony.pins as pin (pin.pinID)}
@@ -288,12 +382,29 @@
                   ></progress>
                 {/if}
               {/if}
+              {#if pin.kind === "factory"}
+                <p class="note">
+                  {pin.schematicName
+                    ? `Making ${pin.schematicName}`
+                    : "No recipe set"}
+                  <!-- ⚠ Only an explicit false is an alarm. null means this pin
+                       has no such state, and says nothing. -->
+                  {#if pin.receivedInputsLastCycle === false}
+                    · fed nothing last cycle
+                  {/if}
+                </p>
+              {/if}
               {#if pin.contents.length}
                 <p class="note">
                   Holding {pin.contents
                     .map((item) => `${item.typeName} (${units(item.quantity)})`)
                     .join(", ")}
                 </p>
+              {/if}
+              <!-- A volume, not a unit count: 12,000 Aqueous Liquids is the
+                   biggest pile on the planet and 0.5% of the hold. -->
+              {#if fillWords(pin)}
+                <p class="note">{fillWords(pin)}</p>
               {/if}
             </li>
           {/each}
@@ -345,6 +456,36 @@
 
   .panel.inner {
     margin-top: 1rem;
+  }
+
+  /* The attention block reads as a notice, not as another table. It is absent
+     entirely when nothing is waiting, so it never becomes furniture the eye
+     learns to skip. */
+  .attention {
+    margin: 0 0 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-line, #23303d);
+    border-left: 3px solid var(--color-warn, #d4a13a);
+    border-radius: 4px;
+  }
+
+  .attention h3 {
+    margin: 0 0 0.75rem;
+    font-size: 15px;
+  }
+
+  .attention .reasons {
+    margin: 0.25rem 0 0.5rem;
+    padding-left: 1rem;
+    gap: 0.25rem;
+    color: var(--color-muted, #8fa3b8);
+    font-size: 13px;
+  }
+
+  .attention .reasons > li {
+    border-top: 0;
+    padding-top: 0;
+    list-style: disc;
   }
 
   .plain-list {

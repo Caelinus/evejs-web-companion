@@ -29,6 +29,7 @@ import type { JsonValue } from "./wire.ts";
 import type {
   Colony,
   ColonyExtractionProgram,
+  ColonyLink,
   ColonyPin,
   ColonyPinKind,
   ColonyReport,
@@ -86,6 +87,38 @@ function asName(value: JsonValue | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/**
+ * A volume in m³, or null when the BFF could not say.
+ *
+ * ⚠ NULL IS NOT 0, AND THIS ONE DIVIDES. A pin's fill is usedM3 / capacityM3;
+ * an unknown capacity coerced to 0 divides by zero, and an unknown used volume
+ * coerced to 0 reports an overflowing launchpad as empty. 0 itself is a real
+ * answer (an empty pin) and is kept — only a missing or nonsense field is null.
+ */
+function asVolume(value: JsonValue | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
+/** A positive id, or null. */
+function asIdentifier(value: JsonValue | undefined): number | null {
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
+}
+
+/**
+ * A three-state flag: true, false, or "the server said nothing".
+ *
+ * The emulator carries the two processor flags on process pins ONLY, so an
+ * absent flag means this pin has no such state — never that it is starved.
+ */
+function asFlag(value: JsonValue | undefined): boolean | null {
+  return value === true ? true : value === false ? false : null;
+}
+
 function decodePinKind(value: JsonValue | undefined): ColonyPinKind {
   const text = typeof value === "string" ? value : "";
   return (PIN_KINDS as readonly string[]).includes(text)
@@ -137,8 +170,26 @@ function decodePin(value: JsonValue): ColonyPin | null {
     contents: asArray(record.contents)
       .map(decodeStoredItem)
       .filter((item): item is ColonyStoredItem => item !== null),
+    usedM3: asVolume(record.usedM3),
+    capacityM3: asVolume(record.capacityM3),
+    schematicID: asIdentifier(record.schematicID),
+    schematicName: asName(record.schematicName),
+    hasReceivedInputs: asFlag(record.hasReceivedInputs),
+    receivedInputsLastCycle: asFlag(record.receivedInputsLastCycle),
+    lastRunAtMs: asInstant(record.lastRunAtMs),
+    lastLaunchAtMs: asInstant(record.lastLaunchAtMs),
     program: decodeProgram(record.program),
   };
+}
+
+function decodeLink(value: JsonValue): ColonyLink | null {
+  const record = asRecord(value);
+  const endpoint1 = asNumber(record.endpoint1);
+  const endpoint2 = asNumber(record.endpoint2);
+  if (endpoint1 <= 0 || endpoint2 <= 0) {
+    return null;
+  }
+  return { endpoint1, endpoint2, level: asNumber(record.level) };
 }
 
 function decodeRoute(value: JsonValue): ColonyRoute | null {
@@ -181,6 +232,9 @@ function decodeColony(value: JsonValue): Colony | null {
     lastSimulatedAtMs: asInstant(record.lastSimulatedAtMs),
     pins,
     linkCount: asNumber(record.linkCount),
+    links: asArray(record.links)
+      .map(decodeLink)
+      .filter((link): link is ColonyLink => link !== null),
     routes: asArray(record.routes)
       .map(decodeRoute)
       .filter((route): route is ColonyRoute => route !== null),
