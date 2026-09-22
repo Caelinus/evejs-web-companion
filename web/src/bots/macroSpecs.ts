@@ -215,6 +215,13 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   // Restart every EXPIRED extractor program across all colonies, reusing each
   // extractor's own last resource. Runs from anywhere (PI is remote).
   "restart-extractors": { args: [], untilRequired: false },
+  // Goods leave a colony only through its command centre. `fullPercent` is
+  // OPTIONAL: left unset, the block waits for the centre to reach the shipped
+  // default (80) before it launches what it is holding.
+  "launch-commodities": {
+    args: [{ key: "fullPercent", kind: "count", required: false }],
+    untilRequired: false,
+  },
   // Docked: quote the active ship + its fitted modules at the repair shop and
   // fix whatever is damaged (the station charges the wallet).
   "repair-ship": { args: [], untilRequired: false },
@@ -319,3 +326,22 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   "analyze-signatures": { args: [], untilRequired: false },
   "recover-scan-probes": { args: [], untilRequired: false },
 };
+
+/** How full a command centre must get before `launch-commodities` fires. */
+export const LAUNCH_FULL_PERCENT_DEFAULT = 80;
+
+/**
+ * The launch threshold this step will actually use, as a percentage.
+ *
+ * ⚠ ONE CLAMP, TWO READERS. The block's sentence in the editor and the decider
+ * that fires the launch must agree, and nothing stops a player typing 0 or 500
+ * into a `count` arg — validateScript bounds loop repeats and nothing else. Two
+ * separate clamps would drift, and the way that shows up is a bot doing
+ * something its own description said it would not.
+ */
+export function launchFullPercent(arg: Arg | undefined): number {
+  if (arg === undefined || arg.kind !== "count" || !Number.isFinite(arg.value)) {
+    return LAUNCH_FULL_PERCENT_DEFAULT;
+  }
+  return Math.min(100, Math.max(1, Math.round(arg.value)));
+}

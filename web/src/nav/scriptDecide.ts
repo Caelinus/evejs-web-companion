@@ -177,6 +177,21 @@ export type ScriptAction =
   | { readonly kind: "applyFitting"; readonly fittingID: number }
   /** Restart ONE expired extractor program (same resource it was pulling). */
   | { readonly kind: "restartExtractor"; readonly planetID: number; readonly pinID: number; readonly resourceTypeID: number }
+  /**
+   * Launch what ONE colony's command centre is holding into orbit.
+   *
+   * ⚠ A COMMAND CENTRE, NEVER A LAUNCHPAD. The emulator refuses every other
+   * pin with `CanOnlyLaunchFromCommandCenters`, and refuses the same centre
+   * twice inside a minute. It charges export tax and leaves a container in
+   * space, so this is costly and externally visible.
+   */
+  | {
+    readonly kind: "launchCommodities";
+    readonly planetID: number;
+    readonly commandPinID: number;
+    /** typeID -> quantity, as the planetMgr handler wants it. */
+    readonly commodities: Readonly<Record<number, number>>;
+  }
   /** Pay the station repair shop to fix these items. */
   | { readonly kind: "repairItems"; readonly itemIDs: readonly number[] }
   /**
@@ -475,6 +490,14 @@ const SETTLE_TICKS_BY_KIND: Partial<Record<ScriptAction["kind"], number>> = {
   placeBuyOrder: 1,
   restartExtractor: 1,
   compressOre: 1,
+
+  // A launch is the same shape of cost as the restart above it, twice over: the
+  // server debits export tax, and what leaves the colony is GONE from it — it
+  // is a container in space that somebody now has to fly out and scoop. The
+  // block does hold the fired pin id, but the confirmation it walks on is the
+  // colony re-read showing the centre emptied, so a duplicate inside one read
+  // is exactly what this entry is here to make expensive.
+  launchCommodities: 1,
 };
 
 // ═══ WHAT STAYS AT THE DEFAULT, AND WHY IT IS NOT AN OVERSIGHT ═══════════════

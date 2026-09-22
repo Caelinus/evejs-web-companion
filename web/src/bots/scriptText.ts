@@ -27,6 +27,7 @@ import type {
   SquadRoleArg,
   WorldRef,
 } from "./botScript.ts";
+import { launchFullPercent } from "./macroSpecs.ts";
 
 /** A percentage a player reads — always with its unit, never a bare number. */
 function pct(fraction: number): string {
@@ -158,6 +159,8 @@ export function macroName(macro: MacroID): string {
       return "Fly to the mission site";
     case "restart-extractors":
       return "Restart the planet extractors";
+    case "launch-commodities":
+      return "Launch from the command centre";
     case "repair-ship":
       return "Repair the ship";
     case "buy-item":
@@ -707,6 +710,10 @@ function macroPhrase(step: MacroStep): string {
       return "Warp to the mission's own site";
     case "restart-extractors":
       return "Restart every expired extractor on your planets";
+    case "launch-commodities":
+      // The SAME clamp the decider fires on, so the sentence cannot promise a
+      // threshold the block will not use.
+      return `Launch from the command centre once it is ${launchFullPercent(step.args["fullPercent"])}% full`;
     case "repair-ship":
       return "Repair the ship at the station";
     case "salvage-wrecks":

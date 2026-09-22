@@ -17,6 +17,7 @@
 import type { Condition, InterruptRow } from "../bots/botScript.ts";
 import type {
   AgentConversation,
+  ColonyPinKind,
   CourierBriefing,
   FlightStatus,
   InventoryItemRow,
@@ -442,6 +443,25 @@ export interface ScriptObservation {
       readonly pinID: number;
       readonly resourceTypeID: number | null;
       readonly expiresAtMs: number | null;
+    }[];
+    /**
+     * Every structure on the planet, for the blocks that act on a hold rather
+     * than on a program.
+     *
+     * ⚠ BOTH VOLUMES MAY BE null, AND null IS NOT 0. An extractor control unit
+     * has no capacity at all, and one commodity the static table cannot weigh
+     * nulls a whole pin's used volume (bridge/planets.ts). A decider that
+     * divides these without checking gets NaN, which compares false against
+     * every threshold and silently never fires.
+     */
+    readonly pins: readonly {
+      readonly pinID: number;
+      readonly kind: ColonyPinKind;
+      readonly usedM3: number | null;
+      readonly capacityM3: number | null;
+      readonly contents: readonly { readonly typeID: number; readonly quantity: number }[];
+      /** Epoch ms, server clock. null is EveJS's "never launched". */
+      readonly lastLaunchAtMs: number | null;
     }[];
   }[] | null;
   // ── The drone-boat block's reads (docs/drone-boat-block-spec.md §8). Every

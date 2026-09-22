@@ -9273,7 +9273,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             damagedItemIDs = null;
           }
         }
-        if (macro === "restart-extractors") {
+        if (macro === "restart-extractors" || macro === "launch-commodities") {
           try {
             const readAt = Date.now();
             const report = decodeColonyReport((await api.getPlanets(callOptions)).planets, readAt);
@@ -9291,6 +9291,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                       ? null
                       : pin.program.expiresAtMs - report.clockOffsetMs,
                 })),
+              // Every structure, for the blocks that act on a hold. The two
+              // volumes are carried across UNCHANGED, nulls included: null is
+              // "the server could not say", and a decider that reads it as 0
+              // would call an unreadable hold empty (or divide by it).
+              pins: colony.pins.map((pin) => ({
+                pinID: pin.pinID,
+                kind: pin.kind,
+                usedM3: pin.usedM3,
+                capacityM3: pin.capacityM3,
+                contents: pin.contents.map((item) => ({
+                  typeID: item.typeID,
+                  quantity: item.quantity,
+                })),
+                // On the SERVER's clock, like the expiries above — a launch
+                // cooldown measured against a wrong browser clock would either
+                // fire early into a refusal or stall a ready colony.
+                lastLaunchAtMs: pin.lastLaunchAtMs === null
+                  ? null
+                  : pin.lastLaunchAtMs - report.clockOffsetMs,
+              })),
             }));
           } catch {
             colonies = null;
@@ -10095,6 +10115,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "restartExtractor":
             await api.restartExtractorProgram(action.planetID, action.pinID, action.resourceTypeID, callOptions);
+            return;
+          case "launchCommodities":
+            await api.launchCommodities(
+              action.planetID,
+              action.commandPinID,
+              action.commodities,
+              callOptions,
+            );
             return;
           case "repairItems":
             if (action.itemIDs.length > 0) {

@@ -153,6 +153,9 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   agent: "Agent",
   level: "Agent level",
   maxJumps: "Longest trip (jumps)",
+  // A bare "Amount" (the generic label for a count) says nothing about what is
+  // being counted, and this one is a percentage of a command centre's hold.
+  fullPercent: "Launch once this full (%)",
   corporation: "Corporation",
   seconds: "Seconds",
   fitting: "Saved fitting",

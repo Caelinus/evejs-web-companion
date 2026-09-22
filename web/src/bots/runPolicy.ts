@@ -132,6 +132,11 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "find-combat-agent": SAFE,
   "fly-to-mission-site": policy(["mission", "combat"]),
   "restart-extractors": policy(["colony"]),
+  // Same treatment as buy-item and repair-ship: the block spends money (the
+  // server debits planetary export tax on every launch) as well as changing
+  // a colony, so it carries both risk classes and cannot be replayed blind
+  // after a process restart.
+  "launch-commodities": policy(["colony", "financial"], false),
   "repair-ship": policy(["financial", "inventory"], false),
   "buy-item": policy(["financial"], false),
   "sell-item": policy(["financial", "inventory"], false),

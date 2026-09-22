@@ -4096,6 +4096,31 @@ export async function restartExtractorProgram(
   );
 }
 
+/**
+ * Launch what a colony's command centre is holding into orbit.
+ *
+ * ⚠ ONLY A COMMAND CENTRE CAN LAUNCH. The emulator refuses every other pin
+ * with `CanOnlyLaunchFromCommandCenters`, and refuses the same centre twice
+ * inside a minute with `CannotLaunchCommandPinNotReady`. It also debits
+ * planetary export tax from the wallet and drops a container in space beside
+ * the planet, so this is a costly, externally visible write — the BFF
+ * confirm-gates it and the caller is expected to have a reason.
+ *
+ * `commodities` is typeID -> quantity, as the planetMgr handler wants it.
+ */
+export async function launchCommodities(
+  planetID: number,
+  commandPinID: number,
+  commodities: Readonly<Record<number, number>>,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson(
+    "/api/bridge/planet/commodities/launch",
+    { planetID, commandPinID, commodities: { ...commodities }, confirm: true },
+    options,
+  );
+}
+
 /** The character's saved-fitting library, raw (decoded by bridge/fittings.ts). */
 export async function loadSavedFittings(options: ApiOptions = {}): Promise<JsonValue> {
   const data = await getJson("/api/bridge/fittings", options);

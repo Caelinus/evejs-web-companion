@@ -57,6 +57,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "boardShip", shipID: 81 },
   { kind: "applyFitting", fittingID: 91 },
   { kind: "restartExtractor", planetID: 40001, pinID: 40002, resourceTypeID: 2073 },
+  { kind: "launchCommodities", planetID: 40001, commandPinID: 40003, commodities: { 2393: 300 } },
   { kind: "repairItems", itemIDs: [101] },
   { kind: "rememberBeltDry", systemName: "Obe", beltName: "Obe III - Asteroid Belt 1", groupID: null },
   { kind: "callPrimary", targetID: 1001 },
