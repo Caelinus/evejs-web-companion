@@ -767,6 +767,62 @@ function getPlanetSchematicName(schematicID) {
   return typeof name === "string" && name.length > 0 ? name : null;
 }
 
+/**
+ * Every row of the `planetSchematics` table — the whole recipe book, not one
+ * factory's lookup. `getPlanetSchematic` above answers "what does THIS pin
+ * make"; the web client's PI planner has the opposite question, "what could
+ * ANY factory make, and from what", which means walking all 68 rows at once.
+ * Raw rows, untranslated (raw `cycleTime`, `pinTypeIDs`, `outputs` as they sit
+ * in the gameStore) — the wire shape those rows get squeezed into belongs to
+ * the route that serves them, not to this reader.
+ */
+function getAllPlanetSchematics() {
+  const cacheKey = "planetSchematics:all";
+  if (caches.has(cacheKey)) {
+    return caches.get(cacheKey);
+  }
+  const table = readStaticTable("planetSchematics");
+  const list = Array.isArray(table.schematics) ? table.schematics : [];
+  caches.set(cacheKey, list);
+  return list;
+}
+
+// --- Commodity tier classification ------------------------------------------
+// PORTED FROM eve.js: server/src/services/planet/planetStaticData.js — its
+// CATEGORY/GROUP constants and its own `getCommodityTier`. That file is the
+// emulator's authority on what a planetary good IS, and a planner drawing on
+// this server has to agree with it rather than reinvent the classification and
+// drift from it.
+//
+// ⚠ THESE ARE COPIED, NOT READ, so they can go stale. They are the kind of
+// constant that only changes when the game's own data does; if a tier ever
+// looks wrong, check them against that file before suspecting the planner.
+const PI_PLANETARY_RESOURCES_CATEGORY_ID = 42;
+const PI_COMMODITY_TIER_BY_GROUP_ID = Object.freeze({
+  1042: 1, // Basic Commodities (P1)
+  1034: 2, // Refined Commodities (P2)
+  1040: 3, // Specialized Commodities (P3)
+  1041: 4, // Advanced Commodities (P4)
+});
+
+/**
+ * 0..4, or null when this type is not a PI good at all (a ship, a module, a
+ * mineral). Raw planetary resources (category 42 — the extractor's own output)
+ * are tier 0; everything else is read off its groupID, exactly as the server
+ * classifies it, so a client-side tier can never disagree with the server's.
+ */
+function getCommodityTier(typeID) {
+  const type = getType(typeID);
+  if (!type) {
+    return null;
+  }
+  if ((Number(type.categoryID) || 0) === PI_PLANETARY_RESOURCES_CATEGORY_ID) {
+    return 0;
+  }
+  const tier = PI_COMMODITY_TIER_BY_GROUP_ID[Number(type.groupID) || 0];
+  return tier === undefined ? null : tier;
+}
+
 // --- System-adjacency graph (goal R5b) -------------------------------------
 // The browser autopilot's route solver is client-side (retail solves routes
 // locally from its static map DB; there is no wire call to the game server for
@@ -1570,6 +1626,8 @@ module.exports = {
   getPlanetName,
   getPlanetSchematic,
   getPlanetSchematicName,
+  getAllPlanetSchematics,
+  getCommodityTier,
   getRegion,
   getRegionName,
   getSolarSystem,

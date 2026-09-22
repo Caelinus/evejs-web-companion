@@ -19391,6 +19391,104 @@ app.get("/api/types/cycle-times", requireAuth, async (req, res, next) => {
 });
 
 /**
+ * PI PLANNER — the planetary production recipe table, from static reference
+ * data.
+ *
+ * Every recipe a colony factory can run lives in the gameStore's
+ * `planetSchematics` table (68 rows), and it never varies by player, by
+ * colony or by planet: schematic 65 makes Superconductors from Chiral
+ * Structures and Water everywhere in New Eden, forever. So unlike
+ * /api/colonies, which projects one player's live pins, this route carries NO
+ * colony, no planetID, no character context at all — it is the recipe BOOK,
+ * not a page out of anyone's copy of it, which is also why it needs no
+ * gateway call and no held session to answer.
+ *
+ * Raw `cycleTime` is renamed to `cycleTimeSeconds` on the wire on purpose: the
+ * gameStore rows carry 1800 and 3600, which are seconds, and this repo has
+ * already shipped a duration field once with the unit left to the reader's
+ * imagination and watched a 285-year cycle render with every test agreeing.
+ * Naming the unit is the guard this time.
+ *
+ * Every one of the 68 real rows carries exactly one `outputs` entry, but nothing
+ * requires that of the table, so a row that does not is not something a
+ * planner can turn into a recipe card — it is SKIPPED rather than guessed at.
+ */
+app.get("/api/pi/schematics", requireAuth, async (req, res, next) => {
+  try {
+    const typeNameOrNull = (typeID) => {
+      const type = staticData.getType(typeID);
+      const name = type && type.name;
+      // null, never a stringified id (R7d) — a raw resource this reader has
+      // not been taught to name is a fact the caller has to see, not a
+      // "Type 2268" typo waiting to happen on screen.
+      return typeof name === "string" && name.length > 0 ? name : null;
+    };
+
+    const schematics = [];
+    for (const row of staticData.getAllPlanetSchematics()) {
+      const rawOutputs = Array.isArray(row && row.outputs) ? row.outputs : [];
+      if (rawOutputs.length !== 1) {
+        continue;
+      }
+      const outputTypeID = Number(rawOutputs[0] && rawOutputs[0].typeID) || 0;
+      const outputQuantity = Number(rawOutputs[0] && rawOutputs[0].quantity) || 0;
+      if (outputTypeID <= 0 || outputQuantity <= 0) {
+        continue;
+      }
+
+      const inputs = (Array.isArray(row.inputs) ? row.inputs : [])
+        .map((input) => ({
+          typeID: Number(input && input.typeID) || 0,
+          typeName: typeNameOrNull(Number(input && input.typeID) || 0),
+          quantity: Number(input && input.quantity) || 0,
+        }))
+        .filter((input) => input.typeID > 0 && input.quantity > 0);
+
+      schematics.push({
+        schematicID: Number(row.schematicID) || 0,
+        name: typeof row.name === "string" && row.name.length > 0 ? row.name : null,
+        cycleTimeSeconds: Number(row.cycleTime) || 0,
+        factoryTypeIDs: (Array.isArray(row.pinTypeIDs) ? row.pinTypeIDs : [])
+          .map((typeID) => Number(typeID) || 0)
+          .filter((typeID) => typeID > 0),
+        inputs,
+        output: {
+          typeID: outputTypeID,
+          typeName: typeNameOrNull(outputTypeID),
+          quantity: outputQuantity,
+        },
+      });
+    }
+
+    // Keyed by every typeID this table names anywhere, inputs and outputs
+    // alike — a raw resource only ever shows up as an input, and the planner
+    // still needs its tier to explain why it cannot be manufactured further.
+    const commodities = {};
+    for (const schematic of schematics) {
+      commodities[String(schematic.output.typeID)] = {
+        typeName: schematic.output.typeName,
+        tier: staticData.getCommodityTier(schematic.output.typeID),
+      };
+      for (const input of schematic.inputs) {
+        commodities[String(input.typeID)] = {
+          typeName: input.typeName,
+          tier: staticData.getCommodityTier(input.typeID),
+        };
+      }
+    }
+
+    res.json({
+      ok: true,
+      source: "static-data",
+      schematics,
+      commodities,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * NPC THREAT DOGMA — the static half of the drone-boat block's target priority.
  *
  * POST /api/types/dogma takes `{ typeIDs, attributeIDs }` and answers the RAW

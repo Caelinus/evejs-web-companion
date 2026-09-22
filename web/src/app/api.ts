@@ -4424,3 +4424,22 @@ export async function getPlanets(options: ApiOptions = {}): Promise<PlanetsResul
   const data = await getJson("/api/bridge/planets", options);
   return { planets: data as JsonValue };
 }
+
+/** The planetary production recipes, decoded by bridge/piRecipes.ts. */
+export interface PiSchematicsResult {
+  /** The whole recipe table; ids in it are for lookups, never for display. */
+  readonly recipes: JsonValue;
+}
+
+/**
+ * Every planetary production recipe (goal R108 slice 1).
+ *
+ * ⚠ NOT A BRIDGE CALL. Like resolveNames and loadBaseCycleTimes this is static
+ * reference data the BFF already has on disk: no gateway round trip, no held
+ * session, nothing about the player in the question or the answer. It is the
+ * same table for everyone, so a caller may read it once and keep it.
+ */
+export async function getPiSchematics(options: ApiOptions = {}): Promise<PiSchematicsResult> {
+  const data = await getJson("/api/pi/schematics", options);
+  return { recipes: data as JsonValue };
+}
