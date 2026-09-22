@@ -3327,10 +3327,12 @@ test("warp-to-anomaly: a refusal is read on the NEXT tick, not after the whole w
   assert.notEqual(out.outcome.kind, "acting", "one tick, not WARP_START_WAIT_TICKS of them");
 });
 
-test("warp-to-ore-anomaly: cannot tell it is standing in an ore site, so it never claims to be", () => {
-  // ⚠ Rock on the grid is NOT evidence of an ore site — a plain belt looks the
-  // same from here. A reading the block cannot make is one it must not act on,
-  // however convenient the shortcut would be.
+test("warp-to-ore-anomaly: rock (or rats) on the grid is still not evidence of an ore site", () => {
+  // ⚠ THE SHORTCUT THAT MUST STAY SHUT. Rock on the grid is NOT evidence of an
+  // ore site — a plain belt looks the same from here — and neither is anything
+  // else the overview lists. The block now CAN answer this question, but only
+  // from the two positions (see the two tests below); with no position on the
+  // scanner row it is back to "cannot tell", whatever is floating outside.
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [rocks("ABC-123")], completedWarps: 3 }), {}, {});
 
@@ -3376,6 +3378,93 @@ function fightUntilClear(
 
 const ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-anomaly", args: {} } as MacroStep;
 const ORE_ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-ore-anomaly", args: {} } as MacroStep;
+
+// ─── Standing in the ore site the warp was refused for ──────────────────
+//
+// Five pilots were parked in the ore site an earlier run had left them in. The
+// tour picked that same site first — it is the first one the scanner lists and
+// nothing had visited it yet this run — the server refused the warp for standing
+// in it, and every one of them stopped on "The ship would not warp to the ore
+// site" with the rock right there in front of the ship.
+
+/** The scanner row for an ore site at a point in the system, in metres. */
+const rocksAt = (label: string, x: number) => ({ label, kind: "ore" as const, position: { x, y: 0, z: 0 } });
+
+test("warp-to-ore-anomaly: a refusal with the ship INSIDE the site it aimed at is an arrival", () => {
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  // 100 km out — under the server's own 150 km warp floor, which is the exact
+  // condition it refused on (MIN_WARP_DISTANCE_METERS in space/runtime.js).
+  const site = rocksAt("ABC-123", 100_000);
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }), {}, {});
+  assert.equal(issued.action.kind, "warpScan", "it still issues the warp");
+
+  const out = oreMacro(
+    ORE_ANOM_STEP,
+    obs({
+      anomalies: [site],
+      completedWarps: 3,               // no warp ever happened
+      refusals: warpRefused(CANNOT_WARP),
+      snapshot: snapshot([]),          // ship at the origin
+      hostileOnGrid: false,            // and NOT because of anything on the grid
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.deepEqual(out.outcome, { kind: "done" }, "standing in the ore site is arriving at it");
+  assert.equal(out.phase, "Arrived");
+});
+
+test("warp-to-ore-anomaly: a refusal with the site a real warp away still stops, in the server's words", () => {
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  // 4 AU out: whatever the server refused for, it was not that the ship is there.
+  const site = rocksAt("ABC-123", 4 * 149_597_870_700);
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }), {}, {});
+
+  const out = oreMacro(
+    ORE_ANOM_STEP,
+    obs({
+      anomalies: [site],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      snapshot: snapshot([]),
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  assert.match(reason, /cannot warp there right now/i, "what the server said must survive");
+});
+
+test("warp-to-ore-anomaly: the position read is of the TARGETED site, not of whichever one is nearest", () => {
+  // ⚠ A system holds several ore sites. Sitting in one of them says nothing
+  // about the warp to ANOTHER, and answering "already here" from the nearest row
+  // would call every refusal in a busy system an arrival.
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const here = rocksAt("ABC-123", 0);                       // the ship is in this one
+  const far = rocksAt("XYZ-789", 4 * 149_597_870_700);
+  // Already visited the one underfoot, so the tour aims at the far one.
+  const board = { oreAnomsVisited: "ABC-123" };
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [here, far], completedWarps: 3 }), {}, board);
+  assert.deepEqual(issued.action, { kind: "warpScan", target: "XYZ-789" }, "it aims at the unvisited site");
+
+  const out = oreMacro(
+    ORE_ANOM_STEP,
+    obs({
+      anomalies: [here, far],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      snapshot: snapshot([]),
+    }),
+    issued.nextMem,
+    board,
+  );
+
+  assert.equal(out.outcome.kind, "blocked", "the site underfoot is not the site it was refused for");
+});
+
 const den = (label: string) => ({ label, kind: "combat" as const });
 const rocks = (label: string) => ({ label, kind: "ore" as const });
 

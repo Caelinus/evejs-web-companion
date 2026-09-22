@@ -24,6 +24,7 @@ import type {
   MiningHold,
   ShipBay,
   SpaceSnapshot,
+  SpaceVector,
 } from "../store/types.ts";
 import type { CargoReading, TravelReading } from "./missionBotLoop.ts";
 import type { SavedFitting } from "../bridge/fittings.ts";
@@ -52,6 +53,16 @@ import type { PropulsionModule } from "./propulsion.ts";
 export interface ScannedAnomaly {
   readonly label: string;
   readonly kind: ExplorationSiteKind;
+  /**
+   * Where the site sits in this solar system, in metres — the scanner row's own
+   * `position`, not a guess. Optional, and `null` when the row carried none.
+   *
+   * It answers ONE question no wording can: a warp the server refused because
+   * the ship is ALREADY STANDING IN THE SITE comes back in the same words as
+   * half a dozen other blockers (see `warpToAnomalyOfKind`), and the ship's own
+   * position beside this one separates them.
+   */
+  readonly position?: SpaceVector | null;
 }
 
 /** One belt the shared memory says is dry: entirely (`all`) or of these ore families (type groups). */

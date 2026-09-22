@@ -46,7 +46,7 @@ import {
   STALL_UNSTICK_WHY,
 } from "./closeInStall.ts";
 import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } from "./targetPriority.ts";
-import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
+import { canMyShipOrderDrone, distanceMeters, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
@@ -126,8 +126,11 @@ function warpLanded(obs: ScriptObservation, mem: MacroMemory): boolean {
 }
 
 /** The memory a step writes when it ISSUES a warp, so `warpLanded` can answer later. */
-function warpIssuedMem(obs: ScriptObservation): MacroMemory {
-  return { issued: true, waited: 0, warpsAtIssue: obs.completedWarps ?? null };
+function warpIssuedMem(obs: ScriptObservation, target: string | null = null): MacroMemory {
+  // `target` is the scan label the warp went out against, remembered because a
+  // refusal arrives with no clue which destination it is about, and telling
+  // "already standing in it" from "told no" needs that site's position.
+  return { issued: true, waited: 0, warpsAtIssue: obs.completedWarps ?? null, target };
 }
 
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
@@ -149,6 +152,11 @@ function num(mem: MacroMemory, key: string): number | null {
 }
 function flag(mem: MacroMemory, key: string): boolean {
   return mem[key] === true;
+}
+/** A remembered label, or null — an empty string is "nothing", never a name. */
+function label(mem: MacroMemory, key: string): string | null {
+  const value = mem[key];
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 /**
@@ -3298,8 +3306,44 @@ interface AnomalyFlavour {
    *
    * It is consulted only after the server has refused the warp, to separate the
    * two refusals that arrive in identical words (see `warpRefusedHere`).
+   *
+   * `target` is the scan label the refused warp was issued against, or null
+   * when the block no longer holds it — a reading that needs the label and
+   * does not have it answers `null` rather than falling back to "some site of
+   * this kind is near", which is a different question.
    */
-  readonly alreadyHere: (obs: ScriptObservation) => boolean | null;
+  readonly alreadyHere: (obs: ScriptObservation, target: string | null) => boolean | null;
+}
+
+/**
+ * The server's own floor for a warp: `MIN_WARP_DISTANCE_METERS` in
+ * space/runtime.js, checked as `pendingWarp.totalDistance < 150_000` before
+ * `WARP_DISTANCE_TOO_CLOSE` goes back. Mirrored rather than invented, because
+ * the whole point of the reading below is to name the state the SERVER refused
+ * on, and a threshold of our own would answer a question nobody asked.
+ */
+const MIN_WARP_DISTANCE_M = 150_000;
+
+/**
+ * Was the refused warp a warp to where the ship already is?
+ *
+ * The one reading that separates the two identical-sounding refusals without
+ * guessing from what is on the grid: the scanner gives the SITE's position and
+ * the snapshot gives the SHIP's, and a gap under the server's own warp floor is
+ * the exact condition it refused on. Either position missing is `null` — cannot
+ * tell — never `false`, because "no reading" and "the ship is elsewhere" send
+ * the player to completely different places.
+ */
+function shipStandsInSite(obs: ScriptObservation, target: string | null): boolean | null {
+  if (target === null) {
+    return null;
+  }
+  const here = obs.snapshot?.ship?.position ?? null;
+  const site = (obs.anomalies ?? []).find((row) => row.label === target)?.position ?? null;
+  if (here === null || site === null || site === undefined) {
+    return null;
+  }
+  return distanceMeters(here, site) < MIN_WARP_DISTANCE_M;
 }
 
 const COMBAT_FLAVOUR: AnomalyFlavour = {
@@ -3323,11 +3367,18 @@ const ORE_FLAVOUR: AnomalyFlavour = {
   emptyScannerHint:
     "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
   givesUpOnSites: false,
-  // ⚠ CANNOT TELL, DELIBERATELY. Rock on the grid is not evidence of an ore
-  // SITE — a plain asteroid belt looks identical from here, and the whole point
-  // of `emptyScannerHint` is that the two get confused. There is no reading this
-  // block holds that separates them, so it makes none and reports the refusal.
-  alreadyHere: () => null,
+  // ⚠ NOT FROM THE ROCK ON THE GRID, WHICH IS THE READING THIS MUST NEVER
+  // MAKE: a plain asteroid belt looks identical from there, and the whole point
+  // of `emptyScannerHint` is that the two get confused. The positions do not
+  // have that problem — the scanner names where the SITE is and the snapshot
+  // names where the SHIP is, and a belt is somewhere else entirely.
+  //
+  // It went from "cannot tell" to a real answer because "cannot tell" stopped
+  // the bot every time: a pilot parked in the ore site from an earlier run had
+  // that same site picked first on the next one, the server refused the warp
+  // for standing in it, and the run ended on "The ship would not warp to the
+  // ore site" with the rock in front of the ship.
+  alreadyHere: shipStandsInSite,
 };
 
 // ── Why the dead end is THREE sentences and not one ──────────────────────────
@@ -3427,7 +3478,7 @@ function warpToAnomalyOfKind(
         // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
         // right now." Standing in the site and the site having gone arrive in the
         // SAME WORDS, so the wording is no help and the grid has to answer.
-        if (flavour.alreadyHere(obs) === true) {
+        if (flavour.alreadyHere(obs, label(mem, "target")) === true) {
           return tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", {
             kind: "done",
           });
@@ -3524,7 +3575,7 @@ function warpToAnomalyOfKind(
         flavour.flying,
         ACTING,
         false,
-        warpIssuedMem(obs),
+        warpIssuedMem(obs, next.label),
       ),
       boardPatch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP

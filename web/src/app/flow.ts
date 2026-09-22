@@ -9330,6 +9330,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 : [{
                     label: site.targetID,
                     kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+                    // The row's own `position`, carried so a refused warp can be
+                    // told apart from standing in the site already. A row
+                    // without one stays null — never an origin, which would
+                    // read as "the ship is right here" for every site at once.
+                    position:
+                      site.position === null || site.position.length < 3
+                        ? null
+                        : { x: site.position[0]!, y: site.position[1]!, z: site.position[2]! },
                   }],
             );
           } catch {
