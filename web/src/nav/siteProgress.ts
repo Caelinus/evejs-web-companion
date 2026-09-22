@@ -114,9 +114,10 @@ const STALL_SECONDS = 40;
  * ~40 s of drones actually on a target inside their control range. Long enough
  * that a cruiser rat's health bar moving slowly is never mistaken for a stall —
  * the test is "not going down AT ALL", not "not dead yet", so a slow kill resets
- * this on its very first tick of damage. Short enough to matter: the existing
- * `MAX_STEP_TICKS` backstop is about an hour, which is far too late to be useful
- * and is not a verdict about the site in any case.
+ * this on its very first tick of damage. Short enough to matter: the
+ * `MAX_SILENT_STEP_TICKS` backstop is an hour and a half of a block emitting
+ * NOTHING, which never fires for a fight that is issuing calls and getting
+ * nowhere, and is not a verdict about the site in any case.
  *
  * ⚠ THESE ARE APPLYING TICKS, NOT ELAPSED TICKS. Forty seconds of a ship sitting
  * out of drone control range contributes ZERO to this number. See the header.

@@ -31,9 +31,9 @@
 // already tried means the program made a full loop emitting nothing — the exact
 // "a tick can legally emit no world call" primitive the phases model died of.
 // That is not silently tolerated: it pauses with a plain reason. A step that
-// runs too long (a macro-internal counter gap) trips MAX_STEP_TICKS. A read that
-// stays unreadable trips the cannot-tell streak. Every way of doing nothing has
-// a bound.
+// goes on emitting nothing (a macro-internal counter gap) trips
+// MAX_SILENT_STEP_TICKS. A read that stays unreadable trips the cannot-tell
+// streak. Every way of doing nothing has a bound.
 
 import { countSteps } from "../bots/botScript.ts";
 import type {
@@ -261,6 +261,11 @@ export type ScriptAction =
  * delivered. It is not counted as world progress anywhere — the livelock proof
  * lives in the forward scan, and an alert is decided in the interrupt path above
  * it, so a program cannot satisfy the scan by alerting.
+ *
+ * The silence counter behind `MAX_SILENT_STEP_TICKS` asks this same question of
+ * a MACRO's action, and the sentence above still holds there: no macro emits an
+ * alert (both emitters are the orchestrator's own, and the skip path zeroes the
+ * counter as it leaves anyway), so nothing can stay alive by alerting either.
  */
 export function isWorldCall(action: ScriptAction): boolean {
   return action.kind !== "wait";
@@ -605,7 +610,44 @@ export type HomeTravelDecider = (obs: ScriptObservation, mem: MacroMemory) => Ma
 
 // ─── Memory ──────────────────────────────────────────────────────────────────
 
-export const MAX_STEP_TICKS = 1800; // ~1h at the 2s cadence — the R39 backstop
+/**
+ * How many ticks a step may stay SILENT — emitting no world call — before the
+ * run is called stuck. The R39 backstop.
+ *
+ * ⚠ SILENT TICKS, NOT ELAPSED TICKS, and the distinction is the whole point.
+ *
+ * This counted elapsed ticks until 2026-09-22 — reset only when the position
+ * changed — which made it a wall-clock cap on ONE VISIT to a step: 90 minutes,
+ * as four stopped miners measured it to within a minute of each other. All four
+ * were working perfectly. Their `mine-at-belt` visit (filtered to two ores,
+ * `until` an ore hold 90% full) had been locking rocks, cycling lasers and
+ * warping to a fresh anomaly as each one ran dry, and was stopped mid-cycle for
+ * taking too long about it. Five more pilots on the SAME script were untouched
+ * for the only reason that they mined a hold in about 25 minutes instead of 55
+ * and so never had a visit cross the line. A slow job is not a stuck one, and a
+ * guard that fires on the slower half of a working fleet is measuring the wrong
+ * thing.
+ *
+ * So a world call resets it. What the guard is for is the macro that emits
+ * NOTHING for ever (the "a tick can legally emit no world call" primitive in the
+ * header) — and that macro is silent by definition, so it still trips. This is
+ * the same shape as `STALL_TICKS` in siteProgress.ts, which counts APPLYING
+ * ticks and not elapsed ones for the same reason.
+ *
+ * A macro that keeps ACTING without getting anywhere is somebody else's job,
+ * deliberately: refusals belong to the run's refusal ledger (refusalLedger.ts),
+ * an approach that never closes to `closeInStall`, drones that never launch to
+ * `launchStalled`, a rat that will not die to `STALL_TICKS`. Each of those knows
+ * what progress means for its own case; this one does not and must not guess.
+ *
+ * 1800 is left where elapsed-tick tuning put it, and it is generous on purpose.
+ * The silent stretches a HEALTHY run has are real — an autopilot flying a long
+ * route, a `join-fleet` waiting on a squad (JOIN_MAX_WAIT_TICKS is 150) — and
+ * at the ~3s the fleet above actually ticked at, 1800 is an hour and a half of
+ * a bot doing literally nothing. A tighter number would have to argue against
+ * those, and the narrow stall detectors above are where tightness belongs.
+ */
+export const MAX_SILENT_STEP_TICKS = 1800;
 
 const HOME_MEM_KEY = "__home__";
 /** Where a repair trip's borrowed Repair-ship block keeps its own memory. */
@@ -711,6 +753,12 @@ interface Latched {
 export interface ScriptMemory {
   readonly position: Position;
   readonly loopPass: number;
+  /**
+   * Consecutive ticks at this position that issued NO world call. Reset by a
+   * world call and by leaving the position — see `MAX_SILENT_STEP_TICKS` for why
+   * it counts silence rather than elapsed time. The name is historical; it is
+   * kept because it is the persisted memory's field name.
+   */
   readonly stepTicks: number;
   readonly cannotTellStreak: number;
   readonly latched: Latched | null;
@@ -907,7 +955,11 @@ export interface ScriptTickResult {
 const SAY = {
   programDone: "The program finished, so the bot stopped.",
   livelock: "This program has nothing it can do right now, so the bot stopped.",
-  stepTooLong: "A step ran for a very long time without finishing, so the bot stopped.",
+  // ⚠ "did nothing", not "took too long". A slow step is explicitly allowed (see
+  // MAX_SILENT_STEP_TICKS); what this sentence reports is a step that stopped
+  // doing anything at all, and it has to say so or the player goes looking for
+  // the wrong fault — a hold that fills slowly rather than a macro that hung.
+  stepDidNothing: "A step did nothing at all for a very long time, so the bot stopped.",
   unknownMacro: "This program uses an action the bot does not know, so it stopped.",
   headingHome: "A watched warning was hit, so the bot is heading home to stop.",
   inWarp: "The ship is in warp, so the bot is waiting until it lands.",
@@ -1859,10 +1911,14 @@ function runProgram(
           : (script.program[branchNode] as BranchBlock);
       const verdict = evaluateCondition(branch.when, obs);
       if (verdict === "cannot-tell") {
+        // No `isSilent` test here: a branch whose `when` cannot be read waits,
+        // full stop, so every tick counted at this position is already a silent
+        // one. (The cannot-tell streak is the tighter of the two and normally
+        // fires long first; this stays as the backstop it always was.)
         const samePlace = positionKey(position) === positionKey(mem.position);
         const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
-        if (stepTicks > MAX_STEP_TICKS) {
-          return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
+        if (stepTicks > MAX_SILENT_STEP_TICKS) {
+          return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         const streak = bumpCannotTellStreak(mem.cannotTellStreak, true);
         if (cannotTellStreakExhausted(streak)) {
@@ -2047,10 +2103,15 @@ function runProgram(
     }
 
     // Issue the macro's action — the single action of this tick.
+    //
+    // The silence counter is bumped only when that action is a wait: a macro
+    // that issued a world call this tick is working, however long it has been at
+    // it, and starts again from zero. Leaving the position clears it too, which
+    // is what a `done` or a skip does on its way past.
     const samePlace = positionKey(position) === positionKey(mem.position);
-    const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
-    if (stepTicks > MAX_STEP_TICKS) {
-      return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
+    const stepTicks = isWorldCall(tick.action) ? 0 : (samePlace ? mem.stepTicks : 0) + 1;
+    if (stepTicks > MAX_SILENT_STEP_TICKS) {
+      return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
     const streak = bumpCannotTellStreak(mem.cannotTellStreak, blindThisTick);
     if (cannotTellStreakExhausted(streak)) {

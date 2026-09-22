@@ -11,7 +11,7 @@ import type { BotScript, BranchBlock, Condition, InterruptRow, MacroStep, Progra
 import type { ScriptObservation } from "./scriptConditions.ts";
 import {
   MAX_RECOVER_TRIPS,
-  MAX_STEP_TICKS,
+  MAX_SILENT_STEP_TICKS,
   decideScriptAction,
   initialMemory,
   activeMacroID,
@@ -655,19 +655,60 @@ test("an unreadable until heads home after the cannot-tell streak runs out", () 
   assert.match(stopped.pauseReason ?? "", /could not read/i);
 });
 
-test("a step that never finishes trips the step-tick cap", () => {
-  // mine always acts, its until never met: it should eventually pause on the cap.
+// A macro that WAITS for ever: acting, armed, and never a world call. This is
+// the only shape the silence cap is meant to catch.
+const silent: MacroDecider = () => tick({ kind: "wait" }, { kind: "acting" }, true);
+
+/** Drive one step until it leaves "running" or the budget is provably clear. */
+function driveStep(reg: Record<string, MacroDecider>, over: Partial<ScriptObservation>, ticks: number) {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
-  let last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
-  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.action.kind !== "warp"; i += 1) {
+  let last = decideScriptAction(s, obs(over), mem, reg, home);
+  for (let i = 0; i < ticks && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
-    last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
+    last = decideScriptAction(s, obs(over), mem, reg, home);
   }
+  return { s, last };
+}
+
+test("a step that emits nothing at all trips the silence cap", () => {
+  const { s, last } = driveStep(
+    { ...registry, "mine-at-belt": silent },
+    { oreHoldFraction: 0 },
+    MAX_SILENT_STEP_TICKS + 5,
+  );
   assert.equal(last.action.kind, "warp", "the cap sends it home rather than leaving it there");
-  const stopped = decideScriptAction(s, obs({ oreHoldFraction: 0, docked: true }), last.memory, registry, home);
+  const stopped = decideScriptAction(
+    s, obs({ oreHoldFraction: 0, docked: true }), last.memory, { ...registry, "mine-at-belt": silent }, home,
+  );
   assert.equal(stopped.status, "paused");
-  assert.match(stopped.pauseReason ?? "", /very long time/i);
+  assert.match(stopped.pauseReason ?? "", /did nothing/i);
+});
+
+test("a step that keeps acting is never stopped for taking a long time", () => {
+  // THE REGRESSION. `mine` acts every tick and its `until` is never met — a
+  // miner filling a big hold from two ores, which is exactly what the elapsed-
+  // tick cap used to stop at 90 minutes. Far past the budget, it is still mining.
+  const { last } = driveStep(registry, { oreHoldFraction: 0 }, MAX_SILENT_STEP_TICKS * 3);
+  assert.equal(last.status, "running", "a slow job is not a stuck one");
+  assert.equal(last.action.kind, "activate", "and it is still working, not parked");
+  assert.equal(last.memory.stepTicks, 0, "a world call leaves no silence behind it");
+});
+
+test("a step that acts only now and then keeps its budget from running out", () => {
+  // The real shape of a working macro: long silences broken by a world call.
+  // Each call has to clear the count, or the silences add up and stop the bot.
+  const reg = { ...registry, "mine-at-belt": silent };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const acting = { ...registry };
+  let mem = initialMemory(s);
+  for (let i = 0; i < MAX_SILENT_STEP_TICKS * 3; i += 1) {
+    // One world call every 100 ticks, silence in between.
+    const r = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, i % 100 === 0 ? acting : reg, home);
+    assert.equal(r.status, "running", `stopped at tick ${i}: ${r.pauseReason ?? ""}`);
+    assert.notEqual(r.action.kind, "warp", `headed home at tick ${i}`);
+    mem = r.memory;
+  }
 });
 
 // ─── A blocked macro ─────────────────────────────────────────────────────────
