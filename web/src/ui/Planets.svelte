@@ -43,6 +43,7 @@
     serverNow,
     summarizeColony,
   } from "../bridge/planets.ts";
+  import { factoryRecipeWords } from "../bridge/piFactoryWords.ts";
   import { isSessionLost } from "../app/flow.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -357,6 +358,7 @@
         <h4>What is on this planet</h4>
         <ul class="plain-list">
           {#each openColony.pins as pin (pin.pinID)}
+            {@const factory = pin.kind === "factory" ? factoryRecipeWords($planets.recipes, pin) : null}
             <li>
               <span class="asset-place">
                 <TypeIcon typeID={pin.typeID} name={pin.typeName} />
@@ -382,17 +384,21 @@
                   ></progress>
                 {/if}
               {/if}
-              {#if pin.kind === "factory"}
+              {#if factory}
                 <p class="note">
-                  {pin.schematicName
-                    ? `Making ${pin.schematicName}`
-                    : "No recipe set"}
+                  {factory.making}
+                  {#if factory.rate}
+                    · {factory.rate}
+                  {/if}
                   <!-- ⚠ Only an explicit false is an alarm. null means this pin
                        has no such state, and says nothing. -->
                   {#if pin.receivedInputsLastCycle === false}
                     · fed nothing last cycle
                   {/if}
                 </p>
+                {#if factory.needs}
+                  <p class="note">{factory.needs}</p>
+                {/if}
               {/if}
               {#if pin.contents.length}
                 <p class="note">

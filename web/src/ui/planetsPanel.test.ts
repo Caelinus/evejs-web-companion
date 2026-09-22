@@ -46,6 +46,8 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const Planets = (await import("./Planets.svelte")).default;
+const { EMPTY_RECIPE_BOOK } = await import("../bridge/piRecipes.ts");
+import type { PiIngredient, PiRecipeBook, PiSchematic } from "../bridge/piRecipes.ts";
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "Planets.svelte"), "utf8");
@@ -425,6 +427,136 @@ test("a factory says what it makes, and is only called starved when the server s
   const dry = scene({ open: true, colonies: [worldColony([healthyExtractor(), starved])] });
   assert.match(dry.text, /making Superconductors was fed nothing last cycle/i);
   assert.match(dry.text, /1 factory was fed nothing last cycle/);
+});
+
+// --- 2c. R108 slice 2: a factory's recipe (rate and ingredients) ------------
+
+const FACTORY_PIN_ID = 4;
+const FACTORY_TYPE_ID = 2481;
+const SCHEMATIC_ID = 65;
+const OUTPUT_TYPE_ID = 9838;
+const INGREDIENT_TYPE_ID = 2389;
+
+/** A factory pin with sane defaults, matching the fixture already used above. */
+function factoryPin(overrides: Record<string, unknown> = {}): unknown {
+  return pinState({
+    pinID: FACTORY_PIN_ID,
+    typeID: FACTORY_TYPE_ID,
+    typeName: "Temperate Basic Industry Facility",
+    kind: "factory",
+    schematicID: SCHEMATIC_ID,
+    schematicName: "Superconductors",
+    hasReceivedInputs: true,
+    receivedInputsLastCycle: null,
+    ...overrides,
+  });
+}
+
+/** A recipe book that names Superconductors' rate and one ingredient. */
+function recipeBook(): PiRecipeBook {
+  const input: PiIngredient = { typeID: INGREDIENT_TYPE_ID, typeName: "Plasmoids", quantity: 40 };
+  const output: PiIngredient = { typeID: OUTPUT_TYPE_ID, typeName: "Superconductors", quantity: 5 };
+  const sch: PiSchematic = {
+    schematicID: SCHEMATIC_ID,
+    name: "Superconductors",
+    cycleTimeSeconds: 3600,
+    factoryTypeIDs: [],
+    inputs: [input],
+    output,
+  };
+  return {
+    schematics: Object.freeze([sch]),
+    bySchematicID: new Map([[SCHEMATIC_ID, sch]]),
+    byOutputTypeID: new Map([[OUTPUT_TYPE_ID, sch]]),
+    commodities: new Map(),
+    readable: true,
+  };
+}
+
+/**
+ * An open colony holding exactly these pins, with the recipe book applied
+ * (or not) AFTER the colony read — mirroring how the real app lands the two
+ * reads separately (see bridge/piFactoryWords.ts's header).
+ */
+function sceneWithRecipes(pins: readonly unknown[], recipes: PiRecipeBook | null) {
+  return atFrozenBrowserClock(() => {
+    const store = createClientStore();
+    store.apply({
+      type: "planets/loaded",
+      colonies: [worldColony(pins)] as never,
+      coloniesReadable: true,
+      clockOffsetMs: CLOCK_OFFSET,
+    });
+    if (recipes) {
+      store.apply({ type: "planets/recipes", recipes });
+    }
+    store.apply({ type: "planets/selected", planetID: PLANET_ID });
+    const output = render(Planets as never, { props: { store, flow: fakeFlow() } } as never);
+    return { body: output.body, text: visibleText(output.body) };
+  });
+}
+
+test("a factory with a recipe in the book renders what it makes, its rate and its ingredients", () => {
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], recipeBook());
+  assert.match(text, /Making Superconductors/);
+  assert.match(text, /5 every 1 hour/);
+  assert.match(text, /needs 40 Plasmoids/);
+});
+
+test("an unreadable recipe book still shows Making <name> exactly as before, with no rate and no ingredients line", () => {
+  // ⚠ THE DEGRADE CASE. A missing/empty book must never blank the line that
+  // already worked — it may only take away the rate and the ingredients.
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], EMPTY_RECIPE_BOOK);
+  assert.match(text, /Making Superconductors/);
+  assert.doesNotMatch(text, /every/);
+  assert.doesNotMatch(text, /needs \d/);
+});
+
+test('"fed nothing last cycle" still appears alongside the new clauses when the server said false, and not when it is null', () => {
+  const starved = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ receivedInputsLastCycle: false })],
+    recipeBook(),
+  );
+  assert.match(starved.text, /Making Superconductors/);
+  assert.match(starved.text, /5 every 1 hour/);
+  assert.match(starved.text, /fed nothing last cycle/i);
+
+  const fed = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ receivedInputsLastCycle: null })],
+    recipeBook(),
+  );
+  assert.doesNotMatch(fed.text, /fed nothing/i);
+});
+
+test("a factory with no recipe set at all still reads No recipe set", () => {
+  const { text } = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ schematicID: null, schematicName: null })],
+    recipeBook(),
+  );
+  assert.match(text, /No recipe set/);
+  assert.doesNotMatch(text, /every/);
+  assert.doesNotMatch(text, /needs \d/);
+});
+
+test("COMPANION: the factory id sweep's regex really does match a string containing an id", () => {
+  // ⚠ Same trap as the sweep below: a template-literal `\b` is the BACKSPACE
+  // character, not a word boundary, and would match nothing at all.
+  const pattern = new RegExp(`\\b${SCHEMATIC_ID}\\b`);
+  assert.match(` schematic ${SCHEMATIC_ID} here `, pattern);
+  assert.doesNotMatch(" schematic Superconductors here ", pattern);
+  assert.equal(pattern.source.charCodeAt(0), "\\".charCodeAt(0));
+  assert.notEqual(pattern.source.charCodeAt(0), 8);
+});
+
+test("no schematicID or ingredient typeID leaks onto the factory line", () => {
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], recipeBook());
+  for (const id of [SCHEMATIC_ID, INGREDIENT_TYPE_ID, OUTPUT_TYPE_ID, FACTORY_TYPE_ID]) {
+    assert.doesNotMatch(
+      text,
+      new RegExp(`\\b${id}\\b`),
+      `id ${id} leaked to the player`,
+    );
+  }
 });
 
 test("opening a colony shows what is on the planet, in player words", () => {

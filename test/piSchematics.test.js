@@ -202,15 +202,23 @@ test("GET /api/pi/schematics translates the raw table to the documented wire sha
         name: "Superconductors",
         cycleTime: 3600,
         pinTypeIDs: [2470, 2472],
-        inputs: [{ typeID: 2389, quantity: 40 }],
+        inputs: [
+          { typeID: 2389, quantity: 40 },
+          { typeID: 3645, quantity: 40 },
+        ],
         outputs: [{ typeID: 9838, quantity: 5 }],
       },
     ],
+    // The fake answers what the real table answers for these ids. It does not
+    // have to - nothing here reads the real data - but a fixture that states
+    // something false about a real type teaches the next reader a wrong fact,
+    // and this one is a faithful miniature of schematic 65.
     types: {
-      2389: { name: "Chiral Structures" },
+      2389: { name: "Plasmoids" },
+      3645: { name: "Water" },
       9838: { name: "Superconductors" },
     },
-    tiers: { 2389: 0, 9838: 3 },
+    tiers: { 2389: 1, 3645: 1, 9838: 2 },
   }));
   const { response, payload } = await getSchematics(baseUrl);
   assert.equal(response.status, 200);
@@ -223,13 +231,17 @@ test("GET /api/pi/schematics translates the raw table to the documented wire sha
         name: "Superconductors",
         cycleTimeSeconds: 3600,
         factoryTypeIDs: [2470, 2472],
-        inputs: [{ typeID: 2389, typeName: "Chiral Structures", quantity: 40 }],
+        inputs: [
+          { typeID: 2389, typeName: "Plasmoids", quantity: 40 },
+          { typeID: 3645, typeName: "Water", quantity: 40 },
+        ],
         output: { typeID: 9838, typeName: "Superconductors", quantity: 5 },
       },
     ],
     commodities: {
-      9838: { typeName: "Superconductors", tier: 3 },
-      2389: { typeName: "Chiral Structures", tier: 0 },
+      9838: { typeName: "Superconductors", tier: 2 },
+      2389: { typeName: "Plasmoids", tier: 1 },
+      3645: { typeName: "Water", tier: 1 },
     },
   });
 });

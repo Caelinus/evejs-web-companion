@@ -19396,8 +19396,8 @@ app.get("/api/types/cycle-times", requireAuth, async (req, res, next) => {
  *
  * Every recipe a colony factory can run lives in the gameStore's
  * `planetSchematics` table (68 rows), and it never varies by player, by
- * colony or by planet: schematic 65 makes Superconductors from Chiral
- * Structures and Water everywhere in New Eden, forever. So unlike
+ * colony or by planet: schematic 65 makes Superconductors from Plasmoids and
+ * Water everywhere in New Eden, forever. So unlike
  * /api/colonies, which projects one player's live pins, this route carries NO
  * colony, no planetID, no character context at all — it is the recipe BOOK,
  * not a page out of anyone's copy of it, which is also why it needs no

@@ -94,6 +94,7 @@ import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { JamEvent } from "../bridge/jamNotifications.ts";
+import type { PiRecipeBook } from "../bridge/piRecipes.ts";
 import type { TargetEvent } from "../bridge/targetNotifications.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
@@ -771,6 +772,11 @@ export type FeedEvent =
   | { readonly type: "planets/error"; readonly message: string | null }
   | { readonly type: "planets/selected"; readonly planetID: number | null }
   | { readonly type: "planets/cleared" }
+  /**
+   * The planetary recipe table (goal R108). Static reference data, not the
+   * player's — read once and kept across character changes.
+   */
+  | { readonly type: "planets/recipes"; readonly recipes: PiRecipeBook }
   // A snapshot read failed non-fatally; null clears it after a clean read.
   | { readonly type: "space/error"; readonly message: string | null }
   // Drop the space state (docked / character offline / logged out).

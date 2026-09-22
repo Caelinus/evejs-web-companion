@@ -6,6 +6,7 @@ import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { ActiveJam } from "../bridge/jamNotifications.ts";
+import type { PiRecipeBook } from "../bridge/piRecipes.ts";
 import type {
   FleetAvailability,
   FleetPendingInvite,
@@ -2840,4 +2841,19 @@ export interface PlanetsState {
    * nothing whatsoever — both leave this false (the worldHasNoContracts rule).
    */
   readonly hasNoColonies: boolean;
+  /**
+   * The planetary production recipes (goal R108 slice 1).
+   *
+   * ⚠ NOT THE PLAYER'S DATA, which is why it lives here but does not follow
+   * the rest of this slice's lifetime. Colonies belong to one character and
+   * are dropped the moment that character goes away; the recipe table is the
+   * same for everybody and is kept across a character change rather than
+   * re-read for each one.
+   *
+   * ⚠ ITS `readable` FLAG IS NOT `loaded`. An unread book and a book the
+   * server could not supply both leave every factory rendering exactly as it
+   * did before this slice — see bridge/piFactoryWords.ts, which degrades to
+   * the colony read's own name rather than blanking a line.
+   */
+  readonly recipes: PiRecipeBook;
 }
