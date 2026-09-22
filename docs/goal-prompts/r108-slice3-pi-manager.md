@@ -1,7 +1,12 @@
 # R108 slice 3: the PI Manager
 
 **Status:** Design, awaiting approval. Amends slice 3 of the R108 design after the
-operator's own proposal and two rounds of research. **Client + bridge only.**
+operator's own proposal and three rounds of research. **Client + bridge only.**
+
+**§6 is answered** — reading a colony needs only ownership, and was proved live;
+acting needs a selected character. Read §6 before §4 and §5, because it removes
+the takeover hazard from the read path entirely and changes what the cache is
+for.
 
 Slice 3 was originally specified as a read-only fleet board that never signed a
 pilot in. The operator proposed something better: a manager that owns a roster of
@@ -214,32 +219,85 @@ Consequences worth stating:
 
 ---
 
-## 6. The question that must be answered before building
+## 6. ANSWERED: reading needs ownership, acting needs a session
 
-**Does reading a colony require selecting a character?**
+This was the question that blocked the design. It has been settled against the
+gateway source **and proved against the running server**, not reasoned about.
 
-The BFF's colony route demands a held session and reads the held character. But
-the R41 record says the gateway's own read is ownership-scoped and needs **no held
-session** — *reading what you built is not an act of piloting* — and `getSnapshot`
-already takes an account and a character.
+### Reading a colony does NOT require selecting a character
 
-If that holds, one new BFF route can answer colonies for **every character on an
-account** with nothing selected and no hull claimed. Then:
+`GET /_evejs-web/v1/snapshot?accountID=&characterID=` takes both ids from the
+query string and is gated by `validateOwnedCharacter`
+(`D:\evet\server\src\_secondary\express\evejsWebGatewayRuntime.js`), which loads
+the character, compares `character.accountID` to the supplied account, and
+returns. It consults **no session map, no online flag, no bridge session**.
+`buildPlanetRuntimeForCharacter` then filters colonies by `ownerID` out of a
+persisted table — again with no session anywhere.
 
-- refreshing the whole board costs one cheap login per account and claims nothing
-- selects happen only to *act*, and acting goes through the bot host anyway
-- the takeover risk in §4 nearly disappears from the read path entirely
+Proved live against the running stack:
 
-If it does not hold, reads cost a select, the cache and the schedule carry the
-whole design, and §4's limits apply to every refresh.
+| Probe | Result |
+|---|---|
+| Colonies through the **BFF** with nothing selected | `409 NO_LIVE_SESSION` — *"No character is online; select a character first."* |
+| `/snapshot` through the **gateway**, no session, nothing selected | **`200`** for every character on the account |
+| `/snapshot` for a character that exists but belongs to **another account** | `403 CHARACTER_ACCOUNT_MISMATCH` |
+| `/snapshot` for a character id that does not exist | `404 CHARACTER_NOT_FOUND` |
 
-**This is the first research task of slice 3 and it must be settled by reading the
-gateway and proving it live, not by reasoning.** The R41 write-up is a monument to
-what guessing a read surface costs here.
+The two refusals matter as much as the success: they prove the ownership gate
+actually discriminates, rather than the endpoint being open to anyone.
 
-A second, smaller question: do the planetary write routes require a held session
-too? That decides whether the bot host is merely the safest way to act or the only
-one.
+**So the held-session requirement is the BFF route's own shape, not the
+gateway's.** The BFF takes the character from whichever one the tab selected
+because that is how it was written, and its own code already depends on the
+gateway answering for an offline character — `POST /api/bridge/select` and
+`POST /api/bots/start` both call `getSnapshot` as an ownership pre-check
+*before* the character is brought online.
+
+### The route to copy already exists
+
+`GET /api/roster/training` takes **plural** `characterIDs` from the query string,
+passes each one to the gateway with the caller's own accountID, lets
+`validateOwnedCharacter` refuse anything the account does not own, and silently
+drops a refused id rather than failing the whole request. Its own comment says
+so. It is `requireAuth` only — no held session.
+
+That is exactly the shape the PI Manager's read wants, and it means the read
+route is a small, precedented addition rather than new ground.
+
+### Acting DOES require a selected character
+
+The planetary writes ride the bound-object seam, and both `bindBoundObject` and
+`callBoundMethod` hard-require a `bridgeSessionID` that resolves to a live
+session minted by an earlier character select — there is no fallback the way the
+plain call route has one. The emulator then takes `ownerID` from that session
+rather than from the arguments, so a write can never touch another character's
+colony, but it also cannot happen without that character being online.
+
+### What this changes
+
+- **The read path claims no hull and carries no takeover risk.** §4's hazard
+  applies only to acting.
+- Refreshing the whole board costs one cheap login per account plus one cheap
+  call per character. Nothing is selected, so nothing is stolen.
+- **Selecting a character now happens for exactly one reason: to act.** And
+  acting goes through the bot host (§2, rule 2), which is the only thing in the
+  system that arbitrates hull ownership honestly.
+- The cache and the schedule (§5) stop being load-bearing for *correctness* and
+  become what they should be: a way to avoid pointless work.
+
+### The one thing still unproved, stated plainly
+
+**A colony's data has not been seen coming back through a sessionless read,
+because this server currently has no colonies at all** — the `planetRuntimeState`
+table has zero rows, which is also why every probe above reported no planet
+runtime. That absence is explained, not ignored: it is consistent with an empty
+table and tells us nothing against the design.
+
+It is closed by building one colony in-game on any character and re-running the
+same `/snapshot` probe with nothing selected. Until somebody does that, the claim
+"colonies arrive sessionless" rests on the gateway source, which is strong
+evidence but is not a live reading — and this repo has been wrong before about a
+surface nobody had exercised.
 
 ---
 
