@@ -9233,7 +9233,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let scannerOperations: ScriptObservation["scannerOperations"] = null;
         const systemName = store.flight.get().solarSystemName;
         let dryBelts: ScriptObservation["dryBelts"] = null;
-        if (macro === "mine-at-belt" && systemName !== null) {
+        // ⚠ AND NOT IN SITE MODE, WHICH NEVER LOOKS AT A BELT. `mineAtBelt`
+        // routes a site step away before the belt regex, the tier ladder and
+        // `dryBeltNames` — every line that reads this — and reports a barren
+        // grid into the board's own ore-site list rather than into the shared
+        // belt memory. The read is the SAME shape of waste as the scanner read
+        // the site mode was missing, in the other direction: a call per tick
+        // for a list the block cannot use. `needsOreSites` already names
+        // exactly that mode (see activeStepToursOreSites), so it gates both.
+        if (macro === "mine-at-belt" && hint.needsOreSites !== true && systemName !== null) {
           const cached = beltMemoryCache;
           if (cached !== null && cached.system === systemName && Date.now() - cached.at < BELT_MEMORY_CACHE_MS) {
             dryBelts = cached.rows;

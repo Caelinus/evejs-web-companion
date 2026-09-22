@@ -528,6 +528,26 @@ test("mine (site mode): rocks present on the grid -> mine them, exactly like any
   assert.ok(t.action.kind === "orbit" && t.action.targetID === 50001);
 });
 
+test("mine (site mode): the shared BELT memory changes nothing, which is why the read is not taken", () => {
+  // ⚠ THE READ IS GATED OFF FOR THIS MODE IN `observe`, AND THIS IS THE
+  // PROPERTY THAT MAKES THAT SAFE. `dryBelts` is the BFF-shared, belt-name-keyed
+  // memory, and the only line that reads it (`dryBeltNames`) sits past the site
+  // branch, on NEAREST mode's rotation. So a site step mines the rock in front
+  // of it with every belt in the system marked dry — and answers identically
+  // when the list is absent, which is what it now always gets.
+  const rock = entity({ itemID: 50001, name: "Arkonor", miningYieldTypeID: 1230, groupID: 601, position: { x: 8000, y: 0, z: 0 } });
+  const everyBeltDry = [
+    { beltName: "Asteroid Belt 1", all: true, families: [] },
+    { beltName: "Asteroid Belt 2", all: true, families: [] },
+  ];
+  const board = { oreAnomsVisited: "QEE-100" };
+  const withMemory = mine(siteStep([ARKONOR]), obs({ snapshot: snapshot([rock]), dryBelts: everyBeltDry }), NM, board);
+  const without = mine(siteStep([ARKONOR]), obs({ snapshot: snapshot([rock]) }), NM, board);
+
+  assert.equal(withMemory.action.kind, "orbit", "a dry BELT says nothing about the rock on an ore site's grid");
+  assert.deepEqual(without.action, withMemory.action, "the same move with the list and without it");
+  assert.deepEqual(without.outcome, withMemory.outcome);
+});
 test("mine (site mode): a belt on the overview is never a target — site mode never evaluates the belt regex", () => {
   const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 500000, y: 0, z: 0 } });
   const sites = [
