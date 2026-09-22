@@ -15,6 +15,7 @@ import {
   decideScriptAction,
   initialMemory,
   activeMacroID,
+  activeStepToursOreSites,
   activeSquadRole,
   watchSquadRole,
   DEFAULT_SETTLE_TICKS,
@@ -1400,4 +1401,48 @@ test("⚠ warp is NOT in the table — the one movement action that is not idemp
   // all emit it with no memory guard at all. If this assertion ever fails,
   // somebody has tidied warp in for symmetry and bought a double warp with it.
   assert.equal(settleTicksFor({ kind: "warp", targetID: 4002 }), DEFAULT_SETTLE_TICKS);
+});
+
+// ─── The scanner read a site-mode mining block needs ─────────────────────────
+
+test("a mining block set to SITE asks for the scanner read — nearest and chosen do not", () => {
+  // ⚠ THE LIVE FAILURE THIS LOCKS SHUT. `observe` fetches `anomalies` only for
+  // the blocks that fly to an anomaly by name, and `mine-at-belt` is not one of
+  // them — so site mode's barren-grid path, which names the next site ITSELF,
+  // read `null` (meaning "unread yet", which waits) on every tick. Five pilots
+  // mined their ore site out and then sat on "Reading the scanner for the next
+  // ore site." indefinitely with the scanner never asked once.
+  const site: BotScript = script([
+    { id: "m", kind: "macro", macro: "mine-at-belt", args: { belt: { kind: "belt", belt: { mode: "site" } } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+  ]);
+  assert.equal(activeStepToursOreSites(site, initialMemory(site)), true);
+
+  // Pointed at a belt, the SAME block must not pay for a read it never looks at.
+  const nearest = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  assert.equal(activeStepToursOreSites(nearest, initialMemory(nearest)), false);
+
+  const chosen: BotScript = script([
+    { id: "m", kind: "macro", macro: "mine-at-belt",
+      args: { belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: "V - Belt 1", systemName: null } } } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+  ]);
+  assert.equal(activeStepToursOreSites(chosen, initialMemory(chosen)), false);
+
+  // And no other block earns it by sitting next to one that does.
+  const hauling = script([macroStep("d", "deliver-ore")]);
+  assert.equal(activeStepToursOreSites(hauling, initialMemory(hauling)), false);
+});
+
+test("a latched repair trip does not order the scanner read on the site block's behalf", () => {
+  // The trip is running the borrowed Repair-ship block, not the mining one (see
+  // `activeMacroID` above), and the read is priced per block.
+  const s: BotScript = {
+    ...script([
+      { id: "m", kind: "macro", macro: "mine-at-belt", args: { belt: { kind: "belt", belt: { mode: "site" } } },
+        until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+    ], [shieldTrip]),
+  };
+  const flying = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: false }), initialMemory(s), withShop, home);
+  assert.equal(activeStepToursOreSites(s, flying.memory), false);
 });

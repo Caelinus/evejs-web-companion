@@ -9312,7 +9312,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             savedFittings = null;
           }
         }
-        if (macro !== null && ANOMALY_MACROS.has(macro)) {
+        // `needsOreSites` is the site-mode mining block asking for the same
+        // list. It is a hint rather than a third entry in ANOMALY_MACROS
+        // because `mine-at-belt` earns the read only when its belt argument
+        // says "site" — pointed at a belt, the same block must not pay for a
+        // scanner read it will never look at (see activeStepToursOreSites).
+        if (macro !== null && (ANOMALY_MACROS.has(macro) || hint.needsOreSites === true)) {
           try {
             const full = decodeFullState(await api.loadScanFullState(callOptions));
             // The whole row is classified here, not just labelled: `targetID` is

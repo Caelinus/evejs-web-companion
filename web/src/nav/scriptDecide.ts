@@ -833,6 +833,37 @@ export function activeMacroID(script: BotScript, mem: ScriptMemory): string | nu
 }
 
 /**
+ * Is the active block a mining block set to tour ORE SITES? Asked because the
+ * scanner read is priced per block, and `mine-at-belt` is not a block that
+ * flies to an anomaly — except in `site` mode, where the barren-grid path is
+ * the tour: it names the next site itself rather than handing control back to
+ * a `warp-to-ore-anomaly` ahead of it (see `mineAtBeltSiteBarren` in
+ * scriptMacros.ts).
+ *
+ * ⚠ WITHOUT THIS THE SITE MODE CANNOT FINISH A LAP. `observe` only fetches
+ * `anomalies` for the two blocks that fly to an anomaly by name, so a mining
+ * block reading the scanner got a permanent `null` — and `null` there means
+ * "unread yet", which waits. A bot that mined its site out then sat on
+ * "Reading the scanner for the next ore site." forever, one tick after the
+ * other, with the scanner never asked.
+ *
+ * Asked of the STEP rather than of the macro for the same reason
+ * `activeStepNeedsTypeNames` below is: `site` is an ARGUMENT, and the same
+ * block pointed at the nearest belt must not pay for a read it cannot use.
+ */
+export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): boolean {
+  if (mem.position.kind === "done" || mem.latched !== null) {
+    return false;
+  }
+  const step = activeStep(script, mem.position);
+  if (step === undefined || step === null || step.macro !== "mine-at-belt") {
+    return false;
+  }
+  const belt = step.args["belt"];
+  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "site";
+}
+
+/**
  * Does the active block match items by NAME? The one thing type ids and group
  * ids cannot answer, and the only reason to pay for a name lookup on a tick.
  *

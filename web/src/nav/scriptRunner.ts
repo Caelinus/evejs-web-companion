@@ -28,6 +28,7 @@ import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
   activeStepNeedsTypeNames,
+  activeStepToursOreSites,
   activeSquadRole,
   watchSquadRole,
   decideScriptAction,
@@ -67,6 +68,13 @@ export interface ObserveHint {
    * means "no", which is what every block but a name-matching one wants.
    */
   readonly needsTypeNames?: boolean;
+  /**
+   * Whether the active block is a mining block touring ORE SITES, and so needs
+   * the onboard scanner read that only the fly-to-an-anomaly blocks otherwise
+   * pay for (see activeStepToursOreSites). Optional: a caller that does not say
+   * means "no", which is what every block but a site-mode mining one wants.
+   */
+  readonly needsOreSites?: boolean;
   /** Whether that block follows the fleet's called primary (see activeSquadRole). */
   readonly squadRole: SquadRoleArg;
   /**
@@ -345,6 +353,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       obs = await deps.observe({
         activeMacro: activeMacroID(script, memory),
         needsTypeNames: activeStepNeedsTypeNames(script, memory),
+        needsOreSites: activeStepToursOreSites(script, memory),
         squadRole: activeSquadRole(script, memory),
         watchSquadRole: watchSquadRole(script),
         board: memory.board,
