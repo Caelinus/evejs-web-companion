@@ -565,3 +565,42 @@ test("a pilot set up as a companion shows the toggle ticked", () => {
   assert.match(body, /Flies as companion/);
   assert.match(body, /checked/, "the toggle reflects what is stored");
 });
+
+// --- the squad start speaks as the pilot it is starting ---------------------
+//
+// ⚠ A SOURCE READ, NOT A RENDER, AND THAT IS THE HONEST SHAPE HERE. The squad
+// start calls app/api.ts directly, so nothing on these props can observe which
+// token it rode; the fact worth pinning is therefore in the source. It is worth
+// pinning at all because the wrong token does not throw and does not look
+// broken: under R107 every pilot in the tab authenticates as itself, a call made
+// with no options falls back to the per-tab cookie, and a squad spanning
+// accounts then comes back "Character does not belong to the supplied account"
+// for every member but one — with that one refused too, as "A web session is
+// flying this character", because /api/bots/start hands over the CALLER's held
+// session and the caller was somebody else. Both sentences read like a server
+// rule rather than a bug, which is exactly why a regression here would sit
+// unnoticed.
+test("the squad start speaks as the pilot it is starting, either way", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./PilotHangar.svelte", import.meta.url), "utf8");
+  const start = source.match(/startCompanion: async \(characterID, setup\) => \{[\s\S]*?\n {10}\}/);
+  assert.ok(start, "the squad start's startCompanion is gone");
+  const body = start[0];
+  // Signed in HERE: that session's own options, because the start hands that
+  // session's hull over. There is no correct call with no options at all.
+  assert.match(body, /const held = optionsFor\(characterID\)/);
+  assert.match(body, /startServerCompanion\(characterID, setup, grant, held\)/);
+  assert.doesNotMatch(body, /startServerCompanion\(characterID, setup, grant\)/);
+  // NOT signed in here: sign in as that pilot's own account for the call.
+  assert.match(body, /startCompanionFor\(\s*accountNameFor\(characterID\)/);
+});
+
+test("App hands the hangar the roster's tokens, not the tab's", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
+  // `[\s\S]*?` rather than `[^>]*`: the tag's own props hold arrow functions.
+  const mount = source.match(/<PilotHangar[\s\S]*?\/>/);
+  assert.ok(mount, "App no longer mounts the hangar");
+  assert.match(mount[0], /optionsFor=/, "the hangar is mounted without per-pilot tokens");
+  assert.match(mount[0], /onHandedOver=/, "the tab would not let go of a handed-over hull");
+});

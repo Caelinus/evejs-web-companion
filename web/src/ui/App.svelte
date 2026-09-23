@@ -26,7 +26,7 @@
   } from "../app/persistedSessions.ts";
   import { setSessionToken, clearSessionToken } from "../app/sessionToken.ts";
   import { holdsTheShip } from "../nav/botRegistry.ts";
-  import { getHealth } from "../app/api.ts";
+  import { getHealth, type ApiOptions } from "../app/api.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { healthPollIntervalMs, resolveServerStatus } from "../app/serverStatus.ts";
   import type { LiveStreamStatus } from "../store/types.ts";
@@ -258,14 +258,49 @@
   }
 
   /**
+   * The session flying one character, or undefined when no slot here holds it.
+   * The roster lives here, so every "which pilot is that" lookup resolves here.
+   */
+  function sessionFor(characterID: number): Session | undefined {
+    return sessions.find((s) => s.store.station.get().online?.characterID === characterID);
+  }
+
+  /**
    * Show one pilot's cockpit and leave the hangar. Reached from the launch
    * dialog's "go to first pilot" and from clicking a pilot that is already in
    * the client.
    */
   function goToPilot(characterID: number): void {
-    const match = sessions.find((s) => s.store.station.get().online?.characterID === characterID);
+    const match = sessionFor(characterID);
     if (match) activeId = match.id;
     hangarOpen = false;
+  }
+
+  /**
+   * The token a call ABOUT one pilot must ride, for the screens that act on
+   * pilots other than the active one (the hangar's squad start). NULL when no
+   * session here is flying that pilot — the caller then has to find another way
+   * to speak as it, and must not fall back to whatever this tab is.
+   *
+   * ⚠ THE PILOT'S OWN SESSION, NOT THE TAB'S. Under R107 every session
+   * authenticates as itself; a call made with no options rides the per-tab
+   * cookie, which names one arbitrary pilot. `/api/bots/start` checks the
+   * character against the CALLER's account and hands over the CALLER's held
+   * session, so the wrong token turns a six-pilot squad start into five
+   * "Character does not belong to the supplied account" refusals and one
+   * "A web session is flying this character".
+   */
+  function requestOptionsFor(characterID: number): ApiOptions | null {
+    return sessionFor(characterID)?.flow.requestOptions() ?? null;
+  }
+
+  /**
+   * Let go of a hull the bot host has taken, in this tab's own UI. The server
+   * already released it as part of the start; this is the tab catching up, and
+   * a failure here does not unmake the bot.
+   */
+  async function releaseHandedOver(characterID: number): Promise<void> {
+    await sessionFor(characterID)?.flow.releaseSession();
   }
 
   // The characters already live in this tab, so the "Add character" picker can
@@ -643,6 +678,8 @@
       onLaunch={bringOnline}
       onShowPilot={goToPilot}
       onClose={active ? () => (hangarOpen = false) : null}
+      optionsFor={requestOptionsFor}
+      onHandedOver={releaseHandedOver}
     />
   </ErrorBoundary>
 {/if}

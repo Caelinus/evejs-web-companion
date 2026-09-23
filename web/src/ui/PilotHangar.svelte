@@ -88,6 +88,7 @@
     listActiveServerBots,
     startServerCompanion,
     type ActiveServerBot,
+    type ApiOptions,
   } from "../app/api.ts";
   import {
     squadStartSummary,
@@ -102,6 +103,7 @@
     COMPANION_GRANT_SCRIPT_REV,
   } from "../bots/companionRunPolicy.ts";
   import { stopServerBotFor } from "../app/stopBotFor.ts";
+  import { startCompanionFor } from "../app/startCompanionFor.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
 
@@ -110,9 +112,39 @@
     onLaunch,
     onShowPilot,
     onClose = null,
+    optionsFor = () => null,
+    onHandedOver = async () => {},
   }: {
     /** Character IDs already in the client, from App's live session list. */
     onlineIDs?: Set<number>;
+    /**
+     * The token a call about THIS pilot must ride (R107 multibox), or NULL when
+     * no session in this tab is flying it.
+     *
+     * ⚠ WITHOUT IT A SQUAD START SPEAKS FOR ONE ACCOUNT AND REFUSES THE REST.
+     * Every pilot in this tab has its OWN session token; a call made with no
+     * options falls back to the per-tab cookie, which names exactly one of them.
+     * A squad whose pilots sit on different accounts then reaches the gateway as
+     * the wrong owner and comes back "Character does not belong to the supplied
+     * account" for every member but one — and that one is refused too, with
+     * "A web session is flying this character", because `/api/bots/start`
+     * hands over the CALLER's held session and the caller was somebody else.
+     *
+     * ⚠ NULL IS A DIFFERENT ANSWER FROM AN EMPTY OPTIONS OBJECT, which is why
+     * this returns one. A pilot with no session here has no hull to hand over
+     * and no token to borrow, so the start signs in as that pilot's own account
+     * for the length of the call (app/startCompanionFor.ts) instead of riding
+     * whatever the tab happens to be.
+     */
+    optionsFor?: (characterID: number) => ApiOptions | null;
+    /**
+     * Catch this tab's own UI up after the host took a hull a session here held.
+     *
+     * ⚠ NOT THE HANDOVER — `/api/bots/start` already did that, atomically, as
+     * part of the start. A failure here is not a failed start: the bot has the
+     * hull either way, and the tab's next read notices.
+     */
+    onHandedOver?: (characterID: number) => Promise<void>;
     /**
      * Bring these pilots online, reporting each one as it lands. App owns the
      * session roster, so it owns this; the hangar only says who.
@@ -348,6 +380,20 @@
       }));
   }
 
+  /**
+   * The account to speak as for a pilot with no session in this tab.
+   *
+   * Read from the remembered roster, which is where the launch path and the
+   * Stop control both get it (`targetsFor`, `stopServerBotFor`) — a pilot this
+   * screen can show is a pilot this browser has signed in at least once, so the
+   * name is there. An empty string is the honest miss: the server then refuses
+   * the login and that pilot's row carries the refusal, which beats guessing an
+   * account and starting a bot on the wrong one.
+   */
+  function accountNameFor(characterID: number): string {
+    return known.find((row) => row.characterID === characterID)?.accountName ?? "";
+  }
+
   // --- bringing a squad's companions online, on the SERVER -----------------
   //
   // ⚠ THIS IS NOT `launch`, AND THE DIFFERENCE MATTERS TO A PLAYER. `launch`
@@ -398,7 +444,23 @@
               analyzeCompanionRunPolicy(setup),
               DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
             );
-            await startServerCompanion(characterID, setup, grant);
+            // ⚠ THAT PILOT'S OWN IDENTITY, NOT THE TAB'S — see `optionsFor`.
+            // Signed in here: its own session must be the caller, because the
+            // start hands that session's hull over. Not signed in here: sign in
+            // as its account for the length of the call.
+            const held = optionsFor(characterID);
+            if (held === null) {
+              await startCompanionFor(accountNameFor(characterID), characterID, setup, grant);
+              return;
+            }
+            // START FIRST, then sync: a refused start must change nothing, so
+            // the tab only lets go of a hull the host has actually taken.
+            await startServerCompanion(characterID, setup, grant, held);
+            try {
+              await onHandedOver(characterID);
+            } catch {
+              // The bot has the hull either way; the tab's next read notices.
+            }
           },
         },
         targets,
