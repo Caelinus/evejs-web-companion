@@ -184,6 +184,14 @@ test("⚠ each pilot's outcome is said about that pilot", () => {
   );
 });
 
+test("taking a pilot off the list is called Remove, never 'Take off'", () => {
+  // In a game about ships "Take off" reads as launching the ship. This button
+  // only edits the list: nothing is signed in, selected or undocked.
+  const text = visibleText(renderSeeded());
+  assert.match(text, /\bRemove\b/);
+  assert.doesNotMatch(text, /take off/i);
+});
+
 test("the add list offers pilots not yet on it, and a squad with someone new", () => {
   const body = renderSeeded();
   assert.match(body, /<option value="pilot:90000004">Eve Spare<\/option>/);

@@ -100,7 +100,8 @@
     choice = "";
   }
 
-  function takeOff(characterID: number): void {
+  /** Off the PI list only: nothing is signed in, selected or undocked. */
+  function removePilot(characterID: number): void {
     keep(removePiMember(roster, characterID));
     const next = new Map(attempts);
     next.delete(characterID);
@@ -214,9 +215,9 @@
                   <button
                     type="button"
                     disabled={pilot.busy}
-                    onclick={() => takeOff(pilot.characterID)}
+                    onclick={() => removePilot(pilot.characterID)}
                   >
-                    Take off
+                    Remove
                   </button>
                 </td>
               </tr>
