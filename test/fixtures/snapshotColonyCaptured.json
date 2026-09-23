@@ -1,0 +1,426 @@
+{
+  "provenance": "One colony exactly as GET /_evejs-web/v1/snapshot returned it inside planetRuntimeState.coloniesByKey, captured against the live gateway on 2026-09-23 with the owning pilot logged out and nothing selected. ownerID, charID, planetID, solarSystemID and every pin id are substituted (90000001 is ESI's documented example character id); every other field, value and key order is as captured.",
+  "colony": {
+    "planetID": 40000002,
+    "ownerID": 90000001,
+    "solarSystemID": 30000001,
+    "planetTypeID": 2016,
+    "planetRadius": 5230000,
+    "typeID": 2016,
+    "level": 5,
+    "commandCenterLevel": 5,
+    "networkRevision": 5,
+    "currentSimTime": "134345346293950000",
+    "createdAt": "2026-09-16T09:23:48.759Z",
+    "updatedAt": "2026-09-22T07:10:29.408Z",
+    "pins": [
+      {
+        "id": 900000000000,
+        "pinID": 900000000000,
+        "ownerID": 90000001,
+        "typeID": 2848,
+        "latitude": 1.0112871762095936,
+        "longitude": 3.594733877951987,
+        "lastRunTime": "134345346293950000",
+        "contents": {},
+        "state": 1,
+        "cycleTime": 72000000000,
+        "programType": 2268,
+        "qtyPerCycle": 4591,
+        "expiryTime": "134349666293950000",
+        "installTime": "134345346293950000",
+        "headRadius": 0.02444472432818074,
+        "heads": [
+          [
+            0,
+            0.8826068433011529,
+            3.634901888875346
+          ],
+          [
+            1,
+            0.9169055308488716,
+            3.5838309516993796
+          ],
+          [
+            2,
+            0.9825260502739046,
+            3.6297979933013615
+          ],
+          [
+            3,
+            0.9326926297279469,
+            3.5172124549432153
+          ],
+          [
+            5,
+            0.9330374153843356,
+            3.647317227768279
+          ],
+          [
+            6,
+            0.8678371076495662,
+            3.5723829886266865
+          ],
+          [
+            7,
+            0.9675519859051053,
+            3.571213384842484
+          ]
+        ]
+      },
+      {
+        "id": 900000000001,
+        "pinID": 900000000001,
+        "ownerID": 90000001,
+        "typeID": 2848,
+        "latitude": 1.0233528369001528,
+        "longitude": 3.5935232709142726,
+        "lastRunTime": "134345346293950000",
+        "contents": {},
+        "state": 1,
+        "cycleTime": 72000000000,
+        "programType": 2268,
+        "qtyPerCycle": 4160,
+        "expiryTime": "134349666293950000",
+        "installTime": "134345346293950000",
+        "headRadius": 0.024443066634958377,
+        "heads": [
+          [
+            0,
+            0.9844762064447303,
+            3.5089184479498345
+          ],
+          [
+            1,
+            1.0668753555860309,
+            3.5721685955096834
+          ],
+          [
+            2,
+            1.0569946703983457,
+            3.5159266749617517
+          ],
+          [
+            3,
+            1.1061829768040048,
+            3.5305637611095038
+          ],
+          [
+            5,
+            1.0168175049843546,
+            3.5550109547162374
+          ],
+          [
+            6,
+            1.0316557963108817,
+            3.6137638646676606
+          ],
+          [
+            7,
+            1.02486328027873,
+            3.467808496128894
+          ]
+        ]
+      },
+      {
+        "id": 900000000002,
+        "pinID": 900000000002,
+        "ownerID": 90000001,
+        "typeID": 2541,
+        "latitude": 1.0185134743015847,
+        "longitude": 3.606557059651108,
+        "lastRunTime": "134340244039500000",
+        "contents": {},
+        "state": 0
+      },
+      {
+        "id": 900000000003,
+        "pinID": 900000000003,
+        "ownerID": 90000001,
+        "typeID": 2473,
+        "latitude": 1.0065232308229788,
+        "longitude": 3.6078241978251313,
+        "lastRunTime": "134344603875360000",
+        "contents": {},
+        "state": 0,
+        "schematicID": 121,
+        "hasReceivedInputs": false,
+        "receivedInputsLastCycle": false
+      },
+      {
+        "id": 900000000004,
+        "pinID": 900000000004,
+        "ownerID": 90000001,
+        "typeID": 2473,
+        "latitude": 1.0305617122305897,
+        "longitude": 3.6052512595478263,
+        "lastRunTime": "134344585875360000",
+        "contents": {
+          "2268": 2635
+        },
+        "state": 0,
+        "schematicID": 121,
+        "hasReceivedInputs": false,
+        "receivedInputsLastCycle": true
+      },
+      {
+        "id": 900000000005,
+        "pinID": 900000000005,
+        "ownerID": 90000001,
+        "typeID": 2473,
+        "latitude": 1.025958508951529,
+        "longitude": 3.6182028908648656,
+        "lastRunTime": "134344586442600000",
+        "contents": {},
+        "state": 0,
+        "schematicID": 121,
+        "hasReceivedInputs": false,
+        "receivedInputsLastCycle": false
+      },
+      {
+        "id": 900000000006,
+        "pinID": 900000000006,
+        "ownerID": 90000001,
+        "typeID": 2473,
+        "latitude": 1.01374045815903,
+        "longitude": 3.619522750765516,
+        "lastRunTime": "134344585875360000",
+        "contents": {},
+        "state": 0,
+        "schematicID": 121,
+        "hasReceivedInputs": false,
+        "receivedInputsLastCycle": false
+      },
+      {
+        "id": 900000000007,
+        "pinID": 900000000007,
+        "ownerID": 90000001,
+        "typeID": 2544,
+        "latitude": 0.9992427245012194,
+        "longitude": 3.595448682838875,
+        "lastRunTime": "134340244039500000",
+        "contents": {
+          "3645": 11600
+        },
+        "state": 0,
+        "lastLaunchTime": "0"
+      },
+      {
+        "id": 900000000008,
+        "pinID": 900000000008,
+        "ownerID": 90000001,
+        "typeID": 2524,
+        "latitude": 1.0487206361525208,
+        "longitude": 3.8391300174471534,
+        "lastRunTime": "134340242287590000",
+        "contents": {},
+        "state": 0,
+        "lastLaunchTime": "0"
+      }
+    ],
+    "links": [
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000000,
+        "endpoint2": 900000000002,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000001,
+        "endpoint2": 900000000002,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000002,
+        "endpoint2": 900000000004,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000003,
+        "endpoint2": 900000000006,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000003,
+        "endpoint2": 900000000007,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000004,
+        "endpoint2": 900000000005,
+        "level": 0
+      },
+      {
+        "typeID": 2280,
+        "endpoint1": 900000000005,
+        "endpoint2": 900000000006,
+        "level": 0
+      }
+    ],
+    "routes": [
+      {
+        "routeID": 1,
+        "charID": 90000001,
+        "path": [
+          900000000003,
+          900000000007
+        ],
+        "commodityTypeID": 3645,
+        "commodityQuantity": 20
+      },
+      {
+        "routeID": 2,
+        "charID": 90000001,
+        "path": [
+          900000000006,
+          900000000003,
+          900000000007
+        ],
+        "commodityTypeID": 3645,
+        "commodityQuantity": 20
+      },
+      {
+        "routeID": 3,
+        "charID": 90000001,
+        "path": [
+          900000000005,
+          900000000006,
+          900000000003,
+          900000000007
+        ],
+        "commodityTypeID": 3645,
+        "commodityQuantity": 20
+      },
+      {
+        "routeID": 4,
+        "charID": 90000001,
+        "path": [
+          900000000004,
+          900000000005,
+          900000000006,
+          900000000003,
+          900000000007
+        ],
+        "commodityTypeID": 3645,
+        "commodityQuantity": 20
+      },
+      {
+        "routeID": 5,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 6,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 7,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005,
+          900000000006
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 8,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005,
+          900000000006,
+          900000000003
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 9,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 10,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 11,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005,
+          900000000006
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 12,
+        "charID": 90000001,
+        "path": [
+          900000000002,
+          900000000004,
+          900000000005,
+          900000000006,
+          900000000003
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 3000
+      },
+      {
+        "routeID": 100,
+        "charID": 90000001,
+        "path": [
+          900000000000,
+          900000000002
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 66104
+      },
+      {
+        "routeID": 101,
+        "charID": 90000001,
+        "path": [
+          900000000001,
+          900000000002
+        ],
+        "commodityTypeID": 2268,
+        "commodityQuantity": 59904
+      }
+    ]
+  }
+}

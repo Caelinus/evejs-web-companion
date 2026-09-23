@@ -18155,14 +18155,20 @@ async function answerWithSkillSheet(res, account, characterID, extra = {}) {
  */
 const ROSTER_TRAINING_MAX_IDS = 12;
 
-app.get("/api/roster/training", requireAuth, async (req, res, next) => {
+/** A roster route's `characterIDs`: comma-separated, junk and repeats dropped. */
+function rosterCharacterIDs(value) {
   const characterIDs = [];
-  for (const part of String(req.query.characterIDs || "").split(",")) {
+  for (const part of String(value || "").split(",")) {
     const characterID = Number(part.trim()) || 0;
     if (characterID > 0 && !characterIDs.includes(characterID)) {
       characterIDs.push(characterID);
     }
   }
+  return characterIDs;
+}
+
+app.get("/api/roster/training", requireAuth, async (req, res, next) => {
+  const characterIDs = rosterCharacterIDs(req.query.characterIDs);
   if (characterIDs.length === 0) {
     res.json({ ok: true, training: [] });
     return;
@@ -18554,6 +18560,34 @@ function projectColony(staticDataSource, colony) {
 }
 
 /**
+ * The colony table a gateway snapshot carries, projected and ordered.
+ *
+ * ⚠ THE FACT, NOT A GUESS (the worldHasNoContracts rule). "The snapshot carried
+ * a colony table and none of it is yours" is a different statement from "this
+ * gateway did not report colonies at all", and only the first one justifies
+ * telling a player they have no colonies. `coloniesReadable` carries which one
+ * happened.
+ */
+function coloniesFromSnapshot(snapshot) {
+  const runtime = snapshot && snapshot.planetRuntimeState;
+  const coloniesReadable = Boolean(
+    runtime && typeof runtime === "object" && !Array.isArray(runtime)
+    && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
+    && !Array.isArray(runtime.coloniesByKey),
+  );
+  const colonies = coloniesReadable
+    ? Object.values(runtime.coloniesByKey)
+      .map((colony) => projectColony(staticData, colony))
+      .filter((colony) => colony.planetID > 0)
+      .sort((left, right) => (
+        String(left.planetName || "").localeCompare(String(right.planetName || ""))
+        || left.planetID - right.planetID
+      ))
+    : [];
+  return { coloniesReadable, colonies };
+}
+
+/**
  * GET /api/bridge/planets — every colony this character owns.
  *
  * ⚠ THE FACT, NOT A GUESS (the worldHasNoContracts rule). "The snapshot carried
@@ -18577,27 +18611,87 @@ app.get("/api/bridge/planets", requireAuth, async (req, res, next) => {
       });
       return;
     }
-    const runtime = snapshot.planetRuntimeState;
-    const coloniesReadable = Boolean(
-      runtime && typeof runtime === "object" && !Array.isArray(runtime)
-      && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
-      && !Array.isArray(runtime.coloniesByKey),
-    );
-    const colonies = coloniesReadable
-      ? Object.values(runtime.coloniesByKey)
-        .map((colony) => projectColony(staticData, colony))
-        .filter((colony) => colony.planetID > 0)
-        .sort((left, right) => (
-          String(left.planetName || "").localeCompare(String(right.planetName || ""))
-          || left.planetID - right.planetID
-        ))
-      : [];
+    const { coloniesReadable, colonies } = coloniesFromSnapshot(snapshot);
     res.json({
       ok: true,
       characterID: held.characterID,
       serverNowMs: Date.now(),
       coloniesReadable,
       colonies,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/roster/planets — the PI Manager's read (R108 slice 3): the colonies
+ * of every pilot asked about, with NONE of them selected.
+ *
+ * ⚠ NO HELD SESSION, AND THAT WAS PROVED, NOT ASSUMED. /api/bridge/planets
+ * above takes its character from the tab's selection because it was written
+ * that way; the gateway underneath does not need one. GET /snapshot is gated by
+ * validateOwnedCharacter alone, and its colony table is filtered by ownerID out
+ * of persisted state — no session map, no online flag. Probed live on
+ * 2026-09-23 against a logged-out pilot that owned colonies: they came back,
+ * owner-filtered, while a pilot on the same account with none came back with a
+ * table that was present and empty. Selecting a character is for ACTING on a
+ * colony, and that goes through the bot host, never through here.
+ *
+ * The shape is /api/roster/training's, deliberately: `characterIDs` from the
+ * browser, each asked with the CALLER's accountID so the gateway refuses what
+ * the account does not own, and a refused or failed pilot LEFT OUT — the board
+ * keeps the reading it had rather than wiping a farmer's colonies on one bad
+ * read. Present-with-no-colonies is the positive statement "has not built".
+ *
+ * EVERY PILOT CARRIES ITS OWN READ INSTANT. `readAtMs` is stamped when THAT
+ * pilot's read landed, not once for the answer: several pilots read in
+ * parallel are still several moments, and a board that merged them under one
+ * stamp would present them as a snapshot they never were. The envelope's
+ * `serverNowMs` is a different thing — the clock sample taken as the answer
+ * leaves, which is what the browser corrects its own clock against. Folding
+ * the two together would skew that correction by however long the slowest
+ * read took.
+ */
+const ROSTER_PLANETS_MAX_IDS = 12;
+
+app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
+  const characterIDs = rosterCharacterIDs(req.query.characterIDs);
+  if (characterIDs.length === 0) {
+    res.json({ ok: true, pilots: [] });
+    return;
+  }
+  if (characterIDs.length > ROSTER_PLANETS_MAX_IDS) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_CHARACTERS",
+      message: `Ask about at most ${ROSTER_PLANETS_MAX_IDS} pilots at a time.`,
+    });
+    return;
+  }
+  try {
+    const pilots = await Promise.all(
+      characterIDs.map(async (characterID) => {
+        let snapshot = null;
+        try {
+          snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
+        } catch (error) {
+          // Not ours, not there, or the gateway stumbled. Say nothing about this
+          // pilot; the board keeps the reading it had.
+          void error;
+          return null;
+        }
+        const readAtMs = Date.now();
+        if (!snapshot) {
+          return null;
+        }
+        return { characterID, readAtMs, ...coloniesFromSnapshot(snapshot) };
+      }),
+    );
+    res.json({
+      ok: true,
+      serverNowMs: Date.now(),
+      pilots: pilots.filter((pilot) => pilot !== null),
     });
   } catch (error) {
     next(error);
