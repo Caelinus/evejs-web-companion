@@ -192,9 +192,24 @@ export function visiblePilots(
  */
 export function groupByAccount(
   visible: readonly HangarPilot[],
-  { padSlots }: { padSlots: boolean },
+  {
+    padSlots,
+    accounts = [],
+  }: {
+    padSlots: boolean;
+    /**
+     * Every known account, pilots or not (app/knownCharacters.ts). One with no
+     * pilot on screen still gets its section on the unfiltered view — it is the
+     * only place its "+ Add character" slots can live. Under a filter it is
+     * left out for the same reason the slots are.
+     */
+    accounts?: readonly string[];
+  },
 ): HangarAccount[] {
   const byAccount = new Map<string, HangarPilot[]>();
+  if (padSlots) {
+    for (const name of accounts) byAccount.set(name, []);
+  }
   for (const pilot of visible) {
     const bucket = byAccount.get(pilot.accountName);
     if (bucket) bucket.push(pilot);

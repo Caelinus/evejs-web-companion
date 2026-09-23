@@ -37,6 +37,7 @@
   import HangarLaunchProgress from "./HangarLaunchProgress.svelte";
   import {
     loadKnownCharacters,
+    loadKnownAccounts,
     forgetKnownCharacter,
     forgetKnownAccount,
     type KnownCharacter,
@@ -137,6 +138,12 @@
   // --- persisted state, read once and written back on every edit -------------
 
   let known = $state<KnownCharacter[]>(loadKnownCharacters());
+  // Re-read whenever `known` is: every path that records or forgets an account
+  // (sign-in, refresh, remove) already reassigns `known` straight after.
+  const knownAccounts = $derived.by(() => {
+    void known;
+    return loadKnownAccounts();
+  });
   let prefs = $state<HangarPrefs>(loadHangarPrefs());
 
   function commit(next: HangarPrefs): void {
@@ -197,7 +204,9 @@
   const pilots = $derived(toHangarPilots(known, prefs, onlineIDs, now));
   const visible = $derived(visiblePilots(pilots, scope, query));
   const padSlots = $derived(scope.kind === "all" && query.trim().length === 0);
-  const accounts = $derived(groupByAccount(visible, { padSlots }));
+  const accounts = $derived(
+    groupByAccount(visible, { padSlots, accounts: knownAccounts }),
+  );
   const knownIDs = $derived(new Set(known.map((row) => row.characterID)));
   const selectedPilots = $derived(pilots.filter((p) => selected.has(p.characterID)));
   const onlineCount = $derived(pilots.filter((p) => p.online).length);
@@ -225,7 +234,9 @@
   $effect(() => {
     if (refreshStarted) return;
     refreshStarted = true;
-    const accountNames = [...new Set(loadKnownCharacters().map((row) => row.accountName))];
+    // Accounts with no pilots are refreshed too: a pilot made on one elsewhere
+    // shows up here on the next open.
+    const accountNames = loadKnownAccounts();
     if (accountNames.length === 0) {
       // First run: nothing to refresh, and nothing to look at either — open the
       // login straight away rather than leaving the player on an empty page
@@ -577,7 +588,8 @@
     loginOpen = false;
     known = loadKnownCharacters();
     // A brand-new account arrives with no characters; say nothing about it here,
-    // the empty slots under its header already do.
+    // the empty slots under its header already do (its header comes from the
+    // accounts list, app/knownCharacters.ts, not from its pilots).
     void accountName;
   }
 </script>
@@ -806,14 +818,14 @@
           >{collapsed ? "▶" : "▼"}</button>
           <span class="hangar-account-name">{account.name}</span>
           <span class="hangar-account-count">{pilotCountLabel(account.pilots.length)}</span>
-          {#if !manage}
+          {#if !manage && account.pilots.length > 0}
             <button
               type="button"
               class="hangar-launch is-account"
               title={`Bring every pilot in ${account.name} online`}
               onclick={() => launch(account.pilots)}
             >▶ ALL</button>
-          {:else}
+          {:else if manage}
             <button
               type="button"
               class="hangar-remove"
@@ -884,7 +896,7 @@
     {/each}
   </main>
 
-  {#if pilots.length === 0}
+  {#if accounts.length === 0 && pilots.length === 0}
     <div class="hangar-empty-screen">
       <div class="hangar-empty-title">No pilots yet</div>
       <p class="hangar-empty-copy">
