@@ -82,13 +82,90 @@ test("a run that spans a rotation keeps the lines that came before it", () => {
   assert.deepEqual(store.read(CHARACTER, "current").map((l) => l.kind), ["start"]);
 });
 
-test("a runaway run is capped, and the log SAYS it was cut off", () => {
+// ── The rolling window ──────────────────────────────────────────────────────
+// The cap this replaced kept a run's FIRST lines and stopped writing. What an
+// operator asks for is what a pilot did just before it stopped, so the window
+// drops the oldest instead — and says how many.
+
+function decides(count, from = 0) {
+  return Array.from({ length: count }, (_, i) => line("decide", { says: `step ${from + i}` }));
+}
+
+test("a runaway run keeps its NEWEST lines, and the log says what it dropped", () => {
   const { store } = tempStore({ maxLines: 3 });
-  store.append(CHARACTER, [line("start"), line("decide"), line("decide"), line("decide"), line("decide")]);
+  store.append(CHARACTER, [line("start"), ...decides(10)]);
 
   const lines = store.read(CHARACTER, "current");
-  assert.equal(lines.length, 4, "three lines plus the notice");
-  assert.equal(lines[3].kind, "truncated", "a log that stops recording must not do it silently");
+  assert.equal(lines.length, 3, "the ceiling counts the notice");
+  assert.equal(lines[0].kind, "trimmed", "a log that drops a beginning must not do it silently");
+  assert.equal(lines[0].dropped, 9, "and must say how much of the run is gone");
+  assert.deepEqual(
+    lines.slice(1).map((l) => l.says),
+    ["step 8", "step 9"],
+    "the END of the run is what survives — the whole point of the window",
+  );
+});
+
+test("the newest lines win even before the file is compacted", () => {
+  // Under the compaction threshold, so the file still holds every line and the
+  // capping is `read`'s alone. Same answer either way.
+  const { dir, store } = tempStore({ maxLines: 3 });
+  store.append(CHARACTER, [line("start"), ...decides(4)]);
+
+  assert.equal(
+    fs.readFileSync(path.join(dir, `${CHARACTER}.jsonl`), "utf8").trim().split("\n").length,
+    5,
+    "nothing has been rewritten yet",
+  );
+  const lines = store.read(CHARACTER, "current");
+  assert.equal(lines.length, 3);
+  assert.equal(lines[0].dropped, 3);
+  assert.deepEqual(lines.slice(1).map((l) => l.says), ["step 2", "step 3"]);
+});
+
+test("a run that never ends does not grow a file that never ends", () => {
+  const { dir, store } = tempStore({ maxLines: 4 });
+  store.append(CHARACTER, [line("start")]);
+  for (let batch = 0; batch < 40; batch++) {
+    store.append(CHARACTER, decides(5, batch * 5));
+  }
+
+  const onDisk = fs.readFileSync(path.join(dir, `${CHARACTER}.jsonl`), "utf8").trim().split("\n");
+  assert.ok(onDisk.length <= 8, `bounded by twice the ceiling, got ${onDisk.length}`);
+  const lines = store.read(CHARACTER, "current");
+  assert.equal(lines[0].kind, "trimmed");
+  assert.equal(
+    lines[0].dropped + (lines.length - 1),
+    201,
+    "every line of the run is either kept or counted as dropped",
+  );
+  assert.equal(lines[lines.length - 1].says, "step 199", "the last thing it did is still there");
+});
+
+test("a fresh store picks up a run already on disk rather than losing count", () => {
+  // A BFF restart mid-run: the new process must not start counting from zero,
+  // or the ceiling is never reached again and the file grows forever.
+  const { dir, store } = tempStore({ maxLines: 3 });
+  store.append(CHARACTER, [line("start"), ...decides(4)]);
+
+  const resumed = createBotLogStore({ dir, maxLines: 3 });
+  resumed.append(CHARACTER, decides(2, 4));
+
+  const onDisk = fs.readFileSync(path.join(dir, `${CHARACTER}.jsonl`), "utf8").trim().split("\n");
+  assert.equal(onDisk.length, 3, "the resumed store compacted rather than appending forever");
+  const lines = resumed.read(CHARACTER, "current");
+  assert.equal(lines[0].dropped, 5);
+  assert.deepEqual(lines.slice(1).map((l) => l.says), ["step 4", "step 5"]);
+});
+
+test("a new run starts from a clean window — the notice does not carry over", () => {
+  const { store } = tempStore({ maxLines: 3 });
+  store.append(CHARACTER, [line("start", { script: "first" }), ...decides(10)]);
+  store.append(CHARACTER, [line("start", { script: "second" }), line("issue", { says: "undock" })]);
+
+  const lines = store.read(CHARACTER, "current");
+  assert.deepEqual(lines.map((l) => l.kind), ["start", "issue"], "nothing has been dropped yet");
+  assert.equal(store.read(CHARACTER, "previous")[0].kind, "trimmed", "the trimmed run is still readable");
 });
 
 test("a store that cannot write drops lines and counts them — it never throws", () => {
