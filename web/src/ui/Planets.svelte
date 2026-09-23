@@ -31,7 +31,7 @@
   import {
     attentionByColony,
     attentionSummaryWords,
-    colonyAttentionWords,
+    colonyLineWords,
     pinFill,
   } from "../bridge/colonyAttention.ts";
   import {
@@ -41,7 +41,6 @@
     programHasExpired,
     programProgress,
     serverNow,
-    summarizeColony,
   } from "../bridge/planets.ts";
   import { factoryRecipeWords } from "../bridge/piFactoryWords.ts";
   import { isSessionLost } from "../app/flow.ts";
@@ -143,33 +142,9 @@
     return `${used} of ${capacity} m3 - ${Math.min(100, Math.floor(fill * 100))}% full`;
   }
 
-  /**
-   * The one-line state of a colony in the list.
-   *
-   * What NEEDS the player wins the line when there is any: the old sentence
-   * below can only describe extractors, so a colony with a full launchpad and
-   * a healthy extractor used to read as simply "Extracting". When nothing is
-   * waiting, the old sentence is still the better one and is kept word for
-   * word (colonyAttentionWords answers null in exactly that case).
-   */
+  /** The one-line state of a colony in the list (shared with the PI Manager). */
   function colonyWords(colony: Colony): string {
-    const waiting = colonyAttentionWords(findingsByPlanetID.get(colony.planetID) ?? []);
-    if (waiting !== null) {
-      return waiting;
-    }
-    const summary = summarizeColony(colony, nowMs);
-    if (summary.expiredProgramCount > 0) {
-      return summary.expiredProgramCount === 1
-        ? "1 extractor has finished its program"
-        : `${summary.expiredProgramCount} extractors have finished their programs`;
-    }
-    if (summary.nextExpiryMs !== null) {
-      return `Extracting — next program ends in ${formatDuration(summary.nextExpiryMs - nowMs)}`;
-    }
-    if (summary.extractorCount === 0) {
-      return "No extractors here yet";
-    }
-    return "No programs running";
+    return colonyLineWords(colony, findingsByPlanetID.get(colony.planetID) ?? [], nowMs);
   }
 
   function toggle(colony: Colony): void {

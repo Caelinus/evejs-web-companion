@@ -22,6 +22,8 @@ import {
   attentionSummaryWords,
   colonyAttentionWords,
   colonyFindings,
+  colonyLineWords,
+  bySeverityThenTime,
   pinFill,
 } from "./colonyAttention.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
@@ -332,5 +334,47 @@ test("quiet colonies are left out of the summary, and the loudest planet leads",
       planetName: "Tanoo V",
     })], NOW)),
     "2 planets need you now.",
+  );
+});
+
+// The one line a colony gets in a list. It lived inside Planets.svelte, where no
+// test could reach it; the PI Manager's board prints the same line for the same
+// colony, so it moved here and both read it from one place.
+test("a colony's one line: what needs you wins, else the shipped sentences", () => {
+  const line = (pins: readonly ColonyPin[]) => {
+    const subject = colony(pins);
+    return colonyLineWords(subject, colonyFindings(subject, NOW), NOW);
+  };
+
+  // Something waiting on the player takes the line.
+  assert.equal(line([extractor(2, NOW - HOUR)]), "1 extractor has finished its program");
+  assert.equal(
+    line([pin({ pinID: 4, kind: "factory", receivedInputsLastCycle: false })]),
+    "1 factory was fed nothing last cycle",
+  );
+
+  // Quiet: the sentences Planets has always printed, word for word.
+  assert.equal(
+    line([extractor(2, NOW + 49 * HOUR), extractor(3, NOW + 50 * HOUR)]),
+    "Extracting — next program ends in 2d 1h",
+  );
+  assert.equal(line([pin({ pinID: 6, kind: "storage" })]), "No extractors here yet");
+  // A control unit with no program is a finding ("idle") and takes the line.
+  // The last sentence is reached only by an extractor structure with no control
+  // unit judging it at all.
+  assert.equal(line([extractor(2, null)]), "1 extractor has no program");
+  assert.equal(line([pin({ pinID: 7, kind: "extractor" })]), "No programs running");
+});
+
+test("a comparator shared with the board orders findings worst first", () => {
+  const findings = colonyFindings(colony([
+    extractor(3, NOW + 2 * HOUR),
+    pin({ pinID: 4, kind: "factory", receivedInputsLastCycle: false }),
+    extractor(2, NOW - HOUR),
+  ]), NOW);
+  const shuffled = [...findings].reverse().sort(bySeverityThenTime);
+  assert.deepEqual(
+    shuffled.map((finding) => finding.kind),
+    ["extractor-expired", "factory-starved", "extractor-expiring"],
   );
 });

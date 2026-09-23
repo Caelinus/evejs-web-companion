@@ -27,6 +27,7 @@
 // the only judgement about time made here, and it is made on that clock.
 
 import type { Colony, ColonyPin } from "../store/types.ts";
+import { formatDuration, summarizeColony } from "./planets.ts";
 
 export type ColonyFindingKind =
   /** A program whose expiry has passed: this extractor has stopped. */
@@ -193,7 +194,11 @@ const KIND_ORDER: Readonly<Record<ColonyFindingKind, number>> = Object.freeze({
   "cc-holds-cargo": 5,
 });
 
-function bySeverityThenTime(left: ColonyFinding, right: ColonyFinding): number {
+/**
+ * Worst first. Exported so a board spanning several pilots orders their colonies
+ * by exactly the rule one colony's own list uses.
+ */
+export function bySeverityThenTime(left: ColonyFinding, right: ColonyFinding): number {
   if (left.urgency !== right.urgency) {
     return left.urgency === "now" ? -1 : 1;
   }
@@ -326,6 +331,43 @@ export function colonyAttentionWords(findings: readonly ColonyFinding[]): string
     default:
       return `${worst.words}${tail}`;
   }
+}
+
+/**
+ * The one-line state of a colony in a list.
+ *
+ * What NEEDS the player wins the line when there is any: the older sentences
+ * below can only describe extractors, so a colony with a full launchpad and a
+ * healthy extractor used to read as simply "Extracting". When nothing is
+ * waiting, those sentences are still the better ones and are kept word for
+ * word from Planets, which printed them first.
+ *
+ * ⚠ ONE PLACE FOR BOTH LISTS. The Planets panel and the PI Manager's board both
+ * print this line for the same colony; two copies would drift, and a player who
+ * sees one colony described two ways believes neither.
+ */
+export function colonyLineWords(
+  colony: Colony,
+  findings: readonly ColonyFinding[],
+  serverNowMs: number,
+): string {
+  const waiting = colonyAttentionWords(findings);
+  if (waiting !== null) {
+    return waiting;
+  }
+  const summary = summarizeColony(colony, serverNowMs);
+  if (summary.expiredProgramCount > 0) {
+    return summary.expiredProgramCount === 1
+      ? "1 extractor has finished its program"
+      : `${summary.expiredProgramCount} extractors have finished their programs`;
+  }
+  if (summary.nextExpiryMs !== null) {
+    return `Extracting — next program ends in ${formatDuration(summary.nextExpiryMs - serverNowMs)}`;
+  }
+  if (summary.extractorCount === 0) {
+    return "No extractors here yet";
+  }
+  return "No programs running";
 }
 
 /**

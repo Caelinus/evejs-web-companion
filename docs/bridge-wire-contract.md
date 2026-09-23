@@ -3733,6 +3733,8 @@ the gateway refused or failed on is **left out**, never answered empty.
 | --- | --- |
 | `web/src/bridge/planets.ts` | Decoder + pure arranging: `decodeColonyReport`, `summarizeColony`, `programProgress`, `programHasExpired`, `pooledContents`, `colonyPlaceWords`, `formatDuration`. Nothing simulates a colony. |
 | `web/src/bridge/piRoster.ts` | `decodeRosterColonies` for `/api/roster/planets` — each pilot through `decodeColonyReport`, its own `readAtMs` kept, the clock offset from the envelope — and `unansweredPilots`. |
+| `web/src/bridge/piBoard.ts` | `buildPiBoard`: the PI Manager's board — four outcomes per pilot, every colony worst first across pilots with its own read age, and the "read at different times" line. |
+| `web/src/app/piRosterPrefs.ts` / `piRosterRead.ts` | The PI roster (members + each pilot's last entry, decoded on the way out of storage) and its read: one throwaway sign-in per account, never a select. |
 | `web/src/bridge/colonyAttention.ts` | The monitor's judgement: `colonyFindings`, `attentionByColony`, `colonyAttentionWords`, `attentionSummaryWords`, `pinFill`. Raises a finding only from a fact the server stated — a null raises nothing, so a quiet colony is genuinely quiet. |
 | `web/src/store/types.ts` | `Colony`, `ColonyPin`, `ColonyLink`, `ColonyExtractionProgram`, `ColonyRoute`, `ColonyStoredItem`, `PlanetsState`. |
 | `web/src/store/clientStore.ts` | `planets` slice; `hasNoColonies` is set **only** from `coloniesReadable && colonies.length === 0`. |

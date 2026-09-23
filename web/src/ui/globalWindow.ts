@@ -3,7 +3,7 @@
 // Every other panel is a view of ONE character's store, so it is right that
 // switching pilots tears it down: App mounts a Workspace per active pilot under
 // a `{#key active.id}`, and the desktop, its windows and their saved layout all
-// live inside that. Two windows are the exception, and neither by preference:
+// live inside that. Three windows are the exception, and none by preference:
 //
 //   • THE BOT MANAGER. Its pilots region is a table of EVERY held session plus
 //     every character with a server bot and no session here — it is a view of
@@ -21,6 +21,10 @@
 //     about the whole squad. Tearing it down on a pilot switch would be worse
 //     here than for the Manager: the very act of checking on another pilot is
 //     what would destroy the view you were checking with.
+//
+//   • PLANETARY INDUSTRY (R108). Every assigned pilot's colonies on one board,
+//     read with no character selected. It is about all of them, and the read it
+//     is part-way through would be lost to a switch like the Manager's poll.
 //
 // So they are hoisted ABOVE that key, into App, onto their own layer over
 // whichever workspace is showing. This module is that layer's model: which tabs
@@ -56,7 +60,7 @@ import type { TabID } from "./tabs.ts";
  * exactly why it is a set here rather than a comparison spelled out four times
  * and kept in step by hand.
  */
-export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion"]);
+export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion", "piManager"]);
 
 /** True when this tab opens as a global window, not a workspace window. */
 export function isGlobalTab(id: TabID): boolean {

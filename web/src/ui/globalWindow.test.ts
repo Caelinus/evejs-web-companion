@@ -82,6 +82,17 @@ test("every global tab has a door somewhere", () => {
   assert.match(CHARACTER_BAR, /Fleet companions/);
 });
 
+test("the PI Manager is global, and its door is the rail", () => {
+  // R108 slice 3. A board of every assigned pilot's colonies is about all of
+  // them, so a pilot switch must not tear it down; and unlike the companions it
+  // has nothing to do with the pilot on screen, so the rail is the right door.
+  assert.equal(isGlobalTab("piManager"), true);
+  for (const docked of [true, false]) {
+    const offered = new Set(launchableTabsFor(docked).map((tab) => tab.id));
+    assert.equal(offered.has("piManager"), true, "the PI Manager must be in the rail");
+  }
+});
+
 test("a global tab that is not launchable is still a named tab", () => {
   // The window's title comes from `tabLabel`, and NEOCOM_GLYPHS is exhaustive
   // over TabID — so a global tab missing from the table would be a window

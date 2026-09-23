@@ -28,6 +28,7 @@
   import BotBuilder from "./BotBuilder.svelte";
   import BotManager from "./BotManager.svelte";
   import FleetCompanions from "./FleetCompanions.svelte";
+  import PiManager from "./PiManager.svelte";
   import Chat from "./Chat.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
@@ -148,6 +149,11 @@
        store. `flow` is passed for one thing only: the account-scoped read of
        the server's companion roster. -->
   <FleetCompanions {flow} {sessions} {onGoToPilot} />
+{:else if tab === "piManager"}
+  <!-- ⚠ GIVEN NOTHING. The board is the player's PI roster across accounts and
+       reads through its own throwaway sign-ins; it is not a view of the
+       mounted pilot, so it takes neither that pilot's store nor its flow. -->
+  <PiManager />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

@@ -326,3 +326,54 @@ surface nobody had exercised.
 - **A cache of several pilots read at different moments** is not one moment. Every
   row carries its own read-at, and the board never presents a merged view as if it
   were a snapshot.
+
+---
+
+## 9. What landed: the read path and the board (read-only)
+
+### §6's open question is closed
+
+Probed on 2026-09-23 against the running server, which by then had colonies on two
+pilots of one account. With the owning pilot logged out, nothing selected and no
+server bot on it, `/snapshot` returned its colonies — owner-filtered — while a
+third pilot on the same account came back with a colony table that was present
+and empty. The ownership gate still discriminated (403 across accounts). The
+premise holds as a live reading, not only as source.
+
+⚠ The host's `D:\evet\_local\gameStore\gamestore.sqlite` is **not** the running
+server's store; the container's is `/var/lib/evejs/gameStore/gamestore.sqlite`.
+The earlier "zero colonies" count was read from the host file and proved nothing.
+
+### The pieces
+
+| Piece | Where |
+|---|---|
+| `GET /api/roster/planets` — plural ids, caller's account, refused left out, per-pilot `readAtMs` beside one envelope `serverNowMs` | `src/server.js` |
+| The decoder, and "asked but not answered" | `web/src/bridge/piRoster.ts` |
+| The roster store — members plus each pilot's last reading kept verbatim and decoded on the way out | `web/src/app/piRosterPrefs.ts` |
+| The read — one throwaway sign-in per account, one account at a time, 12 per ask, never a select | `web/src/app/piRosterRead.ts` |
+| The board — four per-pilot outcomes, worst first across pilots, a read age on every row | `web/src/bridge/piBoard.ts` |
+| The window — global, in the rail, reads when opened and on Refresh, never on a timer | `web/src/ui/PiManager.svelte` |
+
+The one-line colony sentence moved out of `Planets.svelte` into
+`colonyLineWords` (`colonyAttention.ts`) so the panel and the board cannot word one
+colony two ways.
+
+### Proved live, end to end
+
+The worktree's own BFF code, booted against the real gateway: throwaway sign-in,
+one ask for three owned pilots and one foreign one, sign-out. The three owned
+pilots answered (five colonies, none, two), the foreign one was left out, and the
+same session's `/api/bridge/planets` answered `409 NO_LIVE_SESSION`. The pilots'
+read instants differed from the envelope's sample by up to ~0.4 s — the skew that
+keeping the two apart exists to avoid. No select appeared in the server log.
+
+### Not done here, deliberately
+
+- **Opening the window needs a pilot online in the tab.** The rail lives in the
+  per-pilot workspace, as the Bot Manager's does. A door on the Pilot Hangar
+  landing screen would let the board open with nobody online; that screen is being
+  changed elsewhere, so it is left for a later pass.
+- **No scheduler, no dispatch** (§5 and slice 4).
+- **Selecting a colony does not yet focus it in Planets**, which is per-pilot and
+  would need that pilot to be the active one.

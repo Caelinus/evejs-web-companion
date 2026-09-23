@@ -32,6 +32,7 @@ export type TabID =
   | "finder"
   | "skills"
   | "planets"
+  | "piManager"
   | "activity"
   | "fleet"
   | "scanner"
@@ -148,6 +149,11 @@ export const TABS: readonly TabDef[] = [
   { id: "finder", label: "Agent Finder", where: "both" },
   { id: "skills", label: "Skills", where: "both" },
   { id: "planets", label: "Planets", where: "both" },
+  // R108 slice 3 — a GLOBAL window (globalWindow.ts): every assigned pilot's
+  // colonies on one board, read with no character selected. In the rail, like
+  // the Bot Manager, because it answers a question about all pilots that a
+  // player asks whichever one is on screen.
+  { id: "piManager", label: "Planetary Industry", where: "both" },
   { id: "activity", label: "Activity", where: "both" },
   { id: "fleet", label: "Fleet", where: "both" },
   { id: "mail", label: "Mail", where: "both" },

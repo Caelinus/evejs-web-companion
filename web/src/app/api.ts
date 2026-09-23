@@ -3570,6 +3570,30 @@ export async function resolveNames(
   return { names, unresolved };
 }
 
+// --- R108 slice 3: the PI Manager's read, with no character selected ---------
+// GET /api/roster/planets?characterIDs=a,b,c answers each of those pilots'
+// colonies through the gateway's ownership check alone. The body goes back RAW:
+// the PI roster stores each pilot's entry as it arrived and decodes it with
+// bridge/piRoster.ts on the way out, so a live answer and a stored one pass
+// through one decoder.
+
+/** At most this many pilots per ask — the route refuses more. */
+export const ROSTER_PLANETS_MAX_IDS = 12;
+
+export async function loadRosterPlanets(
+  characterIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const ids = characterIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (ids.length === 0) {
+    return { ok: true, pilots: [] };
+  }
+  return getJson(
+    `/api/roster/planets?characterIDs=${encodeURIComponent(ids.join(","))}`,
+    options,
+  );
+}
+
 // --- R107 The hangar's training column, for pilots who are NOT signed in ----
 // GET /api/roster/training?characterIDs=a,b,c answers what each of those pilots
 // is training, read from the gateway's live queue snapshot.
