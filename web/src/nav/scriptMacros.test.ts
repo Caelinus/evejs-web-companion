@@ -3482,7 +3482,71 @@ test("warp-to-ore-anomaly: the position read is of the TARGETED site, not of whi
     board,
   );
 
-  assert.equal(out.outcome.kind, "blocked", "the site underfoot is not the site it was refused for");
+  assert.notEqual(out.phase, "Arrived", "the site underfoot is not the site it was refused for");
+  const retry = oreMacro(
+    ORE_ANOM_STEP,
+    obs({ anomalies: [here, far], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]) }),
+    out.nextMem,
+    board,
+  );
+  assert.deepEqual(retry.action, { kind: "warpScan", target: "ABC-123" }, "it tries the other site instead");
+});
+
+// ─── A site mined out while the ship was away ────────────────────────────────
+//
+// A pilot came back from unloading and read the scanner just as the fleet
+// finished emptying an ore site. The site was still listed, the server had
+// already torn it down and refused the warp ("not scanned down"), and the pilot
+// stopped while the other eight flew on to the next site.
+
+const NOT_SCANNED = "You have not scanned that site down, so you cannot warp to it yet.";
+
+test("warp-to-ore-anomaly: a refused site is set aside and the next one is tried", () => {
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const dying = rocksAt("GUN-001", 4 * 149_597_870_700);
+  const fresh = rocksAt("GUV-002", 6 * 149_597_870_700);
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [dying, fresh], completedWarps: 3 }), {}, {});
+  assert.deepEqual(issued.action, { kind: "warpScan", target: "GUN-001" });
+
+  const refusedObs = obs({
+    anomalies: [dying, fresh],
+    completedWarps: 3,
+    refusals: warpRefused(NOT_SCANNED),
+    snapshot: snapshot([]),
+  });
+  const out = oreMacro(ORE_ANOM_STEP, refusedObs, issued.nextMem, issued.boardPatch ?? {});
+  assert.equal(out.outcome.kind, "acting", "a refused site is not a reason to stop the bot");
+
+  const retry = oreMacro(ORE_ANOM_STEP, refusedObs, out.nextMem, issued.boardPatch ?? {});
+  assert.deepEqual(retry.action, { kind: "warpScan", target: "GUV-002" });
+
+  // The old refusal is still in the ledger — no success has cleared it yet — and
+  // it must not be read as a refusal of the NEW warp.
+  const waiting = oreMacro(ORE_ANOM_STEP, refusedObs, retry.nextMem, {});
+  assert.equal(waiting.outcome.kind, "acting", "the stale refusal is not about this warp");
+  assert.equal(waiting.phase, "Flying to the ore site");
+});
+
+test("warp-to-ore-anomaly: when every ore site has refused, it stops with the server's words", () => {
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const a = rocksAt("GUN-001", 4 * 149_597_870_700);
+  const b = rocksAt("GUV-002", 6 * 149_597_870_700);
+  const first = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [a, b], completedWarps: 3 }), {}, {});
+  const once = obs({ anomalies: [a, b], completedWarps: 3, refusals: warpRefused(NOT_SCANNED), snapshot: snapshot([]) });
+  const skip = oreMacro(ORE_ANOM_STEP, once, first.nextMem, {});
+  const second = oreMacro(ORE_ANOM_STEP, once, skip.nextMem, {});
+  assert.deepEqual(second.action, { kind: "warpScan", target: "GUV-002" });
+
+  const twice = obs({
+    anomalies: [a, b],
+    completedWarps: 3,
+    refusals: [{ ...warpRefused(NOT_SCANNED)[0]!, count: 2 }],
+    snapshot: snapshot([]),
+  });
+  const out = oreMacro(ORE_ANOM_STEP, twice, second.nextMem, {});
+  assert.equal(out.outcome.kind, "blocked");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  assert.match(reason, /not scanned that site down/i);
 });
 
 const den = (label: string) => ({ label, kind: "combat" as const });

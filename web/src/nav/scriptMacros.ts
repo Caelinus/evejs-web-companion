@@ -153,6 +153,11 @@ function num(mem: MacroMemory, key: string): number | null {
 function flag(mem: MacroMemory, key: string): boolean {
   return mem[key] === true;
 }
+/** A remembered comma-joined list of labels; empty when there is none. */
+function listOf(mem: MacroMemory, key: string): string[] {
+  const value = mem[key];
+  return typeof value === "string" ? value.split(",").filter((item) => item.length > 0) : [];
+}
 /** A remembered label, or null — an empty string is "nothing", never a name. */
 function label(mem: MacroMemory, key: string): string | null {
   const value = mem[key];
@@ -3471,8 +3476,13 @@ function warpToAnomalyOfKind(
       // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
       // — already there — and all four stopped rather than fighting the rats in
       // front of them.
+      // ⚠ ONLY A REFUSAL NEWER THAN THE LAST ONE THIS STEP SAW. The ledger keys
+      // on step and action with no target, and a record lives until a SUCCESS
+      // clears it — so after moving on from a refused site, the warp to the
+      // next one would read the old refusal on its first tick and give up on a
+      // site it never actually asked for.
       const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
-      if (refusal !== null) {
+      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
         // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
         // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
         // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
@@ -3483,8 +3493,24 @@ function warpToAnomalyOfKind(
             kind: "done",
           });
         }
-        // Cannot tell, or told no. Stop — but with what the SERVER said, not
-        // with a guess about the warp never starting.
+        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
+        // It happened for real: a pilot came back from unloading, read the
+        // scanner while the site the rest of the fleet had just emptied was
+        // still listed, and warped at it. The server had already torn it down
+        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
+        // scanned down"), and the pilot stopped while the others flew on to the
+        // next site. A refused site is set aside for this step and the pick runs
+        // again. The bot only stops when no site of this kind is left to try.
+        const target = label(mem, "target");
+        const refused = [...listOf(mem, "refused"), ...(target === null ? [] : [target])];
+        if (pickSite(obs.anomalies ?? [], board, refused) !== null) {
+          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
+            refused: refused.join(","),
+            refusalsSeen: refusal.count,
+          });
+        }
+        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
+        // the SERVER said, not with a guess about the warp never starting.
         return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
           kind: "blocked",
           reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
@@ -3517,9 +3543,6 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, 0, 0),
       });
     }
-    const visited = String(board[flavour.boardKey] ?? "")
-      .split(",")
-      .filter((label) => label.length > 0);
     const ofKind = anomalies.filter((site) => site.kind === wanted);
     // ── §13: the sites this run has given up on ────────────────────────────
     //
@@ -3533,26 +3556,20 @@ function warpToAnomalyOfKind(
     // exists to catch. This block has no such problem: it is the thing that
     // issued the warp, so an arrival is simply the tick it commits to a label —
     // the same tick it already writes that label into `anomsVisited`.
-    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
-    const workable =
-      ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
-    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
-    // situations and the old code answered both by stopping: there is no site of
-    // this kind here (a real dead end), or every one of them has been flown to
-    // once (not a dead end at all). A site is not finished because the ship has
-    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
-    // in a system holding a single ore site the visited list retired it after one
-    // trip and stopped a bot that had barely scratched it. So a completed lap
-    // wipes the list and starts the next one, and the run now ends where it
-    // should: at Mine-at-a-belt, which is the block that can actually see there
-    // is no rock left and says so.
-    const fresh = workable.find((site) => !visited.includes(site.label));
-    const next = fresh ?? workable[0];
-    if (next === undefined) {
+    const refused = listOf(mem, "refused");
+    const pick = pickSite(anomalies, board, refused);
+    if (pick === null) {
       // Two different dead ends now share this branch, and they must not share a
       // sentence: "there is no site of this kind here" (the scanner's fault, or
       // the system's) and "there are, and the run has given up on every one of
-      // them" (§13's stop).
+      // them" (§13's stop). A third joins them when the scanner changed after a
+      // refusal and only refused sites are left.
+      if (ofKind.length > 0 && ofKind.every((site) => refused.includes(site.label))) {
+        return tick(WAIT, `No ${flavour.noun} here would take the ship.`, "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to any ${flavour.noun} the scanner lists here, so the bot stopped.`,
+        });
+      }
       if (ofKind.length > 0) {
         return tick(WAIT, `Every ${flavour.noun} here is one I have given up on.`, "Scanning", {
           kind: "blocked",
@@ -3565,7 +3582,7 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
-    const lapRestart = fresh === undefined;
+    const { next, lapRestart, visited, ledger } = pick;
     return {
       ...tick(
         { kind: "warpScan", target: next.label },
@@ -3575,7 +3592,12 @@ function warpToAnomalyOfKind(
         flavour.flying,
         ACTING,
         false,
-        warpIssuedMem(obs, next.label),
+        {
+          ...warpIssuedMem(obs, next.label),
+          ...(refused.length > 0
+            ? { refused: refused.join(","), refusalsSeen: num(mem, "refusalsSeen") }
+            : {}),
+        },
       ),
       boardPatch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
@@ -3601,6 +3623,40 @@ function warpToAnomalyOfKind(
       },
     };
   };
+
+  /**
+   * The next site to fly to, or null when there is none — skipping any site this
+   * step has already been refused a warp to.
+   */
+  function pickSite(
+    anomalies: NonNullable<ScriptObservation["anomalies"]>,
+    board: ScriptBoard,
+    refused: readonly string[],
+  ) {
+    const visited = String(board[flavour.boardKey] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0);
+    const ofKind = anomalies.filter((site) => site.kind === wanted && !refused.includes(site.label));
+    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
+    const workable =
+      ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
+    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
+    // situations and the old code answered both by stopping: there is no site of
+    // this kind here (a real dead end), or every one of them has been flown to
+    // once (not a dead end at all). A site is not finished because the ship has
+    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
+    // in a system holding a single ore site the visited list retired it after one
+    // trip and stopped a bot that had barely scratched it. So a completed lap
+    // wipes the list and starts the next one, and the run now ends where it
+    // should: at Mine-at-a-belt, which is the block that can actually see there
+    // is no rock left and says so.
+    const fresh = workable.find((site) => !visited.includes(site.label));
+    const next = fresh ?? workable[0];
+    if (next === undefined) {
+      return null;
+    }
+    return { next, lapRestart: fresh === undefined, visited, ledger };
+  }
 }
 
 const warpToAnomaly: MacroDecider = warpToAnomalyOfKind("combat", COMBAT_FLAVOUR);
