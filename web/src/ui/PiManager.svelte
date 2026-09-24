@@ -52,7 +52,7 @@
     tierTag,
     type CorpStockRead,
   } from "../bridge/piStock.ts";
-  import { missingByTier, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
+  import { missingByTier, planStepCounts, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
   import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
   import {
     createPiPlan,
@@ -284,31 +284,64 @@
   // Each plan's standing, worked out now from the stock as it stands -- the
   // same planner the open plan uses, never a stored verdict.
   const planStanding = $derived.by(() => {
-    const out = new Map<string, { words: string; bad: boolean; title: string }>();
+    const out = new Map<string, PlanStanding>();
     const book = recipes;
     if (!book?.readable) return out;
     for (const entry of plans) {
-      const result = planWithStock({
+      out.set(entry.planID, standingOf(planWithStock({
         book,
         targetTypeID: entry.typeID,
         quantity: entry.quantity,
         holdings,
         colonies: plannerColonies,
         browserNowMs,
-      });
-      if (result === null) {
-        out.set(entry.planID, { words: "unknown", bad: true, title: "The recipe table has no way to make this." });
-      } else {
-        const bad = result.gaps.length > 0;
-        out.set(entry.planID, { words: bad ? `${result.gaps.length} blocked` : "covered", bad, title: result.verdict });
-      }
+      })));
     }
     return out;
   });
+  // The open plan's own counts, for the summary above its missing list.
+  const openCounts = $derived(plan ? planStepCounts(plan) : null);
 
-  function planTitle(entry: { typeID: number; quantity: number }): string {
-    const name = (recipes ? commodityName(recipes, entry.typeID) : null) ?? `Commodity ${entry.typeID}`;
-    return `${countWords(entry.quantity)} ${name}`;
+  interface PlanStanding {
+    readonly words: string;
+    readonly tone: "ok" | "act" | "bad";
+    readonly title: string;
+    /** Share of steps already covered, 0 to 1, for the bar. */
+    readonly share: number;
+  }
+
+  function standingOf(result: ReturnType<typeof planWithStock>): PlanStanding {
+    if (result === null) {
+      return { words: "unknown", tone: "bad", title: "The recipe table has no way to make this.", share: 0 };
+    }
+    const counts = planStepCounts(result);
+    const share = counts.steps > 0 ? counts.ok / counts.steps : 1;
+    const title = `${counts.ok} of ${counts.steps} steps covered. ${result.verdict}`;
+    if (result.gaps.length > 0) return { words: `${result.gaps.length} blocked`, tone: "bad", title, share };
+    if (counts.act > 0) return { words: `${counts.act} to change`, tone: "act", title, share };
+    return { words: "covered", tone: "ok", title, share };
+  }
+
+  function planName(typeID: number): string {
+    return (recipes ? commodityName(recipes, typeID) : null) ?? `Commodity ${typeID}`;
+  }
+
+  /** Change the open plan's quantity: planned at once, saved behind it. */
+  function commitQuantity(): void {
+    const quantity = Number(planQuantity.replace(/,/g, "").trim());
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      planError = "Enter how many, as a whole number.";
+      return;
+    }
+    planError = null;
+    if (planRequest === null || planRequest.quantity === quantity) return;
+    planRequest = { ...planRequest, quantity };
+    if (openPlan !== null) void changePlan(openPlan, { quantity });
+  }
+
+  function commitNote(): void {
+    const note = planNote.trim();
+    if (openPlan !== null && openPlan.note !== note) void changePlan(openPlan, { note });
   }
 
   function keepView(next: PiPlanView): void {
@@ -929,218 +962,297 @@
             {reading ? "Reading the recipe table..." : "The recipe table has not been read yet. Refresh reads it."}
           </p>
         {:else}
-          <!-- SAVED PLANS: every Plan press lands here. Each row's standing is
-               worked out now, from the stock as it stands. Each plan is judged
-               on its own, so two plans can both count the same units. -->
-          {#snippet planRow(entry: SavedPiPlan)}
-            {@const standing = planStanding.get(entry.planID)}
-            <li class="pi-saved-row" class:on={entry.planID === planView.openID}>
-              <button type="button" class="pi-saved-open" onclick={() => showPlan(entry)} title={entry.note || undefined}>
-                <TypeIcon typeID={entry.typeID} name={planTitle(entry)} />
-                <span class="pi-saved-name">{planTitle(entry)}</span>
-                {#if entry.note}<span class="pi-saved-note">{entry.note}</span>{/if}
-              </button>
-              {#if standing}
-                <span class="pi-tag" class:bad={standing.bad} class:ok={!standing.bad} title={standing.title}>{standing.words}</span>
-              {/if}
-              {#if entry.status === "active"}
-                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => setPlanStatus(entry, "done")}>Done</button>
-              {:else}
-                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => setPlanStatus(entry, "active")}>Reopen</button>
-                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => removePlan(entry)}>Delete</button>
-              {/if}
-            </li>
-          {/snippet}
-          <div class="pi-saved" aria-label="Saved plans">
-            <div class="pi-saved-head">
-              <h3>Plans</h3>
-              <button type="button" onclick={() => showPlan(null)} disabled={planRequest === null && planView.openID === null}>New plan</button>
-            </div>
-            {#if plansError}
-              <p class="pi-plan-error" role="alert">{plansError}</p>
-            {/if}
-            {#if !plansLoaded && !plansError}
-              <p class="empty">Reading your saved plans...</p>
-            {:else if activePlans.length === 0}
-              <p class="empty">No plans yet. Choose something to make below; it is kept as soon as you press Plan.</p>
-            {:else}
-              <ul class="pi-saved-list">
-                {#each activePlans as entry (entry.planID)}
-                  {@render planRow(entry)}
-                {/each}
-              </ul>
-            {/if}
-            {#if donePlans.length > 0}
-              <details class="pi-saved-done">
-                <summary>Done ({donePlans.length})</summary>
-                <ul class="pi-saved-list">
-                  {#each donePlans as entry (entry.planID)}
-                    {@render planRow(entry)}
-                  {/each}
-                </ul>
-              </details>
-            {/if}
-          </div>
-
-          <form
-            class="pi-plan-form"
-            onsubmit={(event) => {
-              event.preventDefault();
-              submitPlan();
-            }}
-          >
-            <label for="pi-plan-quantity">Make</label>
-            <input
-              id="pi-plan-quantity"
-              class="pi-plan-quantity"
-              inputmode="numeric"
-              placeholder="20"
-              bind:value={planQuantity}
-              oninput={() => (planError = null)}
-            />
-            <select
-              class="pi-plan-target"
-              aria-label="What to make"
-              bind:value={planTarget}
-              onchange={() => (planError = null)}
-            >
-              <option value="">Choose a commodity</option>
-              {#each targetGroups as group (group.label)}
-                <optgroup label={group.label}>
-                  {#each group.rows as row (row.typeID)}
-                    <option value={String(row.typeID)}>{row.name}</option>
-                  {/each}
-                </optgroup>
-              {/each}
-            </select>
-            <input
-              class="pi-plan-note"
-              aria-label="Note"
-              placeholder="Note (optional)"
-              maxlength="500"
-              bind:value={planNote}
-            />
-            <button type="submit">Plan</button>
-          </form>
-          {#if planError}
-            <p class="pi-plan-error" role="alert">{planError}</p>
-          {/if}
-
-          <!-- THE CHAIN AS A TREE. Colour, a bar and short tags say how each step
-               stands; the sentence behind a tag is its hover title. A step with
-               inputs folds; while folded, one dot per input says how that input
-               stands, so a green step hiding a red input still shows it. -->
-          {#snippet planNode(node: PlanNode)}
-            {@const row = node.row}
-            {@const open = node.children.length > 0 && isTreeOpen(node.key)}
-            <li role="treeitem" aria-selected="false" aria-expanded={node.children.length > 0 ? open : undefined}>
-              <div class="pi-node state-{row.state}">
-                {#if node.children.length > 0}
-                  <button type="button" class="pi-node-name" onclick={() => toggleTree(node.key)}>
-                    <span class="pi-chevron" aria-hidden="true">{open ? "v" : ">"}</span>
-                    <TypeIcon typeID={row.typeID} name={row.typeName} />
-                    <span>{row.typeName}</span>
-                    {#if tierTag(row.tier)}<span class="pi-chip">{tierTag(row.tier)}</span>{/if}
-                    {#if !open}
-                      <span class="pi-dots" aria-hidden="true">
-                        {#each node.children as child (child.key)}
-                          <span class="pi-dot state-{child.worst}"></span>
-                        {/each}
+          <!-- SAVED PLANS, LIST AND DETAIL. Plans on the left, each with its
+               standing worked out now from the stock as it stands; the open one
+               on the right. Each plan is judged on its own, so two plans can both
+               count the same units. -->
+          <div class="pi-planner">
+            <aside class="pi-plans" aria-label="Your plans">
+              <div class="pi-plans-head">
+                <h3>Your plans</h3>
+                <button type="button" class="pi-new" onclick={() => showPlan(null)}>+ New</button>
+              </div>
+              {#snippet planRow(entry: SavedPiPlan)}
+                {@const standing = planStanding.get(entry.planID)}
+                <li>
+                  <button
+                    type="button"
+                    class="pi-plan-card"
+                    class:on={entry.planID === planView.openID}
+                    aria-current={entry.planID === planView.openID ? "true" : undefined}
+                    onclick={() => showPlan(entry)}
+                    title={standing?.title}
+                  >
+                    <span class="pi-plan-card-top">
+                      <TypeIcon typeID={entry.typeID} name={planName(entry.typeID)} size="md" />
+                      <span class="pi-plan-card-text">
+                        <span class="pi-plan-card-name">{planName(entry.typeID)}</span>
+                        <span class="pi-plan-card-sub">{countWords(entry.quantity)}{entry.note ? ` - ${entry.note}` : ""}</span>
+                      </span>
+                    </span>
+                    {#if standing}
+                      <span class="pi-plan-card-foot">
+                        <span class="pi-meter" aria-hidden="true">
+                          <span class="pi-meter-fill tone-{standing.tone}" style:width={`${Math.round(standing.share * 100)}%`}></span>
+                        </span>
+                        <span class="pi-pill tone-{standing.tone}">{standing.words}</span>
                       </span>
                     {/if}
                   </button>
-                {:else}
-                  <span class="pi-node-name">
-                    <span class="pi-chevron" aria-hidden="true"></span>
-                    <TypeIcon typeID={row.typeID} name={row.typeName} />
-                    <span>{row.typeName}</span>
-                    {#if tierTag(row.tier)}<span class="pi-chip">{tierTag(row.tier)}</span>{/if}
-                  </span>
-                {/if}
-                <span class="pi-tags">
-                  {#if node.repeat}
-                    <span class="pi-tag" title="Drawn in full above">above</span>
-                  {:else}
-                    {#each row.tags as tag, index (index)}
-                      <span class="pi-tag" class:act={tag.tone === "act"} class:bad={tag.tone === "bad"} title={tag.title}>{tag.text}</span>
+                </li>
+              {/snippet}
+              {#if !plansLoaded && !plansError}
+                <p class="pi-plans-empty">Reading your saved plans...</p>
+              {:else if activePlans.length === 0}
+                <p class="pi-plans-empty">No plans yet. Start one with New.</p>
+              {:else}
+                <ul class="pi-plan-list">
+                  {#each activePlans as entry (entry.planID)}
+                    {@render planRow(entry)}
+                  {/each}
+                </ul>
+              {/if}
+              {#if donePlans.length > 0}
+                <details class="pi-plans-done">
+                  <summary>Done ({donePlans.length})</summary>
+                  <ul class="pi-plan-list">
+                    {#each donePlans as entry (entry.planID)}
+                      {@render planRow(entry)}
                     {/each}
-                  {/if}
-                </span>
-                <span class="pi-cover">
-                  <span class="pi-bar" aria-hidden="true">
-                    <span class="pi-bar-fill held" style:width={`${Math.min(1, row.held / row.needed) * 100}%`}></span>
-                  </span>
-                  <span class="pi-cover-nums">
-                    {#if row.holdings.length > 0}
-                      <button
-                        type="button"
-                        class="pi-held"
-                        aria-expanded={placesOpen.has(node.key)}
-                        title="Where it is"
-                        onclick={() => (placesOpen = toggleKey(placesOpen, node.key))}
-                      >{countWords(row.held)}</button>
-                    {:else}
-                      {countWords(row.held)}
-                    {/if}
-                    / {countWords(row.needed)}
-                  </span>
-                </span>
-              </div>
-              {#if placesOpen.has(node.key)}
-                <ul class="pi-places">
-                  {#each row.holdings as holding, index (index)}
-                    <li title={`${holding.ownerWords} - ${holdingAgeWords(holding, browserNowMs)}`}>
-                      <span class="pi-source">{holding.source}</span>{countWords(holding.quantity)} {holding.placeWords}
-                    </li>
-                  {/each}
-                </ul>
+                  </ul>
+                </details>
               {/if}
-              {#if open}
-                <ul class="pi-tree-kids" role="group">
-                  {#each node.children as child (child.key)}
-                    {@render planNode(child)}
-                  {/each}
-                </ul>
-              {/if}
-            </li>
-          {/snippet}
+            </aside>
 
-          {#if plan && planRequest}
-            <p class="pi-plan-head">
-              <span>{countWords(planRequest.quantity)} {plan.tree.row.typeName}</span>
-              <span class="pi-tag" class:bad={plan.gaps.length > 0} class:ok={plan.gaps.length === 0} title={plan.verdict}>
-                {plan.gaps.length > 0 ? `${plan.gaps.length} blocked` : "covered"}
-              </span>
-            </p>
-            <!-- WHAT IS MISSING, by tier from the ground up: raw first, because an
-                 extractor feeds everything above it. Blocked steps lead each tier. -->
-            {#if missing.length > 0}
-              <div class="pi-missing" aria-label="Missing">
-                {#each missing as group (group.tier)}
-                  <div class="pi-missing-tier">
-                    <h3>{tierTag(group.tier) ?? "other"}</h3>
-                    <ul>
-                      {#each group.rows as row (row.typeID)}
-                        <li class="pi-missing-row state-{row.state}">
-                          <TypeIcon typeID={row.typeID} name={row.typeName} />
-                          <span class="pi-missing-name">{row.typeName}</span>
-                          <span class="pi-missing-count" title={`${countWords(row.held)} held of ${countWords(row.needed)}`}>{countWords(row.toMake)} missing</span>
-                          <span class="pi-tags">
-                            {#each row.tags as tag, index (index)}
-                              <span class="pi-tag" class:act={tag.tone === "act"} class:bad={tag.tone === "bad"} title={tag.title}>{tag.text}</span>
+            <div class="pi-plan-detail">
+              {#if plansError}
+                <p class="pi-plan-error" role="alert">{plansError}</p>
+              {/if}
+
+              {#if planRequest === null}
+                <!-- A NEW PLAN. It is kept the moment it is planned. -->
+                <form
+                  class="pi-compose"
+                  onsubmit={(event) => {
+                    event.preventDefault();
+                    submitPlan();
+                  }}
+                >
+                  <h3 class="pi-compose-title">New plan</h3>
+                  <div class="pi-compose-row">
+                    <label class="pi-field pi-field-qty">
+                      <span>Make</span>
+                      <input
+                        id="pi-plan-quantity"
+                        inputmode="numeric"
+                        placeholder="20"
+                        bind:value={planQuantity}
+                        oninput={() => (planError = null)}
+                      />
+                    </label>
+                    <label class="pi-field pi-field-grow">
+                      <span>Commodity</span>
+                      <select bind:value={planTarget} onchange={() => (planError = null)}>
+                        <option value="">Choose a commodity</option>
+                        {#each targetGroups as group (group.label)}
+                          <optgroup label={group.label}>
+                            {#each group.rows as row (row.typeID)}
+                              <option value={String(row.typeID)}>{row.name}</option>
                             {/each}
-                          </span>
-                        </li>
+                          </optgroup>
+                        {/each}
+                      </select>
+                    </label>
+                  </div>
+                  <label class="pi-field">
+                    <span>Note</span>
+                    <input placeholder="For mining foreman boosters" maxlength="500" bind:value={planNote} />
+                  </label>
+                  <div class="pi-compose-actions">
+                    <button type="submit" class="primary" disabled={planSaving}>Create plan</button>
+                  </div>
+                  {#if planError}
+                    <p class="pi-plan-error" role="alert">{planError}</p>
+                  {/if}
+                </form>
+              {:else}
+                <header class="pi-detail-head">
+                  <span class="pi-detail-icon">
+                    <TypeIcon typeID={planRequest.typeID} name={planName(planRequest.typeID)} size="lg" />
+                  </span>
+                  <div class="pi-detail-title">
+                    <h3>
+                      {planName(planRequest.typeID)}
+                      {#if recipes && tierTag(tierOf(recipes, planRequest.typeID))}
+                        <span class="pi-chip">{tierTag(tierOf(recipes, planRequest.typeID))}</span>
+                      {/if}
+                      {#if openPlan?.status === "done"}<span class="pi-pill">done</span>{/if}
+                    </h3>
+                    <input
+                      class="pi-detail-note"
+                      aria-label="Note"
+                      placeholder={openPlan ? "Add a note" : "Not saved"}
+                      maxlength="500"
+                      disabled={openPlan === null}
+                      bind:value={planNote}
+                      onchange={commitNote}
+                    />
+                  </div>
+                  <div class="pi-detail-actions">
+                    <label class="pi-detail-qty">
+                      <span>Make</span>
+                      <input
+                        inputmode="numeric"
+                        bind:value={planQuantity}
+                        oninput={() => (planError = null)}
+                        onchange={commitQuantity}
+                        onkeydown={(event) => event.key === "Enter" && commitQuantity()}
+                      />
+                    </label>
+                    {#if openPlan?.status === "active"}
+                      <button type="button" disabled={planSaving} onclick={() => openPlan && setPlanStatus(openPlan, "done")}>Mark done</button>
+                    {:else if openPlan?.status === "done"}
+                      <button type="button" disabled={planSaving} onclick={() => openPlan && setPlanStatus(openPlan, "active")}>Reopen</button>
+                      <button type="button" class="danger" disabled={planSaving} onclick={() => openPlan && removePlan(openPlan)}>Delete</button>
+                    {/if}
+                  </div>
+                </header>
+                {#if planError}
+                  <p class="pi-plan-error" role="alert">{planError}</p>
+                {/if}
+
+                {#if plan && openCounts}
+                  <div class="pi-stats" title={plan.verdict}>
+                    <div class="pi-stat tone-ok">
+                      <span class="pi-stat-label">Covered</span>
+                      <span class="pi-stat-value">{openCounts.ok} of {openCounts.steps} steps</span>
+                    </div>
+                    <div class="pi-stat tone-act">
+                      <span class="pi-stat-label">Can fix now</span>
+                      <span class="pi-stat-value">{openCounts.act}</span>
+                    </div>
+                    <div class="pi-stat tone-bad">
+                      <span class="pi-stat-label">Blocked</span>
+                      <span class="pi-stat-value">{plan.gaps.length}</span>
+                    </div>
+                  </div>
+                  <p class="pi-verdict">{plan.verdict}</p>
+
+                  <!-- WHAT IS MISSING, by tier from the ground up: raw first,
+                       because an extractor feeds everything above it. Blocked
+                       steps lead each tier. -->
+                  {#if missing.length > 0}
+                    <h4 class="pi-section-title">Missing, from the ground up</h4>
+                    <ul class="pi-missing" aria-label="Missing">
+                      {#each missing as group (group.tier)}
+                        {#each group.rows as row (row.typeID)}
+                          <li class="pi-missing-row state-{row.state}">
+                            <span class="pi-chip">{tierTag(group.tier) ?? "other"}</span>
+                            <span class="pi-missing-name">
+                              <TypeIcon typeID={row.typeID} name={row.typeName} />
+                              {row.typeName}
+                            </span>
+                            <span class="pi-missing-count" title={`${countWords(row.held)} held of ${countWords(row.needed)}`}>{countWords(row.toMake)}</span>
+                            <span class="pi-tags">
+                              {#each row.tags as tag, index (index)}
+                                <span class="pi-pill" class:tone-act={tag.tone === "act"} class:tone-bad={tag.tone === "bad"} title={tag.title}>{tag.text}</span>
+                              {/each}
+                            </span>
+                          </li>
+                        {/each}
                       {/each}
                     </ul>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-            <ul class="pi-tree" role="tree" aria-label={plan.verdict}>
-              {@render planNode(plan.tree)}
-            </ul>
-          {/if}
+                  {/if}
+
+                    <!-- THE CHAIN AS A TREE. Colour, a bar and short tags say how each step
+                         stands; the sentence behind a tag is its hover title. A step with
+                         inputs folds; while folded, one dot per input says how that input
+                         stands, so a green step hiding a red input still shows it. -->
+                    {#snippet planNode(node: PlanNode)}
+                      {@const row = node.row}
+                      {@const open = node.children.length > 0 && isTreeOpen(node.key)}
+                      <li role="treeitem" aria-selected="false" aria-expanded={node.children.length > 0 ? open : undefined}>
+                        <div class="pi-node state-{row.state}">
+                          {#if node.children.length > 0}
+                            <button type="button" class="pi-node-name" onclick={() => toggleTree(node.key)}>
+                              <span class="pi-chevron" aria-hidden="true">{open ? "v" : ">"}</span>
+                              <TypeIcon typeID={row.typeID} name={row.typeName} />
+                              <span>{row.typeName}</span>
+                              {#if tierTag(row.tier)}<span class="pi-chip">{tierTag(row.tier)}</span>{/if}
+                              {#if !open}
+                                <span class="pi-dots" aria-hidden="true">
+                                  {#each node.children as child (child.key)}
+                                    <span class="pi-dot state-{child.worst}"></span>
+                                  {/each}
+                                </span>
+                              {/if}
+                            </button>
+                          {:else}
+                            <span class="pi-node-name">
+                              <span class="pi-chevron" aria-hidden="true"></span>
+                              <TypeIcon typeID={row.typeID} name={row.typeName} />
+                              <span>{row.typeName}</span>
+                              {#if tierTag(row.tier)}<span class="pi-chip">{tierTag(row.tier)}</span>{/if}
+                            </span>
+                          {/if}
+                          <span class="pi-tags">
+                            {#if node.repeat}
+                              <span class="pi-tag" title="Drawn in full above">above</span>
+                            {:else}
+                              {#each row.tags as tag, index (index)}
+                                <span class="pi-tag" class:act={tag.tone === "act"} class:bad={tag.tone === "bad"} title={tag.title}>{tag.text}</span>
+                              {/each}
+                            {/if}
+                          </span>
+                          <span class="pi-cover">
+                            <span class="pi-bar" aria-hidden="true">
+                              <span class="pi-bar-fill held" style:width={`${Math.min(1, row.held / row.needed) * 100}%`}></span>
+                            </span>
+                            <span class="pi-cover-nums">
+                              {#if row.holdings.length > 0}
+                                <button
+                                  type="button"
+                                  class="pi-held"
+                                  aria-expanded={placesOpen.has(node.key)}
+                                  title="Where it is"
+                                  onclick={() => (placesOpen = toggleKey(placesOpen, node.key))}
+                                >{countWords(row.held)}</button>
+                              {:else}
+                                {countWords(row.held)}
+                              {/if}
+                              / {countWords(row.needed)}
+                            </span>
+                          </span>
+                        </div>
+                        {#if placesOpen.has(node.key)}
+                          <ul class="pi-places">
+                            {#each row.holdings as holding, index (index)}
+                              <li title={`${holding.ownerWords} - ${holdingAgeWords(holding, browserNowMs)}`}>
+                                <span class="pi-source">{holding.source}</span>{countWords(holding.quantity)} {holding.placeWords}
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if open}
+                          <ul class="pi-tree-kids" role="group">
+                            {#each node.children as child (child.key)}
+                              {@render planNode(child)}
+                            {/each}
+                          </ul>
+                        {/if}
+                      </li>
+                    {/snippet}
+
+                  <details class="pi-chain">
+                    <summary>Full chain ({openCounts.steps} steps)</summary>
+                    <ul class="pi-tree" role="tree" aria-label={plan.verdict}>
+                      {@render planNode(plan.tree)}
+                    </ul>
+                  </details>
+                {/if}
+              {/if}
+            </div>
+          </div>
         {/if}
       </section>
     </div>
@@ -1501,37 +1613,36 @@
   .pi-sources li {
     padding: 0.1rem 0;
   }
-  .pi-plan-form {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
+  /* THE PLANNER: plans on the left, the open plan on the right. Square like
+   * the rest of the app (R53): every corner goes through the radius tokens. */
+  .pi-planner {
+    display: grid;
+    grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
   }
-  .pi-plan-form input,
-  .pi-plan-form select,
-  .pi-plan-form button {
-    min-height: 40px;
+  .pi-plans,
+  .pi-plan-detail {
+    background: var(--color-panel-3);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-frame);
   }
-  .pi-plan-quantity {
-    width: 5.5rem;
+  .pi-plans {
+    padding: 0.6rem;
   }
-  .pi-plan-target {
-    flex: 1 1 14rem;
+  .pi-plan-detail {
+    padding: 1rem 1.1rem;
+    min-width: 0;
   }
-  .pi-plan-note {
-    flex: 1 1 12rem;
-  }
-  .pi-saved {
-    margin: 0 0 1rem;
-  }
-  .pi-saved-head {
+  .pi-plans-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.5rem;
   }
-  .pi-saved-head h3 {
+  .pi-plans-head h3,
+  .pi-section-title,
+  .pi-stat-label {
     margin: 0;
     font-size: 11px;
     font-weight: 600;
@@ -1539,91 +1650,278 @@
     text-transform: uppercase;
     color: var(--color-muted);
   }
-  .pi-saved-list {
+  .pi-new {
+    min-height: 28px;
+    padding: 0 0.6rem;
+  }
+  .pi-plans-empty {
+    margin: 0.5rem 0.2rem;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  .pi-plan-list {
+    display: grid;
+    gap: 0.3rem;
     list-style: none;
     margin: 0;
     padding: 0;
   }
-  .pi-saved-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.15rem 0.4rem;
-    border-left: 2px solid transparent;
-  }
-  .pi-saved-row.on {
-    border-left-color: var(--color-accent);
-    background: var(--color-panel-3);
-  }
-  .pi-saved-open {
-    display: flex;
-    flex: 1 1 auto;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-    min-height: 36px;
-    padding: 0;
+  .pi-plan-card {
+    display: grid;
+    gap: 0.45rem;
+    width: 100%;
+    padding: 0.5rem 0.55rem;
     background: transparent;
-    border: 0;
-    color: var(--color-text-bright);
+    border: 1px solid transparent;
+    border-radius: var(--radius-control);
+    color: var(--color-text);
     text-align: left;
     cursor: pointer;
   }
-  .pi-saved-name {
-    white-space: nowrap;
+  .pi-plan-card:hover:not(.on) {
+    background: var(--color-panel);
+    border-color: var(--color-line);
   }
-  .pi-saved-note {
+  .pi-plan-card.on {
+    background: var(--color-panel-2);
+    border-color: var(--color-accent-dim);
+  }
+  .pi-plan-card-top {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+  }
+  .pi-plan-card-text {
+    display: grid;
+    min-width: 0;
+  }
+  .pi-plan-card-name {
+    color: var(--color-text-bright);
     overflow: hidden;
-    color: var(--color-muted);
-    font-size: 0.85rem;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
-  .pi-saved-action {
-    min-height: 32px;
-  }
-  .pi-saved-done summary {
-    margin-top: 0.4rem;
+  .pi-plan-card-sub {
     color: var(--color-muted);
+    font-size: 0.8rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .pi-plan-card-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .pi-meter {
+    flex: 1 1 auto;
+    height: 4px;
+    background: var(--color-line);
+    overflow: hidden;
+  }
+  .pi-meter-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-good);
+  }
+  .pi-meter-fill.tone-act {
+    background: var(--color-warn);
+  }
+  .pi-meter-fill.tone-bad {
+    background: var(--color-danger);
+  }
+  .pi-plans-done {
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--color-line);
+  }
+  .pi-plans-done summary {
+    margin-bottom: 0.3rem;
+    color: var(--color-muted);
+    font-size: 0.85rem;
     cursor: pointer;
+  }
+  .pi-pill {
+    display: inline-block;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--color-line-strong);
+    border-radius: var(--radius-control);
+    color: var(--color-cell);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .pi-pill.tone-ok {
+    border-color: color-mix(in srgb, var(--color-good) 55%, transparent);
+    background: color-mix(in srgb, var(--color-good) 12%, transparent);
+    color: var(--color-good);
+  }
+  .pi-pill.tone-act {
+    border-color: color-mix(in srgb, var(--color-warn) 55%, transparent);
+    background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+    color: var(--color-warn);
+  }
+  .pi-pill.tone-bad {
+    border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    color: var(--color-danger);
+  }
+
+  /* A new plan. */
+  .pi-compose {
+    display: grid;
+    gap: 0.75rem;
+    max-width: 40rem;
+  }
+  .pi-compose-title {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--color-text-bright);
+  }
+  .pi-compose-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .pi-field {
+    display: grid;
+    gap: 0.25rem;
+    color: var(--color-muted);
+    font-size: 0.8rem;
+  }
+  .pi-field input,
+  .pi-field select {
+    min-height: 38px;
+  }
+  .pi-field-qty input {
+    width: 6rem;
+  }
+  .pi-field-grow {
+    flex: 1 1 16rem;
+  }
+  .pi-compose-actions {
+    display: flex;
+    justify-content: flex-end;
   }
   .pi-plan-error {
     margin: 0.35rem 0 0;
     color: var(--color-danger);
     font-size: 0.85rem;
   }
-  .pi-plan-head {
+
+  /* The open plan. */
+  .pi-detail-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.9rem;
+  }
+  .pi-detail-icon {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    margin: 1rem 0 0.5rem;
-    font-size: 1.05rem;
+    justify-content: center;
+    width: 3.25rem;
+    height: 3.25rem;
+    background: var(--color-panel-2);
+    border: 1px solid var(--color-line);
+  }
+  .pi-detail-title {
+    display: grid;
+    flex: 1 1 14rem;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+  .pi-detail-title h3 {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 500;
     color: var(--color-text-bright);
   }
-  .pi-missing {
-    display: grid;
-    gap: 0.6rem;
-    margin: 0 0 1rem;
-  }
-  .pi-missing-tier h3 {
-    margin: 0 0 0.25rem;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+  .pi-detail-note {
+    min-height: 28px;
+    padding: 0 0.3rem;
+    background: transparent;
+    border: 1px solid transparent;
     color: var(--color-muted);
+    font-size: 0.85rem;
   }
-  .pi-missing-tier ul {
+  .pi-detail-note:hover:not(:disabled),
+  .pi-detail-note:focus {
+    border-color: var(--color-line-strong);
+    background: var(--color-field);
+    color: var(--color-text);
+  }
+  .pi-detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .pi-detail-actions button {
+    min-height: 34px;
+  }
+  .pi-detail-qty {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  .pi-detail-qty input {
+    width: 5.5rem;
+    min-height: 34px;
+  }
+  .pi-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin: 1rem 0 0.4rem;
+  }
+  .pi-stat {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    border-top-width: 2px;
+  }
+  .pi-stat.tone-ok {
+    border-top-color: var(--color-good);
+  }
+  .pi-stat.tone-act {
+    border-top-color: var(--color-warn);
+  }
+  .pi-stat.tone-bad {
+    border-top-color: var(--color-danger);
+  }
+  .pi-stat-value {
+    font-size: 1.15rem;
+    color: var(--color-text-bright);
+  }
+  .pi-verdict {
+    margin: 0 0 1rem;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  .pi-section-title {
+    margin-bottom: 0.35rem;
+  }
+  .pi-missing {
     list-style: none;
-    margin: 0;
+    margin: 0 0 1rem;
     padding: 0;
   }
   .pi-missing-row {
     display: grid;
-    grid-template-columns: auto minmax(9rem, 14rem) 8rem minmax(0, 1fr);
-    gap: 0.5rem;
+    grid-template-columns: 3rem minmax(9rem, 16rem) 6rem minmax(0, 1fr);
+    gap: 0.6rem;
     align-items: center;
+    min-height: 36px;
     padding: 0.2rem 0.6rem;
+    border-top: 1px solid var(--color-line);
     border-left: 3px solid var(--color-good);
   }
   .pi-missing-row.state-act {
@@ -1632,14 +1930,35 @@
   .pi-missing-row.state-bad {
     border-left-color: var(--color-danger);
   }
+  .pi-missing-row .pi-chip {
+    justify-self: start;
+  }
   .pi-missing-name {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
     color: var(--color-text-bright);
   }
   .pi-missing-count {
-    font-size: 12px;
-    color: var(--color-muted);
     text-align: right;
     font-variant-numeric: tabular-nums;
+    color: var(--color-text);
+  }
+  .pi-chain summary {
+    color: var(--color-muted);
+    cursor: pointer;
+    margin-bottom: 0.5rem;
+  }
+  @media (max-width: 760px) {
+    .pi-planner {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .pi-missing-row {
+      grid-template-columns: 2.6rem minmax(0, 1fr) auto;
+    }
+    .pi-missing-row .pi-tags {
+      grid-column: 2 / -1;
+    }
   }
   .pi-tree,
   .pi-tree-kids,

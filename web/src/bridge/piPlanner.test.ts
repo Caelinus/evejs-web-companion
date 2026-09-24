@@ -14,7 +14,7 @@ import { decodeRecipeBook, type PiCommodity, type PiRecipeBook, type PiSchematic
 import type { JsonValue } from "./wire.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 import type { Holding } from "./piStock.ts";
-import { missingByTier, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
+import { missingByTier, planStepCounts, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
 
 // --- a small book with known numbers ---------------------------------------
 
@@ -414,6 +414,18 @@ test("the missing summary runs raw first, blocked first, and leaves out what is 
   ]);
   const p2 = missingByTier(result).find((entry) => entry.tier === 2)!;
   assert.deepEqual(p2.rows.map((row) => row.state), ["act", "ok"], "the factory switch before what is already made");
+});
+
+test("step counts are one per commodity, by state, and add up to the steps", () => {
+  const colonies = [
+    colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, XI_RECIPE), extractor(20, RAW_B, 100, null)]),
+  ];
+  const result = plan({ targetTypeID: P3_Y, quantity: 3, colonies, holdings: [held(P1_B, 1000)] });
+  const counts = planStepCounts(result);
+  assert.equal(counts.steps, result.rows.length);
+  assert.equal(counts.ok + counts.act + counts.bad, counts.steps);
+  assert.equal(counts.act, result.rows.filter((row) => row.state === "act").length);
+  assert.ok(counts.act >= 1, "the idle factory is a change you can make");
 });
 
 // --- the real table ---------------------------------------------------------

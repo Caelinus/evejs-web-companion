@@ -569,3 +569,21 @@ export function missingByTier(plan: Plan): MissingTier[] {
         STATE_RANK[right.state] - STATE_RANK[left.state] || right.toMake - left.toMake)),
     }));
 }
+
+/** How many of a plan's steps stand each way — for a summary and a bar. */
+export interface PlanStepCounts {
+  readonly ok: number;
+  readonly act: number;
+  readonly bad: number;
+  readonly steps: number;
+}
+
+/**
+ * Count the plan's steps by state. A step is one commodity (the consolidated
+ * rows, never the tree), so a commodity two branches share counts once.
+ */
+export function planStepCounts(plan: Plan): PlanStepCounts {
+  const counts = { ok: 0, act: 0, bad: 0 };
+  for (const row of plan.rows) counts[row.state] += 1;
+  return { ...counts, steps: plan.rows.length };
+}
