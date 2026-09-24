@@ -154,14 +154,14 @@ test("the rail follows the docked / in-space state", () => {
   assert.equal(/aria-label="Fitting"/.test(inSpace), false);
 });
 
-test("the rail offers ONE way into the bots that run on the server, not two", () => {
+test("the rail offers NO way into the bots that run on the server", () => {
   // The Server Bots entry is gone: the Bot Manager's pilots region lists the
-  // same rows beside the tab runs and the pilots that could take one. This is a
-  // crowding fix, so what it guards against is the entry quietly coming back
-  // and the rail growing a second door onto one subject again.
+  // same rows. And the Bot Manager left the rail too — its door is the brand
+  // strip (GlobalLaunchers.svelte), which opens it with nobody in the client.
+  // What this guards against is either entry quietly coming back.
   for (const docked of [true, false]) {
     const body = renderRail(docked);
-    assert.match(body, /aria-label="Bot Manager"/);
+    assert.equal(body.includes('aria-label="Bot Manager"'), false, "the Bot Manager opens from the brand strip");
     assert.equal(
       body.includes('aria-label="Server Bots"'),
       false,

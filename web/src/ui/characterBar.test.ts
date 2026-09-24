@@ -35,12 +35,12 @@ test("the bar shows Connecting… while the first health ping is in flight", () 
   assert.match(body, /Connecting/);
 });
 
-// ─── the Fleet companions door ───────────────────────────────────────────────
+// ─── the global-window doors ─────────────────────────────────────────────────
 //
-// ⚠ THIS BUTTON IS THE ONLY WAY INTO A WHOLE WINDOW. Fleet companions is global
-// and deliberately NOT in the Neocom rail (it is about every pilot, and the rail
-// belongs to one), so if this button ever stops rendering the panel becomes
-// unreachable rather than merely harder to find.
+// ⚠ THESE BUTTONS ARE THE ONLY WAY INTO WHOLE WINDOWS. The Bot Manager, PI and
+// Fleet companions are global and deliberately NOT in the Neocom rail (they are
+// about every pilot, and the rail belongs to one), so if the strip ever stops
+// rendering the panels become unreachable rather than merely harder to find.
 
 function renderCompanionBar(props: Record<string, unknown>): string {
   return render(CharacterBar as never, {
@@ -50,15 +50,17 @@ function renderCompanionBar(props: Record<string, unknown>): string {
       serverStatus: "online",
       onSwitch: () => {},
       onAdd: () => {},
-      onCompanions: () => {},
+      onOpenGlobal: () => {},
       ...props,
     },
   } as never).body;
 }
 
-test("the bar carries a Fleet companions button", () => {
+test("the bar carries a door onto each global window", () => {
   const body = renderCompanionBar({});
-  assert.match(body, /char-bar-companions/);
+  assert.match(body, /data-launch="botManager"/);
+  assert.match(body, /data-launch="piManager"/);
+  assert.match(body, /data-launch="companion"/);
   assert.match(body, /Fleet companions/);
 });
 
@@ -66,22 +68,24 @@ test("the count is shown only when somebody is actually flying", () => {
   // A badge reading "0" is a badge that has to be read before it can be
   // dismissed; the absence of one says the same thing faster.
   const idle = renderCompanionBar({ companionCount: 0 });
-  assert.doesNotMatch(idle, /char-bar-companions-count/);
+  assert.doesNotMatch(idle, /global-launch-count/);
 
   const flying = renderCompanionBar({ companionCount: 2 });
-  assert.match(flying, /char-bar-companions-count/);
+  assert.match(flying, /global-launch-count/);
   assert.match(flying, /2 flying/, "and it is in the accessible name too, in words");
 });
 
 test("the button says whether its window is already open", () => {
   // The bar doubles as the answer to "is that thing on screen somewhere?" — a
   // window that is merely put away still counts as open.
-  assert.match(renderCompanionBar({ companionsOpen: true }), /aria-pressed="true"/);
-  assert.match(renderCompanionBar({ companionsOpen: false }), /aria-pressed="false"/);
+  const open = renderCompanionBar({ globalOpenIds: new Set(["companion"]) });
+  assert.match(open, /aria-pressed="true"[^>]*data-launch="companion"|data-launch="companion"[^>]*aria-pressed="true"/);
+  assert.match(open, /data-launch="botManager"[^>]*aria-pressed="false"|aria-pressed="false"[^>]*data-launch="botManager"/);
+  assert.doesNotMatch(renderCompanionBar({}), /aria-pressed="true"/);
 });
 
 test("a bar mounted without the door renders without one, rather than throwing", () => {
-  // Harnesses and older mounts pass no `onCompanions`; a bar that crashed on
+  // Harnesses and older mounts pass no `onOpenGlobal`; a bar that crashed on
   // that would take the whole top of the tab down with it.
   const body = render(CharacterBar as never, {
     props: {
@@ -92,5 +96,5 @@ test("a bar mounted without the door renders without one, rather than throwing",
       onAdd: () => {},
     },
   } as never).body;
-  assert.doesNotMatch(body, /char-bar-companions/);
+  assert.doesNotMatch(body, /global-launch/);
 });
