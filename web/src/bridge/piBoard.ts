@@ -94,6 +94,8 @@ export interface PiPilotRow {
   readonly pilotName: string;
   /** The sentence about this pilot when there is one to say; null otherwise. */
   readonly noteWords: string | null;
+  /** Read, and found with no colony: the one note a roster can fold away. */
+  readonly notBuilt: boolean;
   readonly colonyCount: number;
   /** How old this pilot's reading is, or null when there is none. */
   readonly readAgeWords: string | null;
@@ -427,6 +429,9 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
       characterID,
       pilotName,
       noteWords: pilotNote(pilotName, knownName !== undefined, attempt, reading),
+      notBuilt: knownName !== undefined
+        && attempt !== "no-account" && attempt !== "failed" && attempt !== "unanswered"
+        && reading !== null && reading.report.coloniesReadable && reading.report.colonies.length === 0,
       colonyCount: reading?.report.colonies.length ?? 0,
       readAgeWords: reading === null ? null : ageWords(reading, input.browserNowMs),
       busy: attempt === "reading",
@@ -565,4 +570,44 @@ function emptyWords(input: PiBoardInput): string | null {
       && reading.report.colonies.length === 0;
   });
   return everyoneEmpty ? "None of your pilots has built on a planet yet." : null;
+}
+
+/**
+ * One account's pilots on the roster. A pilot with colonies, or with anything
+ * else to say, gets a row; one read and found with no colony is only a name.
+ */
+export interface PiAccountGroup {
+  /** Null for pilots no longer in the hangar, whose account is not known. */
+  readonly accountName: string | null;
+  readonly rows: readonly PiPilotRow[];
+  readonly notBuilt: readonly PiPilotRow[];
+  readonly colonyCount: number;
+  /** Said once for the account when every pilot in it reads the same; else null. */
+  readonly readAgeWords: string | null;
+}
+
+/** The roster by account, accounts by name and pilots in roster order. */
+export function pilotsByAccount(
+  pilots: readonly PiPilotRow[],
+  accountOf: ReadonlyMap<number, string>,
+): PiAccountGroup[] {
+  const byAccount = new Map<string | null, PiPilotRow[]>();
+  for (const pilot of pilots) {
+    const accountName = accountOf.get(pilot.characterID) ?? null;
+    byAccount.set(accountName, [...(byAccount.get(accountName) ?? []), pilot]);
+  }
+  return [...byAccount.entries()]
+    .sort(([left], [right]) =>
+      left === null ? 1 : right === null ? -1 : left.localeCompare(right))
+    .map(([accountName, members]) => {
+      const ages = new Set(members.map((pilot) => pilot.readAgeWords));
+      const [onlyAge] = ages;
+      return {
+        accountName,
+        rows: members.filter((pilot) => !pilot.notBuilt),
+        notBuilt: members.filter((pilot) => pilot.notBuilt),
+        colonyCount: members.reduce((total, pilot) => total + pilot.colonyCount, 0),
+        readAgeWords: ages.size === 1 && onlyAge !== undefined ? onlyAge : null,
+      };
+    });
 }

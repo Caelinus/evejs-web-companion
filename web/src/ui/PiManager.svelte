@@ -35,7 +35,7 @@
     type PiRosterPrefs,
   } from "../app/piRosterPrefs.ts";
   import { readPiRoster } from "../app/piRosterRead.ts";
-  import { buildPiBoard, type PiDispatchState, type PilotAttempt } from "../bridge/piBoard.ts";
+  import { buildPiBoard, pilotsByAccount, type PiAccountGroup, type PiDispatchState, type PilotAttempt } from "../bridge/piBoard.ts";
   import { restartExtractorsFor } from "../app/piDispatch.ts";
   import { listActiveServerBots } from "../app/api.ts";
   import { commodityName, decodeRecipeBook, madeThings, tierOf, type PiRecipeBook, type PiTier } from "../bridge/piRecipes.ts";
@@ -171,13 +171,31 @@
   const board = $derived(
     buildPiBoard({ members: roster.members, names, readings, attempts, browserNowMs, recipes, activeBots, dispatch }),
   );
+  // THE ROSTER BY ACCOUNT. What a pilot's colonies are ("5 colonies, Alpha")
+  // is the Colonies view's own words, so the two views cannot disagree.
+  const accounts = $derived(
+    pilotsByAccount(board.pilots, new Map(known.map((pilot) => [pilot.characterID, pilot.accountName]))),
+  );
+  const colonyWords = $derived(new Map(board.groups.map((group) => [group.characterID, group.countWords])));
+  const pilotRows = $derived(new Map(board.pilots.map((pilot) => [pilot.characterID, pilot])));
+  /** "3 pilots, 5 colonies - Read 45 minutes ago": the age only when it is one. */
+  function accountWords(account: PiAccountGroup): string {
+    const pilots = account.rows.length + account.notBuilt.length;
+    const parts = [pilots === 1 ? "1 pilot" : `${pilots} pilots`];
+    if (account.colonyCount > 0) {
+      parts.push(account.colonyCount === 1 ? "1 colony" : `${account.colonyCount} colonies`);
+    }
+    const counts = parts.join(", ");
+    return account.readAgeWords ? `${counts} - ${account.readAgeWords}` : counts;
+  }
   const addablePilots = $derived(
     known
       .filter((pilot) => !roster.members.includes(pilot.characterID))
       .sort((left, right) => left.characterName.localeCompare(right.characterName)),
   );
-  // The badge is what waits in that view: colonies that need you, pilots
-  // with a restart to offer. Nothing waiting, no badge.
+  // The badge is what waits in that view: colonies that need you. A restart
+  // is offered on its pilot's colonies, so it waits there too. Nothing
+  // waiting, no badge.
   const menu = $derived<{ id: View; label: string; badge: number; urgent: boolean }[]>([
     {
       id: "colonies",
@@ -187,12 +205,7 @@
     },
     { id: "stock", label: "Stock", badge: 0, urgent: false },
     { id: "planner", label: "Planner", badge: 0, urgent: false },
-    {
-      id: "pilots",
-      label: "Pilots",
-      badge: board.pilots.filter((pilot) => pilot.restart?.enabled).length,
-      urgent: false,
-    },
+    { id: "pilots", label: "Pilots", badge: 0, urgent: false },
   ]);
 
   // ③ WHAT YOU HOLD. `readings` is already the roster's own pilots only
@@ -656,11 +669,34 @@
                What needs you is said ON the colony's row, worst first — there
                is no second list to keep in step with this one. -->
           {#each board.groups as group (group.characterID)}
+            {@const pilot = pilotRows.get(group.characterID)}
             <section class="pi-group" aria-label={`${group.pilotName}'s colonies`}>
               <header class="pi-group-head">
                 <h3>{group.pilotName} <span class="note">- {group.countWords}</span></h3>
                 <span class="note">{group.readAgeWords}</span>
               </header>
+              {#if pilot?.restart || pilot?.botWords || pilot?.dispatchWords}
+                <div class="pi-group-action">
+                  {#if pilot.restart}
+                    <!-- What the run does is said BEFORE the button, so the
+                         click is the decision; there is no dialog after it. -->
+                    <span class="note">{pilot.restart.words}</span>
+                    <button
+                      type="button"
+                      disabled={!pilot.restart.enabled}
+                      onclick={() => void restartExtractors(pilot.characterID)}
+                    >
+                      {pilot.restart.label}
+                    </button>
+                  {/if}
+                  {#if pilot.botWords}
+                    <span class="note pilot-note">{pilot.botWords}</span>
+                  {/if}
+                  {#if pilot.dispatchWords}
+                    <span class="note pilot-note" role="status">{pilot.dispatchWords}</span>
+                  {/if}
+                </div>
+              {/if}
               <ul class="pi-colonies">
                 {#each group.rows as row (row.key)}
                   <li class="pi-colony tone-{row.tone}">
@@ -697,6 +733,16 @@
               </ul>
             </section>
           {/each}
+
+          <!-- ⚠ SAID, NOT IMPLIED. Reading brings nobody online. Acting does, and
+               only through the server bot host, which refuses a pilot already
+               flown from this site or by another bot — so that refusal, not a
+               promise from this window, is what keeps a ship from being taken. -->
+          <p class="note pi-footnote">
+            A restart runs on the server, which will not take a pilot already flown
+            from this site or by another bot; if it refuses, its reason is shown
+            above that pilot's colonies.
+          </p>
         {/if}
       </section>
 
@@ -714,66 +760,6 @@
           {#if roster.members.length === 0 && board.emptyWords}
             <p class="empty">{board.emptyWords}</p>
           {/if}
-          {#if board.pilots.length > 0}
-            <div class="table-wrap overflow-x-auto">
-              <table class="guests reflow">
-                <thead>
-                  <tr>
-                    <th>Pilot</th>
-                    <th>Colonies</th>
-                    <th>Read</th>
-                    <th><span class="sr-only">Remove</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each board.pilots as pilot (pilot.characterID)}
-                    <tr>
-                      <td data-label="Pilot">
-                        {pilot.pilotName}
-                        {#if pilot.noteWords}
-                          <span class="note pilot-note">{pilot.noteWords}</span>
-                        {/if}
-                        {#if pilot.botWords}
-                          <span class="note pilot-note">{pilot.botWords}</span>
-                        {/if}
-                        {#if pilot.restart}
-                          <!-- What the run does is said BEFORE the button, so the
-                               click is the decision; there is no dialog after it. -->
-                          <span class="pilot-note pi-dispatch">
-                            <span class="note">{pilot.restart.words}</span>
-                            <button
-                              type="button"
-                              disabled={!pilot.restart.enabled}
-                              onclick={() => void restartExtractors(pilot.characterID)}
-                            >
-                              {pilot.restart.label}
-                            </button>
-                          </span>
-                        {/if}
-                        {#if pilot.dispatchWords}
-                          <span class="note pilot-note" role="status">{pilot.dispatchWords}</span>
-                        {/if}
-                      </td>
-                      <td data-label="Colonies">
-                        {pilot.colonyCount === 0 ? "-" : pilot.colonyCount}
-                      </td>
-                      <td data-label="Read" class="note">{pilot.readAgeWords ?? "-"}</td>
-                      <td data-label="">
-                        <button
-                          type="button"
-                          disabled={pilot.busy}
-                          onclick={() => removePilot(pilot.characterID)}
-                        >
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-
           {#if addablePilots.length > 0 || squadsWithNewPilots.length > 0}
             <div class="pi-add">
               <label for="pi-add-choice">Add</label>
@@ -799,17 +785,79 @@
           {:else if known.length === 0}
             <p class="note">Pilots come from the Pilot hangar. Add an account there first.</p>
           {/if}
+
+          <!-- BY ACCOUNT. A pilot with colonies, or with anything else to say,
+               is a row; one read and found with no colony is only a name, so
+               the same sentence is not printed once per alt. -->
+          {#each accounts as account (account.accountName ?? "")}
+            <section class="pi-account" aria-label={account.accountName ?? "No longer in the hangar"}>
+              <header class="pi-group-head">
+                <h4>{account.accountName ?? "No longer in the hangar"}</h4>
+                <span class="note">{accountWords(account)}</span>
+              </header>
+              {#if account.rows.length > 0}
+                <ul class="pi-pilots">
+                  {#each account.rows as pilot (pilot.characterID)}
+                    <li class="pi-pilot">
+                      <span class="pi-pilot-who">
+                        <span class="pi-pilot-name">{pilot.pilotName}</span>
+                        {#if colonyWords.get(pilot.characterID)}
+                          <span class="note">{colonyWords.get(pilot.characterID)}</span>
+                        {/if}
+                        {#if pilot.noteWords}
+                          <span class="note">{pilot.noteWords}</span>
+                        {/if}
+                        {#if pilot.botWords}
+                          <span class="note">{pilot.botWords}</span>
+                        {/if}
+                      </span>
+                      {#if !account.readAgeWords}
+                        <span class="note pi-pilot-age">{pilot.readAgeWords ?? "-"}</span>
+                      {/if}
+                      <button
+                        type="button"
+                        class="pi-remove"
+                        disabled={pilot.busy}
+                        aria-label={`Remove ${pilot.pilotName}`}
+                        title={`Remove ${pilot.pilotName}`}
+                        onclick={() => removePilot(pilot.characterID)}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if account.notBuilt.length > 0}
+                <div class="pi-unbuilt">
+                  <span class="note">Not on a planet yet</span>
+                  <ul>
+                    {#each account.notBuilt as pilot (pilot.characterID)}
+                      <li class="pi-tag">
+                        <span>{pilot.pilotName}</span>
+                        {#if !account.readAgeWords && pilot.readAgeWords}
+                          <span class="note">- {pilot.readAgeWords}</span>
+                        {/if}
+                        <button
+                          type="button"
+                          class="pi-remove"
+                          disabled={pilot.busy}
+                          aria-label={`Remove ${pilot.pilotName}`}
+                          title={`Remove ${pilot.pilotName}`}
+                          onclick={() => removePilot(pilot.characterID)}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              {/if}
+            </section>
+          {/each}
         </section>
 
-        <!-- ⚠ SAID, NOT IMPLIED. Reading brings nobody online. Acting does, and only
-             through the server bot host, which refuses a pilot already flown from
-             this site or by another bot — so that refusal, not a promise from this
-             window, is what keeps a ship from being taken. -->
-        <p class="note">
-          Colonies are read without bringing any pilot online. A restart runs on the
-          server, which will not take a pilot already flown from this site or by
-          another bot; if it refuses, its reason is shown on that pilot's row.
-        </p>
+        <p class="note pi-footnote">Colonies are read without bringing any pilot online.</p>
       </section>
 
       <!-- ③ WHAT YOU HOLD (R108 slice 5). One line per commodity; colony stock is
@@ -1477,32 +1525,124 @@
     color: var(--color-warn);
   }
   .pilot-note {
-    display: block;
+    flex: 1 1 100%;
   }
-  .pi-dispatch {
+  /* A restart, on the pilot's colonies: its sentence, then the button. */
+  .pi-group-action {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.25rem 0.75rem;
-    margin-top: 0.35rem;
+    gap: 0.35rem 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-row-line);
+    border-left: 3px solid var(--color-warn);
   }
-  .pi-dispatch button {
+  .pi-group-action > .note:first-child {
+    flex: 1 1 24rem;
+  }
+  .pi-group-action button {
     min-height: 40px;
+  }
+  .pi-footnote {
+    margin-top: 1rem;
   }
   .pi-add {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
-    margin-top: 0.5rem;
+    max-width: 36rem;
+    margin-bottom: 1rem;
   }
   .pi-add select {
     flex: 1 1 14rem;
     min-height: 40px;
   }
-  .pi-add button,
-  td button {
+  .pi-add button {
     min-height: 40px;
+  }
+  .pi-account + .pi-account {
+    margin-top: 1rem;
+  }
+  .pi-account h4 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+  .pi-pilots,
+  .pi-unbuilt ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pi-pilot {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.35rem 0 0.35rem 0.75rem;
+    border-bottom: 1px solid var(--color-row-line);
+  }
+  .pi-pilot-who {
+    display: grid;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .pi-pilot-name {
+    color: var(--color-text-bright);
+  }
+  .pi-pilot-age {
+    white-space: nowrap;
+  }
+  .pi-unbuilt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding: 0.5rem 0 0 0.75rem;
+  }
+  .pi-unbuilt ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .pi-tag {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding-left: 0.5rem;
+    border: 1px solid var(--color-line-strong);
+    background: var(--color-panel-2);
+  }
+  /* Quiet until pointed at: removing is rare, and never the row's point. */
+  .pi-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--color-muted);
+    cursor: pointer;
+  }
+  .pi-tag .pi-remove {
+    min-width: 32px;
+    min-height: 32px;
+  }
+  .pi-remove svg {
+    width: 14px;
+    height: 14px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+  }
+  .pi-remove:hover:not(:disabled) {
+    color: var(--color-danger);
+    background: var(--color-panel-3);
   }
   .pi-summary dd.warn {
     color: var(--color-warn);

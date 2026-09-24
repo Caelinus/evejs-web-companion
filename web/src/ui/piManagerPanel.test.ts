@@ -197,7 +197,9 @@ test("⚠ the window draws one frame, not a box per section", () => {
 
 test("⚠ each pilot's outcome is said about that pilot", () => {
   const text = visibleText(renderSeeded());
-  assert.match(text, /Cy Newbie Cy Newbie has not built on a planet yet\./);
+  // Read and found with no colony: folded to a name, not a sentence per alt.
+  assert.match(text, /Not on a planet yet Cy Newbie/);
+  assert.doesNotMatch(text, /has not built on a planet yet/);
   assert.match(
     text,
     /A pilot no longer in the hangar This pilot is no longer in the hangar, so there is no account to read with\./,
@@ -207,9 +209,11 @@ test("⚠ each pilot's outcome is said about that pilot", () => {
 test("taking a pilot off the list is called Remove, never 'Take off'", () => {
   // In a game about ships "Take off" reads as launching the ship. This button
   // only edits the list: nothing is signed in, selected or undocked.
-  const text = visibleText(renderSeeded());
-  assert.match(text, /\bRemove\b/);
-  assert.doesNotMatch(text, /take off/i);
+  const body = renderSeeded();
+  // A quiet glyph, named for the pilot it removes, on rows and on names alike.
+  assert.match(body, /aria-label="Remove Ada Farmer"/);
+  assert.match(body, /aria-label="Remove Cy Newbie"/);
+  assert.doesNotMatch(body, /take off/i);
 });
 
 test("the add list offers pilots not yet on it, and a squad with someone new", () => {
@@ -235,6 +239,22 @@ test("a pilot with an ended extractor is offered a restart, said before the butt
   );
   // Only one pilot has anything to restart.
   assert.equal(text.match(/Restart extractors/g)?.length, 1);
+});
+
+test("the restart is offered on the pilot's colonies, not on the roster", () => {
+  const body = renderSeeded();
+  const colonies = body.slice(body.indexOf('id="pi-view-colonies"'), body.indexOf('id="pi-view-pilots"'));
+  const pilots = body.slice(body.indexOf('id="pi-view-pilots"'), body.indexOf('id="pi-view-stock"'));
+  assert.match(visibleText(colonies), /Ada Farmer - 2 colonies, Alpha Read 2 hours ago 1 extractor has ended/);
+  assert.doesNotMatch(pilots, /Restart extractors/);
+});
+
+test("the roster is grouped by account, and a shared age is said once", () => {
+  const body = renderSeeded();
+  const text = visibleText(body.slice(body.indexOf('id="pi-view-pilots"'), body.indexOf('id="pi-view-stock"')));
+  assert.match(text, /alpha 2 pilots, 2 colonies - Read 2 hours ago Ada Farmer 2 colonies, Alpha/);
+  // A pilot whose account is not known any more is still listed.
+  assert.match(text, /No longer in the hangar 1 pilot A pilot no longer in the hangar/);
 });
 
 test("⚠ a restart goes through the server bot host, never a select in this tab", () => {
@@ -276,8 +296,9 @@ test("the window has its own menu, and shows one view at a time", () => {
 
 test("the menu badges say what waits in each view", () => {
   const text = visibleText(renderSeeded());
-  // One colony needs you; one pilot has a restart to offer.
-  assert.match(text, /Colonies 1 Stock Planner Pilots 1/);
+  // One colony needs you. The restart waits on the colonies too, so Pilots
+  // has no badge of its own.
+  assert.match(text, /Colonies 1 Stock Planner Pilots (?!\d)/);
 });
 
 test("an empty roster opens on Pilots, where a pilot is added", () => {

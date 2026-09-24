@@ -20,7 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPiBoard, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
+import { buildPiBoard, pilotsByAccount, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
 import type { PilotColonyReading } from "./piRoster.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 
@@ -479,4 +479,41 @@ test("the strip counts colonies, those extracting, those that need you, and the 
     readings: new Map([[FARMER, reading(FARMER, [QUIET, STOPPED, COMING_UP], NOW - MINUTE)]]),
   }));
   assert.deepEqual(board.summary, { colonies: 3, extracting: 2, needYouNow: 1, nextEndsWords: "2 hours" });
+});
+
+test("the roster groups by account, and folds only a pilot read with no colony", () => {
+  const board = buildPiBoard(input({
+    members: [FARMER, HAULER, NEWBIE, LOST],
+    attempts: new Map([[HAULER, "failed"]]),
+    readings: new Map([
+      [FARMER, reading(FARMER, [QUIET], NOW - MINUTE)],
+      [NEWBIE, reading(NEWBIE, [], NOW - MINUTE)],
+      [LOST, reading(LOST, [], NOW - MINUTE, false)],
+    ]),
+    names: new Map([[FARMER, "Ada Farmer"], [HAULER, "Bo Hauler"], [NEWBIE, "Cy Newbie"], [LOST, "Di Lost"]]),
+  }));
+  // Only a readable, empty colony table folds. "Could not be read" and "the
+  // server did not say" are not "has none", so they keep their rows.
+  assert.deepEqual(board.pilots.map((pilot) => pilot.notBuilt), [false, false, true, false]);
+
+  const groups = pilotsByAccount(board.pilots, new Map([
+    [FARMER, "beta"],
+    [NEWBIE, "beta"],
+    [LOST, "alpha"],
+  ]));
+  assert.deepEqual(
+    groups.map((group) => ({
+      accountName: group.accountName,
+      rows: group.rows.map((pilot) => pilot.pilotName),
+      notBuilt: group.notBuilt.map((pilot) => pilot.pilotName),
+      colonyCount: group.colonyCount,
+      readAgeWords: group.readAgeWords,
+    })),
+    [
+      { accountName: "alpha", rows: ["Di Lost"], notBuilt: [], colonyCount: 0, readAgeWords: "Read 1 minute ago" },
+      { accountName: "beta", rows: ["Ada Farmer"], notBuilt: ["Cy Newbie"], colonyCount: 1, readAgeWords: "Read 1 minute ago" },
+      // An account nobody knows any more goes last, and has no one age.
+      { accountName: null, rows: ["Bo Hauler"], notBuilt: [], colonyCount: 0, readAgeWords: null },
+    ],
+  );
 });
