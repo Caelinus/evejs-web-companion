@@ -3215,6 +3215,41 @@ export async function deleteBotScript(scriptID: string, options: ApiOptions = {}
   await postJson(`/api/botscripts/${encodeURIComponent(scriptID)}/delete`, {}, options);
 }
 
+// ─── Saved PI plans (src/piPlanStore.js) ─────────────────────────────────────
+// Rows from the companion's own database. The answers are handed back RAW:
+// app/piPlans.ts decodes them, so a stored row and a fresh one go through the
+// same door.
+
+/** The fields a plan may carry on create or update. */
+export interface PiPlanFields {
+  readonly typeID?: number;
+  readonly quantity?: number;
+  readonly note?: string;
+  readonly status?: "active" | "done";
+}
+
+export async function listPiPlans(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/pi/plans", options)).plans ?? null;
+}
+
+export async function createPiPlan(fields: PiPlanFields, options: ApiOptions = {}): Promise<JsonValue> {
+  return (await postJson("/api/pi/plans", fields, options)).plan ?? null;
+}
+
+export async function updatePiPlan(
+  planID: string,
+  fields: PiPlanFields,
+  baseRev: number,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/pi/plans/${encodeURIComponent(planID)}`, { ...fields, baseRev }, options);
+  return data.plan ?? null;
+}
+
+export async function deletePiPlan(planID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/pi/plans/${encodeURIComponent(planID)}/delete`, {}, options);
+}
+
 // ─── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies on a session of its own, so it keeps running when
 // this tab goes away. These calls are the remote control: start a saved

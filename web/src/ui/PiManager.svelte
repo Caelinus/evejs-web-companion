@@ -54,6 +54,23 @@
   } from "../bridge/piStock.ts";
   import { missingByTier, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
   import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
+  import {
+    createPiPlan,
+    deletePiPlan,
+    loadPiPlans,
+    updatePiPlan,
+    withPlan,
+    withoutPlan,
+    type SavedPiPlan,
+  } from "../app/piPlans.ts";
+  import {
+    loadPiPlanView,
+    prunePiPlanView,
+    savePiPlanView,
+    withOpenNodes,
+    withOpenPlan,
+    type PiPlanView,
+  } from "../app/piPlanView.ts";
   import type { Session } from "../app/sessions.ts";
   import TypeIcon from "./TypeIcon.svelte";
 
@@ -105,6 +122,15 @@
   // their stock is.
   let treeOverride = $state<Map<string, boolean>>(new Map());
   let placesOpen = $state<Set<string>>(new Set());
+  // SAVED PLANS (app/piPlans.ts). The rows live on the server; which one was
+  // open and how its tree was unfolded live in this browser (app/piPlanView.ts).
+  // Every Plan press saves, so there is no Save button to forget.
+  let plans = $state<SavedPiPlan[]>([]);
+  let plansLoaded = $state(false);
+  let plansError = $state<string | null>(null);
+  let planSaving = $state(false);
+  let planNote = $state("");
+  let planView = $state<PiPlanView>(loadPiPlanView());
 
   async function loadActiveBots(): Promise<void> {
     try {
@@ -244,6 +270,125 @@
     const next = new Map(treeOverride);
     next.set(key, !isTreeOpen(key));
     treeOverride = next;
+    const openID = planView.openID;
+    if (openID !== null) {
+      const keys = [...next].filter(([, open]) => open).map(([nodeKey]) => nodeKey);
+      keepView(withOpenNodes(planView, openID, keys));
+    }
+  }
+
+  // ④ SAVED PLANS.
+  const openPlan = $derived(plans.find((entry) => entry.planID === planView.openID) ?? null);
+  const activePlans = $derived(plans.filter((entry) => entry.status === "active"));
+  const donePlans = $derived(plans.filter((entry) => entry.status === "done"));
+  // Each plan's standing, worked out now from the stock as it stands -- the
+  // same planner the open plan uses, never a stored verdict.
+  const planStanding = $derived.by(() => {
+    const out = new Map<string, { words: string; bad: boolean; title: string }>();
+    const book = recipes;
+    if (!book?.readable) return out;
+    for (const entry of plans) {
+      const result = planWithStock({
+        book,
+        targetTypeID: entry.typeID,
+        quantity: entry.quantity,
+        holdings,
+        colonies: plannerColonies,
+        browserNowMs,
+      });
+      if (result === null) {
+        out.set(entry.planID, { words: "unknown", bad: true, title: "The recipe table has no way to make this." });
+      } else {
+        const bad = result.gaps.length > 0;
+        out.set(entry.planID, { words: bad ? `${result.gaps.length} blocked` : "covered", bad, title: result.verdict });
+      }
+    }
+    return out;
+  });
+
+  function planTitle(entry: { typeID: number; quantity: number }): string {
+    const name = (recipes ? commodityName(recipes, entry.typeID) : null) ?? `Commodity ${entry.typeID}`;
+    return `${countWords(entry.quantity)} ${name}`;
+  }
+
+  function keepView(next: PiPlanView): void {
+    planView = next;
+    savePiPlanView(next);
+  }
+
+  /** The accounts a plan call may sign in with: the roster's own first. */
+  function planAccounts(): string[] {
+    const byCharacter = new Map(known.map((pilot) => [pilot.characterID, pilot.accountName]));
+    const first = roster.members.map((id) => byCharacter.get(id)).filter((name): name is string => !!name);
+    return [...first, ...known.map((pilot) => pilot.accountName)];
+  }
+
+  function showPlan(entry: SavedPiPlan | null): void {
+    planError = null;
+    placesOpen = new Set();
+    if (entry === null) {
+      planTarget = "";
+      planQuantity = "";
+      planNote = "";
+      planRequest = null;
+      treeOverride = new Map();
+      keepView(withOpenPlan(planView, null));
+      return;
+    }
+    planTarget = String(entry.typeID);
+    planQuantity = String(entry.quantity);
+    planNote = entry.note;
+    planRequest = { typeID: entry.typeID, quantity: entry.quantity };
+    treeOverride = new Map((planView.openNodes[entry.planID] ?? []).map((key) => [key, true]));
+    keepView(withOpenPlan(planView, entry.planID));
+  }
+
+  async function loadPlans(): Promise<void> {
+    try {
+      plans = await loadPiPlans(planAccounts());
+      plansError = null;
+      plansLoaded = true;
+      keepView(prunePiPlanView(planView, plans.map((entry) => entry.planID)));
+      // Where you left off: the plan that was open, unless the form moved on.
+      if (planRequest === null && openPlan !== null) showPlan(openPlan);
+    } catch (error) {
+      plansError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function changePlan(entry: SavedPiPlan, fields: Parameters<typeof updatePiPlan>[2]): Promise<void> {
+    planSaving = true;
+    try {
+      plans = withPlan(plans, await updatePiPlan(planAccounts(), entry, fields));
+      plansError = null;
+    } catch (error) {
+      plansError = error instanceof Error ? error.message : String(error);
+      // Most likely changed elsewhere: take the server's copy.
+      void loadPlans();
+    } finally {
+      planSaving = false;
+    }
+  }
+
+  /** Done, or back to active. Leaving a plan open when it is marked done is fine. */
+  function setPlanStatus(entry: SavedPiPlan, status: "active" | "done"): void {
+    void changePlan(entry, { status });
+  }
+
+  /** For good -- offered only on a plan already marked done. */
+  async function removePlan(entry: SavedPiPlan): Promise<void> {
+    planSaving = true;
+    try {
+      await deletePiPlan(planAccounts(), entry.planID);
+      plans = withoutPlan(plans, entry.planID);
+      plansError = null;
+      if (planView.openID === entry.planID) showPlan(null);
+      keepView(prunePiPlanView(planView, plans.map((row) => row.planID)));
+    } catch (error) {
+      plansError = error instanceof Error ? error.message : String(error);
+    } finally {
+      planSaving = false;
+    }
   }
 
   function toggleKey(set: Set<string>, key: string): Set<string> {
@@ -262,9 +407,40 @@
       planError = "Enter how many, as a whole number.";
     } else {
       planError = null;
-      treeOverride = new Map();
-      placesOpen = new Set();
+      const note = planNote.trim();
+      const current = openPlan;
+      // A different commodity is a different plan; the same one is this plan
+      // with a new number or note.
+      if (current === null || current.typeID !== typeID) {
+        treeOverride = new Map();
+        placesOpen = new Set();
+      }
+      // Planned at once, from what is held: the save is bookkeeping, and a
+      // server that cannot take it right now must not stop the planning.
       planRequest = { typeID, quantity };
+      void savePlan(current, { typeID, quantity, note });
+    }
+  }
+
+  async function savePlan(
+    current: SavedPiPlan | null,
+    fields: { typeID: number; quantity: number; note: string },
+  ): Promise<void> {
+    if (current !== null && current.typeID === fields.typeID) {
+      if (current.quantity === fields.quantity && current.note === fields.note) return;
+      await changePlan(current, { quantity: fields.quantity, note: fields.note });
+      return;
+    }
+    planSaving = true;
+    try {
+      const created = await createPiPlan(planAccounts(), fields);
+      plans = withPlan(plans, created);
+      plansError = null;
+      keepView(withOpenPlan(planView, created.planID));
+    } catch (error) {
+      plansError = `Not saved: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      planSaving = false;
     }
   }
 
@@ -356,6 +532,7 @@
 
   onMount(() => {
     void refresh();
+    void loadPlans();
     const tick = setInterval(() => (browserNowMs = Date.now()), 30_000);
     return () => clearInterval(tick);
   });
@@ -752,6 +929,59 @@
             {reading ? "Reading the recipe table..." : "The recipe table has not been read yet. Refresh reads it."}
           </p>
         {:else}
+          <!-- SAVED PLANS: every Plan press lands here. Each row's standing is
+               worked out now, from the stock as it stands. Each plan is judged
+               on its own, so two plans can both count the same units. -->
+          {#snippet planRow(entry: SavedPiPlan)}
+            {@const standing = planStanding.get(entry.planID)}
+            <li class="pi-saved-row" class:on={entry.planID === planView.openID}>
+              <button type="button" class="pi-saved-open" onclick={() => showPlan(entry)} title={entry.note || undefined}>
+                <TypeIcon typeID={entry.typeID} name={planTitle(entry)} />
+                <span class="pi-saved-name">{planTitle(entry)}</span>
+                {#if entry.note}<span class="pi-saved-note">{entry.note}</span>{/if}
+              </button>
+              {#if standing}
+                <span class="pi-tag" class:bad={standing.bad} class:ok={!standing.bad} title={standing.title}>{standing.words}</span>
+              {/if}
+              {#if entry.status === "active"}
+                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => setPlanStatus(entry, "done")}>Done</button>
+              {:else}
+                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => setPlanStatus(entry, "active")}>Reopen</button>
+                <button type="button" class="pi-saved-action" disabled={planSaving} onclick={() => removePlan(entry)}>Delete</button>
+              {/if}
+            </li>
+          {/snippet}
+          <div class="pi-saved" aria-label="Saved plans">
+            <div class="pi-saved-head">
+              <h3>Plans</h3>
+              <button type="button" onclick={() => showPlan(null)} disabled={planRequest === null && planView.openID === null}>New plan</button>
+            </div>
+            {#if plansError}
+              <p class="pi-plan-error" role="alert">{plansError}</p>
+            {/if}
+            {#if !plansLoaded && !plansError}
+              <p class="empty">Reading your saved plans...</p>
+            {:else if activePlans.length === 0}
+              <p class="empty">No plans yet. Choose something to make below; it is kept as soon as you press Plan.</p>
+            {:else}
+              <ul class="pi-saved-list">
+                {#each activePlans as entry (entry.planID)}
+                  {@render planRow(entry)}
+                {/each}
+              </ul>
+            {/if}
+            {#if donePlans.length > 0}
+              <details class="pi-saved-done">
+                <summary>Done ({donePlans.length})</summary>
+                <ul class="pi-saved-list">
+                  {#each donePlans as entry (entry.planID)}
+                    {@render planRow(entry)}
+                  {/each}
+                </ul>
+              </details>
+            {/if}
+          </div>
+
           <form
             class="pi-plan-form"
             onsubmit={(event) => {
@@ -783,6 +1013,13 @@
                 </optgroup>
               {/each}
             </select>
+            <input
+              class="pi-plan-note"
+              aria-label="Note"
+              placeholder="Note (optional)"
+              maxlength="500"
+              bind:value={planNote}
+            />
             <button type="submit">Plan</button>
           </form>
           {#if planError}
@@ -1280,6 +1517,75 @@
   }
   .pi-plan-target {
     flex: 1 1 14rem;
+  }
+  .pi-plan-note {
+    flex: 1 1 12rem;
+  }
+  .pi-saved {
+    margin: 0 0 1rem;
+  }
+  .pi-saved-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+  }
+  .pi-saved-head h3 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .pi-saved-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pi-saved-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.15rem 0.4rem;
+    border-left: 2px solid transparent;
+  }
+  .pi-saved-row.on {
+    border-left-color: var(--color-accent);
+    background: var(--color-panel-3);
+  }
+  .pi-saved-open {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    min-height: 36px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--color-text-bright);
+    text-align: left;
+    cursor: pointer;
+  }
+  .pi-saved-name {
+    white-space: nowrap;
+  }
+  .pi-saved-note {
+    overflow: hidden;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .pi-saved-action {
+    min-height: 32px;
+  }
+  .pi-saved-done summary {
+    margin-top: 0.4rem;
+    color: var(--color-muted);
+    cursor: pointer;
   }
   .pi-plan-error {
     margin: 0.35rem 0 0;

@@ -14,6 +14,8 @@ const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
+const { lazyCompanionDb } = require("./companionDb");
+const { createPiPlanStore } = require("./piPlanStore");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
@@ -42,6 +44,22 @@ const BOTSCRIPT_STATUS = {
   SCRIPT_REV_CONFLICT: 409,
   BOTSCRIPT_NOT_FOUND: 404,
 };
+// The same for a saved PI plan (src/piPlanStore.js).
+const PI_PLAN_STATUS = {
+  PI_PLAN_INVALID: 400,
+  PI_PLAN_LIMIT_REACHED: 409,
+  PI_PLAN_REV_CONFLICT: 409,
+  PI_PLAN_NOT_FOUND: 404,
+};
+function sendPiPlanError(res, error, next) {
+  const status = error && PI_PLAN_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
+
 function sendBotScriptError(res, error, next) {
   const status = error && BOTSCRIPT_STATUS[error.code];
   if (status) {
@@ -62,6 +80,10 @@ const staticData = options.staticData || staticDataModule;
 // is our own JSON file.
 const botScripts =
   options.botScriptStore || botScriptStoreModule.createBotScriptStore({ dataDir: config.dataDir });
+// Saved PI plans, in the companion's own data/companion.sqlite (src/companionDb.js),
+// opened on the first request that needs it -- never eve.js's gamestore.
+const piPlans =
+  options.piPlanStore || createPiPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
 // Persistent-session handles (goal R2): webSessionID -> the opaque
 // bridgeSessionID the gateway minted, held server-side only. The browser
 // never sees the handle; it just gets its character/station state back.
@@ -19995,6 +20017,40 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
     res.json({ ok: true, removed });
   } catch (error) {
     next(error);
+  }
+});
+
+// ── Saved Planetary Industry plans (R108) ──────────────────────────────────
+// CRUD over pi_plans in data/companion.sqlite. A plan is intent -- commodity,
+// quantity, note, active or done -- and the browser re-plans it from live
+// stock. Global like the bot library; requireAuth only proves a sign-in.
+app.get("/api/pi/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plans: piPlans.list() });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plan: piPlans.create(req.body || {}) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans/:planID", requireAuth, (req, res, next) => {
+  try {
+    const { baseRev, ...fields } = req.body || {};
+    res.json({ ok: true, plan: piPlans.update(req.params.planID, fields, baseRev) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans/:planID/delete", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, removed: piPlans.remove(req.params.planID) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
   }
 });
 
