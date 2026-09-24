@@ -13,7 +13,7 @@ import { decodeRecipeBook, type PiCommodity, type PiRecipeBook, type PiSchematic
 import type { JsonValue } from "./wire.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 import type { Holding } from "./piStock.ts";
-import { parseWithin, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
+import { planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
 
 // --- a small book with known numbers ---------------------------------------
 
@@ -161,7 +161,6 @@ function plan(overrides: Partial<PlannerInput>) {
     quantity: 10,
     holdings: [],
     colonies: [],
-    withinMs: null,
     browserNowMs: NOW,
     ...overrides,
   });
@@ -251,7 +250,7 @@ test("a factory that could run the recipe but makes something else is named, wit
   assert.equal(gamma.detail, "Its factory makes Xi now.");
 });
 
-test("a factory making it gives the rate, labelled 'up to', and no gap without a deadline", () => {
+test("a factory making it gives the rate, labelled 'up to', and no gap", () => {
   const gammaRecipe = GAMMA_RECIPE;
   const result = plan({
     colonies: [colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, gammaRecipe), factory(11, ADVANCED_FACTORY, gammaRecipe)])],
@@ -266,17 +265,11 @@ test("a factory making it gives the rate, labelled 'up to', and no gap without a
   assert.match(result.verdict, /Nothing needs to change\.$/);
 });
 
-test("'too slow' is a gap only against a deadline, and says the rate and the shortfall", () => {
-  const gammaRecipe = GAMMA_RECIPE;
-  const colonies = [colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, gammaRecipe)])];
-  const holdings = [held(P1_A, 1000), held(P1_B, 1000)];
-  assert.equal(plan({ colonies, holdings, quantity: 50 }).gaps.length, 0);
-  const late = plan({ colonies, holdings, quantity: 50, withinMs: 2 * HOUR });
-  assert.equal(late.gaps.length, 1);
-  assert.equal(late.gaps[0]!.kind, "too-slow");
-  assert.equal(late.gaps[0]!.headline, "Gamma is made at 5 an hour.");
-  assert.equal(late.gaps[0]!.detail, "The 50 still to make take 10 hours, longer than the 2 hours you gave.");
-  assert.equal(late.verdict, "You can't make 50 Gamma within 2 hours. 1 thing is missing.");
+test("slow production is not a gap: the row says how long the rest takes", () => {
+  const colonies = [colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, GAMMA_RECIPE)])];
+  const result = plan({ colonies, holdings: [held(P1_A, 1000), held(P1_B, 1000)], quantity: 50 });
+  assert.equal(result.gaps.length, 0);
+  assert.equal(rowOf(result, P2_C)!.coverWords, "10 hours at that rate");
 });
 
 test("a raw resource extracted nowhere names the colonised planets that carry it, richest first", () => {
@@ -305,7 +298,7 @@ test("a running extractor's rate is the server's, for the installed program", ()
   assert.equal(rowOf(result, RAW_B)!.sourceWords, "Alpha III, 12,000 an hour on the installed program");
 });
 
-test("gaps come in the order worth telling: makes-nothing, busy factory, too slow, not extracted", () => {
+test("gaps come in the order worth telling: makes-nothing, busy factory, not extracted", () => {
   // Upsilon: no factory runs it (nothing-makes); Xi's advanced factory could
   // make Gamma (busy); Raw B is carried but not extracted.
   const xi = XI_RECIPE;
@@ -315,8 +308,8 @@ test("gaps come in the order worth telling: makes-nothing, busy factory, too slo
   const result = plan({ targetTypeID: P3_Y, quantity: 3, colonies, holdings: [held(P1_A, 1000)] });
   const kinds = result.gaps.map((gap) => gap.kind);
   assert.deepEqual(kinds, [...kinds].sort((left, right) =>
-    ["nothing-makes", "factory-busy", "too-slow", "not-extracted"].indexOf(left)
-      - ["nothing-makes", "factory-busy", "too-slow", "not-extracted"].indexOf(right)));
+    ["nothing-makes", "factory-busy", "not-extracted"].indexOf(left)
+      - ["nothing-makes", "factory-busy", "not-extracted"].indexOf(right)));
   assert.equal(kinds[0], "nothing-makes");
   assert.equal(kinds.at(-1), "not-extracted");
   // Every gap is numbered on its row.
@@ -332,19 +325,7 @@ test("holding the target outright is the fifth kind: nothing needs to change", (
 });
 
 test("a nonsensical request is null, as resolveChain's is", () => {
-  assert.equal(planWithStock({ book: BOOK, targetTypeID: P2_C, quantity: 0, holdings: [], colonies: [], withinMs: null, browserNowMs: NOW }), null);
-});
-
-// --- the deadline field ------------------------------------------------------
-
-test("a deadline reads days, hours and minutes, or a bare number of hours", () => {
-  assert.equal(parseWithin(""), null);
-  assert.equal(parseWithin("3d"), 3 * 24 * HOUR);
-  assert.equal(parseWithin("2d 6h"), 54 * HOUR);
-  assert.equal(parseWithin("36"), 36 * HOUR);
-  assert.equal(parseWithin("90m"), 1.5 * HOUR);
-  assert.ok(Number.isNaN(parseWithin("soon")));
-  assert.ok(Number.isNaN(parseWithin("3d later")));
+  assert.equal(planWithStock({ book: BOOK, targetTypeID: P2_C, quantity: 0, holdings: [], colonies: [], browserNowMs: NOW }), null);
 });
 
 // --- the real table ---------------------------------------------------------
@@ -392,7 +373,6 @@ test("real table: Robotics nets held stock before expanding, and names every mis
     quantity: 6,
     holdings: [held(firstInput.typeID, 12)],
     colonies: [],
-    withinMs: null,
     browserNowMs: NOW,
   })!;
   const first = result.rows.find((row) => row.typeID === firstInput.typeID)!;

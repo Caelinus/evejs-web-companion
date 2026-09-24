@@ -35,10 +35,12 @@
 //   1. nothing you own makes this — no factory anywhere can run its recipe;
 //   2. a factory could make this but is making something else — named, with
 //      what it makes now;
-//   3. it is made too slowly — only against a deadline the player gave, with
-//      the rate and the shortfall, never an adjective;
-//   4. it is extracted nowhere you own — naming the colonised planets that
+//   3. it is extracted nowhere you own — naming the colonised planets that
 //      carry it, with the server's quality number.
+//
+// "Made too slowly" is deliberately not a gap: slow is only slow against a
+// deadline, and the player chose not to plan against one. Each row says
+// instead how long its current producers take to cover what is missing.
 //
 // With none of these, the verdict is the fifth kind: nothing needs to change.
 
@@ -60,12 +62,10 @@ export interface PlannerInput {
   readonly quantity: number;
   readonly holdings: readonly Holding[];
   readonly colonies: readonly PlannerColony[];
-  /** A deadline in ms from now, or null for none. Only a deadline makes "too slow" a gap. */
-  readonly withinMs: number | null;
   readonly browserNowMs: number;
 }
 
-export type PlanGapKind = "nothing-makes" | "factory-busy" | "too-slow" | "not-extracted";
+export type PlanGapKind = "nothing-makes" | "factory-busy" | "not-extracted";
 
 export interface PlanGap {
   readonly kind: PlanGapKind;
@@ -120,8 +120,7 @@ export interface Plan {
 const GAP_ORDER: Readonly<Record<PlanGapKind, number>> = Object.freeze({
   "nothing-makes": 0,
   "factory-busy": 1,
-  "too-slow": 2,
-  "not-extracted": 3,
+  "not-extracted": 2,
 });
 
 function rateWords(perHour: number): string {
@@ -296,14 +295,7 @@ export function planWithStock(input: PlannerInput): Plan | null {
 
     if (toMake > 0) {
       if (producers.length > 0) {
-        if (input.withinMs !== null && coverMs !== null && coverMs > input.withinMs) {
-          gap = {
-            kind: "too-slow",
-            typeID,
-            headline: `${typeName} is made at ${rateWords(perHour)} an hour.`,
-            detail: `The ${countWords(toMake)} still to make take ${formatDuration(coverMs)}, longer than the ${formatDuration(input.withinMs)} you gave.`,
-          };
-        }
+        // Made already; the row says how long the rest takes.
       } else if (recipe !== null) {
         const candidates = idleCandidates(recipe, input.colonies);
         if (candidates.length > 0) {
@@ -391,10 +383,7 @@ export function planWithStock(input: PlannerInput): Plan | null {
   } else if (gaps.length === 0) {
     verdict = `What you hold and what your colonies make cover ${quantityWords} ${target.typeName}. Nothing needs to change.`;
   } else {
-    const within = input.withinMs !== null && gaps.every((entry) => entry.gap.kind === "too-slow")
-      ? ` within ${formatDuration(input.withinMs)}`
-      : " yet";
-    verdict = `You can't make ${quantityWords} ${target.typeName}${within}. ${gaps.length} thing${
+    verdict = `You can't make ${quantityWords} ${target.typeName} yet. ${gaps.length} thing${
       gaps.length === 1 ? " is" : "s are"} missing.`;
   }
 
@@ -404,23 +393,4 @@ export function planWithStock(input: PlannerInput): Plan | null {
     gaps: Object.freeze(gaps.map((entry) => entry.gap)),
     rows: Object.freeze(numbered),
   };
-}
-
-/**
- * A deadline typed by the player: "3d", "36h", "2d 6h", or a bare number of
- * hours. Null for empty; NaN for something that is not a duration.
- */
-export function parseWithin(text: string): number | null {
-  const trimmed = text.trim().toLowerCase();
-  if (trimmed === "") return null;
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed) * 3_600_000;
-  const pattern = /(\d+(?:\.\d+)?)\s*([dhm])/g;
-  let total = 0;
-  let consumed = "";
-  for (const match of trimmed.matchAll(pattern)) {
-    const amount = Number(match[1]);
-    total += amount * (match[2] === "d" ? 86_400_000 : match[2] === "h" ? 3_600_000 : 60_000);
-    consumed += match[0];
-  }
-  return consumed.replace(/\s/g, "") === trimmed.replace(/\s/g, "") && total > 0 ? total : NaN;
 }

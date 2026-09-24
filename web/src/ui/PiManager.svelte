@@ -52,7 +52,7 @@
     tierTag,
     type CorpStockRead,
   } from "../bridge/piStock.ts";
-  import { parseWithin, planWithStock, type PlannerColony } from "../bridge/piPlanner.ts";
+  import { planWithStock, type PlannerColony } from "../bridge/piPlanner.ts";
   import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
   import type { Session } from "../app/sessions.ts";
   import TypeIcon from "./TypeIcon.svelte";
@@ -98,9 +98,8 @@
   // derived from the request and the stock as it stands, so a Refresh re-plans.
   let planTarget = $state("");
   let planQuantity = $state("");
-  let planWithin = $state("");
   let planError = $state<string | null>(null);
-  let planRequest = $state<{ typeID: number; quantity: number; withinMs: number | null } | null>(null);
+  let planRequest = $state<{ typeID: number; quantity: number } | null>(null);
   let planOpen = $state<Set<number>>(new Set());
 
   async function loadActiveBots(): Promise<void> {
@@ -226,7 +225,6 @@
           quantity: planRequest.quantity,
           holdings,
           colonies: plannerColonies,
-          withinMs: planRequest.withinMs,
           browserNowMs,
         })
       : null,
@@ -235,17 +233,14 @@
   function submitPlan(): void {
     const typeID = Number(planTarget);
     const quantity = Number(planQuantity.replace(/,/g, "").trim());
-    const withinMs = parseWithin(planWithin);
     if (!Number.isSafeInteger(typeID) || typeID <= 0) {
       planError = "Choose something to make.";
     } else if (!Number.isSafeInteger(quantity) || quantity <= 0) {
       planError = "Enter how many, as a whole number.";
-    } else if (withinMs !== null && Number.isNaN(withinMs)) {
-      planError = "Write the deadline as 3d, 36h or 2d 6h, or leave it empty.";
     } else {
       planError = null;
       planOpen = new Set();
-      planRequest = { typeID, quantity, withinMs };
+      planRequest = { typeID, quantity };
     }
   }
 
@@ -764,22 +759,13 @@
                 </optgroup>
               {/each}
             </select>
-            <label for="pi-plan-within">within</label>
-            <input
-              id="pi-plan-within"
-              class="pi-plan-within"
-              placeholder="3d"
-              bind:value={planWithin}
-              oninput={() => (planError = null)}
-            />
             <button type="submit">Plan</button>
           </form>
           {#if planError}
             <p class="pi-plan-error" role="alert">{planError}</p>
           {:else}
             <p class="note">
-              Counts every colony, hangar and corp hangar that was read. A deadline is
-              optional; without one nothing is called too slow.
+              Counts every colony, hangar and corp hangar that was read.
             </p>
           {/if}
 
@@ -1241,8 +1227,7 @@
   .pi-plan-form button {
     min-height: 40px;
   }
-  .pi-plan-quantity,
-  .pi-plan-within {
+  .pi-plan-quantity {
     width: 5.5rem;
   }
   .pi-plan-target {

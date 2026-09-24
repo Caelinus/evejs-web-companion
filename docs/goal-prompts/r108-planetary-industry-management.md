@@ -297,7 +297,9 @@ Gap kinds, in the order they are worth telling someone:
 1. **Nothing you own makes this.** No colony has a factory producing it.
 2. **A factory could make this but is making something else.** Name the colony and
    what it makes now — this is the gap that slice 6 can close in one click.
-3. **It is made too slowly.** Give the rate and the shortfall, not an adjective.
+3. ~~**It is made too slowly.**~~ Dropped when built (2026-09-24): slow only means
+   something against a deadline, and the operator chose not to plan against one. Each
+   row says instead how long its current producers take to cover the shortfall.
 4. **It is extracted nowhere you own.** For a raw resource with no extractor — and
    here `GetPlanetResourceInfo` earns its keep, naming which of the pilot's planets
    carries that resource and at what quality.
