@@ -38,6 +38,7 @@
   import { restartExtractorsFor } from "../app/piDispatch.ts";
   import { listActiveServerBots } from "../app/api.ts";
   import { decodeRecipeBook, type PiRecipeBook } from "../bridge/piRecipes.ts";
+  import TypeIcon from "./TypeIcon.svelte";
 
   let roster = $state<PiRosterPrefs>(loadPiRoster());
   let known = $state<KnownCharacter[]>(loadKnownCharacters());
@@ -248,53 +249,74 @@
           <p class="empty">{board.emptyWords}</p>
         {/if}
 
-        <!-- ① NEEDS YOU. A list, not a table: it is read top to bottom, worst first,
-             and when nothing is waiting the section is simply absent — an empty space
-             says it without being read. -->
-        {#if board.needsYou.length > 0}
-          <section class="pi-section" aria-labelledby="pi-needs-you">
-            <h3 id="pi-needs-you">Needs you</h3>
-            <ul class="needs-you">
-              {#each board.needsYou as item (item.key)}
-                <li class:now={item.urgency === "now"} class:soon={item.urgency === "soon"}>
-                  <span class="where"><strong>{item.placeWords}</strong> - {item.pilotName}</span>
-                  <span class="what">{item.words}</span>
-                  <span class="note">{item.readAgeWords}</span>
-                </li>
-              {/each}
-            </ul>
-          </section>
-        {/if}
-
-        <!-- ② COLONIES, every pilot's, worst first, each with its own age. -->
         {#if board.colonies.length > 0}
-          <section class="pi-section" aria-labelledby="pi-colonies">
-            <h3 id="pi-colonies">Colonies</h3>
-            <div class="table-wrap overflow-x-auto">
-              <table class="guests reflow">
-                <thead>
-                  <tr>
-                    <th>Planet</th>
-                    <th>Pilot</th>
-                    <th>State</th>
-                    <th>Read</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each board.colonies as row (row.key)}
-                    <tr class:now={row.needsYouNow}>
-                      <td data-label="Planet">{row.placeWords}</td>
-                      <td data-label="Pilot">{row.pilotName}</td>
-                      <td data-label="State">{row.stateWords}</td>
-                      <td data-label="Read" class="note">{row.readAgeWords}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
+          <!-- THE STRIP: the whole estate in four numbers, before any row. -->
+          <dl class="pi-summary">
+            <div>
+              <dt>Colonies</dt>
+              <dd>{board.summary.colonies}</dd>
             </div>
-          </section>
-        {/if}
+            <div>
+              <dt>Extracting</dt>
+              <dd class="good">{board.summary.extracting}</dd>
+            </div>
+            <div>
+              <dt>Need you now</dt>
+              <dd class:bad={board.summary.needYouNow > 0}>{board.summary.needYouNow}</dd>
+            </div>
+            <div>
+              <dt>Next program ends</dt>
+              <dd>{board.summary.nextEndsWords ?? "-"}</dd>
+            </div>
+          </dl>
 
+          <!-- ② COLONIES BY PILOT. One reading per pilot, so its age is said
+               once, on the pilot's line, and is true of every row under it.
+               What needs you is said ON the colony's row, worst first — there
+               is no second list to keep in step with this one. -->
+          {#each board.groups as group (group.characterID)}
+            <section class="pi-group" aria-label={`${group.pilotName}'s colonies`}>
+              <header class="pi-group-head">
+                <h3>{group.pilotName} <span class="note">- {group.countWords}</span></h3>
+                <span class="note">{group.readAgeWords}</span>
+              </header>
+              <ul class="pi-colonies">
+                {#each group.rows as row (row.key)}
+                  <li class="pi-colony tone-{row.tone}">
+                    <span class="pi-colony-place">
+                      <TypeIcon typeID={row.planetTypeID} name={row.kindWords} size="md" />
+                      <span>
+                        <span class="pi-colony-name">{row.placeWords}</span>
+                        <span class="note">{row.kindWords}</span>
+                      </span>
+                    </span>
+                    <span class="pi-colony-resources">
+                      {#each row.resources as resource (resource)}
+                        <span class="pi-chip">{resource}</span>
+                      {/each}
+                    </span>
+                    <span class="pi-colony-program">
+                      {#if row.program}
+                        <span class="pi-bar" aria-hidden="true">
+                          <span class="pi-bar-fill program" class:ended={row.program.ended} style:width={`${row.program.fraction * 100}%`}></span>
+                        </span>
+                      {/if}
+                      <span class="pi-status">{row.statusWords}</span>
+                    </span>
+                    <span class="pi-colony-storage">
+                      {#if row.storage}
+                        <span class="pi-bar" aria-hidden="true">
+                          <span class="pi-bar-fill storage" class:high={row.storage.high} style:width={`${row.storage.fraction * 100}%`}></span>
+                        </span>
+                        <span class="note" class:warn={row.storage.high}>{row.storage.words}</span>
+                      {/if}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/each}
+        {/if}
       </section>
 
       <!-- THE ROSTER: who is on planetary industry, and what each read said. The
@@ -503,29 +525,150 @@
     margin: 0 0 0.35rem;
     font-size: 0.95rem;
   }
-  .needs-you {
+  /* ⚠ ONE FRAME, THE WINDOW'S. The app styles every `section` as a framed
+   * panel, so this window came out as box in box in box. Its own sections are
+   * headings and rules, not cards — the same reset StationPanel makes. A
+   * scoped rule is unlayered, so it outranks the components layer outright. */
+  .pi-manager,
+  .pi-manager section {
+    border: 0;
+    background: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pi-manager::before,
+  .pi-manager section::before {
+    content: none;
+  }
+
+  .pi-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin: 0 0 1rem;
+  }
+  .pi-summary dt {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .pi-summary dd {
+    margin: 0;
+    font-size: 1.35rem;
+    color: var(--color-text-bright);
+    font-variant-numeric: tabular-nums;
+  }
+  .pi-summary dd.good {
+    color: var(--color-good);
+  }
+  .pi-summary dd.bad {
+    color: var(--color-danger);
+  }
+
+  .pi-group + .pi-group {
+    margin-top: 1rem;
+  }
+  .pi-group-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.25rem 1rem;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--color-line-strong);
+  }
+  .pi-group-head h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--color-text-bright);
+  }
+  .pi-colonies {
     list-style: none;
     margin: 0;
     padding: 0;
+  }
+  .pi-colony {
     display: grid;
-    gap: 0.35rem;
+    grid-template-columns: minmax(11rem, 1.5fr) minmax(8rem, 1.3fr) minmax(9rem, 1.6fr) minmax(7rem, 0.9fr);
+    gap: 0.5rem 1rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-row-line);
+    border-left: 3px solid var(--color-good);
   }
-  .needs-you li {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem 0.75rem;
-    padding: 0.35rem 0.5rem;
-    border-left: 3px solid var(--color-line);
-    background: var(--color-panel-3);
-  }
-  .needs-you li.now {
-    border-left-color: var(--color-danger);
-  }
-  .needs-you li.soon {
+  .pi-colony.tone-soon {
     border-left-color: var(--color-warn);
   }
-  tr.now td:first-child {
-    box-shadow: inset 3px 0 0 var(--color-danger);
+  .pi-colony.tone-stopped {
+    border-left-color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 7%, transparent);
+  }
+  .pi-colony-place {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+  .pi-colony-place > span:last-child {
+    display: grid;
+    min-width: 0;
+  }
+  .pi-colony-name {
+    color: var(--color-text-bright);
+  }
+  .pi-colony-resources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+  .pi-chip {
+    font-size: 11px;
+    padding: 0 0.4rem;
+    border: 1px solid var(--color-line-strong);
+    color: var(--color-cell);
+    white-space: nowrap;
+  }
+  .pi-colony-program,
+  .pi-colony-storage {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+  .pi-bar {
+    display: block;
+    height: 4px;
+    background: var(--color-line);
+  }
+  .pi-bar-fill {
+    display: block;
+    height: 100%;
+  }
+  .pi-bar-fill.program {
+    background: var(--color-good);
+  }
+  .pi-bar-fill.program.ended {
+    background: var(--color-danger);
+  }
+  .pi-bar-fill.storage {
+    background: var(--color-accent);
+  }
+  .pi-bar-fill.storage.high {
+    background: var(--color-warn);
+  }
+  .pi-status {
+    font-size: 0.85rem;
+    color: var(--color-muted);
+  }
+  .tone-stopped .pi-status {
+    color: var(--color-danger);
+  }
+  .tone-soon .pi-status {
+    color: var(--color-warn);
+  }
+  .note.warn {
+    color: var(--color-warn);
   }
   .pilot-note {
     display: block;
@@ -584,6 +727,13 @@
     }
     .pi-menu-item.on {
       border-bottom-color: var(--color-accent);
+    }
+    .pi-summary {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    /* A colony becomes a small card: place and resources, then the bars. */
+    .pi-colony {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 </style>

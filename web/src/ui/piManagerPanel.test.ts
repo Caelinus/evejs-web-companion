@@ -162,17 +162,26 @@ test("an empty roster says what to do, and offers the hangar's pilots", () => {
   assert.match(text, /Pilots come from the Pilot hangar/);
 });
 
-test("stored readings are printed: worst first, each with its own age", () => {
+test("stored readings are printed by pilot: worst first, under the pilot's age", () => {
   const text = visibleText(renderSeeded());
-  assert.match(text, /Needs you/);
-  assert.match(text, /Alpha II - Ada Farmer 1 extractor has finished its program Read 2 hours ago/);
-  // Both colonies in the table, the stopped one first.
-  const stopped = text.indexOf("Alpha II Ada Farmer");
-  const running = text.indexOf("Alpha I Ada Farmer");
+  // The age of a pilot's one reading is said once, on the line above its rows.
+  assert.match(text, /Ada Farmer - 2 colonies, Alpha Read 2 hours ago/);
+  // What needs you is said on the colony's own row, and that row comes first.
+  const stopped = text.indexOf("Alpha II Barren - CC 5");
+  const running = text.indexOf("Alpha I Barren - CC 5");
   assert.ok(stopped >= 0 && running > stopped, text);
-  // Every table row carries its own age, not only the list above it.
-  assert.match(text, /Alpha II Ada Farmer 1 extractor has finished its program Read 2 hours ago/);
-  assert.match(text, /Alpha I Ada Farmer Extracting — next program ends in [^R]+ Read 2 hours ago/);
+  assert.match(text, /Alpha II Barren - CC 5 Aqueous Liquids 1 extractor has finished its program/);
+  assert.match(text, /Alpha I Barren - CC 5 Aqueous Liquids Ends in (\d+d )?\d+h/);
+});
+
+test("the strip counts the estate before any row", () => {
+  const text = visibleText(renderSeeded());
+  assert.match(text, /Colonies 2 Extracting 1 Need you now 1 Next program ends (\d+d )?\d+h/);
+});
+
+test("⚠ the window draws one frame, not a box per section", () => {
+  // The components layer frames every `section`; this window resets its own.
+  assert.match(SOURCE, /\.pi-manager section \{\s*border: 0;/);
 });
 
 test("⚠ each pilot's outcome is said about that pilot", () => {

@@ -408,3 +408,63 @@ test("a program that states no end is one the macro restarts, so it is offered",
   }));
   assert.match(board.pilots[0]!.restart!.words, /^1 extractor has ended on 1 colony\./);
 });
+
+test("colonies are grouped by pilot, the pilot with the worst colony first", () => {
+  const board = buildPiBoard(input({
+    readings: new Map([
+      [FARMER, reading(FARMER, [QUIET, COMING_UP], NOW - MINUTE)],
+      [NEWBIE, reading(NEWBIE, [STOPPED], NOW - MINUTE)],
+    ]),
+  }));
+  assert.deepEqual(
+    board.groups.map((group) => [group.pilotName, group.countWords, group.rows.map((row) => row.placeWords)]),
+    [
+      ["Cy Newbie", "1 colony, Alpha", ["Alpha II"]],
+      ["Ada Farmer", "2 colonies, Alpha", ["Alpha IV", "Alpha I"]],
+    ],
+  );
+  assert.equal(board.groups[0]!.readAgeWords, "Read 1 minute ago");
+});
+
+test("a colony row says its kind, what it pulls, how far its program is, and its tone", () => {
+  const board = buildPiBoard(input({
+    readings: new Map([[FARMER, reading(FARMER, [QUIET, STOPPED, COMING_UP], NOW - MINUTE)]]),
+  }));
+  const byPlace = new Map(board.colonies.map((row) => [row.placeWords, row]));
+  const quiet = byPlace.get("Alpha I")!;
+  assert.equal(quiet.kindWords, "Barren - CC 5");
+  assert.deepEqual(quiet.resources, ["Aqueous Liquids"]);
+  assert.equal(quiet.tone, "ok");
+  assert.equal(quiet.statusWords, "Ends in 1d 6h");
+  // 18 of its 48 hours are gone.
+  assert.equal(quiet.program!.ended, false);
+  assert.ok(Math.abs(quiet.program!.fraction - 18 / 48) < 1e-9);
+
+  const stopped = byPlace.get("Alpha II")!;
+  assert.equal(stopped.tone, "stopped");
+  assert.deepEqual(stopped.program, { fraction: 1, ended: true });
+  assert.equal(stopped.statusWords, "1 extractor has finished its program");
+
+  assert.equal(byPlace.get("Alpha IV")!.tone, "soon");
+});
+
+test("storage is the fullest hold, rounded down, and high from 80%", () => {
+  const holds = colony(40000010, "Alpha V", [
+    pin({ pinID: 3, kind: "storage", usedM3: 2000, capacityM3: 12000 }),
+    pin({ pinID: 4, kind: "launchpad", usedM3: 8199, capacityM3: 10000 }),
+  ]);
+  const board = buildPiBoard(input({ readings: new Map([[FARMER, reading(FARMER, [holds, QUIET], NOW - MINUTE)]]) }));
+  const row = board.colonies.find((candidate) => candidate.placeWords === "Alpha V")!;
+  assert.equal(row.storage!.words, "Storage 81% full");
+  assert.equal(row.storage!.high, true);
+  assert.equal(row.program, null, "no extractor, no program bar");
+  // A colony whose holds state no fill has no storage bar at all.
+  assert.equal(board.colonies.find((candidate) => candidate.placeWords === "Alpha I")!.storage, null);
+});
+
+test("the strip counts colonies, those extracting, those that need you, and the next end", () => {
+  const board = buildPiBoard(input({
+    readings: new Map([[FARMER, reading(FARMER, [QUIET, STOPPED, COMING_UP], NOW - MINUTE)]]),
+  }));
+  assert.deepEqual(board.summary, { colonies: 3, extracting: 2, needYouNow: 1, nextEndsWords: "2 hours" });
+});

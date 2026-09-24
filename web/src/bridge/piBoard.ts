@@ -29,10 +29,11 @@ import {
   bySeverityThenTime,
   colonyAttentionWords,
   colonyLineWords,
+  pinFill,
   type ColonyAttention,
   type ColonyFindingUrgency,
 } from "./colonyAttention.ts";
-import { colonyPlaceWords, formatDuration, serverNow } from "./planets.ts";
+import { colonyPlaceWords, formatDuration, serverNow, summarizeColony } from "./planets.ts";
 
 /**
  * What the latest attempt to read a pilot did.
@@ -113,6 +114,58 @@ export interface PiColonyRow {
   readonly stateWords: string;
   readonly needsYouNow: boolean;
   readonly readAgeWords: string;
+  /** The planet's own type, for its icon only — never printed (R7d). */
+  readonly planetTypeID: number;
+  /** "Barren - CC 5": the kind of planet and the command center's level. */
+  readonly kindWords: string;
+  /** What its extractors pull, by name, each once. */
+  readonly resources: readonly string[];
+  /** "stopped" wants the player now, "soon" before long, "ok" nothing. */
+  readonly tone: "stopped" | "soon" | "ok";
+  /** The soonest extraction program, as a bar; null when none is running or ended. */
+  readonly program: PiProgramBar | null;
+  /** Under the program bar: what needs doing, else when the program ends. */
+  readonly statusWords: string;
+  /** The fullest hold, as a bar; null when no hold's fill can be stated. */
+  readonly storage: PiFillBar | null;
+}
+
+/** How far through its program the extractor that ends first is. */
+export interface PiProgramBar {
+  /** 0 to 1; 1 once it has ended. */
+  readonly fraction: number;
+  readonly ended: boolean;
+}
+
+export interface PiFillBar {
+  /** 0 to 1. */
+  readonly fraction: number;
+  /** "Storage 22% full", rounded down so it never claims more than there is. */
+  readonly words: string;
+  /** Near enough full to look at. */
+  readonly high: boolean;
+}
+
+/** One pilot's colonies, under one line that says whose and how old. */
+export interface PiColonyGroup {
+  readonly characterID: number;
+  readonly pilotName: string;
+  /** "2 colonies, Alpha" — the count and the systems they are in. */
+  readonly countWords: string;
+  readonly readAgeWords: string;
+  /** Worst first, as in `colonies`. */
+  readonly rows: readonly PiColonyRow[];
+}
+
+/** The strip across the top of the colonies view. */
+export interface PiColonySummary {
+  readonly colonies: number;
+  /** Colonies with a program running and none ended. */
+  readonly extracting: number;
+  /** Colonies that want the player now. */
+  readonly needYouNow: number;
+  /** "2d 22h" until the first running program ends; null when none runs. */
+  readonly nextEndsWords: string | null;
 }
 
 export interface PiNeedsYou {
@@ -130,6 +183,9 @@ export interface PiBoard {
   readonly pilots: readonly PiPilotRow[];
   /** Every colony of every pilot, worst first, quiet ones after. */
   readonly colonies: readonly PiColonyRow[];
+  /** The same rows by pilot; the pilot with the worst colony first. */
+  readonly groups: readonly PiColonyGroup[];
+  readonly summary: PiColonySummary;
   /** Only what has something to say, worst first. Empty is the quiet answer. */
   readonly needsYou: readonly PiNeedsYou[];
   /** Said when the merged readings are far apart; null when they are not. */
@@ -267,6 +323,85 @@ function byWorst(left: Placed, right: Placed): number {
   return left.memberIndex - right.memberIndex;
 }
 
+/** "Planet (Barren)" is how the type table names it; the player says "Barren". */
+function kindWords(colony: Colony): string {
+  const typeName = colony.planetTypeName?.match(/^Planet \((.+)\)$/)?.[1] ?? colony.planetTypeName;
+  const level = `CC ${colony.commandCenterLevel}`;
+  return typeName ? `${typeName} - ${level}` : level;
+}
+
+function resourcesOf(colony: Colony): string[] {
+  const names = new Set<string>();
+  for (const pin of colony.pins) {
+    if (pin.program?.resourceTypeName) {
+      names.add(pin.program.resourceTypeName);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * The extractor that needs the player first: an ended one if there is one,
+ * else the running one that ends soonest.
+ */
+function programBar(colony: Colony, nowMs: number): PiProgramBar | null {
+  let soonest: { installedAtMs: number; expiresAtMs: number } | null = null;
+  for (const pin of colony.pins) {
+    const program = pin.program;
+    if (!program || program.expiresAtMs === null) {
+      continue;
+    }
+    if (program.expiresAtMs <= nowMs) {
+      return { fraction: 1, ended: true };
+    }
+    if (soonest === null || program.expiresAtMs < soonest.expiresAtMs) {
+      soonest = { installedAtMs: program.installedAtMs ?? program.expiresAtMs, expiresAtMs: program.expiresAtMs };
+    }
+  }
+  if (soonest === null) {
+    return null;
+  }
+  const length = soonest.expiresAtMs - soonest.installedAtMs;
+  const fraction = length > 0 ? (nowMs - soonest.installedAtMs) / length : 0;
+  return { fraction: Math.min(1, Math.max(0, fraction)), ended: false };
+}
+
+/** A hold counts as "high" from here; below it the bar is only information. */
+const HIGH_FILL = 0.8;
+
+function storageBar(colony: Colony): PiFillBar | null {
+  let fullest: number | null = null;
+  for (const pin of colony.pins) {
+    const fill = pinFill(pin);
+    if (fill !== null && (fullest === null || fill > fullest)) {
+      fullest = fill;
+    }
+  }
+  if (fullest === null) {
+    return null;
+  }
+  const fraction = Math.min(1, Math.max(0, fullest));
+  return { fraction, words: `Storage ${Math.floor(fraction * 100)}% full`, high: fraction >= HIGH_FILL };
+}
+
+/** What wants the player, in the colony list's own words; else the countdown. */
+function statusWords(entry: Placed): string {
+  const findings = entry.attention?.findings ?? [];
+  if (findings.length === 0) {
+    const next = summarizeColony(entry.colony, entry.nowMs).nextExpiryMs;
+    if (next !== null) {
+      return `Ends in ${formatDuration(next - entry.nowMs)}`;
+    }
+  }
+  return colonyLineWords(entry.colony, findings, entry.nowMs);
+}
+
+function countWords(colonies: readonly Colony[]): string {
+  const count = colonies.length === 1 ? "1 colony" : `${colonies.length} colonies`;
+  const systems = [...new Set(colonies.map((colony) => colony.solarSystemName).filter((name) => name !== null))];
+  return systems.length > 0 ? `${count}, ${systems.join(", ")}` : count;
+}
+
 export function buildPiBoard(input: PiBoardInput): PiBoard {
   const pilots: PiPilotRow[] = [];
   const placed: Placed[] = [];
@@ -314,7 +449,51 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
     stateWords: colonyLineWords(entry.colony, entry.attention?.findings ?? [], entry.nowMs),
     needsYouNow: entry.attention?.needsYouNow ?? false,
     readAgeWords: ageWords(entry.reading, input.browserNowMs),
+    planetTypeID: entry.colony.planetTypeID,
+    kindWords: kindWords(entry.colony),
+    resources: resourcesOf(entry.colony),
+    tone: entry.attention === null ? "ok" : entry.attention.needsYouNow ? "stopped" : "soon",
+    program: programBar(entry.colony, entry.nowMs),
+    statusWords: statusWords(entry),
+    storage: storageBar(entry.colony),
   }));
+
+  // Groups in the order their worst colony comes, so trouble stays on top.
+  const groups: PiColonyGroup[] = [];
+  const byPilot = new Map<number, PiColonyRow[]>();
+  for (const row of colonies) {
+    let rows = byPilot.get(row.characterID);
+    if (rows === undefined) {
+      rows = [];
+      byPilot.set(row.characterID, rows);
+      const entry = placed.find((candidate) => candidate.characterID === row.characterID)!;
+      groups.push({
+        characterID: row.characterID,
+        pilotName: row.pilotName,
+        countWords: countWords(entry.reading.report.colonies),
+        readAgeWords: row.readAgeWords,
+        rows,
+      });
+    }
+    rows.push(row);
+  }
+
+  let nextEndsMs: number | null = null;
+  for (const entry of placed) {
+    const next = summarizeColony(entry.colony, entry.nowMs).nextExpiryMs;
+    if (next !== null && (nextEndsMs === null || next - entry.nowMs < nextEndsMs)) {
+      nextEndsMs = next - entry.nowMs;
+    }
+  }
+  const summary: PiColonySummary = {
+    colonies: placed.length,
+    extracting: placed.filter((entry) => {
+      const colony = summarizeColony(entry.colony, entry.nowMs);
+      return colony.runningProgramCount > 0 && colony.expiredProgramCount === 0;
+    }).length,
+    needYouNow: colonies.filter((row) => row.needsYouNow).length,
+    nextEndsWords: nextEndsMs === null ? null : formatDuration(nextEndsMs),
+  };
   const needsYou = ordered
     .filter((entry) => entry.attention !== null)
     .map((entry): PiNeedsYou => {
@@ -333,6 +512,8 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
   return {
     pilots,
     colonies,
+    groups,
+    summary,
     needsYou,
     staleWords: staleWords(input),
     emptyWords: emptyWords(input),
