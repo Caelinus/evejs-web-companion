@@ -14,7 +14,7 @@ import { decodeRecipeBook, type PiCommodity, type PiRecipeBook, type PiSchematic
 import type { JsonValue } from "./wire.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 import type { Holding } from "./piStock.ts";
-import { initiallyOpen, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
+import { missingByTier, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
 
 // --- a small book with known numbers ---------------------------------------
 
@@ -373,16 +373,21 @@ test("tags are short; the sentence rides along as the title", () => {
   assert.deepEqual(noFactory.map((tag) => tag.text), ["no factory"]);
 });
 
-test("the tree opens down to the problems, and a fully covered branch stays folded", () => {
-  const colonies = [colony(1, "Alpha III", [], [])];
-  // Beta held in full; Alpha not: only Alpha's branch has something below it.
-  const result = plan({ colonies, holdings: [held(P1_B, 1000)] });
-  const open = initiallyOpen(result.tree);
-  const alpha = result.tree.children.find((child) => child.row.typeID === P1_A)!;
-  const beta = result.tree.children.find((child) => child.row.typeID === P1_B)!;
-  assert.ok(open.has(result.tree.key));
-  assert.ok(open.has(alpha.key), "Alpha opens onto its missing raw resource");
-  assert.equal(open.has(beta.key), false);
+test("the missing summary runs raw first, blocked first, and leaves out what is held", () => {
+  const colonies = [
+    colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, XI_RECIPE), extractor(20, RAW_B, 100, null)]),
+  ];
+  // Beta held in full: neither it nor Raw B is missing.
+  const result = plan({ targetTypeID: P3_Y, quantity: 3, colonies, holdings: [held(P1_B, 1000)] });
+  const summary = missingByTier(result).map((entry) => [entry.tier, entry.rows.map((row) => row.typeName)]);
+  assert.deepEqual(summary, [
+    [0, ["Raw A"]],
+    [1, ["Alpha"]],
+    [2, ["Gamma", "Xi"]],
+    [3, ["Upsilon"]],
+  ]);
+  const p2 = missingByTier(result).find((entry) => entry.tier === 2)!;
+  assert.deepEqual(p2.rows.map((row) => row.state), ["act", "ok"], "the factory switch before what is already made");
 });
 
 // --- the real table ---------------------------------------------------------

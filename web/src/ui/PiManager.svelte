@@ -52,7 +52,7 @@
     tierTag,
     type CorpStockRead,
   } from "../bridge/piStock.ts";
-  import { initiallyOpen, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
+  import { missingByTier, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
   import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
   import type { Session } from "../app/sessions.ts";
   import TypeIcon from "./TypeIcon.svelte";
@@ -100,8 +100,9 @@
   let planQuantity = $state("");
   let planError = $state<string | null>(null);
   let planRequest = $state<{ typeID: number; quantity: number } | null>(null);
-  // Which tree nodes the player opened or folded, over the plan's own default
-  // (open down to the problems); and which nodes show where their stock is.
+  // Which tree nodes the player opened; the tree starts folded, because the
+  // missing summary above it is what to read first. And which nodes show where
+  // their stock is.
   let treeOverride = $state<Map<string, boolean>>(new Map());
   let placesOpen = $state<Set<string>>(new Set());
 
@@ -233,10 +234,10 @@
       : null,
   );
 
-  const treeDefault = $derived(plan ? initiallyOpen(plan.tree) : new Set<string>());
+  const missing = $derived(plan ? missingByTier(plan) : []);
 
   function isTreeOpen(key: string): boolean {
-    return treeOverride.get(key) ?? treeDefault.has(key);
+    return treeOverride.get(key) ?? false;
   }
 
   function toggleTree(key: string): void {
@@ -874,6 +875,31 @@
                 {plan.gaps.length > 0 ? `${plan.gaps.length} blocked` : "covered"}
               </span>
             </p>
+            <!-- WHAT IS MISSING, by tier from the ground up: raw first, because an
+                 extractor feeds everything above it. Blocked steps lead each tier. -->
+            {#if missing.length > 0}
+              <div class="pi-missing" aria-label="Missing">
+                {#each missing as group (group.tier)}
+                  <div class="pi-missing-tier">
+                    <h3>{tierTag(group.tier) ?? "other"}</h3>
+                    <ul>
+                      {#each group.rows as row (row.typeID)}
+                        <li class="pi-missing-row state-{row.state}">
+                          <TypeIcon typeID={row.typeID} name={row.typeName} />
+                          <span class="pi-missing-name">{row.typeName}</span>
+                          <span class="pi-missing-count" title={`${countWords(row.held)} held of ${countWords(row.needed)}`}>{countWords(row.toMake)} missing</span>
+                          <span class="pi-tags">
+                            {#each row.tags as tag, index (index)}
+                              <span class="pi-tag" class:act={tag.tone === "act"} class:bad={tag.tone === "bad"} title={tag.title}>{tag.text}</span>
+                            {/each}
+                          </span>
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/each}
+              </div>
+            {/if}
             <ul class="pi-tree" role="tree" aria-label={plan.verdict}>
               {@render planNode(plan.tree)}
             </ul>
@@ -1267,6 +1293,47 @@
     margin: 1rem 0 0.5rem;
     font-size: 1.05rem;
     color: var(--color-text-bright);
+  }
+  .pi-missing {
+    display: grid;
+    gap: 0.6rem;
+    margin: 0 0 1rem;
+  }
+  .pi-missing-tier h3 {
+    margin: 0 0 0.25rem;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .pi-missing-tier ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pi-missing-row {
+    display: grid;
+    grid-template-columns: auto minmax(9rem, 14rem) 8rem minmax(0, 1fr);
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.2rem 0.6rem;
+    border-left: 3px solid var(--color-good);
+  }
+  .pi-missing-row.state-act {
+    border-left-color: var(--color-warn);
+  }
+  .pi-missing-row.state-bad {
+    border-left-color: var(--color-danger);
+  }
+  .pi-missing-name {
+    color: var(--color-text-bright);
+  }
+  .pi-missing-count {
+    font-size: 12px;
+    color: var(--color-muted);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .pi-tree,
   .pi-tree-kids,

@@ -501,17 +501,32 @@ function buildTree(rows: readonly PlanRow[], target: PlanRow): PlanNode {
   return build(target, "");
 }
 
+/** Every step still short of what the plan needs, for one tier. */
+export interface MissingTier {
+  readonly tier: PiTier | null;
+  readonly rows: readonly PlanRow[];
+}
+
 /**
- * The nodes to open at first: every node with something not covered below
- * it, so the tree lands on the problems and a fully covered branch stays
- * folded.
+ * What is still to make, by tier from the ground up - raw resources first,
+ * because an extractor feeds everything above it. Within a tier the blocked
+ * steps come first, then the ones a factory switch fixes, then the ones
+ * already being made; the biggest shortfall first among equals.
  */
-export function initiallyOpen(tree: PlanNode): Set<string> {
-  const open = new Set<string>();
-  const walk = (node: PlanNode): void => {
-    if (node.children.some((child) => child.worst !== "ok")) open.add(node.key);
-    for (const child of node.children) walk(child);
-  };
-  walk(tree);
-  return open;
+export function missingByTier(plan: Plan): MissingTier[] {
+  const byTier = new Map<PiTier | null, PlanRow[]>();
+  for (const row of plan.rows) {
+    if (row.toMake <= 0) continue;
+    const list = byTier.get(row.tier) ?? [];
+    list.push(row);
+    byTier.set(row.tier, list);
+  }
+  const tierRank = (tier: PiTier | null) => tier ?? 5;
+  return [...byTier.entries()]
+    .sort(([left], [right]) => tierRank(left) - tierRank(right))
+    .map(([tier, rows]) => ({
+      tier,
+      rows: Object.freeze(rows.sort((left, right) =>
+        STATE_RANK[right.state] - STATE_RANK[left.state] || right.toMake - left.toMake)),
+    }));
 }
