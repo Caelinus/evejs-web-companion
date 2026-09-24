@@ -239,3 +239,34 @@ test("⚠ the window never selects a character, and never reads on a timer", () 
   assert.ok(interval, "the age tick exists");
   assert.doesNotMatch(interval![1]!, /refresh|readPiRoster/);
 });
+
+test("the window has its own menu, and shows one view at a time", () => {
+  const body = renderSeeded();
+  for (const id of ["colonies", "pilots", "planner"]) {
+    assert.match(body, new RegExp(`<button[^>]*role="tab"[^>]*id="pi-tab-${id}"`));
+  }
+  // A roster with pilots opens on Colonies; the other views are hidden, not
+  // left out, so a restart already started keeps saying so.
+  assert.match(body, /id="pi-tab-colonies"[^>]*aria-selected="true"/);
+  assert.doesNotMatch(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-pilots"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-planner"[^>]*hidden/);
+});
+
+test("the menu badges say what waits in each view", () => {
+  const text = visibleText(renderSeeded());
+  // One colony needs you; one pilot has a restart to offer.
+  assert.match(text, /Colonies 1 Pilots 1 Planner/);
+});
+
+test("an empty roster opens on Pilots, where a pilot is added", () => {
+  setKnownCharacterStorage(null);
+  setPiRosterStorage(null);
+  const body = render(PiManager as never, { props: {} } as never).body;
+  assert.match(body, /id="pi-tab-pilots"[^>]*aria-selected="true"/);
+  assert.match(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
+});
+
+test("the planner says it is not built, rather than pretending to plan", () => {
+  assert.match(visibleText(renderSeeded()), /The planner is not built yet\./);
+});
