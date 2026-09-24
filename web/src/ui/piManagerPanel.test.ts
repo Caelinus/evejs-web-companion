@@ -207,6 +207,13 @@ test("no id as data and no machinery words in anything a player reads", () => {
   assert.match(`Pilot ${FARMER}`, /\d{5,}/);
 });
 
+test("the board is given the recipe table the read fetched", () => {
+  // onMount does not run under the server generator, so this is pinned at the
+  // source: without it the board judges starved factories by routes alone.
+  assert.match(SOURCE, /buildPiBoard\(\{[^}]*\brecipes\b[^}]*\}\)/);
+  assert.match(SOURCE, /onRecipes:/);
+});
+
 test("⚠ the window never selects a character, and never reads on a timer", () => {
   assert.doesNotMatch(SOURCE, /selectCharacter|\/api\/bridge\/select|flow\.select/);
   // The one interval moves the ages on; it must not be the thing that reads.

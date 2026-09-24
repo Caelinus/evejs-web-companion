@@ -425,8 +425,9 @@ test("a factory says what it makes, and is only called starved when the server s
     receivedInputsLastCycle: false,
   });
   const dry = scene({ open: true, colonies: [worldColony([healthyExtractor(), starved])] });
-  assert.match(dry.text, /making Superconductors was fed nothing last cycle/i);
-  assert.match(dry.text, /1 factory was fed nothing last cycle/);
+  // No route and no recipe table: nothing can be feeding it, which is a fault.
+  assert.match(dry.text, /No route brings anything to the factory making Superconductors/);
+  assert.match(dry.text, /1 factory has nothing coming in/);
 });
 
 // --- 2c. R108 slice 2: a factory's recipe (rate and ingredients) ------------
@@ -520,6 +521,10 @@ test('"fed nothing last cycle" still appears alongside the new clauses when the 
   assert.match(starved.text, /Making Superconductors/);
   assert.match(starved.text, /5 every 1 hour/);
   assert.match(starved.text, /fed nothing last cycle/i);
+  // With the recipe table the panel judges by what the factory NEEDS, so the
+  // missing input is named rather than "anything".
+  assert.match(starved.text, /No route brings \S.* to the factory making Superconductors/);
+  assert.doesNotMatch(starved.text, /No route brings anything/);
 
   const fed = sceneWithRecipes(
     [healthyExtractor(), factoryPin({ receivedInputsLastCycle: null })],

@@ -31,6 +31,7 @@ const staticData = require("../src/staticData");
 
 const { decodeRosterColonies, unansweredPilots } = require("../web/src/bridge/piRoster.ts");
 const { colonyFindings } = require("../web/src/bridge/colonyAttention.ts");
+const { decodeRecipeBook } = require("../web/src/bridge/piRecipes.ts");
 
 const CAPTURED = require("./fixtures/snapshotColonyCaptured.json").colony;
 
@@ -205,16 +206,56 @@ test("with the game data: structures are classified, programs read, and the atte
     assert.equal(typeof program.resourceTypeName, "string");
   }
 
-  // Judged at the colony's own simulated instant, so the answer does not drift
-  // with the day this test runs: the factories the capture says went unfed are
-  // exactly the ones reported starved, and each is named by what it makes.
-  const findings = colonyFindings(colony, colony.lastSimulatedAtMs);
-  const starved = findings.filter((finding) => finding.kind === "factory-starved");
+  // ⚠ THE CAPTURE IS A WORKING COLONY, AND THE MONITOR NOW SAYS SO. Three of
+  // its four factories went unfed last cycle — the server says so, and the
+  // factory row still shows it — but both extractors are running and feed a
+  // storage that routes to every factory: supply is live, only slower than four
+  // factories could use. Judged at the colony's own simulated instant (so the
+  // answer does not drift with the day this runs) and against the REAL recipe
+  // table read through the REAL route, that is not a finding.
+  const recipes = await readRecipeBook();
+  assert.equal(recipes.readable, true);
   const unfed = CAPTURED.pins.filter((pin) => pin.receivedInputsLastCycle === false).map((pin) => pin.pinID);
   assert.equal(unfed.length, 3);
-  assert.deepEqual(starved.map((finding) => finding.pinID).sort(), unfed.sort());
-  for (const finding of starved) {
-    assert.match(finding.words, /^The factory making \S/);
+  const at = colony.lastSimulatedAtMs;
+  const starvedIn = (subject, nowMs) =>
+    colonyFindings(subject, nowMs, undefined, recipes).filter((finding) => finding.kind === "factory-starved");
+  assert.deepEqual(starvedIn(colony, at), []);
+
+  // Once the programs have run out, the extractors are the finding — named
+  // once each — and the factories behind them are not listed again.
+  const afterExpiry = Math.max(...colony.pins.map((pin) => pin.program?.expiresAtMs ?? 0)) + 1;
+  const expiredKinds = colonyFindings(colony, afterExpiry, undefined, recipes).map((finding) => finding.kind);
+  assert.deepEqual(expiredKinds, ["extractor-expired", "extractor-expired"]);
+
+  // Cut the routes into the factories and the fault is real: each unfed
+  // factory is named, by what it makes and what is not reaching it.
+  const startsAtStorage = (route) =>
+    colony.pins.find((pin) => pin.pinID === route.path[0])?.kind === "storage";
+  const cut = { ...colony, routes: colony.routes.filter((route) => !startsAtStorage(route)) };
+  const faults = starvedIn(cut, at);
+  assert.deepEqual(faults.map((finding) => finding.pinID).sort(), [...unfed].sort());
+  for (const finding of faults) {
+    assert.match(finding.words, /^No route brings \S.* to the factory making \S/);
     assert.doesNotMatch(finding.words, /\d{3,}/);
   }
 });
+
+/** The recipe table through the real route, decoded by the real decoder. */
+async function readRecipeBook() {
+  const app = createApp({
+    eveStore: fakeStore(),
+    eveGatewayClient: capturedGateway(),
+    webAuth: fakeAuth(),
+    staticData,
+    errorLogger() {},
+  });
+  const server = app.listen(0, "127.0.0.1");
+  activeServers.add(server);
+  await once(server, "listening");
+  const response = await ORIGINAL_FETCH(`http://127.0.0.1:${server.address().port}/api/pi/schematics`, {
+    headers: { cookie: `evejs_web_poc=${COOKIE_TOKEN}` },
+  });
+  assert.equal(response.status, 200);
+  return decodeRecipeBook(JSON.parse(await response.text()));
+}

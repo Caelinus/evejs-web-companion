@@ -185,7 +185,7 @@ test("a starved factory is an alarm ONLY when the server said false", () => {
     NOW,
   );
   assert.equal(starved[0]!.kind, "factory-starved");
-  assert.match(starved[0]!.words, /making Superconductors was fed nothing/);
+  assert.match(starved[0]!.words, /No route brings anything to the factory making Superconductors/);
 
   // null is "this pin has no such state" — every extractor and every hold
   // answers it, and it must never be read as starvation.
@@ -282,7 +282,7 @@ test("a colony line names the worst kind and admits there is more", () => {
   ]);
   assert.equal(
     colonyAttentionWords(colonyFindings(mixed, NOW)),
-    "1 factory was fed nothing last cycle, and more needs you here",
+    "1 factory has nothing coming in, and more needs you here",
   );
 
   // Two of the SAME kind is a count, not a "and more".
@@ -350,7 +350,7 @@ test("a colony's one line: what needs you wins, else the shipped sentences", () 
   assert.equal(line([extractor(2, NOW - HOUR)]), "1 extractor has finished its program");
   assert.equal(
     line([pin({ pinID: 4, kind: "factory", receivedInputsLastCycle: false })]),
-    "1 factory was fed nothing last cycle",
+    "1 factory has nothing coming in",
   );
 
   // Quiet: the sentences Planets has always printed, word for word.

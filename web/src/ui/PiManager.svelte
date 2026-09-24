@@ -34,6 +34,7 @@
   } from "../app/piRosterPrefs.ts";
   import { readPiRoster } from "../app/piRosterRead.ts";
   import { buildPiBoard, type PilotAttempt } from "../bridge/piBoard.ts";
+  import { decodeRecipeBook, type PiRecipeBook } from "../bridge/piRecipes.ts";
 
   let roster = $state<PiRosterPrefs>(loadPiRoster());
   let known = $state<KnownCharacter[]>(loadKnownCharacters());
@@ -44,6 +45,9 @@
   let reading = $state(false);
   let browserNowMs = $state(Date.now());
   let choice = $state("");
+  // Static, so read once per open window. Without it a starved factory is
+  // judged by what its routes bring rather than by its recipe.
+  let recipes = $state<PiRecipeBook | null>(null);
 
   function keep(next: PiRosterPrefs): void {
     roster = next;
@@ -53,7 +57,7 @@
   const names = $derived(new Map(known.map((pilot) => [pilot.characterID, pilot.characterName])));
   const readings = $derived(piReadings(roster));
   const board = $derived(
-    buildPiBoard({ members: roster.members, names, readings, attempts, browserNowMs }),
+    buildPiBoard({ members: roster.members, names, readings, attempts, browserNowMs, recipes }),
   );
   const addablePilots = $derived(
     known
@@ -83,6 +87,11 @@
         for (const [characterID, attempt] of result.attempts) merged.set(characterID, attempt);
         attempts = merged;
         browserNowMs = Date.now();
+      }, recipes?.readable ? {} : {
+        onRecipes: (raw) => {
+          const book = decodeRecipeBook(raw);
+          if (book.readable) recipes = book;
+        },
       });
     } finally {
       reading = false;

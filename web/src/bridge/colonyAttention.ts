@@ -28,6 +28,8 @@
 
 import type { Colony, ColonyPin } from "../store/types.ts";
 import { formatDuration, summarizeColony } from "./planets.ts";
+import { factoryStarvationWords } from "./colonySupply.ts";
+import type { PiRecipeBook } from "./piRecipes.ts";
 
 export type ColonyFindingKind =
   /** A program whose expiry has passed: this extractor has stopped. */
@@ -219,11 +221,17 @@ export function bySeverityThenTime(left: ColonyFinding, right: ColonyFinding): n
   return (left.pinID ?? 0) - (right.pinID ?? 0);
 }
 
-/** Everything on ONE planet that wants the player, worst first. */
+/**
+ * Everything on ONE planet that wants the player, worst first.
+ *
+ * `recipes` lets a starved factory be judged against what its recipe needs;
+ * without it, a factory's inputs are what its routes bring in.
+ */
 export function colonyFindings(
   colony: Colony,
   serverNowMs: number,
   thresholds: AttentionThresholds = DEFAULT_ATTENTION_THRESHOLDS,
+  recipes: PiRecipeBook | null = null,
 ): readonly ColonyFinding[] {
   const findings: ColonyFinding[] = [];
   for (const pin of colony.pins) {
@@ -233,20 +241,23 @@ export function colonyFindings(
         findings.push(finding);
       }
     }
-    // ⚠ ONLY AN EXPLICIT false. null is "this pin has no such state", which is
-    // what every non-factory pin answers; reading it as starvation would put
-    // an alarm on every extractor on every planet.
+    // ⚠ ONLY AN EXPLICIT false, AND ONLY WHEN NOTHING IS COMING. null is "this
+    // pin has no such state", which every non-factory pin answers. And false
+    // alone is not a fault: on a colony whose extraction is the bottleneck most
+    // factories go unfed on most cycles. colonySupply.ts follows the routes and
+    // speaks only when an input has no live source at all.
     if (pin.kind === "factory" && pin.receivedInputsLastCycle === false) {
-      findings.push({
-        planetID: colony.planetID,
-        pinID: pin.pinID,
-        kind: "factory-starved",
-        urgency: "now",
-        dueAtMs: null,
-        words: pin.schematicName
-          ? `The factory making ${pin.schematicName} was fed nothing last cycle`
-          : "A factory was fed nothing last cycle",
-      });
+      const words = factoryStarvationWords(colony, pin, serverNowMs, recipes);
+      if (words !== null) {
+        findings.push({
+          planetID: colony.planetID,
+          pinID: pin.pinID,
+          kind: "factory-starved",
+          urgency: "now",
+          dueAtMs: null,
+          words,
+        });
+      }
     }
     const hold = holdFinding(colony, pin, thresholds);
     if (hold !== null) {
@@ -275,10 +286,11 @@ export function attentionByColony(
   colonies: readonly Colony[],
   serverNowMs: number,
   thresholds: AttentionThresholds = DEFAULT_ATTENTION_THRESHOLDS,
+  recipes: PiRecipeBook | null = null,
 ): readonly ColonyAttention[] {
   return colonies
     .map((colony) => {
-      const findings = colonyFindings(colony, serverNowMs, thresholds);
+      const findings = colonyFindings(colony, serverNowMs, thresholds, recipes);
       return {
         colony,
         findings,
@@ -323,7 +335,7 @@ export function colonyAttentionWords(findings: readonly ColonyFinding[]): string
     case "extractor-expired":
       return `${countWords(sameKind, "1 extractor has finished its program", "extractors have finished their programs")}${tail}`;
     case "factory-starved":
-      return `${countWords(sameKind, "1 factory", "factories")} ${sameKind === 1 ? "was" : "were"} fed nothing last cycle${tail}`;
+      return `${countWords(sameKind, "1 factory has", "factories have")} nothing coming in${tail}`;
     case "pin-full":
       return `${countWords(sameKind, "1 hold is full", "holds are full")}${tail}`;
     case "extractor-idle":

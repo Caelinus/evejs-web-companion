@@ -68,7 +68,8 @@
   // Only the colonies with something to say, loudest first. Recomputed as the
   // clock ticks, because an expiry passing is exactly what turns a quiet
   // colony into a loud one.
-  const attention = $derived(attentionByColony(colonies, nowMs));
+  // The recipe table lets a starved factory be judged against what it needs.
+  const attention = $derived(attentionByColony(colonies, nowMs, undefined, $planets.recipes));
   const summaryWords = $derived(attentionSummaryWords(attention));
   const findingsByPlanetID = $derived(
     new Map(attention.map((entry) => [entry.colony.planetID, entry.findings])),

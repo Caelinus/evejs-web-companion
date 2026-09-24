@@ -45,6 +45,7 @@ function deps(
     refuseSignIn?: string[];
     failLoadFor?: string[];
     leaveOut?: number[];
+    failRecipes?: boolean;
   } = {},
 ): PiReadDeps & { log: Log } {
   const log: Log = { events: [], inFlight: 0, maxInFlight: 0 };
@@ -80,8 +81,36 @@ function deps(
       } as JsonValue;
     },
     now: () => 2000,
+    async loadRecipes(token) {
+      log.events.push(`recipes:${token}`);
+      if (options.failRecipes) throw new Error("no table");
+      return { schematics: [] } as JsonValue;
+    },
   };
 }
+
+test("the recipe table is read once, on the first account that signs in", async () => {
+  const d = deps({ refuseSignIn: ["alpha"] });
+  const tables: JsonValue[] = [];
+  await readPiRoster([A1, B1, C1], KNOWN, d, undefined, { onRecipes: (raw) => tables.push(raw) });
+  assert.deepEqual(d.log.events.filter((event) => event.startsWith("recipes:")), ["recipes:token-bravo"]);
+  assert.equal(tables.length, 1);
+  // Read inside the sign-in, before its token is signed out.
+  const events = d.log.events;
+  assert.ok(events.indexOf("recipes:token-bravo") < events.indexOf("signOut:token-bravo"));
+});
+
+test("the recipe table is optional: not asked for, not read; failing, not fatal", async () => {
+  const quiet = deps();
+  await readPiRoster([A1], KNOWN, quiet);
+  assert.equal(quiet.log.events.some((event) => event.startsWith("recipes:")), false);
+
+  const failing = deps({ failRecipes: true });
+  let delivered = 0;
+  const results = await readPiRoster([A1], KNOWN, failing, undefined, { onRecipes: () => (delivered += 1) });
+  assert.equal(delivered, 0);
+  assert.deepEqual([...results[0]!.attempts], [[A1, "read"]]);
+});
 
 test("each account is signed in once, asked once, and signed out", async () => {
   const d = deps();

@@ -238,7 +238,7 @@ test("⚠ worst first ACROSS pilots, and quiet colonies after every noisy one", 
     ],
   );
   assert.equal(board.needsYou[0]!.words, "1 extractor has finished its program");
-  assert.equal(board.needsYou[1]!.words, "1 factory was fed nothing last cycle");
+  assert.equal(board.needsYou[1]!.words, "1 factory has nothing coming in");
   // Coming up has no "now" sentence, so it is told in the finding's own words.
   assert.match(board.needsYou[2]!.words, /Aqueous Liquids/);
 });
@@ -302,4 +302,33 @@ test("no machinery words and no bare ids anywhere a player reads", () => {
   assert.doesNotMatch(printed, /schematic|\bpin\b|\bECU\b|characterID|planetID/i);
   // And the sweep does catch an id when one is there.
   assert.match(JSON.stringify({ x: `${FARMER}` }), /\d{5,}/);
+});
+
+test("the board judges a starved factory by its recipe when it has the table", async () => {
+  const { decodeRecipeBook } = await import("./piRecipes.ts");
+  const recipes = decodeRecipeBook({
+    schematics: [{
+      schematicID: 121,
+      name: "Water",
+      cycleTimeSeconds: 1800,
+      factoryTypeIDs: [2473],
+      inputs: [{ typeID: 2268, quantity: 3000, typeName: "Aqueous Liquids" }],
+      output: { typeID: 3645, quantity: 20, typeName: "Water" },
+    }],
+  } as never);
+  // Unfed last cycle, no route in, but holding a full batch: the recipe says it
+  // has what it needs. Without the table there is nothing to say that with.
+  const stocked = colony(40000012, "Alpha V", [
+    pin({
+      pinID: 4,
+      kind: "factory",
+      schematicID: 121,
+      schematicName: "Water",
+      receivedInputsLastCycle: false,
+      contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 3000 }],
+    }),
+  ]);
+  const readings = new Map([[FARMER, reading(FARMER, [stocked], NOW - MINUTE)]]);
+  assert.equal(buildPiBoard(input({ members: [FARMER], readings })).needsYou.length, 1);
+  assert.deepEqual(buildPiBoard(input({ members: [FARMER], readings, recipes })).needsYou, []);
 });

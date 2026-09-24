@@ -19,6 +19,7 @@
 
 import {
   ROSTER_PLANETS_MAX_IDS,
+  getPiSchematics as apiGetPiSchematics,
   loadRosterPlanets as apiLoadRosterPlanets,
   login as apiLogin,
   logout as apiLogout,
@@ -35,6 +36,17 @@ export interface PiReadDeps {
   loadRosterPlanets(characterIDs: readonly number[], token: string): Promise<JsonValue>;
   /** The browser's clock, for each answer's clock correction. */
   now(): number;
+  /** The planetary recipe table (static; any signed-in caller may read it). */
+  loadRecipes(token: string): Promise<JsonValue>;
+}
+
+export interface PiReadOptions {
+  /**
+   * Asked for, the recipe table is read ONCE, inside the first sign-in that
+   * succeeds — the window has no token of its own to read it with. A failure
+   * is silent: without the table a starved factory is judged by its routes.
+   */
+  readonly onRecipes?: (raw: JsonValue) => void;
 }
 
 export interface PiAnswer {
@@ -74,6 +86,9 @@ export const DEFAULT_PI_READ_DEPS: PiReadDeps = {
     return apiLoadRosterPlanets(characterIDs, { token, priority: "user" });
   },
   now: () => Date.now(),
+  async loadRecipes(token) {
+    return (await apiGetPiSchematics({ token, priority: "user" })).recipes;
+  },
 };
 
 function chunks(ids: readonly number[]): number[][] {
@@ -88,6 +103,7 @@ async function readAccount(
   accountName: string,
   characterIDs: readonly number[],
   deps: PiReadDeps,
+  whileSignedIn: (token: string) => Promise<void>,
 ): Promise<PiAccountRead> {
   const attempts = new Map<number, PilotAttempt>(characterIDs.map((id) => [id, "failed"]));
   const answers: PiAnswer[] = [];
@@ -98,6 +114,7 @@ async function readAccount(
     return { accountName, answers, attempts };
   }
   try {
+    await whileSignedIn(token);
     for (const ask of chunks(characterIDs)) {
       let envelope: JsonValue;
       try {
@@ -131,6 +148,7 @@ export async function readPiRoster(
   known: readonly PilotAccount[],
   deps: PiReadDeps = DEFAULT_PI_READ_DEPS,
   onAccountDone: (result: PiAccountRead) => void = () => {},
+  options: PiReadOptions = {},
 ): Promise<PiAccountRead[]> {
   const accountOf = new Map(known.map((entry) => [entry.characterID, entry.accountName]));
   const byAccount = new Map<string, number[]>();
@@ -156,8 +174,18 @@ export async function readPiRoster(
     results.push(orphaned);
     onAccountDone(orphaned);
   }
+  let recipesWanted = options.onRecipes !== undefined;
+  const readRecipes = async (token: string): Promise<void> => {
+    if (!recipesWanted) return;
+    recipesWanted = false;
+    try {
+      options.onRecipes?.(await deps.loadRecipes(token));
+    } catch {
+      // Silent on purpose: the board judges starvation by routes without it.
+    }
+  };
   for (const [accountName, characterIDs] of byAccount) {
-    const result = await readAccount(accountName, characterIDs, deps);
+    const result = await readAccount(accountName, characterIDs, deps, readRecipes);
     results.push(result);
     onAccountDone(result);
   }

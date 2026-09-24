@@ -23,6 +23,7 @@
 
 import type { Colony } from "../store/types.ts";
 import type { PilotColonyReading } from "./piRoster.ts";
+import type { PiRecipeBook } from "./piRecipes.ts";
 import {
   attentionByColony,
   bySeverityThenTime,
@@ -55,6 +56,11 @@ export interface PiBoardInput {
   readonly attempts: ReadonlyMap<number, PilotAttempt>;
   /** The browser's clock now; each reading corrects it by its own offset. */
   readonly browserNowMs: number;
+  /**
+   * The recipe table, when it has been read: a starved factory is judged
+   * against what its recipe needs. Without it, against what its routes bring.
+   */
+  readonly recipes?: PiRecipeBook | null;
 }
 
 export interface PiPilotRow {
@@ -190,7 +196,7 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
     }
     const nowMs = serverNow(reading.report.clockOffsetMs, input.browserNowMs);
     const attention = new Map(
-      attentionByColony(reading.report.colonies, nowMs).map((entry) => [entry.colony.planetID, entry]),
+      attentionByColony(reading.report.colonies, nowMs, undefined, input.recipes ?? null).map((entry) => [entry.colony.planetID, entry]),
     );
     for (const colony of reading.report.colonies) {
       placed.push({
