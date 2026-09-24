@@ -31,7 +31,7 @@
   import { healthPollIntervalMs, resolveServerStatus } from "../app/serverStatus.ts";
   import type { LiveStreamStatus } from "../store/types.ts";
   import DesktopWindow from "./DesktopWindow.svelte";
-  import PanelHost from "./PanelHost.svelte";
+  import GlobalPanel from "./GlobalPanel.svelte";
   import { tabLabel, type TabID } from "./tabs.ts";
   // The global layer reuses the desktop's own reducers: a window list behaves
   // the same wherever it floats, and only OPENING differs (placement, and which
@@ -514,7 +514,12 @@
     // all, so opening one here would light the rail's "open" state on a window
     // nothing draws. MobileWorkspace shows a global tab as an ordinary panel
     // selection instead, which is what the workspace request below asks for.
-    if (isMobile) {
+    //
+    // ⚠ UNLESS NOBODY IS IN THE CLIENT. The hangar has no workspace to show a
+    // panel in, so there the layer IS mounted on a phone too (see the mount
+    // below) and the window floats over the hangar like on a desktop.
+    if (isMobile && active) {
+      hangarOpen = false;
       requestOpenInWorkspace(id);
       return;
     }
@@ -552,6 +557,10 @@
     }
     const target = sessionID ?? activeId;
     if (target === null) return;
+    // The panel opens on a pilot's workspace, which the hangar covers: asking
+    // for the Bot Builder from a Bot Manager opened over the hangar must show
+    // the builder, not open it somewhere underneath.
+    hangarOpen = false;
     if (target !== activeId) switchTo(target);
     openRequestCount += 1;
     openRequest = { id, n: openRequestCount, sessionID: target };
@@ -597,11 +606,11 @@
       {activeId}
       {serverStatus}
       {companionCount}
-      companionsOpen={globalOpenIds.has("companion")}
+      {globalOpenIds}
       onSwitch={switchTo}
       onAdd={addCharacter}
       onHangar={() => (hangarOpen = true)}
-      onCompanions={() => openGlobalTab("companion")}
+      onOpenGlobal={openGlobalTab}
     />
   </ErrorBoundary>
   <!-- Remount on switch: each Workspace binds one stable store/flow for its
@@ -625,42 +634,6 @@
       />
     </ErrorBoundary>
   {/key}
-  {#if globalWins.length > 0 && !isMobile}
-    <!-- THE GLOBAL WINDOWS, on their own layer over whichever workspace is
-         showing. `pointer-events: none` on the layer and `auto` on the windows
-         is what keeps a full-viewport overlay from swallowing every click meant
-         for the cockpit underneath it.
-
-         Each is given the ACTIVE pilot's store and flow, which change under it
-         rather than remounting it — that is exactly the difference from a
-         workspace window, and why these panels keep their roster, their search
-         box and their polls across a switch. -->
-    <div class="global-layer" bind:this={globalLayerEl}>
-      {#each shownGlobalWins as win (win.id)}
-        <ErrorBoundary name={tabLabel(win.id)}>
-          <DesktopWindow
-            {win}
-            title={tabLabel(win.id)}
-            focused={win.id === globalFocusedId}
-            onFocus={() => (globalWins = focusWindow(globalWins, win.id))}
-            onClose={() => (globalWins = closeWindow(globalWins, win.id))}
-            onToggleMinimize={() => (globalWins = toggleMinimize(globalWins, win.id))}
-            onMove={(x, y) => (globalWins = moveWindow(globalWins, win.id, x, y))}
-            onResize={(w, h) => (globalWins = resizeWindow(globalWins, win.id, w, h))}
-          >
-            <PanelHost
-              store={active.store}
-              flow={active.flow}
-              tab={win.id}
-              onOpen={requestOpenInWorkspace}
-              onGoToPilot={switchTo}
-              {sessions}
-            />
-          </DesktopWindow>
-        </ErrorBoundary>
-      {/each}
-    </div>
-  {/if}
 {:else if restoring}
   <!-- Refresh restore in flight and no cockpit up yet: bringing pilots back. -->
   <h1>EveJS Web</h1>
@@ -680,8 +653,55 @@
       onClose={active ? () => (hangarOpen = false) : null}
       optionsFor={requestOptionsFor}
       onHandedOver={releaseHandedOver}
+      {globalOpenIds}
+      {companionCount}
+      onOpenGlobal={openGlobalTab}
     />
   </ErrorBoundary>
+{/if}
+
+{#if globalWins.length > 0 && (!isMobile || !active)}
+  <!-- THE GLOBAL WINDOWS, on their own layer over whichever screen is showing:
+       a pilot's workspace, or the Pilot Hangar.
+
+       ⚠ OUTSIDE `{#if active}`, AND AFTER THE HANGAR. These windows are about
+       every pilot and open from the hangar's brand strip with nobody in the
+       client, so they cannot depend on a pilot being active; and drawn after
+       the hangar, they sit over it (`.over-hangar`) rather than under it.
+
+       `pointer-events: none` on the layer and `auto` on the windows is what
+       keeps a full-viewport overlay from swallowing every click meant for the
+       screen underneath it.
+
+       Each takes the held sessions, never the active pilot's store or flow —
+       see GlobalPanel.svelte — so a pilot switch changes nothing under them. -->
+  <div class="global-layer" class:over-hangar={hangarOpen || !active} bind:this={globalLayerEl}>
+    {#each shownGlobalWins as win (win.id)}
+      <ErrorBoundary name={tabLabel(win.id)}>
+        <DesktopWindow
+          {win}
+          title={tabLabel(win.id)}
+          focused={win.id === globalFocusedId}
+          onFocus={() => (globalWins = focusWindow(globalWins, win.id))}
+          onClose={() => (globalWins = closeWindow(globalWins, win.id))}
+          onToggleMinimize={() => (globalWins = toggleMinimize(globalWins, win.id))}
+          onMove={(x, y) => (globalWins = moveWindow(globalWins, win.id, x, y))}
+          onResize={(w, h) => (globalWins = resizeWindow(globalWins, win.id, w, h))}
+        >
+          <GlobalPanel
+            tab={win.id}
+            {sessions}
+            hasPilot={active !== null}
+            onOpen={requestOpenInWorkspace}
+            onGoToPilot={(id) => {
+              hangarOpen = false;
+              switchTo(id);
+            }}
+          />
+        </DesktopWindow>
+      </ErrorBoundary>
+    {/each}
+  </div>
 {/if}
 
 {#if onboarding}

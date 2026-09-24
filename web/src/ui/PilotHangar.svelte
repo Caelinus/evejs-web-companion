@@ -106,6 +106,8 @@
   import { startCompanionFor } from "../app/startCompanionFor.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
+  import GlobalLaunchers from "./GlobalLaunchers.svelte";
+  import type { TabID } from "./tabs.ts";
 
   let {
     onlineIDs = new Set<number>(),
@@ -114,7 +116,21 @@
     onClose = null,
     optionsFor = () => null,
     onHandedOver = async () => {},
+    globalOpenIds = new Set<TabID>(),
+    companionCount = 0,
+    onOpenGlobal,
   }: {
+    /** The global windows open right now, so their doors light up. */
+    globalOpenIds?: ReadonlySet<TabID>;
+    /** Pilots flying as companions, for the Companions door's count. */
+    companionCount?: number;
+    /**
+     * Open a global window — Bot Manager, Planetary Industry, Fleet companions —
+     * over this screen. They are about every pilot, so they open here with
+     * nobody in the client just as they do over a cockpit. Absent in tests and
+     * harnesses, which then draw no doors.
+     */
+    onOpenGlobal?: (id: TabID) => void;
     /** Character IDs already in the client, from App's live session list. */
     onlineIDs?: Set<number>;
     /**
@@ -666,6 +682,9 @@
         <span class="hangar-online-dot" aria-hidden="true"></span>
         <span>{onlineCount} in client</span>
       </span>
+      {#if onOpenGlobal}
+        <GlobalLaunchers openIds={globalOpenIds} {companionCount} onOpen={onOpenGlobal} />
+      {/if}
     </div>
 
     <div class="hangar-search">

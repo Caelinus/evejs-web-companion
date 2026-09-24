@@ -112,7 +112,12 @@ export const TABS: readonly TabDef[] = [
   // take one. A second entry for the same rows only ever meant two ways into one
   // subject in a rail that already has too many. `ServerBots.svelte` still
   // exists, mounted on character select, which has no Manager to hold it.
-  { id: "botManager", label: "Bot Manager", where: "both" },
+  //
+  // ⚠ NOT IN THE RAIL ANY MORE. Its door is beside the brand
+  // (GlobalLaunchers.svelte), on the character bar AND the Pilot Hangar, so it
+  // opens with nobody in the client — which a rail inside a pilot's workspace
+  // can never offer.
+  { id: "botManager", label: "Bot Manager", where: "both", launchable: false },
   // ⚠ NOT A BOT, AND NOT IN THE RAIL. The fleet companion is a GLOBAL window
   // (globalWindow.ts) over every pilot at once, and the one door onto it is the
   // button beside the brand in the character bar — which is the only chrome
@@ -150,10 +155,9 @@ export const TABS: readonly TabDef[] = [
   { id: "skills", label: "Skills", where: "both" },
   { id: "planets", label: "Planets", where: "both" },
   // R108 slice 3 — a GLOBAL window (globalWindow.ts): every assigned pilot's
-  // colonies on one board, read with no character selected. In the rail, like
-  // the Bot Manager, because it answers a question about all pilots that a
-  // player asks whichever one is on screen.
-  { id: "piManager", label: "Planetary Industry", where: "both" },
+  // colonies on one board, read with no character selected. Out of the rail
+  // like the Bot Manager: its door is beside the brand (GlobalLaunchers.svelte).
+  { id: "piManager", label: "Planetary Industry", where: "both", launchable: false },
   { id: "activity", label: "Activity", where: "both" },
   { id: "fleet", label: "Fleet", where: "both" },
   { id: "mail", label: "Mail", where: "both" },

@@ -59,14 +59,29 @@ test("the Workspace is still inside that key — the hoist is for one window, no
   assert.ok(workspace > keyStart && workspace < keyEnd, "<Workspace> must stay inside the key");
 });
 
-test("the layer is given the ACTIVE pilot's store and flow, rather than capturing one", () => {
-  // It survives the switch, so what it is handed has to FOLLOW the switch —
-  // otherwise it keeps querying with a pilot the player has moved on from, and
-  // its own token, which is worse than being remounted.
-  const layerAt = MARKUP.indexOf("global-layer");
-  const layer = MARKUP.slice(layerAt);
-  assert.match(layer, /store=\{active\.store\}/);
-  assert.match(layer, /flow=\{active\.flow\}/);
+test("the layer is given NO pilot's store or flow, only the held sessions", () => {
+  // It opens from the Pilot Hangar with nobody in the client, so it cannot
+  // need an active pilot; and over a cockpit, a window about every pilot that
+  // borrowed the active one's token would speak for one account only. Each
+  // panel reaches pilots through their own sessions or accounts
+  // (app/pilotReach.ts).
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /<GlobalPanel/);
+  assert.doesNotMatch(layer, /active\.store/);
+  assert.doesNotMatch(layer, /active\.flow/);
+});
+
+test("the layer is not inside {#if active}, and is drawn after the hangar", () => {
+  // Nobody in the client is exactly when the hangar shows, and the windows
+  // must open there; drawn before the hangar they would sit under it.
+  const body = MARKUP.slice(MARKUP.indexOf("</script>"));
+  const activeStart = body.indexOf("{#if active}");
+  const activeEnd = body.indexOf("{:else if restoring}");
+  const layer = body.indexOf("global-layer");
+  const hangar = body.indexOf("<PilotHangar");
+  assert.ok(activeStart >= 0 && activeEnd > activeStart, "the active-pilot block moved or was renamed");
+  assert.ok(layer > activeEnd, "the global layer is inside {#if active} - it cannot open from the hangar");
+  assert.ok(layer > hangar, "the global layer is drawn before the hangar, so the hangar covers it");
 });
 
 // ─── the open-request counter ────────────────────────────────────────────────
@@ -185,7 +200,7 @@ test("focus is a real question now that two windows can overlap", () => {
 
 // ─── the companions door ─────────────────────────────────────────────────────
 
-test("the character bar opens Fleet companions, and sits outside the pilot-switch key", () => {
+test("the character bar opens the global windows, and sits outside the pilot-switch key", () => {
   // The bar is the only chrome that survives a switch, which is why the door to
   // a window about EVERY pilot hangs there — a door inside the key would be
   // rebuilt with the pilot it is not about.
@@ -198,8 +213,9 @@ test("the character bar opens Fleet companions, and sits outside the pilot-switc
   const barAt = body.indexOf("<CharacterBar");
   assert.ok(keyStart > 0, "the pilot-switch key block moved or was renamed");
   assert.ok(barAt >= 0 && barAt < keyStart, "the character bar must stay above the key");
-  assert.match(MARKUP, /onCompanions=\{\(\) => openGlobalTab\("companion"\)\}/);
-  assert.match(MARKUP, /companionsOpen=\{globalOpenIds\.has\("companion"\)\}/);
+  const bar = body.slice(barAt, body.indexOf("/>", barAt));
+  assert.match(bar, /onOpenGlobal=\{openGlobalTab\}/);
+  assert.match(bar, /\{globalOpenIds\}/);
 });
 
 test("the count on that door is read from every session, not from the active pilot", () => {
@@ -215,9 +231,11 @@ test("on a phone a global tab opens as a PANEL, because the layer is not mounted
   // the layer there would light the door's "open" state on a window nothing
   // draws — a click that appears to do nothing at all.
   const opener = APP.slice(APP.indexOf("const openGlobalTab"));
-  const mobileAt = opener.indexOf("if (isMobile)");
+  // ⚠ UNLESS NOBODY IS IN THE CLIENT: then there is no workspace to show a
+  // panel in, and the layer is mounted on a phone too, over the hangar.
+  const mobileAt = opener.indexOf("if (isMobile && active)");
   const openAt = opener.indexOf("openGlobal(globalWins, id)");
   assert.ok(mobileAt >= 0, "the phone case is gone");
   assert.ok(openAt > mobileAt, "the phone must be answered before the layer is touched");
-  assert.match(MARKUP, /\{#if globalWins\.length > 0 && !isMobile\}/);
+  assert.match(MARKUP, /\{#if globalWins\.length > 0 && \(!isMobile \|\| !active\)\}/);
 });

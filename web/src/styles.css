@@ -2756,11 +2756,20 @@
     color: var(--color-accent);
     flex: 0 0 auto;
   }
-  /* The Fleet companions door, beside the brand: the one control in this bar
-     that is about every pilot rather than the active one. Styled as a quiet
+  /* The doors onto the global windows (GlobalLaunchers.svelte), beside the
+     brand: the controls in this bar that are about every pilot rather than
+     the active one. The Pilot Hangar's header carries the same strip in its
+     own palette (`.hangar .global-launch`). Styled as a quiet
      chrome button that LIGHTS UP while its window is open, so the bar doubles
      as the answer to "is that thing already on screen somewhere?". */
-  .char-bar-companions {
+  .global-launchers {
+    display: flex;
+    align-self: stretch;
+    align-items: stretch;
+    gap: 0.25rem;
+    flex: 0 0 auto;
+  }
+  .global-launch {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
@@ -2774,13 +2783,13 @@
     font-size: 0.78rem;
     cursor: pointer;
   }
-  .char-bar-companions:hover { color: var(--color-text); border-color: var(--color-line-strong); }
-  .char-bar-companions.open {
+  .global-launch:hover { color: var(--color-text); border-color: var(--color-line-strong); }
+  .global-launch.open {
     color: var(--color-accent-bright);
     border-color: var(--color-accent-dim);
     background: var(--color-panel-2);
   }
-  .char-bar-companions-glyph {
+  .global-launch-glyph {
     flex: 0 0 auto;
     width: 1.1rem;
     height: 1.1rem;
@@ -2792,7 +2801,7 @@
   }
   /* The count is a STATE, so it is not colour alone: the number itself is the
      information, and the aria-label says it in words. */
-  .char-bar-companions-count {
+  .global-launch-count {
     min-width: 1.1rem;
     padding: 0 0.25rem;
     text-align: center;
@@ -2827,7 +2836,7 @@
    * has to be made in the component anyway. Keeping the number in both places
    * would be keeping two things equal by hand. */
   .char-bar.narrow .char-bar-add-text { display: none; }
-  .char-bar.narrow .char-bar-companions-text { display: none; }
+  .char-bar.narrow .global-launch-text { display: none; }
   .char-bar.narrow .char-bar-status-text { display: none; }
   .char-bar.narrow .char-bar-list { flex: 0 1 auto; min-width: 0; }
   /* ⚠ THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so several
@@ -3699,6 +3708,15 @@
   }
   .global-layer > * {
     pointer-events: auto;
+  }
+  /* Over the Pilot Hangar (App.svelte opens these windows from its brand
+   * strip, with or without anybody in the client). Above the hangar's own
+   * z-index 30, and starting below its sticky 52px header rather than the
+   * character bar, so the doors that opened the windows stay clickable. Its
+   * dialogs sit far higher (400+) and still cover everything. */
+  .global-layer.over-hangar {
+    top: 52px;
+    z-index: 35;
   }
   /* ⚠ THERE IS NO SECOND STRIP ANY MORE, and its absence is the fix. This layer
    * used to put its own chips bottom-RIGHT, opposite the desktop's own strip, on
@@ -6640,6 +6658,25 @@
     gap: 14px;
     min-width: 0;
   }
+  /* The global-window doors (GlobalLaunchers.svelte) in the hangar's own
+     palette — the same strip as the character bar's, so the Bot Manager is
+     found beside the brand whether or not anybody is in the client. */
+  .hangar .global-launchers { align-self: center; height: 28px; }
+  .hangar .global-launch {
+    border-color: var(--hangar-line-3);
+    color: var(--hangar-text-dim);
+    font-family: var(--hangar-mono, inherit);
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .hangar .global-launch:hover { color: var(--hangar-text-bright); border-color: var(--hangar-line-5); }
+  .hangar .global-launch.open {
+    color: var(--hangar-link-bright);
+    border-color: var(--hangar-accent);
+    background: var(--hangar-accent-fill);
+  }
+  .hangar .global-launch-count { background: var(--hangar-good); color: var(--hangar-page); }
   .hangar-wordmark {
     font-size: 13px;
     letter-spacing: 3px;

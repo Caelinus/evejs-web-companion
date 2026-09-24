@@ -5,19 +5,20 @@
   // clicking a chip switches which. All the pilots stay live on the BFF while
   // backgrounded — this bar just picks which one the workspace is driving.
   import CharacterChip from "./CharacterChip.svelte";
-  import { NEOCOM_GLYPHS } from "./neocomIcons.ts";
+  import GlobalLaunchers from "./GlobalLaunchers.svelte";
   import type { Session } from "../app/sessions.ts";
+  import type { TabID } from "./tabs.ts";
 
   let {
     sessions,
     activeId,
     serverStatus,
     companionCount = 0,
-    companionsOpen = false,
+    globalOpenIds = new Set<TabID>(),
     onSwitch,
     onAdd,
     onHangar,
-    onCompanions,
+    onOpenGlobal,
   }: {
     sessions: Session[];
     activeId: string | null;
@@ -28,8 +29,8 @@
      * reading "0" is a badge that has to be read before it can be dismissed.
      */
     companionCount?: number;
-    /** The Fleet companions window is open (possibly put away). */
-    companionsOpen?: boolean;
+    /** The global windows open right now (possibly put away). */
+    globalOpenIds?: ReadonlySet<TabID>;
     onSwitch: (id: string) => void;
     onAdd: () => void;
     /**
@@ -40,16 +41,17 @@
      */
     onHangar: () => void;
     /**
-     * Open the global Fleet companions window.
+     * Open one of the global windows — Bot Manager, Planetary Industry, Fleet
+     * companions.
      *
-     * ⚠ IT HANGS HERE RATHER THAN IN THE NEOCOM, and the reason is the same one
-     * that makes the window global: a companion squad is not a view of the
-     * pilot whose cockpit happens to be showing. This bar is the only chrome
-     * that survives a pilot switch, so it is the only place a door onto every
-     * pilot at once can honestly sit. Optional so the bar still renders in the
-     * tests and harnesses that mount it without the roster behind it.
+     * ⚠ THEY HANG HERE RATHER THAN IN THE NEOCOM, and the reason is the same
+     * one that makes them global: none is a view of the pilot whose cockpit
+     * happens to be showing. This bar is the only chrome that survives a pilot
+     * switch, so it is the only place a door onto every pilot at once can
+     * honestly sit. Optional so the bar still renders in the tests and
+     * harnesses that mount it without the roster behind it.
      */
-    onCompanions?: () => void;
+    onOpenGlobal?: (id: TabID) => void;
   } = $props();
 
   /**
@@ -106,37 +108,13 @@
 <div class="char-bar" class:narrow>
   <span class="char-bar-brand">EVEJS</span>
   <!--
-    THE FLEET COMPANIONS DOOR. Beside the brand, before the pilots: everything
-    to the right of it is about ONE pilot, and this is the one control up here
-    that is about all of them.
-
-    ⚠ THE GLYPH IS NEVER THE ONLY LABEL (neocomIcons.ts states the rule). The
-    word rides with it wherever there is room and the `aria-label` carries the
-    count in words regardless, so a narrow bar that drops the text still
-    announces "Fleet companions — 2 flying" rather than a picture.
+    THE DOORS ONTO THE GLOBAL WINDOWS. Beside the brand, before the pilots:
+    everything to the right of them is about ONE pilot, and these are the
+    controls up here that are about all of them. The Pilot Hangar's header
+    carries the same strip (GlobalLaunchers.svelte).
   -->
-  {#if onCompanions}
-    <button
-      type="button"
-      class="char-bar-companions"
-      class:open={companionsOpen}
-      aria-pressed={companionsOpen}
-      aria-label={companionCount > 0
-        ? `Fleet companions — ${companionCount} flying`
-        : "Fleet companions"}
-      title="Fleet companions — every pilot flying with a fleet"
-      onclick={onCompanions}
-    >
-      <svg class="char-bar-companions-glyph" viewBox="0 0 24 24" aria-hidden="true">
-        {#each NEOCOM_GLYPHS.companion as d (d)}
-          <path {d} />
-        {/each}
-      </svg>
-      <span class="char-bar-companions-text">Companions</span>
-      {#if companionCount > 0}
-        <span class="char-bar-companions-count" aria-hidden="true">{companionCount}</span>
-      {/if}
-    </button>
+  {#if onOpenGlobal}
+    <GlobalLaunchers openIds={globalOpenIds} {companionCount} onOpen={onOpenGlobal} />
   {/if}
   {#if narrow}
     <!--

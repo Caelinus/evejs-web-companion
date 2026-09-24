@@ -48,7 +48,8 @@
   // companion doing something else.
   import { onMount } from "svelte";
   import FleetCompanion from "./FleetCompanion.svelte";
-  import { listServerBots, stopServerBot, type ServerBot } from "../app/api.ts";
+  import { stopServerBot, type ServerBot } from "../app/api.ts";
+  import { createPilotReach } from "../app/pilotReach.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { holdsTheShip, type ShipControllerID } from "../nav/botRegistry.ts";
   // ⚠ NO `canTagWords` HERE ANY MORE. The roster dropped its Can tag column;
@@ -83,7 +84,7 @@
     setRosterSetup,
     type CompanionRosterPrefs,
   } from "../app/companionRosterPrefs.ts";
-  import { loadKnownCharacters } from "../app/knownCharacters.ts";
+  import { loadKnownAccounts, loadKnownCharacters } from "../app/knownCharacters.ts";
   import {
     MAX_CAPACITOR_FLOOR,
     MAX_DRONE_HEALTH_FLOOR,
@@ -99,21 +100,17 @@
   } from "../nav/fleetCompanionLoop.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
   import type { Session } from "../app/sessions.ts";
-  import type { AppFlow } from "../app/flow.ts";
   import type { FleetCompanionState } from "../store/types.ts";
 
   let {
-    flow,
     sessions,
     onGoToPilot,
   }: {
-    /**
-     * The ACTIVE pilot's flow, used for one thing only: the account-scoped read
-     * of the server's bot roster. Every per-pilot action below goes through
-     * that pilot's OWN flow, off its own session — this window is never allowed
-     * to drive one pilot with another's.
-     */
-    flow?: AppFlow;
+    // ⚠ NO `flow`. This window used to borrow the ACTIVE pilot's for the
+    // account-scoped read of the server's companions, which showed one
+    // account's and nothing at all on the Pilot Hangar with nobody in the
+    // client. Every per-pilot action below goes through that pilot's OWN flow;
+    // the server's roster is read as each account (app/pilotReach.ts).
     sessions?: readonly Session[];
     /** Make a pilot the active cockpit. Absent in tests and harnesses. */
     onGoToPilot?: (sessionID: string) => void;
@@ -433,20 +430,31 @@
   let serverError = $state<string | null>(null);
   let serverLoaded = $state(false);
 
+  const reach = createPilotReach({
+    held: () => pilots,
+    known: () => loadKnownCharacters(),
+    accounts: () => loadKnownAccounts(),
+  });
+  onMount(() => () => void reach.release());
+
   async function refreshServer(): Promise<void> {
-    if (!flow) return;
     try {
-      serverBots = await listServerBots(flow.requestOptions());
-      serverError = null;
-    } catch {
-      serverError = "Could not read the server's companions — are you still signed in?";
+      const read = await reach.readServerBots();
+      if (read.allFailed) {
+        serverError = "Could not read the server's companions — is the server up?";
+      } else {
+        serverBots = [...read.bots];
+        serverError =
+          read.missing.length > 0
+            ? `Could not read the companions on ${read.missing.join(", ")} — any running there are not listed.`
+            : null;
+      }
     } finally {
       serverLoaded = true;
     }
   }
 
   onMount(() => {
-    if (!flow) return;
     void refreshServer();
     const beat = skipWhileBusy(refreshServer);
     const handle = setInterval(() => void beat(), SERVER_ROSTER_POLL_MS);
@@ -620,7 +628,7 @@
         }
       }
       for (const bot of serverRows) {
-        await stopServerBot(bot.botID, flow?.requestOptions() ?? {});
+        await stopServerBot(bot.botID, await reach.ownerOptions(bot.characterID));
       }
       await refreshServer();
     });
@@ -934,7 +942,7 @@
         </tbody>
       </table>
     </div>
-    {#if flow && !serverLoaded}
+    {#if !serverLoaded}
       <p class="note">Reading the server's companions…</p>
     {/if}
   {/if}
@@ -1141,7 +1149,7 @@
           disabled={busy}
           onclick={() =>
             run(async () => {
-              await stopServerBot(selectedServerBot.botID, flow?.requestOptions() ?? {});
+              await stopServerBot(selectedServerBot.botID, await reach.ownerOptions(selectedServerBot.characterID));
               await refreshServer();
             })}
         >

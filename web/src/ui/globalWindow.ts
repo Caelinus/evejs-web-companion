@@ -62,6 +62,46 @@ import type { TabID } from "./tabs.ts";
  */
 export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion", "piManager"]);
 
+/** One door onto a global window, as the brand strip draws it. */
+export interface GlobalLauncher {
+  readonly id: TabID;
+  /** The word beside the glyph. Short: it shares a header with the brand. */
+  readonly label: string;
+  /** The window's full name, for the accessible label. */
+  readonly title: string;
+  /** What the window is for, as a tooltip. */
+  readonly hint: string;
+}
+
+/**
+ * The brand strip's doors (GlobalLaunchers.svelte), in the order drawn.
+ *
+ * ⚠ EVERY GLOBAL TAB HAS EXACTLY ONE ENTRY HERE. These windows are out of the
+ * rail (tabs.ts `launchable: false`), so this list is their only door: a
+ * global tab missing from it is a window nobody can open. globalWindow.test.ts
+ * holds the two lists together.
+ */
+export const GLOBAL_LAUNCHERS: readonly GlobalLauncher[] = [
+  {
+    id: "botManager",
+    label: "Bots",
+    title: "Bot Manager",
+    hint: "Bot Manager — start and watch bots on every pilot and squad",
+  },
+  {
+    id: "piManager",
+    label: "PI",
+    title: "Planetary Industry",
+    hint: "Planetary Industry — every pilot's colonies on one board",
+  },
+  {
+    id: "companion",
+    label: "Companions",
+    title: "Fleet companions",
+    hint: "Fleet companions — every pilot flying with a fleet",
+  },
+];
+
 /** True when this tab opens as a global window, not a workspace window. */
 export function isGlobalTab(id: TabID): boolean {
   return GLOBAL_TABS.has(id);

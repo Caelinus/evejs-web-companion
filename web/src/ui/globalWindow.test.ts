@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 
 import {
   DEFAULT_GLOBAL_POS,
+  GLOBAL_LAUNCHERS,
   GLOBAL_TABS,
   isGlobalTab,
   loadGlobalWindows,
@@ -55,6 +56,7 @@ function byId(wins: readonly WinState[], id: string): WinState {
 }
 
 const CHARACTER_BAR = readFileSync(new URL("./CharacterBar.svelte", import.meta.url), "utf8");
+const HANGAR = readFileSync(new URL("./PilotHangar.svelte", import.meta.url), "utf8");
 
 // ─── which tabs are global ───────────────────────────────────────────────────
 
@@ -69,28 +71,27 @@ test("every global tab has a door somewhere", () => {
   // If this ever fails the panel has become unreachable, which is a worse bug
   // than the crowding the hoist was part of fixing.
   //
-  // The two have DIFFERENT doors on purpose: the Bot Manager is in the rail,
-  // and Fleet companions is the button beside the brand in the character bar —
-  // the only chrome that survives a pilot switch, which is the honest place for
-  // a window that is about every pilot at once.
+  // They share ONE door, and it is not the rail: the launcher strip beside the
+  // brand (GlobalLaunchers.svelte), which the character bar AND the Pilot
+  // Hangar carry — so each opens with nobody in the client as well as over a
+  // cockpit. So every global tab must be a launcher and none a rail entry.
+  const launchers = new Set(GLOBAL_LAUNCHERS.map((launcher) => launcher.id));
+  assert.deepEqual([...launchers].sort(), [...GLOBAL_TABS].sort(), "every global tab needs exactly one launcher");
+  assert.equal(launchers.size, GLOBAL_LAUNCHERS.length, "a global tab is launched twice");
   for (const docked of [true, false]) {
     const offered = new Set(launchableTabsFor(docked).map((tab) => tab.id));
-    assert.equal(offered.has("botManager"), true, "the Bot Manager must stay in the rail");
-    assert.equal(offered.has("companion"), false, "Fleet companions is not a rail entry");
+    for (const id of GLOBAL_TABS) {
+      assert.equal(offered.has(id), false, `'${id}' opens from the brand strip, not the rail`);
+    }
   }
-  assert.match(CHARACTER_BAR, /onCompanions/, "the character bar must carry the companions door");
-  assert.match(CHARACTER_BAR, /Fleet companions/);
+  assert.match(CHARACTER_BAR, /<GlobalLaunchers/, "the character bar must carry the launchers");
+  assert.match(HANGAR, /<GlobalLaunchers/, "the Pilot Hangar must carry the launchers");
 });
 
-test("the PI Manager is global, and its door is the rail", () => {
+test("the PI Manager is global", () => {
   // R108 slice 3. A board of every assigned pilot's colonies is about all of
-  // them, so a pilot switch must not tear it down; and unlike the companions it
-  // has nothing to do with the pilot on screen, so the rail is the right door.
+  // them, so a pilot switch must not tear it down.
   assert.equal(isGlobalTab("piManager"), true);
-  for (const docked of [true, false]) {
-    const offered = new Set(launchableTabsFor(docked).map((tab) => tab.id));
-    assert.equal(offered.has("piManager"), true, "the PI Manager must be in the rail");
-  }
 });
 
 test("a global tab that is not launchable is still a named tab", () => {

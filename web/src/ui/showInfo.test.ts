@@ -152,7 +152,9 @@ test("Show Info is NOT launchable from the rail", () => {
 // opened from the button beside the brand in the character bar rather than from
 // a per-pilot rail; globalWindow.test.ts pins that door so this exemption can
 // never quietly become an unreachable panel.
-const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots", "companion"]);
+// The Bot Manager and Planetary Industry are out for the same reason: all three
+// global windows open from the brand strip (GlobalLaunchers.svelte).
+const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots", "companion", "botManager", "piManager"]);
 
 test("every OTHER tab is still launchable", () => {
   // ⚠ `launchable` is absent on every pre-existing tab and absent means yes. A

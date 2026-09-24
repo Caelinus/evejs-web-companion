@@ -230,54 +230,6 @@ export function pilotRunState(
   return tabRunState(bots, customBot);
 }
 
-// --- one roster from every pilot's account --------------------------------
-//
-// ⚠ THE SERVER'S BOT LIST IS PER ACCOUNT. /api/bots answers with the calling
-// account's bots only (botHost.list), and a tab can hold pilots from several
-// accounts ("Add character" is a full login). Asking once, as the active
-// pilot, hides every other account's server bots: a row that just handed its
-// ship to the server reads "Nothing is running" with no way to stop it. So
-// the panel asks once PER PILOT, each with its own login, and merges here.
-
-/** One pilot's read of the server roster; `source` is whoever asked. */
-export type RosterRead<S> =
-  | { readonly source: S; readonly ok: true; readonly bots: readonly ServerBot[] }
-  | { readonly source: S; readonly ok: false };
-
-export interface MergedRoster<S> {
-  /** Every bot any pilot could see, once each. */
-  readonly bots: readonly ServerBot[];
-  /**
-   * botID -> a source whose account can see (and so stop) that bot. The
-   * server's stop is account-scoped exactly like its list, so the pilot that
-   * listed a bot is one whose login may stop it.
-   */
-  readonly ownerOf: ReadonlyMap<string, S>;
-  /** How many reads failed — some-failed is not all-failed, and not "none running". */
-  readonly failed: number;
-}
-
-/** Merge per-pilot roster reads, de-duplicated by botID (same-account pilots see the same bots). */
-export function mergeServerRosters<S>(reads: readonly RosterRead<S>[]): MergedRoster<S> {
-  const bots: ServerBot[] = [];
-  const ownerOf = new Map<string, S>();
-  let failed = 0;
-  for (const read of reads) {
-    if (!read.ok) {
-      failed += 1;
-      continue;
-    }
-    for (const bot of read.bots) {
-      if (ownerOf.has(bot.botID)) {
-        continue;
-      }
-      ownerOf.set(bot.botID, read.source);
-      bots.push(bot);
-    }
-  }
-  return { bots, ownerOf, failed };
-}
-
 // --- pilots with no tab open -------------------------------------------------
 
 /**

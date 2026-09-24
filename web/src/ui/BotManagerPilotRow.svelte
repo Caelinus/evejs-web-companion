@@ -19,9 +19,8 @@
   // inside `$effect` (App.svelte's station-watch effect is the precedent for
   // subscribing explicitly rather than with `$store` sugar) instead of once
   // at the top level.
-  import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
+  import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type ApiOptions, type BotScriptSummary, type ServerBot } from "../app/api.ts";
   import type { Session } from "../app/sessions.ts";
-  import type { AppFlow } from "../app/flow.ts";
   import {
     lastAlertPhrase,
     pilotRunState,
@@ -40,21 +39,21 @@
   let {
     session,
     serverBot,
-    ownerFlow,
     scripts,
+    ownerOptions,
     onChanged,
     onSetUpBuiltIn,
   }: {
     session?: Session;
     serverBot: ServerBot | null;
-    /**
-     * For a server-only row: the pilot whose login LISTED this bot. The
-     * server's stop is per account like its list, so that is a login allowed
-     * to stop it — the active pilot's may belong to another account.
-     */
-    ownerFlow?: AppFlow;
     /** The library rows the panel already loaded — this row never fetches its own. */
     scripts: readonly BotScriptSummary[];
+    /**
+     * The options a call about a pilot rides — its account's, for a
+     * server-only row that has no session here. Absent in tests, where the
+     * row falls back to the tab's own token.
+     */
+    ownerOptions?: (characterID: number) => Promise<ApiOptions>;
     /** Fires after a stop OR a start, so the panel refreshes the roster and server-bot list either way. */
     onChanged: () => void;
     /**
@@ -208,11 +207,13 @@
     busy = true;
     stopError = null;
     try {
-      // Direct api.ts calls must ride the owning pilot's flow options. A
-      // server-only row (no session held here) uses the login that listed the
-      // bot — same account, so allowed to stop it — and only without one
-      // falls back to the tab's active-pilot token (App.svelte's token mirror).
-      const options = (session?.flow ?? ownerFlow)?.requestOptions() ?? {};
+      // Direct api.ts calls must ride the owning pilot's flow options; a
+      // server-only row (no session held here) has no flow of its own and is
+      // stopped AS ITS ACCOUNT — /api/bots/:id/stop is scoped to the caller's
+      // account, so the tab's token would refuse any other account's bot.
+      const options = session
+        ? session.flow.requestOptions()
+        : ((await ownerOptions?.(serverBot.characterID)) ?? {});
       await stopServerBot(serverBot.botID, options);
       onChanged();
     } catch {

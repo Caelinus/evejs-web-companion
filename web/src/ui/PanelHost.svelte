@@ -142,13 +142,12 @@
 {:else if tab === "botBuilder"}
   <BotBuilder {store} {flow} />
 {:else if tab === "botManager"}
-  <BotManager {store} {flow} {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
+  <BotManager {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
 {:else if tab === "companion"}
-  <!-- ⚠ NOT GIVEN `store`. Every other panel here is a view of the mounted
-       pilot; this one is a view of ALL of them and reads each session's own
-       store. `flow` is passed for one thing only: the account-scoped read of
-       the server's companion roster. -->
-  <FleetCompanions {flow} {sessions} {onGoToPilot} />
+  <!-- ⚠ NOT GIVEN `store` OR `flow`. Every other panel here is a view of the
+       mounted pilot; this one is a view of ALL of them, reads each session's
+       own store, and reads the server's roster as each account. -->
+  <FleetCompanions {sessions} {onGoToPilot} />
 {:else if tab === "piManager"}
   <!-- ⚠ GIVEN NOTHING. The board is the player's PI roster across accounts and
        reads through its own throwaway sign-ins; it is not a view of the

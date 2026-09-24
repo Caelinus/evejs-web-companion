@@ -26,10 +26,10 @@
     startServerBot as apiStartServerBot,
     startServerCompanion,
     getBotScript,
+    type ApiOptions,
     type BotScriptSummary,
     type ServerBot,
   } from "../app/api.ts";
-  import type { AppFlow } from "../app/flow.ts";
   import type { Session } from "../app/sessions.ts";
   import {
     groupMemberStates,
@@ -55,7 +55,8 @@
     scripts,
     sessions,
     serverBots,
-    flow,
+    ownerOptions,
+    libraryOptions,
     companionSetups,
     nameOf,
     onChanged,
@@ -67,8 +68,13 @@
     sessions: readonly Session[];
     /** The server roster the panel already polls. */
     serverBots: readonly ServerBot[];
-    /** The panel's own flow — the token used for a member no session here holds. */
-    flow: AppFlow;
+    /**
+     * The options a call about one member rides: its own session when this tab
+     * holds it, otherwise its ACCOUNT's (BotManager.svelte's `ownerOptions`).
+     */
+    ownerOptions: (characterID: number) => Promise<ApiOptions>;
+    /** Options any signed-in account can read the shared bot library with. */
+    libraryOptions: () => Promise<ApiOptions>;
     /** Each companion's saved setup, by characterID. Empty for a squad group. */
     companionSetups: ReadonlyMap<number, CompanionSetup>;
     nameOf: (characterID: number) => string | null;
@@ -169,16 +175,14 @@
    * that pilot's own session or the server sees the hull still held by somebody
    * else and refuses with CHARACTER_IN_USE.
    *
-   * ⚠ A MEMBER WITH NO SESSION HERE RIDES THE PANEL'S TOKEN, which is the
-   * active pilot's — and the gateway refuses a character that token's account
-   * does not own. So a group spanning accounts can only start the members of
-   * the account currently signed in here. That is the Pilot Hangar's squad
-   * start's limit too, and it surfaces the right way round: the refusal is the
-   * server's own sentence on that pilot's row, and the rest of the group still
-   * flies.
+   * ⚠ A MEMBER WITH NO SESSION HERE IS REACHED AS ITS OWN ACCOUNT, never as
+   * whichever pilot is on screen — the gateway refuses a character the
+   * caller's account does not own, and a group may span several accounts.
+   * The panel decides how (app/accountPass.ts); a sign-in that fails is that
+   * member's refusal, and the rest of the group still flies.
    */
-  function optionsFor(characterID: number) {
-    return sessionFor(characterID)?.flow.requestOptions() ?? flow.requestOptions();
+  function optionsFor(characterID: number): Promise<ApiOptions> {
+    return ownerOptions(characterID);
   }
 
   /**
@@ -216,10 +220,10 @@
     if (scriptID === null) return;
     const outcome = await startGroupOnServer(
       {
-        fetchScript: (id) => getBotScript(id, flow.requestOptions()),
+        fetchScript: async (id) => getBotScript(id, await libraryOptions()),
         confirm: (message) => window.confirm(message),
-        startServerBot: (characterID, id, grant) =>
-          apiStartServerBot(characterID, id, grant, optionsFor(characterID)),
+        startServerBot: async (characterID, id, grant) =>
+          apiStartServerBot(characterID, id, grant, await optionsFor(characterID)),
         releaseHeld,
       },
       scriptID,
@@ -257,7 +261,7 @@
             analyzeCompanionRunPolicy(setup),
             DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
           );
-          await startServerCompanion(characterID, setup, grant, optionsFor(characterID));
+          await startServerCompanion(characterID, setup, grant, await optionsFor(characterID));
           try {
             // Same sync, same order, same reason as the saved-bot path: the
             // host has the hull, so a member whose tab was holding it must
@@ -287,7 +291,7 @@
     try {
       const outcome = await startGroupHere(
         {
-          fetchScript: (id) => getBotScript(id, flow.requestOptions()),
+          fetchScript: async (id) => getBotScript(id, await libraryOptions()),
           confirm: (message) => window.confirm(message),
           startCustomBotFor: async (characterID, doc, id) => {
             const session = sessionFor(characterID);
