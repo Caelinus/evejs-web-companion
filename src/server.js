@@ -18461,6 +18461,37 @@ function pinUsedM3(staticDataSource, contents) {
  * run out is not decided here either — the browser compares `expiresAtMs` to
  * `serverNowMs`, so a page left open goes stale visibly instead of lying.
  */
+const ECU_NOISE_FACTOR_ATTRIBUTE_ID = 1687;
+
+/**
+ * The most one cycle of this program can yield — which is also how much its
+ * routes may reserve, and how much they MUST reserve for the game to call the
+ * extractor settled. Null when the program or the noise factor is unknown.
+ *
+ * This is the retail client's EcuPin.GetMaxOutput and the emulator's
+ * getPinProducts for an ECU, the same arithmetic on the same numbers:
+ * trunc((1 + ecuNoiseFactor) * qtyPerCycle) * cycleSeconds / 900, floored.
+ * No extractor type carries ecuNoiseFactor; each uses the attribute's SDE
+ * default (0.8), so the default fallback is load-bearing here.
+ */
+function ecuMaxOutputPerCycle(staticDataSource, pin) {
+  const qtyPerCycle = Number(pin && pin.qtyPerCycle) || 0;
+  const cycleTicks = Number(pin && pin.cycleTime) || 0;
+  if (!(Number(pin && pin.programType) > 0) || qtyPerCycle <= 0 || cycleTicks <= 0) {
+    return null;
+  }
+  const read = staticDataSource && staticDataSource.getTypeDogmaAttributeOrDefault;
+  const noise = typeof read === "function"
+    ? Number(read(Number(pin && pin.typeID) || 0, ECU_NOISE_FACTOR_ATTRIBUTE_ID, null))
+    : NaN;
+  if (!Number.isFinite(noise)) {
+    return null;
+  }
+  const output = Math.trunc((1 + Math.max(0, noise)) * qtyPerCycle)
+    * (cycleTicks / FILETIME_TICKS_PER_SECOND) / 900;
+  return output > 0 ? Math.floor(output) : null;
+}
+
 function projectExtractionProgram(staticDataSource, pin) {
   const resourceTypeID = Number(pin && pin.programType) || 0;
   const expiresAtMs = fileTimeToEpochMs(pin && pin.expiryTime);
@@ -18475,6 +18506,7 @@ function projectExtractionProgram(staticDataSource, pin) {
     quantityPerCycle: Number(pin && pin.qtyPerCycle) || 0,
     installedAtMs,
     expiresAtMs,
+    maxOutputPerCycle: ecuMaxOutputPerCycle(staticDataSource, pin),
     headCount: Array.isArray(pin && pin.heads) ? pin.heads.length : 0,
     // The drill area the program was installed with. It is what sets how long a
     // program runs (the emulator's getProgramLengthFromHeadRadius), and a
@@ -18520,6 +18552,12 @@ function projectColony(staticDataSource, colony) {
       // been dry since carries hasReceivedInputs true and this false.
       hasReceivedInputs: flag(pin && pin.hasReceivedInputs),
       receivedInputsLastCycle: flag(pin && pin.receivedInputsLastCycle),
+      // Whether the pin is running right now: the retail BasePin.IsActive,
+      // activityState > STATE_IDLE (0). A factory set to a recipe with nothing
+      // in its buffer sits at 0. Null when the server gave no state.
+      active: Number.isFinite(Number(pin && pin.state)) && pin.state !== null && pin.state !== ""
+        ? Number(pin.state) > 0
+        : null,
       // Instants, epoch ms against the same serverNowMs as everything else.
       // "0" — a pad that has never launched — comes back null, not 1601.
       lastRunAtMs: fileTimeToEpochMs(pin && pin.lastRunTime),

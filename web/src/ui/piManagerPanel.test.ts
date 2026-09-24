@@ -231,7 +231,7 @@ test("a pilot with an ended extractor is offered a restart, said before the butt
   const text = visibleText(renderSeeded());
   assert.match(
     text,
-    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
+    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
   );
   // Only one pilot has anything to restart.
   assert.equal(text.match(/Restart extractors/g)?.length, 1);

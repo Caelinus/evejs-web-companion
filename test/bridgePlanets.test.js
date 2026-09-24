@@ -303,6 +303,11 @@ function fakeStaticData() {
     getStation() {
       return null;
     },
+    // ecuNoiseFactor (1687): no extractor type carries it, so every one reads
+    // the attribute's SDE default, 0.8.
+    getTypeDogmaAttributeOrDefault(typeID, attributeID, fallback = null) {
+      return Number(attributeID) === 1687 ? 0.8 : fallback;
+    },
   };
 }
 
@@ -498,6 +503,34 @@ test("an extraction program carries the server's own numbers, unchanged", async 
   assert.equal(active.program.headCount, 3);
   // The drill area, which sets the run length — a restart sends it back.
   assert.equal(active.program.headRadius, 0.012);
+});
+
+test("an extractor states the most a cycle can yield: what its routes must reserve", async () => {
+  // The retail client's EcuPin.GetMaxOutput: trunc(1.8 * qtyPerCycle) *
+  // cycleSeconds / 900. 2841 an hour -> trunc(5113.8) * 4 = 20452.
+  const { baseUrl } = await selected();
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const pins = payload.colonies[0].pins;
+  assert.equal(pins.find((pin) => pin.pinID === 2).program.maxOutputPerCycle, 20452);
+  // Thirty minutes of 1204 -> trunc(2167.2) * 2 = 4334.
+  assert.equal(pins.find((pin) => pin.pinID === 3).program.maxOutputPerCycle, 4334);
+});
+
+test("a pin says whether it is running now, and a missing state stays unknown", async () => {
+  const { baseUrl } = await selected({
+    async getSnapshot() {
+      const colony = capturedColony();
+      delete colony.pins.find((pin) => pin.pinID === 4).state;
+      return {
+        planetRuntimeState: { schemaVersion: 1, coloniesByKey: { "40000002:140000238": colony } },
+      };
+    },
+  });
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/planets");
+  const pins = payload.colonies[0].pins;
+  assert.equal(pins.find((pin) => pin.pinID === 2).active, true);
+  assert.equal(pins.find((pin) => pin.pinID === 3).active, false);
+  assert.equal(pins.find((pin) => pin.pinID === 4).active, null);
 });
 
 test("a cycle time is TICKS on the wire and SECONDS in the answer", async () => {

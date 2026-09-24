@@ -159,7 +159,9 @@ function waterColony(
       route([STORAGE, 4, 5]),
       route([STORAGE, 4, 5, 6]),
       route([STORAGE, 4, 5, 6, 3]),
-      route([3, PAD], WATER),
+      // Every factory sends its Water on: the game flags one whose output
+      // goes nowhere (colonyData.IsSomeProductUnrouted).
+      ...[3, 4, 5, 6].map((factoryPinID) => route([factoryPinID, PAD], WATER)),
     ],
   );
 }

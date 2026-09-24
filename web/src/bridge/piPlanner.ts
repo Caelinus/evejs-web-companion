@@ -188,18 +188,32 @@ function producersFrom(
   return [...byPlanet.values()].sort((left, right) => right.perHour - left.perHour);
 }
 
-function factoriesRunning(recipe: PiSchematic, colonies: readonly PlannerColony[]): PlanProducer[] {
-  if (recipe.cycleTimeSeconds === null) return [];
+/**
+ * The factories set to this recipe, split by whether they are running now.
+ *
+ * ⚠ SET IS NOT RUNNING. A factory keeps its recipe while it sits idle with an
+ * empty buffer, and counting it as a producer is how the plan once said a
+ * colony was making something the game showed as stopped. Only a pin the
+ * server says is active (retail BasePin.IsActive) counts toward the rate; an
+ * unknown state (an older BFF) is still counted, because an unknown raises
+ * nothing.
+ */
+function factoriesSetTo(
+  recipe: PiSchematic,
+  colonies: readonly PlannerColony[],
+): { running: PlanProducer[]; idle: PlanProducer[] } {
+  if (recipe.cycleTimeSeconds === null) return { running: [], idle: [] };
   const perHour = (recipe.output.quantity * 3600) / recipe.cycleTimeSeconds;
-  const found: { colony: Colony; perHour: number }[] = [];
+  const running: { colony: Colony; perHour: number }[] = [];
+  const idle: { colony: Colony; perHour: number }[] = [];
   for (const { colony } of colonies) {
     for (const pin of colony.pins) {
       if (pin.kind === "factory" && pin.schematicID === recipe.schematicID) {
-        found.push({ colony, perHour });
+        (pin.active === false ? idle : running).push({ colony, perHour });
       }
     }
   }
-  return producersFrom("factory", found);
+  return { running: producersFrom("factory", running), idle: producersFrom("factory", idle) };
 }
 
 /** A factory of a type that can run this recipe, set to something else. */
@@ -310,12 +324,15 @@ export function planWithStock(input: PlannerInput): Plan | null {
     }
 
     let producers: PlanProducer[] = [];
+    let idleFactories: PlanProducer[] = [];
     let sourceWords: string;
     let gap: PlanGap | null = null;
     let stopped: Colony[] = [];
     const tags: PlanTag[] = [];
     if (recipe !== null) {
-      producers = factoriesRunning(recipe, input.colonies);
+      const setTo = factoriesSetTo(recipe, input.colonies);
+      producers = setTo.running;
+      idleFactories = setTo.idle;
     } else {
       const found = extractors(typeID, input.colonies, input.browserNowMs);
       producers = found.running;
@@ -323,14 +340,18 @@ export function planWithStock(input: PlannerInput): Plan | null {
     }
     const perHour = producers.reduce((total, producer) => total + producer.perHour, 0);
 
+    const placesOf = (list: readonly PlanProducer[]) => listWords(list.map((producer) =>
+      producer.count > 1 ? `${producer.placeWords} (${producer.count})` : producer.placeWords));
+    const idleWords = idleFactories.length > 0 ? `${placesOf(idleFactories)} idle` : null;
     if (producers.length > 0) {
-      const places = listWords(producers.map((producer) =>
-        producer.count > 1 ? `${producer.placeWords} (${producer.count})` : producer.placeWords));
+      const places = placesOf(producers);
       sourceWords = recipe !== null
-        ? `${places}, up to ${rateWords(perHour)} an hour`
+        ? `${places}, up to ${rateWords(perHour)} an hour${idleWords ? `; ${idleWords}` : ""}`
         : `${places}, ${rateWords(perHour)} an hour on the installed program`;
     } else if (toMake === 0) {
       sourceWords = "held";
+    } else if (idleWords !== null) {
+      sourceWords = `${placesOf(idleFactories)}, set to it but idle now`;
     } else {
       sourceWords = recipe !== null ? "nothing" : "not extracted";
     }
@@ -341,6 +362,9 @@ export function planWithStock(input: PlannerInput): Plan | null {
     if (toMake > 0) {
       if (producers.length > 0) {
         // Made already; the row says how long the rest takes.
+      } else if (idleFactories.length > 0) {
+        // Set up to make it and waiting for inputs: nothing to switch or
+        // build, and what feeds it is the row below. The idle tag says so.
       } else if (recipe !== null) {
         const candidates = idleCandidates(recipe, input.colonies);
         if (candidates.length > 0) {
@@ -415,7 +439,18 @@ export function planWithStock(input: PlannerInput): Plan | null {
       }
       tags.push({ text: `${rateWords(perHour)}/h`, tone: null, title: rateTitle });
     }
-    const state: PlanState = gap === null ? "ok" : gap.kind === "factory-busy" ? "act" : "bad";
+    for (const producer of idleFactories) {
+      const noun = producer.count === 1 ? "factory is" : "factories are";
+      tags.push({
+        text: `idle ${producer.placeWords}`,
+        tone: "act",
+        title: `${producer.count} ${noun} set to make ${typeName} at ${producer.placeWords} but not running: nothing is in the input buffer.`,
+      });
+    }
+    const waitingOnIdle = toMake > 0 && producers.length === 0 && idleFactories.length > 0;
+    const state: PlanState = gap === null
+      ? (waitingOnIdle ? "act" : "ok")
+      : gap.kind === "factory-busy" ? "act" : "bad";
 
     const depth = depthOf.get(typeID) ?? 0;
     if (gap !== null) gaps.push({ gap, rowIndex: rows.length, depth });
@@ -458,6 +493,10 @@ export function planWithStock(input: PlannerInput): Plan | null {
   let verdict: string;
   if (target.toMake === 0) {
     verdict = `You hold ${countWords(target.held)} ${target.typeName} already. Nothing needs to change.`;
+  } else if (gaps.length === 0 && numbered.some((row) => row.state === "act")) {
+    // Every step has a factory set to it, but some of those sit idle: "Nothing
+    // needs to change" would be true of the wiring and false of the colony.
+    verdict = `Your colonies are set up to make ${quantityWords} ${target.typeName}, but some factories are idle, waiting for inputs.`;
   } else if (gaps.length === 0) {
     verdict = `What you hold and what your colonies make cover ${quantityWords} ${target.typeName}. Nothing needs to change.`;
   } else {

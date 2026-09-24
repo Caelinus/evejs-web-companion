@@ -32,14 +32,17 @@ const NOW = Date.UTC(2026, 6, 21, 12, 0, 0);
 const HOUR = 3_600_000;
 
 function pin(overrides: Partial<ColonyPin> & Pick<ColonyPin, "pinID" | "kind">): ColonyPin {
+  // A factory here has a recipe unless a test says otherwise: one without is
+  // a finding of its own (the game's "no schematic" rule).
+  const factory = overrides.kind === "factory";
   return {
     typeID: 2562,
     typeName: "Temperate Storage Facility",
     contents: [],
     usedM3: 0,
     capacityM3: null,
-    schematicID: null,
-    schematicName: null,
+    schematicID: factory ? 121 : null,
+    schematicName: factory ? "Water" : null,
     hasReceivedInputs: null,
     receivedInputsLastCycle: null,
     lastRunAtMs: NOW - 60_000,
@@ -377,4 +380,103 @@ test("a comparator shared with the board orders findings worst first", () => {
     shuffled.map((finding) => finding.kind),
     ["extractor-expired", "factory-starved", "extractor-expiring"],
   );
+});
+
+// --- The game's own attention rules (colonyData.IsPinNeedingAttention) -------
+
+test("an extractor whose routes carry less than a cycle yields is flagged, as the game flags it", () => {
+  // The live case: the program was restarted with a bigger yield and the
+  // storage route still reserves the old amount.
+  const short = colony(
+    [
+      pin({
+        ...extractor(2, NOW + 48 * HOUR),
+        program: { ...extractor(2, NOW + 48 * HOUR).program!, maxOutputPerCycle: 35608 },
+      }),
+      pin({ pinID: 6, kind: "storage" }),
+    ],
+    {
+      routes: [{ routeID: 1, path: [2, 6], commodityTypeID: 2268, commodityTypeName: null, commodityQuantity: 35288 }],
+    },
+  );
+  const [finding] = colonyFindings(short, NOW);
+  assert.equal(finding!.kind, "extractor-unrouted");
+  assert.equal(finding!.urgency, "now");
+  assert.equal(finding!.words, "An extractor's routes carry 35,288 of the 35,608 Aqueous Liquids a cycle can yield");
+  assert.equal(colonyAttentionWords([finding!]), "1 extractor yields more than its routes carry");
+
+  // Settled, or with no stated maximum (an older BFF): nothing to say.
+  const settled = { ...short, routes: [{ ...short.routes[0]!, commodityQuantity: 35608 }] };
+  assert.deepEqual(colonyFindings(settled, NOW), []);
+  assert.deepEqual(colonyFindings(colony([extractor(2, NOW + 48 * HOUR)]), NOW), []);
+});
+
+test("a stopped extractor is said once: its routes are moot until it runs again", () => {
+  const stopped = colony([
+    pin({
+      ...extractor(2, NOW - HOUR),
+      program: { ...extractor(2, NOW - HOUR).program!, maxOutputPerCycle: 1000 },
+    }),
+  ]);
+  assert.deepEqual(colonyFindings(stopped, NOW).map((finding) => finding.kind), ["extractor-expired"]);
+});
+
+test("a factory with no recipe set is flagged", () => {
+  const bare = colony([pin({ pinID: 4, kind: "factory", schematicID: null, schematicName: null, typeName: "Basic Industry Facility" })]);
+  const findings = colonyFindings(bare, NOW);
+  assert.deepEqual(findings.map((finding) => [finding.kind, finding.words]), [
+    ["factory-no-recipe", "Basic Industry Facility has no recipe set"],
+  ]);
+  assert.equal(colonyAttentionWords(findings), "1 factory has no recipe set");
+});
+
+test("with the recipe table: a missing input route, then an unrouted output, one sentence per factory", async () => {
+  const { decodeRecipeBook } = await import("./piRecipes.ts");
+  const book = decodeRecipeBook({
+    schematics: [{
+      schematicID: 121,
+      name: "Water",
+      cycleTimeSeconds: 1800,
+      factoryTypeIDs: [2473],
+      inputs: [{ typeID: 2268, quantity: 3000, typeName: "Aqueous Liquids" }],
+      output: { typeID: 3645, quantity: 20, typeName: "Water" },
+    }],
+  } as never);
+  const route = (routeID: number, path: number[], typeID: number, qty: number) =>
+    ({ routeID, path, commodityTypeID: typeID, commodityTypeName: null, commodityQuantity: qty });
+  const factory = pin({ pinID: 4, kind: "factory", receivedInputsLastCycle: true });
+  const storage = pin({ pinID: 6, kind: "storage", contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 9000 }] });
+  const pad = pin({ pinID: 7, kind: "launchpad" });
+
+  // Fed last cycle, but nothing routes Aqueous in: the game flags it anyway.
+  const noInput = colony([factory, storage, pad], { routes: [route(2, [4, 7], 3645, 20)] });
+  assert.deepEqual(colonyFindings(noInput, NOW, undefined, book).map((f) => [f.kind, f.words]), [
+    ["factory-input-unrouted", "No route brings Aqueous Liquids to the factory making Water"],
+  ]);
+
+  // Fed and routed in, but its Water goes nowhere.
+  const noOutput = colony([factory, storage, pad], { routes: [route(1, [6, 4], 2268, 3000)] });
+  assert.deepEqual(colonyFindings(noOutput, NOW, undefined, book).map((f) => [f.kind, f.words]), [
+    ["factory-output-unrouted", "Nothing takes all of Water away from the factory making Water"],
+  ]);
+
+  // Neither: wired in and out is quiet. Without the table nothing is judged.
+  const wired = colony([factory, storage, pad], { routes: [route(1, [6, 4], 2268, 3000), route(2, [4, 7], 3645, 20)] });
+  assert.deepEqual(colonyFindings(wired, NOW, undefined, book), []);
+  assert.deepEqual(colonyFindings(noOutput, NOW), []);
+});
+
+test("two findings on one structure never share a key in the panel", () => {
+  const both = colony([
+    pin({
+      pinID: 4,
+      kind: "factory",
+      schematicID: null,
+      schematicName: null,
+      usedM3: 95,
+      capacityM3: 100,
+    }),
+  ]);
+  const keys = colonyFindings(both, NOW).map((finding) => `${finding.pinID ?? "colony"}:${finding.kind}`);
+  assert.equal(new Set(keys).size, keys.length);
 });

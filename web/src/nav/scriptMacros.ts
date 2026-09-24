@@ -4026,6 +4026,57 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
       reason: `${notTaken} of ${restarted.size} extractor ${restarted.size === 1 ? "restart" : "restarts"} did not take - the server refused ${notTaken === 1 ? "it" : "them"}. The bot log names the reason.`,
     });
   }
+  // ── Then the routes. A new program yields a different maximum cycle, and the
+  // server never grows routes to fit it; the retail client re-sizes them in the
+  // same edit as the install. So, once the restarts have landed and the new
+  // maxima are stated, every extractor whose storage routes reserve less gets
+  // them removed and recreated at the retail split - restarted this run or an
+  // earlier one, since both leave the colony flagged in the game. Same rules
+  // as the restarts: one per tick, each pin tried once, and one still short
+  // after its edit was refused.
+  const reroutedRaw = mem["rerouted"];
+  const rerouted = new Set<number>(Array.isArray(reroutedRaw) ? (reroutedRaw as number[]) : []);
+  for (const colony of colonies) {
+    for (const plan of colony.reroutes ?? []) {
+      if (rerouted.has(plan.pinID)) continue;
+      const attempts = (num(mem, "attempts") ?? 0) + 1;
+      if (attempts > MAX_BLOCK_ATTEMPTS * 4) {
+        return tick(WAIT, "The reroutes kept not landing.", "Rerouting extractors", {
+          kind: "blocked",
+          reason: "The extractor reroutes kept not taking, so the bot stopped.",
+        });
+      }
+      return tick(
+        {
+          kind: "rerouteExtractor",
+          planetID: plan.planetID,
+          pinID: plan.pinID,
+          removeRouteIDs: plan.removeRouteIDs,
+          create: plan.create,
+        },
+        colony.planetName !== null
+          ? `Re-sizing an extractor's routes at ${colony.planetName}.`
+          : "Re-sizing an extractor's routes.",
+        "Rerouting extractors",
+        ACTING,
+        false,
+        { ...mem, attempts, rerouted: [...rerouted, plan.pinID] },
+      );
+    }
+  }
+  let rerouteNotTaken = 0;
+  for (const colony of colonies) {
+    for (const plan of colony.reroutes ?? []) {
+      if (rerouted.has(plan.pinID)) rerouteNotTaken += 1;
+    }
+  }
+  if (rerouteNotTaken > 0) {
+    const noun = rerouteNotTaken === 1 ? "reroute" : "reroutes";
+    return tick(WAIT, `${rerouteNotTaken} extractor ${noun} did not take.`, "Rerouting extractors", {
+      kind: "blocked",
+      reason: `${rerouteNotTaken} extractor ${noun} did not take - the server refused ${rerouteNotTaken === 1 ? "it" : "them"}, so those routes still carry less than the program yields. The bot log names the reason.`,
+    });
+  }
   if (skippedUnknown > 0) {
     return tick(
       WAIT,

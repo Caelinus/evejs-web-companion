@@ -2739,6 +2739,12 @@ export interface ColonyExtractionProgram {
   readonly expiresAtMs: number | null;
   readonly headCount: number;
   /**
+   * The most one cycle can yield, which is what this extractor's routes must
+   * reserve between them before the game calls it settled (retail
+   * EcuPin.GetMaxOutput). Null or absent when the BFF could not say.
+   */
+  readonly maxOutputPerCycle?: number | null;
+  /**
    * The drill area the program was installed with — which is also what sets
    * how long it runs. A restart sends it back unchanged. Null or absent when
    * the server gave none (an older BFF), and then nothing may guess one.
@@ -2780,6 +2786,12 @@ export interface ColonyPin {
    */
   readonly hasReceivedInputs: boolean | null;
   readonly receivedInputsLastCycle: boolean | null;
+  /**
+   * Whether the pin is running right now (retail BasePin.IsActive). A factory
+   * set to a recipe but waiting for inputs is false. Null or absent when the
+   * server gave no state, which is NOT "idle".
+   */
+  readonly active?: boolean | null;
   /** When this pin last ran, and (launchpads, command centres) last launched. */
   readonly lastRunAtMs: number | null;
   readonly lastLaunchAtMs: number | null;

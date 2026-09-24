@@ -904,6 +904,56 @@ test("restart-extractors: a restart the server refused ends the run BLOCKED, not
   assert.match(second.outcome.kind === "blocked" ? second.outcome.reason : "", /1 of 1 extractor restart did not take/);
 });
 
+test("restart-extractors: after the restarts land, routes sized for the old program are re-sized, then done", () => {
+  // Live: a restart raised the yield, the emulator never grows routes, and the
+  // game flagged the colony while every factory was running.
+  const restart = SCRIPT_MACROS["restart-extractors"]!;
+  const s = step("restart-extractors" as never);
+  const past = Date.now() - 60_000;
+  const future = Date.now() + 60_000;
+  const plan = {
+    planetID: 40000001,
+    pinID: 1,
+    removeRouteIDs: [7],
+    create: [{ path: [1, 2], typeID: 2268, quantity: 35608 }],
+  };
+  const expired = [{
+    planetID: 40000001,
+    planetName: "Matar V",
+    extractors: [{ pinID: 1, resourceTypeID: 2268, expiresAtMs: past, headRadius: 0.03 }],
+    reroutes: [],
+  }];
+  const first = restart(s, obs({ colonies: expired } as never), {}, NB);
+  assert.equal(first.action.kind, "restartExtractor");
+
+  // The re-read: running again, and its route now short of the new maximum.
+  const running = [{ ...expired[0]!, extractors: [{ ...expired[0]!.extractors[0]!, expiresAtMs: future }], reroutes: [plan] }];
+  const second = restart(s, obs({ colonies: running } as never), first.nextMem, NB);
+  assert.deepEqual(second.action, { kind: "rerouteExtractor", ...plan });
+
+  // Settled on the next read -> done.
+  const settled = [{ ...running[0]!, reroutes: [] }];
+  const third = restart(s, obs({ colonies: settled } as never), second.nextMem, NB);
+  assert.equal(third.outcome.kind, "done");
+
+  // Still short after its edit -> refused, and said so.
+  const refused = restart(s, obs({ colonies: running } as never), second.nextMem, NB);
+  assert.equal(refused.outcome.kind, "blocked");
+  assert.match(refused.outcome.kind === "blocked" ? refused.outcome.reason : "", /1 extractor reroute did not take/);
+});
+
+test("restart-extractors: a colony with nothing expired still gets its stale routes fixed", () => {
+  const restart = SCRIPT_MACROS["restart-extractors"]!;
+  const s = step("restart-extractors" as never);
+  const colonies = [{
+    planetID: 40000001,
+    planetName: "Matar V",
+    extractors: [{ pinID: 1, resourceTypeID: 2268, expiresAtMs: Date.now() + 60_000, headRadius: 0.03 }],
+    reroutes: [{ planetID: 40000001, pinID: 1, removeRouteIDs: [7], create: [{ path: [1, 2], typeID: 2268, quantity: 10 }] }],
+  }];
+  assert.equal(restart(s, obs({ colonies } as never), {}, NB).action.kind, "rerouteExtractor");
+});
+
 test("repair-ship: the shop's quote decides; repairs then done only on a clean re-quote", () => {
   const repair = SCRIPT_MACROS["repair-ship"]!;
   const s = step("repair-ship" as never);

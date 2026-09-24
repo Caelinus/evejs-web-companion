@@ -98,6 +98,7 @@ import {
 } from "../bridge/drones.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
+import { extractorReroute, type ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import { decodeRecipeBook } from "../bridge/piRecipes.ts";
 import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
@@ -9329,6 +9330,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                       ? null
                       : pin.program.expiresAtMs - report.clockOffsetMs,
                 })),
+              // Routes still sized for an earlier program, with the retail
+              // re-size for each. Only the restart block acts on them.
+              reroutes: colony.pins
+                .filter((pin) => pin.kind === "extractor-control")
+                .map((pin) => extractorReroute(colony, pin.pinID))
+                .filter((plan): plan is ExtractorReroute => plan !== null),
               // Every structure, for the blocks that act on a hold. The two
               // volumes are carried across UNCHANGED, nulls included: null is
               // "the server could not say", and a decider that reads it as 0
@@ -10157,6 +10164,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               action.pinID,
               action.resourceTypeID,
               action.headRadius,
+              callOptions,
+            );
+            return;
+          case "rerouteExtractor":
+            await api.rerouteExtractorRoutes(
+              action.planetID,
+              action.removeRouteIDs,
+              action.create,
               callOptions,
             );
             return;

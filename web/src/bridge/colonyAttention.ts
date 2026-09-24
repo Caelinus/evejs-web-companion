@@ -29,6 +29,7 @@
 import type { Colony, ColonyPin } from "../store/types.ts";
 import { formatDuration, summarizeColony } from "./planets.ts";
 import { factoryStarvationWords } from "./colonySupply.ts";
+import { extractorShortfall, isRoutedInto, routedFrom } from "./colonyRoutes.ts";
 import type { PiRecipeBook } from "./piRecipes.ts";
 
 export type ColonyFindingKind =
@@ -42,6 +43,18 @@ export type ColonyFindingKind =
   | "pin-full"
   /** A factory the last simulated cycle fed nothing. */
   | "factory-starved"
+  /** A factory with no recipe set (retail ProcessPin.IsNeedingAttention). */
+  | "factory-no-recipe"
+  /** A recipe input no route brings in (retail IsSomeConsumableUnfulfilled). */
+  | "factory-input-unrouted"
+  /** A factory whose output no route carries away in full (IsSomeProductUnrouted). */
+  | "factory-output-unrouted"
+  /**
+   * An extractor whose routes reserve less than its maximum cycle
+   * (IsSomeProductUnrouted) - typically routes still sized for the program
+   * before a restart.
+   */
+  | "extractor-unrouted"
   /** The command centre is holding goods: they can be launched. */
   | "cc-holds-cargo";
 
@@ -186,14 +199,93 @@ function holdFinding(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// THE GAME'S OWN ATTENTION RULES (colonyData.IsPinNeedingAttention).
+//
+// The retail client flags a pin when it has no recipe, when a recipe input has
+// no route in, or when what it produces is not routed away in full. These are
+// wiring facts, read straight off the routes, so unlike the feed flag above
+// they do not flicker cycle to cycle. Its fourth rule (a full store with a
+// route in) is already covered by the fuller pin-full rule.
+
+function extractorUnroutedFinding(colony: Colony, pin: ColonyPin): ColonyFinding | null {
+  const shortfall = extractorShortfall(colony, pin);
+  if (shortfall === null) return null;
+  const what = pin.program?.resourceTypeName ?? "what it pulls";
+  return {
+    planetID: colony.planetID,
+    pinID: pin.pinID,
+    kind: "extractor-unrouted",
+    urgency: "now",
+    dueAtMs: null,
+    words: shortfall.routed === 0
+      ? `No route carries ${what} away from an extractor`
+      : `An extractor's routes carry ${shortfall.routed.toLocaleString("en-US")} of the ${shortfall.maxOutput.toLocaleString("en-US")} ${what} a cycle can yield`,
+  };
+}
+
+/** Everything wrong with one factory's wiring, root cause first. */
+function factoryWiringFindings(
+  colony: Colony,
+  pin: ColonyPin,
+  serverNowMs: number,
+  recipes: PiRecipeBook | null,
+): ColonyFinding[] {
+  const base = { planetID: colony.planetID, pinID: pin.pinID, urgency: "now", dueAtMs: null } as const;
+  if (pin.schematicID === null) {
+    return [{ ...base, kind: "factory-no-recipe", words: `${pinWords(pin)} has no recipe set` }];
+  }
+  const found: ColonyFinding[] = [];
+  // ⚠ ONLY AN EXPLICIT false, AND ONLY WHEN NOTHING IS COMING. null is "this
+  // pin has no such state", which every non-factory pin answers. And false
+  // alone is not a fault: on a colony whose extraction is the bottleneck most
+  // factories go unfed on most cycles. colonySupply.ts follows the routes and
+  // speaks only when an input has no live source at all. It comes first
+  // because its sentence says the most (it also covers a missing route).
+  if (pin.receivedInputsLastCycle === false) {
+    const words = factoryStarvationWords(colony, pin, serverNowMs, recipes);
+    if (words !== null) {
+      found.push({ ...base, kind: "factory-starved", words });
+    }
+  }
+  // Without the recipe table there is no telling what it needs or makes, and
+  // an unknown raises nothing.
+  const recipe = recipes !== null && recipes.readable
+    ? recipes.bySchematicID.get(pin.schematicID) ?? null
+    : null;
+  if (recipe === null) return found;
+  const making = pin.schematicName ?? recipe.output.typeName ?? null;
+  const target = making ? `the factory making ${making}` : "a factory";
+  const missing = recipe.inputs.find((input) => !isRoutedInto(colony, pin.pinID, input.typeID));
+  if (missing !== undefined) {
+    found.push({
+      ...base,
+      kind: "factory-input-unrouted",
+      words: `No route brings ${missing.typeName ?? "what it needs"} to ${target}`,
+    });
+  }
+  if (routedFrom(colony, pin.pinID, recipe.output.typeID) < recipe.output.quantity) {
+    found.push({
+      ...base,
+      kind: "factory-output-unrouted",
+      words: `Nothing takes all of ${making ?? "its output"} away from ${target}`,
+    });
+  }
+  return found;
+}
+
 /** Severity order, worst first. Ties inside a kind are broken by time. */
 const KIND_ORDER: Readonly<Record<ColonyFindingKind, number>> = Object.freeze({
   "extractor-expired": 0,
-  "factory-starved": 1,
-  "pin-full": 2,
-  "extractor-idle": 3,
-  "extractor-expiring": 4,
-  "cc-holds-cargo": 5,
+  "factory-no-recipe": 1,
+  "factory-input-unrouted": 2,
+  "factory-starved": 3,
+  "pin-full": 4,
+  "extractor-idle": 5,
+  "extractor-unrouted": 6,
+  "factory-output-unrouted": 7,
+  "extractor-expiring": 8,
+  "cc-holds-cargo": 9,
 });
 
 /**
@@ -240,23 +332,22 @@ export function colonyFindings(
       if (finding !== null) {
         findings.push(finding);
       }
+      // A stopped extractor already has its sentence; its routes are moot
+      // until it runs again.
+      const stopped = finding !== null && finding.urgency === "now";
+      const unrouted = stopped ? null : extractorUnroutedFinding(colony, pin);
+      if (unrouted !== null) {
+        findings.push(unrouted);
+      }
     }
-    // ⚠ ONLY AN EXPLICIT false, AND ONLY WHEN NOTHING IS COMING. null is "this
-    // pin has no such state", which every non-factory pin answers. And false
-    // alone is not a fault: on a colony whose extraction is the bottleneck most
-    // factories go unfed on most cycles. colonySupply.ts follows the routes and
-    // speaks only when an input has no live source at all.
-    if (pin.kind === "factory" && pin.receivedInputsLastCycle === false) {
-      const words = factoryStarvationWords(colony, pin, serverNowMs, recipes);
-      if (words !== null) {
-        findings.push({
-          planetID: colony.planetID,
-          pinID: pin.pinID,
-          kind: "factory-starved",
-          urgency: "now",
-          dueAtMs: null,
-          words,
-        });
+    if (pin.kind === "factory") {
+      // ⚠ ONE SENTENCE PER FACTORY, THE ROOT CAUSE. The game lights a factory
+      // for each of these at once, but a factory with no recipe has no inputs
+      // to route, and one with nothing coming in has no output to route yet:
+      // the first that applies is the one worth saying.
+      const [first] = factoryWiringFindings(colony, pin, serverNowMs, recipes);
+      if (first !== undefined) {
+        findings.push(first);
       }
     }
     const hold = holdFinding(colony, pin, thresholds);
@@ -340,6 +431,10 @@ export function colonyAttentionWords(findings: readonly ColonyFinding[]): string
       return `${countWords(sameKind, "1 hold is full", "holds are full")}${tail}`;
     case "extractor-idle":
       return `${countWords(sameKind, "1 extractor has no program", "extractors have no program")}${tail}`;
+    case "extractor-unrouted":
+      return `${countWords(sameKind, "1 extractor yields more than its routes carry", "extractors yield more than their routes carry")}${tail}`;
+    case "factory-no-recipe":
+      return `${countWords(sameKind, "1 factory has", "factories have")} no recipe set${tail}`;
     default:
       return `${worst.words}${tail}`;
   }

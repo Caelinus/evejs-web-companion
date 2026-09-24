@@ -34,6 +34,7 @@ import {
   type ColonyFindingUrgency,
 } from "./colonyAttention.ts";
 import { colonyPlaceWords, formatDuration, serverNow, summarizeColony } from "./planets.ts";
+import { extractorReroute } from "./colonyRoutes.ts";
 
 /**
  * What the latest attempt to read a pilot did.
@@ -248,18 +249,29 @@ function dispatchFor(
   if (reading !== null) {
     const nowMs = serverNow(reading.report.clockOffsetMs, input.browserNowMs);
     const { extractors, colonies } = restartableExtractors(reading, nowMs);
-    if (extractors > 0) {
-      const ended = extractors === 1 ? "1 extractor has" : `${extractors} extractors have`;
+    // Routes still sized for an earlier program: the same run re-sizes them
+    // (the retail client does it in the install edit; see colonyRoutes.ts).
+    const reroutes = reading.report.colonies.reduce((total, colony) => total + colony.pins
+      .filter((pin) => pin.kind === "extractor-control" && extractorReroute(colony, pin.pinID) !== null)
+      .length, 0);
+    if (extractors > 0 || reroutes > 0) {
       const where = colonies === 1 ? "1 colony" : `${colonies} colonies`;
+      const ended = extractors === 0
+        ? null
+        : `${extractors === 1 ? "1 extractor has" : `${extractors} extractors have`} ended on ${where}.`;
+      const short = reroutes === 0
+        ? null
+        : `${reroutes === 1 ? "1 extractor yields" : `${reroutes} extractors yield`} more than ${reroutes === 1 ? "its" : "their"} routes carry.`;
       restart = {
         // Not while a bot flies the pilot, while it is being read, or while a
         // start from here is in flight or has just gone out.
         enabled: !flying && attempt !== "reading" && state?.kind !== "starting" && state?.kind !== "started",
-        label: "Restart extractors",
+        label: extractors > 0 ? "Restart extractors" : "Fix extractor routes",
         // "an hour": PI_RESTART_RUNTIME_MINUTES in app/piDispatch.ts.
         words:
-          `${ended} ended on ${where}. This starts a server run for ${pilotName} that restarts every ` +
-          "ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+          `${[ended, short].filter((part) => part !== null).join(" ")} This starts a server run for ${pilotName} that restarts every ` +
+          "ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, " +
+          "then stops. It changes nothing else and runs for an hour at most.",
       };
     }
   }

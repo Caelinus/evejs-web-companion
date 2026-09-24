@@ -266,6 +266,32 @@ test("a factory making it gives the rate, labelled 'up to', and no gap", () => {
   assert.match(result.verdict, /Nothing needs to change\.$/);
 });
 
+test("⚠ a factory set to the recipe but idle is not counted as making it", () => {
+  // Live: the plan said a colony's factories were running while the game showed
+  // them stopped - they kept their recipe with empty buffers.
+  const running = { ...factory(10, ADVANCED_FACTORY, GAMMA_RECIPE), active: true };
+  const idle = { ...factory(11, ADVANCED_FACTORY, GAMMA_RECIPE), active: false };
+  const holdings = [held(P1_A, 1000), held(P1_B, 1000)];
+
+  const mixed = rowOf(plan({ colonies: [colony(1, "Alpha III", [running, idle])], holdings }), P2_C)!;
+  assert.equal(mixed.sourceWords, "Alpha III, up to 5 an hour; Alpha III idle");
+  assert.equal(mixed.producers.reduce((total, producer) => total + producer.count, 0), 1);
+  assert.ok(mixed.tags.some((tag) => tag.text === "idle Alpha III" && tag.tone === "act"));
+
+  const allIdle = plan({ colonies: [colony(1, "Alpha III", [idle])], holdings });
+  const target = rowOf(allIdle, P2_C)!;
+  assert.equal(target.sourceWords, "Alpha III, set to it but idle now");
+  assert.equal(target.coverWords, null);
+  assert.equal(target.state, "act");
+  // Nothing to switch or build, so not a gap - but not "nothing needs to change".
+  assert.equal(allIdle.gaps.length, 0);
+  assert.match(allIdle.verdict, /some factories are idle, waiting for inputs\.$/);
+
+  // No state from the server (an older BFF): counted, as before.
+  const unknown = rowOf(plan({ colonies: [colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, GAMMA_RECIPE)])], holdings }), P2_C)!;
+  assert.equal(unknown.sourceWords, "Alpha III, up to 5 an hour");
+});
+
 test("slow production is not a gap: the row says how long the rest takes", () => {
   const colonies = [colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, GAMMA_RECIPE)])];
   const result = plan({ colonies, holdings: [held(P1_A, 1000), held(P1_B, 1000)], quantity: 50 });

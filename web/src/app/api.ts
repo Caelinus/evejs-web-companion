@@ -4146,6 +4146,34 @@ export async function restartExtractorProgram(
 }
 
 /**
+ * Re-size an extractor's routes: remove the old ones and create the new ones
+ * in ONE network edit, so the colony is never left with the extractor
+ * unrouted between two submits.
+ *
+ * Command 7 = REMOVEROUTE(routeID); command 6 = CREATEROUTE(routeID, path,
+ * typeID, quantity). A new route carries a temporary id the way the retail
+ * client mints one (clientColony.GetTemporaryRouteID: the tuple (2, n)); the
+ * server allocates the real id.
+ */
+export async function rerouteExtractorRoutes(
+  planetID: number,
+  removeRouteIDs: readonly number[],
+  create: readonly { readonly path: readonly number[]; readonly typeID: number; readonly quantity: number }[],
+  options: ApiOptions = {},
+): Promise<void> {
+  const changes: JsonValue[] = [
+    ...removeRouteIDs.map((routeID): JsonValue => [7, [routeID]]),
+    ...create.map((route, index): JsonValue =>
+      [6, [[2, index + 1], [...route.path], route.typeID, route.quantity]]),
+  ];
+  await postJson(
+    "/api/bridge/planet/network/update",
+    { planetID, changes, confirm: true },
+    options,
+  );
+}
+
+/**
  * Launch what a colony's command centre is holding into orbit.
  *
  * ⚠ ONLY A COMMAND CENTRE CAN LAUNCH. The emulator refuses every other pin

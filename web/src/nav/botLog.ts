@@ -184,6 +184,10 @@ export function describeAction(action: ScriptAction): string {
       return `apply fitting ${action.fittingID}`;
     case "restartExtractor":
       return `restart extractor ${action.pinID} on planet ${action.planetID} for ${action.resourceTypeID}`;
+    case "rerouteExtractor":
+      return `reroute extractor ${action.pinID} on planet ${action.planetID}: remove ${action.removeRouteIDs.join(",")}, create ${action.create
+        .map((route) => `${route.path.join(">")} ${route.typeID}x${route.quantity}`)
+        .join("; ")}`;
     case "launchCommodities":
       return `launch ${Object.entries(action.commodities)
         .map(([typeID, quantity]) => `${typeID}x${quantity}`)

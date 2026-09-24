@@ -108,7 +108,7 @@ const QUIET = colony(40000002, "Alpha I", [extractor(2, NOW + 30 * HOUR)]);
 const STOPPED = colony(40000004, "Alpha II", [extractor(2, NOW - HOUR)]);
 const STARVED = colony(40000006, "Alpha III", [
   extractor(2, NOW + 30 * HOUR),
-  pin({ pinID: 4, kind: "factory", schematicName: "Water", receivedInputsLastCycle: false }),
+  pin({ pinID: 4, kind: "factory", schematicID: 121, schematicName: "Water", receivedInputsLastCycle: false }),
 ]);
 const COMING_UP = colony(40000008, "Alpha IV", [extractor(2, NOW + 2 * HOUR)]);
 
@@ -316,18 +316,30 @@ test("the board judges a starved factory by its recipe when it has the table", a
       output: { typeID: 3645, quantity: 20, typeName: "Water" },
     }],
   } as never);
-  // Unfed last cycle, no route in, but holding a full batch: the recipe says it
-  // has what it needs. Without the table there is nothing to say that with.
-  const stocked = colony(40000012, "Alpha V", [
-    pin({
-      pinID: 4,
-      kind: "factory",
-      schematicID: 121,
-      schematicName: "Water",
-      receivedInputsLastCycle: false,
-      contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 3000 }],
-    }),
-  ]);
+  // Unfed last cycle and holding a full batch: the recipe says it has what it
+  // needs. Without the table its inputs are what its routes bring, and one of
+  // them (contrived: a commodity Water does not take) comes from an empty
+  // storage - dead supply. Wired in and out for Water itself, so the game's
+  // own routing rules have nothing to say either way.
+  const stocked = {
+    ...colony(40000012, "Alpha V", [
+      pin({ pinID: 3, kind: "storage" }),
+      pin({ pinID: 5, kind: "launchpad" }),
+      pin({
+        pinID: 4,
+        kind: "factory",
+        schematicID: 121,
+        schematicName: "Water",
+        receivedInputsLastCycle: false,
+        contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 3000 }],
+      }),
+    ]),
+    routes: [
+      { routeID: 1, path: [3, 4], commodityTypeID: 2268, commodityTypeName: null, commodityQuantity: 3000 },
+      { routeID: 2, path: [4, 5], commodityTypeID: 3645, commodityTypeName: null, commodityQuantity: 20 },
+      { routeID: 3, path: [3, 4], commodityTypeID: 2393, commodityTypeName: null, commodityQuantity: 3000 },
+    ],
+  };
   const readings = new Map([[FARMER, reading(FARMER, [stocked], NOW - MINUTE)]]);
   assert.equal(buildPiBoard(input({ members: [FARMER], readings })).needsYou.length, 1);
   assert.deepEqual(buildPiBoard(input({ members: [FARMER], readings, recipes })).needsYou, []);
@@ -347,7 +359,7 @@ test("a pilot with ended extractors is offered a restart, with what it does said
   assert.deepEqual(farmer!.restart, {
     enabled: true,
     label: "Restart extractors",
-    words: "3 extractors have ended on 2 colonies. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+    words: "3 extractors have ended on 2 colonies. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, then stops. It changes nothing else and runs for an hour at most.",
   });
   // A pilot with nothing ended is offered nothing.
   assert.equal(hauler!.restart, null);

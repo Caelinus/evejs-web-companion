@@ -244,7 +244,7 @@
                 <span class="muted">{entry.needsYouNow ? "now" : "coming up"}</span>
               </span>
               <ul class="plain-list reasons">
-                {#each entry.findings as finding (finding.pinID ?? finding.kind)}
+                {#each entry.findings as finding (`${finding.pinID ?? "colony"}:${finding.kind}`)}
                   <li>
                     {finding.words}{#if finding.dueAtMs !== null && finding.dueAtMs > nowMs}
                       — in {formatDuration(finding.dueAtMs - nowMs)}
@@ -325,7 +325,7 @@
         {#if (findingsByPlanetID.get(openColony.planetID) ?? []).length}
           <h4>What needs you here</h4>
           <ul class="plain-list">
-            {#each findingsByPlanetID.get(openColony.planetID) ?? [] as finding (finding.pinID ?? finding.kind)}
+            {#each findingsByPlanetID.get(openColony.planetID) ?? [] as finding (`${finding.pinID ?? "colony"}:${finding.kind}`)}
               <li>{finding.words}</li>
             {/each}
           </ul>

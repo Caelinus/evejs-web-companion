@@ -552,6 +552,26 @@ function getTypeDogmaAttribute(typeID, attributeID, fallback = null) {
   return fallback;
 }
 
+/**
+ * A type's attribute, or the attribute's own SDE default when the type does
+ * not carry it — the way dogma itself resolves a missing attribute (the
+ * emulator's planetStaticData.getTypeAttribute does exactly this).
+ *
+ * getTypeDogmaAttribute stays raw on purpose: the drone-boat read needs
+ * "absent" to stay absent. Use this one only where the game would apply the
+ * default, e.g. ecuNoiseFactor (1687), which no extractor carries and every
+ * extractor uses at its default 0.8.
+ */
+function getTypeDogmaAttributeOrDefault(typeID, attributeID, fallback = null) {
+  const value = getTypeDogmaAttribute(typeID, attributeID, null);
+  if (value !== null && value !== undefined) {
+    return value;
+  }
+  const attribute = buildJsonlIndex("dogmaAttributes.jsonl").get(Number(attributeID) || 0);
+  const defaultValue = attribute ? attribute.defaultValue : undefined;
+  return defaultValue === undefined || defaultValue === null ? fallback : defaultValue;
+}
+
 // --- Raw dogma attribute values for a set of types --------------------------
 //
 // The read behind POST /api/types/dogma, and the static half of the drone-boat
@@ -1645,6 +1665,7 @@ module.exports = {
   getTypeCategoryName,
   getTypeDogma,
   getTypeDogmaAttribute,
+  getTypeDogmaAttributeOrDefault,
   readTypeAttributes,
   // Exported as numbers, not just enforced inside readTypeAttributes: the
   // route in front of it has to REJECT an oversized body before the read

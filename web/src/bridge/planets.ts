@@ -154,6 +154,11 @@ function decodeProgram(value: JsonValue | undefined): ColonyExtractionProgram | 
     installedAtMs: asInstant(record.installedAtMs),
     expiresAtMs: asInstant(record.expiresAtMs),
     headCount: asNumber(record.headCount),
+    maxOutputPerCycle:
+      typeof record.maxOutputPerCycle === "number" && Number.isFinite(record.maxOutputPerCycle)
+        && record.maxOutputPerCycle > 0
+        ? record.maxOutputPerCycle
+        : null,
     headRadius:
       typeof record.headRadius === "number" && Number.isFinite(record.headRadius) && record.headRadius > 0
         ? record.headRadius
@@ -181,6 +186,7 @@ function decodePin(value: JsonValue): ColonyPin | null {
     schematicName: asName(record.schematicName),
     hasReceivedInputs: asFlag(record.hasReceivedInputs),
     receivedInputsLastCycle: asFlag(record.receivedInputsLastCycle),
+    active: asFlag(record.active),
     lastRunAtMs: asInstant(record.lastRunAtMs),
     lastLaunchAtMs: asInstant(record.lastLaunchAtMs),
     program: decodeProgram(record.program),
