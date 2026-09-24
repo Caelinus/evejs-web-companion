@@ -83,6 +83,19 @@ export interface PlanProducer {
   readonly perHour: number;
 }
 
+/**
+ * How a step stands, for its colour: covered (by stock or production), a
+ * change the player can make (a factory set to something else), or blocked.
+ */
+export type PlanState = "ok" | "act" | "bad";
+
+/** A short tag on a step. The full sentence rides along as its hover title. */
+export interface PlanTag {
+  readonly text: string;
+  readonly tone: "act" | "bad" | null;
+  readonly title: string | null;
+}
+
 export interface PlanRow {
   readonly typeID: number;
   readonly typeName: string;
@@ -106,6 +119,26 @@ export interface PlanRow {
   /** 1-based index into the plan's gaps, when this row has one. */
   readonly gapNumber: number | null;
   readonly holdings: readonly Holding[];
+  readonly state: PlanState;
+  /** Short tags: where it is made and how fast, or what blocks it. */
+  readonly tags: readonly PlanTag[];
+}
+
+/**
+ * One step in the chain as a TREE, for drawing: each input under what it is
+ * used for. The numbers are the consolidated row's, so a commodity two parents
+ * share is drawn in full under the first and as a `repeat` under the others -
+ * never counted twice.
+ */
+export interface PlanNode {
+  /** Unique within the tree: the typeIDs on the path from the target. */
+  readonly key: string;
+  readonly row: PlanRow;
+  readonly children: readonly PlanNode[];
+  /** Already drawn under an earlier parent; drawn here without its inputs. */
+  readonly repeat: boolean;
+  /** The worst state in this node's subtree, itself included. */
+  readonly worst: PlanState;
 }
 
 export interface Plan {
@@ -115,6 +148,14 @@ export interface Plan {
   readonly gaps: readonly PlanGap[];
   /** Target first, then deeper steps; each commodity once. */
   readonly rows: readonly PlanRow[];
+  /** The same rows, drawn as the recipe tree from the target. */
+  readonly tree: PlanNode;
+}
+
+const STATE_RANK: Readonly<Record<PlanState, number>> = Object.freeze({ ok: 0, act: 1, bad: 2 });
+
+function worseOf(left: PlanState, right: PlanState): PlanState {
+  return STATE_RANK[left] >= STATE_RANK[right] ? left : right;
 }
 
 const GAP_ORDER: Readonly<Record<PlanGapKind, number>> = Object.freeze({
@@ -195,8 +236,8 @@ function extractors(typeID: number, colonies: readonly PlannerColony[], browserN
 }
 
 /** Which colonised planets carry this resource, richest first. */
-function carriers(typeID: number, colonies: readonly PlannerColony[]): string[] {
-  const found: { words: string; quality: number | null }[] = [];
+function carriers(typeID: number, colonies: readonly PlannerColony[]): { place: string; words: string; quality: number | null }[] {
+  const found: { place: string; words: string; quality: number | null }[] = [];
   const seen = new Set<number>();
   for (const { colony } of colonies) {
     if (seen.has(colony.planetID)) continue;
@@ -204,10 +245,13 @@ function carriers(typeID: number, colonies: readonly PlannerColony[]): string[] 
     if (!resource) continue;
     seen.add(colony.planetID);
     const kind = colony.planetTypeName ? ` (${colony.planetTypeName.replace(/^Planet \((.*)\)$/, "$1")})` : "";
-    found.push({ words: `${colonyPlaceWords(colony)}${kind}`, quality: resource.quality });
+    found.push({ place: colonyPlaceWords(colony), words: `${colonyPlaceWords(colony)}${kind}`, quality: resource.quality });
   }
-  found.sort((left, right) => (right.quality ?? -1) - (left.quality ?? -1));
-  return found.map((entry) => (entry.quality === null ? entry.words : `${entry.words} at quality ${countWords(entry.quality)}`));
+  return found.sort((left, right) => (right.quality ?? -1) - (left.quality ?? -1));
+}
+
+function carrierWords(entry: { words: string; quality: number | null }): string {
+  return entry.quality === null ? entry.words : `${entry.words} at quality ${countWords(entry.quality)}`;
 }
 
 /** Longest distance of every commodity from the target, and the recipe the tree used. */
@@ -269,6 +313,7 @@ export function planWithStock(input: PlannerInput): Plan | null {
     let sourceWords: string;
     let gap: PlanGap | null = null;
     let stopped: Colony[] = [];
+    const tags: PlanTag[] = [];
     if (recipe !== null) {
       producers = factoriesRunning(recipe, input.colonies);
     } else {
@@ -308,6 +353,10 @@ export function planWithStock(input: PlannerInput): Plan | null {
             detail: `Its factory makes ${first.pin.schematicName ?? "nothing"} now${
               more > 0 ? `; ${more} more factor${more === 1 ? "y" : "ies"} could too` : ""}.`,
           };
+          const title = `${gap.headline} ${gap.detail}`;
+          tags.push({ text: `switch ${colonyPlaceWords(first.colony)}`, tone: "act", title });
+          tags.push({ text: `now ${first.pin.schematicName ?? "idle"}`, tone: null, title });
+          if (more > 0) tags.push({ text: `+${more}`, tone: null, title });
         } else {
           gap = {
             kind: "nothing-makes",
@@ -315,22 +364,34 @@ export function planWithStock(input: PlannerInput): Plan | null {
             headline: `Nothing you own makes ${typeName}.`,
             detail: "No colony has a factory that can run its recipe.",
           };
+          tags.push({ text: "no factory", tone: "bad", title: `${gap.headline} ${gap.detail}` });
         }
       } else if (tier === 0 || tier === null) {
         // A leaf nothing in the book makes is a raw resource unless the book
         // itself classifies it higher: in the real table every such leaf is.
         const planets = carriers(typeID, input.colonies);
+        const stoppedPlaces = [...new Set(stopped.map(colonyPlaceWords))];
         const stoppedWords = stopped.length > 0
-          ? `Its program on ${listWords([...new Set(stopped.map(colonyPlaceWords))])} has ended. `
+          ? `Its program on ${listWords(stoppedPlaces)} has ended. `
           : "";
         gap = {
           kind: "not-extracted",
           typeID,
           headline: stopped.length > 0 ? `${typeName} is extracted nowhere right now.` : `Nothing you own extracts ${typeName}.`,
           detail: planets.length > 0
-            ? `${stoppedWords}${listWords(planets)} ${planets.length === 1 ? "carries" : "carry"} it.`
+            ? `${stoppedWords}${listWords(planets.map(carrierWords))} ${planets.length === 1 ? "carries" : "carry"} it.`
             : `${stoppedWords}None of your colonised planets carries it.`,
         };
+        const title = `${gap.headline} ${gap.detail}`;
+        tags.push({ text: "no extractor", tone: "bad", title });
+        for (const place of stoppedPlaces) tags.push({ text: `ended ${place}`, tone: "bad", title });
+        for (const planet of planets) {
+          tags.push({
+            text: planet.quality === null ? planet.place : `${planet.place} q${countWords(planet.quality)}`,
+            tone: null,
+            title: carrierWords(planet),
+          });
+        }
       } else {
         gap = {
           kind: "nothing-makes",
@@ -338,8 +399,23 @@ export function planWithStock(input: PlannerInput): Plan | null {
           headline: `Nothing you own makes ${typeName}.`,
           detail: "The recipe table has no recipe for it.",
         };
+        tags.push({ text: "no recipe", tone: "bad", title: `${gap.headline} ${gap.detail}` });
       }
     }
+    if (producers.length > 0) {
+      const cover = coverWords ? `; ${coverWords}` : "";
+      const rateTitle = recipe !== null
+        ? `Up to ${rateWords(perHour)} an hour at full supply${cover}`
+        : `${rateWords(perHour)} an hour on the installed program${cover}`;
+      for (const producer of producers) {
+        const noun = producer.kind === "factory"
+          ? (producer.count === 1 ? "factory" : "factories")
+          : (producer.count === 1 ? "extractor" : "extractors");
+        tags.push({ text: producer.placeWords, tone: null, title: `${producer.count} ${noun}` });
+      }
+      tags.push({ text: `${rateWords(perHour)}/h`, tone: null, title: rateTitle });
+    }
+    const state: PlanState = gap === null ? "ok" : gap.kind === "factory-busy" ? "act" : "bad";
 
     const depth = depthOf.get(typeID) ?? 0;
     if (gap !== null) gaps.push({ gap, rowIndex: rows.length, depth });
@@ -358,6 +434,8 @@ export function planWithStock(input: PlannerInput): Plan | null {
       coverWords,
       gapNumber: null,
       holdings: Object.freeze([...(heldBy.get(typeID) ?? [])].sort(compareHoldings)),
+      state,
+      tags: Object.freeze(tags),
     });
   }
 
@@ -392,5 +470,48 @@ export function planWithStock(input: PlannerInput): Plan | null {
     covered: gaps.length === 0,
     gaps: Object.freeze(gaps.map((entry) => entry.gap)),
     rows: Object.freeze(numbered),
+    tree: buildTree(numbered, target),
   };
+}
+
+/**
+ * The rows as the recipe tree from the target. A step's inputs are drawn only
+ * when it has runs to make; a commodity already drawn under an earlier parent
+ * is drawn again as a `repeat`, without its inputs.
+ */
+function buildTree(rows: readonly PlanRow[], target: PlanRow): PlanNode {
+  const byType = new Map(rows.map((row) => [row.typeID, row]));
+  const drawn = new Set<number>();
+  const build = (row: PlanRow, path: string): PlanNode => {
+    const key = path === "" ? String(row.typeID) : `${path}/${row.typeID}`;
+    if (drawn.has(row.typeID)) {
+      return { key, row, children: [], repeat: true, worst: row.state };
+    }
+    drawn.add(row.typeID);
+    const children: PlanNode[] = [];
+    if (row.madeBy !== null && row.runs !== null) {
+      for (const ingredient of row.madeBy.inputs) {
+        const child = byType.get(ingredient.typeID);
+        if (child) children.push(build(child, key));
+      }
+    }
+    const worst = children.reduce((state, child) => worseOf(state, child.worst), row.state);
+    return { key, row, children: Object.freeze(children), repeat: false, worst };
+  };
+  return build(target, "");
+}
+
+/**
+ * The nodes to open at first: every node with something not covered below
+ * it, so the tree lands on the problems and a fully covered branch stays
+ * folded.
+ */
+export function initiallyOpen(tree: PlanNode): Set<string> {
+  const open = new Set<string>();
+  const walk = (node: PlanNode): void => {
+    if (node.children.some((child) => child.worst !== "ok")) open.add(node.key);
+    for (const child of node.children) walk(child);
+  };
+  walk(tree);
+  return open;
 }

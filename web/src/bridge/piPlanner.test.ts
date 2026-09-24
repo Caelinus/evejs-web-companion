@@ -1,5 +1,6 @@
 // The planner's proof (R108 slice 5): held stock is taken off before inputs are
-// worked out, and every shortfall is named as one of the four gaps, in order.
+// worked out, every shortfall is named as one of the three gaps, in order, and the
+// chain is drawn as a tree whose colours and tags say how each step stands.
 //
 // Most cases run on a hand-built book so every number is known in advance; the
 // real-table case at the end checks the netting against the emulator's own
@@ -13,7 +14,7 @@ import { decodeRecipeBook, type PiCommodity, type PiRecipeBook, type PiSchematic
 import type { JsonValue } from "./wire.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 import type { Holding } from "./piStock.ts";
-import { planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
+import { initiallyOpen, planWithStock, type PlannerColony, type PlannerInput } from "./piPlanner.ts";
 
 // --- a small book with known numbers ---------------------------------------
 
@@ -326,6 +327,62 @@ test("holding the target outright is the fifth kind: nothing needs to change", (
 
 test("a nonsensical request is null, as resolveChain's is", () => {
   assert.equal(planWithStock({ book: BOOK, targetTypeID: P2_C, quantity: 0, holdings: [], colonies: [], browserNowMs: NOW }), null);
+});
+
+// --- the tree, the tags and the colours --------------------------------------
+
+test("the tree puts each input under what it is used for, and a shared one is drawn once in full", () => {
+  const result = plan({ targetTypeID: P3_Y, quantity: 3 });
+  const tree = result.tree;
+  assert.equal(tree.row.typeID, P3_Y);
+  assert.deepEqual(tree.children.map((child) => child.row.typeID), [P2_C, P2_X]);
+  const [gamma, xi] = tree.children;
+  // Alpha is under Gamma in full, and under Xi only as a repeat with no inputs.
+  const alphaUnderGamma = gamma!.children.find((child) => child.row.typeID === P1_A)!;
+  const alphaUnderXi = xi!.children.find((child) => child.row.typeID === P1_A)!;
+  assert.equal(alphaUnderGamma.repeat, false);
+  assert.ok(alphaUnderGamma.children.length > 0);
+  assert.equal(alphaUnderXi.repeat, true);
+  assert.equal(alphaUnderXi.children.length, 0);
+  assert.notEqual(alphaUnderGamma.key, alphaUnderXi.key);
+});
+
+test("a step is green, amber or red, and a parent knows the worst below it", () => {
+  const colonies = [
+    colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, XI_RECIPE)], [{ typeID: RAW_B, typeName: null, quality: 50 }]),
+  ];
+  const result = plan({ colonies, holdings: [held(P1_A, 1000)] });
+  assert.equal(rowOf(result, P1_A)!.state, "ok");
+  assert.equal(rowOf(result, P2_C)!.state, "act", "a factory that could be switched");
+  assert.equal(rowOf(result, RAW_B)!.state, "bad");
+  assert.equal(result.tree.worst, "bad");
+});
+
+test("tags are short; the sentence rides along as the title", () => {
+  const colonies = [
+    colony(1, "Alpha III", [factory(10, ADVANCED_FACTORY, XI_RECIPE)], [{ typeID: RAW_B, typeName: null, quality: 50 }]),
+    colony(2, "Alpha V", [factory(11, BASIC_FACTORY, SCHEMATICS[0])]),
+  ];
+  const result = plan({ colonies, holdings: [held(P1_B, 1000)] });
+  const tagsOf = (typeID: number) => rowOf(result, typeID)!.tags.map((tag) => [tag.text, tag.tone]);
+  assert.deepEqual(tagsOf(P2_C), [["switch Alpha III", "act"], ["now Xi", null]]);
+  assert.deepEqual(tagsOf(P1_A), [["Alpha V", null], ["40/h", null]]);
+  assert.deepEqual(tagsOf(RAW_A), [["no extractor", "bad"]]);
+  assert.match(rowOf(result, P2_C)!.tags[0]!.title!, /^Alpha III could make Gamma\. Its factory makes Xi now\.$/);
+  const noFactory = plan({}).rows[0]!.tags;
+  assert.deepEqual(noFactory.map((tag) => tag.text), ["no factory"]);
+});
+
+test("the tree opens down to the problems, and a fully covered branch stays folded", () => {
+  const colonies = [colony(1, "Alpha III", [], [])];
+  // Beta held in full; Alpha not: only Alpha's branch has something below it.
+  const result = plan({ colonies, holdings: [held(P1_B, 1000)] });
+  const open = initiallyOpen(result.tree);
+  const alpha = result.tree.children.find((child) => child.row.typeID === P1_A)!;
+  const beta = result.tree.children.find((child) => child.row.typeID === P1_B)!;
+  assert.ok(open.has(result.tree.key));
+  assert.ok(open.has(alpha.key), "Alpha opens onto its missing raw resource");
+  assert.equal(open.has(beta.key), false);
 });
 
 // --- the real table ---------------------------------------------------------
