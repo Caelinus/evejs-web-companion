@@ -61,6 +61,30 @@ export interface PiBoardInput {
    * against what its recipe needs. Without it, against what its routes bring.
    */
   readonly recipes?: PiRecipeBook | null;
+  /** Pilots a server bot is flying now (GET /api/bots/active). */
+  readonly activeBots?: ReadonlySet<number>;
+  /** What the window's own starts did, per pilot. */
+  readonly dispatch?: ReadonlyMap<number, PiDispatchState>;
+}
+
+/** A start from this window, as far as it has got. */
+export type PiDispatchState =
+  | { readonly kind: "starting" }
+  | { readonly kind: "started" }
+  | { readonly kind: "refused"; readonly sentence: string };
+
+/**
+ * The "restart extractors" offer on a pilot's row (slice 4).
+ *
+ * ⚠ SAID BEFORE THE BUTTON, NOT IN A DIALOG AFTER IT. `words` states what the
+ * run will do — every ended extractor on ALL of the pilot's colonies, because
+ * the macro cannot be aimed at one — and its limits, so the click is the
+ * decision and nothing interrupts it.
+ */
+export interface PiRestartOffer {
+  readonly enabled: boolean;
+  readonly label: string;
+  readonly words: string;
 }
 
 export interface PiPilotRow {
@@ -72,6 +96,12 @@ export interface PiPilotRow {
   /** How old this pilot's reading is, or null when there is none. */
   readonly readAgeWords: string | null;
   readonly busy: boolean;
+  /** Null when nothing on this pilot's colonies can be restarted. */
+  readonly restart: PiRestartOffer | null;
+  /** Said when a server bot is flying this pilot, which rules a start out. */
+  readonly botWords: string | null;
+  /** What this window's last start for the pilot did. */
+  readonly dispatchWords: string | null;
 }
 
 export interface PiColonyRow {
@@ -119,6 +149,69 @@ function ageWords(reading: PilotColonyReading, browserNowMs: number): string {
   }
   const nowMs = serverNow(reading.report.clockOffsetMs, browserNowMs);
   return `Read ${formatDuration(nowMs - reading.readAtMs)} ago`;
+}
+
+/**
+ * Extractors the restart-extractors macro would actually restart: a program
+ * whose resource is known and which has ended (or states no end). One with no
+ * program at all is left alone by the macro — it reuses the last resource and
+ * never guesses — so offering a run for it would start one that does nothing.
+ */
+function restartableExtractors(reading: PilotColonyReading, nowMs: number): { extractors: number; colonies: number } {
+  let extractors = 0;
+  let colonies = 0;
+  for (const colony of reading.report.colonies) {
+    const here = colony.pins.filter((pin) =>
+      pin.kind === "extractor-control"
+      && pin.program !== null
+      && pin.program.resourceTypeID > 0
+      && (pin.program.expiresAtMs === null || pin.program.expiresAtMs <= nowMs)).length;
+    extractors += here;
+    if (here > 0) colonies += 1;
+  }
+  return { extractors, colonies };
+}
+
+function dispatchFor(
+  input: PiBoardInput,
+  characterID: number,
+  pilotName: string,
+  attempt: PilotAttempt,
+  reading: PilotColonyReading | null,
+): Pick<PiPilotRow, "restart" | "botWords" | "dispatchWords"> {
+  const flying = input.activeBots?.has(characterID) ?? false;
+  const state = input.dispatch?.get(characterID) ?? null;
+  const dispatchWords = state === null
+    ? null
+    : state.kind === "starting"
+      ? "Starting the run on the server..."
+      : state.kind === "started"
+        ? "The run has started on the server. Refresh once it has finished to see the extractors running."
+        : state.sentence;
+  let restart: PiRestartOffer | null = null;
+  if (reading !== null) {
+    const nowMs = serverNow(reading.report.clockOffsetMs, input.browserNowMs);
+    const { extractors, colonies } = restartableExtractors(reading, nowMs);
+    if (extractors > 0) {
+      const ended = extractors === 1 ? "1 extractor has" : `${extractors} extractors have`;
+      const where = colonies === 1 ? "1 colony" : `${colonies} colonies`;
+      restart = {
+        // Not while a bot flies the pilot, while it is being read, or while a
+        // start from here is in flight or has just gone out.
+        enabled: !flying && attempt !== "reading" && state?.kind !== "starting" && state?.kind !== "started",
+        label: "Restart extractors",
+        // "an hour": PI_RESTART_RUNTIME_MINUTES in app/piDispatch.ts.
+        words:
+          `${ended} ended on ${where}. This starts a server run for ${pilotName} that restarts every ` +
+          "ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+      };
+    }
+  }
+  return {
+    restart,
+    botWords: flying ? "A server bot is flying this pilot now." : null,
+    dispatchWords,
+  };
 }
 
 function pilotNote(
@@ -190,6 +283,7 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
       colonyCount: reading?.report.colonies.length ?? 0,
       readAgeWords: reading === null ? null : ageWords(reading, input.browserNowMs),
       busy: attempt === "reading",
+      ...dispatchFor(input, characterID, pilotName, attempt, reading),
     });
     if (reading === null) {
       return;

@@ -1,6 +1,6 @@
 <script lang="ts">
-  // PLANETARY INDUSTRY (R108 slice 3) — every assigned pilot's colonies on one
-  // board, READ-ONLY.
+  // PLANETARY INDUSTRY (R108 slices 3 and 4) — every assigned pilot's colonies
+  // on one board, and one action: restarting a pilot's ended extractors.
   //
   // ⚠ A GLOBAL WINDOW WITH NO STORE. Every other panel is a view of the mounted
   // pilot. This one is a view of the player's own PI roster, which spans
@@ -10,8 +10,9 @@
   //
   // ⚠ NOTHING HERE SELECTS A CHARACTER. Reading a colony needs only ownership,
   // proved live; a select claims a hull, and a bot flying that pilot in another
-  // tab would lose its ship without a word. Acting on a colony will go through
-  // the bot host, which is the one thing that arbitrates hulls honestly.
+  // tab would lose its ship without a word. Acting on a colony goes through the
+  // SERVER bot host (app/piDispatch.ts), the one thing that arbitrates hulls
+  // honestly: it refuses a pilot already flown, in its own words.
   //
   // ⚠ IT READS WHEN OPENED AND WHEN ASKED, AND NEVER ON A TIMER. The 30-second
   // tick below moves the ages on and touches no network. When to read on its
@@ -33,7 +34,9 @@
     type PiRosterPrefs,
   } from "../app/piRosterPrefs.ts";
   import { readPiRoster } from "../app/piRosterRead.ts";
-  import { buildPiBoard, type PilotAttempt } from "../bridge/piBoard.ts";
+  import { buildPiBoard, type PiDispatchState, type PilotAttempt } from "../bridge/piBoard.ts";
+  import { restartExtractorsFor } from "../app/piDispatch.ts";
+  import { listActiveServerBots } from "../app/api.ts";
   import { decodeRecipeBook, type PiRecipeBook } from "../bridge/piRecipes.ts";
 
   let roster = $state<PiRosterPrefs>(loadPiRoster());
@@ -48,6 +51,40 @@
   // Static, so read once per open window. Without it a starved factory is
   // judged by what its routes bring rather than by its recipe.
   let recipes = $state<PiRecipeBook | null>(null);
+  // Who a server bot is flying (a public read), and what this window's own
+  // starts did. Read when the window opens, on Refresh and after a start —
+  // never on a timer.
+  let activeBots = $state<Set<number>>(new Set());
+  let dispatch = $state<Map<number, PiDispatchState>>(new Map());
+
+  async function loadActiveBots(): Promise<void> {
+    try {
+      activeBots = new Set((await listActiveServerBots()).map((bot) => bot.characterID));
+    } catch {
+      // Keep what we had: the server still refuses a start for a flown pilot,
+      // in its own words, so a stale list here cannot cause a takeover.
+    }
+  }
+
+  /**
+   * Restart a pilot's ended extractors, as a SERVER run. Never a select from
+   * here: the bot host decides whether the pilot is free, and says why not.
+   */
+  async function restartExtractors(characterID: number): Promise<void> {
+    const accountName = known.find((pilot) => pilot.characterID === characterID)?.accountName;
+    const set = (state: PiDispatchState) => {
+      const next = new Map(dispatch);
+      next.set(characterID, state);
+      dispatch = next;
+    };
+    if (!accountName) {
+      set({ kind: "refused", sentence: "This pilot is no longer in the hangar, so there is no account to start it with." });
+      return;
+    }
+    set({ kind: "starting" });
+    set(await restartExtractorsFor(accountName, characterID));
+    await loadActiveBots();
+  }
 
   function keep(next: PiRosterPrefs): void {
     roster = next;
@@ -57,7 +94,7 @@
   const names = $derived(new Map(known.map((pilot) => [pilot.characterID, pilot.characterName])));
   const readings = $derived(piReadings(roster));
   const board = $derived(
-    buildPiBoard({ members: roster.members, names, readings, attempts, browserNowMs, recipes }),
+    buildPiBoard({ members: roster.members, names, readings, attempts, browserNowMs, recipes, activeBots, dispatch }),
   );
   const addablePilots = $derived(
     known
@@ -74,6 +111,7 @@
     if (reading || roster.members.length === 0) return;
     reading = true;
     known = loadKnownCharacters();
+    void loadActiveBots();
     const asked = roster.members;
     attempts = new Map(asked.map((id) => [id, "reading" as const]));
     try {
@@ -115,6 +153,9 @@
     const next = new Map(attempts);
     next.delete(characterID);
     attempts = next;
+    const started = new Map(dispatch);
+    started.delete(characterID);
+    dispatch = started;
   }
 
   onMount(() => {
@@ -215,6 +256,26 @@
                   {#if pilot.noteWords}
                     <span class="note pilot-note">{pilot.noteWords}</span>
                   {/if}
+                  {#if pilot.botWords}
+                    <span class="note pilot-note">{pilot.botWords}</span>
+                  {/if}
+                  {#if pilot.restart}
+                    <!-- What the run does is said BEFORE the button, so the
+                         click is the decision; there is no dialog after it. -->
+                    <span class="pilot-note pi-dispatch">
+                      <span class="note">{pilot.restart.words}</span>
+                      <button
+                        type="button"
+                        disabled={!pilot.restart.enabled}
+                        onclick={() => void restartExtractors(pilot.characterID)}
+                      >
+                        {pilot.restart.label}
+                      </button>
+                    </span>
+                  {/if}
+                  {#if pilot.dispatchWords}
+                    <span class="note pilot-note" role="status">{pilot.dispatchWords}</span>
+                  {/if}
                 </td>
                 <td data-label="Colonies">
                   {pilot.colonyCount === 0 ? "-" : pilot.colonyCount}
@@ -263,12 +324,14 @@
     {/if}
   </section>
 
-  <!-- ⚠ SAID, NOT IMPLIED. What the manager cannot see (section 4 of the
-       design): a pilot flown in another tab or on another device is invisible
-       to everything here. Reading is safe regardless; acting will not be. -->
+  <!-- ⚠ SAID, NOT IMPLIED. Reading brings nobody online. Acting does, and only
+       through the server bot host, which refuses a pilot already flown from
+       this site or by another bot — so that refusal, not a promise from this
+       window, is what keeps a ship from being taken. -->
   <p class="note">
-    Colonies are read without bringing any pilot online, so nothing here takes a
-    ship from a pilot flying elsewhere.
+    Colonies are read without bringing any pilot online. A restart runs on the
+    server, which will not take a pilot already flown from this site or by
+    another bot; if it refuses, its reason is shown on that pilot's row.
   </p>
 </section>
 
@@ -306,6 +369,16 @@
   }
   .pilot-note {
     display: block;
+  }
+  .pi-dispatch {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 0.75rem;
+    margin-top: 0.35rem;
+  }
+  .pi-dispatch button {
+    min-height: 40px;
   }
   .pi-add {
     display: flex;

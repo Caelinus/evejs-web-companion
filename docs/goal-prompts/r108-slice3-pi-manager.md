@@ -377,3 +377,36 @@ keeping the two apart exists to avoid. No select appeared in the server log.
 - **No scheduler, no dispatch** (§5 and slice 4).
 - **Selecting a colony does not yet focus it in Planets**, which is per-pilot and
   would need that pilot to be the active one.
+
+## 10. After the board went live: starvation, then dispatch
+
+### A starved factory is judged against its supply
+
+The live board showed "needs you now" on every planet of a working roster:
+"fed nothing last cycle" is the normal state of most factories where extraction
+is the bottleneck (four Water factories want 24,000 Aqueous Liquids an hour; two
+extractors deliver a few thousand). `colonySupply.ts` now follows the colony's
+routes and speaks only when an input has no live source at all — no route, or
+every route leads back to nothing — and leaves a chain that dies at a stopped
+extractor to that extractor's own finding. Against the live server a five-colony
+roster went from 16 alarms to none, while four ended extractor programs on
+another pilot were still reported, once each.
+
+### Slice 4, first action: restart extractors
+
+- **Per pilot, not per planet.** `restart-extractors` walks every colony the
+  pilot owns and cannot be aimed at one, so the offer sits on the pilot's row and
+  says "all of its colonies". It counts only extractors the macro will actually
+  restart: a known resource whose program ended or states no end. One with no
+  program at all is left alone by the macro, so it is not offered.
+- **Through the server bot host, on a throwaway sign-in.** No select happens in
+  the tab. The host refuses a pilot a web session or another bot holds, and that
+  refusal is shown in its own words.
+- **An ordinary saved bot.** The host starts only saved bots, so the window keeps
+  "Planetary: restart extractors" in the library (one step, no watches), saving
+  it once if missing. A copy someone changed is refused, not overwritten.
+- **Said before the button, not in a dialog.** The row states what the run does
+  and that it runs for an hour at most; the grant is built from the same policy
+  analysis the host runs, so the click is the decision.
+- **Not yet:** `launch-commodities` (it spends export tax and is not
+  restart-safe), and the scheduler (§5).

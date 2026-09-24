@@ -332,3 +332,79 @@ test("the board judges a starved factory by its recipe when it has the table", a
   assert.equal(buildPiBoard(input({ members: [FARMER], readings })).needsYou.length, 1);
   assert.deepEqual(buildPiBoard(input({ members: [FARMER], readings, recipes })).needsYou, []);
 });
+
+// --- R108 slice 4: dispatch ---------------------------------------------------
+
+test("a pilot with ended extractors is offered a restart, with what it does said first", () => {
+  const board = buildPiBoard(input({
+    members: [FARMER, HAULER],
+    readings: new Map([
+      [FARMER, reading(FARMER, [STOPPED, colony(40000014, "Alpha VI", [extractor(3, NOW - 2 * HOUR), extractor(4, NOW - HOUR)])], NOW - MINUTE)],
+      [HAULER, reading(HAULER, [QUIET], NOW - MINUTE)],
+    ]),
+  }));
+  const [farmer, hauler] = board.pilots;
+  assert.deepEqual(farmer!.restart, {
+    enabled: true,
+    label: "Restart extractors",
+    words: "3 extractors have ended on 2 colonies. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+  });
+  // A pilot with nothing ended is offered nothing.
+  assert.equal(hauler!.restart, null);
+});
+
+test("⚠ a pilot a server bot is already flying is not offered a start", () => {
+  const board = buildPiBoard(input({
+    members: [FARMER],
+    readings: new Map([[FARMER, reading(FARMER, [STOPPED], NOW - MINUTE)]]),
+    activeBots: new Set([FARMER]),
+  }));
+  const [farmer] = board.pilots;
+  assert.equal(farmer!.restart!.enabled, false);
+  assert.equal(farmer!.botWords, "A server bot is flying this pilot now.");
+});
+
+test("no start while the pilot is being read, or while a start is on its way", () => {
+  const readings = new Map([[FARMER, reading(FARMER, [STOPPED], NOW - MINUTE)]]);
+  const reading_ = buildPiBoard(input({ members: [FARMER], readings, attempts: new Map([[FARMER, "reading"]]) }));
+  assert.equal(reading_.pilots[0]!.restart!.enabled, false);
+  const starting = buildPiBoard(input({ members: [FARMER], readings, dispatch: new Map([[FARMER, { kind: "starting" }]]) }));
+  assert.equal(starting.pilots[0]!.restart!.enabled, false);
+  assert.equal(starting.pilots[0]!.dispatchWords, "Starting the run on the server...");
+});
+
+test("what a start did is said on the pilot's row, a refusal in the server's own words", () => {
+  const readings = new Map([[FARMER, reading(FARMER, [STOPPED], NOW - MINUTE)]]);
+  const started = buildPiBoard(input({ members: [FARMER], readings, dispatch: new Map([[FARMER, { kind: "started" }]]) }));
+  assert.equal(
+    started.pilots[0]!.dispatchWords,
+    "The run has started on the server. Refresh once it has finished to see the extractors running.",
+  );
+  const inUse = "A web session is flying this character. Log it out (or wait for it to expire), then start the bot.";
+  const refused = buildPiBoard(input({ members: [FARMER], readings, dispatch: new Map([[FARMER, { kind: "refused", sentence: inUse }]]) }));
+  assert.equal(refused.pilots[0]!.dispatchWords, inUse);
+  // Refused is not final: the button is offered again.
+  assert.equal(refused.pilots[0]!.restart!.enabled, true);
+});
+
+test("an extractor with no program is not offered: the macro has no resource to restart it on", () => {
+  // restart-extractors reuses the resource an extractor last pulled and never
+  // guesses, so offering it here would start a run that does nothing.
+  const idle = colony(40000016, "Alpha VII", [pin({ pinID: 2, kind: "extractor-control", program: null })]);
+  const board = buildPiBoard(input({ members: [FARMER], readings: new Map([[FARMER, reading(FARMER, [idle], NOW - MINUTE)]]) }));
+  assert.equal(board.pilots[0]!.restart, null);
+});
+
+test("a program that states no end is one the macro restarts, so it is offered", () => {
+  // restart-extractors treats a program with no expiry as never having run,
+  // and restarts it on its known resource.
+  const undated = extractor(2, NOW);
+  const colonyWithUndated = colony(40000018, "Alpha VIII", [
+    { ...undated, program: { ...undated.program!, expiresAtMs: null } },
+  ]);
+  const board = buildPiBoard(input({
+    members: [FARMER],
+    readings: new Map([[FARMER, reading(FARMER, [colonyWithUndated], NOW - MINUTE)]]),
+  }));
+  assert.match(board.pilots[0]!.restart!.words, /^1 extractor has ended on 1 colony\./);
+});

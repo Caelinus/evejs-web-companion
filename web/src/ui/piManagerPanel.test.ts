@@ -207,6 +207,24 @@ test("no id as data and no machinery words in anything a player reads", () => {
   assert.match(`Pilot ${FARMER}`, /\d{5,}/);
 });
 
+test("a pilot with an ended extractor is offered a restart, said before the button", () => {
+  const text = visibleText(renderSeeded());
+  assert.match(
+    text,
+    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
+  );
+  // Only one pilot has anything to restart.
+  assert.equal(text.match(/Restart extractors/g)?.length, 1);
+});
+
+test("⚠ a restart goes through the server bot host, never a select in this tab", () => {
+  assert.match(SOURCE, /restartExtractorsFor\(accountName, characterID\)/);
+  assert.doesNotMatch(SOURCE, /startLocal|runHere|flow\.start/);
+  // The flying-bot list loads in onMount, which SSR never runs, so the
+  // disabled state is pinned where it is decided: the board's own verdict.
+  assert.match(SOURCE, /disabled=\{!pilot\.restart\.enabled\}/);
+});
+
 test("the board is given the recipe table the read fetched", () => {
   // onMount does not run under the server generator, so this is pinned at the
   // source: without it the board judges starved factories by routes alone.
