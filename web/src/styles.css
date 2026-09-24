@@ -6628,10 +6628,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  @keyframes hangarPulseDot {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
-  }
   @keyframes hangarRiseIn {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: none; }
@@ -6684,22 +6680,6 @@
     color: var(--hangar-link);
     text-transform: uppercase;
     white-space: nowrap;
-  }
-  .hangar-online-count {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-family: var(--hangar-mono);
-    font-size: 11px;
-    color: var(--hangar-text-dim);
-    white-space: nowrap;
-  }
-  .hangar-online-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--hangar-good);
-    animation: hangarPulseDot 2.4s infinite;
   }
   .hangar-search {
     display: flex;

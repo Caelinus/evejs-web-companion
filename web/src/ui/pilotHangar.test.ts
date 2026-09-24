@@ -127,7 +127,9 @@ test("a populated hangar groups by account and prints every pilot column", () =>
   // The summary counts the whole roster, and nothing is filtered yet.
   assert.match(body, /All pilots, grouped by account/);
   assert.match(body, /3 shown/);
-  assert.match(body, /1 in client/);
+  // The header carries no "N in client" counter: the In client filter chip
+  // already shows that count, and the header's room is the launchers'.
+  assert.doesNotMatch(body, /in client</);
 });
 
 test("a roster row written before the hangar existed renders dashes, not ids", () => {

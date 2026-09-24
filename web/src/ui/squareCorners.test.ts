@@ -78,11 +78,9 @@ test("only the documented circles keep a radius, and they are all circles", () =
     // The radial fitting window's dashed guide circle (R21). Decoration, and
     // aria-hidden; see the note beside the rule.
     ".fit-ring-guide",
-    // The Pilot Hangar's three status dots: the pulsing "in client" indicator in
-    // the header, a pilot's squad colour dots, and the launch queue's per-pilot
-    // state dot. Each carries a text label or a title beside it, so none of them
-    // is the only way to read what it means.
-    ".hangar-online-dot",
+    // The Pilot Hangar's two status dots: a pilot's squad colour dots, and the
+    // launch queue's per-pilot state dot. Each carries a text label or a title
+    // beside it, so neither is the only way to read what it means.
     ".hangar-tag",
     ".hangar-queue-dot",
   ];

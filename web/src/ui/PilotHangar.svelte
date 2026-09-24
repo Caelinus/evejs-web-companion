@@ -678,10 +678,6 @@
   <header class="hangar-head">
     <div class="hangar-brand">
       <span class="hangar-wordmark">EveJS Web</span>
-      <span class="hangar-online-count">
-        <span class="hangar-online-dot" aria-hidden="true"></span>
-        <span>{onlineCount} in client</span>
-      </span>
       {#if onOpenGlobal}
         <GlobalLaunchers openIds={globalOpenIds} {companionCount} onOpen={onOpenGlobal} />
       {/if}
