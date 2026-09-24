@@ -35,6 +35,7 @@ import type {
   ColonyReport,
   ColonyRoute,
   ColonyStoredItem,
+  PlanetResource,
 } from "../store/types.ts";
 
 const PIN_KINDS: readonly ColonyPinKind[] = Object.freeze([
@@ -242,7 +243,30 @@ function decodeColony(value: JsonValue): Colony | null {
     routes: asArray(record.routes)
       .map(decodeRoute)
       .filter((route): route is ColonyRoute => route !== null),
+    resources: decodeResources(record.resources),
   };
+}
+
+/** A planet's resources, or null when the read carried none (unknown, not empty). */
+function decodeResources(value: JsonValue | undefined): readonly PlanetResource[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const resources: PlanetResource[] = [];
+  for (const entry of value) {
+    const record = asRecord(entry);
+    const typeID = asIdentifier(record.typeID);
+    if (typeID === null) {
+      continue;
+    }
+    const quality = record.quality === null || record.quality === undefined ? NaN : Number(record.quality);
+    resources.push({
+      typeID,
+      typeName: asName(record.typeName),
+      quality: Number.isFinite(quality) ? quality : null,
+    });
+  }
+  return resources;
 }
 
 /**

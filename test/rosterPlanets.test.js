@@ -39,6 +39,7 @@ const NO_TABLE_ID = 90000004;
 const SLOW_ID = 90000005;
 const MISSING_ID = 90000008;
 const NOT_OURS_ID = 90000009;
+const STOCK_ID = 90000010;
 
 const PLANET_A = 40000002;
 const PLANET_B = 40000004;
@@ -47,6 +48,11 @@ const ECU_TYPE_ID = 3068;
 const COMMAND_CENTER_TYPE_ID = 2254;
 const TEMPERATE_TYPE_ID = 11;
 const SLOW_DELAY_MS = 60;
+const STATION_ID = 60000004;
+const SHIP_ITEM_ID = 1000000100;
+const WATER_TYPE_ID = 3645;
+const AQUEOUS_TYPE_ID = 2268;
+const SHIP_CATEGORY_ID = 6;
 
 const activeServers = new Set();
 
@@ -119,6 +125,34 @@ function snapshotWith(colonies) {
   };
 }
 
+/**
+ * A pilot with stock, as the gateway carries it: items keyed by itemID (the
+ * live shape), and the planet's resource record beside its colony.
+ */
+function stockSnapshot() {
+  const snapshot = snapshotWith([colony(PLANET_A, STOCK_ID)]);
+  snapshot.characters = { [String(STOCK_ID)]: { corporationID: 98000001 } };
+  const item = (itemID, fields) => [String(itemID), { itemID, ownerID: STOCK_ID, flagID: 4, singleton: 0, ...fields }];
+  snapshot.items = Object.fromEntries([
+    // Two stacks of one type in one hangar: one line, summed.
+    item(1000000001, { typeID: WATER_TYPE_ID, categoryID: 43, locationID: STATION_ID, stacksize: 300, quantity: 300 }),
+    item(1000000002, { typeID: WATER_TYPE_ID, categoryID: 43, locationID: STATION_ID, stacksize: 100, quantity: 100 }),
+    // Raw resource in a ship's cargo, the ship docked at the same station.
+    item(SHIP_ITEM_ID, { typeID: 648, categoryID: SHIP_CATEGORY_ID, locationID: STATION_ID, itemName: "Hauler One", singleton: 1, quantity: -1, stacksize: 1 }),
+    item(1000000003, { typeID: AQUEOUS_TYPE_ID, categoryID: 42, locationID: SHIP_ITEM_ID, flagID: 5, stacksize: 5000, quantity: 5000 }),
+    // Not planetary: never stock.
+    item(1000000004, { typeID: 34, categoryID: 4, locationID: STATION_ID, stacksize: 9, quantity: 9 }),
+  ]);
+  snapshot.planetRuntimeState.resourcesByPlanetID = {
+    [String(PLANET_A)]: {
+      planetID: PLANET_A,
+      resourceTypeIDs: [AQUEOUS_TYPE_ID, 2073],
+      qualitiesByTypeID: { [String(AQUEOUS_TYPE_ID)]: 96, 2073: 140 },
+    },
+  };
+  return snapshot;
+}
+
 function fakeGateway() {
   const asked = [];
   return {
@@ -146,6 +180,9 @@ function fakeGateway() {
       if (characterID === NO_TABLE_ID) {
         return { source: "evejs-web-gateway", items: [] };
       }
+      if (characterID === STOCK_ID) {
+        return stockSnapshot();
+      }
       if (characterID === SLOW_ID) {
         await new Promise((resolve) => setTimeout(resolve, SLOW_DELAY_MS));
         return snapshotWith([colony(PLANET_A, SLOW_ID)]);
@@ -162,7 +199,7 @@ async function startTestServer(gateway) {
     eveGatewayClient: gateway,
     webAuth: fakeAuth(),
     staticData: {
-      getStation: () => null,
+      getStation: (id) => (id === STATION_ID ? { stationName: "Alpha I - Moon 1 - Station" } : null),
       getTypeName: (id) => `Type ${id}`,
       // Group decides a structure's kind (1063 = extractor control, 1027 = command).
       getType: (id) => ({ [ECU_TYPE_ID]: { groupID: 1063 }, [COMMAND_CENTER_TYPE_ID]: { groupID: 1027 } })[id] || null,
@@ -318,4 +355,55 @@ test("the route needs a signed-in account", async () => {
   assert.equal(response.status, 401);
   assert.equal(payload.error, "AUTH_REQUIRED");
   assert.equal(gateway.asked.length, 0);
+});
+
+test("a pilot's planetary stock comes back with where each unit sits — still with nobody selected", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${STOCK_ID}`);
+  const [pilot] = payload.pilots;
+  assert.equal(pilot.corporationID, 98000001);
+  assert.deepEqual(pilot.stock, [
+    {
+      typeID: AQUEOUS_TYPE_ID,
+      typeName: `Type ${AQUEOUS_TYPE_ID}`,
+      quantity: 5000,
+      locationID: STATION_ID,
+      locationName: "Alpha I - Moon 1 - Station",
+      holder: "ship",
+      holderName: "Hauler One",
+    },
+    {
+      typeID: WATER_TYPE_ID,
+      typeName: `Type ${WATER_TYPE_ID}`,
+      quantity: 400,
+      locationID: STATION_ID,
+      locationName: "Alpha I - Moon 1 - Station",
+      holder: "hangar",
+      holderName: null,
+    },
+  ]);
+});
+
+test("a pilot with nothing planetary answers an empty stock, not a missing one", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${NOT_YET_BUILT_ID}`);
+  assert.deepEqual(payload.pilots[0].stock, []);
+  // The snapshot named no corporation: null, never 0.
+  assert.equal(payload.pilots[0].corporationID, null);
+});
+
+test("a colony carries its planet's resources and their quality, as the server states them", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${STOCK_ID}`);
+  const [colonyA] = payload.pilots[0].colonies;
+  assert.deepEqual(colonyA.resources, [
+    { typeID: AQUEOUS_TYPE_ID, typeName: `Type ${AQUEOUS_TYPE_ID}`, quality: 96 },
+    { typeID: 2073, typeName: "Type 2073", quality: 140 },
+  ]);
+});
+
+test("⚠ a planet with no resource record is null — unknown, not 'carries nothing'", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${FARMER_ID}`);
+  assert.equal(payload.pilots[0].colonies[0].resources, null);
 });

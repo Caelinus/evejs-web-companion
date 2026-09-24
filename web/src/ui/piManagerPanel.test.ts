@@ -132,11 +132,22 @@ function renderSeeded(): string {
           colonyWire(40000002, "Alpha I", now + 30 * 60 * MINUTE),
           colonyWire(40000004, "Alpha II", now - 30 * MINUTE),
         ],
+        stock: [
+          {
+            typeID: 2268,
+            typeName: "Aqueous Liquids",
+            quantity: 5000,
+            locationID: 60000004,
+            locationName: "Alpha I - Moon 1 - Station",
+            holder: "ship",
+            holderName: "Hauler One",
+          },
+        ],
       },
       { characterID: NEWBIE, readAtMs: readAt, coloniesReadable: true, colonies: [] },
     ],
   };
-  savePiRoster(recordPiAnswer(addPiMembers(EMPTY_PI_ROSTER, [FARMER, NEWBIE, STRANGER]), answer, readAt));
+  savePiRoster(recordPiAnswer(addPiMembers(EMPTY_PI_ROSTER, [FARMER, NEWBIE, STRANGER]), answer as never, readAt));
   try {
     return render(PiManager as never, { props: {} } as never).body;
   } finally {
@@ -251,7 +262,7 @@ test("⚠ the window never selects a character, and never reads on a timer", () 
 
 test("the window has its own menu, and shows one view at a time", () => {
   const body = renderSeeded();
-  for (const id of ["colonies", "pilots", "planner"]) {
+  for (const id of ["colonies", "stock", "planner", "pilots"]) {
     assert.match(body, new RegExp(`<button[^>]*role="tab"[^>]*id="pi-tab-${id}"`));
   }
   // A roster with pilots opens on Colonies; the other views are hidden, not
@@ -260,12 +271,13 @@ test("the window has its own menu, and shows one view at a time", () => {
   assert.doesNotMatch(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
   assert.match(body, /<section[^>]*id="pi-view-pilots"[^>]*hidden/);
   assert.match(body, /<section[^>]*id="pi-view-planner"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-stock"[^>]*hidden/);
 });
 
 test("the menu badges say what waits in each view", () => {
   const text = visibleText(renderSeeded());
   // One colony needs you; one pilot has a restart to offer.
-  assert.match(text, /Colonies 1 Pilots 1 Planner/);
+  assert.match(text, /Colonies 1 Stock Planner Pilots 1/);
 });
 
 test("an empty roster opens on Pilots, where a pilot is added", () => {
@@ -276,6 +288,27 @@ test("an empty roster opens on Pilots, where a pilot is added", () => {
   assert.match(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
 });
 
-test("the planner says it is not built, rather than pretending to plan", () => {
-  assert.match(visibleText(renderSeeded()), /The planner is not built yet\./);
+test("the planner says plainly when it has no recipe table to plan with", () => {
+  // Rendering never reads, so the table was never read: say so, offer no form.
+  const body = renderSeeded();
+  assert.match(visibleText(body), /The recipe table has not been read yet\. Refresh reads it\./);
+  assert.doesNotMatch(body, /id="pi-plan-quantity"/);
+});
+
+test("stock says where every unit sits, and what each part of the total rests on", () => {
+  const body = renderSeeded();
+  const text = visibleText(body);
+  // The line, in the hangar column, with the colony column empty.
+  assert.match(text, /Aqueous Liquids - 5,000 - 5,000/);
+  // What each part of the total rests on, said beside the numbers.
+  assert.match(text, /Colonies and personal hangars - 1 pilot, oldest read 2 hours ago/);
+  assert.match(text, /Personal hangars of Cy Newbie not read yet\. Refresh reads them\./);
+  assert.match(text, /A pilot no longer in the hangar not read, so nothing they hold is counted\./);
+});
+
+test("the corp hangar read rides a session already online, and never signs anyone in itself", () => {
+  // It is reached only through the tab's sessions, on each pilot's own options.
+  assert.match(SOURCE, /session\.flow\.requestOptions\(\)/);
+  const corpRead = readFileSync(path.join(UI_DIR, "../app/piCorpRead.ts"), "utf8");
+  assert.doesNotMatch(corpRead, /login|signIn|selectCharacter|\/api\/bridge\/select/);
 });

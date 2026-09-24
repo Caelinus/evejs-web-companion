@@ -1,6 +1,7 @@
 <script lang="ts">
-  // PLANETARY INDUSTRY (R108 slices 3 and 4) — every assigned pilot's colonies
-  // on one board, and one action: restarting a pilot's ended extractors.
+  // PLANETARY INDUSTRY (R108 slices 3 to 5) — every assigned pilot's colonies
+  // on one board, one action (restarting a pilot's ended extractors), what is
+  // held across colonies, hangars and corp hangars, and the planner.
   //
   // ⚠ A GLOBAL WINDOW WITH NO STORE. Every other panel is a view of the mounted
   // pilot. This one is a view of the player's own PI roster, which spans
@@ -37,8 +38,30 @@
   import { buildPiBoard, type PiDispatchState, type PilotAttempt } from "../bridge/piBoard.ts";
   import { restartExtractorsFor } from "../app/piDispatch.ts";
   import { listActiveServerBots } from "../app/api.ts";
-  import { decodeRecipeBook, type PiRecipeBook } from "../bridge/piRecipes.ts";
+  import { commodityName, decodeRecipeBook, madeThings, tierOf, type PiRecipeBook, type PiTier } from "../bridge/piRecipes.ts";
+  import {
+    countWords,
+    holdingAgeWords,
+    holdingsFromCorpReads,
+    holdingsFromReadings,
+    isPlayerCorporation,
+    stockByTier,
+    stockLines,
+    stockSources,
+    stockSummary,
+    tierTag,
+    type CorpStockRead,
+  } from "../bridge/piStock.ts";
+  import { parseWithin, planWithStock, type PlannerColony } from "../bridge/piPlanner.ts";
+  import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
+  import type { Session } from "../app/sessions.ts";
   import TypeIcon from "./TypeIcon.svelte";
+
+  // ⚠ THE SESSIONS ARE FOR CORP HANGARS ONLY. Corp-owned goods are in no
+  // pilot's snapshot, so they are read through a pilot of that corporation who
+  // is already online in this tab, on that pilot's own session
+  // (app/piCorpRead.ts). Nothing here selects, signs in or brings anyone online.
+  let { sessions = [] }: { sessions?: readonly Session[] } = $props();
 
   let roster = $state<PiRosterPrefs>(loadPiRoster());
   let known = $state<KnownCharacter[]>(loadKnownCharacters());
@@ -62,8 +85,23 @@
   // opens on Pilots, because adding one is the only thing to do there.
   // ⚠ Every view is RENDERED and the others are `hidden`, not left out: a
   // restart already started keeps saying so while the player looks elsewhere.
-  type View = "colonies" | "pilots" | "planner";
+  type View = "colonies" | "stock" | "planner" | "pilots";
   let view = $state<View>(loadPiRoster().members.length === 0 ? "pilots" : "colonies");
+
+  // What each corporation's hangars said at the last Refresh (R108 slice 5).
+  let corpReads = $state<CorpStockRead[]>([]);
+  // The Stock view's own controls. Opening a row shows where every unit is.
+  let stockTier = $state<PiTier | "all">("all");
+  let stockSearch = $state("");
+  let stockOpen = $state<Set<number>>(new Set());
+  // The planner's form, and the request its Plan button last made. The plan is
+  // derived from the request and the stock as it stands, so a Refresh re-plans.
+  let planTarget = $state("");
+  let planQuantity = $state("");
+  let planWithin = $state("");
+  let planError = $state<string | null>(null);
+  let planRequest = $state<{ typeID: number; quantity: number; withinMs: number | null } | null>(null);
+  let planOpen = $state<Set<number>>(new Set());
 
   async function loadActiveBots(): Promise<void> {
     try {
@@ -118,14 +156,126 @@
       badge: board.needsYou.length,
       urgent: board.needsYou.some((item) => item.urgency === "now"),
     },
+    { id: "stock", label: "Stock", badge: 0, urgent: false },
+    { id: "planner", label: "Planner", badge: 0, urgent: false },
     {
       id: "pilots",
       label: "Pilots",
       badge: board.pilots.filter((pilot) => pilot.restart?.enabled).length,
       urgent: false,
     },
-    { id: "planner", label: "Planner", badge: 0, urgent: false },
   ]);
+
+  // ③ WHAT YOU HOLD. `readings` is already the roster's own pilots only
+  // (piReadings), so a removed pilot's goods leave the totals with it.
+  const memberReadings = $derived(readings);
+  const holdings = $derived([
+    ...holdingsFromReadings(memberReadings, names),
+    ...holdingsFromCorpReads(corpReads, recipes),
+  ]);
+  const lines = $derived(stockLines(holdings, recipes));
+  const summary = $derived(stockSummary(lines));
+  const sources = $derived(
+    stockSources({ members: roster.members, readings: memberReadings, names, corpReads, browserNowMs }),
+  );
+  const shownGroups = $derived(
+    stockByTier(
+      lines.filter((line) =>
+        (stockTier === "all" || line.tier === stockTier)
+        && line.typeName.toLowerCase().includes(stockSearch.trim().toLowerCase())),
+    ),
+  );
+  const corpWords = $derived.by(() => {
+    const read = corpReads.filter((corp) => corp.state === "read").length;
+    if (corpReads.length === 0) return "-";
+    return read === corpReads.length ? countWords(summary.inCorp) : `${read} of ${corpReads.length} read`;
+  });
+
+  function toggle(set: Set<number>, typeID: number): Set<number> {
+    const next = new Set(set);
+    if (next.has(typeID)) next.delete(typeID);
+    else next.add(typeID);
+    return next;
+  }
+
+  // ④ THE PLANNER.
+  // Everything a factory makes, grouped by tier for the picker. A recipe the
+  // book does not classify still appears, under Other, rather than vanishing.
+  const targetGroups = $derived.by(() => {
+    const book = recipes;
+    if (!book) return [];
+    const groups = new Map<string, { label: string; rows: { typeID: number; name: string }[] }>();
+    for (const row of madeThings(book)) {
+      const tier = tierOf(book, row.output.typeID);
+      const label = tier === null ? "Other" : `P${tier}`;
+      const group = groups.get(label) ?? { label, rows: [] };
+      group.rows.push({ typeID: row.output.typeID, name: commodityName(book, row.output.typeID) ?? row.name });
+      groups.set(label, group);
+    }
+    return [...groups.values()];
+  });
+  const plannerColonies = $derived<PlannerColony[]>(
+    [...memberReadings.values()].flatMap((reading) =>
+      reading.report.colonies.map((colony) => ({ colony, clockOffsetMs: reading.report.clockOffsetMs }))),
+  );
+  const plan = $derived(
+    planRequest && recipes?.readable
+      ? planWithStock({
+          book: recipes,
+          targetTypeID: planRequest.typeID,
+          quantity: planRequest.quantity,
+          holdings,
+          colonies: plannerColonies,
+          withinMs: planRequest.withinMs,
+          browserNowMs,
+        })
+      : null,
+  );
+
+  function submitPlan(): void {
+    const typeID = Number(planTarget);
+    const quantity = Number(planQuantity.replace(/,/g, "").trim());
+    const withinMs = parseWithin(planWithin);
+    if (!Number.isSafeInteger(typeID) || typeID <= 0) {
+      planError = "Choose something to make.";
+    } else if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      planError = "Enter how many, as a whole number.";
+    } else if (withinMs !== null && Number.isNaN(withinMs)) {
+      planError = "Write the deadline as 3d, 36h or 2d 6h, or leave it empty.";
+    } else {
+      planError = null;
+      planOpen = new Set();
+      planRequest = { typeID, quantity, withinMs };
+    }
+  }
+
+  /** Pilots online in this tab, read at call time, for the corp hangar read. */
+  function onlinePilots(): OnlinePilot[] {
+    const pilots: OnlinePilot[] = [];
+    for (const session of sessions) {
+      const online = session.store.station.get().online;
+      if (!online) continue;
+      pilots.push({
+        characterID: online.characterID,
+        corporationID: online.corporationID,
+        options: session.flow.requestOptions(),
+      });
+    }
+    return pilots;
+  }
+
+  async function refreshCorpStock(): Promise<void> {
+    const online = onlinePilots();
+    const corporations = [
+      ...[...piReadings(roster).values()].map((reading) => reading.corporationID ?? null),
+      ...online.map((pilot) => pilot.corporationID),
+    ].filter(isPlayerCorporation);
+    try {
+      corpReads = await readCorpStock(corporations, online);
+    } catch {
+      // Each corp's outcome is caught inside the read; keep the last answer.
+    }
+  }
   const squadsWithNewPilots = $derived(
     hangar.squads.filter((squad) =>
       (hangar.members[squad.id] ?? []).some((id) => !roster.members.includes(id)),
@@ -156,6 +306,8 @@
           if (book.readable) recipes = book;
         },
       });
+      // After the roster, because it names each pilot's corporation.
+      await refreshCorpStock();
     } finally {
       reading = false;
       browserNowMs = Date.now();
@@ -431,8 +583,144 @@
         </p>
       </section>
 
-      <!-- ④ THE PLANNER (R108 slice 5) is not built. Its place in the menu is, so
-           the view says so plainly rather than pretending to plan. -->
+      <!-- ③ WHAT YOU HOLD (R108 slice 5). One line per commodity; colony stock is
+           its own column because it is already where it is needed. Opening a
+           line lists every place it sits, whose it is and when it was read. -->
+      <section
+        class="pi-view"
+        id="pi-view-stock"
+        role="tabpanel"
+        aria-labelledby="pi-tab-stock"
+        hidden={view !== "stock"}
+      >
+        {#if roster.members.length === 0}
+          <p class="empty">
+            No pilots are on planetary industry yet.
+            <button type="button" class="pi-link" onclick={() => (view = "pilots")}>Add one under Pilots</button>
+          </p>
+        {:else}
+          <dl class="pi-summary">
+            <div>
+              <dt>Kinds held</dt>
+              <dd>{summary.kinds}</dd>
+            </div>
+            <div>
+              <dt>In colonies</dt>
+              <dd>{countWords(summary.inColonies)}</dd>
+            </div>
+            <div>
+              <dt>In hangars</dt>
+              <dd>{countWords(summary.inHangars)}</dd>
+            </div>
+            <div>
+              <dt>Corp hangars</dt>
+              <dd class:warn={corpReads.some((corp) => corp.state !== "read")}>{corpWords}</dd>
+            </div>
+          </dl>
+
+          <div class="pi-filter">
+            <div class="pi-tiers" role="group" aria-label="Tier">
+              {#each ["all", 0, 1, 2, 3, 4] as const as tier (tier)}
+                <button
+                  type="button"
+                  class="pi-tier"
+                  class:on={stockTier === tier}
+                  aria-pressed={stockTier === tier}
+                  onclick={() => (stockTier = tier)}
+                >
+                  {tier === "all" ? "All" : tier === 0 ? "Raw" : `P${tier}`}
+                </button>
+              {/each}
+            </div>
+            <input
+              type="search"
+              class="pi-search"
+              placeholder="Find a commodity"
+              aria-label="Find a commodity"
+              bind:value={stockSearch}
+            />
+          </div>
+
+          {#if lines.length === 0}
+            <p class="empty">
+              {reading ? "Reading what you hold..." : "Nothing planetary is held anywhere that was read."}
+            </p>
+          {:else if shownGroups.length === 0}
+            <p class="empty">Nothing held matches that.</p>
+          {:else}
+            <div class="table-wrap overflow-x-auto">
+              <table class="pi-table">
+                <thead>
+                  <tr>
+                    <th>Commodity</th>
+                    <th class="num">In colonies</th>
+                    <th class="num">In hangars</th>
+                    <th class="num">Corp</th>
+                    <th class="num">Total</th>
+                  </tr>
+                </thead>
+                {#each shownGroups as group (group.label)}
+                  <tbody>
+                    <tr class="pi-tier-head">
+                      <th colspan="5" scope="rowgroup">{group.label}</th>
+                    </tr>
+                    {#each group.lines as line (line.typeID)}
+                      <tr>
+                        <td>
+                          <button
+                            type="button"
+                            class="pi-open"
+                            aria-expanded={stockOpen.has(line.typeID)}
+                            onclick={() => (stockOpen = toggle(stockOpen, line.typeID))}
+                          >
+                            <span class="pi-caret" aria-hidden="true">{stockOpen.has(line.typeID) ? "v" : ">"}</span>
+                            <TypeIcon typeID={line.typeID} name={line.typeName} />
+                            <span>{line.typeName}</span>
+                          </button>
+                        </td>
+                        <td class="num">{line.inColonies > 0 ? countWords(line.inColonies) : "-"}</td>
+                        <td class="num">{line.inHangars > 0 ? countWords(line.inHangars) : "-"}</td>
+                        <td class="num">{line.inCorp > 0 ? countWords(line.inCorp) : "-"}</td>
+                        <td class="num">{countWords(line.total)}</td>
+                      </tr>
+                      {#if stockOpen.has(line.typeID)}
+                        <tr class="pi-where">
+                          <td colspan="5">
+                            <ul>
+                              {#each line.holdings as holding, index (index)}
+                                <li>
+                                  <span class="pi-source">{holding.source}</span>
+                                  {countWords(holding.quantity)} - {holding.placeWords} - {holding.ownerWords}
+                                  <span class="note">- {holdingAgeWords(holding, browserNowMs)}</span>
+                                </li>
+                              {/each}
+                            </ul>
+                          </td>
+                        </tr>
+                      {/if}
+                    {/each}
+                  </tbody>
+                {/each}
+              </table>
+            </div>
+          {/if}
+
+          {#if sources.length > 0}
+            <section class="pi-section" aria-labelledby="pi-sources">
+              <h3 id="pi-sources">Where this came from</h3>
+              <ul class="pi-sources">
+                {#each sources as source, index (index)}
+                  <li class="note" class:warn={source.warn}>{source.words}</li>
+                {/each}
+              </ul>
+            </section>
+          {/if}
+        {/if}
+      </section>
+
+      <!-- ④ THE PLANNER (R108 slice 5). Something to make and how many; the
+           verdict, the gaps in the order worth telling, then the chain. Every
+           number is recipe arithmetic or a server-stated fact. -->
       <section
         class="pi-view"
         id="pi-view-planner"
@@ -440,14 +728,148 @@
         aria-labelledby="pi-tab-planner"
         hidden={view !== "planner"}
       >
-        <section class="pi-section" aria-labelledby="pi-planner">
-          <h3 id="pi-planner">Planner</h3>
-          <p class="empty">The planner is not built yet.</p>
-          <p class="note">
-            It will take something to make and how much, and work out whether your
-            colonies and what you hold can make it, and what is missing if not.
+        {#if !recipes?.readable}
+          <p class="empty">
+            {reading ? "Reading the recipe table..." : "The recipe table has not been read yet. Refresh reads it."}
           </p>
-        </section>
+        {:else}
+          <form
+            class="pi-plan-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              submitPlan();
+            }}
+          >
+            <label for="pi-plan-quantity">Make</label>
+            <input
+              id="pi-plan-quantity"
+              class="pi-plan-quantity"
+              inputmode="numeric"
+              placeholder="20"
+              bind:value={planQuantity}
+              oninput={() => (planError = null)}
+            />
+            <select
+              class="pi-plan-target"
+              aria-label="What to make"
+              bind:value={planTarget}
+              onchange={() => (planError = null)}
+            >
+              <option value="">Choose a commodity</option>
+              {#each targetGroups as group (group.label)}
+                <optgroup label={group.label}>
+                  {#each group.rows as row (row.typeID)}
+                    <option value={String(row.typeID)}>{row.name}</option>
+                  {/each}
+                </optgroup>
+              {/each}
+            </select>
+            <label for="pi-plan-within">within</label>
+            <input
+              id="pi-plan-within"
+              class="pi-plan-within"
+              placeholder="3d"
+              bind:value={planWithin}
+              oninput={() => (planError = null)}
+            />
+            <button type="submit">Plan</button>
+          </form>
+          {#if planError}
+            <p class="pi-plan-error" role="alert">{planError}</p>
+          {:else}
+            <p class="note">
+              Counts every colony, hangar and corp hangar that was read. A deadline is
+              optional; without one nothing is called too slow.
+            </p>
+          {/if}
+
+          {#if plan}
+            <p class="pi-verdict" class:good={plan.covered}>{plan.verdict}</p>
+            {#if plan.gaps.length > 0}
+              <ol class="pi-gaps">
+                {#each plan.gaps as gap, index (index)}
+                  <li class="pi-gap gap-{gap.kind}">
+                    <span class="pi-gap-head">{gap.headline}</span>
+                    {#if gap.detail}
+                      <span class="note">{gap.detail}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ol>
+            {/if}
+
+            <h3 class="pi-chain-head">The chain</h3>
+            <div class="table-wrap overflow-x-auto">
+              <table class="pi-table">
+                <thead>
+                  <tr>
+                    <th>Commodity</th>
+                    <th class="num">Need</th>
+                    <th class="num">Held</th>
+                    <th class="num">To make</th>
+                    <th>Made by</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each plan.rows as row (row.typeID)}
+                    <tr class:pi-row-gap={row.gapNumber !== null}>
+                      <td>
+                        <span class="pi-chain-name" style:padding-left={`${row.depth * 1.1}rem`}>
+                          {#if row.holdings.length > 0}
+                            <button
+                              type="button"
+                              class="pi-open"
+                              aria-expanded={planOpen.has(row.typeID)}
+                              onclick={() => (planOpen = toggle(planOpen, row.typeID))}
+                            >
+                              <span class="pi-caret" aria-hidden="true">{planOpen.has(row.typeID) ? "v" : ">"}</span>
+                              <span>{row.typeName}</span>
+                            </button>
+                          {:else}
+                            <span class="pi-caret" aria-hidden="true"></span>
+                            <span>{row.typeName}</span>
+                          {/if}
+                          {#if tierTag(row.tier)}
+                            <span class="pi-chip">{tierTag(row.tier)}</span>
+                          {/if}
+                        </span>
+                      </td>
+                      <td class="num">{countWords(row.needed)}</td>
+                      <td class="num">{row.held > 0 ? countWords(row.held) : "0"}</td>
+                      <td class="num" class:good={row.toMake === 0}>{countWords(row.toMake)}</td>
+                      <td class:bad={row.gapNumber !== null && row.producers.length === 0}>
+                        {row.sourceWords}
+                        {#if row.coverWords}
+                          <span class="note pilot-note">{row.coverWords}</span>
+                        {/if}
+                      </td>
+                    </tr>
+                    {#if planOpen.has(row.typeID)}
+                      <tr class="pi-where">
+                        <td colspan="5">
+                          <ul>
+                            {#each row.holdings as holding, index (index)}
+                              <li>
+                                <span class="pi-source">{holding.source}</span>
+                                {countWords(holding.quantity)} - {holding.placeWords} - {holding.ownerWords}
+                                <span class="note">- {holdingAgeWords(holding, browserNowMs)}</span>
+                              </li>
+                            {/each}
+                          </ul>
+                        </td>
+                      </tr>
+                    {/if}
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            <p class="note">
+              Extractor rates are for the programs installed now. A factory rate is its
+              recipe at full supply. Every other figure is recipe arithmetic in whole runs,
+              with what you hold taken off before inputs are worked out.
+            </p>
+          {/if}
+        {/if}
       </section>
     </div>
   </div>
@@ -698,6 +1120,173 @@
   td button {
     min-height: 40px;
   }
+  .pi-summary dd.warn {
+    color: var(--color-warn);
+  }
+  .pi-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-bottom: 0.5rem;
+  }
+  .pi-tiers {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .pi-tier {
+    min-height: 32px;
+    padding: 0 0.6rem;
+    background: transparent;
+    border: 1px solid var(--color-line);
+    color: var(--color-muted);
+  }
+  .pi-tier.on {
+    border-color: var(--color-accent);
+    color: var(--color-text-bright);
+  }
+  .pi-search {
+    margin-left: auto;
+    min-height: 32px;
+    flex: 0 1 14rem;
+  }
+  .pi-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  .pi-table th,
+  .pi-table td {
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--color-row-line);
+    text-align: left;
+    vertical-align: top;
+  }
+  .pi-table th {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    font-weight: 500;
+  }
+  .pi-table .num {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .pi-table td.good {
+    color: var(--color-good);
+  }
+  .pi-table td.bad {
+    color: var(--color-danger);
+  }
+  .pi-tier-head th {
+    padding-top: 0.75rem;
+    border-bottom-color: var(--color-line-strong);
+    color: var(--color-text-bright);
+  }
+  .pi-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--color-text-bright);
+    text-align: left;
+    cursor: pointer;
+  }
+  .pi-caret {
+    display: inline-block;
+    width: 0.8rem;
+    color: var(--color-muted);
+    font-size: 11px;
+  }
+  .pi-where td {
+    padding-left: 2rem;
+    background: var(--color-panel-3);
+  }
+  .pi-where ul,
+  .pi-sources,
+  .pi-gaps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pi-where li {
+    padding: 0.15rem 0;
+    font-size: 0.85rem;
+  }
+  .pi-source {
+    display: inline-block;
+    min-width: 4rem;
+    margin-right: 0.4rem;
+    padding: 0 0.3rem;
+    border: 1px solid var(--color-line-strong);
+    font-size: 11px;
+    text-align: center;
+    color: var(--color-cell);
+  }
+  .pi-sources li {
+    padding: 0.1rem 0;
+  }
+  .pi-plan-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .pi-plan-form input,
+  .pi-plan-form select,
+  .pi-plan-form button {
+    min-height: 40px;
+  }
+  .pi-plan-quantity,
+  .pi-plan-within {
+    width: 5.5rem;
+  }
+  .pi-plan-target {
+    flex: 1 1 14rem;
+  }
+  .pi-plan-error {
+    margin: 0.35rem 0 0;
+    color: var(--color-danger);
+    font-size: 0.85rem;
+  }
+  .pi-verdict {
+    margin: 1rem 0 0.5rem;
+    font-size: 1.05rem;
+    color: var(--color-text-bright);
+  }
+  .pi-verdict.good {
+    color: var(--color-good);
+  }
+  .pi-gap {
+    display: grid;
+    gap: 0.1rem;
+    margin: 0.35rem 0;
+    padding: 0.3rem 0.75rem;
+    border-left: 2px solid var(--color-warn);
+  }
+  .pi-gap.gap-nothing-makes {
+    border-left-color: var(--color-danger);
+  }
+  .pi-gap-head {
+    color: var(--color-text-bright);
+  }
+  .pi-chain-head {
+    margin: 1rem 0 0.35rem;
+    font-size: 0.95rem;
+  }
+  .pi-chain-name {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .pi-row-gap td:first-child {
+    box-shadow: inset 2px 0 0 var(--color-warn);
+  }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -730,6 +1319,10 @@
     }
     .pi-summary {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .pi-search {
+      margin-left: 0;
+      flex: 1 1 100%;
     }
     /* A colony becomes a small card: place and resources, then the bars. */
     .pi-colony {

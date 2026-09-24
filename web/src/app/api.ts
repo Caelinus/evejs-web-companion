@@ -3594,6 +3594,23 @@ export async function loadRosterPlanets(
   );
 }
 
+// --- R108 slice 5: a corporation's hangars, read through a held session -----
+// GET /api/bridge/corp-assets (the R61 corpmgr reads). Without a locationID it
+// answers where the corp has offices (`inventory`); with one it also answers
+// what is in that office (`locationInventory`). The body goes back RAW, for
+// bridge/corpAssets.ts to unwrap. It rides the HELD session of `options`: corp
+// goods are in no pilot's snapshot, so a pilot of that corp must be online.
+
+export async function loadCorpAssets(
+  locationID: number | null,
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const query = locationID !== null && Number.isSafeInteger(locationID) && locationID > 0
+    ? `?which=offices&locationID=${locationID}`
+    : "?which=offices";
+  return getJson(`/api/bridge/corp-assets${query}`, options);
+}
+
 // --- R107 The hangar's training column, for pilots who are NOT signed in ----
 // GET /api/roster/training?characterIDs=a,b,c answers what each of those pilots
 // is training, read from the gateway's live queue snapshot.

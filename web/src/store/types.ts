@@ -2821,6 +2821,19 @@ export interface Colony {
   readonly linkCount: number;
   readonly links: readonly ColonyLink[];
   readonly routes: readonly ColonyRoute[];
+  /**
+   * What the planet carries and how rich each resource is, as the server
+   * states it (R108 slice 5). Null or absent when the read carried no record
+   * for the planet: unknown, never "carries nothing".
+   */
+  readonly resources?: readonly PlanetResource[] | null;
+}
+
+/** One resource a planet carries. `quality` is the server's number, unscaled. */
+export interface PlanetResource {
+  readonly typeID: number;
+  readonly typeName: string | null;
+  readonly quality: number | null;
 }
 
 /** The decoded GET /api/bridge/planets payload. */

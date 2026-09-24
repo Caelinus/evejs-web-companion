@@ -18582,9 +18582,19 @@ function coloniesFromSnapshot(snapshot) {
     && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
     && !Array.isArray(runtime.coloniesByKey),
   );
+  const resourcesByPlanetID = runtime && runtime.resourcesByPlanetID
+    && typeof runtime.resourcesByPlanetID === "object"
+    ? runtime.resourcesByPlanetID
+    : {};
   const colonies = coloniesReadable
     ? Object.values(runtime.coloniesByKey)
-      .map((colony) => projectColony(staticData, colony))
+      .map((colony) => {
+        const projected = projectColony(staticData, colony);
+        return {
+          ...projected,
+          resources: projectPlanetResources(staticData, resourcesByPlanetID[String(projected.planetID)]),
+        };
+      })
       .filter((colony) => colony.planetID > 0)
       .sort((left, right) => (
         String(left.planetName || "").localeCompare(String(right.planetName || ""))
@@ -18592,6 +18602,115 @@ function coloniesFromSnapshot(snapshot) {
       ))
     : [];
   return { coloniesReadable, colonies };
+}
+
+/**
+ * What a colonised planet carries, and how rich each resource is (R108 slice 5).
+ *
+ * The snapshot carries the planet's own resource record beside the colony: the
+ * same `qualitiesByTypeID` GetPlanetResourceInfo answers from, with no session
+ * needed. `quality` is the server's number as stated — not a percentage, and
+ * not rescaled here. Null when the snapshot carried no record for the planet:
+ * "unknown" is not "carries nothing".
+ */
+function projectPlanetResources(staticDataSource, record) {
+  if (!record || typeof record !== "object" || !Array.isArray(record.resourceTypeIDs)) {
+    return null;
+  }
+  const qualities = record.qualitiesByTypeID && typeof record.qualitiesByTypeID === "object"
+    ? record.qualitiesByTypeID
+    : {};
+  return record.resourceTypeIDs
+    .map((id) => Number(id) || 0)
+    .filter((typeID) => typeID > 0)
+    .map((typeID) => {
+      const quality = Number(qualities[String(typeID)]);
+      return {
+        typeID,
+        typeName: staticDataSource.getTypeName(typeID),
+        quality: Number.isFinite(quality) ? quality : null,
+      };
+    });
+}
+
+// The server's own classification of planetary goods: category 42 is Planetary
+// Resources (what an extractor pulls up), 43 Planetary Commodities (everything
+// a factory makes). By category, never by a list of item ids.
+const PLANETARY_CATEGORY_IDS = new Set([42, 43]);
+const SHIP_CATEGORY_ID = 6;
+
+/**
+ * Every planetary good this pilot owns outside its colonies, and where it sits
+ * (R108 slice 5).
+ *
+ * ⚠ NO SESSION, LIKE THE COLONIES. The gateway snapshot carries every item the
+ * character owns, plus the parents of those items, owner-filtered on the server
+ * (listItemsForCharacter). Reading stock this way brings nobody online.
+ *
+ * Each stack is walked up through what holds it (a ship's cargo, a container)
+ * to the place it is docked, so a unit is always said with its place. Stacks of
+ * one type in one holder are summed: the planner needs "how much, where", not
+ * item ids. Corporation-owned goods are not here; the snapshot is filtered to
+ * the character as owner.
+ */
+function stockFromSnapshot(staticDataSource, snapshot) {
+  const rawItems = snapshot && snapshot.items;
+  const items = Array.isArray(rawItems)
+    ? rawItems
+    : rawItems && typeof rawItems === "object" ? Object.values(rawItems) : [];
+  const byItemID = new Map();
+  for (const item of items) {
+    const itemID = Number(item && item.itemID) || 0;
+    if (itemID > 0) {
+      byItemID.set(itemID, item);
+    }
+  }
+  const stacks = new Map();
+  for (const item of items) {
+    if (!item || !PLANETARY_CATEGORY_IDS.has(Number(item.categoryID))) {
+      continue;
+    }
+    const typeID = Number(item.typeID) || 0;
+    const quantity = Number(item.stacksize) > 0 ? Number(item.stacksize) : Number(item.quantity) || 0;
+    if (typeID <= 0 || quantity <= 0) {
+      continue;
+    }
+    let holder = "hangar";
+    let holderName = null;
+    let locationID = Number(item.locationID) || 0;
+    // Bounded: a corrupt parent chain must not spin.
+    for (let depth = 0; depth < 8 && byItemID.has(locationID); depth += 1) {
+      const parent = byItemID.get(locationID);
+      if (holder === "hangar") {
+        holder = Number(parent.categoryID) === SHIP_CATEGORY_ID ? "ship" : "container";
+        holderName = typeof parent.itemName === "string" && parent.itemName.length > 0
+          ? parent.itemName
+          : staticDataSource.getTypeName(Number(parent.typeID) || 0);
+      }
+      locationID = Number(parent.locationID) || 0;
+    }
+    const station = locationID > 0 && typeof staticDataSource.getStation === "function"
+      ? staticDataSource.getStation(locationID)
+      : null;
+    const key = `${typeID}:${locationID}:${holder}:${holderName || ""}`;
+    const known = stacks.get(key);
+    if (known) {
+      known.quantity += quantity;
+      continue;
+    }
+    stacks.set(key, {
+      typeID,
+      typeName: staticDataSource.getTypeName(typeID),
+      quantity,
+      locationID: locationID > 0 ? locationID : null,
+      // Null when the place is not a station the static map knows (a
+      // structure, or somewhere in space): the browser words that, never an id.
+      locationName: station && station.stationName ? String(station.stationName) : null,
+      holder,
+      holderName,
+    });
+  }
+  return [...stacks.values()].sort((left, right) => left.typeID - right.typeID);
 }
 
 /**
@@ -18659,6 +18778,11 @@ app.get("/api/bridge/planets", requireAuth, async (req, res, next) => {
  * leaves, which is what the browser corrects its own clock against. Folding
  * the two together would skew that correction by however long the slowest
  * read took.
+ *
+ * THE SAME SNAPSHOT CARRIES THE PILOT'S STOCK (R108 slice 5). `stock` is every
+ * planetary good the pilot owns outside its colonies, with where it sits, and
+ * each colony carries its planet's resource qualities — so the planner needs
+ * no second read and no session. See stockFromSnapshot.
  */
 const ROSTER_PLANETS_MAX_IDS = 12;
 
@@ -18692,7 +18816,18 @@ app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
         if (!snapshot) {
           return null;
         }
-        return { characterID, readAtMs, ...coloniesFromSnapshot(snapshot) };
+        const character = snapshot.characters && typeof snapshot.characters === "object"
+          ? snapshot.characters[String(characterID)]
+          : null;
+        const corporationID = Number(character && character.corporationID) || 0;
+        return {
+          characterID,
+          readAtMs,
+          // Which corporation's hangars this pilot could read, if it were online.
+          corporationID: corporationID > 0 ? corporationID : null,
+          ...coloniesFromSnapshot(snapshot),
+          stock: stockFromSnapshot(staticData, snapshot),
+        };
       }),
     );
     res.json({

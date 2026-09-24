@@ -149,10 +149,11 @@
        own store, and reads the server's roster as each account. -->
   <FleetCompanions {sessions} {onGoToPilot} />
 {:else if tab === "piManager"}
-  <!-- ⚠ GIVEN NOTHING. The board is the player's PI roster across accounts and
-       reads through its own throwaway sign-ins; it is not a view of the
-       mounted pilot, so it takes neither that pilot's store nor its flow. -->
-  <PiManager />
+  <!-- ⚠ NOT THE MOUNTED PILOT'S. The board is the player's PI roster across
+       accounts and reads through its own throwaway sign-ins, so it takes neither
+       this pilot's store nor its flow. It is given the tab's sessions only to
+       read corp hangars through a pilot of that corp already online. -->
+  <PiManager {sessions} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}
