@@ -13,7 +13,8 @@
 // share is netted and rounded ONCE, against its whole-chain need.
 //
 // Held means everywhere: colony storage, personal hangars and corporation
-// hangars all count. Where each unit sits is kept on the row, because stock in
+// hangars all count — except what already sits in a factory's input buffer,
+// which is committed to the recipe that factory runs. Where each unit sits is kept on the row, because stock in
 // a station hangar needs a hauler before a factory can use it — the plan says
 // so by naming the place, and does not pretend to move it.
 //
@@ -236,7 +237,7 @@ export function planWithStock(input: PlannerInput): Plan | null {
 
   const heldBy = new Map<number, Holding[]>();
   for (const holding of input.holdings) {
-    if (holding.quantity <= 0) continue;
+    if (holding.quantity <= 0 || holding.inFactory === true) continue;
     const list = heldBy.get(holding.typeID) ?? [];
     list.push(holding);
     heldBy.set(holding.typeID, list);

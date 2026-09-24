@@ -211,6 +211,15 @@ test("held means everywhere: colony, hangar and corp hangar all count, and each 
   assert.deepEqual(alpha.holdings.map((holding) => holding.source), ["colony", "hangar", "corp"]);
 });
 
+test("what sits in a factory's input buffer is not counted: it is already committed", () => {
+  const result = plan({
+    holdings: [{ ...held(P1_A, 1000, "colony", "Alpha III factory input"), inFactory: true }, held(P1_A, 30)],
+  });
+  const alpha = rowOf(result, P1_A)!;
+  assert.equal(alpha.held, 30);
+  assert.equal(alpha.toMake, 50);
+});
+
 test("a commodity two branches share is one row, netted and rounded once", () => {
   // Upsilon needs Gamma and Xi, and both need Alpha: one Alpha row, whole need.
   const result = plan({ targetTypeID: P3_Y, quantity: 3 });

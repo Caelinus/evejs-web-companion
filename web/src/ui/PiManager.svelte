@@ -865,7 +865,7 @@
             </div>
             <p class="note">
               Extractor rates are for the programs installed now. A factory rate is its
-              recipe at full supply. Every other figure is recipe arithmetic in whole runs,
+              recipe at full supply. What waits in a factory's input is not counted as held. Every other figure is recipe arithmetic in whole runs,
               with what you hold taken off before inputs are worked out.
             </p>
           {/if}

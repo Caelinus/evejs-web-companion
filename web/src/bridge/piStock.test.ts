@@ -54,6 +54,7 @@ const COLONY: Colony = {
     pin(1, "storage", [{ typeID: WATER, typeName: "Water", quantity: 100 }]),
     pin(2, "storage", [{ typeID: WATER, typeName: "Water", quantity: 50 }]),
     pin(3, "launchpad", [{ typeID: WATER, typeName: "Water", quantity: 900 }]),
+    pin(4, "factory", [{ typeID: AQUEOUS, typeName: "Aqueous Liquids", quantity: 3000 }]),
   ],
   linkCount: 0, links: [], routes: [],
 };
@@ -95,6 +96,8 @@ test("every holding is said with its place: colony structure, hangar, ship's car
       // Two storage units on one planet are one line: the player cannot tell them apart.
       ["colony", "Alpha III storage", "Pilot One", 150],
       ["colony", "Alpha III launchpad", "Pilot One", 900],
+      // Held, and said to be a factory's input — the planner leaves it out.
+      ["colony", "Alpha III factory input", "Pilot One", 3000],
       ["hangar", "Alpha VI - Moon 2 hangar", "Pilot One", 400],
       ["hangar", "Alpha VI - Moon 2, in Hauler One's cargo", "Pilot One", 5000],
       ["corp", "Alpha VI - Moon 2 office, division 3", "Example Corp", 600],
@@ -115,7 +118,7 @@ test("a line per commodity keeps colony, hangar and corp apart, and sums them", 
   assert.equal(water.total, 2050);
   assert.deepEqual(water.holdings.map((holding) => holding.source), ["colony", "colony", "hangar", "corp"]);
   assert.deepEqual(stockByTier(lines).map((group) => group.label), ["Raw", "P1 - basic"]);
-  assert.deepEqual(stockSummary(lines), { kinds: 2, inColonies: 1050, inHangars: 5400, inCorp: 600 });
+  assert.deepEqual(stockSummary(lines), { kinds: 2, inColonies: 4050, inHangars: 5400, inCorp: 600 });
 });
 
 test("a corp that could not be read adds nothing, and the sources say why", () => {

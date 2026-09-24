@@ -42,6 +42,11 @@ export interface Holding {
   readonly ownerWords: string;
   /** The planet a colony holding sits on; null for a hangar or a corp office. */
   readonly planetID: number | null;
+  /**
+   * True for what sits in a factory's input buffer: it is held, but already
+   * committed to the recipe that factory runs, so the planner does not count it.
+   */
+  readonly inFactory?: boolean;
   /** When it was read, on the server's clock; null when unknown. */
   readonly readAtMs: number | null;
   /** The server's clock minus the browser's, for this holding's read. */
@@ -110,7 +115,7 @@ const PIN_WORDS: Readonly<Record<ColonyPinKind, string>> = Object.freeze({
   command: "command centre",
   "extractor-control": "extractor",
   extractor: "extractor head",
-  factory: "factory",
+  factory: "factory input",
   storage: "storage",
   launchpad: "launchpad",
   other: "structure",
@@ -140,6 +145,7 @@ function colonyHoldings(
         placeWords: `${colonyPlaceWords(colony)} ${PIN_WORDS[pin.kind]}`,
         ownerWords,
         planetID: colony.planetID,
+        inFactory: pin.kind === "factory",
         readAtMs: reading.readAtMs,
         clockOffsetMs: reading.report.clockOffsetMs,
       });
