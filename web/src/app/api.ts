@@ -4109,13 +4109,21 @@ export async function restartExtractorProgram(
   planetID: number,
   pinID: number,
   resourceTypeID: number,
+  headRadius: number,
   options: ApiOptions = {},
 ): Promise<void> {
-  // Command 13 = INSTALLPROGRAM(pinID, programTypeID, headRadius). A null head
-  // radius keeps the pin's existing drill area — a pure "run it again".
+  // Command 13 = INSTALLPROGRAM(pinID, programTypeID, headRadius).
+  //
+  // ⚠ THE RADIUS IS THE PIN'S OWN, SENT BACK. It is not "how wide": it is what
+  // sets how long the program runs, and the emulator refuses anything that is
+  // not a real number inside the drill-area bounds — null included, which is
+  // what this used to send on the belief that it meant "keep the current one".
+  // Every restart came back "Cannot install a program with a completely
+  // bonkers radius". The retail client reinstalls with the ECU's current
+  // headRadius too.
   await postJson(
     "/api/bridge/planet/network/update",
-    { planetID, changes: [[13, [pinID, resourceTypeID, null]]], confirm: true },
+    { planetID, changes: [[13, [pinID, resourceTypeID, headRadius]]], confirm: true },
     options,
   );
 }

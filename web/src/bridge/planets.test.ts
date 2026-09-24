@@ -105,6 +105,7 @@ function rawReport(overrides: Record<string, JsonValue> = {}): JsonValue {
               installedAtMs: SERVER_NOW - 3 * HOUR,
               expiresAtMs: SERVER_NOW + 21 * HOUR,
               headCount: 3,
+              headRadius: 0.012,
             },
           },
           {
@@ -515,4 +516,13 @@ test("a colony with no planetID is dropped rather than rendered as a blank row",
     decodeColonyReport(raw as unknown as JsonValue, SERVER_NOW).colonies,
     [],
   );
+});
+
+test("a program carries the drill area it was installed with, for a restart to send back", () => {
+  // The area sets how long the program runs, and the emulator refuses a
+  // restart without a real one. An absent area is null, never a made-up number.
+  const report = decodeColonyReport(rawReport(), SERVER_NOW);
+  const pins = report.colonies[0]!.pins;
+  assert.equal(pins.find((pin) => pin.pinID === 2)!.program!.headRadius, 0.012);
+  assert.equal(pins.find((pin) => pin.pinID === 3)!.program!.headRadius, null);
 });

@@ -153,6 +153,10 @@ function decodeProgram(value: JsonValue | undefined): ColonyExtractionProgram | 
     installedAtMs: asInstant(record.installedAtMs),
     expiresAtMs: asInstant(record.expiresAtMs),
     headCount: asNumber(record.headCount),
+    headRadius:
+      typeof record.headRadius === "number" && Number.isFinite(record.headRadius) && record.headRadius > 0
+        ? record.headRadius
+        : null,
   };
 }
 

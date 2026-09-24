@@ -175,8 +175,17 @@ export type ScriptAction =
   | { readonly kind: "boardShip"; readonly shipID: number }
   /** Apply a saved fitting to the active ship (modules from this hangar). */
   | { readonly kind: "applyFitting"; readonly fittingID: number }
-  /** Restart ONE expired extractor program (same resource it was pulling). */
-  | { readonly kind: "restartExtractor"; readonly planetID: number; readonly pinID: number; readonly resourceTypeID: number }
+  /**
+   * Restart ONE expired extractor program — the same resource it was pulling,
+   * over the same drill area (which is what sets how long it runs).
+   */
+  | {
+      readonly kind: "restartExtractor";
+      readonly planetID: number;
+      readonly pinID: number;
+      readonly resourceTypeID: number;
+      readonly headRadius: number;
+    }
   /**
    * Launch what ONE colony's command centre is holding into orbit.
    *

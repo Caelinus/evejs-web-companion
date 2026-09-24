@@ -3945,9 +3945,16 @@ const flyToMissionSite: MacroDecider = (_step, obs, mem) => {
 
 // ── restart-extractors ───────────────────────────────────────────────────────
 // Walk every colony and restart each extractor whose program has EXPIRED — on
-// the SAME resource it was already pulling (never a guess). One restart per
+// the SAME resource it was already pulling, over the SAME drill area (never a
+// guess — the area is what sets how long the program runs). One restart per
 // tick, confirmed by the next colonies re-read (the expiry moves into the
-// future); a pin with no known last resource is left alone and said so.
+// future); a pin with no known last resource or area is left alone and said so.
+//
+// ⚠ A RESTART THAT DID NOT TAKE ENDS THE RUN BLOCKED, NOT DONE. Each pin is
+// tried once per run, so after the walk every tried pin must read as running
+// again. One still expired was refused — and a run that tried four extractors,
+// had all four refused and then said "Every extractor is running." is exactly
+// what this used to do.
 const restartExtractors: MacroDecider = (_step, obs, mem) => {
   const colonies = obs.colonies ?? null;
   if (colonies === null) {
@@ -3974,6 +3981,11 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         skippedUnknown += 1;
         continue; // no last resource to reuse — never guess what to pull
       }
+      const headRadius = pin.headRadius ?? null;
+      if (headRadius === null) {
+        skippedUnknown += 1;
+        continue; // no last drill area — never guess how long it should run
+      }
       const attempts = (num(mem, "attempts") ?? 0) + 1;
       if (attempts > MAX_BLOCK_ATTEMPTS * 4) {
         return tick(WAIT, "The restarts kept not landing.", "Restarting extractors", {
@@ -3982,7 +3994,13 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         });
       }
       return tick(
-        { kind: "restartExtractor", planetID: colony.planetID, pinID: pin.pinID, resourceTypeID: pin.resourceTypeID },
+        {
+          kind: "restartExtractor",
+          planetID: colony.planetID,
+          pinID: pin.pinID,
+          resourceTypeID: pin.resourceTypeID,
+          headRadius,
+        },
         colony.planetName !== null ? `Restarting an extractor at ${colony.planetName}.` : "Restarting an extractor.",
         "Restarting extractors",
         ACTING,
@@ -3990,6 +4008,23 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         { ...mem, attempts, restarted: [...restarted, pin.pinID] },
       );
     }
+  }
+  // Every tried pin must now read as running. This read is the one taken
+  // AFTER the last restart, so a pin still expired here was refused.
+  let notTaken = 0;
+  for (const colony of colonies) {
+    for (const pin of colony.extractors) {
+      if (restarted.has(pin.pinID) && (pin.expiresAtMs === null || pin.expiresAtMs <= now)) {
+        notTaken += 1;
+      }
+    }
+  }
+  if (notTaken > 0) {
+    const noun = notTaken === 1 ? "restart" : "restarts";
+    return tick(WAIT, `${notTaken} extractor ${noun} did not take.`, "Restarting extractors", {
+      kind: "blocked",
+      reason: `${notTaken} of ${restarted.size} extractor ${restarted.size === 1 ? "restart" : "restarts"} did not take - the server refused ${notTaken === 1 ? "it" : "them"}. The bot log names the reason.`,
+    });
   }
   if (skippedUnknown > 0) {
     return tick(

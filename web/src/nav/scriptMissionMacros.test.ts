@@ -854,25 +854,54 @@ test("restart-extractors: restarts only EXPIRED programs on their own resource, 
       planetID: 40000001,
       planetName: "Matar V",
       extractors: [
-        { pinID: 1, resourceTypeID: 2268, expiresAtMs: past }, // expired -> restart
-        { pinID: 2, resourceTypeID: 2305, expiresAtMs: future }, // running -> leave
-        { pinID: 3, resourceTypeID: null, expiresAtMs: past }, // unknown resource -> never guess
+        { pinID: 1, resourceTypeID: 2268, expiresAtMs: past, headRadius: 0.03 }, // expired -> restart
+        { pinID: 2, resourceTypeID: 2305, expiresAtMs: future, headRadius: 0.02 }, // running -> leave
+        { pinID: 3, resourceTypeID: null, expiresAtMs: past, headRadius: 0.02 }, // unknown resource -> never guess
+        { pinID: 4, resourceTypeID: 2305, expiresAtMs: past, headRadius: null }, // unknown area -> never guess
       ],
     },
   ];
 
   const first = restart(s, obs({ colonies } as never), {}, NB);
   assert.ok(first.action.kind === "restartExtractor" && first.action.pinID === 1 && first.action.resourceTypeID === 2268);
+  // The drill area goes back UNCHANGED: it is what sets how long the program runs.
+  assert.equal(first.action.headRadius, 0.03);
 
-  // Pin 1 already restarted this run: the unknown-resource pin is SKIPPED (with
-  // the skip said out loud), and the running one untouched -> done.
-  const second = restart(s, obs({ colonies } as never), first.nextMem, NB);
+  // The re-read shows pin 1 running again. The unknown-resource and
+  // unknown-area pins are SKIPPED (with the skip said out loud), and the
+  // running one untouched -> done.
+  const after = [
+    { ...colonies[0]!, extractors: colonies[0]!.extractors.map((pin) => (pin.pinID === 1 ? { ...pin, expiresAtMs: future } : pin)) },
+  ];
+  const second = restart(s, obs({ colonies: after } as never), first.nextMem, NB);
   assert.equal(second.outcome.kind, "done");
-  assert.match(second.why, /left alone/);
+  assert.match(second.why, /2 extractors .*left alone/);
 
   // No colonies at all -> done, plainly.
   const none = restart(s, obs({ colonies: [] } as never), {}, NB);
   assert.equal(none.outcome.kind, "done");
+});
+
+test("restart-extractors: a restart the server refused ends the run BLOCKED, not done", () => {
+  // Live, every restart came back "completely bonkers radius" and the run still
+  // ended "Every extractor is running." A tried pin that still reads expired on
+  // the next read was refused, and the player has to hear that.
+  const restart = SCRIPT_MACROS["restart-extractors"]!;
+  const s = step("restart-extractors" as never);
+  const past = Date.now() - 60_000;
+  const colonies = [
+    {
+      planetID: 40000001,
+      planetName: "Matar V",
+      extractors: [{ pinID: 1, resourceTypeID: 2268, expiresAtMs: past, headRadius: 0.03 }],
+    },
+  ];
+  const first = restart(s, obs({ colonies } as never), {}, NB);
+  assert.equal(first.action.kind, "restartExtractor");
+  // The re-read still shows it expired: refused.
+  const second = restart(s, obs({ colonies } as never), first.nextMem, NB);
+  assert.equal(second.outcome.kind, "blocked");
+  assert.match(second.outcome.kind === "blocked" ? second.outcome.reason : "", /1 of 1 extractor restart did not take/);
 });
 
 test("repair-ship: the shop's quote decides; repairs then done only on a clean re-quote", () => {

@@ -18476,6 +18476,13 @@ function projectExtractionProgram(staticDataSource, pin) {
     installedAtMs,
     expiresAtMs,
     headCount: Array.isArray(pin && pin.heads) ? pin.heads.length : 0,
+    // The drill area the program was installed with. It is what sets how long a
+    // program runs (the emulator's getProgramLengthFromHeadRadius), and a
+    // restart has to send it back: InstallProgram refuses anything that is not
+    // a real number inside the drill-area bounds ("completely bonkers radius").
+    headRadius: Number.isFinite(Number(pin && pin.headRadius)) && Number(pin.headRadius) > 0
+      ? Number(pin.headRadius)
+      : null,
   };
 }
 

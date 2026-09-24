@@ -443,6 +443,8 @@ export interface ScriptObservation {
       readonly pinID: number;
       readonly resourceTypeID: number | null;
       readonly expiresAtMs: number | null;
+      /** The drill area to reinstall with (it sets the run length); null = unknown. */
+      readonly headRadius?: number | null;
     }[];
     /**
      * Every structure on the planet, for the blocks that act on a hold rather

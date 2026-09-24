@@ -496,6 +496,8 @@ test("an extraction program carries the server's own numbers, unchanged", async 
   assert.equal(active.program.cycleTimeSeconds, 3600);
   assert.equal(active.program.quantityPerCycle, 2841);
   assert.equal(active.program.headCount, 3);
+  // The drill area, which sets the run length — a restart sends it back.
+  assert.equal(active.program.headRadius, 0.012);
 });
 
 test("a cycle time is TICKS on the wire and SECONDS in the answer", async () => {

@@ -2738,6 +2738,12 @@ export interface ColonyExtractionProgram {
   readonly installedAtMs: number | null;
   readonly expiresAtMs: number | null;
   readonly headCount: number;
+  /**
+   * The drill area the program was installed with — which is also what sets
+   * how long it runs. A restart sends it back unchanged. Null or absent when
+   * the server gave none (an older BFF), and then nothing may guess one.
+   */
+  readonly headRadius?: number | null;
 }
 
 /** What a pin IS, decided by the BFF from the type's group. */
