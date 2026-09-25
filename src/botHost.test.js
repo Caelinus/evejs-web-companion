@@ -1218,3 +1218,45 @@ test("a script row never grows an abandonment field", async () => {
   await host.start(START);
   assert.equal("abandonment" in readRosterFile(rosterPath)[0], false);
 });
+
+// THE PI BOARD'S CORP READ: a read-only route may look up the session a running
+// bot holds, and only the bot's OWN account may. Nothing else leaves the host.
+function makeReadableHost() {
+  return makeHost({
+    webAuth: {
+      createSessionToken: () => "bot-token",
+      verifySessionToken: (token) => (token === "bot-token" ? { sessionID: "bot-web-session" } : null),
+    },
+  });
+}
+
+test("a running bot's session is readable by its own account", async () => {
+  const host = makeReadableHost();
+  assert.equal((await host.start(START)).ok, true);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), "bot-web-session");
+});
+
+test("another account's bot session is never handed out", async () => {
+  const host = makeReadableHost();
+  await host.start(START);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID + 1), null);
+});
+
+test("a character no bot claims has no readable session", () => {
+  const host = makeReadableHost();
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), null);
+});
+
+test("a stopped bot's session is no longer readable", async () => {
+  const host = makeReadableHost();
+  const started = await host.start(START);
+  await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), null);
+});
+
+test("the readable session never reaches the public rows", async () => {
+  const host = makeReadableHost();
+  await host.start(START);
+  const text = JSON.stringify([host.list(ACCOUNT.accountID), host.activeBots()]);
+  assert.equal(text.includes("bot-web-session"), false);
+});

@@ -3,23 +3,39 @@
 // ⚠ THE ONE READ THAT NEEDS A PILOT ONLINE. Colonies and personal hangars come
 // from each pilot's gateway snapshot with nobody selected (piRosterRead.ts),
 // but corp-owned goods are in no pilot's snapshot: the snapshot is filtered to
-// the character as owner. The corp asset read (corpmgr, GET
-// /api/bridge/corp-assets) runs on a HELD session, so it is made through a pilot
-// of that corporation who is already online in this tab — riding that pilot's
-// own session, never selecting anyone. A corp with none of its pilots online is
+// the character as owner. The corp asset read (corpmgr) runs on a HELD session,
+// so it is made through a pilot of that corporation who is ALREADY online:
+//
+//   • online in this tab — riding that pilot's own session
+//     (GET /api/bridge/corp-assets);
+//   • flown by a server bot of the player's — on the bot's session, through a
+//     read-only route that never selects, releases or stops anything
+//     (GET /api/bots/corp-assets). The call itself is made as the pilot's
+//     ACCOUNT on a throwaway sign-in, the roster read's pattern, signed in only
+//     when a bot is actually tried and signed out when the read ends.
+//
+// Nobody is selected and nobody is brought online. A corp with neither is
 // reported as such; the board says so beside the numbers and offers no sign-in.
 //
-// ⚠ ONE PILOT PER CORPORATION, TRIED IN TURN. Every member reads the same
-// hangars, so the first pilot that answers is the answer. A pilot that is
-// refused (no hangar access, a stale session) is recorded against that pilot
-// and the next one is tried: in a game where roles differ, one pilot's refusal
-// must not hide goods another pilot can see.
+// ⚠ ONE PILOT PER CORPORATION, TRIED IN TURN, THIS TAB'S FIRST. Every member
+// reads the same hangars, so the first pilot that answers is the answer. A
+// pilot that is refused (no hangar access, a stale session, a bot that just
+// ended) is recorded against that pilot and the next one is tried: in a game
+// where roles differ, one pilot's refusal must not hide goods another can see.
 //
 // ⚠ ONE OFFICE AT A TIME, for the reason piRosterRead.ts reads one account at
 // a time: the browser allows about six connections per origin, and the player's
 // own clicks must not queue behind a sweep.
 
-import { loadCorpAssets as apiLoadCorpAssets, resolveNames as apiResolveNames, type ApiOptions, type ResolveNamesResult } from "./api.ts";
+import {
+  loadBotCorpAssets as apiLoadBotCorpAssets,
+  loadCorpAssets as apiLoadCorpAssets,
+  login as apiLogin,
+  logout as apiLogout,
+  resolveNames as apiResolveNames,
+  type ApiOptions,
+  type ResolveNamesResult,
+} from "./api.ts";
 import type { JsonValue } from "../bridge/wire.ts";
 import type { NameRef } from "../store/names.ts";
 import { decodeCorpAssetItems, decodeCorpAssetLocations } from "../bridge/corpAssets.ts";
@@ -33,18 +49,50 @@ export interface OnlinePilot {
   readonly options: ApiOptions;
 }
 
+/** A roster pilot a server bot is flying, as the corp read needs it. */
+export interface BotPilot {
+  readonly characterID: number;
+  readonly corporationID: number | null;
+  /** The account the throwaway sign-in is made as. */
+  readonly accountName: string;
+}
+
 export interface PiCorpReadDeps {
   loadCorpAssets(locationID: number | null, options: ApiOptions): Promise<Record<string, JsonValue>>;
+  loadBotCorpAssets(characterID: number, locationID: number | null, options: ApiOptions): Promise<Record<string, JsonValue>>;
   resolveNames(items: readonly NameRef[], options: ApiOptions): Promise<ResolveNamesResult>;
+  /** A throwaway session token for this account. Throws when refused. */
+  signIn(accountName: string): Promise<string>;
+  signOut(token: string): Promise<void>;
   /** The browser's clock. */
   now(): number;
 }
 
 const LIVE_DEPS: PiCorpReadDeps = {
   loadCorpAssets: (locationID, options) => apiLoadCorpAssets(locationID, options),
+  loadBotCorpAssets: (characterID, locationID, options) => apiLoadBotCorpAssets(characterID, locationID, options),
   resolveNames: (items, options) => apiResolveNames(items, options),
+  async signIn(accountName) {
+    // As the roster read signs in: `token: null` keeps the tab's own session
+    // untouched, and a sign-in claims no hull.
+    const result = await apiLogin(accountName, "", { token: null });
+    if (result.sessionToken === null) throw new Error("The server did not return a session token.");
+    return result.sessionToken;
+  },
+  async signOut(token) {
+    await apiLogout({ token });
+  },
   now: () => Date.now(),
 };
+
+/** One pilot a corp can be read through, whichever session it rides. */
+interface Reader {
+  readonly characterID: number;
+  readonly viaBot: boolean;
+  /** Options for the calls; a bot's are its account's throwaway sign-in. */
+  options(): Promise<ApiOptions>;
+  load(locationID: number | null, options: ApiOptions): Promise<Record<string, JsonValue>>;
+}
 
 // The server's classification of planetary goods, by category (the same rule
 // the roster read applies to a pilot's own items in src/server.js).
@@ -63,8 +111,13 @@ function errorCode(body: Record<string, JsonValue>, field: string): string | nul
 }
 
 /** Every planetary stack in the corp's offices, through one pilot. Throws when refused. */
-async function readThrough(pilot: OnlinePilot, deps: PiCorpReadDeps): Promise<{ items: CorpStockItem[]; name: string | null }> {
-  const first = await deps.loadCorpAssets(null, pilot.options);
+async function readThrough(
+  reader: Reader,
+  corporationID: number,
+  deps: PiCorpReadDeps,
+): Promise<{ items: CorpStockItem[]; name: string | null }> {
+  const options = await reader.options();
+  const first = await reader.load(null, options);
   const refused = errorCode(first, "inventory");
   if (refused !== null) {
     throw new Error(`the server refused the corporation asset read (${refused})`);
@@ -72,7 +125,7 @@ async function readThrough(pilot: OnlinePilot, deps: PiCorpReadDeps): Promise<{ 
   const locations = decodeCorpAssetLocations(first.inventory ?? null);
   const raw: { locationID: number; typeID: number; quantity: number; division: number | null }[] = [];
   for (const location of locations) {
-    const body = await deps.loadCorpAssets(location.locationID, pilot.options);
+    const body = await reader.load(location.locationID, options);
     const code = errorCode(body, "locationInventory");
     if (code !== null) {
       throw new Error(`the server refused to list an office (${code})`);
@@ -90,14 +143,13 @@ async function readThrough(pilot: OnlinePilot, deps: PiCorpReadDeps): Promise<{ 
 
   // Names in one round trip: the offices' stations and the corporation itself.
   // A name that does not come back is left null and worded by the board.
-  const corporationID = pilot.corporationID!;
   const refs: NameRef[] = [
     { kind: "corporation", id: corporationID },
     ...[...new Set(raw.map((entry) => entry.locationID))].map((id) => ({ kind: "station" as const, id })),
   ];
   let names: Readonly<Record<string, string | null>> = {};
   try {
-    names = (await deps.resolveNames(refs, pilot.options)).names;
+    names = (await deps.resolveNames(refs, options)).names;
   } catch {
     // Unnamed is still counted: the quantities are the point.
   }
@@ -122,56 +174,101 @@ async function readThrough(pilot: OnlinePilot, deps: PiCorpReadDeps): Promise<{ 
 
 /**
  * Read the hangars of every player corporation in `corporationIDs`, each
- * through the first of its pilots online here that answers.
+ * through the first of its pilots that answers: those online in this tab
+ * first, then those a server bot is flying.
  */
 export async function readCorpStock(
   corporationIDs: readonly number[],
   online: readonly OnlinePilot[],
+  bots: readonly BotPilot[] = [],
   deps: PiCorpReadDeps = LIVE_DEPS,
 ): Promise<CorpStockRead[]> {
+  // One throwaway sign-in per account, made the first time one of its bots is
+  // tried, and every one of them signed out when the read ends.
+  const signIns = new Map<string, Promise<string>>();
+  const botOptions = (accountName: string): Promise<ApiOptions> => {
+    let token = signIns.get(accountName);
+    if (token === undefined) {
+      token = deps.signIn(accountName);
+      signIns.set(accountName, token);
+    }
+    return token.then(
+      (value): ApiOptions => ({ token: value, priority: "user" }),
+      () => {
+        throw new Error("could not sign in to this pilot's account");
+      },
+    );
+  };
+
   const reads: CorpStockRead[] = [];
-  for (const corporationID of [...new Set(corporationIDs)].filter(isPlayerCorporation)) {
-    const candidates = online.filter((pilot) => pilot.corporationID === corporationID);
-    if (candidates.length === 0) {
-      reads.push({
+  try {
+    for (const corporationID of [...new Set(corporationIDs)].filter(isPlayerCorporation)) {
+      const inTab = online.filter((pilot) => pilot.corporationID === corporationID);
+      const held = new Set(inTab.map((pilot) => pilot.characterID));
+      const candidates: Reader[] = [
+        ...inTab.map((pilot): Reader => ({
+          characterID: pilot.characterID,
+          viaBot: false,
+          options: async () => pilot.options,
+          load: (locationID, options) => deps.loadCorpAssets(locationID, options),
+        })),
+        ...bots
+          .filter((bot) => bot.corporationID === corporationID && !held.has(bot.characterID))
+          .map((bot): Reader => ({
+            characterID: bot.characterID,
+            viaBot: true,
+            options: () => botOptions(bot.accountName),
+            load: (locationID, options) => deps.loadBotCorpAssets(bot.characterID, locationID, options),
+          })),
+      ];
+      if (candidates.length === 0) {
+        reads.push({
+          corporationID,
+          corporationName: null,
+          state: "unreachable",
+          viaCharacterID: null,
+          viaBot: false,
+          readAtMs: null,
+          items: [],
+          refusals: [],
+        });
+        continue;
+      }
+      const refusals: { characterID: number; reason: string }[] = [];
+      let done: CorpStockRead | null = null;
+      for (const reader of candidates) {
+        try {
+          const { items, name } = await readThrough(reader, corporationID, deps);
+          done = {
+            corporationID,
+            corporationName: name,
+            state: "read",
+            viaCharacterID: reader.characterID,
+            viaBot: reader.viaBot,
+            readAtMs: deps.now(),
+            items,
+            refusals: [...refusals],
+          };
+          break;
+        } catch (error) {
+          refusals.push({ characterID: reader.characterID, reason: refusalWords(error) });
+        }
+      }
+      reads.push(done ?? {
         corporationID,
         corporationName: null,
-        state: "unreachable",
+        state: "failed",
         viaCharacterID: null,
+        viaBot: false,
         readAtMs: null,
         items: [],
-        refusals: [],
+        refusals,
       });
-      continue;
     }
-    const refusals: { characterID: number; reason: string }[] = [];
-    let done: CorpStockRead | null = null;
-    for (const pilot of candidates) {
-      try {
-        const { items, name } = await readThrough(pilot, deps);
-        done = {
-          corporationID,
-          corporationName: name,
-          state: "read",
-          viaCharacterID: pilot.characterID,
-          readAtMs: deps.now(),
-          items,
-          refusals: [...refusals],
-        };
-        break;
-      } catch (error) {
-        refusals.push({ characterID: pilot.characterID, reason: refusalWords(error) });
-      }
+  } finally {
+    for (const token of signIns.values()) {
+      await token.then((value) => deps.signOut(value)).catch(() => {});
     }
-    reads.push(done ?? {
-      corporationID,
-      corporationName: null,
-      state: "failed",
-      viaCharacterID: null,
-      readAtMs: null,
-      items: [],
-      refusals,
-    });
   }
   return reads;
 }

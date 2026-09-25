@@ -327,9 +327,13 @@ test("stock says where every unit sits, and what each part of the total rests on
   assert.match(text, /A pilot no longer in the hangar not read, so nothing they hold is counted\./);
 });
 
-test("the corp hangar read rides a session already online, and never signs anyone in itself", () => {
-  // It is reached only through the tab's sessions, on each pilot's own options.
+test("the corp hangar read rides a session already online, and never selects anyone", () => {
+  // A tab pilot is read on its own options; a bot-flown pilot through the
+  // bot's session, on a throwaway sign-in that leaves the tab's own untouched.
   assert.match(SOURCE, /session\.flow\.requestOptions\(\)/);
   const corpRead = readFileSync(path.join(UI_DIR, "../app/piCorpRead.ts"), "utf8");
-  assert.doesNotMatch(corpRead, /login|signIn|selectCharacter|\/api\/bridge\/select/);
+  assert.doesNotMatch(corpRead, /selectCharacter|\/api\/bridge\/select|startServerBot|stopServerBot/);
+  assert.match(corpRead, /apiLogin\(accountName, "", \{ token: null \}\)/);
+  const api = readFileSync(path.join(UI_DIR, "../app/api.ts"), "utf8");
+  assert.match(api, /getJson\(`\/api\/bots\/corp-assets\?/, "the bot read is a GET");
 });

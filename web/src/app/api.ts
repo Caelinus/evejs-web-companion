@@ -3646,6 +3646,21 @@ export async function loadCorpAssets(
   return getJson(`/api/bridge/corp-assets${query}`, options);
 }
 
+// The same corpmgr reads, made on the game session a RUNNING SERVER BOT of the
+// caller's account holds for `characterID` (GET /api/bots/corp-assets). Only a
+// read beside the bot: the route never selects, releases or stops anything,
+// and answers 409 NO_BOT_SESSION when no bot of this account flies the pilot.
+export async function loadBotCorpAssets(
+  characterID: number,
+  locationID: number | null,
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const location = locationID !== null && Number.isSafeInteger(locationID) && locationID > 0
+    ? `&locationID=${locationID}`
+    : "";
+  return getJson(`/api/bots/corp-assets?characterID=${characterID}&which=offices${location}`, options);
+}
+
 // --- R107 The hangar's training column, for pilots who are NOT signed in ----
 // GET /api/roster/training?characterIDs=a,b,c answers what each of those pilots
 // is training, read from the gateway's live queue snapshot.

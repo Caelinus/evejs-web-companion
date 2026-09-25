@@ -701,6 +701,10 @@ function createBotHost(options) {
       store: null,
       unsubscribe: null,
       claimSecret: createClaimSecret(),
+      // The web session the bot's own token names -- the key its held game
+      // session sits under in the server's bridgeSessions. Only ever handed
+      // out by readableSessionOf below, and never serialized.
+      webSessionID: null,
       deadlineTimer: null,
       // The roster row's authority for a companion (see persistRoster's
       // comment) — null for a script, which is authored by the library instead.
@@ -737,6 +741,9 @@ function createBotHost(options) {
       const token = auth.createSessionToken(account, {
         ttlMs: deadlineMs - now() + SESSION_TEARDOWN_MARGIN_MS,
       });
+      const tokenPayload =
+        typeof auth.verifySessionToken === "function" ? auth.verifySessionToken(token) : null;
+      record.webSessionID = tokenPayload && tokenPayload.sessionID ? String(tokenPayload.sessionID) : null;
       const store = stack.createClientStore();
       // Same fetch the server itself trusts, plus the bot's name on every
       // request so the select guard can tell the bot's own select from a tab's.
@@ -856,6 +863,22 @@ function createBotHost(options) {
     const botID = claims.get(Number(characterID));
     const record = botID ? records.get(botID) : null;
     return Boolean(record && !record.finalized && sameSecret(record.claimSecret, secret));
+  }
+
+  /**
+   * The web session a RUNNING bot of THIS account holds for this character, or
+   * null. A read-only route (the PI board's corp hangar read) looks the bot's
+   * held game session up by it and makes one read on it, as the vitals sampler
+   * does. Deliberately only an id: no flow and no store leave the host, so
+   * nothing that asks can drive the bot, stop it or re-select its pilot.
+   */
+  function readableSessionOf(characterID, accountID) {
+    const botID = claims.get(Number(characterID));
+    const record = botID ? records.get(botID) : null;
+    if (!record || record.finalized || record.accountID !== Number(accountID)) {
+      return null;
+    }
+    return record.webSessionID;
   }
 
   /**
@@ -1095,6 +1118,7 @@ function createBotHost(options) {
     list,
     claimedBy,
     authorizesClaim,
+    readableSessionOf,
     activeCharacterIDs,
     activeBots,
     sampleAllVitals,

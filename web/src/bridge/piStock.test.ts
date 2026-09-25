@@ -80,6 +80,7 @@ const CORP_READ: CorpStockRead = {
   corporationName: "Example Corp",
   state: "read",
   viaCharacterID: PILOT,
+  viaBot: false,
   readAtMs: NOW - 3 * MINUTE,
   items: [{ typeID: WATER, quantity: 600, locationID: 60000004, locationName: "Alpha VI - Moon 2", division: 3 }],
   refusals: [],
@@ -133,7 +134,7 @@ test("a corp that could not be read adds nothing, and the sources say why", () =
   });
   assert.deepEqual(lines, [
     { words: "Colonies and personal hangars - 1 pilot, oldest read 2 minutes ago", warn: false },
-    { words: "Corp hangars of Pilot One's corporation - not read: none of its pilots is online in this tab. Bring one online and Refresh.", warn: true },
+    { words: "Corp hangars of Pilot One's corporation - not read: none of its pilots is online in this tab or flown by a server bot. Bring one online and Refresh.", warn: true },
   ]);
 });
 
@@ -146,6 +147,17 @@ test("the sources name the pilot a corp was read through, and who was refused fi
     browserNowMs: NOW,
   });
   assert.equal(lines[1]!.words, "Example Corp hangars - read through Pilot Two 3 minutes ago (Pilot One refused: no hangar access)");
+});
+
+test("a corp read through a server bot says so", () => {
+  const lines = stockSources({
+    members: [PILOT],
+    readings: new Map([[PILOT, reading(PILOT)]]),
+    names: NAMES,
+    corpReads: [{ ...CORP_READ, viaCharacterID: OTHER_PILOT, viaBot: true }],
+    browserNowMs: NOW,
+  });
+  assert.equal(lines[1]!.words, "Example Corp hangars - read through Pilot Two (server bot) 3 minutes ago");
 });
 
 test("⚠ a reading stored before stock was sent is 'not read yet', never 'holds nothing'", () => {

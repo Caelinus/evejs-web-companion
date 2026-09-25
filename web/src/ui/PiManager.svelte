@@ -53,7 +53,7 @@
     type CorpStockRead,
   } from "../bridge/piStock.ts";
   import { missingByTier, planStepCounts, planWithStock, type PlanNode, type PlannerColony } from "../bridge/piPlanner.ts";
-  import { readCorpStock, type OnlinePilot } from "../app/piCorpRead.ts";
+  import { readCorpStock, type BotPilot, type OnlinePilot } from "../app/piCorpRead.ts";
   import {
     createPiPlan,
     deletePiPlan,
@@ -76,8 +76,9 @@
 
   // ⚠ THE SESSIONS ARE FOR CORP HANGARS ONLY. Corp-owned goods are in no
   // pilot's snapshot, so they are read through a pilot of that corporation who
-  // is already online in this tab, on that pilot's own session
-  // (app/piCorpRead.ts). Nothing here selects, signs in or brings anyone online.
+  // is already online: in this tab, on that pilot's own session, or flown by a
+  // server bot, on the bot's session through a read-only route
+  // (app/piCorpRead.ts). Nothing here selects or brings anyone online.
   let { sessions = [] }: { sessions?: readonly Session[] } = $props();
 
   let roster = $state<PiRosterPrefs>(loadPiRoster());
@@ -505,6 +506,21 @@
     return pilots;
   }
 
+  /**
+   * Roster pilots a server bot is flying, for the corp hangar read. Roster
+   * pilots only: a pilot's corporation is known from its last colony read.
+   */
+  function botPilots(): BotPilot[] {
+    const pilots: BotPilot[] = [];
+    for (const [characterID, reading] of piReadings(roster)) {
+      if (!activeBots.has(characterID)) continue;
+      const accountName = known.find((pilot) => pilot.characterID === characterID)?.accountName;
+      if (!accountName) continue;
+      pilots.push({ characterID, corporationID: reading.corporationID ?? null, accountName });
+    }
+    return pilots;
+  }
+
   async function refreshCorpStock(): Promise<void> {
     const online = onlinePilots();
     const corporations = [
@@ -512,7 +528,7 @@
       ...online.map((pilot) => pilot.corporationID),
     ].filter(isPlayerCorporation);
     try {
-      corpReads = await readCorpStock(corporations, online);
+      corpReads = await readCorpStock(corporations, online, botPilots());
     } catch {
       // Each corp's outcome is caught inside the read; keep the last answer.
     }
@@ -527,7 +543,8 @@
     if (reading || roster.members.length === 0) return;
     reading = true;
     known = loadKnownCharacters();
-    void loadActiveBots();
+    // Awaited before the corp read below, which reads through bot-flown pilots.
+    const botsRead = loadActiveBots();
     const asked = roster.members;
     attempts = new Map(asked.map((id) => [id, "reading" as const]));
     try {
@@ -548,6 +565,7 @@
         },
       });
       // After the roster, because it names each pilot's corporation.
+      await botsRead;
       await refreshCorpStock();
     } finally {
       reading = false;
