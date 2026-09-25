@@ -46,7 +46,7 @@ export const BOT_RISK_LABELS: Readonly<Record<BotRiskClass, string>> = Object.fr
 });
 
 export const DEFAULT_SERVER_BOT_RUNTIME_MINUTES = 12 * 60;
-export const MAX_SERVER_BOT_RUNTIME_MINUTES = 24 * 60;
+export const MAX_SERVER_BOT_RUNTIME_MINUTES = 72 * 60;
 
 /**
  * Authority for one server-side launch. It is intentionally narrow: the exact

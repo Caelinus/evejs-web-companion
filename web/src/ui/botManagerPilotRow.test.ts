@@ -92,7 +92,7 @@ test("the bot picker lists the library rows it was handed, and fetches nothing i
 
 test("the server run limit offers the same choices as the Bots launcher", () => {
   const text = visibleText(renderRow({ session: fakeSession() }));
-  for (const label of ["1 hour", "4 hours", "12 hours", "24 hours"]) {
+  for (const label of ["1 hour", "4 hours", "12 hours", "24 hours", "48 hours", "72 hours"]) {
     assert.match(text, new RegExp(label));
   }
 });

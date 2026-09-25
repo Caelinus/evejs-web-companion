@@ -732,7 +732,7 @@ function createBotHost(options) {
     try {
       // The token covers the APPROVED RUN, not the web default: a bot flying
       // for an hour holds an hour's credential, and one approved for longer
-      // than a browser session lives (runPolicy allows up to 24h, the default
+      // than a browser session lives (runPolicy allows up to 72h, the default
       // sign-in is 12h) is no longer cut off in silence halfway through. See
       // SESSION_TEARDOWN_MARGIN_MS for why it outlives the deadline, and
       // webAuth.createSessionToken for the rail on how far this can be pushed.
