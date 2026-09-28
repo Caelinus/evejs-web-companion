@@ -37,6 +37,8 @@
   import {
     serverBotFor,
     serverOnlyBots,
+    mergeServerRosters,
+    type RosterRead,
     endedRuns,
     runOutcomePhrase,
     lastAlertPhrase,
@@ -65,20 +67,45 @@
   // never collapse into "nothing running" (a player could act on that lie).
   let pilotsLoaded = $state(false);
   let pilotsError = $state<string | null>(null);
-  let serverBots = $state<ServerBot[]>([]);
+  let pilotsWarning = $state<string | null>(null);
+  let serverBots = $state<readonly ServerBot[]>([]);
+  /** botID -> the pilot flow whose account listed it, and so may stop it. */
+  let botOwners = $state<ReadonlyMap<string, AppFlow>>(new Map());
 
+  const heldSessions = $derived(sessions ?? []);
+
+  // The server lists (and stops) bots PER ACCOUNT, and pilots here may be on
+  // different accounts — so ask once per pilot, each with its own login, and
+  // merge (see mergeServerRosters). With no roster threaded in, the panel's
+  // own flow is the only pilot there is.
   async function refreshPilots(): Promise<void> {
+    const flows = [...new Set(heldSessions.length > 0 ? heldSessions.map((s) => s.flow) : [flow])];
     try {
-      serverBots = await listServerBots(botOpts());
+      const reads = await Promise.all(
+        flows.map(async (source): Promise<RosterRead<AppFlow>> => {
+          try {
+            return { source, ok: true, bots: await listServerBots(source.requestOptions()) };
+          } catch {
+            return { source, ok: false };
+          }
+        }),
+      );
+      const merged = mergeServerRosters(reads);
+      if (merged.failed === reads.length) {
+        pilotsError = "Could not load the server's bot roster - are you still logged in?";
+        return;
+      }
+      serverBots = merged.bots;
+      botOwners = merged.ownerOf;
       pilotsError = null;
-    } catch {
-      pilotsError = "Could not load the server's bot roster — are you still logged in?";
+      pilotsWarning =
+        merged.failed === 0
+          ? null
+          : `Could not read the server bots for ${merged.failed} of your pilots, so a bot one of them started may be missing below.`;
     } finally {
       pilotsLoaded = true;
     }
   }
-
-  const heldSessions = $derived(sessions ?? []);
   // Characters a held session already covers, so a server-only row is never
   // shown twice for a pilot whose tab happens to be open right here.
   const heldCharacterIDs = $derived(
@@ -215,6 +242,7 @@
   {:else if heldSessions.length === 0 && extraServerBots.length === 0}
     <p class="empty">No pilots online.</p>
   {:else}
+    {#if pilotsWarning}<p class="note error">{pilotsWarning}</p>{/if}
     <div class="table-wrap overflow-x-auto">
       <table class="guests reflow">
         <thead>
@@ -237,7 +265,12 @@
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}
-            <BotManagerPilotRow serverBot={bot} {scripts} onChanged={refreshPilots} />
+            <BotManagerPilotRow
+              serverBot={bot}
+              ownerFlow={botOwners.get(bot.botID)}
+              {scripts}
+              onChanged={refreshPilots}
+            />
           {/each}
         </tbody>
       </table>

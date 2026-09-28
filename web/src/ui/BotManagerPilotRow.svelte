@@ -21,6 +21,7 @@
   // at the top level.
   import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
   import type { Session } from "../app/sessions.ts";
+  import type { AppFlow } from "../app/flow.ts";
   import { pilotRunState, serverRunState, type PilotRunState } from "../bots/pilotRoster.ts";
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
@@ -30,11 +31,18 @@
   let {
     session,
     serverBot,
+    ownerFlow,
     scripts,
     onChanged,
   }: {
     session?: Session;
     serverBot: ServerBot | null;
+    /**
+     * For a server-only row: the pilot whose login LISTED this bot. The
+     * server's stop is per account like its list, so that is a login allowed
+     * to stop it — the active pilot's may belong to another account.
+     */
+    ownerFlow?: AppFlow;
     /** The library rows the panel already loaded — this row never fetches its own. */
     scripts: readonly BotScriptSummary[];
     /** Fires after a stop OR a start, so the panel refreshes the roster and server-bot list either way. */
@@ -158,11 +166,12 @@
     busy = true;
     stopError = null;
     try {
-      // Direct api.ts calls must ride the owning pilot's flow options; a
-      // server-only row (no session held here) has no flow of its own and
-      // falls back to the tab's active-pilot token, same as any other legacy
-      // call without per-session options (see App.svelte's token mirror).
-      await stopServerBot(serverBot.botID, session?.flow.requestOptions() ?? {});
+      // Direct api.ts calls must ride the owning pilot's flow options. A
+      // server-only row (no session held here) uses the login that listed the
+      // bot — same account, so allowed to stop it — and only without one
+      // falls back to the tab's active-pilot token (App.svelte's token mirror).
+      const options = (session?.flow ?? ownerFlow)?.requestOptions() ?? {};
+      await stopServerBot(serverBot.botID, options);
       onChanged();
     } catch {
       stopError = "Could not stop that bot — it may have already ended.";
