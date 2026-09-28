@@ -221,11 +221,15 @@ export function setInterruptFraction(
 // and SubBotNode — everything a `ProgramNode` can be EXCEPT a top-level LoopBlock
 // (the editor supplies its own single outer loop, or none at all for a run-once
 // bot; a loop nested inside that list has nowhere to go). Copying steps IN FROM
-// a saved bot must respect that same limit rather than quietly flattening a
-// LoopBlock's body into loose steps — that would drop its repeat count, and it
-// would also flatten any branch riding inside it into two loose step lists, which
-// is not the same bot. So a source bot's own top-level loops are left out and
-// reported in plain language; everything else it can legally hold is copied.
+// a saved bot must respect that same limit.
+//
+// ⚠ A TOP-LEVEL LOOP IS THE COMMON CASE, NOT AN EDGE. The editor itself saves
+// every repeating bot (its default) as ONE `main-loop` LoopBlock, so skipping
+// loops would copy nothing from almost any saved bot. A loop's body is exactly
+// what the flat list holds (LoopBodyNode = MacroStep | BranchBlock — a branch in
+// it stays a whole branch), so the body's steps are copied in, in order. What
+// cannot come along is the source's REPEAT COUNT — the bot being edited keeps its
+// own repeat setting — and that is said in plain language, never dropped quietly.
 
 /** What the flat editor's list may directly contain. */
 export type FlatProgramNode = MacroStep | BranchBlock | SubBotNode;
@@ -234,8 +238,9 @@ export interface InsertSavedBotResult {
   /** The editor's list with the source bot's copyable steps appended. */
   readonly steps: readonly FlatProgramNode[];
   /**
-   * Plain sentences (R9a) about anything from the source bot that could not be
-   * copied in, so the caller can tell the player. Empty when nothing was left out.
+   * Plain sentences (R9a) about anything from the source bot that did not carry
+   * over as it was (a repeat count), so the caller can tell the player. Empty
+   * when the copy is exact.
    */
   readonly left: readonly string[];
 }
@@ -289,24 +294,28 @@ export function insertSavedBotSteps(
   };
 
   const appended: FlatProgramNode[] = [];
-  let loopsLeftOut = 0;
+  let loopsUnwrapped = 0;
   for (const node of source.program) {
     if (node.kind === "loop") {
-      // Not representable in the flat list — see the note above. Skipped, not
-      // flattened, and counted so the caller can say so.
-      loopsLeftOut += 1;
+      // The loop itself has nowhere to go in the flat list — see the note
+      // above — but its body does: copy those steps (a branch stays whole), and
+      // count the repeat that did not come along so the caller can say so.
+      for (const element of node.body) {
+        appended.push(cloneWithFreshIds(element, fresh) as FlatProgramNode);
+      }
+      loopsUnwrapped += 1;
       continue;
     }
     appended.push(cloneWithFreshIds(node, fresh) as FlatProgramNode);
   }
 
   const left: string[] = [];
-  if (loopsLeftOut > 0) {
+  if (loopsUnwrapped > 0) {
     const label = source.name.trim().length > 0 ? `"${source.name.trim()}"` : "That saved bot";
     left.push(
-      loopsLeftOut === 1
-        ? `${label} repeats a group of steps; that repeating part could not be copied in, so add it by hand if you want it.`
-        : `${label} repeats ${loopsLeftOut} groups of steps; those repeating parts could not be copied in, so add them by hand if you want them.`,
+      loopsUnwrapped === 1
+        ? `${label} repeats its steps; they were copied in once, and this bot's own repeat setting decides how often they run.`
+        : `${label} repeats ${loopsUnwrapped} groups of steps; each was copied in once, and this bot's own repeat setting decides how often they run.`,
     );
   }
 

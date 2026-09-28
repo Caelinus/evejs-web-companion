@@ -231,25 +231,57 @@ test("insertSavedBotSteps appends copies of a source bot's steps with fresh ids"
   assert.ok(copy1.kind === "macro" && copy1.macro === "mine-at-belt", "contents are preserved");
 });
 
-test("insertSavedBotSteps leaves a top-level loop out and reports it, rather than flattening it", () => {
+test("insertSavedBotSteps copies a top-level loop's body in order, and says the repeat did not come along", () => {
   const make = counter();
   const loopBody: MacroStep = { id: "b1", kind: "macro", macro: "mine-at-belt", args: {}, until: { kind: "hold-empty" } };
+  const inner: BranchBlock = {
+    id: "b2",
+    kind: "branch",
+    when: { kind: "shield-below", fraction: 0.3 },
+    then: [{ id: "t1", kind: "macro", macro: "repair-ship", args: {} }],
+    else: [],
+  };
   const source = sourceScript(
     [
-      { id: "l1", kind: "loop", repeat: { kind: "times", count: 10 }, body: [loopBody] },
+      { id: "l1", kind: "loop", repeat: { kind: "times", count: 10 }, body: [loopBody, inner] },
       { id: "s1", kind: "macro", macro: "undock", args: {} },
     ],
     "Mining loop bot",
   );
 
   const result = insertSavedBotSteps([], source, make);
-  // The loop was not silently flattened into its bare body — it is left out...
-  assert.equal(result.steps.length, 1, "only the plain top-level step was copied in");
-  assert.ok(result.steps[0]?.kind === "macro" && result.steps[0].macro === "undock");
-  // ...and reported in plain language so the caller can tell the player.
+  // The loop's body is copied in order, its branch kept whole, then the rest.
+  assert.equal(result.steps.length, 3);
+  assert.ok(result.steps[0]?.kind === "macro" && result.steps[0].macro === "mine-at-belt");
+  assert.ok(result.steps[1]?.kind === "branch" && result.steps[1].then.length === 1);
+  assert.ok(result.steps[2]?.kind === "macro" && result.steps[2].macro === "undock");
+  const ids = result.steps.flatMap((s) => (s.kind === "branch" ? [s.id, ...s.then.map((t) => t.id)] : [s.id]));
+  assert.equal(new Set(ids).size, ids.length, "every copied id is fresh and unique");
+  assert.ok(!ids.includes("b1") && !ids.includes("b2") && !ids.includes("t1"));
+  // The repeat count is the one thing that did not carry over — said plainly.
   assert.equal(result.left.length, 1);
   assert.match(result.left[0] ?? "", /Mining loop bot/);
-  assert.match(result.left[0] ?? "", /repeats a group of steps/);
+  assert.match(result.left[0] ?? "", /repeat setting/);
+});
+
+test("insertSavedBotSteps copies the steps of a bot saved the way the editor saves a repeating bot", () => {
+  // Regression: the Builder saves any repeating bot (its default) as ONE
+  // `main-loop` LoopBlock, and skipping loops made "Insert steps" copy nothing.
+  const make = counter();
+  const source = sourceScript([
+    {
+      id: "main-loop",
+      kind: "loop",
+      repeat: { kind: "times", count: 20 },
+      body: [
+        { id: "n1", kind: "macro", macro: "undock", args: {} },
+        { id: "n2", kind: "macro", macro: "deliver-ore", args: {} },
+      ],
+    },
+  ]);
+
+  const result = insertSavedBotSteps([], source, make, new Set(["main-loop"]));
+  assert.equal(result.steps.length, 2, "both steps inside the saved loop were copied in");
 });
 
 test("insertSavedBotSteps respects reservedIDs and never collides across many inserts", () => {
