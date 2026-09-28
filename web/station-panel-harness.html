@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Station panel harness</title>
+    <!--
+      DEV-ONLY INTERACTION HARNESS for the docked Station panel.
+
+      WHY IT EXISTS. The panel's tests render it through `svelte/server`, where
+      `$effect`, `onMount` and every event handler are dead — and its whole
+      selection story lives in component state that only a pointer can set. So
+      the suite can prove what the panel DRAWS and `inventoryModel.ts` can prove
+      where a stack may GO, and neither can press a button.
+
+      The only other way to press one is to bring up the BFF, bring up the
+      gateway, sign a pilot in and dock. That is far too much ceremony to pay
+      every time a column moves, so in practice the interactions would never be
+      driven at all. Same reasoning as `tactical-harness.html`.
+
+      `src/stationPanelHarness.ts` mounts the REAL component against a
+      fabricated world and a flow stub that actually moves things, so a
+      confirmed move can be watched emptying one place and filling another.
+
+      It is NOT part of the build: `vite.config.ts` builds `web/index.html`
+      only. Open it with `npm run dev:web` at /station-panel-harness.html.
+    -->
+    <style>
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        background: #05080d;
+        color: #8fa3b8;
+        font: 13px "Segoe UI", system-ui, sans-serif;
+      }
+      .bar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid #1b2836;
+      }
+      .bar b {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #7fb4d9;
+        margin-right: 0.5rem;
+      }
+      .bar button {
+        min-height: 26px;
+        padding: 0 0.6rem;
+        background: #101c2b;
+        border: 1px solid #2a4360;
+        color: #c8d4e2;
+        font: inherit;
+        cursor: pointer;
+      }
+      .bar button.on {
+        border-color: #8ec5ee;
+        color: #e8f3fb;
+      }
+      .bar span {
+        margin-left: auto;
+        font-size: 11px;
+      }
+      main {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        gap: 0.75rem;
+        padding: 0.75rem;
+      }
+      /* The mount host, matching what the shell gives the panel: the whole box,
+         no padding of its own, nothing that scrolls around it. */
+      #frame {
+        flex: none;
+        width: 380px;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        overflow: hidden;
+        border: 1px solid #1b2836;
+        resize: horizontal;
+      }
+      #panel {
+        display: flex;
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+      }
+      #log {
+        flex: 1;
+        min-width: 0;
+        overflow: auto;
+        padding: 0.5rem 0.6rem;
+        border: 1px solid #1b2836;
+        background: #070b11;
+        font: 11px/1.6 "JetBrains Mono", ui-monospace, Consolas, monospace;
+        color: #6cc79a;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <b>Panel width</b>
+      <button type="button" data-width="260">260</button>
+      <button type="button" data-width="380" class="on">380</button>
+      <button type="button" data-width="560">560</button>
+      <button type="button" data-width="640">640</button>
+      <button type="button" data-width="900">900</button>
+      <button type="button" data-width="fill">fill</button>
+      <span>the frame's own bottom-right corner drags too · every flow call is logged on the right</span>
+    </div>
+    <main>
+      <div id="frame"><div id="panel"></div></div>
+      <div id="log"></div>
+    </main>
+    <script type="module" src="./src/stationPanelHarness.ts"></script>
+  </body>
+</html>

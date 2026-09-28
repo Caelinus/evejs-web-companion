@@ -525,7 +525,11 @@ const INITIAL_TARGETING: TargetingState = Object.freeze({
 // deliberately the same shape as the live-notification cap above: the stream is
 // allowed to drop and resynchronise, so a longer buffer would only make the
 // gaps less obvious, not less real.
-const DAMAGE_LOG_LIMIT = 40;
+// ⚠ EXPORTED so the Shots panel can NAME the number instead of keeping its own
+// copy of it. That panel's totals are a sum over this buffer and nothing more,
+// so it has to say "over the last N shots" — and an N written down twice is an
+// N that goes wrong in one place, silently, the first time this cap moves.
+export const DAMAGE_LOG_LIMIT = 40;
 
 // R23 slice B — the mining loop. `taxRate` starts NULL, not 0: reprocessing
 // debits the station's tax from the wallet, and a confident zero before any

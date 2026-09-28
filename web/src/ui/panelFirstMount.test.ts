@@ -46,8 +46,11 @@ const PANELS = [
   "Workspace",
   "LoginForm",
   "CharacterSelect",
+  // The "Inventory & Ship" panel, in BOTH states: the right-hand dock frame
+  // while docked, the Neocom's floating window while flying, and the mobile
+  // home. It renders with nothing but a store and a flow, exactly as it does on
+  // a cold mount before the first read answers.
   "StationPanel",
-  "InventoryShip",
   "Fitting",
   "Industry",
   "Market",
@@ -60,7 +63,13 @@ const PANELS = [
   "AgentsMissions",
   "AgentFinder",
   "Flight",
-  "Overview",
+  // ⚠ "Overview" WAS THE COCKPIT, and it does not exist. What it became is
+  // listed instead — each of these renders on a cold store, which is exactly the
+  // paint a pilot gets on the first frame after undocking.
+  "SpaceOverview",
+  "DronesPanel",
+  "ShotsPanel",
+  "EquipmentPanel",
   "MiningBot",
   "MissionBot",
   "Mining",

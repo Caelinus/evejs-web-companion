@@ -65,9 +65,13 @@ test("the gauges start at the bottom left", () => {
 });
 
 test("the gauges leave a gap centred on the bottom", () => {
-  // 135° -> 405°, so the untouched span is 45°..135°, centred on 90° (the
-  // bottom). That gap is where the capacitor readout sits.
-  assert.equal(GAUGE_START_DEG + GAUGE_SWEEP_DEG, 405);
+  // 150° -> 390°, so the untouched span is 30°..150°, centred on 90° (the
+  // bottom). That gap is where the speed readout sits.
+  //
+  // ⚠ The numbers moved for the in-space redesign (a 240° sweep instead of
+  // 270°) and the SHAPE did not: both assertions below held before and after,
+  // which is the point of testing the shape rather than the constant.
+  assert.equal(GAUGE_START_DEG + GAUGE_SWEEP_DEG, 390);
   const end = polarPoint(CX, CY, 10, GAUGE_START_DEG + GAUGE_SWEEP_DEG);
   assert.ok(end.x > CX, "ends right of centre");
   assert.ok(end.y > CY, "and below it");

@@ -104,6 +104,12 @@ test("distances read in the units a player expects", () => {
   assert.equal(formatDistance(750), "750 m");
   assert.equal(formatDistance(1_500), "1.5 km");
   assert.equal(formatDistance(250_000), "250 km");
+  // ⚠ Whole kilometres are GROUPED, asserted locale-independently: the
+  // separator differs by machine, the digits and their count do not.
+  const far = formatDistance(12_040_310_000);
+  assert.match(far, /km$/);
+  assert.equal(far.replace(/\D/g, ""), "12040310");
+  assert.notEqual(far, "12040310 km", "a long distance must be grouped to be read");
   assert.equal(formatDistance(3 * METRES_PER_AU), "3.0 AU");
   assert.equal(formatDistance(Number.NaN), "—");
 });

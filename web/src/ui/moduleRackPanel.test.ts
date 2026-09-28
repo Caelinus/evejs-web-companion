@@ -197,3 +197,188 @@ test("R7d — no raw ids reach the player's eyes", () => {
     );
   }
 });
+
+// --- press-and-hold to overload ----------------------------------------------
+//
+// The gesture that guards overloading changed from shift-click to a hold. These
+// are source claims rather than render claims because SSR runs no handlers at
+// all: what can be proven here is that the wiring exists and that the OLD
+// wiring is gone, which is exactly the pair that rots when someone "restores"
+// the familiar modifier.
+
+const RACK_SOURCE = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
+const CSS_SOURCE = readFileSync(path.join(UI_DIR, "..", "styles.css"), "utf8");
+
+test("⚠ SHIFT-CLICK IS GONE — it does not exist on a touch screen", () => {
+  assert.equal(
+    /shiftKey/.test(RACK_SOURCE),
+    false,
+    "shift-click came back; on the touch tier this panel now has, it is unreachable",
+  );
+  assert.equal(
+    /Shift-click/.test(RACK_SOURCE),
+    false,
+    "the tooltip still names a modifier the player may not be able to press",
+  );
+});
+
+test("the hold is wired for a pointer AND for a keyboard", () => {
+  for (const handler of ["onpointerdown", "onpointerup", "onpointerleave", "onkeydown", "onkeyup"]) {
+    assert.match(RACK_SOURCE, new RegExp(handler), `no ${handler} — the press is incomplete`);
+  }
+  // ⚠ The keyboard path must suppress the browser's own click for the key, or a
+  // tap fires the module twice. Trading one inaccessible gesture for another is
+  // not a fix.
+  assert.match(RACK_SOURCE, /event\.preventDefault\(\)/);
+});
+
+test("a press that slides off the button does nothing at all", () => {
+  // Not the overload, and not the activation either: dragging off a control is
+  // how a player takes a press back.
+  assert.match(RACK_SOURCE, /function pressCancel\(\)/);
+  assert.match(RACK_SOURCE, /onpointerleave=\{pressCancel\}/);
+});
+
+test("the slot ring is a drawn CIRCLE, not a rounded corner (R53)", () => {
+  // R53 squared this app's corners and squareCorners.test.ts holds them squared.
+  // The round slot face is an SVG circle INSIDE the square tile — the same
+  // exception `.fit-ring-guide` already is.
+  assert.match(RACK_SOURCE, /<circle class="slot-ring-track"/);
+  // ⚠ BOUNDED BY THE RULE'S OWN BRACE. It used to run to
+  // `button.module-slot:hover`, which was the next rule until hover moved onto
+  // the ring — after which this slice swept up half the rack's styling and the
+  // claim stopped being about the tile at all.
+  const at = CSS_SOURCE.indexOf("  .module-slot {");
+  const slotRule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
+  assert.ok(slotRule.length > 0, "the .module-slot rule is not where this test looks");
+  assert.equal(
+    /border-radius/.test(slotRule),
+    false,
+    "the tile was rounded — draw the circle, do not round the box",
+  );
+  // ⚠ AND THE TILE IS NOT PAINTED AT ALL. The square box came off: it drew a
+  // filled bordered rectangle around the circle, both in the same line colour,
+  // and the square won. The 42px box stays as layout and touch target; the ring
+  // is the only thing drawn.
+  assert.match(slotRule, /border: none;/, "the tile got its box back");
+  assert.match(slotRule, /background: none;/, "the tile got its fill back");
+});
+
+// --- rack heat: a stub that admits it ----------------------------------------
+
+test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {
+  const body = renderRack();
+  assert.match(body, /class="rack-heat/, "the heat bar is missing entirely");
+  assert.match(visibleText(body), /not known/, "the heat bar invented a reading");
+  // The trap — damage is the SCAR heat leaves behind, not the heat in the rack
+  // now — is proven on damaged modules in `moduleRack.test.ts`. What is proven
+  // HERE is the rendering half: no fill element is drawn at all, so there is
+  // nothing for a later "just show something" change to quietly start filling.
+  assert.equal(
+    /rack-heat-fill/.test(body),
+    false,
+    "a heat fill was drawn from a reading this client does not have",
+  );
+  assert.equal(/Heat 0/.test(visibleText(body)), false, "not known must never render as 0");
+});
+
+test("⚠ THE HEAT READING IS PART OF THE ROW HEADER, on one line with the name", () => {
+  // It used to be stacked under the rack's name, which made every rack row two
+  // lines tall beside a 42px slot and left "heat not known" reading as a second
+  // label hanging under HIGH. Inline it is one statement about one rack.
+  assert.match(CSS_SOURCE, /\.rack-row-label \{[\s\S]{0,700}flex-direction: row;/);
+  // ⚠ AND THE NAME IS A FIXED WIDTH. At `auto` each name sized to its own word
+  // — HIGH 22px, LOW 20, MID 17 — and the bar took up the slack, so the three
+  // heat bars started at three different x and could not be read down against
+  // each other. Measured live after the fix: all three start at the same x and
+  // are the same width.
+  assert.match(CSS_SOURCE, /\.rack-name \{[\s\S]{0,500}flex: 0 0 22px;/);
+  // The label cell still comes second (after the gutter) and is still fixed —
+  // the claim above. The columns moved from `.rack-row` to the shared grid on
+  // `.module-rack-rows`; see the `display: contents` test in mobileStack.
+  const at = CSS_SOURCE.indexOf("  .module-rack-rows {");
+  assert.match(
+    CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at)),
+    /grid-template-columns: auto \d+px minmax\(0, 1fr\)/,
+  );
+});
+
+test("⚠ THE GUTTER ICON IS ON THE RACK'S CENTRE LINE — FOUND BY EYE", () => {
+  // At 26px square, top-aligned against a 42px row, the glyph rode 8px above
+  // the line the rack's name, its heat bar and every module tile share. That is
+  // the one line this instrument has, and the only thing that was off it was
+  // the control that had just been added to it.
+  //
+  // ⚠ THE SLOT BOX IS WRITTEN DOWN ONCE, and that is the actual fix. The tile
+  // and the gutter both read `--rack-slot`, so a rack row and the icon beside
+  // it cannot disagree about how tall a row is. Two literals is how they came
+  // to disagree in the first place.
+  assert.match(CSS_SOURCE, /\.module-rack-rows \{[\s\S]{0,400}--rack-slot: 42px;/);
+  assert.match(CSS_SOURCE, /width: var\(--rack-slot, 42px\);/);
+  assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,900}height: var\(--rack-slot, 42px\);/);
+  // The extra height is hit area, not ink — the glyph itself stays 16px.
+  assert.match(CSS_SOURCE, /\.rack-bank svg \{[\s\S]{0,120}width: 16px;/);
+});
+
+test("⚠ WEAPON BANKING IS AN ICON IN THE RACK'S GUTTER, and still says what it is", () => {
+  // It was a strip under the racks: a sentence of state and a button spelling
+  // out the action, two lines from the guns it acts on. It is an icon beside
+  // the HIGH rack now — the only rack whose modules banking can affect.
+  //
+  // ⚠ THE WORDS DID NOT GO WITH THE LABEL. `title` and the accessible name both
+  // carry the action AND what is true right now, and `aria-pressed` says the
+  // state again in a way a screen reader reads as state. The two glyphs differ
+  // in SHAPE — a joined chain against a broken one — so nothing rests on colour.
+  assert.match(RACK_SOURCE, /class="rack-bank"/);
+  assert.match(RACK_SOURCE, /aria-pressed=\{linked\}/);
+  assert.match(RACK_SOURCE, /"Link weapons — weapons fire one at a time"/);
+  assert.match(RACK_SOURCE, /`Unlink weapons — \$\{bankedCount\} weapon/);
+  assert.match(RACK_SOURCE, /aria-label=\{linked$/m);
+  // Drawn, not an emoji — the reason the overload dot is drawn.
+  assert.match(RACK_SOURCE, /<svg viewBox="0 0 24 24" aria-hidden="true">/);
+  assert.equal(/rack-banks/.test(RACK_SOURCE), false, "the old strip came back");
+  assert.equal(/rack-banks/.test(CSS_SOURCE), false, "the old strip's styling came back");
+  // It sits in a GUTTER CELL of the high row, so the row's own centring puts it
+  // on the same line as the name, the bar and the tiles — whatever height the
+  // row takes when its slots wrap. It was a column beside the whole stack, and
+  // on a phone, where the high rack wraps, that left it 23px high.
+  assert.match(RACK_SOURCE, /<span class="rack-gutter">/);
+  assert.match(RACK_SOURCE, /\{#if row\.family === "high" && weaponsCount > 1 && flow\}/);
+  assert.equal(/rack-stack/.test(CSS_SOURCE), false, "the old gutter column came back");
+  assert.match(CSS_SOURCE, /\.module-rack-rows \{[\s\S]{0,1200}align-items: center;/);
+  assert.match(CSS_SOURCE, /\.rack-bank \{[\s\S]{0,400}width: 26px;/);
+  // Under a coarse pointer only the WIDTH grows — the height is already a
+  // slot, and a slot clears R8's minimum on its own.
+  assert.match(CSS_SOURCE, /@media \(pointer: coarse\) \{[\s\S]{0,200}\.rack-bank \{ width: var\(--rack-slot, 42px\);/);
+});
+
+test("⚠ THE HEAT READING IS A COLUMN, not something that lands after the slots", () => {
+  // FOUND BY EYE, ON THE PHONE. The first build pushed the heat to the end of
+  // the row with `margin-left: auto`, so each rack's reading landed wherever
+  // that rack's slots happened to stop wrapping — three rows, three different
+  // positions, and nothing you could read down.
+  //
+  // The handoff's row is `44px minmax(0,1fr)`: a fixed label cell holding the
+  // rack name, the bar and the reading, then the slots. A fixed first column is
+  // what makes the three readings a column at all.
+  // The columns live on `.module-rack-rows` now, shared by all three rows —
+  // see the `display: contents` test in mobileStack.test.ts.
+  const at = CSS_SOURCE.indexOf("  .module-rack-rows {");
+  const rule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
+  assert.ok(rule.length > 0, "the shared grid is not where this test looks");
+  assert.match(rule, /display: grid/);
+  assert.match(rule, /grid-template-columns: auto \d+px minmax\(0, 1fr\)/);
+  assert.equal(/margin-left: auto/.test(CSS_SOURCE.slice(
+    CSS_SOURCE.indexOf("  .rack-row-label {"),
+    CSS_SOURCE.indexOf("  .rack-slots {"),
+  )), false, "the heat drifted to the end of the row again");
+  // And in the markup, the label cell holds all three pieces — before the slots.
+  const label = RACK_SOURCE.slice(
+    RACK_SOURCE.indexOf('class="rack-row-label"'),
+    RACK_SOURCE.indexOf('class="rack-slots"'),
+  );
+  assert.ok(label.length > 0, "the label cell no longer precedes the slots");
+  assert.match(label, /rack-name/);
+  assert.match(label, /rack-heat-track/);
+  assert.match(label, /rack-heat-value/);
+});

@@ -2555,13 +2555,64 @@
     gap: 0.6rem;
     padding: 0.6rem;
   }
+  /* THE WORK AREA IS A GRID, and it is the same grid in both states.
+   *
+   * Docked there is one row: the window surface on the left, the Station panel
+   * on the right. In space the left side splits — the radar keeps the top and
+   * the ship HUD takes a fixed strip beneath it — while the dock column spans
+   * both rows, so the overview stays full height.
+   *
+   * ⚠ THE HUD IS A CELL, NOT A FOOTER. It used to sit under the whole work area,
+   * which meant the dock column stopped short of the bottom of the screen for
+   * no reason. Moving it inside costs nothing docked, where the row does not
+   * exist at all.
+   *
+   * ⚠ AND THE WINDOW SURFACE IS THE RADAR'S CELL. That is what gives the
+   * handoff's "floating windows live only inside the radar rect" for free: the
+   * windows are children of `.desktop`, and every clamp in DesktopWindow and
+   * Desktop already measures `.desktop`. Nothing about the clamping changed. */
   .work-main {
     position: relative;
     flex: 1;
     min-height: 0;
-    display: flex;
+    min-width: 0;
+    display: grid;
     gap: 0.6rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "surface panel";
   }
+  .workspace.in-space .work-main {
+    /* ⚠ THE HUD ROW SIZES TO ITS CONTENT, AND 21rem IS NOW ONLY A CEILING.
+     *
+     * It used to be a fixed 21rem, measured: at 17rem the low rack was cut four
+     * pixels short of its own row and at 19rem the weapon-banking strip under
+     * it was, and a rack you cannot see the bottom of is the one thing this
+     * cell exists to prevent. But a measured height is only right for the
+     * content it was measured against -- the footer came off the cell and the
+     * number stayed, leaving a band of empty panel below the racks.
+     *
+     * `auto` cannot be wrong in either direction: it cannot cut the rack short
+     * and it cannot leave a gap. The 21rem survives as a `max-height` on the
+     * cell itself, which is the half of the old number that was actually doing
+     * work -- a hull with a great many slots must not squeeze the radar to
+     * nothing, and `.hud-body` already scrolls. */
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "surface panel"
+      "hud     panel";
+  }
+  /* ⚠ 24rem, RAISED FROM 21. The ceiling exists so a hull with a great many
+   * slots cannot squeeze the radar to nothing, and 21rem was measured when the
+   * cell held ONE line of clusters. Three of them wrap to two lines on a 1280px
+   * window with the dock panel open, which is 340px of content against a 336px
+   * ceiling — the cell scrolled to hide four pixels. The radar still keeps the
+   * clear majority of the surface, and `.hud-body` still scrolls beyond this
+   * rather than pushing the radar off the screen. */
+  .workspace.in-space .work-main > .hud-bar { max-height: 24rem; }
+  .work-main > .desktop { grid-area: surface; }
+  .work-main > .dock-panel { grid-area: panel; }
+  .work-main > .hud-bar { grid-area: hud; }
 
   /* The Neocom inside the workspace: full-height, its own scroll, no sticky. */
   .workspace .neocom {
@@ -2648,6 +2699,75 @@
     overflow-x: auto;
     overflow-y: hidden;
   }
+  .char-bar-add { display: inline-flex; align-items: center; gap: 0.3rem; }
+  /* ⚠ THE PILOT CHIP MUST NOT BE THE THING THAT GIVES WAY.
+   *
+   * At 375px the bar has 359px to spend, and brand + status + Pilots + "+ Add
+   * character" + gaps took 316 of it — leaving the chip 11px, an empty bracket
+   * with the pilot's name clipped away inside it. The bar exists to say who you
+   * are; that is the last thing it may drop.
+   *
+   * So on a narrow bar the ADD button loses its words (the "+" and its
+   * `aria-label` carry it) and the status loses its text — the dot keeps the
+   * colour, and its `title` keeps the word. Neither is what the bar is for. */
+  /* ⚠ DRIVEN BY THE COMPONENT'S OWN `narrow` FLAG, NOT A `@media` HERE.
+   *
+   * The bar CHANGES SHAPE below the breakpoint — a strip of pilot tabs becomes
+   * one pilot and a switcher — which is markup, not styling, so the decision
+   * has to be made in the component anyway. Keeping the number in both places
+   * would be keeping two things equal by hand. */
+  .char-bar.narrow .char-bar-add-text { display: none; }
+  .char-bar.narrow .char-bar-status-text { display: none; }
+  .char-bar.narrow .char-bar-list { flex: 0 1 auto; min-width: 0; }
+  /* ⚠ THE CHIP GIVES UP ITS FIXED WIDTH HERE. It is `flex: 0 0 11rem` so several
+   * pilots line up as identical tabs — right on a wide bar, and too wide for a
+   * phone. With one chip on screen there is nothing to line up with, and the
+   * name already truncates.
+   *
+   * `.char-bar-list >` for specificity: the base `.char-chip` rule is later in
+   * this file, and an equal-weight selector earlier would silently lose. */
+  .char-bar.narrow .char-bar-list > .char-chip {
+    flex: 0 1 auto;
+    min-width: 0;
+    min-height: 1.7rem;
+    padding: 0.1rem 0.5rem;
+  }
+  /* The switcher: a `▾` the width of a thumb, next to the pilot it changes. */
+  .char-bar-switch {
+    flex: 0 0 auto;
+    align-self: center;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0;
+    font-size: 10px;
+    background: var(--color-panel-3);
+    border: 1px solid var(--color-line);
+    color: var(--color-muted);
+  }
+  .char-bar-switch[aria-expanded="true"] {
+    border-color: var(--color-accent);
+    color: var(--color-text-bright);
+  }
+  /* The list of the others. Under the bar, over everything else — and behind a
+   * shade, so the next tap anywhere closes it. */
+  .char-bar-shade { position: fixed; inset: 0; z-index: 60; }
+  .char-bar-pilots {
+    position: absolute;
+    top: calc(var(--char-bar-h) - 4px);
+    left: 0.5rem;
+    right: 0.5rem;
+    z-index: 61;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 0.4rem;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line-strong);
+    box-shadow: 0 8px 20px rgb(0 0 0 / 0.5);
+  }
+  .char-bar-pilots > .char-chip { flex: 0 0 auto; width: 100%; }
   .char-bar-add,
   .char-bar-hangar {
     flex: 0 0 auto;
@@ -3005,8 +3125,8 @@
    * faint grid gives it "desktop" depth without competing with panel content. */
   .desktop {
     position: relative;
-    flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
     border: 1px solid var(--color-line);
     background-color: var(--color-bg);
@@ -3229,7 +3349,6 @@
     overflow: auto;
     padding: 0.6rem 0.7rem;
   }
-  .win.collapsed { height: auto !important; }
 
   /* Resize affordances — the right / bottom edges and the SE corner. */
   .win-resize { position: absolute; touch-action: none; }
@@ -3250,7 +3369,7 @@
   /* The fixed top-right dock panel (overview / station services), collapsible. */
   .dock-panel {
     position: relative;
-    flex: 0 0 auto;
+    min-height: 0;
     width: 22rem;
     max-width: 60vw;
     display: flex;
@@ -3261,34 +3380,12 @@
     overflow: hidden;
   }
   .dock-panel.collapsed { width: 2rem; }
-  .dock-panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-    padding: 0.35rem 0.5rem;
-    background: var(--color-panel-2);
-    border-bottom: 1px solid var(--color-line);
-  }
-  .dock-panel-head h2 {
-    margin: 0;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.09em;
-    color: var(--color-text-bright);
-  }
-  .dock-collapse,
   .dock-expand {
     min-height: 26px;
     min-width: 26px;
     padding: 0 0.3rem;
-    background: transparent;
     border: 1px solid transparent;
     color: var(--color-muted);
-  }
-  .dock-collapse:hover { color: var(--color-text-bright); border-color: var(--color-line); }
-  .dock-panel-body { flex: 1; min-height: 0; overflow: auto; padding: 0.6rem 0.7rem; }
-  .dock-expand {
     width: 100%;
     height: 100%;
     display: flex;
@@ -3306,6 +3403,53 @@
   }
   .dock-expand:hover .dock-expand-label { color: var(--color-text-bright); }
 
+  /* THE WINDOW STRIP — one chip per open window, at the surface's bottom-left.
+   *
+   * ⚠ IT IS THE ONLY WAY BACK TO A MINIMIZED WINDOW that does not require the
+   * player to remember which launcher entry it was. A hide with no visible
+   * handle is a window they have lost, so the strip lists windows that are on
+   * the surface too and the DOT says which are which — the chip is never the
+   * only thing that carries the state, and neither is its colour. */
+  .win-strip {
+    position: absolute;
+    left: 0.6rem;
+    bottom: 0.6rem;
+    z-index: 500;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    max-width: calc(100% - 1.2rem);
+  }
+  .win-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 26px;
+    padding: 0 0.55rem;
+    background: #1f3a55;
+    border: 1px solid var(--color-accent);
+    color: var(--color-text-bright);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .win-chip-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--color-accent);
+  }
+  .win-chip.away {
+    background: var(--color-panel-2);
+    border-color: var(--color-line-strong);
+    color: var(--color-cell);
+  }
+  .win-chip.away .win-chip-dot { background: #3a4a5c; }
+  .win-chip:hover { border-color: var(--color-accent-bright); }
+
   /* Drag-to-resize the dock panel from its left edge (the "expandable" panel). */
   .dock-resize {
     position: absolute;
@@ -3317,10 +3461,6 @@
     z-index: 2;
     touch-action: none;
   }
-
-  /* In space the dock panel is just the compact overview (locked targets are a
-   * separate floating panel now, ship condition / modules are in the HUD). */
-  .dock-overview { flex: 1; min-width: 0; overflow: auto; }
 
   /* The floating "Locked targets" panel — a free strip over the work area,
    * draggable by its bar, HORIZONTAL by default (the brackets lay left-to-right).
@@ -3354,52 +3494,400 @@
    * a second row (the body scrolls sideways when there are many locks). */
   .targets-panel .target-bracket { flex-wrap: nowrap; margin: 0; }
 
-  /* The compact overview (dock panel): hide what the bottom HUD already shows and
-   * the relocated targets table.
+  /* ------------------------------------------- the HUD cell (in space only) --
+   * Direction 1C's bottom-left cell: a named header, the two instruments, and a
+   * footer carrying what the ship is doing plus Stop.
    *
-   * ⚠ R82 REMOVED THE `white-space: nowrap` THAT USED TO LIVE HERE. It was the
-   * dock panel's own workaround for the grid being a six-column table — it kept
-   * each row on one line by letting the box scroll SIDEWAYS instead, which is
-   * exactly the thing that made this panel awkward to read. The list truncates
-   * now, so there is nothing to force and nothing to scroll. */
-  .dock-overview .ov-ship-condition,
-  .dock-overview .ov-locked-targets,
-  .dock-overview .ov-equipment,
-  .dock-overview .ov-shots { display: none; }
-  /* The dock column is short as well as narrow, so its list gets less of it. */
-  .dock-overview .overview-list { max-height: 42vh; }
-
-  /* The bottom HUD bar (in space only). Clusters reuse .hud-cluster / .hud-nav. */
+   * ⚠ THE FOOTER IS A GRID ROW, NOT SOMETHING PINNED. `auto 1fr auto` means the
+   * body absorbs every spare pixel and the footer sits at the bottom without
+   * being taken out of flow — so Stop cannot end up underneath the rack when
+   * the fit is long, which is precisely when it is needed.
+   *
+   * It used to be a four-column bar (gauges | rack | shots | nav). The shots
+   * log moved to a window and the nav buttons went entirely — see HudBar.svelte
+   * for where and why. */
   .hud-bar {
     flex: 0 0 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 2fr 3fr 2.4fr 1.3fr;
-    gap: 0.6rem;
+    /* Two rows, not three. The footer is gone — see the note in HudBar.svelte. */
+    grid-template-rows: auto 1fr;
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
   }
-
-  /* Shots-fired cluster in the HUD (moved out of the Overview cockpit). A short
-   * scrolling combat log so the bar height stays in line with the gauges. */
-  .hud-shots { min-width: 0; }
-  .hud-shots-empty { margin: 0.3rem 0 0; color: var(--color-muted); font-size: 0.85rem; }
-  .hud-shots-list {
-    list-style: none;
-    margin: 0.3rem 0 0;
-    padding: 0;
-    max-height: 7.5rem;
-    overflow-y: auto;
+  /* ⚠ A THREE-COLUMN GRID, AND THE MIDDLE ONE IS `auto`.
+   *
+   * `1fr auto 1fr` centres Stop against the CELL rather than against the text
+   * either side of it, so it does not drift as the ship's name and the state
+   * sentence change length. A flex row with `margin-inline: auto` would put it
+   * at the midpoint of whatever is left over, which moves. It is the control a
+   * pilot presses without looking; it has to be in the same place every time.
+   *
+   * The row grew from 32px to fit Stop's 40px touch target (R8) — and the cell
+   * is still shorter than it was, because a whole footer row went away. */
+  .hud-head {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 0.5rem;
+    /* Driven by Stop, which is the tallest thing in it. Low enough that the row
+     * costs the instruments almost nothing; see the note on `.hud-stop`. */
+    min-height: 34px;
+    padding: 0.15rem 0.6rem;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-panel-2);
+    min-width: 0;
+  }
+  /* ⚠ NOT space-between inside the left cell: the tag and the ship's name are
+   * one phrase read left to right, and pushing them apart puts a hand-span
+   * between "Ship" and what it is naming. */
+  .hud-head-ship {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .hud-head-tag {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted);
+  }
+  .hud-head-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-bright);
+    font-weight: 600;
+  }
+  .hud-head-hull {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  /* What the ship is DOING, right-aligned — the other half of the glance, and
+   * the whole sentence rather than the one word it used to be: "Orbiting Foo at
+   * 2.1 AU", not "ORBIT". Quiet rather than blue when stopped, because
+   * "stopped" is the absence of activity and should not read as an event.
+   *
+   * It ellipsises rather than wrapping: this row is a fixed height and a second
+   * line would push the instruments down by however long a thing happens to be
+   * named. */
+  .hud-head-state {
+    min-width: 0;
+    /* ⚠ NO `justify-self: end` HERE — `text-align` DOES THE SAME JOB SAFELY.
+     *
+     * FOUND ON A NARROW WINDOW. `justify-self: end` sizes a grid item to its
+     * CONTENT and then aligns that box to the end of its track, so the item was
+     * as wide as the sentence rather than as wide as the column it was in:
+     * `overflow: hidden` had nothing to clip, and the text ran left out of a
+     * 118px track across 235px, straight under the Stop button. Stretched to
+     * the track — the default — the box is the column, the ellipsis works, and
+     * `text-align: right` still puts the words on the right. */
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.85rem;
+    color: var(--color-accent-bright, var(--color-accent));
+  }
+  .hud-head-state.stopped { color: var(--color-muted); }
+  .hud-head-state.error { color: var(--color-danger); }
+  /* ⚠ A WRAPPING ROW, NOT A FIXED SET OF COLUMNS. READ THIS BEFORE ADDING ONE.
+   *
+   * The three clusters — cargo, the gauge, the racks — sit centred as a group
+   * on one line while there is room, and a cluster that does not fit moves to
+   * the NEXT LINE rather than being squeezed. That priority is the whole point:
+   * flex wraps an item before it shrinks one, and the rack has a hard minimum
+   * (26px gutter + 132px header + 182px of slots + gaps = 356px) below which it
+   * stops being readable.
+   *
+   * FOUND BY THE OPERATOR, at a window a hair above the mobile breakpoint. This
+   * was a three-column grid with a `@media (max-width: 820px)` override that
+   * collapsed it to `1fr` — a rule written when the body had TWO clusters and
+   * stacking was the whole answer. With three it forced all of them into one
+   * 323px column, the rack overflowed it by 33px, and `overflow: auto` turned
+   * that into a horizontal scrollbar with the slots strung down the right-hand
+   * edge. That breakpoint is gone: wrapping is width-driven by definition, so
+   * there is no number left to keep in sync.
+   *
+   * ⚠ CENTRED, AND THE CLUSTERS KEEP THEIR OWN WIDTHS. The gauge is a fixed
+   * 170px; cargo is as wide as the bay names it holds; the rack is its own
+   * width rather than everything left over — that last one matters, because a
+   * rack stretched across a wide cell puts its four slots at the left edge of a
+   * 660px box with the right half of the instrument empty.
+   *
+   * ⚠ `safe center`, NOT PLAIN `center`. Centred content that outgrows its box
+   * overflows equally on BOTH sides, and the left overflow cannot be scrolled
+   * to — a cluster too wide for the cell would lose its left edge with no way
+   * to reach it. `safe` falls back to start-alignment at exactly that point,
+   * and a browser that does not know the keyword drops the declaration and gets
+   * plain left alignment, which is the right thing to degrade to.
+   *
+   * ⚠ THE SLOTS THEMSELVES STAY LEFT-ALIGNED INSIDE EACH RACK ROW. High, mid
+   * and low hold different numbers of modules, and centring each row would
+   * stagger the columns against each other — the rack reads as a grid only
+   * because every row starts at the same x.
+   *
+   * ⚠ AND IT IS THE CONTAINER FOR THE RACK'S NARROW FORM. `container-type` is
+   * safe HERE and nowhere closer to the rack: this box sits in `grid-area: hud`
+   * under a `minmax(0, 1fr)` column, so its inline size comes from outside and
+   * never from its contents. On `.module-rack` it would sever the very
+   * content-sizing that gives the rack its width. */
+  .hud-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: safe center;
+    /* 1rem between clusters, not 1.6. The wider gap was set when there were two
+     * of them and the cell had air to spare; with three it is 51px of nothing
+     * standing between the rack and one line. */
+    gap: 0.6rem 1rem;
+    padding: 0.5rem 0.75rem 0.25rem;
+    min-height: 0;
+    overflow: auto;
+    container-type: inline-size;
+    container-name: hud;
+  }
+  /* Each cluster keeps its own width and wraps rather than shrinking; `0 1` so
+   * a cluster that is ALONE on a line and still too wide can give way rather
+   * than overflow. */
+  .hud-body > .hud-cluster { flex: 0 1 auto; min-width: 0; }
+  /* ⚠ 150px, WHICH IS THE WHEEL'S OWN CAP — it was 170. That number came from
+   * the handoff's two-column grid, where a fixed gauge column stopped the racks
+   * shuffling sideways as the cell grew. Nothing needs it now: the wheel is
+   * capped at 150 and the readout under it is 119, so the extra 20px was blank
+   * either side of the instrument. Measured, and it is the difference between
+   * one line and two on a 1280px window. */
+  .hud-body > .ship-gauges { flex: 0 0 150px; }
+  /* ---------------------------------------------------- the cargo readout --
+   * Deliberately the same shape as a rack row — name, bar, reading, on one
+   * line — because it is the same kind of statement and sits eight pixels from
+   * it. A second visual language for "how full is this thing" inside one
+   * instrument would read as two instruments. */
+  .cargo-bays {
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.25rem;
+    min-width: 0;
   }
-  .hud-shots-list li {
+  .cargo-head {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--color-muted);
+  }
+  .cargo-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .cargo-list {
     display: flex;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.15rem 0;
-    border-bottom: 1px solid var(--color-row-line);
+    flex-direction: column;
+    gap: 0.3rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    min-width: 0;
   }
-  .hud-shot-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hud-shot-meta { flex: 0 0 auto; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+  .cargo-bay {
+    display: grid;
+    /* ⚠ FIXED, AND WIDE ENOUGH FOR THE LONGEST NAME. One grid per bay would let
+     * each row size to its own words and the bars would not line up — the same
+     * failure the rack rows had. 84px is measured: "CARGO HOLD" needs 70 at
+     * this size and clipped at 66, and the fleet and ship maintenance bays are
+     * longer still. A clipped bay NAME is worse than a narrow bar: the bar is a
+     * glance you can take again, the name is which hold you are looking at. */
+    grid-template-columns: 84px minmax(2.5rem, 1fr) 2.6rem;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .cargo-bay-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted);
+  }
+  /* ⚠ AN EMPTY TRACK IS DRAWN, AN UNKNOWN FILL IS NOT. The track is the hold's
+   * outline and is always right; the FILL is a reading, and a hold nobody
+   * measured gets no fill at all — see CargoBays.svelte. */
+  .cargo-track {
+    display: block;
+    height: 3px;
+    min-width: 0;
+    background: var(--color-field);
+  }
+  .cargo-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-accent);
+  }
+  .cargo-fill.warn { background: var(--color-warn); }
+  .cargo-fill.full { background: var(--color-danger); }
+  .cargo-bay-value {
+    justify-self: end;
+    white-space: nowrap;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted);
+  }
+  .cargo-bay-value.warn { color: var(--color-warn); }
+  .cargo-bay-value.full { color: var(--color-danger); }
+  /* Italic, so a reading that does not exist never reads as one that does —
+   * the same treatment the rack heat's unknown gets. */
+  .cargo-bay-value.unknown { font-style: italic; }
+
+  /* Stop keeps a full touch target (R8) and never shrinks below its word — it
+   * is the one control here a pilot presses without looking. A ghost rather
+   * than a filled accent: it is the header's only button, so nothing needs
+   * out-shouting, and a solid blue block between a ship's name and its state
+   * reads as an alert. */
+  .hud-stop {
+    justify-self: center;
+    /* ⚠ BELOW THE GLOBAL 40px, AND R8 IS NOT BROKEN BY IT.
+     *
+     * R8's minimum is a TOUCH target, and this row is the top of a fixed-height
+     * cell where every pixel it takes comes off the instruments underneath it.
+     * With a mouse, 30px is a comfortable target; with a finger it is not. So
+     * the exception is scoped to the pointer that makes it safe and reversed
+     * for the one that does not, below.
+     *
+     * ⚠ SCOPED ON `pointer: coarse`, NOT ON A WIDTH. The phone tier is not the
+     * only touch screen — a desktop-width tablet lands on this same cell, and a
+     * breakpoint would hand it a 30px Stop. The query asks the question that
+     * actually matters: is this being pressed with a finger. */
+    min-height: 30px;
+    padding: 0.25rem 1.1rem;
+    white-space: nowrap;
+    background: var(--color-panel-3);
+    border: 1px solid var(--color-line-strong);
+    color: var(--color-text-bright);
+  }
+  @media (pointer: coarse) {
+    .hud-stop { min-height: 40px; }
+  }
+  .hud-stop:hover { border-color: var(--color-danger); }
+
+  /* The HUD cell owns its own frame, so its clusters must not draw a second
+   * one inside it — two nested boxes around one instrument reads as a bug. */
+  .hud-bar .hud-cluster { background: none; border: 0; padding: 0; min-width: 0; }
+  /* ...and the accent hairline with them. A `<section>` gets one for free, and
+   * the gauges and the racks are two sections inside one cell — so the cell drew
+   * a fading blue line above each of them, for no frame that exists. */
+  .hud-bar .hud-cluster::before { content: none; }
+  /* ⚠ A WINDOWED PANEL DOES NOT REPEAT ITS OWN NAME.
+   *
+   * The window's title bar already says EQUIPMENT, DRONES, SHOTS FIRED — and
+   * then the panel underneath said "YOUR EQUIPMENT", "DRONES", "SHOTS FIRED"
+   * again, in a 42px band, on every window. It is the same doubling the mobile
+   * cards had, one frame up.
+   *
+   * The TITLE goes; the head row stays, because that is where a panel's own
+   * controls live (Mining's Refresh, the station panel's collapse) and where its
+   * counts live. And the title is CLIPPED rather than removed: panels are
+   * `aria-labelledby` their heading, so taking it out of the tree takes the
+   * section's accessible name with it. */
+  .win-body > .panel > .panel-head > h2 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* With nothing visible left in it, the head collapses rather than leaving the
+   * band it was drawn for. A head that still has controls keeps its box. */
+  .win-body > .panel > .panel-head:not(:has(> *:not(h2))) {
+    margin-bottom: 0;
+    padding-block: 0;
+    border-bottom: 0;
+    background: none;
+    min-height: 0;
+  }
+
+  /* ⚠ AND THE HEAD MUST NOT BLEED HERE. `.panel-head`'s negative inline margin
+   * exists to reach the edges of a PADDED panel; the cell's clusters have no
+   * padding to reach past, so it bled 32px outside its own box and that was the
+   * whole of the HUD's sideways scroll (R8). */
+  /* ⚠ CLIPPED, NOT REMOVED — the rack section is `aria-labelledby` it, so
+   * taking it out of the tree takes the section's accessible name with it. The
+   * reference has no such heading, and it earns none: HIGH / MID / LOW label
+   * the rows, and the cell is already titled SHIP. */
+  .hud-bar .panel-head {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    background: none;
+  }
+
+  /* ⚠ IN THE CELL, THE WHEEL AND ITS NUMBERS SIT SIDE BY SIDE.
+   *
+   * Stacked (which is what the mobile workspace still wants, and what the
+   * default rule above stays) the instrument is ~230px tall, and the cell's row
+   * is 17rem. That overflowed by enough to cut the LOW rack off the bottom —
+   * the rack being readable at a glance is the entire point of the cell, so the
+   * gauge is what gives way, not the racks. Side by side it is ~136px, which is
+   * the wheel's own height and nothing more. */
+  /* ⚠ THE REFERENCE'S SHAPE: the gauge with its numbers UNDER it, in a fixed
+   * 170px column, and the racks in the rest.
+   *
+   * The first build put the readout BESIDE the wheel to save height, back when
+   * the cell was 17rem and the racks were being cut off. The cell is 21rem now
+   * and the racks fit, so the layout can be the one the design asked for —
+   * which reads better anyway: three numbers in a row under the thing they
+   * describe, rather than a column beside it. */
+  .hud-bar .ship-hud {
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.4rem;
+  }
+  .hud-bar .hud-wheel {
+    flex: 0 0 auto;
+    max-width: 150px;
+    /* ⚠ NEGATIVE, AND MEASURED AGAINST THE SAME EMPTY BAND AS THE SPEED.
+     *
+     * The wheel's box is square but its ink stops at 72% of the height (see
+     * `.wheel-speed`), so laying the readout out below the BOX left a band of
+     * nothing between the instrument and its own numbers. This closes the part
+     * of that band the speed does not use.
+     *
+     * It is deliberately smaller than the band: the speed lives down there, and
+     * pulling the readout up the full 28% would run the two together. Measured
+     * at -1.8rem the numbers sit 15px under the speed, which is a gap you can
+     * see across and not a gap you can lose things in. */
+    margin-bottom: -1.8rem;
+  }
+  .hud-bar .hud-readout {
+    flex: 0 0 auto;
+    flex-direction: row;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0.1rem 0.9rem;
+    min-width: 0;
+  }
+  .hud-bar .hud-readout-row { flex-direction: column; align-items: center; }
 
   /* Narrow screens: stack the rail on top and drop the dock panel below the
    * desktop. The desktop windowing is a large-screen feature; this only keeps
@@ -3418,7 +3906,11 @@
     .desktop { min-height: 60vh; }
     .dock-panel { width: auto; max-width: none; }
     .dock-panel.collapsed { width: auto; }
-    .hud-bar { grid-template-columns: 1fr; }
+    /* ⚠ `.hud-body { grid-template-columns: 1fr }` WAS HERE, AND IT IS GONE.
+     * It collapsed the cell's clusters into one column, which was right while
+     * there were two of them and wrong the moment there were three — see the
+     * note on `.hud-body`. It wraps on its own now, at whatever width it runs
+     * out of room, so there is no breakpoint to keep in step with it. */
   }
 
   /* ============================================== notices: toasts + log (R80) --
@@ -3829,6 +4321,131 @@
   }
   .mobile-nav-home.active { background: var(--color-panel-2); }
 
+  /* ------------------------------------ the in-space mobile stack (1D) --
+   * One column of collapsible cards. The desktop's grid needs a radar and two
+   * more cells; a phone has room for neither, so the arrangement changes and
+   * the COMPONENTS do not — every card below is the same panel the desktop
+   * mounts. */
+  /* ⚠ THE CARD IS A `<section>`, AND THE APP DRESSES EVERY `<section>`.
+   *
+   * It arrived with the global panel's padding, its bottom margin AND its accent
+   * hairline — a 1px line inset from each side that starts accent-blue and fades
+   * to transparent on the right. Together those drew an empty padded band across
+   * the top of every card with a blue mark floating at its left edge, tapering
+   * away to the right. That is decoration for a panel with a title inside it;
+   * this card's header is a full-width button that should meet its own edges.
+   *
+   * The station and space panels cancelled the same hairline for the same
+   * reason (`.stn-panel`, `.spc-panel` below); this is the third. */
+  .mob-card {
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+  }
+  .mob-card::before { content: none; }
+  /* ⚠ THE CARD'S HEADING IS AN `h2`, AND THE APP DRESSES BARE `h2`s.
+   *
+   * `section > h2::before` gives every section heading a small accent tick, and
+   * the card IS a `<section>` — so the tick opened a line box of its own ABOVE
+   * the fold button: a 20px empty strip on top of every card with a blue mark
+   * floating at its left, 60px of header where 40 was drawn. The heading is
+   * here for the document outline, not for decoration; the button inside it is
+   * the whole control.
+   *
+   * Zero-specificity `:where()` so nothing has to out-rank anything — the same
+   * reset the station panel needed when the app dressed its sections as panels. */
+  :where(.mob-card-head) {
+    margin: 0;
+    padding: 0;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: 0;
+    letter-spacing: normal;
+    text-transform: none;
+    color: inherit;
+  }
+  .mob-card-head::before { content: none; display: none; }
+  .mob-card-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    /* 40px, not the handoff's 32: R8's tap target wins over the mock's density,
+     * and this is the control a pilot presses most on this screen. */
+    min-height: 40px;
+    padding: 0 0.6rem;
+    background: var(--color-panel-2);
+    border: 0;
+    border-bottom: 1px solid var(--color-line);
+    color: var(--color-text-bright);
+    text-align: left;
+  }
+  .mob-card.collapsed .mob-card-toggle { border-bottom: 0; }
+  .mob-card-chevron {
+    flex: 0 0 auto;
+    font-size: 9px;
+    color: var(--color-muted);
+  }
+  .mob-card-title {
+    flex: 0 0 auto;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .mob-card-hint {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+  .mob-card-body { padding: 0.5rem 0.6rem; min-width: 0; }
+  /* ⚠ A LIST BODY CAPS AND SCROLLS INSIDE ITSELF. Without this a full overview
+   * pushes the next card's header a screen and a half away, and the fold
+   * control a pilot is reaching for is the thing that scrolled off. */
+  .mob-card-body.scrolls {
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  /* The panels inside a card already draw their own frame for the desktop; the
+   * card IS the frame here, so the inner one would be a box in a box. */
+  .mob-card-body > .panel,
+  .mob-card-body > .spc-panel {
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  /* Same as the window body does for the same reason: the card IS the frame, so
+   * the panel inside must not draw a second one — hairline included. */
+  .mob-card-body > .panel::before,
+  .mob-card-body > .spc-panel::before {
+    content: none;
+  }
+  .mob-card-body > .panel > .panel-head,
+  .mob-card-body > .spc-panel > .spc-head {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+  /* ⚠ THE PANEL'S OWN TITLE IS HIDDEN, BUT NOT ITS HEAD ROW.
+   *
+   * FOUND LIVE: five of the six cards read "OVERVIEW / OVERVIEW", "DRONES /
+   * DRONES" — the card header and the panel's own heading, one above the other.
+   * The title goes because the card already says it.
+   *
+   * The rest of that row STAYS, and that is the load-bearing half: it is where
+   * the counts live ("84 things in range", "2 out"), and those are exactly what
+   * a card must not hide. Hiding the whole head would have been one selector
+   * shorter and would have taken the numbers with it. */
+  .mob-card-body > .spc-panel > .spc-head > .spc-head-title,
+  .mob-card-body > .panel > .panel-head > h2 {
+    display: none;
+  }
+
   /* ===================================================== settings panel --
    * The client's own settings (Settings.svelte) — plain panel form controls in
    * the shared design language. */
@@ -4109,23 +4726,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .hud-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-  .hud-nav-item {
-    min-height: 40px;
-    text-align: left;
-    background: var(--color-panel-2);
-    border: 1px solid var(--color-line);
-    color: var(--color-text);
-  }
-  .hud-nav-item:hover {
-    border-color: var(--color-accent);
-    color: var(--color-text-bright);
-  }
-
   /* ============================================ the circular ship HUD (R71) --
    * EVE's own instrument: shield / armor / hull as three concentric arcs around
    * a discrete capacitor ring, with the charge in the middle. The geometry is
@@ -4186,6 +4786,34 @@
   .wheel-cap.filled { stroke: var(--color-capacitor); }
   /* The charge sits in the gap the arcs deliberately leave at the bottom... but
    * centred in the wheel, which is where the eye goes. */
+  /* THE SPEED, IN THE GAP THE GAUGES LEAVE. The arcs sweep 240 degrees from
+   * 150, which puts a 120-degree notch at the bottom — see shipHudArcs.ts. That
+   * notch is not spare room, it is where this reading goes: speed and condition
+   * belong to the same glance, and putting speed outside the wheel would make a
+   * pilot look in two places. */
+  .wheel-speed {
+    position: absolute;
+    left: 50%;
+    /* ⚠ 26%, WHICH IS WHERE THE ARCS STOP — not the bottom of the box.
+     *
+     * The wheel is a SQUARE, and the arcs are a 240 degree sweep with a 120
+     * degree notch centred on the bottom: the lowest ink is at 75 + 66*cos(60)
+     * = 108 of a 150 viewBox, so the bottom 28% of the box is empty. Parked at
+     * `bottom: 0` the speed sat at the floor of that empty band, a clear
+     * finger's width below the instrument it belongs to.
+     *
+     * At 26% it sits just inside the notch, close under the CAP reading, which
+     * is what the notch is FOR. */
+    bottom: 26%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    color: var(--color-muted);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
   .wheel-centre {
     position: absolute;
     inset: 0;
@@ -4250,38 +4878,158 @@
   }
   /* The HUD module rack — three rows (high / mid / low) of slot tiles. */
   .module-rack-rows {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+    /* ⚠ THE SLOT BOX, WRITTEN DOWN ONCE. The tile, and anything that has to
+     * line up with a rack row, both read it from here — a rack row is exactly
+     * as tall as one slot, so this is also the row height. It was two literals
+     * before and they disagreed the moment the gutter arrived. */
+    --rack-slot: 42px;
+    /* ⚠ ONE GRID FOR ALL THREE RACKS, and the rows are `display: contents`.
+     *
+     * Each row used to be its own grid, which meant an `auto` column sized to
+     * that ROW's content: the gutter would have been the button's width on the
+     * high rack and zero on the other two, and the three labels would have
+     * started at three different x. Sharing one grid is what makes a column a
+     * column — the same reason the label cell is fixed-width one level in.
+     *
+     * `align-items: center` here is what puts the banking icon, the rack name,
+     * the heat bar, the reading and every module tile on one line, whatever
+     * height a row happens to take when its slots wrap. */
+    display: grid;
+    grid-template-columns: auto 132px minmax(0, 1fr);
+    align-items: center;
+    gap: 0.35rem 8px;
     margin-top: 0.4rem;
   }
-  .rack-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+  /* Not a box of its own — its three cells are the grid's. */
+  .rack-row { display: contents; }
+  /* Everything that is not a rack row spans the whole width. */
+  .module-rack-rows > .rack-hint,
+  .module-rack-rows > .rack-damage,
+  .module-rack-rows > .rack-error { grid-column: 1 / -1; }
+  /* The gutter cell. Empty on the mid and low racks, which is why the column is
+   * `auto` and not a number: it is exactly as wide as the one control in it. */
+  .rack-gutter {
+    display: grid;
+    place-items: center;
+    min-width: 0;
   }
+  /* ⚠ AN ICON BUTTON, SO IT IS DELIBERATELY BELOW THE GLOBAL 40px. Same
+   * argument as `.hud-stop`: R8's minimum is a touch target and this cell is a
+   * fixed height, so the exception is scoped to the pointer that makes it safe
+   * and reversed under `pointer: coarse` below. */
+  .rack-bank {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    /* ⚠ AS TALL AS A SLOT, WHICH IS HIT AREA AND NOT INK — the glyph stays 16px.
+     * The CENTRING is the grid's job now (see `.module-rack-rows`); this is
+     * only about being a target worth aiming at. */
+    height: var(--rack-slot, 42px);
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 1px solid transparent;
+    color: var(--color-muted);
+  }
+  .rack-bank svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+  .rack-bank:hover:not(:disabled) {
+    background: none;
+    border-color: var(--color-line-strong);
+    color: var(--color-text-bright);
+  }
+  /* Banked: lit in the accent, and the glyph itself is a joined chain rather
+   * than a broken one — the state never rests on the colour. */
+  .rack-bank.linked { color: var(--color-accent); }
+  @media (pointer: coarse) {
+    /* Only the WIDTH needs the touch minimum — the height is already a slot. */
+    .rack-bank { width: var(--rack-slot, 42px); }
+  }
+  /* ⚠ A GRID, NOT A WRAPPING FLEX ROW — the handoff's `44px minmax(0,1fr)`.
+   *
+   * The first build was a flex row with the heat pushed to the end by
+   * `margin-left: auto`, so each rack's reading landed wherever that rack's
+   * slots happened to stop wrapping: three rows, three different positions, and
+   * nothing you could read down. A fixed first column is what makes the three
+   * readings a column. */
+  /* ⚠ THE HEADER IS ONE LINE: name, bar, reading, read left to right.
+   *
+   * It used to stack them, which made every rack row two lines tall against a
+   * 42px slot and left "heat not known" sitting under its rack's name like a
+   * second label. Inline, the row header reads as one statement — "HIGH, this
+   * much heat" — and the row is as tall as its slots and no taller.
+   *
+   * The bar takes the slack between the two texts, so the three bars start and
+   * end at the same x on every row and can be compared down the column. */
   .rack-row-label {
-    flex: 0 0 2.4rem;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .rack-name {
+    /* ⚠ A FIXED 22px, WHICH IS "HIGH" MEASURED. At `auto` each name sized to
+     * its own word — HIGH 22px, LOW 20, MID 17 — and the bar took up the slack,
+     * so the three heat bars started at three different x and could not be read
+     * down against each other. That is the same failure the fixed label COLUMN
+     * exists to prevent, one level in. */
+    flex: 0 0 22px;
     font-size: 10px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.14em;
     color: var(--color-muted);
   }
   .rack-slots {
     display: flex;
     flex-wrap: wrap;
     gap: 0.3rem;
+    flex: 1 1 auto;
     min-width: 0;
   }
   .module-slot {
-    width: 2.2rem;
-    height: 2.2rem;
+    position: relative;
+    /* ⚠ THE HOLD GESTURE ONLY WORKS IF THE BROWSER LETS IT. Without this, a
+     * press on a slot is claimed by the page's own scroll and long-press
+     * handling before 600ms is up — so on the touch tier the whole point of
+     * replacing shift-click would have been lost. `none` on the slot itself
+     * costs nothing: it is 42px, and the page scrolls everywhere around it. */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    /* The handoff's slot box — and, not by accident, a real touch target where
+     * the old 2.2rem (35px) was not. The number itself lives on
+     * `.module-rack-rows`, because the gutter has to line up with it. */
+    width: var(--rack-slot, 42px);
+    height: var(--rack-slot, 42px);
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
-    border: 1px solid var(--color-line);
-    background: var(--color-panel-3);
+    /* NOT `overflow: hidden` any more — it clipped the slot ring's stroke. The
+     * icon is sized to the tile, so there is nothing left to clip. */
+    /* ⚠ NO BORDER AND NO FILL. THE RING IS THE SLOT.
+     *
+     * The tile used to carry a 1px box and a panel-3 fill as well as the drawn
+     * circle inside it, so every slot read as a SQUARE with a faint circle lost
+     * in it — both in `--color-line`, competing, and the square winning because
+     * it is a filled full-perimeter box. The design has no square: the round
+     * face IS the slot, which is how retail draws it.
+     *
+     * The 42px box stays as LAYOUT — it is the touch target, it is what keeps
+     * the rack from reflowing between a filled slot and an empty one, and it is
+     * the viewBox the ring is drawn in. It is simply no longer painted. Every
+     * state that used to tint the border now tints the ring's stroke; they are
+     * gathered under the ring below rather than left scattered here. */
+    border: none;
+    background: none;
     color: var(--color-muted);
     font-size: 11px;
     font-weight: 700;
@@ -4293,18 +5041,14 @@
     line-height: 1;
     cursor: pointer;
   }
-  button.module-slot:hover:not(:disabled) { border-color: var(--color-accent-dim); }
   button.module-slot:disabled { cursor: default; }
-  /* A cycling module glows in the accent; an offline one is dimmed. */
-  .module-slot.active {
-    border-color: var(--color-accent);
-    /* An inner rim AND an outer bloom. The rim is what makes a lit tile legible
-     * against its neighbours; the bloom is what makes a rack of them read as
-     * "the guns are up" from the corner of the eye, which is the only way a
-     * pilot looks at the rack while actually flying. */
-    box-shadow:
-      inset 0 0 0 1px var(--color-accent),
-      0 0 0.5rem color-mix(in srgb, var(--color-accent) 45%, transparent);
+  /* ⚠ FOCUS IS DRAWN EXPLICITLY, because the tile no longer has a border to
+   * change. Keyboard focus was riding on the box; without this a player tabbing
+   * the rack would have no idea which slot they were on. An outline, not the
+   * ring — it must be legible on top of whatever the ring is already saying. */
+  button.module-slot:focus-visible {
+    outline: 2px solid var(--color-accent-bright);
+    outline-offset: -1px;
   }
   .module-slot.offline { opacity: 0.45; }
   /* The cycle sweep: a thin fill along the bottom of the tile, driven by the
@@ -4327,6 +5071,12 @@
   .module-cycle {
     position: absolute;
     inset: 0;
+    /* ⚠ CLIPPED TO THE RING, now that there is no square to fill. A conic
+     * gradient over the full box reaches into the corners, and with the tile
+     * unpainted those corners were the only square left on the rack — the wipe
+     * drew the box the design does not have. 18px is the ring's outer edge
+     * (r17 + half of its 2.5 stroke), so the sweep fills the circle exactly. */
+    clip-path: circle(18px at 50% 50%);
     background: conic-gradient(
       color-mix(in srgb, var(--color-accent) 42%, transparent) var(--sweep, 0%),
       transparent 0
@@ -4335,10 +5085,7 @@
   }
   /* Overloaded: running hot and taking damage. The marker is a glance — the
    * button's own title carries the state in words. */
-  .module-slot.overloaded {
-    position: relative;
-    border-color: var(--color-danger);
-  }
+  .module-slot.overloaded { position: relative; }
   /* A cycling module that is ALSO overloaded sweeps in the danger colour, so the
    * two states do not have to be told apart by a 9px flame alone. */
   .module-slot.overloaded .module-cycle {
@@ -4347,25 +5094,424 @@
       transparent 0
     );
   }
+  /* Overloaded: a pulsing dot in the corner of the tile.
+   *
+   * It replaced a 9px flame emoji. An emoji renders at the mercy of whatever
+   * font the platform picked and at that size several of them are unreadable
+   * smudges; a dot is drawn by the same renderer as everything else here. The
+   * state is still carried in WORDS by the button's own title — this is the
+   * glance, never the only telling. */
   .module-heat {
     position: absolute;
-    right: -1px;
-    bottom: -2px;
-    font-size: 9px;
-    line-height: 1;
+    /* ⚠ ON THE RING'S LOWER-RIGHT, not the box's corner. At 2px it sat in the
+     * corner of a square that is no longer drawn — a dot floating in the gap
+     * between two slots, belonging to neither. 5px puts it on the circle. */
+    right: 5px;
+    bottom: 5px;
+    width: 5px;
+    height: 5px;
+    background: var(--color-danger);
+    animation: module-heat-pulse 1.1s ease-in-out infinite alternate;
     pointer-events: none;
   }
-  /* Burnt out: the server will not run it at all until it is repaired. */
+  @keyframes module-heat-pulse {
+    from { opacity: 0.35; }
+    to { opacity: 1; }
+  }
+  /* Burnt out: the server will not run it at all until it is repaired. A cross
+   * drawn from two gradients — no glyph, for the reason above. */
   .module-slot:has(.module-burnt) { position: relative; opacity: 0.55; }
   .module-burnt {
     position: absolute;
-    left: -1px;
-    bottom: -2px;
-    font-size: 9px;
-    line-height: 1;
-    color: var(--color-danger);
+    inset: 0;
     pointer-events: none;
+    /* Same clip as the sweep: the cross is drawn corner to corner, so without
+     * it the X would stick out past the round slot on all four diagonals. */
+    clip-path: circle(18px at 50% 50%);
+    background:
+      linear-gradient(to bottom right, transparent calc(50% - 1px), var(--color-danger) calc(50% - 1px), var(--color-danger) calc(50% + 1px), transparent calc(50% + 1px)),
+      linear-gradient(to bottom left, transparent calc(50% - 1px), var(--color-danger) calc(50% - 1px), var(--color-danger) calc(50% + 1px), transparent calc(50% + 1px));
   }
+
+  /* ------------------------------------------------------ the slot ring ----
+   * The round face the retail rack has, drawn as an SVG circle INSIDE a square
+   * tile.
+   *
+   * ⚠ IT IS NOT `border-radius`, AND THAT IS DELIBERATE. R53 squared this app's
+   * corners and `squareCorners.test.ts` holds them squared. This is the same
+   * exception `.fit-ring-guide` already is: a geometric instrument drawn inside
+   * the box, not a rounded frame around it. */
+  .slot-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .slot-ring circle {
+    fill: none;
+    stroke-width: 2.5;
+  }
+  /* ⚠ THE TRACK IS THE SLOT NOW, so it is drawn in the stronger line colour.
+   * At `--color-line` it was a hint behind a box; with the box gone it is the
+   * only thing saying where one module ends and the next begins. */
+  .slot-ring-track { stroke: var(--color-line-strong); }
+
+  /* ------------------------------------------------------------------------
+   * ⚠ EVERY STATE THE BORDER USED TO CARRY, GATHERED HERE.
+   *
+   * Hover, active, overloaded and holding all used to tint `border-color` on
+   * the tile. They tint the ring instead, in the order a pilot needs them:
+   * later rules win, and the later ones are the more urgent. Keep them in one
+   * block — scattered across the tile's rules is how the square and the circle
+   * came to disagree in the first place. */
+  button.module-slot:hover:not(:disabled) .slot-ring-track { stroke: var(--color-accent-dim); }
+  /* A cycling module glows in the accent. The bloom is what makes a rack of
+   * them read as "the guns are up" from the corner of the eye, which is the
+   * only way a pilot looks at the rack while actually flying — it was an outer
+   * box-shadow and is a drop-shadow on the drawn circle now, which is the same
+   * light around the shape that is actually there. */
+  .module-slot.active .slot-ring-track { stroke: var(--color-accent); }
+  .module-slot.active .slot-ring {
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--color-accent) 70%, transparent));
+  }
+  .module-slot.overloaded .slot-ring-track { stroke: var(--color-danger); }
+  .module-slot.holding .slot-ring-track { stroke: var(--color-danger); }
+  /* An empty slot: dashed and hollow. Nothing else on the rack is dashed, so it
+   * can never be mistaken for a fitted module whose icon failed to load. */
+  .slot-ring-empty {
+    stroke: var(--color-line);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+  }
+  /* THE HEAT-DAMAGE WEDGE — how burnt this module already is. Three bands, and
+   * each is also a different arc LENGTH (see rackDamageWedge), so the reading
+   * never depends on telling two colours apart. */
+  .slot-ring-wear { stroke-width: 3.5; stroke-linecap: butt; }
+  .slot-ring-wear.warm { stroke: var(--color-warn); }
+  .slot-ring-wear.hot { stroke: color-mix(in srgb, var(--color-danger) 65%, var(--color-warn)); }
+  .slot-ring-wear.burning { stroke: var(--color-danger); }
+  /* The hold, filling towards an overload. The only warning a player gets
+   * before a module starts damaging itself, so it is drawn bright and on the
+   * tile being held. */
+  .slot-ring-hold {
+    stroke: var(--color-danger);
+    stroke-width: 3.5;
+    stroke-linecap: butt;
+  }
+
+  /* ------------------------------------------------ rack heat (A STUB) -----
+   * ⚠ THE TRACK IS EMPTY BECAUSE THE READING DOES NOT EXIST, and the cell says
+   * so in words. Do NOT give the unknown state a fill, a shimmer, or a
+   * "probably fine" tint: an empty heat bar reads as COLD, and a pilot who
+   * believes a fabricated cold rack overloads into a burnout.
+   *
+   * The bands are the handoff's — cool under 30%, warm under 60%, hot above —
+   * and they are NOT the damage bands. Damage is the scar heat leaves behind;
+   * this is the heat in the rack now. */
+  .rack-heat-track {
+    display: block;
+    /* Takes the slack in the one-line header rather than spanning it: the name
+     * and the reading are fixed, so the bar is what varies, and it varies the
+     * same amount on all three rows. */
+    flex: 1 1 auto;
+    min-width: 20px;
+    height: 3px;
+    background: var(--color-field);
+  }
+  .rack-heat-fill { display: block; height: 100%; }
+  .rack-heat-fill.cool { background: var(--color-accent); }
+  .rack-heat-fill.warm { background: var(--color-warn); }
+  .rack-heat-fill.hot { background: var(--color-danger); }
+  .rack-heat-value {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 9px;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted);
+  }
+  .rack-heat-value.cool { color: var(--color-accent); }
+  .rack-heat-value.warm { color: var(--color-warn); }
+  .rack-heat-value.hot { color: var(--color-danger); }
+  /* Italic, so a reading that does not exist never reads as one that does. */
+  .rack-heat-value.unknown { font-style: italic; }
+
+  /* ⚠ THE HUD INSIDE A MOBILE CARD.
+   *
+   * `.hud-bar` is the desktop's fixed-height grid cell; in a card it has to
+   * size to its content. The gauge stacks ABOVE its numbers here rather than
+   * beside them — a phone has the vertical room the desktop cell does not, and
+   * the reference stacks them. */
+  .mob-card-body > .hud-bar {
+    display: block;
+    background: none;
+    border: 0;
+  }
+  /* ⚠ THE HEADER STAYS, AND ONLY THE SHIP'S NAME GOES.
+   *
+   * This rule used to hide the whole header, because the card's own title
+   * already names the ship and the header held nothing else worth the room.
+   * STOP LIVES HERE NOW. Hiding the row would take the one control a pilot
+   * reaches for when things go wrong off the phone entirely — which has already
+   * happened once on this tier, and was only noticed by flying it.
+   *
+   * So the name goes (the card title says it) and Stop and the state stay. */
+  .mob-card-body > .hud-bar > .hud-head {
+    min-height: 0;
+    padding: 0 0 0.5rem;
+    border-bottom: 0;
+    background: none;
+    /* Two columns: Stop, then the state. `1fr auto 1fr` would reserve a third
+     * of a 375px row for a name that is not rendered. */
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .mob-card-body > .hud-bar > .hud-head > .hud-head-ship { display: none; }
+  /* ⚠ NO CARGO READOUT ON THE PHONE. The card is already a scroll, and a third
+   * block above the gauge would push the module rack below the fold on the tier
+   * where the fold is tightest. The holds are one tap away in Mining and in
+   * Inventory & Ship, both of which are in the tab strip. */
+  .mob-card-body .cargo-cluster { display: none; }
+  .mob-card-body > .hud-bar > .hud-body {
+    display: block;
+    padding: 0;
+    overflow: visible;
+  }
+  /* ⚠ THE STACKING IS THE SHARED RULE NOW. The gauge sat BESIDE its numbers in
+   * the desktop cell for one phase, back when the cell was 17rem and the racks
+   * were being cut off; a phone stacked them and needed its own overrides. The
+   * cell is 21rem and stacks too, as the reference always had it — so the only
+   * thing left that is genuinely mobile is the size. */
+  .mob-card-body > .hud-bar .hud-wheel { max-width: 170px; }
+  /* ⚠ IN A NARROW CELL THE HEADER SITS ABOVE ITS SLOTS, NOT BESIDE THEM.
+   *
+   * MEASURED, and it is not close. The rack area on a 375px phone is 335px: the
+   * gutter takes 42 and four high slots need 182, which leaves 111 for a header
+   * whose own minimum is 102 — before either gap. Every arrangement that keeps
+   * the header beside the slots fits by a handful of pixels on THAT phone and
+   * wraps on a 360px one, and a rack that wraps to 3+1 while the racks under it
+   * sit half empty reads as a bug.
+   *
+   * So the slots take the full width on their own line and the header keeps the
+   * line above it. The header is still ONE line — which was the point — and the
+   * heat bar gets the whole width to be read across, which it never had. The
+   * gutter column stays, so the banking icon is still on the high rack's header
+   * and still on its centre line.
+   *
+   * ⚠ THIS USED TO BE KEYED ON `.mob-card-body` — THE PHONE — AND THAT WAS THE
+   * WRONG QUESTION. A desktop window dragged to just above the mobile
+   * breakpoint gives the rack the same 340-odd pixels and got none of this: it
+   * kept the wide shape and scrolled sideways. It is a WIDTH question, so it is
+   * a `@container` one (R85), and one rule now covers the phone and the narrow
+   * window alike. 420px is the rack's own minimum (356) plus the gauge column
+   * it would otherwise be sharing the line with. */
+  /* ⚠ WHEN THE CLUSTERS STACK, CARGO GOES LAST.
+   *
+   * Stacked, the cell is at its 21rem ceiling and scrolls — so the order stops
+   * being cosmetic and becomes which instrument you can see without scrolling
+   * for it. The gauge and the rack are what a pilot flies by; cargo is what
+   * they check between trips. In the DOM cargo is first, because on a wide cell
+   * it belongs in the space on the left; `order` moves it rather than the
+   * markup, so a screen reader's order follows the visual one either way.
+   *
+   * `order: 1` and nothing else: everything defaults to 0, so this is "after
+   * the others" without numbering the others. */
+  @container hud (max-width: 420px) {
+    .hud-body > .cargo-cluster { order: 1; }
+  }
+
+  @container hud (max-width: 420px) {
+    .module-rack-rows {
+      grid-template-columns: auto minmax(0, 1fr);
+      row-gap: 0.2rem;
+    }
+    .rack-slots {
+      grid-column: 1 / -1;
+      /* The racks would otherwise run together: with the slots on their own
+       * line the gap between a header and ITS slots and the gap between two
+       * racks are the same gap. This is what separates one rack from the next. */
+      margin-bottom: 0.35rem;
+    }
+    .rack-slots:last-child { margin-bottom: 0; }
+  }
+  .mob-card-body > .hud-bar > .hud-body > .module-rack { margin-top: 0.7rem; }
+  /* ⚠ THE "MODULES" HEADING IS CLIPPED FOR BOTH TIERS NOW, by the `.hud-bar`
+   * rule above — the reference has no such heading on either, and a rule
+   * written twice is a rule that drifts. */
+
+  /* ------------------------------------------------- the Shots window (§7) --
+   * The combat log as its own window. The totals sit above the table with the
+   * number of shots they were taken over printed underneath them.
+   *
+   * ⚠ THE CAPTION IS NOT DECORATION. These are a sum over a bounded tail of the
+   * push channel, so they are never "damage this fight" — see `shotsLog.ts`.
+   * Styling that let the two numbers read as a scoreboard while the caption
+   * faded away would be the lie the caption exists to prevent, which is why it
+   * keeps body-text size and sits directly under them. */
+  /* A hostile, marked in the ROW LIST as well as the threat strip. A word, so
+   * the marking never depends on telling the colour apart. */
+  .spc-row-badge {
+    align-self: flex-start;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0 3px;
+    border: 1px solid var(--stn-danger-text, var(--color-danger));
+    color: var(--stn-danger-text, var(--color-danger));
+  }
+
+  /* Mine this: one line per laser. See the markup note — a single shared
+   * verdict loses every refusal but the last. */
+  .spc-mine-reports {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+  }
+  .spc-mine-reports li {
+    display: flex;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .spc-mine-reports li.bad { color: var(--stn-danger-text); }
+  .spc-mine-name { flex: 0 0 auto; color: var(--color-text-bright); }
+  .spc-mine-outcome { min-width: 0; }
+
+  /* Compress: one row per stack in the hold, each with its own button. One
+   * stack at a time is the server's own shape — it answers per stack — and a
+   * "compress everything" button would hide which ones it quietly skipped. */
+  .compress-list {
+    list-style: none;
+    margin: 0.4rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .compress-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--color-row-line);
+  }
+  .compress-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .compress-qty {
+    flex: 0 0 auto;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .compress-list button { flex: 0 0 auto; min-height: 40px; }
+
+  /* ------------------------------------------------- the grid picker (§7) --
+   * A filter over a native <select>: pick something that is on the grid, BY
+   * NAME. It replaced the last raw-id fields in the client.
+   *
+   * The select stays native on purpose — keyboard-operable, type-ahead
+   * searchable and screen-reader announced for free, none of which a
+   * div-and-listbox reimplementation gets right by accident (R8). */
+  .grid-picker {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    flex: 1 1 14rem;
+  }
+  .grid-picker-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .grid-picker-label {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-muted);
+  }
+  .grid-picker-filter input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 32px;
+  }
+  .grid-picker select {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+  }
+  .grid-picker-empty { font-size: 11px; }
+
+  /* ⚠ A PANEL INSIDE A WINDOW HAS NO PADDING TO BLEED PAST.
+   *
+   * `.panel-head`'s negative inline margin exists to reach the edges of a
+   * PADDED panel. A windowed panel's own padding is stripped, so the head hung
+   * 16px outside it on each side and the window body scrolled sideways by the
+   * difference (R8). Measured live at 5px in the equipment window — small, and
+   * still sideways scroll.
+   *
+   * Zeroing the bleed rather than matching it to `.win-body`'s padding keeps
+   * the number out of two places; the head simply starts where its panel does.
+   */
+  .win-body > .panel > .panel-head {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+
+  /* "Send drones" on a hostile row — the cockpit's fastest path, carried back
+   * into the threat strip. Small and inline, because it sits inside a row that
+   * is already an alert and must not become the loudest thing in it. */
+  .spc-threat-send,
+  .spc-threat-lock {
+    flex: 0 0 auto;
+    min-height: 28px;
+    padding: 0.1rem 0.45rem;
+    font-size: 11px;
+    background: var(--color-panel-2);
+    border: 1px solid var(--color-line);
+    color: var(--color-text);
+  }
+  .spc-threat-send:hover:not(:disabled),
+  .spc-threat-lock:hover:not(:disabled) { border-color: var(--color-danger); }
+
+  .shot-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    margin: 0.5rem 0 0.2rem;
+  }
+  .shot-total {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+  .shot-total dt {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--color-muted);
+  }
+  .shot-total dd {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-bright);
+  }
+  .shot-total.dealt dd { color: var(--color-accent); }
+  .shot-total.taken dd { color: var(--color-danger); }
+  .shot-totals-caption { margin-top: 0; }
 
   /* The repair list under the rack. Repairing consumes nanite paste, so it is a
    * deliberate control rather than another modifier on a tile. */
@@ -4391,15 +5537,12 @@
 
   /* Weapon banking: the racks look identical banked or not, so the state is
    * said in words next to the control that changes it. */
-  .rack-banks {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.4rem;
-    margin-top: 0.5rem;
-  }
-  .rack-banks-state { font-size: 0.78rem; color: var(--color-muted); }
-  .module-slot.empty { background: var(--color-field); cursor: default; }
+  /* No fill and no border: the dashed ring inside IS the empty slot. A solid box
+   * here reads as a fitted module with a missing icon. */
+  /* Nothing left to un-paint — the tile carries no box for an empty slot to
+   * have to hide. The dashed `.slot-ring-empty` is the whole of what it looks
+   * like now. */
+  .module-slot.empty { cursor: default; }
   /* A click in flight: presentation only — the glow itself waits for the poll. */
   .module-slot.pending { animation: rack-pending 0.8s ease-in-out infinite alternate; }
   @keyframes rack-pending {
@@ -6063,6 +7206,1332 @@
       max-width: none;
       flex-wrap: wrap;
     }
+  }
+  /* ⚠ THE ONE RULE THAT HIDES THE DESKTOP, and it requires a class that only
+   * exists while docked. `station-expanded` is bound to Workspace's DERIVED
+   * flag (`isDocked && preference`), never to the stored preference, so a pilot
+   * in space cannot reach it however they left the panel — undocking into a
+   * hidden desktop with no HUD and no target panel would leave no way back to
+   * any of them. `dockPanelStates.test.ts` fails if a second rule learns to
+   * hide it, or if this one stops asking for the class. */
+  .work-main.station-expanded > .desktop { display: none; }
+
+  .dock-panel.expanded {
+    flex: 1;
+    width: auto;
+    max-width: none;
+  }
+
+  /* THE SHARED MOUNT. Both arms of the dock frame — the Station panel docked,
+   * the Overview in space — bring their own header and their own pinned strips,
+   * so each wants the same thing from the frame: the whole box, and nothing
+   * else. A host that scrolled or padded would put a pinned strip below the
+   * fold. What the frame still owns is the border, the width, the collapse
+   * strip and the resize handle. */
+  .dock-host {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .mobile-main.mobile-main-station {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+  }
+
+  /* The palette, declared ONCE for both roots. The Station panel and the
+   * Overview are the same frame at different moments and the space handoff
+   * reuses the station handoff's tokens verbatim, so two copies of these values
+   * is simply two things to keep in step by hand. */
+  /* ======================================================================
+   * 6. THE STATION PANEL — the right-hand dock panel while DOCKED
+   * ----------------------------------------------------------------------
+   * The hangars, the ship bays, the corporation's divisions and the station's
+   * services, as table ROWS. It replaced a grid of large tiles that used a
+   * 1200px-wide dock column to show about eight things.
+   *
+   * ⚠ DOCKED ONLY. In space the same frame holds § 7's Overview. NONE of the
+   * rules here may be written so that they can reach it: everything is under
+   * `.stn-panel`, and the palette is scoped to the two panel roots rather than
+   * added to the global `@theme` tokens. `dockPanelStates.test.ts` fails if the
+   * frame's shared rules or the global tokens move.
+   *
+   * ⚠ THE FRAME NO LONGER DRESSES EITHER PANEL. `.dock-panel-head`,
+   * `.dock-panel-body`, `.dock-collapse` and `.dock-overview` are gone: both
+   * arms bring their own header and their own pinned strips, so what the frame
+   * owns is the border, the width, the collapse strip and the resize handle,
+   * and `.dock-host` hands a panel the whole box.
+   *
+   * WHY THESE PANELS HAVE THEIR OWN PALETTE AND DENSITY.
+   * Same reason as the Pilot Hangar in section 5: the rest of this file dresses
+   * PANELS — framed blocks of prose and record tables with 40px controls. These
+   * two are dense, cold, square tables that have to stay readable in a 260px
+   * column and use the room in a 1200px one.
+   *
+   * ⚠ THE WIDTH QUESTION IS `@container`, NOT `@media` (R85). A panel here lives
+   * in a column the player drags, so "is there room for another column" is a
+   * question about THIS panel and never about the browser window. Asking the
+   * viewport is exactly the bug R85 fixed.
+   *
+   * ⚠ AND `container-type` MAKES A PANEL A CONTAINING BLOCK for its
+   * `position: fixed` descendants, so every popover here is `absolute` against
+   * its own panel root on purpose.
+   * ==================================================================== */
+
+  /* The palette, declared ONCE for both roots. The Station panel and the
+   * Overview are the same frame at different moments and the space handoff
+   * reuses the station handoff's tokens verbatim, so two copies of these values
+   * is simply two things to keep in step by hand. */
+  .stn-panel,
+  .spc-panel {
+    --stn-page: #0a1119;
+    --stn-raised: #0e1826;
+    --stn-surface: #0c131d;
+    --stn-hover: #0f1824;
+    --stn-picked: #132538;
+    --stn-tint: #1f3a55;
+    --stn-flying: #0f1c2b;
+    --stn-line: #1c2939;
+    --stn-line-strong: #2a4360;
+    --stn-hair: #111a26;
+    --stn-track: #131d2a;
+    --stn-text: #d6e1ec;
+    --stn-bright: #e8f3fb;
+    --stn-secondary: #a9b8c8;
+    --stn-muted: #7f93a8;
+    --stn-disabled: #5f7188;
+    --stn-accent: #8ec5ee;
+    --stn-accent-strong: #5aa9e6;
+    --stn-btn-text: #a9c8e2;
+    --stn-danger-text: #e0a39a;
+    --stn-danger-line: #4a2c2c;
+    --stn-danger-bg: #1b1113;
+    --stn-danger-strong: #d97a6a;
+
+    container-type: inline-size;
+    container-name: station;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    /* ⚠ `width: 100%` IS LOAD-BEARING, not tidiness. `inline-size` containment
+     * stops the CONTENT contributing to the element's own width, so a host that
+     * makes this a flex ITEM (rather than a block child of a column) sizes it
+     * from its content — which containment has just removed — and it collapses
+     * to zero. Measured: 0px wide inside a `display: flex` row. Taking the
+     * width from the parent is the same rule `.table-wrap` carries, and for the
+     * same reason. */
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--stn-page);
+    color: var(--stn-text);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* ⚠ THE PANEL CANCELS THE APP'S ELEMENT DRESSING, ONCE, HERE.
+   *
+   * The base and component layers style BARE ELEMENTS for a page of panels: a
+   * `section` is a bordered card with a gradient and an accent hairline, a
+   * `button` is a 40px gradient control, an `input` is a 40px field, and `p` /
+   * `h3` / `dl` carry their own vertical rhythm. Every one of those is right
+   * there and wrong inside a dense inventory table, which is why the first pass
+   * of this panel came out as a stack of nested cards.
+   *
+   * `:where()` is what makes this safe: it contributes NO specificity, so each
+   * rule below weighs exactly `.stn-panel` (0,1,0) and every `.stn-*` component
+   * class further down wins on source order rather than needing to be written
+   * defensively. Reset first, dress after — never the other way round. */
+  .stn-panel :where(section, .panel) {
+    position: static;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+  }
+  .stn-panel :where(section, .panel)::before { content: none; }
+  .stn-panel :where(ul, ol) { list-style: none; margin: 0; padding: 0; }
+  .stn-panel :where(li, p, h3, dl, dt, dd) { margin: 0; }
+  .stn-panel :where(button) {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: normal;
+    line-height: 1.2;
+    transition: none;
+  }
+  .stn-panel :where(input, select, textarea) {
+    min-height: 0;
+    padding: 0;
+    max-width: none;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+  }
+  /* The base's hover gradient is (0,2,1) and would outrank a plain component
+   * class, so it is cancelled at matching weight and re-offered per control. */
+  .stn-panel button:hover:not(:disabled) {
+    background: none;
+    border-color: inherit;
+  }
+  .stn-panel button:disabled { opacity: 1; }
+
+  .stn-panel button,
+  .stn-panel input,
+  .stn-panel select {
+    font-family: inherit;
+    font-size: 13px;
+    border-radius: 0;
+  }
+  .stn-panel button:focus-visible,
+  .stn-panel input:focus-visible,
+  .stn-panel select:focus-visible {
+    outline: 2px solid var(--stn-accent);
+    outline-offset: -2px;
+  }
+  .stn-panel button:disabled {
+    color: var(--stn-disabled);
+    cursor: default;
+  }
+
+  /* The scrollbar, dark and thin so a scrolling list does not put a bright
+   * chrome-coloured bar down the middle of the workspace. */
+  .stn-content {
+    scrollbar-width: thin;
+    scrollbar-color: var(--stn-line-strong) var(--stn-page);
+  }
+  .stn-content::-webkit-scrollbar { width: 8px; height: 8px; }
+  .stn-content::-webkit-scrollbar-track {
+    background: var(--stn-page);
+    border-left: 1px solid var(--stn-hair);
+  }
+  .stn-content::-webkit-scrollbar-thumb {
+    background: var(--stn-line-strong);
+    border: 2px solid var(--stn-page);
+  }
+  .stn-content::-webkit-scrollbar-thumb:hover { background: var(--stn-accent-strong); }
+
+  /* --- 6.1 the header ------------------------------------------------- */
+
+  .stn-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--stn-raised);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-head-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  /* The station's name, secondary to the workspace header above it. It is the
+   * first thing allowed to shrink, and it never wraps the header to two rows. */
+  .stn-head-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-icon-btn {
+    flex: none;
+    min-height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-icon-btn:hover:not(:disabled) {
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+  /* The word beside the glyph comes back wherever there is room for it, and on
+   * a touch-sized panel — where `title` produces no tooltip at all. */
+  .stn-icon-word { display: none; margin-left: 4px; }
+
+  /* --- 6.2 the location row -------------------------------------------- */
+
+  .stn-locations {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-tabs { display: none; flex-wrap: wrap; }
+  .stn-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 38px;
+    padding: 0 12px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--stn-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-tab:hover:not(.on) { color: var(--stn-bright); }
+  .stn-tab.on {
+    color: var(--stn-bright);
+    border-bottom-color: var(--stn-accent);
+  }
+  .stn-badge { font-size: 11px; color: var(--stn-muted); }
+  .stn-tab.on .stn-badge { color: var(--stn-accent); }
+
+  /* The dropdown needs room for the longest location name; when the panel
+   * cannot give both it and the filter that room, the filter takes the next
+   * line rather than clipping "Procurer bays" to "Procurer bays (". */
+  .stn-picker {
+    flex: 1 1 150px;
+    min-width: 0;
+    height: 36px;
+    padding: 0 8px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-bright);
+    font-weight: 600;
+  }
+
+  .stn-filter {
+    flex: 1 1 100px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 8px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+  }
+  .stn-filter-glyph { color: var(--stn-muted); }
+  .stn-filter input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    color: var(--stn-text);
+    outline: none;
+  }
+
+  /* --- 6.3 what the panel has to say ----------------------------------- */
+
+  .stn-notes {
+    flex: none;
+    padding: 6px 12px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .stn-note {
+    margin: 0;
+    color: var(--stn-muted);
+    text-wrap: pretty;
+  }
+  .stn-note + .stn-note { margin-top: 4px; }
+  .stn-note.bad { color: var(--stn-danger-text); }
+
+  /* --- 6.4 the scrolling content --------------------------------------- */
+
+  .stn-content {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .stn-view {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .stn-view[hidden] { display: none; }
+  .stn-group { display: flex; flex-direction: column; min-width: 0; }
+
+  .stn-group-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 12px 12px 8px;
+    background: transparent;
+    border: 0;
+    color: var(--stn-muted);
+    font-size: 11px;
+    text-align: left;
+  }
+  /* Only the chevron and the title fold the bay away; Stack all is a sibling,
+   * because a button inside a button is not markup a browser will honour. */
+  .stn-group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .stn-group-toggle:hover { background: var(--stn-surface); }
+  .stn-chevron { width: 10px; font-size: 10px; color: var(--stn-muted); }
+  .stn-group-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--stn-secondary);
+    white-space: nowrap;
+  }
+  .stn-group-count { display: none; white-space: nowrap; }
+  .stn-group-gap { flex: 1; }
+
+  /* The fill is a SUMMARY. The reading beside it is the real answer, so a place
+   * whose capacity was never reported gets a flat, unfilled track and the words
+   * "not known" — never a confident empty bar, which reads as "there is room". */
+  .stn-bar {
+    flex: 1;
+    min-width: 40px;
+    height: 3px;
+    background: var(--stn-track);
+  }
+  .stn-bar.nolimit { background: var(--stn-line-strong); }
+  .stn-bar-fill { display: block; height: 100%; background: var(--stn-accent-strong); }
+  .stn-bar-fill.full { background: var(--stn-danger-strong); }
+  .stn-group-cap {
+    font-variant-numeric: tabular-nums;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  .stn-group-cap.unknown { color: var(--stn-muted); }
+
+  /* --- 6.5 the rows ----------------------------------------------------- */
+
+  .stn-colhead,
+  .stn-row {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) 64px;
+    column-gap: 8px;
+    align-items: center;
+    min-width: 0;
+  }
+  .stn-colhead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 28px;
+    padding: 0 12px;
+    background: var(--stn-surface);
+    border-top: 1px solid var(--stn-line);
+    border-bottom: 1px solid var(--stn-line);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  /* A sortable column header. It deliberately does NOT set `text-align`: the
+   * cell class it also carries does, and a button that reset it to `inherit`
+   * put "QTY" on the left of a right-aligned column. */
+  .stn-sort {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+  .stn-sort.on { color: var(--stn-accent); }
+
+  .stn-rows { list-style: none; margin: 0; padding: 0; min-width: 0; }
+  .stn-rows.drop-target { outline: 1px dashed var(--stn-accent); outline-offset: -1px; }
+
+  .stn-row {
+    min-height: 46px;
+    padding: 2px 12px 2px 10px;
+    border-bottom: 1px solid var(--stn-hair);
+    border-left: 2px solid transparent;
+    cursor: pointer;
+  }
+  .stn-row:hover { background: var(--stn-hover); }
+  .stn-row.picked {
+    background: var(--stn-picked);
+    border-left-color: var(--stn-accent-strong);
+  }
+  .stn-row.readonly { cursor: default; }
+  .stn-row input[type="checkbox"] { accent-color: var(--stn-accent-strong); margin: 0; }
+
+  .stn-cell-pick { display: none; }
+  .stn-cell-icon { display: flex; }
+  .stn-cell-icon .type-icon { width: 28px; height: 28px; }
+  .stn-cell-name { display: flex; flex-direction: column; min-width: 0; }
+  .stn-name {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* One line carrying the two readings the narrow tier has no columns for. It
+   * never wraps — a row that grows a second line breaks the rhythm of the list. */
+  .stn-meta {
+    font-size: 11px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-cell-qty {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .stn-cell-unit,
+  .stn-cell-vol,
+  .stn-cell-state,
+  .stn-cell-move { display: none; }
+  .stn-cell-unit,
+  .stn-cell-vol {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .stn-cell-unit { color: var(--stn-muted); }
+  .stn-cell-state { color: var(--stn-muted); }
+  .stn-cell-move { justify-content: flex-end; gap: 3px; min-width: 0; }
+  .stn-muted { color: var(--stn-muted); font-size: 11px; }
+
+  .stn-empty {
+    padding: 18px 12px;
+    color: var(--stn-muted);
+    border-bottom: 1px solid var(--stn-hair);
+    text-wrap: pretty;
+  }
+  .stn-empty.bad { color: var(--stn-danger-text); }
+
+  /* --- 6.6 buttons ------------------------------------------------------ */
+
+  .stn-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 10px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-weight: 500;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-btn:hover:not(:disabled) { border-color: var(--stn-accent); }
+  .stn-btn-quick {
+    background: #0f1a28;
+    color: var(--stn-btn-text);
+    font-size: 11px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* A narrow panel gets the destination's first word — "Ore", "Station" — with
+   * the full name on the button's title and in the move bar. The alternative
+   * was "to Station hangar" pushing the quantity column into an ellipsis. */
+  .stn-quick-long { display: none; }
+  .stn-quick-short { display: inline; }
+  .stn-btn-more { min-height: 26px; padding: 0 6px; background: #0f1a28; color: var(--stn-btn-text); }
+  .stn-btn-ghost { background: transparent; border-color: var(--stn-line); color: var(--stn-secondary); }
+  .stn-btn-go {
+    min-height: 30px;
+    padding: 0 14px;
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .stn-btn-danger {
+    background: var(--stn-danger-bg);
+    border-color: var(--stn-danger-line);
+    color: var(--stn-danger-text);
+  }
+  .stn-btn-danger-go {
+    min-height: 30px;
+    padding: 0 14px;
+    background: var(--stn-danger-line);
+    border-color: var(--stn-danger-strong);
+    color: var(--stn-bright);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  /* Re-stacking is offered where it can act — the item hangar and the cargo
+   * hold, which are the only two places the bridge can re-stack. */
+  .stn-stack { min-height: 24px; padding: 0 8px; font-size: 11px; }
+  .stn-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 12px;
+  }
+  .stn-btn-wide { min-height: 32px; padding: 0 12px; }
+
+  /* --- 6.7 the corporation's divisions ---------------------------------- */
+
+  .stn-divisions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px 0;
+  }
+  .stn-chip {
+    min-height: 28px;
+    padding: 0 10px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    font-weight: 500;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .stn-chip.on {
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+
+  /* --- 6.8 the ship hangar ---------------------------------------------- */
+
+  .stn-ship-colhead,
+  .stn-ship-row {
+    grid-template-columns: 44px minmax(0, 1fr) 108px;
+  }
+  .stn-ship-row { min-height: 60px; padding: 6px 12px 6px 10px; }
+  .stn-ship-row.flying {
+    background: var(--stn-flying);
+    border-left-color: var(--stn-accent-strong);
+  }
+  .stn-cell-render { display: flex; }
+  .stn-cell-render .type-icon { width: 40px; height: 40px; }
+  .stn-ship-name { font-weight: 600; font-size: 14px; }
+  .stn-cell-bays,
+  .stn-cell-status { display: none; color: var(--stn-secondary); min-width: 0; }
+  .stn-cell-bays {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-cell-status.accent { color: var(--stn-accent); }
+  .stn-ship-row .stn-cell-move { display: flex; }
+
+  /* --- 6.9 the station's services --------------------------------------- */
+
+  .stn-services {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+    padding: 14px 12px;
+  }
+  .stn-services[hidden] { display: none; }
+  .stn-services-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .stn-section {
+    margin: 4px 0 0;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--stn-secondary);
+  }
+  .stn-facts {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 14px;
+    margin: 0;
+  }
+  .stn-facts dt {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .stn-facts dd { margin: 0; text-wrap: pretty; }
+  .stn-services .stn-controls { padding: 0; }
+  /* The guests table keeps the app's own table styling and its R8 reflow
+   * contract — it is a genuine record table and that machinery is already
+   * built and tested. Only the pilot's own row is tinted, to match the panel. */
+  .stn-services tr.self { background: var(--stn-flying); }
+  .stn-services tr.self td:first-child { font-weight: 600; }
+
+  /* --- 6.10 the action bar ---------------------------------------------- */
+
+  .stn-actions {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 6px 12px;
+    background: var(--stn-raised);
+    border-top: 1px solid var(--stn-line);
+  }
+  .stn-actions.armed { border-top-color: var(--stn-line-strong); }
+  .stn-sel-mark {
+    width: 3px;
+    height: 20px;
+    background: #3a4a5c;
+  }
+  .stn-actions.armed .stn-sel-mark { background: var(--stn-accent); }
+  .stn-sel-count {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #3a4a5c;
+    white-space: nowrap;
+  }
+  .stn-actions.armed .stn-sel-count { color: var(--stn-accent); }
+  .stn-sel-vol {
+    color: var(--stn-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .stn-qty { display: flex; align-items: center; gap: 5px; color: var(--stn-muted); font-size: 12px; }
+  .stn-qty input {
+    width: 56px;
+    min-height: 26px;
+    padding: 0 6px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-size: 12px;
+  }
+  .stn-actions-gap { flex: 1; }
+  .stn-targets { display: none; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .stn-targets-label { color: var(--stn-muted); font-size: 12px; }
+  .stn-ask { min-width: 0; text-wrap: pretty; }
+  .stn-accent { color: var(--stn-accent); }
+  .stn-actions .stn-muted { font-size: 12px; }
+
+  /* --- 6.11 the row menu ------------------------------------------------ */
+
+  .stn-target-toggle { min-height: 32px; }
+  .stn-target-menu {
+    right: 12px;
+    bottom: 52px;
+    left: auto;
+    max-height: 60%;
+    overflow: auto;
+  }
+
+  .stn-menu-shade { position: absolute; inset: 0; z-index: 40; }
+  .stn-menu {
+    position: absolute;
+    z-index: 41;
+    min-width: 180px;
+    max-width: calc(100% - 8px);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+  }
+  .stn-menu-head {
+    margin: 0;
+    padding: 6px 10px 4px;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stn-menu-item {
+    min-height: 30px;
+    padding: 0 10px;
+    background: transparent;
+    border: 0;
+    color: var(--stn-text);
+    font-weight: 500;
+    font-size: 12px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stn-menu-item:hover:not(:disabled) { background: var(--stn-tint); }
+
+  /* --- 6.12 the width tiers --------------------------------------------- */
+  /*
+   * Mobile-first: the rules above are the NARROWEST panel, and each tier adds
+   * columns as the panel earns the room. A server render therefore emits every
+   * cell and the stylesheet decides which are shown — which is also why the
+   * tests assert the tiers here rather than in the rendered body.
+   */
+
+  /* ~330px: the checkbox column and the per-row move controls arrive. Below
+   * this the row itself is the tap target and the action bar does the moving. */
+  @container station (min-width: 330px) {
+    .stn-colhead,
+    .stn-row { grid-template-columns: 20px 28px minmax(0, 1fr) 64px 112px; }
+    .stn-cell-pick { display: flex; }
+    .stn-cell-move { display: flex; }
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 110px; }
+  }
+
+  /* 560px: a tab row instead of a dropdown, and the total-m³ and state columns.
+   * The per-row meta line goes away — its two readings now have columns. */
+  @container station (min-width: 560px) {
+    .stn-locations { gap: 8px; padding: 0 8px; }
+    .stn-tabs { display: flex; flex: 1; min-width: 0; }
+    .stn-picker { display: none; }
+    .stn-filter { flex: none; height: 28px; width: 150px; }
+    .stn-icon-word { display: inline; }
+
+    .stn-colhead,
+    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 80px 88px 70px 116px; }
+    .stn-cell-vol,
+    .stn-cell-state { display: block; }
+    .stn-meta { display: none; }
+    .stn-row { min-height: 38px; }
+    .stn-group-count { display: inline; }
+    .stn-cell-icon .type-icon { width: 32px; height: 32px; }
+
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 150px 130px 140px; }
+    .stn-cell-bays,
+    .stn-cell-status { display: block; }
+    .stn-ship-row .stn-meta { display: none; }
+
+    .stn-services { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
+  }
+
+  /* 900px: the per-unit m³ column, a wider filter, and Stack all on the item
+   * hangar — the things that are useful but not worth a column of their own
+   * until the panel is genuinely wide. */
+  @container station (min-width: 900px) {
+    .stn-colhead,
+    .stn-row { grid-template-columns: 24px 32px minmax(0, 1fr) 110px 90px 110px 110px 150px; }
+    .stn-cell-unit { display: block; }
+    .stn-filter { width: 220px; }
+    .stn-quick-long { display: inline; }
+    .stn-quick-short { display: none; }
+    .stn-targets { display: flex; }
+    .stn-target-toggle { display: none; }
+
+    .stn-ship-colhead,
+    .stn-ship-row { grid-template-columns: 44px minmax(0, 1fr) 190px 160px 150px; }
+  }
+
+
+  /* ======================================================================
+   * 7. THE OVERVIEW — the right-hand dock panel while IN SPACE
+   * ----------------------------------------------------------------------
+   * What is around your ship, what you have picked, and everything you can do
+   * to it. The in-space counterpart of § 6's Station panel, and it reuses that
+   * section's palette verbatim rather than declaring a second one: they are the
+   * same frame at different moments, and two nearly-identical palettes is how
+   * two panels drift apart.
+   *
+   * ⚠ IN SPACE ONLY. Docked, the same frame holds `.stn-panel`. Nothing here
+   * may be written so that it can reach the Station panel — everything is under
+   * `.spc-panel`, and `spaceWorkspaceStates.test.ts` fails if the panel is ever
+   * mounted outside an `isDocked` guard.
+   *
+   * ⚠ THE WIDTH TIERS ARE `@container`, NOT `@media` (R85), for the same reason
+   * as § 6: this panel lives in a column the player drags, so "is there room
+   * for the Type and Group columns" is a question about THIS panel and never
+   * about the browser window.
+   *
+   * ⚠ AND `container-type` MAKES THIS A CONTAINING BLOCK for `position: fixed`
+   * descendants, so the range menu is `absolute` against this root on purpose.
+   * ==================================================================== */
+
+  .spc-panel {
+    container-type: inline-size;
+    container-name: space;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    /* ⚠ Load-bearing, exactly as on `.stn-panel`: `inline-size` containment
+     * stops the CONTENT sizing the element, so a host that makes this a flex
+     * item would collapse it to zero. It takes its width from the parent. */
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--stn-page);
+    color: var(--stn-text);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* The same reset § 6 needs, and for the same reason: the app dresses bare
+   * elements as PANELS, which is right for a page of them and wrong inside a
+   * dense list. `:where()` carries no specificity, so every `.spc-*` class
+   * below wins on source order. Reset first, dress after. */
+  .spc-panel :where(section, .panel) {
+    position: static;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+  }
+  .spc-panel :where(section, .panel)::before { content: none; }
+  .spc-panel :where(ul, ol) { list-style: none; margin: 0; padding: 0; }
+  .spc-panel :where(li, p, h2, h3, dl, dt, dd) { margin: 0; }
+  .spc-panel :where(button) {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: normal;
+    line-height: 1.2;
+    transition: none;
+  }
+  .spc-panel :where(input, select) {
+    min-height: 0;
+    padding: 0;
+    max-width: none;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+  }
+  .spc-panel button:hover:not(:disabled) { background: none; border-color: inherit; }
+  .spc-panel button:disabled { opacity: 1; }
+  .spc-panel button, .spc-panel input { font-family: inherit; font-size: 13px; border-radius: 0; }
+  .spc-panel button:focus-visible,
+  .spc-panel input:focus-visible {
+    outline: 2px solid var(--stn-accent);
+    outline-offset: -2px;
+  }
+
+  /* --- 7.1 the header --------------------------------------------------- */
+
+  .spc-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 12px;
+    background: var(--stn-raised);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-head-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  .spc-head-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-icon-btn {
+    flex: none;
+    min-height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    cursor: pointer;
+  }
+  .spc-icon-btn:hover:not(:disabled) { border-color: var(--stn-accent); color: var(--stn-bright); }
+
+  /* --- 7.2 the threat strip --------------------------------------------- */
+  /*
+   * ⚠ ABOVE THE LIST AND OUTSIDE THE SCROLLER, on purpose: a warning you have
+   * to scroll to is a warning you will miss. It is also the only element here
+   * that ignores the preset and the row cap — no filter may hide something that
+   * is shooting at you.
+   */
+  .spc-threats {
+    flex: none;
+    padding: 8px 12px;
+    background: #1b1113;
+    border-bottom: 1px solid #4a2c2c;
+    color: var(--stn-danger-text);
+  }
+  .spc-threats-head { font-size: 12px; }
+  .spc-threat-list { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .spc-threat {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  .spc-threat-name {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    color: var(--stn-danger-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-threat-name:hover { color: var(--stn-bright); }
+  .spc-threat-kind { color: var(--stn-muted); white-space: nowrap; }
+  .spc-threat-range { color: var(--stn-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* --- 7.3 what is picked, and what you can do to it -------------------- */
+
+  .spc-selected {
+    flex: none;
+    padding: 8px 10px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-selected-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .spc-selected-icon { display: flex; }
+  .spc-selected-icon .type-icon { width: 28px; height: 28px; }
+  .spc-selected-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .spc-selected-name .spc-name { font-weight: 600; }
+  .spc-locked-badge {
+    flex: none;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-warn);
+  }
+  .spc-locked-badge.acquiring { color: var(--stn-muted); }
+
+  /* The verb bar. Every action the model returns is drawn — including the ones
+   * it returns DISABLED, wearing the sentence that says why. Dropping one
+   * silently leaves a player wondering where a button went. */
+  .spc-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .spc-action { display: flex; }
+  .spc-action-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    width: 54px;
+    min-height: 44px;
+    padding: 4px 2px;
+    background: #0f1a28;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-btn-text);
+    cursor: pointer;
+  }
+  .spc-action.ranged .spc-action-btn { width: 58px; }
+  .spc-action-btn:hover:not(:disabled) { border-color: var(--stn-accent); color: var(--stn-bright); }
+  .spc-action-btn:disabled { color: var(--stn-disabled); cursor: default; }
+  .spc-glyph {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* ⚠ THE WORD IS NOT DECORATION. A tooltip does not exist on a touch screen,
+   * and this panel has a touch tier — so the verb is always under the glyph. */
+  .spc-action-label {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-align: center;
+    line-height: 1.1;
+  }
+  .spc-action-more {
+    width: 16px;
+    min-height: 44px;
+    background: #0f1a28;
+    border: 1px solid var(--stn-line-strong);
+    border-left: 0;
+    color: var(--stn-btn-text);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .spc-action-more:hover:not(:disabled) { border-color: var(--stn-accent); }
+
+  /* --- 7.4 the distance menu -------------------------------------------- */
+
+  .spc-menu-shade { position: absolute; inset: 0; z-index: 40; }
+  .spc-menu {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    top: 92px;
+    z-index: 41;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line-strong);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+  }
+  .spc-menu-head {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .spc-menu-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .spc-chip {
+    min-height: 28px;
+    padding: 0 10px;
+    background: var(--stn-page);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .spc-chip.on {
+    background: var(--stn-tint);
+    border-color: var(--stn-accent);
+    color: var(--stn-bright);
+  }
+  .spc-menu-custom { display: flex; align-items: center; gap: 6px; }
+  .spc-menu-custom input {
+    width: 68px;
+    min-height: 28px;
+    padding: 0 6px;
+    background: var(--stn-page);
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+  }
+  .spc-menu-unit { color: var(--stn-muted); font-size: 12px; }
+  .spc-btn {
+    min-height: 28px;
+    padding: 0 10px;
+    background: #101c2b;
+    border: 1px solid var(--stn-line-strong);
+    color: var(--stn-text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .spc-btn:hover:not(:disabled) { border-color: var(--stn-accent); }
+
+  /* --- 7.5 the filter row ----------------------------------------------- */
+
+  .spc-filters {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-tabs { display: flex; flex-wrap: wrap; }
+  .spc-tab {
+    min-height: 26px;
+    padding: 0 8px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--stn-secondary);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .spc-tab:hover:not(.on) { color: var(--stn-bright); }
+  .spc-tab.on { color: var(--stn-bright); border-bottom-color: var(--stn-accent); }
+  .spc-search {
+    flex: 1 1 130px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 0 8px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+  }
+  .spc-search-glyph { color: var(--stn-muted); }
+  .spc-search input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; }
+
+  /* --- 7.6 the list ----------------------------------------------------- */
+
+  .spc-content {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--stn-line-strong) var(--stn-page);
+  }
+  .spc-content::-webkit-scrollbar { width: 8px; height: 8px; }
+  .spc-content::-webkit-scrollbar-track { background: var(--stn-page); border-left: 1px solid var(--stn-hair); }
+  .spc-content::-webkit-scrollbar-thumb { background: var(--stn-line-strong); border: 2px solid var(--stn-page); }
+  .spc-content::-webkit-scrollbar-thumb:hover { background: var(--stn-accent-strong); }
+
+  .spc-colhead,
+  .spc-row-btn {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) 84px;
+    column-gap: 8px;
+    align-items: center;
+    min-width: 0;
+    text-align: left;
+  }
+  .spc-colhead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 26px;
+    padding: 0 10px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--stn-muted);
+  }
+  .spc-sort {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+  .spc-sort.on { color: var(--stn-accent); }
+
+  .spc-rows { min-width: 0; }
+  .spc-row { border-bottom: 1px solid var(--stn-hair); border-left: 2px solid transparent; }
+  .spc-row:hover { background: var(--stn-hover); }
+  .spc-row.picked { background: var(--stn-picked); border-left-color: var(--stn-accent-strong); }
+  .spc-row-btn {
+    width: 100%;
+    min-height: 40px;
+    padding: 2px 10px 2px 8px;
+    cursor: pointer;
+  }
+  .spc-cell-icon { display: flex; }
+  .spc-cell-icon .type-icon { width: 20px; height: 20px; }
+  .spc-cell-name { display: flex; flex-direction: column; min-width: 0; }
+  .spc-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* ⚠ A hostile's name is tinted AND the threat strip names it above the list.
+   * Colour is never the only thing that says something is shooting at you. */
+  .spc-row.hostile .spc-name,
+  .spc-name.hostile { color: var(--stn-danger-text); }
+  .spc-lock-mark { color: var(--stn-warn); margin-left: 4px; }
+  .spc-meta {
+    font-size: 11px;
+    color: var(--stn-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-cell-type,
+  .spc-cell-group {
+    display: none;
+    color: var(--stn-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spc-cell-range {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--stn-text);
+    white-space: nowrap;
+  }
+  /* Far things are dimmer, so the near ones read first. The figure is still
+   * there — this is emphasis, not a hidden reading. */
+  .spc-cell-range.far { color: var(--stn-muted); }
+
+  .spc-empty { padding: 18px 12px; color: var(--stn-muted); }
+  .spc-note {
+    margin: 0;
+    padding: 6px 12px;
+    color: var(--stn-muted);
+    font-size: 12px;
+    text-wrap: pretty;
+  }
+  .spc-note.bad { color: var(--stn-danger-text); }
+  .spc-selected .spc-note { padding: 4px 0 0; }
+
+  /* --- 7.7 the width tiers ---------------------------------------------- */
+  /*
+   * Mobile-first: the rules above are the narrowest panel, and the Type and
+   * Group columns arrive when the panel has earned the room for them. The
+   * per-row meta line carries the same two readings until then.
+   */
+  @container space (min-width: 560px) {
+    .spc-colhead,
+    .spc-row-btn { grid-template-columns: 24px minmax(0, 1.4fr) minmax(0, 1fr) 90px 92px; }
+    .spc-cell-type,
+    .spc-cell-group { display: block; }
+    .spc-meta { display: none; }
+    .spc-row-btn { min-height: 32px; }
+    .spc-search { flex: none; width: 200px; }
+    .spc-menu { left: auto; right: 10px; width: 320px; }
   }
 
 }

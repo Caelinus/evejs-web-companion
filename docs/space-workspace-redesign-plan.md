@@ -1,0 +1,564 @@
+# Plan: the in-space workspace redesign
+
+Written 2026-09-06 against `design_handoff_space_panel` (direction **1C** desktop, **1D** mobile). It
+follows `docs/station-panel-redesign-plan.md`, whose docked work is done — this package explicitly
+reuses that one's tokens, type, scrollbar and button styles verbatim.
+
+⚠ **This is not a panel redesign. It is a workspace redesign.** The station package replaced the
+contents of one frame. This one changes the shape of the whole in-space work area, splits the
+largest component in the codebase into five, and asks for two features that do not exist at any
+layer. Sized honestly it is several times the station panel.
+
+---
+
+## 1. The blast radius, measured
+
+### 1.1 What the in-space workspace is today
+
+```
+.workspace                    grid: neocom | work
+  .work                       flex column
+    WorkspaceHeader           where you are + Dock
+    CustomBotReadout
+    .work-main                flex ROW
+      .desktop                flex:1 — floating windows, with Tactical as an inset:0 BACKDROP
+      .dock-panel             fixed 22rem, collapsible, resizable  -> <Overview compact>
+      TargetsPanel            absolute, z 400, over both
+    HudBar                    grid: ShipHud | ModuleRack | shots | nav buttons
+```
+
+The handoff wants:
+
+```
+.work-main                    grid  minmax(0,1fr) / minmax(320px,34%)
+                              rows  minmax(0,1fr) / 270px
+  radar                       top-left      — floating windows live ONLY in here
+  hud                         bottom-left   — gauge + racks, 270px
+  overview                    right, spanning both rows, resizable, min 320px
+```
+
+So: the HUD moves *into* the work area as a grid cell, the radar stops being the whole left side,
+and the windows' bounds stop being the desktop and become the radar.
+
+### 1.2 `Overview.svelte` is 2788 lines and holds sixteen sections
+
+This is the centre of the work. In document order:
+
+| # | Section | Handoff sends it to |
+| --- | --- | --- |
+| 1 | panel header | the overview panel's own 32px header |
+| 2 | flight strip (where / doing / wrong · Undock **or Stop**) | split: the HUD footer sentence + Stop, and Flight's Status grid |
+| 3 | "Undock to see…" | n/a |
+| 4 | **threat block** (hostiles, "You are taking damage", arrival banner, per-threat Lock / Send drones) | **nowhere — see 2.7** |
+| 5 | ship condition + hold strip | the HUD gauge |
+| 6 | selection bar (name, verbs, per-concern errors, mine reports) | the selected-item + icon action row |
+| 7 | Search / Category / Group / Sort controls | the filter row |
+| 8 | preset tabs (R79) | the ALL / MINING / TRAVEL / COMBAT tabs — an exact match |
+| 9 | the row list | the rows |
+| 10 | flight + gate-link errors | ? |
+| 11 | locked-targets table | dropped; a `⌖` on the row instead — **but see 2.8** |
+| 12 | equipment table (power up / switch on / off / down) | the HUD's module racks |
+| 13 | "Flying distances" `<details>` | the per-action `▾` range popovers |
+| 14 | drones `<details>` | the Drones window |
+| 15 | shots fired | the Shots window |
+| 16 | RadialMenu | keep |
+
+**The `compact` prop is dead.** `Overview.svelte:1614` sets `class:overview-compact`, and no
+`.overview-compact` rule exists anywhere in the repo. The docked-panel trimming is really done by
+`.dock-overview .ov-ship-condition, .ov-locked-targets, .ov-equipment, .ov-shots { display: none }`
+(`styles.css:3365-3370`). Everything still computes and renders into the DOM. Delete the prop.
+
+### 1.3 What is genuinely shared, and what is not
+
+* **`space/rowActions.ts` is already the verb set as DATA** — warp, approach, orbit, keepAtRange,
+  align, dock (by kind), jump (only with a gate link), mine, lock/unlock, haul — each with a
+  `concern` and a `unavailable` sentence. `space/rowActionRunner.ts` is the single dispatch site.
+  The handoff's icon action row is a **re-skin of an existing model**, not new logic. This is the
+  largest single piece of luck in the package.
+* **`space/overviewPresets.ts` already is ALL / MINING / TRAVEL / COMBAT**, classified through
+  `bracketRole` so the list and the radar agree, and `presetAllows` force-includes anything hostile.
+  The handoff's filter tabs are the same four.
+* **`space/overview.ts` already formats distance** and caps at `ROW_CAP = 200` with the preset
+  applied *before* the cap.
+* **The dock frame** (`.dock-panel*`) is shared with the docked Station panel. Once the in-space
+  content also brings its own header, `.dock-panel-head` and `.dock-panel-body` are dead in both
+  arms — which is a simplification, but it retires the CSS that `dockPanelStates.test.ts` currently
+  hashes.
+* **`.desktop`, `desktop.ts`, `DesktopWindow.svelte`** are shared with the *docked* desktop. Every
+  window change lands on the docked workspace too.
+
+### 1.4 The mirror net
+
+The station work built `dockPanelStates.test.ts` to stop a docked change reaching space. This work
+needs the **mirror**: a net that stops an in-space change reaching the docked workspace. Same
+technique — render `DockPanel` and `Workspace` docked, pin what must not appear, hash the shared
+frame CSS — plus, because the windows are shared, a pin that the docked desktop still opens,
+drags and persists windows exactly as it does now.
+
+---
+
+## 2. Where the handoff has to bend
+
+### 2.1 Icons and fonts — settled already
+
+`images.evetech.net` is out for the same reason as last time (`web/src/ui/typeIcons.ts`: icons are
+local only; the browser never touches an external host). Fonts are the bundled Barlow pair. The
+handoff's action-bar glyphs are described as "swap for the app's icon set" — `ui/actionIcons.ts`
+already exists and is the place.
+
+### 2.2 ⚠ Rack heat has no data. None.
+
+The handoff asks for a per-rack heat bar with a percentage, and a per-module heat wedge sized
+`6 + dmg×10` px in three colour bands.
+
+**There is no heat model in this client at any layer** — not in the store, not in the bridge, not on
+the BFF. Greps for `heatState|heatLevel|rackHeat|heatCapacity|heatAttenuation` across `web/src` and
+`src/server.js` return nothing. What exists is:
+
+* `SpaceShip.moduleDamage` — per module, `0..1`, where 1 is burnt out. This is the **consequence** of
+  heat, not heat.
+* `overloadedModuleIDs` — a boolean per module.
+
+So:
+
+* The **per-module wedge is built** off `damage`. It is honest: it is what heat did.
+* The **per-rack heat bar is STUBBED.** ✅ **Decided:** build the bar, its label and its colour
+  bands, wired to a rack-heat reading that does not exist yet — and until it does, render it exactly
+  the way an unread bay capacity renders: **"not known", with a flat unfilled track**, never a 0 and
+  never an average of module damage standing in for it. Heat mechanics are a separate piece of work
+  in another session; the day the reading arrives the bar lights up with no UI change.
+
+  ⚠ The flat track matters as much as the words. An empty bar reads as "cold", which is a claim
+  about a ship that could be about to burn a module out.
+
+⚠ `types.ts:1611`: "`{}` AND `null` ARE DIFFERENT. `{}` is 'every module is intact'; `null` is 'we
+could not read the fit'. Overloading is what causes this damage, so a page that treated the second as
+the first would hide the cost of the very feature that produces it."
+
+### 2.3 Press-and-hold overload replaces shift-click
+
+Overload exists end to end: `flow.setModuleOverload` → `POST /api/bridge/dogma/module/overload`,
+verified against the snapshot rather than the 200. `repairModule` is its complement and is wired.
+
+Today the guard is **shift-click**, with a stated reason: "the retail modifier, and deliberately
+behind one: overloading damages the module, so it must not share the plain click that fires it."
+The handoff's 600 ms hold is a different guard for the same reason and is fine — it also works on
+touch, which shift-click never did. Two things must survive the swap:
+
+* an **offline** module is inert to both press and hold (`rackClickAction` returns null);
+* **unknown** overload state (`overloadedModuleIDs === null`) says nothing about heat either way, and
+  must not render as "not hot".
+
+Unused capability worth reaching for while here: the BFF already has rack-level
+`/module/overload-rack`, `/stop-overload-rack` and `/repair/start-many` (`src/server.js:9300, 9319,
+9337`). Nothing in `web/src` exposes them.
+
+### 2.4 ⚠ The capacitor: discrete segments vs a dashed arc
+
+The handoff draws the capacitor as a dashed arc (`6 3`). Today it is **12 counted segments**, and
+that is a documented decision:
+
+> ⚠ DISCRETE IS THE POINT. EVE's capacitor has never been a smooth bar, and a pilot counts remaining
+> segments rather than reading a percentage — "three left" is a decision, "24%" is a number you then
+> have to convert. — `shipHudArcs.ts:123`
+
+A dash pattern is a texture, not a count: `6 3` does not divide into a fixed number of segments as
+the ratio changes, so you cannot count what is left.
+
+✅ **Decided: keep the twelve counted segments, drawn at the handoff's radius, stroke and 240°
+sweep.** It looks nearly identical to the drawing and keeps the property the note is about. This is a
+deliberate divergence from a package whose colours and behaviour are called final, and its author
+should be told.
+
+### 2.5 The gauge's angles move, and they are pinned by test
+
+Today: start 135°, sweep 270°, gap centred on the bottom (`shipHudArcs.ts:36`), three radii
+45/38/31 plus a 22 cap ring, in a 0–100 viewBox. The handoff: start 210°, sweep 240°, radii
+66/57/48/37 in a 150×150 box, stroke 7.
+
+`shipHudArcs.test.ts` pins 135/270 **by test, not just by constant** ("the gauges start at the bottom
+left", "the gauges leave a gap centred on the bottom"). Changing them is a deliberate test change,
+not a break. Everything else in that suite is geometry that still holds: clockwise, the 359.999
+clamp, concentric radii, and — most importantly — **an unknown reading draws nothing and is not the
+same as empty**.
+
+### 2.6 ⚠ The Shots window's totals cannot be a fight total
+
+`damageLog` is a bounded **40-event tail** (`DAMAGE_LOG_LIMIT`), fed by a push channel that is
+explicitly allowed to drop and resynchronise. The current panel says so out loud:
+
+> This is a running commentary, not a tally: the live channel is allowed to drop and pick up again,
+> so shots can be missing from this list.
+
+The handoff's header wants **Dealt · Received · Shots · Hit rate**. Summed over that tail those are
+not the fight's totals and must not be presented as if they were.
+
+✅ **Decided: keep all four figures and say in the header what window they cover** — the last 40
+shots. The sentence about the channel dropping stays.
+
+✅ **Decided: no "crit" colour.** `DamageEvent.quality` exists, but: "NOT translated to retail's
+'Grazes'/'Wrecks' wording here: the mapping is not sourced from this server, and inventing it would
+be fabricated detail." Colouring a band we cannot name is the same invention with the label removed.
+`miss` stays — a real 0 is a value the server does send.
+
+### 2.7 ⚠ The threat block is not in the handoff, and must not be lost
+
+`Overview.svelte:1695-1759` reads the **whole snapshot, uncapped and unfiltered**, and gives:
+hostiles by name and kind, a "You are taking damage" banner, an arrival banner, and per-threat Lock /
+Release lock / Send drones. `overviewPresets.ts` exists partly to serve it — "⚠ NO PRESET CAN HIDE
+SOMETHING THAT IS SHOOTING AT YOU", and the hostile clause is first and unconditional.
+
+The handoff's overview has hostile *names* in `#e0a39a` and nothing else. Dropping the block would
+remove the only place the client tells a pilot they are under attack, and the only per-threat lock
+that bypasses the row cap.
+
+✅ **Decided: it survives as its own strip above the overview list**, restyled to the new language,
+still uncapped and still unfiltered, keeping the damage banner, the arrival banner and per-threat
+Lock / Release lock / Send drones. This is a deliberate addition to the handoff — it changes the
+panel's top — and its author should be told.
+
+### 2.8 The locked-targets table and TargetsPanel overlap
+
+Today `locked` is shown twice: as a six-column reflow table inside Overview, and as the floating
+`TargetsPanel` of round bracket cards. The handoff drops the table (a `⌖` on the row instead) and
+never mentions the panel. Keeping all three would be three places for one fact.
+
+✅ **Decided: the table goes** (the handoff is right), `TargetsPanel` stays as the at-a-glance
+condition read it was built for (R71), and the row gets its `⌖`. A judgement call rather than one put
+to the operator: the panel shows the same facts in a better form, so nothing is lost. Note `TargetsPanel` currently
+clamps to `.work-main`; under the new grid it should clamp to the radar like every other floater.
+
+### 2.9 Orbit and keep-at-range distances: one source of truth, not two
+
+Today: **one** `orbit` and **one** `hold` value, in `ui/flyingDistances.ts`, persisted to
+`localStorage`, chosen in **Settings**, with fixed menus (`WARP_RANGES` 0/10/20/30/50/70/100 km,
+`HOLD_RANGES` 500 m/1/2.5/5/10/20/30 km). `Tactical.svelte` and the runner read the same three.
+
+The handoff wants a `▾` on each of Orbit and Keep, presets 1/5/10/20 km plus a custom field,
+remembered **per action, for the session**, defaults orbit 5 km and keep 10 km.
+
+Three conflicts: the storage (localStorage vs session), the presets (different ladders), and where
+they are chosen (Settings vs the action). ✅ **Decided: the action's `▾` becomes the one place they are chosen, and it writes through to
+`flyingDistances`** — so Settings, the radial menu and the radar keep agreeing with the overview.
+localStorage stays: a distance that forgets itself every session is worse, not better, and two
+sources of truth for "how far do I orbit" is a bug waiting to be filed. The ladders are merged rather
+than one replacing the other.
+
+### 2.10 Minimize and the window strip do not exist
+
+`desktop.ts` has `collapsed` (shade to the title bar) and nothing else — no minimize, no taskbar. The
+Neocom rail is the only open-window indicator today (`class:open` / `class:active` per entry).
+
+The handoff wants **minimize** (hidden entirely) plus a **strip** of chips at the radar's bottom-left.
+That is a second, different hide beside `collapsed`, and two shade-like states on one window will
+confuse. ✅ **Decided: add `minimized` to `WinState` and keep `collapsed`**; the strip lists every open
+window and a chip's dot distinguishes visible from minimized. Collapse shades a window you are still
+looking at; minimize puts it away. They are different acts and the handoff wants both. The rail keeps meaning "open".
+
+⚠ **REVERSED AFTER THE FACT, at the operator's call: `collapsed` is gone.** Both did ship, and the
+reasoning above is still true — they *are* different acts. It is just not a difference worth two
+controls. The shade is the weaker of the two: it goes on occupying the desktop, goes on overlapping
+whatever is under it, and leaves a stub the player has to find again, where a put-away leaves a chip
+in the strip, which is a better handle than a floating stub.
+
+So a window has **two** chrome buttons, not three — `—` (put away) and `✕` (close) — and `—` is the
+glyph a player already reads as "minimize". Double-clicking the title bar puts the window away,
+where it used to shade it: the same gesture on the same target, doing the thing that survived.
+
+⚠ **A layout saved while the shade existed still loads.** `collapsed` is not required by the
+validator, and `loadLayout` now rebuilds each window FIELD BY FIELD rather than spreading it — a
+stale key that rides in on a `{ ...w }` is one that gets written straight back out on the next save
+and lives forever. Naming the fields is what makes removing one actually remove it.
+Both must be persisted through `DesktopLayout`, whose validator has to learn the field the way it
+just learned `stationExpanded` — an absent field reads `false`.
+
+### 2.11 Drones and Shots have to become windows
+
+They are sections of `Overview.svelte` today, not tabs. `tabs.ts` has no `drones` or `shots` id, and
+`desktop.ts` treats only `overview` as chrome. Making them floating windows means two new `TabID`s,
+two Neocom entries (in-space only), and two new panels. Flight and Mining are already in-space window
+tabs, so those two only change their default position and their content.
+
+### 2.12 Compress and jettison need flow methods — but compress CAN be aimed
+
+The Mining window wants **Compress** and **Jettison…**. `api.jettisonItems` and
+`api.compressOreInSpace` exist and are used by the bot action switch, but neither is an `AppFlow`
+method, so no panel can call them. Both need wiring up.
+
+The facility looked at first like a blocker. It is not: **a compression facility is a SHIP on grid**,
+not only a structure — "a mining support ship on grid, your own hull or a fleet-mate's, running an
+Industrial Core plus a compression module" (`api.ts:3566`). And the snapshot already carries the
+reading:
+
+```
+SpaceEntity.compressionFacility?: { rangeMeters, typeListIDs } | null
+```
+
+> ⚠ OPTIONAL so a server that does not project it yet still decodes, and ABSENT MUST READ AS "NOT A
+> FACILITY" — never as an unknown worth trying. Read it as `entity.compressionFacility ?? null`.
+> — `types.ts:1548`
+
+✅ **Decided: Compress ships in Phase 4 with a real picker**, built on the rule the `compress-ore`
+bot macro already uses (`nav/scriptMacros.ts:3643`) — an in-range, non-NPC hull whose
+`compressionFacility` is present and non-null. Lift that rule into a pure module rather than writing
+a second copy of it; two copies "would not diverge loudly — they would diverge in ONE branch".
+
+Three things the panel must keep straight, all of them already documented:
+
+* **absent ≠ null ≠ present.** An unread facility reading is not a candidate, and is not the same as
+  a support ship with its gear switched off.
+* **The server refuses with one silence.** "It refuses a missing facility, an out-of-range one, a
+  foreign item and an ore that has no compressed form all with the same silence, so the caller
+  re-reads its hold rather than guessing which" (`api.ts:3554`). So a refused compress re-reads the
+  hold and says it was refused — it never names a cause it does not have.
+* **Nothing on grid to compress against is a sentence, not a hidden button.** The same rule
+  `rowActions` follows: the control is always drawn, wearing its reason.
+
+### 2.13 Raw ID inputs go, and that is a real fix
+
+`Flight.svelte` currently asks the player to type `"stargate / celestial ID"`, `"source stargate ID"`,
+`"destination station ID"`. The handoff replaces all three with searchable pickers filtered from the
+overview. That is the last place in the client where a player handles a raw id by hand — worth
+calling out as a correctness win, not just a visual one.
+
+---
+
+## 3. Files
+
+| File | Change |
+| --- | --- |
+| `web/src/ui/SpaceOverview.svelte` | **new.** the right-hand panel: header, selected item + icon actions, filter tabs, columns, rows, threat strip |
+| `web/src/ui/spaceRanges.ts` | **new, pure.** the orbit/keep ladders, the custom value, and the write-through to `flyingDistances` |
+| `web/src/ui/DronesPanel.svelte` | **new.** lifted out of `Overview.svelte` |
+| `web/src/ui/ShotsPanel.svelte` | **new.** lifted out of `Overview.svelte` |
+| `web/src/ui/ShipHud.svelte`, `shipHudArcs.ts` | new geometry; the cap stays discrete |
+| `web/src/ui/ModuleRack.svelte`, `moduleRack.ts` | slot redraw, press-and-hold overload, damage wedge |
+| `web/src/ui/Flight.svelte` | the three pickers replace the id inputs |
+| `web/src/ui/Mining.svelte` | in-space holds + jettison; window chrome |
+| `web/src/ui/HudBar.svelte` | becomes the `hud` grid cell; loses shots and the nav buttons |
+| `web/src/ui/Overview.svelte` | **shrinks to nothing and is deleted** once every section has a home |
+| `web/src/ui/desktop.ts`, `DesktopWindow.svelte`, `Desktop.svelte` | `minimized`, the strip, clamp to the radar rect |
+| `web/src/ui/Workspace.svelte`, `styles.css` | the grid; a `§ 7` section under `.spc-*` |
+| `web/src/ui/tabs.ts` | `drones`, `shots` |
+| `web/src/ui/spaceWorkspaceStates.test.ts` | **new.** the mirror net |
+
+---
+
+## 4. Phases
+
+Each leaves the app working and the suite green. A patch branch off the integration branch per
+phase, merged with `--no-ff`.
+
+**Phase 0 — the mirror net, and the model. DONE.** `spaceWorkspaceStates.test.ts` pins the *docked*
+workspace against everything that follows — what it renders, that no in-space chrome reaches it,
+that every in-space piece is still behind an `isDocked` guard, and the shared window model's
+contract. It deliberately does not re-hash the dock frame CSS or the design tokens, because
+`dockPanelStates.test.ts` already does and one hash with two homes is a hash nobody updates
+correctly. `spaceRanges.ts` is the ranged-verb model. No visual change.
+
+⚠ **One thing the survey missed, found while building it.** `flyingDistances`' loader validated the
+stored orbit and keep values **against the fixed ladder** — so the handoff's custom distance field
+would have been accepted for the session and then silently reverted to 1 km on the next reload. A
+setting that works until you stop watching it is worse than one that refuses outright. The validator
+now accepts any sane metre count for those two fields (warp keeps its menu; nothing offers a custom
+warp range), and `rangeLabel` takes a namer so a value off the ladder reads as itself rather than as
+a dash.
+
+**Deferred to Phase 2, deliberately:** the handoff's new defaults (orbit 5 km, keep 10 km, against
+today's retail-cited 1 km each). Changing them changes the "Flying distances" summary text that
+`overviewActions.test.ts` pins, and that summary is being replaced by the picker in Phase 2 — so
+both move together rather than breaking the suite twice.
+
+**Phase 1 — the shell.** `.work-main` becomes the handoff's grid; `HudBar` moves into the `hud`
+cell; the radar becomes a sized area rather than the whole left side; windows clamp to the radar;
+`minimized` + the window strip land in `desktop.ts` and `DesktopWindow`. Panel *contents* do not
+change — this is the structural half, verified on its own.
+
+**Phase 2 — the overview panel.** `SpaceOverview.svelte`: header, selected item + the icon action
+row (over the existing `rowActions` data), the range `▾` popovers, filter tabs, sortable columns,
+rows, and the threat strip. Mounted in the dock frame's in-space arm. `Overview.svelte` keeps
+everything not yet moved, hidden by the wrapper as it is today.
+
+**Phase 3 — the HUD. DONE.** New gauge geometry (`GAUGE_START_DEG` 135 → 150, `GAUGE_SWEEP_DEG`
+270 → 240, so the gap is a 120° notch centred on the bottom — and the speed reading now lives in
+it); the module slot redraw as a 42px tile with an SVG ring, the heat-damage wedge, and
+press-and-hold overload; the rack heat bar, stubbed and saying so; and `HudBar` rebuilt as a cell
+with a header, the two instruments, and a footer.
+
+⚠ **The handoff's literal "start 210°" was NOT copied.** It is written in a different angular
+convention; putting 210 into `shipHudArcs.ts` would have swung the gap to the LEFT. What is honoured
+is the shape. The comment in that file says so, because the number is the kind of thing a later
+reader "fixes".
+
+⚠ **The slot ring is a drawn `<circle>`, never `border-radius`.** R53 squared this app's corners and
+`squareCorners.test.ts` holds them squared; the round face is a geometric instrument drawn *inside*
+a square tile, the same exception `.fit-ring-guide` already is. The tile also grew from 2.2rem
+(35px) to the handoff's 42px, which incidentally makes it a real touch target for the first time.
+
+**Capability moved, not dropped.** Two things left `HudBar` and one arrived:
+
+| What | Where it went | Why |
+| --- | --- | --- |
+| "Shots fired" | Stays in the transitional `Overview` window; gets its own panel in Phase 4 | A scrolling text log is the one shape that cannot share a cell with two instruments |
+| The Flight / Mining nav buttons | Deleted — every one was already a Neocom rail entry on screen at the same time | Two ways to open one window, one costing a row of a fixed-height HUD, is not a feature |
+| **Stop** | **Arrived**, from the overview window's flight strip into the HUD footer | It is the control a pilot reaches for when things go wrong; it must not be behind a window they have to open first |
+
+Stop's rule travelled with it intact — never disabled, never behind a busy guard — and so did both
+halves of its test. They now render `HudBar` in `chromeRender.test.ts`; `flightStrip.test.ts` keeps
+the inverse assertion, that the strip did not quietly draw a second one.
+
+**Anchors that moved deliberately:** `chromeRender.test.ts`'s "the HUD offers the module rack and
+the flight panels" split into a rack test and an explicit "no longer duplicates the rail's own
+launchers" test; `flightStrip.test.ts`'s three Stop tests moved to `chromeRender.test.ts`;
+`moduleRack.test.ts`'s tooltip fixtures say "Hold to overload" where they said "Shift-click".
+
+**Still to come:** the mobile tier is Phase 5, so the cell is desktop-shaped today.
+
+**Phase 4 — the windows.** `DronesPanel` and `ShotsPanel` lifted out of `Overview.svelte`; `Flight`
+gets its three pickers in place of the raw id inputs; `Mining` gets its in-space half — holds,
+Jettison, and Compress over a facility picker built on `compressionFacility`. `Overview.svelte` is
+deleted at the end of this phase, and that deletion is the phase's real deliverable.
+
+### ⚠ 4.1 What the survey found that this plan had not counted
+
+Before writing any of it, three read-only surveys went over `Overview.svelte`'s test suites, the
+`Flight` inputs, and the jettison/compress path. Deleting the cockpit is a bigger job than §4 said,
+because **four capabilities have no new home**, and the failure mode is not a red test — it is a
+capability that stops existing with every remaining test green.
+
+| # | What has no home | Why it matters |
+| --- | --- | --- |
+| 1 | The **equipment table** | `ModuleRack` is a *different widget*, not a replacement: it cannot power an OFFLINE module up, has no "Use it on" target picker, and shows no cycle length. Fitting is **docked-only** — so deleting the cockpit removes the only way to online a module IN SPACE. |
+| 2 | **Mine** and **Haul** | `SpaceOverview`'s dispatcher names them and refuses: *"… is in the Around Your Ship window for now."* Neither is a single flow call; both need real implementations before the cockpit goes. |
+| 3 | The flight strip's **where / doing / wrong** narration | The bot's own words, the first refusal, and where you are. Stop already moved to the HUD; the narration did not. §1.2 sends it to Flight's Status grid. |
+| 4 | ~~"Send drones" on a hostile row~~ | ✅ **Done in 4a.** It was the fastest path in the client from "something is shooting me" to "my drones are on it" — no lock, no window. `SpaceOverview` never had it. |
+
+Plus five smaller corrections to this document:
+
+* **`api.ts` is `web/src/app/api.ts`, not `src/api.ts`.** `src/` is plain JavaScript. Both the
+  jettison and compress **routes already exist** (`/api/bridge/ship/jettison`,
+  `/api/bridge/mining/compress`) and so do their `api.ts` functions — they are reachable today only
+  from the bot-script action dispatcher. The **only** missing layer is `AppFlow`.
+* **Jump is not two independent gate ids.** `GateLink` carries `destinationGateID`, so picking one
+  gate on the grid determines the far side. Two pickers would be a worse UI than one, and the
+  authoritative "is this a gate" test is gate-graph membership (`gateLinkFor`) — *not* `kind` or
+  `groupID === 10`, which `gateLinks.ts` explicitly warns against.
+* **`dockStationID` feeds TWO calls**, `dock` and `dockAt`. One picked value, two buttons.
+* **`IN_SPACE_DEFAULT` is `"overview"`**, and `MobileWorkspace.svelte` mounts the cockpit too. Both
+  move with the deletion.
+* **`shell.ts` and `shell.test.ts` are dead** as of Phase 3 — nothing but the test imports
+  `SPACE_PANELS` now that the HUD lost its nav buttons. They go with this phase, for exactly the
+  reason `chromeRender.test.ts`'s own header records about the shells it replaced.
+
+**Order, revised — all done.** 4a ✅ the two windows + Send drones. 4b ✅ the equipment window.
+4c ✅ Flight (the narration, then the pickers). 4d ✅ Mining (two `AppFlow` verbs, Jettison,
+Compress). 4e ✅ Mine and Haul in `SpaceOverview`, the deletion, and the suite re-anchoring.
+
+### 4.2 What the deletion itself found
+
+`Overview.svelte` is gone, and so are `shell.ts` / `shell.test.ts` (dead since Phase 3 took the
+HUD's nav buttons — a suite testing a module nothing imported, the exact trap `chromeRender.test.ts`
+records about the shells it replaced).
+
+Re-pointing the cockpit's suites at their new homes is what surfaced the rest. **Five capabilities
+had silently stopped existing**, none of them with a red test:
+
+| What | Where it went | How it was found |
+| --- | --- | --- |
+| **"Send drones" on a hostile row** | back on the threat strip | `dronePanel.test.ts`'s call-site count |
+| **Lock on a hostile row** | back on the threat strip | `dronePanel.test.ts`'s R8 button sweep |
+| **A hostile MARKED IN THE ROW LIST** | back, as a word badge | `dronePanel.test.ts`, re-pointed |
+| **A vanished selection dropped with a notice** | back in `SpaceOverview` | `selectionHasVanished` had no caller left |
+| **Setting a destination off this grid** | `travel` is a **both** tab now | the "Somewhere else…" row's test |
+
+And one that never worked at all: **`minerCount` was never passed to `actionsForRow`**, so "Mine
+this" was permanently disabled reading *"No mining equipment is switched on"* on a hull with three
+powered-up Miner Is. `minerCount ?? 0` is the safe default for an optional field, and it makes an
+UNSET one indistinguishable from an honest refusal. No render test could catch it: the action bar
+only appears once a row is picked, and SSR picks nothing.
+
+**Anchors moved, not deleted.** `dronePanel` splits between `DronesPanel` and `SpaceOverview`;
+`flightStrip` renders `Flight`; `overviewActions` splits across `SpaceOverview`, `EquipmentPanel`,
+`TargetsPanel`, `Mining` and `rowActions.ts`; the crash repro covers the two panels that render
+drone rows; `panelFirstMount` lists the four panels the cockpit became. `IN_SPACE_DEFAULT` is
+`flight` — the overview is fixed chrome, so it is never something to land on.
+
+**Phase 5 — mobile. DONE.** The 1D stacked collapsible cards in `MobileWorkspace`: Ship → Overview
+→ Drones → Shots fired → Navigation & Flight → Mining, one column, page scrolls, no radar. Every
+card mounts the SAME component the desktop does — a mobile variant of any of these panels would be a
+second thing to keep honest, and every capability check in the suite would then only be checking one
+of the two.
+
+⚠ **A folded card is NOT RENDERED, not hidden.** These bodies poll, tick and animate; `display:none`
+would leave every one of them running behind a closed header, on the device least able to afford it.
+
+⚠ **An unknown or unreadable fold reads as OPEN.** A private window throws outright on
+`localStorage`, and a stored value can be anything. Only a real `true` folds a card — because a
+folded card is one a pilot cannot see they are missing, which is the failure this screen is built to
+avoid. Only the folded ones are written, so a card added later can never arrive pre-folded.
+
+**Two things the live run changed.** The handoff caps *list* bodies at 320px; `Flight`'s body
+measured **1,427px** on a 375×812 phone — not a list, and nearly two screens — so it caps for the
+rule's REASON rather than its letter. And five of the six cards read "OVERVIEW / OVERVIEW": the card
+header plus the panel's own. The panel's TITLE is hidden, and the rest of its head row kept, because
+that is where the counts live ("84 things in range", "None out") and those are exactly what a folded
+card must not take with it.
+
+**`touch-action: none` on the module slots** — the gesture Phase 3 introduced FOR this tier. Without
+it a press is claimed by the page's scroll and long-press handling long before the 600 ms hold
+completes, so overloading on a phone would have been exactly as unreachable as the shift-click it
+replaced.
+
+**And one pre-existing bug:** the mobile nav bar filtered on `isWindowTab` but never on
+`isLaunchable`, so it offered **Show Info** — a contextual panel that only opens because something
+was clicked — on every phone, where it could only ever open onto nothing.
+
+---
+
+## 5. Verification
+
+**The suites that will deliberately break, and must be rewritten rather than deleted.**
+`overviewActions.test.ts` is the big one: it greps `Overview.svelte` for literal comment banners
+(`R30 slice D — THE SELECTION BAR`), exact per-verb call-site counts, the **document order** of
+sections, and "exactly 2 `<details class="collapsible">`". Every one of those assertions is guarding
+a real rule; each has to be re-anchored to whichever new file now owns the rule. The same goes for
+`flightStrip.test.ts` (**"STOP IS NEVER DISABLED"** — carry it to the HUD footer), `dronePanel.test.ts`
+(30 tests, including "a hostile is marked in the ordinary overview list too"), and
+`tacticalMount.test.ts` (matches the literal strings `class="desktop has-view"` and `class="tactical"`).
+
+**The nets that must stay green untouched.** `dockPanelStates.test.ts`, `stationPanel.test.ts`,
+`inventoryModel.test.ts`, `desktop.test.ts`, `squareCorners.test.ts`, `reflowContract.test.ts`,
+`space/tactical.test.ts` (~55 pure-geometry tests), `space/rowActions.test.ts`,
+`space/overviewPresets.test.ts`, `space/selection.test.ts`.
+
+**New guards, one per bent rule in section 2.** The heat bar is absent and the damage wedge reads
+from `moduleDamage`; an unknown overload state says nothing; the capacitor is still counted
+segments; the shots header names its own window; a hostile still reaches the pilot through the threat
+strip whatever preset is chosen; the range `▾` writes through to `flyingDistances` so Settings and
+the radar cannot disagree; a window that is minimized is still listed in the strip.
+
+**Driving it.** The station panel's harness pattern works here and is cheaper than it was: a
+`space-workspace-harness.html` mounting the real panels against a fabricated snapshot, plus — now
+that the in-client browser can be authenticated — the live client for the parts a harness cannot
+fake (a real snapshot, a real lock, a real overload).
+
+**Baseline.** Whole repo, per file, over `web/src src test`: **4246 tests, 24 failing**, all of them
+the host's locale formatting. Run it in the main checkout, not a fresh worktree.
+
+---
+
+## 6. Decisions taken
+
+All six were settled before any code was written.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 1 | The threat block (2.7) | **Its own strip above the overview list.** Uncapped, unfilterable, keeping the damage and arrival banners and per-threat Lock / Send drones. A deliberate addition to the handoff. |
+| 2 | Rack heat (2.2) | **Stub it, reading "not known".** The bar, its label and its bands are built and wired to a reading that does not exist yet; heat mechanics land in a separate session. Never a 0, never an average of module damage. |
+| 3 | The capacitor (2.4) | **Twelve counted segments**, at the handoff's radius, stroke and 240° sweep. A count you can read beats a texture you cannot. |
+| 4 | Shots totals (2.6) | **All four figures, with the header naming its window** — the last 40 shots. No "crit" colour: the band is not sourced from this server. |
+| 5 | Compress (2.12) | **Ships in Phase 4**, with a picker over `compressionFacility` on the snapshot, reusing the `compress-ore` macro's rule. Jettison ships alongside it. |
+| 6 | `Overview.svelte` (§4) | **Deleted in Phase 4.** The deletion is the phase's deliverable — it is the only thing that proves the new panels cover what it did. Its six suites are re-anchored, never deleted. |
+
+Two of these diverge from a package whose colours and behaviour are called final — the threat strip
+(1) and the capacitor (3) — and its author should be told which and why.

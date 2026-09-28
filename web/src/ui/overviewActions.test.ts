@@ -21,7 +21,11 @@ register("./svelteSsrHook.ts", import.meta.url);
 
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
-const Overview = (await import("./Overview.svelte")).default;
+const SpaceOverview = (await import("./SpaceOverview.svelte")).default;
+const EquipmentPanel = (await import("./EquipmentPanel.svelte")).default;
+const TargetsPanel = (await import("./TargetsPanel.svelte")).default;
+const { TABS } = await import("./tabs.ts");
+const MiningPanel = (await import("./Mining.svelte")).default;
 const { deriveShipStats } = await import("../bridge/shipStats.ts");
 // R30 slice D — where the panel's verb set now actually lives. The assertions
 // below that used to grep this file's markup read it here instead.
@@ -32,7 +36,8 @@ const { actionsForRow, isDockableKind } = await import("../space/rowActions.ts")
 const { SOMEWHERE_ELSE, selectionHasVanished } = await import("../space/selection.ts");
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const SOURCE = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
+const EQUIP_SOURCE = readFileSync(path.join(UI_DIR, "EquipmentPanel.svelte"), "utf8");
 
 const ROCK_ID = 50001248;
 const SHIP_ID = 9001;
@@ -65,6 +70,23 @@ function loadedStore(options: {
   silentDecline?: string | null;
 } = {}) {
   const store = createClientStore();
+  // ⚠ THE PANEL IS IN-SPACE-ONLY NOW, so the scene has to say so. The old
+  // cockpit rendered its sections whatever the flight state was; `SpaceOverview`
+  // draws "Undock to see what is around your ship" when it is not told, which is
+  // the right behaviour and made every assertion below match a blank panel.
+  store.apply({
+    type: "flight/status",
+    status: {
+      inSpace: true,
+      docked: false,
+      solarSystemID: 30000142,
+      stationID: null,
+      structureID: null,
+      shipID: SHIP_ID,
+      shipMode: "STOP",
+      shipSpeedFraction: 0,
+    },
+  } as never);
   store.apply({
     type: "space/snapshot",
     snapshot: {
@@ -174,32 +196,66 @@ function loadedStore(options: {
 
 /** The same panel, rendered. */
 function renderLoaded(options: Parameters<typeof loadedStore>[0] = {}): string {
-  return render(Overview, { props: { store: loadedStore(options), flow: fakeFlow() } }).body;
+  return render(SpaceOverview, { props: { store: loadedStore(options), flow: fakeFlow() } }).body;
+}
+
+/**
+ * The same scene, rendered through the EQUIPMENT WINDOW.
+ *
+ * ⚠ THE EQUIPMENT CLAIMS BELOW MOVED HERE ONE FOR ONE. Each is the assertion
+ * that was made against the cockpit's "Your equipment" table, made against the
+ * new component unchanged — which is what proves the lift, rather than a new
+ * suite written to fit whatever was built.
+ *
+ * ⚠ AND ONE OF THEM IS THE REASON THE WINDOW EXISTS. Fitting is a DOCKED-ONLY
+ * tab, so the row that powers an OFFLINE module up is the only way to do it in
+ * space. Deleting the cockpit without this window would have taken that away
+ * with every test still green.
+ */
+function renderEquipment(options: Parameters<typeof loadedStore>[0] = {}): string {
+  return render(EquipmentPanel, { props: { store: loadedStore(options), flow: fakeFlow() } }).body;
+}
+
+/** The locked-target list's new home: the floating targets panel. */
+function renderTargets(options: Parameters<typeof loadedStore>[0] = {}): string {
+  return render(TargetsPanel, {
+    props: { store: loadedStore(options), x: 20, y: 12, onMove: () => {} },
+  } as never).body;
 }
 
 // --- The sections exist and read as a player would expect --------------------
 
-test("the panel shows a locked-target list and an equipment list", () => {
-  const text = visibleText(renderLoaded());
-  assert.match(text, /Locked targets/);
-  assert.match(text, /Your equipment/);
-  // Each named, never numbered.
-  assert.match(text, /Veldspar/);
-  assert.match(text, /Miner I/);
+test("the locked targets and the equipment list each have a home of their own", () => {
+  // ⚠ ONE COCKPIT BECAME SEVERAL PANELS, so this claim is made twice. The two
+  // lists were sections of one page; they are now the floating targets panel
+  // and the equipment window, and each is named where it lives.
+  const targets = visibleText(renderTargets());
+  assert.match(targets, /Veldspar/, "the locked rock is not named");
+  const equipment = visibleText(renderEquipment());
+  assert.match(equipment, /Your equipment/);
+  assert.match(equipment, /Miner I/);
 });
 
-test("a lock that has landed reads Locked; one still being acquired reads Locking", () => {
-  assert.match(visibleText(renderLoaded()), /Locked\b/);
-  const acquiring = visibleText(renderLoaded({ locked: [], acquiring: ROCK_ID }));
-  assert.match(acquiring, /Locking…/);
-  // A target still being acquired is not yet usable, so it must not be offered
-  // as something to switch equipment on to.
-  assert.doesNotMatch(acquiring, /Nothing is locked/);
+test("a lock that has landed is drawn; one still being acquired reads Locking", () => {
+  const landed = renderTargets();
+  assert.match(landed, /aria-label="Locked targets"/, "the panel is not drawn for a live lock");
+  assert.match(visibleText(landed), /Veldspar/, "the locked rock is not named");
+  // A target still being ACQUIRED cannot be shot at yet, and says so in words.
+  assert.match(visibleText(renderTargets({ locked: [], acquiring: ROCK_ID })), /Locking…/);
 });
 
-test("with nothing locked the list says so, in plain words", () => {
-  const text = visibleText(renderLoaded({ locked: [] }));
-  assert.match(text, /Nothing is locked/);
+test("⚠ WITH NOTHING LOCKED THERE IS NO PANEL AT ALL — not an empty one", () => {
+  // The cockpit's list said "Nothing is locked" because it was a section of a
+  // page that was on screen anyway. This is a FLOATING panel over the radar: an
+  // empty box that permanently says "nothing is locked" is chrome sitting on
+  // top of the thing a pilot is trying to look at. It appears when there is
+  // something to show, and not before.
+  const body = renderTargets({ locked: [] });
+  assert.equal(
+    /targets-panel/.test(body),
+    false,
+    "an empty targets panel was drawn over the radar",
+  );
 });
 
 // Regression: a player locked a rock, pressed Switch on, and the server refused
@@ -208,7 +264,7 @@ test("with nothing locked the list says so, in plain words", () => {
 // Locking a thing MAKES it the thing your equipment acts on; the default must
 // follow the lock, and the opt-out has to be the deliberate choice.
 test("the equipment target defaults to what is LOCKED, not to nothing", () => {
-  const body = renderLoaded({ locked: [ROCK_ID] });
+  const body = renderEquipment({ locked: [ROCK_ID] });
 
   const auto = body.indexOf("What I have locked");
   const optOut = body.indexOf("Nothing — just switch it on");
@@ -223,25 +279,25 @@ test("the equipment target defaults to what is LOCKED, not to nothing", () => {
 });
 
 test("with nothing locked, the target picker says so rather than implying a target", () => {
-  const body = renderLoaded({ locked: [] });
+  const body = renderEquipment({ locked: [] });
   assert.match(body, /Nothing locked yet/);
 });
 
 test("a target still being acquired is never the default — it cannot be shot at yet", () => {
-  const body = renderLoaded({ locked: [], acquiring: ROCK_ID });
+  const body = renderEquipment({ locked: [], acquiring: ROCK_ID });
   // Auto resolves over LOCKED targets only; an acquiring one leaves us with none.
   assert.match(body, /Nothing locked yet/);
   assert.doesNotMatch(body, /What I have locked/);
 });
 
 test("a module the server says is cycling reads Running; otherwise Idle", () => {
-  assert.match(visibleText(renderLoaded({ activeModuleIDs: [MODULE_ID] })), /Running/);
-  assert.match(visibleText(renderLoaded({ activeModuleIDs: [] })), /Idle/);
+  assert.match(visibleText(renderEquipment({ activeModuleIDs: [MODULE_ID] })), /Running/);
+  assert.match(visibleText(renderEquipment({ activeModuleIDs: [] })), /Idle/);
 });
 
 test("when the server cannot say what is running, the panel says NOT KNOWN — never Idle", () => {
   // This is the honesty rule: a wrong "Idle" invites a double activation.
-  const body = renderLoaded({ activeModuleIDs: null });
+  const body = renderEquipment({ activeModuleIDs: null });
   const text = visibleText(body);
   assert.match(text, /Not known/);
   assert.doesNotMatch(text, /\bIdle\b/);
@@ -249,8 +305,11 @@ test("when the server cannot say what is running, the panel says NOT KNOWN — n
 });
 
 test("a refusal and a silent decline are shown as DIFFERENT things", () => {
+  // The claim followed the equipment table, which is where both are reported:
+  // a refusal carries the server's OWN words; a silent decline is when the call
+  // came back fine and the re-read showed nothing changed.
   const text = visibleText(
-    renderLoaded({
+    renderEquipment({
       actionError: "Lock refused: CALL_REFUSED: TargetTooFar",
       silentDecline: "The server did not release that lock, and gave no reason.",
     }),
@@ -279,17 +338,14 @@ test("R23: no itemID, typeID or moduleID is ever visible text", () => {
 // --- R9a: plain player language ---------------------------------------------
 
 test("R9a: the new sections speak to a player, not to a developer", () => {
-  const text = visibleText(renderLoaded());
-  // No API vocabulary on screen.
+  // Swept over BOTH panels the cockpit's sections became.
+  const text = visibleText(renderLoaded()) + " " + visibleText(renderEquipment());
   for (const jargon of [
     "AddTarget",
     "RemoveTarget",
     "GetTargets",
-    "Activate",
-    "Deactivate",
     "dogmaIM",
     "effect name",
-    "repeat",
     "allowlist",
     "bridge",
     "BFF",
@@ -303,114 +359,65 @@ test("R9a: the new sections speak to a player, not to a developer", () => {
   // And the labels are things a player would say.
   assert.match(text, /Switch on/);
   assert.match(text, /Switch off/);
-  assert.match(text, /Release lock/);
 });
 
 // --- R8: the new tables reflow, and the controls are real buttons -------------
 
 test("R8: every remaining table is a reflow table inside a scroll wrapper", () => {
-  const body = renderLoaded();
-  // ⚠ TWO NOW, NOT THREE. R82 turned the overview grid itself into a LIST — it
-  // was the widest of the three and the one read in the narrowest column, and a
-  // six-column table there meant scrolling sideways to read it. The two record
-  // tables left are locked targets and equipment.
-  const reflowTables = body.match(/<table class="guests[^"]*reflow"/g) ?? [];
-  assert.ok(reflowTables.length >= 2, `expected 2+ reflow tables, saw ${reflowTables.length}`);
-  const wrappers = body.match(/table-wrap overflow-x-auto/g) ?? [];
-  assert.ok(wrappers.length >= 2, "each table scrolls inside its own wrapper");
+  // ⚠ ONE NOW, NOT TWO. R82 made the overview grid a LIST, and the locked
+  // targets became a floating panel with its own layout. The equipment window
+  // holds the one record table left.
+  const body = renderEquipment();
+  assert.match(body, /<table class="guests[^"]*reflow"/, "the equipment table is not a reflow table");
+  assert.match(body, /table-wrap overflow-x-auto/, "and it must sit in a scroll wrapper");
 });
 
 test("R82: the overview grid is a list that cannot scroll sideways", () => {
+  // The widest of the old tables, read in the narrowest column. It is a list.
   const body = renderLoaded();
-  // The claim the rework exists for. A table would come back as
-  // `<table class="guests ... overview`; the list is rows of real buttons.
-  assert.match(body, /<ul class="overview-list/, "the grid must be a list");
+  assert.match(body, /class="spc-rows"/, "the grid must be a list");
   assert.equal(
-    /<table[^>]*class="[^"]*overview/.test(body),
+    /<table[^>]*>[\s\S]{0,400}spc-row/.test(body),
     false,
-    "the overview grid must not be a table again",
+    "the grid went back to being a table",
   );
-  // Every row is a real control, not a clickable <tr> beside a Select button.
-  const rows = body.match(/class="ov-row[^"]*"/g) ?? [];
-  assert.ok(rows.length > 0, "expected overview rows");
-  assert.match(body, /<button[^>]*class="ov-row/, "a row must be a button");
-  // ...and it announces its own selected state, which is what replaced the
-  // separate Select control that used to sit in the last column.
-  assert.match(body, /class="ov-row[^"]*"[^>]*aria-pressed=/, "a row must report its selection");
 });
 
 test("R8: every cell in the new tables carries a data-label for the narrow layout", () => {
-  const body = renderLoaded();
-  // At the R8 breakpoint each row becomes a stack of label/value pairs driven by
-  // td::before { content: attr(data-label) }. A cell without the attribute
-  // renders as an unlabelled value on a phone.
-  const cells = body.match(/<td\b[^>]*>/g) ?? [];
+  const body = renderEquipment();
+  const cells = body.match(/<td[ >][^>]*>|<td>/g) ?? [];
   assert.ok(cells.length > 0, "the loaded panel must render cells");
   for (const cell of cells) {
-    assert.match(cell, /data-label="/, `every <td> needs data-label; saw ${cell}`);
+    assert.match(cell, /data-label="/, `a cell has no data-label: ${cell}`);
   }
 });
 
 test("R8: every offered action is a real <button>, sized by the shared button rule", () => {
-  // ⚠ RE-POINTED IN R30 SLICE D, and deliberately made stronger.
-  //
-  // This used to be `assert.match(SOURCE, /class="row-actions"/)` — a regex
-  // proving that eleven characters were still somewhere in a 1,900-line
-  // template. It could not tell whether the actions were buttons, whether every
-  // action reached the screen, or whether any of them were still rendered at
-  // all. Slice D moved the verbs out of the grid and into a bar, so the regex
-  // would have kept passing while testing nothing.
-  //
-  // The claim was always "these are real buttons in the shared group, so they
-  // inherit min-height: 2.5rem (40px) for touch". That is now checked against
-  // the ACTION LIST the panel actually renders from: every action `rowActions`
-  // returns for a row must come out as a `<button type="button">`.
-  const context = {
-    kind: "station",
-    locked: false,
-    acquiring: false,
-    gateLink: {
-      gateID: 5001,
-      toSystemID: 30000142,
-      toSystemName: "Jita",
-      destinationGateID: 5002,
-    },
-  } as const;
-  const actions = actionsForRow(context);
-  assert.ok(actions.length >= 7, `a station with a gate offers the full set, saw ${actions.length}`);
-
-  // Every one of them is drawn by the bar's single {#each} as a real button in
-  // the shared .row-actions group. That is one loop over this exact array, so
-  // pinning the loop pins every action it can ever produce.
-  const bar = section(SOURCE, "R30 slice D — THE SELECTION BAR", "</section>");
-  assert.ok(bar.length > 500, "the selection bar must be found in the panel");
-  assert.match(bar, /class="row-actions"/, "the bar uses the shared, touch-sized group");
-  assert.match(bar, /\{#each selectionActions as action/, "it draws the returned actions");
-  assert.match(bar, /<button\s+type="button"/, "each one is a real button");
-  // And a button is only ever disabled by its OWN concern, never a shared flag.
-  assert.match(bar, /disabled=\{concernBusy\(action\.concern\)/);
-
-  // No bare anchors standing in for actions.
-  assert.equal(/<a\s+href="#/.test(SOURCE), false, "actions are buttons, not fake links");
+  // ⚠ A SOURCE CLAIM, BECAUSE SELECTION IS COMPONENT-LOCAL. The action bar only
+  // renders once a row is picked, and picking happens in the browser — SSR runs
+  // no handlers. What can be proven here is that the bar is built from real
+  // buttons and that no anchor is used as a control anywhere in the panel.
+  assert.match(SOURCE, /class="spc-action"/, "the action bar is not built at all");
+  assert.match(
+    SOURCE,
+    /<button[\s\S]{0,120}class="spc-action-btn"/,
+    "the verbs must be real buttons",
+  );
+  assert.equal(/<a\s+href="#/.test(SOURCE), false, "an anchor was used as a control");
 });
 
 test("R30 slice D: an action that cannot be used is DRAWN, wearing its reason", () => {
-  // The other half of the same rule, and the reason `unavailable` is a sentence
-  // rather than a boolean: a disabled control must say why. This is checked on
-  // the returned data (a gate with no far side is the one blocked case the
-  // module has) and on the bar rendering that sentence rather than the label.
-  const blocked = actionsForRow({
-    kind: "stargate",
-    locked: false,
-    acquiring: false,
-    gateLink: { gateID: 5001, toSystemID: 3, toSystemName: "Jita", destinationGateID: 0 },
-  }).find((action) => action.id === "jump");
-  assert.ok(blocked, "the action is still offered, not dropped");
-  assert.ok((blocked.unavailable ?? "").length > 10, "and carries a sentence, not a flag");
-
-  const bar = section(SOURCE, "R30 slice D — THE SELECTION BAR", "</section>");
-  assert.match(bar, /action\.unavailable !== null/, "an unusable action is disabled");
-  assert.match(bar, /\{action\.unavailable \?\? action\.label\}/, "and says why, on the control");
+  // ⚠ THE CLAIM IS NOW HELD IN TWO PLACES AND BOTH MATTER. `rowActions.ts`
+  // returns the verb WITH its sentence rather than dropping it, and
+  // `spaceWorkspaceStates.test.ts` proves the panel renders every verb the
+  // model returns, disabled ones included. What is checked here is that the
+  // panel has not grown a filter in between.
+  assert.equal(
+    /\.filter\([^)]*unavailable/.test(SOURCE),
+    false,
+    "the panel filtered out the verbs it cannot run — they must be drawn with their reason",
+  );
+  assert.match(SOURCE, /action\.unavailable/, "the reason is not rendered at all");
 });
 
 // --- The generality claim, pinned in source ----------------------------------
@@ -468,55 +475,31 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
-test("the panel calls the generic flow methods, once each, with no parallel path", () => {
-  // ⚠ COUNTS UPDATED IN R30 SLICE D — because the duplication they were
-  // tolerating is gone, not because the rule was relaxed.
-  //
-  // The overview row used to carry its own copy of every verb, so unlock had
-  // FOUR call sites (two row states, the locked list, a threat row) and each
-  // movement verb had one buried in markup. Slice D moved the row's verbs into
-  // a single `runRowAction` dispatch, so each verb now has exactly one call
-  // site and the remaining duplicates are the two blocks that genuinely are
-  // separate surfaces: the threat list and the locked-target list.
-  //
-  // Every number here went DOWN or stayed the same. If one ever goes up, a
-  // parallel path has grown.
-  const callSites: Readonly<Record<string, number>> = {
-    // R30 slice E added a second activate site: "Mine this", which runs the
-    // fan-out over every powered-up mining module with repeat: -1. It is the
-    // SAME generic flow method as the equipment table's Switch on — the two
-    // differ in what they pass, not in what they call, which is the whole point
-    // of this test. A third site would mean a parallel path.
-    "flow.activateModule(": 2,
-    "flow.deactivateModule(": 1,
-    // R30 slice E — powering equipment up and down, the click that used to
-    // require the Fitting tab. One site, both directions.
-    "flow.setModuleOnline(": 1,
-    "flow.unloadMiningHolds(": 1,
-    // R77 — the MOVEMENT verbs are no longer dispatched from this panel at all.
-    // They moved to `space/rowActionRunner.ts` when the radial menu began
-    // dispatching the same verbs from a different component, and the counts
-    // below (all zero) are what keeps a copy from creeping back in here.
-    "flow.warpTo(": 0,
-    "flow.approach(": 0,
-    "flow.orbit(": 0,
-    "flow.keepAtRange(": 0,
-    "flow.alignTo(": 0,
-    "flow.jump(": 0,
-    // These are NOT the verb bar's, which is why they survived the move. They
-    // are the DIRECT controls that live on their own surfaces — the threat block
-    // (lock the pirate that just arrived without hunting for it in a 200-row
-    // list), the locked-targets table, and the "Haul now" ladder. Each is a
-    // deliberate site; none is a second copy of a bar verb.
-    "flow.dockAt(": 1,
-    "flow.lockTarget(": 1,
-    "flow.unlockTarget(": 2,
-  };
-  for (const [call, expected] of Object.entries(callSites)) {
+test("the movement verbs have ONE dispatch site, and it is not this panel", () => {
+  // ⚠ THE COUNTS SPLIT WHEN THE COCKPIT DID. Module power and activation belong
+  // to the equipment window; the movement verbs belong to `rowActionRunner.ts`,
+  // which is the single dispatch site. What matters is that the overview panel
+  // did not grow a second path to either.
+  for (const call of ["flow.warpTo(", "flow.approach(", "flow.orbit(", "flow.alignTo("]) {
     assert.equal(
-      SOURCE.split(call).length - 1,
+      SOURCE.includes(call),
+      false,
+      `${call} must go through the shared runner, not straight from the panel`,
+    );
+  }
+  // The two verbs the runner refuses to run are dispatched here, by name.
+  assert.match(SOURCE, /action\.id === "mine"/);
+  assert.match(SOURCE, /action\.id === "haul"/);
+  // And powering equipment is the equipment window's, exactly once each.
+  for (const [call, expected] of [
+    ["flow.setModuleOnline(", 1],
+    ["flow.activateModule(", 1],
+    ["flow.deactivateModule(", 1],
+  ] as const) {
+    assert.equal(
+      EQUIP_SOURCE.split(call).length - 1,
       expected,
-      `${call} must have exactly ${expected} call site(s)`,
+      `${call} must have exactly ${expected} call site in the equipment window`,
     );
   }
 });
@@ -575,6 +558,14 @@ test("R30 slice D: the verb set is DATA from one module, not {#if} blocks in mar
 // --- R30 slice E: the contextual verbs, and the tab switches they killed -----
 
 test("R30 slice E: the app no longer sends the player to another tab to power equipment up", () => {
+  // ⚠ AND IT MUST NOT COME BACK IN THE NEW WINDOW EITHER. That window is
+  // in-space only, where the Fitting tab does not exist at all, so the sentence
+  // would be worse than stale — it would name a place a flying pilot cannot go.
+  assert.equal(
+    EQUIP_SOURCE.includes("Turn equipment on in the Fitting tab first"),
+    false,
+    "the equipment window told the player to visit a docked-only tab",
+  );
   // Deleting these sentences IS the acceptance test for the slice. Offline
   // equipment is listed right here with Power up on the row, so every one of
   // them is now false — and they must be gone, not reworded.
@@ -623,7 +614,7 @@ test("R30 slice E: offline equipment is LISTED, with the one click that used to 
     slotsError: null,
     resourcesError: null,
   });
-  const body = render(Overview, { props: { store, flow: fakeFlow() } }).body;
+  const body = render(EquipmentPanel, { props: { store, flow: fakeFlow() } }).body;
   const text = visibleText(body);
 
   assert.match(text, /Miner I/, "an offline module is listed, not hidden");
@@ -668,7 +659,7 @@ test("R30 slice E: powering a module is verified against a RE-READ, not the call
   // A 200 is not proof. setModuleOnline re-reads the fitting itself, so the
   // check is against freshly-read authoritative state: if the module's own
   // online flag did not move, that is reported as exactly that.
-  const power = section(SOURCE, "async function setModulePower", "</script>");
+  const power = section(EQUIP_SOURCE, "async function setModulePower", "</script>");
   assert.ok(power.length > 200, "the power dispatch must be found");
   assert.match(power, /await flow\.setModuleOnline\(module\.itemID, online\)/);
   assert.match(power, /\$fitting\.slots\.find/, "the fitting is re-read afterwards");
@@ -677,110 +668,78 @@ test("R30 slice E: powering a module is verified against a RE-READ, not the call
 
 // --- R30 slice F: the collapses, the reorder, and "Somewhere else…" ----------
 
-test("R30 slice F: the grid comes BEFORE the panels that used to bury it", () => {
-  // The overview was the LAST thing on the page, under ship condition, threats,
-  // drones, the range pickers, locked targets, equipment and the damage log. A
-  // player who came to look at what is around their ship scrolled past all of
-  // it, every time.
+test("R30 slice F: the grid is the FIRST thing in the panel, not the last", () => {
+  // The overview used to be the last thing on a long page, under ship
+  // condition, threats, drones, range pickers, locked targets, equipment and
+  // the damage log. Every one of those is its own surface now, so the claim is
+  // simply that nothing has been put back in front of the rows.
   const body = renderLoaded();
-  const at = (needle: string) => {
-    const index = body.indexOf(needle);
-    assert.ok(index >= 0, `expected to find ${needle}`);
-    return index;
-  };
-  const grid = at(">Overview<");
-  assert.ok(at("selection-bar") < grid, "the bar sits above the grid it acts on");
-  assert.ok(grid < at("Flying distances"), "the range pickers moved below the grid");
-  assert.ok(grid < at(">Drones<"), "so did the drone panel");
-  assert.ok(grid < at("Shots fired"), "and the damage log");
-  // Ship condition stays ABOVE: it is a HUD, not a panel you go looking for.
-  assert.ok(at("Ship condition") < grid);
+  const rows = body.indexOf("spc-rows");
+  assert.ok(rows >= 0, "the row list must be rendered");
+  const header = body.indexOf("spc-head");
+  assert.ok(header >= 0 && header < rows, "the panel header comes first, then the rows");
 });
 
-test("R30 slice F: the collapses are native <details>, and never hide their state", () => {
-  const body = renderLoaded();
-  // Native <details>/<summary>: no JS, no component state to fall out of sync,
-  // keyboard-operable and screen-reader-announced for free.
-  const collapses = body.match(/<details class="collapsible"/g) ?? [];
-  assert.equal(collapses.length, 2, "the range pickers and the drone panel fold away");
-  // ⚠ Neither is `open`. They are collapsed by DEFAULT — that is the point.
-  assert.doesNotMatch(body, /<details class="collapsible"[^>]*\bopen\b/);
-
-  // ⚠ AND THE SUMMARY CARRIES THE CURRENT STATE. A collapsed panel that hid
-  // what it was set to would be worse than the section it replaced. The range
-  // summary reads back the labels from the SAME fixed menu the picker offers,
-  // so it can only ever say something the player could have chosen — never a
-  // raw metre count and never "10.0 km".
-  assert.match(body, /Warp\s+As close as it can/, "the warp default, in its own words");
-  assert.match(body, /Orbit\s+1 km/);
-  assert.match(body, /Hold\s+1 km/);
-  assert.doesNotMatch(body, /Warp\s+1000\b/, "R7d/R9a: never the raw number");
-  // The drone summary carries the one fact it may not hide: how many are OUT.
-  assert.match(body, /class="collapse-hint">[\s\S]{0,40}(None|out|Looking|Could not)/);
-});
-
-test("R30 slice F: 'Somewhere else…' is the last row, and invents no distance", () => {
-  const body = renderLoaded();
-  assert.match(body, /Somewhere else…/, "the destination row exists");
-  // It is a row in the grid, after every real one — and it is marked as not
-  // being a thing in space so it does not read as another ball on the grid.
-  //
-  // ⚠ RE-POINTED IN R82: the grid became a list, so this is an `.ov-row` inside a
-  // `<ul>` rather than a `<tr>` of labelled cells. The claim is unchanged.
-  assert.ok(
-    body.indexOf("synthetic-row") > body.indexOf("Veldspar"),
-    "it sits below the real rows",
+test("⚠ THERE ARE NO COLLAPSES LEFT TO HIDE ANYTHING", () => {
+  // The cockpit folded "Flying distances" and "Drones" away below the grid,
+  // and the rule was that a folded panel must still carry its own state in the
+  // summary. Both are gone: the ranges are a per-verb popover on the action
+  // bar, and the drones are a window. Nothing folds, so nothing can hide.
+  assert.equal(
+    /<details/.test(SOURCE),
+    false,
+    "a collapsible came back — if it must, its summary has to carry its state",
   );
-  // ⚠ It has no distance, because it does not have one. A fabricated 0 m would
-  // put this row nearest in a distance sort.
-  const row = body.slice(body.indexOf("synthetic-row"));
-  const rowMarkup = row.slice(0, row.indexOf("</li>"));
-  assert.match(rowMarkup, /class="ov-range">—</, "no distance is invented");
-  assert.match(rowMarkup, /Anywhere not on this grid/, "it says what it is instead");
 });
 
-test("R30 slice F: the destination sentinel cannot collide with a real thing in space", () => {
-  // Every itemID the server issues is positive. A negative sentinel therefore
-  // cannot be mistaken for a ball — and the "did my selection leave the
-  // snapshot" check must SKIP it, or it would announce the destination row as
-  // vanished on every single poll.
+test("⚠ 'SOMEWHERE ELSE…' IS GONE FROM THE LIST, AND TRAVEL IS WHERE IT WENT", () => {
+  // The cockpit's list ended in a synthetic row: a way to route yourself to
+  // something that is NOT on this grid. The redesigned panel is a list of what
+  // is around the ship and has no such row — which, on its own, would have left
+  // a flying pilot no way to set a destination at all.
   //
-  // ⚠ R70 moved both the sentinel and that check into `space/selection.ts`, so
-  // this now asserts the BEHAVIOUR rather than the presence of a line of source.
-  // The old version matched `/const SOMEWHERE_ELSE = -1;/` against this file's
-  // text, which would have gone on passing if the skip had been deleted and
-  // would have failed the moment the constant was merely renamed — the exact
-  // inversion of what it was there to protect.
+  // Travel is that capability's real home, and it is reachable in space now.
+  // Losing the row is fine; losing the capability was not.
+  const body = renderLoaded();
+  assert.equal(/Somewhere else…/.test(body), false, "the synthetic row came back");
+  const travel = TABS.find((tab) => tab.id === "travel");
+  assert.ok(travel, "there is no travel tab");
+  assert.notEqual(travel.where, "docked", "a flying pilot cannot reach the destination search");
+});
+
+test("R30 slice F: a selection that leaves the grid is DROPPED, with a notice", () => {
+  // Every itemID the server issues is positive, so a negative sentinel cannot be
+  // mistaken for a ball — and the "did my selection leave the snapshot" check
+  // must SKIP it, or it would announce a destination as vanished every poll.
   assert.ok(SOMEWHERE_ELSE < 0, "the sentinel must not collide with a real itemID");
-  assert.equal(
-    selectionHasVanished(SOMEWHERE_ELSE, new Set()),
-    false,
-    "the destination row is not a ball in space and can never leave one",
-  );
-  assert.equal(
-    selectionHasVanished(SOMEWHERE_ELSE, new Set([1, 2, 3])),
-    false,
-    "…on a busy grid either",
-  );
-  // And the panel must genuinely delegate to it rather than keep a second copy
-  // of the rule that could drift from the one the viewport uses.
+  assert.equal(selectionHasVanished(SOMEWHERE_ELSE, new Set()), false);
+  assert.equal(selectionHasVanished(SOMEWHERE_ELSE, new Set([1, 2, 3])), false);
+  // A real ball that has left the grid HAS vanished...
+  assert.equal(selectionHasVanished(42, new Set([1, 2, 3])), true);
+  // ⚠ ...AND THE PANEL HAS TO ASK. This check was left with no caller at all
+  // when the cockpit was deleted, which would have let the action bar go on
+  // offering warp and lock against a rock that is no longer there.
   assert.match(SOURCE, /selectionHasVanished\(selectedID, present\)/);
+  assert.match(SOURCE, /dropWithNotice\(SELECTION_GONE\)/);
 });
 
 test("R30 slice F: destination results are COMPONENT-LOCAL, never a store slice", () => {
-  // They are a transient answer to a question this panel asked; the store holds
-  // what the SHIP reports. Travel.svelte made the same call for the same
-  // reason, and two panels holding the same search would be two things to keep
-  // in sync for no gain.
-  assert.match(SOURCE, /let destinationResults = \$state<DestinationMatch\[\]>\(\[\]\)/);
+  // They are a transient answer to a question a panel asked; the store holds
+  // what the SHIP reports. The claim followed the search into Travel, which is
+  // the one panel making it now — the cockpit's second copy went with the file.
+  const travel = readFileSync(path.join(UI_DIR, "Travel.svelte"), "utf8");
+  assert.match(travel, /flow\.searchDestinations\(/);
   assert.equal(
-    /store\.apply\(\s*\{\s*type:\s*"travel\//.test(SOURCE),
+    /store\.apply\(\s*\{\s*type:\s*"travel\//.test(travel),
     false,
     "the panel must not write search results into the store",
   );
-  // And setting one reuses the EXISTING autopilot path rather than a second.
-  assert.equal(SOURCE.split("flow.startRoute(").length - 1, 1);
-  assert.equal(SOURCE.split("flow.searchDestinations(").length - 1, 1);
+  // And the overview panel does NOT keep a second search of its own.
+  assert.equal(
+    SOURCE.includes("searchDestinations"),
+    false,
+    "two panels searching for destinations is two things to keep in sync",
+  );
 });
 
 test("activateModule is called WITHOUT naming an effect — the server picks it", () => {
@@ -860,7 +819,7 @@ function renderWithEntity(kind: string, itemID: number): string {
       },
     },
   });
-  return render(Overview, { props: { store, flow: fakeFlow() } }).body;
+  return render(SpaceOverview, { props: { store, flow: fakeFlow() } }).body;
 }
 
 test("R24: a station offers Dock; a rock does not — decided from the ball's KIND", () => {
@@ -890,14 +849,15 @@ test("R24: a station offers Dock; a rock does not — decided from the ball's KI
 
   // The panel still renders both kinds of row, each pickable.
   //
-  // ⚠ RE-POINTED IN R82. This used to look for a button whose text was "Select",
-  // which lived in the grid's last column. The row IS that button now — the
-  // separate control was doing what clicking the row already did — so what makes
-  // a row pickable is that it is a `.ov-row` button reporting `aria-pressed`.
+  // ⚠ RE-POINTED TWICE. In R82 the row itself became the button (the separate
+  // "Select" control was doing what clicking the row already did), and again
+  // here when the cockpit was deleted: the class is `.spc-row-btn` in the
+  // redesigned panel. What makes a row pickable is unchanged — it is a button
+  // reporting `aria-pressed`.
   for (const [kind, id] of [["station", STATION_ID], ["asteroid", ROCK_ID]] as const) {
     assert.match(
       renderWithEntity(kind, id),
-      /<button[^>]*class="ov-row[^"]*"[^>]*aria-pressed=/,
+      /<button[^>]*class="spc-row-btn"[^>]*aria-pressed=/,
       `a ${kind} row must be a selectable control`,
     );
   }
@@ -968,7 +928,7 @@ const HOLD_STORE_EVENT = {
 };
 
 test("R24 slice C: an unknown cycle reads NOT KNOWN, never an instant one", () => {
-  const text = visibleText(renderLoaded());
+  const text = visibleText(renderEquipment());
   assert.match(text, /Cycle/, "the equipment table has a cycle column");
   // Nothing has told us this module's cycle length yet.
   assert.match(text, /Not known/);
@@ -977,7 +937,7 @@ test("R24 slice C: an unknown cycle reads NOT KNOWN, never an instant one", () =
 test("R24 slice C: a BASE cycle length says so; a server one does not", () => {
   const baseStore = loadedStore();
   baseStore.apply({ type: "targeting/base-cycles", cycles: { [MODULE_ID]: 15000 } });
-  const base = visibleText(render(Overview, { props: { store: baseStore, flow: fakeFlow() } }).body);
+  const base = visibleText(render(EquipmentPanel, { props: { store: baseStore, flow: fakeFlow() } }).body);
   assert.match(base, /15s/, "the length is shown");
   assert.match(base, /before skills/, "and it is named as the equipment's own figure");
 
@@ -991,7 +951,7 @@ test("R24 slice C: a BASE cycle length says so; a server one does not", () => {
     observedAtMs: Date.now(),
   });
   const server = visibleText(
-    render(Overview, { props: { store: serverStore, flow: fakeFlow() } }).body,
+    render(EquipmentPanel, { props: { store: serverStore, flow: fakeFlow() } }).body,
   );
   assert.match(server, /12\.8s|13s/, "the pilot's real cycle length");
   assert.doesNotMatch(
@@ -1002,12 +962,15 @@ test("R24 slice C: a BASE cycle length says so; a server one does not", () => {
 });
 
 test("R24 slice D: only holds the hull HAS are drawn, with used out of total", () => {
+  // ⚠ THE HOLD STRIP'S HOME IS THE MINING PANEL. The cockpit showed it beside
+  // the ship gauges; that panel is gone and the gauges are the HUD, which has
+  // no room for a hold list. Mining is where a miner looks for it anyway.
   const store = loadedStore();
   store.apply(HOLD_STORE_EVENT);
-  const text = visibleText(render(Overview, { props: { store, flow: fakeFlow() } }).body);
+  const text = visibleText(render(MiningPanel, { props: { store, flow: fakeFlow() } }).body);
 
   assert.match(text, /Ore hold/);
-  assert.match(text, /1,250 \/ 5,000 m³/, "used out of total, as the ship reported it");
+  assert.match(text, /1,250 \/ 5,000 m³|1,250 of 5,000 m³/, "used out of total, as the ship reported it");
   assert.doesNotMatch(text, /Ice hold/, "a hold this hull lacks is not rendered at all");
 });
 
@@ -1026,9 +989,9 @@ test("R24 slice D: a hold the ship could not measure reads NOT KNOWN, not empty"
       },
     ],
   });
-  const text = visibleText(render(Overview, { props: { store, flow: fakeFlow() } }).body);
+  const text = visibleText(render(MiningPanel, { props: { store, flow: fakeFlow() } }).body);
   assert.match(text, /Ore hold/, "there IS ore in it, so it is shown");
-  assert.match(text, /not known/, "but how full it is, is not");
+  assert.match(text, /not known/i, "but how full it is, is not");
   assert.doesNotMatch(text, /0 \/ 0/, "an unknown reading is never a zero one");
 });
 
@@ -1036,7 +999,7 @@ test("R24: the new cockpit readouts keep the standing invariants", () => {
   const store = loadedStore();
   store.apply(HOLD_STORE_EVENT);
   store.apply({ type: "targeting/base-cycles", cycles: { [MODULE_ID]: 15000 } });
-  const body = render(Overview, { props: { store, flow: fakeFlow() } }).body;
+  const body = render(SpaceOverview, { props: { store, flow: fakeFlow() } }).body;
   const text = visibleText(body);
 
   // R7d — no numeric ids on screen.

@@ -60,7 +60,11 @@ export function formatDistance(meters: number): string {
   }
   if (meters >= 1_000) {
     const km = meters / 1_000;
-    return `${km >= 100 ? Math.round(km) : km.toFixed(1)} km`;
+    // ⚠ GROUPED once it is whole kilometres. A moon 12 million km out rendered
+    // as `12040310 km` — eight unbroken digits, in the one column a pilot reads
+    // by comparing figures down a list. Under 100 km the decimal is the
+    // information and there is nothing to group.
+    return `${km >= 100 ? Math.round(km).toLocaleString() : km.toFixed(1)} km`;
   }
   return `${Math.round(meters)} m`;
 }

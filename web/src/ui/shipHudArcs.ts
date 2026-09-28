@@ -22,10 +22,17 @@
 // passed into it uses that convention, so there is exactly one place to be
 // confused about it rather than one per call site.
 //
-// The gauges run from 135° (bottom left) clockwise through 270° to 45°
-// (bottom right), leaving a 90° gap centred on the bottom. The gap is not
-// decoration: it is where the capacitor readout sits, and it is what stops the
-// three rings from reading as a solid target.
+// The gauges run from 150° (bottom left) clockwise through 240° to 30°
+// (bottom right), leaving a 120° gap centred on the bottom. The gap is not
+// decoration: it is where the speed readout sits, and it is what stops the
+// rings from reading as a solid target.
+//
+// ⚠ THE HANDOFF'S "START 210°" IS NOT THIS FILE'S 210°. The in-space design
+// specifies a 240° sweep opening at the bottom, and gives a start angle in its
+// own drawing tool's convention. Copying that number here would have put the
+// gap on the LEFT, because 0° is three o'clock here and angles increase
+// clockwise. What is honoured is the SHAPE the handoff draws — a 240° arc with
+// its opening at the bottom — expressed in this file's own terms.
 //
 // ⚠ A SWEEP OF 360° IS NOT ALLOWED AND IS NOT AN OVERSIGHT. An SVG arc whose
 // start and end points are identical is degenerate — the renderer draws nothing
@@ -33,9 +40,9 @@
 // wanting a closed ring must use a <circle>, not this.
 
 /** Where the gauge arcs begin, in this file's convention. */
-export const GAUGE_START_DEG = 135;
-/** How far they sweep. 270° leaves a 90° gap centred on the bottom. */
-export const GAUGE_SWEEP_DEG = 270;
+export const GAUGE_START_DEG = 150;
+/** How far they sweep. 240° leaves a 120° gap centred on the bottom. */
+export const GAUGE_SWEEP_DEG = 240;
 
 /** A point on a circle, in the convention above. */
 export function polarPoint(

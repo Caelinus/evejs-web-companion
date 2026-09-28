@@ -48,7 +48,16 @@ const idsOf = (isDocked: boolean): TabID[] => visibleTabsFor(isDocked).map((t) =
 test("the IN-SPACE default is NOT station (the login-default bug)", () => {
   // The exact regression: a hardcoded "station" default while in space.
   assert.notEqual(defaultTabFor(false), "station");
-  assert.equal(defaultTabFor(false), "overview");
+  // ⚠ IT WAS "overview" UNTIL THAT TAB STOPPED EXISTING. "Around Your Ship" was
+  // a window while the old cockpit was being taken apart; the overview is fixed
+  // chrome now — the dock panel on the right, the whole screen on mobile — so
+  // it is never something to LAND on, because it is already there.
+  assert.equal(defaultTabFor(false), "flight");
+  assert.equal(
+    TABS.some((tab) => tab.id === ("overview" as TabID)),
+    false,
+    "the cockpit tab came back",
+  );
 });
 
 test("the DOCKED default is the inventory dock content (station services live inside it)", () => {
@@ -64,19 +73,24 @@ test("docked shows fitting + travel + bots and hides the in-space-only tabs", ()
   for (const shown of ["fitting", "travel", "bots"] as const) {
     assert.ok(docked.includes(shown), `${shown} must be visible while docked`);
   }
-  for (const hidden of ["flight", "overview", "mining", "scanner"] as const) {
+  for (const hidden of ["flight", "mining", "scanner"] as const) {
     assert.equal(docked.includes(hidden), false, `${hidden} must be hidden while docked`);
   }
 });
 
 test("in space shows the flight tabs and hides fitting + travel", () => {
   const space = idsOf(false);
-  for (const shown of ["flight", "overview", "mining", "scanner"] as const) {
+  for (const shown of ["flight", "mining", "scanner", "drones", "shots", "equipment"] as const) {
     assert.ok(space.includes(shown), `${shown} must be visible in space`);
   }
-  for (const hidden of ["fitting", "travel"] as const) {
+  for (const hidden of ["fitting"] as const) {
     assert.equal(space.includes(hidden), false, `${hidden} must be hidden in space`);
   }
+  // ⚠ TRAVEL IS NOT HIDDEN ANY MORE. It reads no docked state at all, and when
+  // the old cockpit went it took the only in-space way to route yourself
+  // somewhere off this grid with it — the "Somewhere else…" row at the bottom
+  // of its list. Travel is that capability's real home.
+  assert.ok(space.includes("travel"), "a flying pilot must be able to set a destination");
   // Bots and the Bot Builder are "both" tabs: a running bot has to stay
   // reachable in space, which is where it does its work.
   for (const shown of ["bots", "botBuilder"] as const) {
@@ -97,8 +111,9 @@ test("the 'both' tabs (including Activity, Fleet and both wallets) show in eithe
 test("a now-hidden selected tab falls back to the state default", () => {
   // Was on Flight (in-space only), then docked -> falls back to the dock default.
   assert.equal(resolvePage("flight", true), "inventory");
-  // Was on Fitting (docked only), then undocked -> falls back to overview.
-  assert.equal(resolvePage("fitting", false), "overview");
+  // Was on Fitting (docked only), then undocked -> falls back to the in-space
+  // default, which is Flight now that the overview is fixed chrome.
+  assert.equal(resolvePage("fitting", false), "flight");
 });
 
 test("a still-visible selection is kept across a state change", () => {
@@ -109,7 +124,7 @@ test("a still-visible selection is kept across a state change", () => {
 
 test("no explicit selection follows the state default", () => {
   assert.equal(resolvePage(null, true), "inventory");
-  assert.equal(resolvePage(null, false), "overview");
+  assert.equal(resolvePage(null, false), "flight");
 });
 
 // --- deriveDocked reads the authoritative flag, not stale data ---------------

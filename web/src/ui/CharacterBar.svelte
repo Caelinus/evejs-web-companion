@@ -22,6 +22,46 @@
     onHangar: () => void;
   } = $props();
 
+  /**
+   * A NARROW BAR SHOWS ONE PILOT AND A WAY TO CHANGE IT.
+   *
+   * ⚠ THE TAB STRIP IS A DESKTOP SHAPE. It is a scrolling row of 11rem tabs,
+   * which needs room the phone does not have: at 375px the bar had 359px, the
+   * other controls took 316, and the chip absorbed the whole shortfall — eleven
+   * pixels, a border with the pilot's name clipped away inside it.
+   *
+   * So below the breakpoint the strip becomes the ACTIVE pilot plus a switcher,
+   * and the switcher only exists when there is somebody to switch to.
+   *
+   * ⚠ ONE NUMBER, IN ONE PLACE. This flag drives the markup AND the narrow-bar
+   * styling (`.char-bar.narrow`), rather than a `$state` here and a `@media`
+   * there that have to be kept equal by hand.
+   */
+  let narrow = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia("(max-width: 560px)");
+    const update = (): void => { narrow = mq.matches; };
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  });
+
+  const activeSession = $derived(sessions.find((s) => s.id === activeId) ?? sessions[0] ?? null);
+  const others = $derived(sessions.filter((s) => s.id !== activeSession?.id));
+
+  /** The switcher's list, open or shut. */
+  let switching = $state(false);
+  $effect(() => {
+    // A pilot list that outlives the pilots is a menu onto nothing.
+    if (others.length === 0) {
+      switching = false;
+    }
+  });
+  function pick(id: string): void {
+    switching = false;
+    onSwitch(id);
+  }
+
   const statusLabel = $derived(
     serverStatus === "online"
       ? "Connected"
@@ -31,17 +71,59 @@
   );
 </script>
 
-<div class="char-bar">
+<svelte:window onkeydown={(event) => event.key === "Escape" && (switching = false)} />
+
+<div class="char-bar" class:narrow>
   <span class="char-bar-brand">EVEJS</span>
-  <div class="char-bar-list">
-    {#each sessions as session (session.id)}
-      <CharacterChip
-        {session}
-        active={session.id === activeId}
-        onSelect={() => onSwitch(session.id)}
-      />
-    {/each}
-  </div>
+  {#if narrow}
+    <!--
+      One pilot, and a way to change it. The chip is COMPACT here — dot and
+      name — because the workspace header directly below already says where the
+      ship is, in more detail than the chip's state line can.
+    -->
+    <div class="char-bar-list">
+      {#if activeSession}
+        <!--
+          ⚠ `{#key}`, AND IT IS LOAD-BEARING. `CharacterChip` reads its session's
+          store slices once at init — it has to, because `$station` needs a
+          stable top-level binding — so handing a live instance a different
+          `session` changes nothing: it goes on rendering the pilot it was
+          created for. The desktop strip never hits this because `{#each … (id)}`
+          keys every chip; this one chip has to say so itself.
+        -->
+        {#key activeSession.id}
+          <CharacterChip
+            session={activeSession}
+            active={true}
+            compact={true}
+            onSelect={() => others.length > 0 && (switching = !switching)}
+          />
+        {/key}
+      {/if}
+      {#if others.length > 0}
+        <button
+          type="button"
+          class="char-bar-switch"
+          aria-haspopup="listbox"
+          aria-expanded={switching}
+          aria-label={`Switch pilot — ${others.length} other${others.length === 1 ? "" : "s"} online`}
+          onclick={() => (switching = !switching)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+      {/if}
+    </div>
+  {:else}
+    <div class="char-bar-list">
+      {#each sessions as session (session.id)}
+        <CharacterChip
+          {session}
+          active={session.id === activeId}
+          onSelect={() => onSwitch(session.id)}
+        />
+      {/each}
+    </div>
+  {/if}
   <span class="char-bar-status char-bar-status-{serverStatus}" title={`Server: ${statusLabel}`}>
     <span class="char-bar-status-dot"></span>
     <span class="char-bar-status-text">{statusLabel}</span>
@@ -49,5 +131,38 @@
   <button type="button" class="char-bar-hangar" onclick={onHangar} title="Pilot hangar — every pilot, squads and accounts">
     Pilots
   </button>
-  <button type="button" class="char-bar-add" onclick={onAdd}>+ Add character</button>
+  <!--
+    ⚠ THE LABEL IS TWO PIECES SO A NARROW BAR CAN DROP ONE.
+
+    At 375px the whole bar is 359px of usable width and this button alone took
+    119 of it, which crushed the pilot CHIP — the one thing the bar exists to
+    show — down to an 11px stub with nothing readable in it. The "+" carries
+    the button on a phone; the words come back as soon as there is room.
+
+    `aria-label` is unconditional, so the button is never just a plus sign to
+    anything that reads it aloud.
+  -->
+  <button type="button" class="char-bar-add" onclick={onAdd} aria-label="Add character">
+    <span aria-hidden="true">+</span>
+    <span class="char-bar-add-text">Add character</span>
+  </button>
+
+  {#if switching && others.length > 0}
+    <!--
+      ⚠ THE OTHERS KEEP THEIR STATE LINE. The active chip drops it because the
+      header repeats it; here it is the whole point — the state is how you tell
+      which pilot you are about to switch to.
+    -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="char-bar-shade" onclick={() => (switching = false)}></div>
+    <div class="char-bar-pilots" role="listbox" aria-label="Pilots online">
+      {#each others as session (session.id)}
+        <CharacterChip
+          {session}
+          active={false}
+          onSelect={() => pick(session.id)}
+        />
+      {/each}
+    </div>
+  {/if}
 </div>

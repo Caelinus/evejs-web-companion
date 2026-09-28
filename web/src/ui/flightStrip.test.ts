@@ -27,10 +27,11 @@ register("./svelteSsrHook.ts", import.meta.url);
 
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
-const Overview = (await import("./Overview.svelte")).default;
+const Flight = (await import("./Flight.svelte")).default;
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE = readFileSync(path.join(UI_DIR, "Overview.svelte"), "utf8");
+const SOURCE = readFileSync(path.join(UI_DIR, "Flight.svelte"), "utf8");
+const NARRATION = readFileSync(path.join(UI_DIR, "flightNarration.ts"), "utf8");
 
 const SHIP_ID = 9001;
 const SHIP_TYPE_ID = 622;
@@ -139,7 +140,7 @@ function inSpaceStore() {
 }
 
 function renderWith(store: unknown): string {
-  return render(Overview as never, { props: { store, flow: fakeFlow() } } as never).body;
+  return render(Flight as never, { props: { store, flow: fakeFlow() } } as never).body;
 }
 
 // --- where ------------------------------------------------------------------
@@ -285,44 +286,50 @@ test("docked, the primary control is Undock — and it is HERE, not on another t
   assert.equal(/Stop the ship/.test(text), false, "a docked ship has no engines to cut");
 });
 
-test("in space, the primary control is Stop", () => {
-  assert.match(visibleText(renderWith(inSpaceStore())), /Stop the ship/);
-});
-
-test("STOP IS NEVER DISABLED — not by a shared flag, not by its own", () => {
+test("in space, the strip no longer carries Stop — the HUD does", () => {
+  // ⚠ THIS ASSERTION IS THE INVERSE OF THE ONE IT REPLACED, AND DELIBERATELY.
+  //
+  // Stop used to be the strip's in-space control. It moved to the HUD footer,
+  // which is always on screen in space, because this window is one a player has
+  // to OPEN — and the control you reach for when things are going wrong must
+  // not be behind that. The rule that travels with it ("never disabled, never
+  // guarded") is now asserted in `chromeRender.test.ts` against `HudBar`; both
+  // halves of it, so nothing was dropped in the move.
+  //
+  // What is checked here is only that it did not end up in BOTH places: two
+  // Stops on screen means two places a refusal could be reported and one of
+  // them will be the one the player is not looking at.
   const body = renderWith(inSpaceStore());
-  // Find the Stop button's own markup and assert it carries no disabled state.
-  const index = body.indexOf("Stop the ship");
-  assert.ok(index > 0, "the Stop control is rendered");
-  const openTag = body.lastIndexOf("<button", index);
-  const buttonTag = body.slice(openTag, index);
+  const from = body.indexOf("flight-strip");
+  assert.ok(from > 0, "the flight strip is rendered at all");
+  // The strip's OWN markup, bounded at its closing tag — not a fixed window,
+  // which would quietly stop covering the strip the moment it grew.
+  const strip = body.slice(from, body.indexOf("</section>", from));
+  assert.ok(strip.length > 0, "the strip section is not closed");
   assert.equal(
-    /disabled/.test(buttonTag),
+    strip.includes("Stop the ship"),
     false,
-    "Stop must never render a disabled attribute — see the comment in Overview.svelte",
+    "the strip drew Stop again — it belongs to the HUD footer now",
   );
-});
-
-test("Stop is not silently swallowed by a busy guard either", () => {
-  // The other half of the same rule: an enabled button that drops the click
-  // because something else is in flight is the same failure, wearing a
-  // friendlier face. Stop routes through the UNGUARDED path.
-  assert.match(
-    SOURCE,
-    /runUnguarded\(\(\) => flow\.stopShip\(\)\)/,
-    "Stop must call flow.stopShip through the unguarded runner",
-  );
+  // Non-vacuous: the slice really is the strip, and really does still hold the
+  // strip's own content. Without this the assertion above passes on an empty
+  // string.
+  assert.match(strip, /strip-where/, "the slice is not the flight strip");
 });
 
 // --- the structural claims --------------------------------------------------
 
 test("the busy state is a per-concern SET, not one flag", () => {
-  // A single shared flag is what greys out Stop mid-fight because a lock
-  // request happened to be pending.
-  assert.match(SOURCE, /busyConcerns\s*=\s*\$state<readonly Concern\[\]>/);
-  assert.match(SOURCE, /function concernBusy\(concern: Concern\): boolean/);
+  // ⚠ THE CLAIM MOVED WITH THE PANEL THAT HAS VERBS. The cockpit is gone; the
+  // component that now dispatches flight verbs against a picked row is
+  // `SpaceOverview`, and this is the rule that stops one in-flight request
+  // greying out every other control — including, historically, Stop, mid-fight,
+  // because a lock happened to be pending.
+  const overview = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
+  assert.match(overview, /let busy = \$state<ReadonlySet<ActionConcern>>/);
+  assert.match(overview, /busy\.has\(/, "controls must be disabled by their OWN concern");
   // And the exemption is written down so a later cleanup does not undo it.
-  assert.match(SOURCE, /DO NOT CLEAN THIS UP/);
+  assert.match(overview, /A SET, NOT A FLAG/);
 });
 
 test("the app no longer tells the player to go to the Flight tab to undock", () => {

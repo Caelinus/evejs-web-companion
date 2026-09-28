@@ -7,13 +7,25 @@
   // PanelHost) — just one at a time, no windows, no drag.
   import WorkspaceHeader from "./WorkspaceHeader.svelte";
   import PanelHost from "./PanelHost.svelte";
-  import Overview from "./Overview.svelte";
-  import InventoryShip from "./InventoryShip.svelte";
-  import ShipHud from "./ShipHud.svelte";
-  import ModuleRack from "./ModuleRack.svelte";
+  import SpaceOverview from "./SpaceOverview.svelte";
+  import StationPanel from "./StationPanel.svelte";
+  import HudBar from "./HudBar.svelte";
+  import MobileCard from "./MobileCard.svelte";
+  import DronesPanel from "./DronesPanel.svelte";
+  import ShotsPanel from "./ShotsPanel.svelte";
+  import Flight from "./Flight.svelte";
+  import Mining from "./Mining.svelte";
+  import {
+    MOBILE_CARDS,
+    isCollapsed,
+    readCollapsed,
+    tabsShownInStack,
+    toggleCollapsed,
+    writeCollapsed,
+  } from "./mobileCards.ts";
   import TargetBracket from "./TargetBracket.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
-  import { visibleTabsFor, type TabID } from "./tabs.ts";
+  import { isLaunchable, visibleTabsFor, type TabID } from "./tabs.ts";
   import { isWindowTab } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -41,12 +53,40 @@
     if (!$fitting.loaded) void flow.loadFitting().catch(() => {});
   });
 
+  /**
+   * Which cards of the in-space stack are folded away.
+   *
+   * ⚠ READ ONCE, ON MOUNT, NOT IN A `$derived`. `localStorage` is not reactive
+   * and throws outright in some private-window configurations, so it is touched
+   * exactly where a failure can be caught and turned into "nothing folded" —
+   * which is the safe direction: a card a pilot cannot see they are missing is
+   * the failure this whole screen is built to avoid.
+   */
+  let collapsed = $state(readCollapsed(typeof localStorage === "undefined" ? null : localStorage));
+  function toggleCard(id: string): void {
+    collapsed = toggleCollapsed(collapsed, id);
+    writeCollapsed(typeof localStorage === "undefined" ? null : localStorage, collapsed);
+  }
+
   // The openable panels for the current state (chrome tabs excluded); "home" is
   // the null selection. While docked, "Inventory & Ship" is dropped from the
   // bar — the docked home IS that content, so the tab would be a duplicate.
+  //
+  // ⚠ AND IN SPACE, EVERYTHING THE STACK ALREADY SHOWS IS DROPPED TOO. Those
+  // six panels are the home screen; offering each of them again in the bar
+  // costs a tap target and teaches nothing — the same call the HUD's nav
+  // buttons lost on the desktop.
   const tabs = $derived(
     visibleTabsFor(isDocked).filter(
-      (tab) => isWindowTab(tab.id) && !(isDocked && tab.id === "inventory"),
+      (tab) =>
+        isWindowTab(tab.id) &&
+        // ⚠ AND NOT A CONTEXTUAL PANEL. `Show Info` only ever opens because
+        // something was clicked, so a bar entry for it could only open onto
+        // nothing. The desktop rail has always filtered these out; this bar
+        // never did, and offered it on every phone.
+        isLaunchable(tab) &&
+        !(isDocked && tab.id === "inventory") &&
+        !(!isDocked && tabsShownInStack().has(tab.id)),
     ),
   );
   let selected = $state<TabID | null>(null);
@@ -59,27 +99,74 @@
     <WorkspaceHeader {store} {flow} {isDocked} />
   </ErrorBoundary>
 
-  <main class="mobile-main">
+  <!-- The docked home is the Station panel, which sizes itself and pins its own
+       action bar — so for that ONE case the host stops padding and scrolling and
+       hands it the whole box. Every other panel, in space included, keeps the
+       scrolling padded column it has always had. -->
+  <main class="mobile-main" class:mobile-main-station={effective === null && isDocked}>
     {#if effective !== null}
       <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} />
     {:else if isDocked}
-      <!-- Docked home = the same tabbed dock content as the desktop's right
-           panel (hangars + Station Services); the header above already names
-           the station, so the dock variant's compact layout fits here too. -->
-      <ErrorBoundary name="Inventory &amp; Ship">
-        <InventoryShip {store} {flow} dock />
+      <!-- Docked home = the same Station panel as the desktop's right-hand dock,
+           at its narrowest tier. There is no strip to fold into on a phone, so
+           it is given no collapse control. -->
+      <ErrorBoundary name="Station">
+        <StationPanel {store} {flow} isDocked={true} />
       </ErrorBoundary>
     {:else}
-      <ErrorBoundary name="Ship HUD">
-        <section class="mobile-hud">
-          <ShipHud {store} />
-          <ModuleRack {store} {flow} />
-        </section>
-        <TargetBracket {store} />
-      </ErrorBoundary>
-      <ErrorBoundary name="Overview">
-        <Overview {store} {flow} />
-      </ErrorBoundary>
+      <!--
+        ============================================ the in-space stack (1D) ==
+
+        ⚠ ONE COLUMN OF COLLAPSIBLE CARDS, AND NO RADAR. The radar is a picture
+        that needs room to mean anything and there is none on a phone; once it
+        goes, the desktop's three-cell grid is three things fighting over 380px.
+        So the order is fixed, the page scrolls, and the pilot decides what they
+        are doing by folding away what they are not: a miner folds Shots, someone
+        in a fight folds Mining.
+
+        Every card is the SAME COMPONENT the desktop uses. There is no mobile
+        variant of any of these panels — a second implementation is a second
+        thing to keep honest, and the honesty is the whole product.
+      -->
+      <TargetBracket {store} />
+      {#each MOBILE_CARDS as card (card.id)}
+        <MobileCard
+          title={card.title}
+          collapsed={isCollapsed(collapsed, card.id)}
+          scrolls={card.scrolls}
+          onToggle={() => toggleCard(card.id)}
+        >
+          <ErrorBoundary name={card.title}>
+            {#if card.id === "ship"}
+              <!--
+                ⚠ THE WHOLE HUD, NOT JUST THE GAUGE AND THE RACKS.
+                
+                This card was `ShipHud` + `ModuleRack`, which left the phone
+                with no STOP button on the one screen a pilot looks at — it was
+                three cards down, inside Navigation & Flight, behind a fold. The
+                reference puts the ship's state and Stop in this card's footer,
+                and it is right: Stop is the control you reach for when things
+                are going wrong, and it must not be behind anything.
+
+                `HudBar` is that header + gauge + racks + footer, and it is the
+                same component the desktop cell is. Its own header is hidden
+                here because the card header already says SHIP.
+              -->
+              <HudBar {store} {flow} />
+            {:else if card.id === "overview"}
+              <SpaceOverview {store} {flow} />
+            {:else if card.id === "drones"}
+              <DronesPanel {store} {flow} />
+            {:else if card.id === "shots"}
+              <ShotsPanel {store} {flow} />
+            {:else if card.id === "flight"}
+              <Flight {store} {flow} />
+            {:else if card.id === "mining"}
+              <Mining {store} {flow} />
+            {/if}
+          </ErrorBoundary>
+        </MobileCard>
+      {/each}
     {/if}
   </main>
 
