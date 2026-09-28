@@ -5801,8 +5801,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * fight-back watch runs over whatever step is active — a mining step, a
    * hauling step — so gating this on the active macro would leave the watch
    * picking its primary blind, which is the one moment prioritising matters
-   * most. Player hulls are the exception: they are only prey under the PvP
-   * blocks, so they are resolved only there.
+   * most. Only NPC hostiles are resolved: no script block targets a player.
    *
    * Cheap after the first look: `requestNames` skips ids already cached or in
    * flight, so this costs one round trip per NEW ship type, not one per tick,
@@ -5811,8 +5810,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   async function classifyTargetGroups(
     snapshot: ReturnType<typeof decodeSpaceSnapshot>,
     origin: SpaceVector,
-    macro: string | null,
-    shipID: number | null,
   ): Promise<Readonly<Record<number, string | null>> | null> {
     if (snapshot === null) {
       return null;
@@ -5821,20 +5818,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     for (const row of hostileRows(snapshot, origin)) {
       if (row.typeID !== null) {
         typeIDs.add(row.typeID);
-      }
-    }
-    if (macro !== null && PVP_MACROS.has(macro)) {
-      for (const entity of snapshot.entities) {
-        if (
-          entity.kind === "ship" &&
-          entity.isNpc === false &&
-          entity.isSelf === false &&
-          entity.itemID !== shipID &&
-          entity.characterID !== null &&
-          entity.typeID !== null
-        ) {
-          typeIDs.add(entity.typeID);
-        }
       }
     }
     if (typeIDs.size === 0) {
@@ -5894,9 +5877,6 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   const BAY_MACROS = new Set(["unload-cargo"]);
   const FLEET_MANAGEMENT_MACROS = new Set(["create-fleet", "invite-to-fleet", "join-fleet"]);
   const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
-  // The blocks for which another PLAYER's hull is a target rather than scenery —
-  // the only ones that resolve player ship groups for the priority ladder.
-  const PVP_MACROS = new Set(["attack-player", "hunt-player"]);
   const SCANNER_MACROS = new Set([
     "launch-scan-probes",
     "analyze-signatures",
@@ -6304,7 +6284,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
-        const targetGroupNames = await classifyTargetGroups(snapshot, origin, macro, ship?.itemID ?? null);
+        const targetGroupNames = await classifyTargetGroups(snapshot, origin);
         // The fleet's called primary, for a block that asked to follow one. Every
         // failure — no fleet, no call, a stale call, a refused read — lands as
         // null, which reads as "pick for yourself" rather than as a fault: a

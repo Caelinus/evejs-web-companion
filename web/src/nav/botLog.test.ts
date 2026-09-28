@@ -53,7 +53,6 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "moveItems", itemIDs: [111], from: "hangar", to: "cargo", qty: null },
   { kind: "placeBuyOrder", typeID: 34, quantity: 10, price: 5 },
   { kind: "placeSellOrder", itemID: 121, typeID: 34, price: 6, quantity: 1 },
-  { kind: "sendChat", channel: "local", message: "hello" },
   { kind: "jettison", itemIDs: [131] },
   { kind: "compressOre", itemID: 141, facilityID: 151 },
   { kind: "scannerLaunch" },

@@ -184,8 +184,6 @@ export function describeAction(action: ScriptAction): string {
       return `buy ${action.quantity} of type ${action.typeID} at ${action.price}`;
     case "placeSellOrder":
       return `sell item ${action.itemID} at ${action.price}`;
-    case "sendChat":
-      return `say in ${action.channel}: "${action.message}"`;
     case "jettison":
       return `jettison ${action.itemIDs.join(",")}`;
     case "compressOre":

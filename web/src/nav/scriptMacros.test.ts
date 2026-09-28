@@ -2038,15 +2038,6 @@ test("fight: the player's own ladder is followed", () => {
   assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "battleships first, because that is what was asked");
 });
 
-test("attack players: the ladder ranks player hulls too", () => {
-  const attack = SCRIPT_MACROS["attack-player"]!;
-  const step = { id: "a", kind: "macro", macro: "attack-player", args: {} } as const;
-  const brick = entity({ itemID: 7001, typeID: BRICK_TYPE, kind: "ship", characterID: 90000001, position: { x: 3000, y: 0, z: 0 } });
-  const tackle = entity({ itemID: 7002, typeID: TACKLE_TYPE, kind: "ship", characterID: 90000002, position: { x: 50000, y: 0, z: 0 } });
-  const tick = attack(step, obs({ snapshot: snapshot([brick, tackle]), weaponModuleIDs: [500], targetGroupNames: GRID_GROUPS }), {}, {});
-  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 7002);
-});
-
 // ── flying with the fleet (the shared squad board) ───────────────────────────
 //
 // `squad: follow` shoots what the fleet called WHEN that ship is here; `squad:
@@ -2134,15 +2125,3 @@ test("off: a block that never mentions the fleet never calls anything", () => {
   assert.ok(tick.action.kind === "activate" && tick.action.targetID === 6661, "and a call it is not following is ignored");
 });
 
-test("attack players: follow and call work the same way on a camp", () => {
-  const attack = SCRIPT_MACROS["attack-player"]!;
-  const one = entity({ itemID: 7001, typeID: BRICK_TYPE, kind: "ship", characterID: 90000001, position: { x: 3000, y: 0, z: 0 } });
-  const two = entity({ itemID: 7002, typeID: BRICK_TYPE, kind: "ship", characterID: 90000002, position: { x: 30000, y: 0, z: 0 } });
-  const follow: MacroStep = { id: "a", kind: "macro", macro: "attack-player", args: { squad: { kind: "squadRole", role: "follow" } } };
-  const tick = attack(follow, obs({ snapshot: snapshot([one, two]), weaponModuleIDs: [500], squadPrimaryTargetID: 7002 }), {}, {});
-  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 7002);
-
-  const call: MacroStep = { id: "a", kind: "macro", macro: "attack-player", args: { squad: { kind: "squadRole", role: "call" } } };
-  const empty = attack(call, obs({ snapshot: snapshot([]), weaponModuleIDs: [500] }), { calledTargetID: 7001 }, {});
-  assert.ok(empty.action.kind === "callPrimary" && empty.action.targetID === null, "an empty camp stands its call down");
-});
