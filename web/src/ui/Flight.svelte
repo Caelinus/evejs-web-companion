@@ -240,7 +240,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Flight</h2>
+    <h2 class="panel-title">Flight</h2>
     <p class="controls">
       <button type="button" class="primary" disabled={busy} onclick={() => run(() => flow.loadFlightStatus())}>
         Refresh flight status

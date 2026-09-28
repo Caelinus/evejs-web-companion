@@ -147,7 +147,12 @@ test("Show Info is NOT launchable from the rail", () => {
  *
  * Anything NOT on this list must stay launchable.
  */
-const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots"]);
+// ⚠ `companion` IS IN HERE BECAUSE IT HAS A DOOR OF ITS OWN, not because it is
+// contextual. Fleet companions is a GLOBAL window about every pilot at once,
+// opened from the button beside the brand in the character bar rather than from
+// a per-pilot rail; globalWindow.test.ts pins that door so this exemption can
+// never quietly become an unreachable panel.
+const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots", "companion"]);
 
 test("every OTHER tab is still launchable", () => {
   // ⚠ `launchable` is absent on every pre-existing tab and absent means yes. A

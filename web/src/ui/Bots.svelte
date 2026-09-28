@@ -3,8 +3,16 @@
   //
   // One place a player goes to say "run something the client already ships
   // with". It answers "what can I run?" and "is anything running?" for every
-  // built-in bot — mining, mission and the fleet companion — with the same
-  // checklist and running-status treatment either way.
+  // built-in bot — mining and mission — with the same checklist and
+  // running-status treatment either way.
+  //
+  // ⚠ THE FLEET COMPANION IS NOT HERE ANY MORE, and it did not simply move: it
+  // stopped being a bot. It was built as the third instance of this pattern and
+  // so inherited this panel, but it picks no work of its own, needs no setup
+  // against a belt or an agent, and is watched across every pilot at once — so
+  // it lives in the global Fleet companions window, opened from the character
+  // bar. What this panel still says about it is the one thing that IS this
+  // panel's business: whether it is holding your ship (see `runningName`).
   //
   // What USED to live here has moved to the Bot Manager: the saved-bot
   // library (any account's saved scripts, run here or handed to the server),
@@ -12,10 +20,9 @@
   // than only the one active in this tab. This panel could never reach those
   // other pilots; the Bot Manager can, so it owns that surface now.
   //
-  // ⚠ IT EMBEDS THE REAL COMPONENTS AND FORKS NOTHING. `MiningBot.svelte`,
-  // `MissionBot.svelte` and `FleetCompanion.svelte` are rendered here exactly as
-  // they are rendered where they already live: same props, same controls, same
-  // readout. A second copy of a readout drifts, and a drifted readout does not
+  // ⚠ IT EMBEDS THE REAL COMPONENTS AND FORKS NOTHING. `MiningBot.svelte` and
+  // `MissionBot.svelte` are rendered here exactly as they are rendered where
+  // they already live: same props, same controls, same readout. A second copy of a readout drifts, and a drifted readout does not
   // go quiet — it keeps rendering, confidently, about a bot that is doing
   // something else. Everything this panel adds is ABOUT the bots (which exist,
   // which is running, what each needs) and nothing it adds is a re-statement of
@@ -26,10 +33,8 @@
   import { onMount } from "svelte";
   import MiningBot from "./MiningBot.svelte";
   import MissionBot from "./MissionBot.svelte";
-  import FleetCompanion from "./FleetCompanion.svelte";
   import {
     BOTS,
-    FLEET_COMPANION_REQUIREMENTS,
     MINING_BOT_REQUIREMENTS,
     MISSION_BOT_REQUIREMENTS,
     evaluateRequirements,
@@ -51,10 +56,6 @@
   const bot = store.bot;
   // svelte-ignore state_referenced_locally
   const missionBot = store.missionBot;
-  // svelte-ignore state_referenced_locally
-  const companion = store.companion;
-  // svelte-ignore state_referenced_locally
-  const fleet = store.fleet;
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
   // svelte-ignore state_referenced_locally
@@ -145,31 +146,13 @@
     }).rows.filter((row) => row.source === "ship"),
   );
 
-  /**
-   * The companion's own "ship" reads: whether this pilot is in a fleet, from
-   * the SAME availability read Fleet Center uses, never a second idea of it.
-   */
-  const inFleet = $derived(
-    $fleet.availability === "ready" ? true : $fleet.availability === "not-in-fleet" ? false : null,
-  );
-  const companionRows = $derived(
-    evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, {
-      inFleet,
-      docked: shipIsDocked,
-    }).rows.filter((row) => row.source === "ship"),
-  );
-
   function rowsFor(id: BotID): readonly RequirementRow[] {
-    if (id === "mining") return miningRows;
-    if (id === "mission") return missionRows;
-    return companionRows;
+    return id === "mining" ? miningRows : missionRows;
   }
 
   /** The bot's own run state, straight from its slice. */
   function statusOf(id: BotID): string {
-    if (id === "mining") return $bot.status;
-    if (id === "mission") return $missionBot.status;
-    return $companion.status;
+    return id === "mining" ? $bot.status : $missionBot.status;
   }
 
   /** What the badge says. Plain language, never the raw state word (R9a). */
@@ -191,10 +174,21 @@
   }
 
   const running = $derived($bots.runningBotID);
+  /**
+   * What is holding the ship, named.
+   *
+   * ⚠ THE COMPANION IS NAMED HERE THOUGH IT IS NOT A BOT AND IS NOT ON THIS
+   * PAGE. It is not in `BOTS` any more, so a lookup alone would answer "nothing
+   * is running" about a ship a companion is actively flying — and this panel's
+   * next act would be to start a mining bot on top of it. Whoever holds the
+   * hull gets said out loud; only the CONTROLS moved.
+   */
   const runningName = $derived(
     running === "custom"
       ? ($customBot.name ?? "Your bot")
-      : (BOTS.find((row) => row.id === running)?.name ?? null),
+      : running === "companion"
+        ? "The fleet companion"
+        : (BOTS.find((row) => row.id === running)?.name ?? null),
   );
 
   /**
@@ -203,7 +197,7 @@
    * only while the player has not chosen otherwise.
    */
   $effect(() => {
-    if (running !== null && running !== "custom" && opened === null) {
+    if ((running === "mining" || running === "mission") && opened === null) {
       opened = running;
     }
   });
@@ -218,7 +212,6 @@
   onMount(() => {
     void Promise.resolve(flow.loadFitting()).catch(() => {});
     void Promise.resolve(flow.loadMiningHolds()).catch(() => {});
-    void Promise.resolve(flow.loadFleet()).catch(() => {});
   });
 
   // Names AND groups for whatever is fitted, so "is that a Strip Miner?" is
@@ -238,35 +231,41 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Bots</h2>
+    <h2 class="panel-title">Bots</h2>
+    <!-- ⚠ WHAT IS FLYING THE SHIP BELONGS IN THE STRIP. It used to be a
+         line of its own below two paragraphs of standing explanation - so the
+         one fact on this panel that CHANGES sat underneath the two that never
+         do, and the strip above it was empty. -->
+    {#if runningName}
+      <p class="stat-line">
+        <strong>{runningName}</strong> is flying your ship right now.
+      </p>
+    {:else}
+      <p class="stat-line">Nothing is running.</p>
+    {/if}
   </header>
+  <!-- ⚠ "EVERYTHING THIS CLIENT CAN RUN FOR YOU" IS GONE; THE RULES STAYED.
+       That opener described the window, which the title bar and the list below
+       it already do. Every sentence after it is a rule about what happens to
+       your ship that nothing on screen shows. -->
   <p class="note">
-    Everything this client can run for you. A bot runs in this tab: close it and
-    your ship finishes what it was last told to do and sits. Only one bot can fly
-    your ship at a time — starting one stops whatever else was running. A saved
-    bot can instead run <em>on the server</em>, which keeps flying after this tab
-    is gone. Saved bots are shared: anyone with a character here can run any of
-    them.
+    A bot runs in this tab: close it and your ship finishes what it was last
+    told to do and sits. Only one bot can fly your ship at a time — starting one
+    stops whatever else was running. A saved bot can instead run <em>on the
+    server</em>, which keeps flying after this tab is gone. Saved bots are
+    shared: anyone with a character here can run any of them.
   </p>
   <!-- ⚠ NOT "the Bot Manager tab" ANY MORE. There is no such rail entry to send
        anybody to, and this panel is reached FROM the Manager rather than beside
        it, so the old sentence pointed backwards up the path the player just
-       walked. What is worth saying instead is what this panel is FOR, since the
-       Manager is where they came from and where everything else lives. -->
+       walked.
+       ⚠ AND NOT "these bots ship with the client" EITHER. That sentence
+       described what this window is, which the window already is. What stays
+       is the half that sends a player somewhere they cannot otherwise find. -->
   <p class="note">
-    These bots ship with the client, so they are set up here against your ship
-    rather than picked from the saved library. Saved bots, every pilot's
-    current run, and starting one on a pilot you are not sitting in right now
-    all live in the Bot Manager.
+    Saved bots, every pilot's current run, and starting one on a pilot you are
+    not sitting in right now all live in the Bot Manager.
   </p>
-  {#if runningName}
-    <p class="stat-line">
-      <strong>{runningName}</strong>
-      <span class="note"> is flying your ship right now.</span>
-    </p>
-  {:else}
-    <p class="note">Nothing is running.</p>
-  {/if}
 </section>
 
 <section>
@@ -328,8 +327,6 @@
   <MiningBot {store} {flow} />
 {:else if opened === "mission"}
   <MissionBot {store} {flow} />
-{:else if opened === "companion"}
-  <FleetCompanion {store} {flow} />
 {/if}
 
 <style>

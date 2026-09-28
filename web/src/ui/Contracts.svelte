@@ -205,7 +205,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Contracts</h2>
+    <h2 class="panel-title">Contracts</h2>
     <p class="controls">
       <button type="button" class="primary" disabled={busy} onclick={() => void run(() => flow.loadContracts(0))}>
         Refresh

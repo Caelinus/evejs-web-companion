@@ -117,9 +117,8 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Agent Finder</h2>
+    <h2 class="panel-title">Agent Finder</h2>
   </header>
-  <p class="note">Find an agent and set your destination.</p>
 </section>
 
 <section>

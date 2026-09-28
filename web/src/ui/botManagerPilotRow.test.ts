@@ -240,21 +240,21 @@ test("the R7d sweep would actually catch a leaked id", () => {
 });
 
 
-test("a headless companion's row says what it is doing, not just that it is running", () => {
-  // ⚠ THE SERVER SIDE IS THE ONLY SIDE THIS FILE CAN RENDER. A tab companion
-  // reaches the row through a store subscription in an `$effect`, which SSR
-  // skips (see this file's header) -- so the tab branch, and the choice of
-  // source between the two, are covered in bots/pilotRoster.test.ts against the
-  // pure `companionFactsFor` instead. What is proven here is that the facts
-  // actually reach the markup.
+test("a companion's row NAMES the run and sends the player elsewhere for it", () => {
+  // ⚠ THE FLEET READOUT USED TO BE HERE AND IS DELIBERATELY GONE. A companion
+  // is not a bot (nav/botRegistry.ts), so the in-fleet / following / can-tag
+  // badge and the fit warnings moved to the Fleet companions window, over every
+  // pilot at once. What must NOT go with them is the ownership fact: a hull a
+  // companion is flying must never read as free, or this panel's next act is to
+  // start a script on top of a pilot in a fleet fight.
   const text = visibleText(
     renderRow({
       serverBot: fakeServerBot({
         kind: "companion",
         scriptID: "companion",
-        scriptName: "Fleet companion (Logistics)",
+        scriptName: "whatever the host called it",
         companion: {
-          role: "logi",
+          role: null,
           inFleet: true,
           followingOrderFrom: "broadcast",
           lastOrderHeard: "the fleet's target call",
@@ -263,38 +263,21 @@ test("a headless companion's row says what it is doing, not just that it is runn
       }),
     }),
   );
-  assert.match(text, /In fleet: yes/);
-  assert.match(text, /following a fleet broadcast/);
-  assert.match(text, /Last order heard: the fleet's target call/);
-  assert.match(text, /Logistics/);
+  assert.match(text, /Fleet companion/, "the hull is named as held");
+  assert.match(text, /Fleet companions window/, "and the door to it is named");
+  assert.doesNotMatch(text, /In fleet:/);
+  assert.doesNotMatch(text, /can tag:/);
+  assert.doesNotMatch(text, /Last order heard/);
+  assert.doesNotMatch(text, /whatever the host called it/, "not the run's own name");
 });
 
-test("a companion that cannot tag says so, and one that has not looked says something else", () => {
-  // ⚠ THE THREE-STATE, END TO END. A pilot the server would silently refuse
-  // looks identical to one with nothing to tag unless the row distinguishes
-  // them -- and neither may read like the third case, a roster not yet seen.
-  const refused = visibleText(
-    renderRow({
-      serverBot: fakeServerBot({
-        kind: "companion",
-        companion: {
-          role: null,
-          inFleet: true,
-          followingOrderFrom: null,
-          lastOrderHeard: null,
-          canTag: false,
-        },
-      }),
-    }),
-  );
-  assert.match(refused, /can tag: no - not a fleet commander/);
-
-  const unread = visibleText(
-    renderRow({ serverBot: fakeServerBot({ kind: "companion", companion: null }) }),
-  );
-  assert.match(unread, /can tag: not known/);
-  assert.doesNotMatch(unread, /can tag: no/, "an unread roster is not a refusal");
-  assert.match(unread, /In fleet: not known/);
+test("a companion's row offers no Stop — stopping one is the companions window's act", () => {
+  // Not a styling choice: dropping a pilot out of whatever its fleet is in the
+  // middle of is a decision made while LOOKING at the fleet, and this panel
+  // cannot show one.
+  const markup = renderRow({ serverBot: fakeServerBot({ kind: "companion" }) });
+  assert.doesNotMatch(visibleText(markup), /Stop/);
+  assert.match(visibleText(markup), /In the Fleet companions window/);
 });
 
 test("a plain script row grows no companion badge", () => {

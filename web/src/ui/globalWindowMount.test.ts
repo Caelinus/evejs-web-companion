@@ -118,3 +118,106 @@ test("the request is passed down as a prop, not pulled from a shared singleton",
   assert.match(withoutComments(WORKSPACE), /openRequest,/);
   assert.match(MARKUP, /\{openRequest\}/);
 });
+
+// ─── the layer holds MORE THAN ONE window ────────────────────────────────────
+
+test("the layer draws every global window, not just the front one", () => {
+  // ⚠ THE REGRESSION THIS GUARDS. The layer held exactly one window while the
+  // Bot Manager was alone on it. Fleet companions joined it, and a layer that
+  // still drew one would make the two evict each other — open the companions
+  // roster and the Manager you were reading vanishes, with nothing on screen
+  // saying why. A `{#each}` over the list is what makes both fit.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /\{#each shownGlobalWins as win \(win\.id\)\}/);
+  assert.match(layer, /<DesktopWindow/);
+});
+
+test("⚠ a put-away global window keeps a chip, in the ONE strip a player already reads", () => {
+  // ⚠ THE BUG THIS REPLACES A TEST FOR. This layer used to render a strip of
+  // its own, bottom-right, opposite the desktop's own strip — so putting a
+  // window away sent its handle to one of two corners depending on which window
+  // it was, with nothing on screen explaining the difference. One gesture must
+  // not have two answers, so the chips go down to the desktop's strip and this
+  // layer has no strip at all.
+  //
+  // A hide with no visible handle is still a window the player has lost, so
+  // what must hold is not "no strip here" but "listed SOMEWHERE": App hands the
+  // whole list down, Workspace forwards it, and Desktop renders it.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.doesNotMatch(layer, /win-strip/, "the second strip is back");
+  assert.match(MARKUP, /<Workspace[\s\S]*?\{globalWins\}/);
+  assert.match(MARKUP, /onToggleGlobalMinimize=\{\(id\) =>/);
+
+  const workspace = withoutComments(WORKSPACE);
+  assert.match(workspace, /globalWins,/, "Workspace must take the list");
+  assert.match(workspace, /<Desktop[\s\S]*?\{globalWins\}/, "and hand it to the desktop");
+
+  const desktop = withoutComments(
+    readFileSync(fileURLToPath(new URL("./Desktop.svelte", import.meta.url)), "utf8"),
+  );
+  const strip = desktop.slice(desktop.indexOf('class="win-strip"'));
+  assert.match(strip, /\{#each globalChips as win \(win\.id\)\}/, "the chips must be drawn");
+  assert.match(strip, /onToggleGlobalMinimize\?\.\(win\.id\)/, "and act on the layer that owns them");
+});
+
+test("the desktop draws the global windows' CHIPS and never the windows", () => {
+  // They belong to App's layer, above the pilot-switch remount. A desktop that
+  // drew one would put a character-scoped second copy on screen and tear it
+  // down on every switch — the whole thing the hoist removed.
+  const desktop = withoutComments(
+    readFileSync(fileURLToPath(new URL("./Desktop.svelte", import.meta.url)), "utf8"),
+  );
+  // The SURFACE is the markup above the strip's own `{#if}` — the script block
+  // names the props and the guard counts the chips, and neither is drawing a
+  // window. What must be clean is the part that mounts `<DesktopWindow>`.
+  const body = desktop.slice(desktop.indexOf("</script>"));
+  const surface = body.slice(0, body.indexOf("{#if openHere"));
+  assert.doesNotMatch(surface, /globalChips|globalWins/, "a global window drawn on a pilot's desktop");
+});
+
+test("focus is a real question now that two windows can overlap", () => {
+  // With one window it could be hard-coded true. With two, a hard-coded focus
+  // ring is a lie about which one a keypress reaches.
+  const layer = MARKUP.slice(MARKUP.indexOf("global-layer"));
+  assert.match(layer, /focused=\{win\.id === globalFocusedId\}/);
+  assert.doesNotMatch(layer, /focused=\{true\}/);
+});
+
+// ─── the companions door ─────────────────────────────────────────────────────
+
+test("the character bar opens Fleet companions, and sits outside the pilot-switch key", () => {
+  // The bar is the only chrome that survives a switch, which is why the door to
+  // a window about EVERY pilot hangs there — a door inside the key would be
+  // rebuilt with the pilot it is not about.
+  // ⚠ MEASURED IN THE MARKUP, NOT THE WHOLE FILE. `{#key active.id}` is also
+  // written in a code comment up in the script block, and an index taken over
+  // the file would compare a position against that sentence rather than against
+  // the real block.
+  const body = MARKUP.slice(MARKUP.indexOf("</script>"));
+  const keyStart = body.indexOf("{#key active.id}");
+  const barAt = body.indexOf("<CharacterBar");
+  assert.ok(keyStart > 0, "the pilot-switch key block moved or was renamed");
+  assert.ok(barAt >= 0 && barAt < keyStart, "the character bar must stay above the key");
+  assert.match(MARKUP, /onCompanions=\{\(\) => openGlobalTab\("companion"\)\}/);
+  assert.match(MARKUP, /companionsOpen=\{globalOpenIds\.has\("companion"\)\}/);
+});
+
+test("the count on that door is read from every session, not from the active pilot", () => {
+  // No pilot's own store can answer "how many of my pilots are flying as
+  // companions"; reading the mounted one would make the badge count 1 or 0.
+  const counter = APP.slice(APP.indexOf("function recountCompanions"));
+  assert.match(counter, /for \(const session of sessions\)/);
+  assert.match(counter, /holdsTheShip/);
+});
+
+test("on a phone a global tab opens as a PANEL, because the layer is not mounted there", () => {
+  // MobileWorkspace is one panel at a time with nowhere to float. Opening onto
+  // the layer there would light the door's "open" state on a window nothing
+  // draws — a click that appears to do nothing at all.
+  const opener = APP.slice(APP.indexOf("const openGlobalTab"));
+  const mobileAt = opener.indexOf("if (isMobile)");
+  const openAt = opener.indexOf("openGlobal(globalWins, id)");
+  assert.ok(mobileAt >= 0, "the phone case is gone");
+  assert.ok(openAt > mobileAt, "the phone must be answered before the layer is touched");
+  assert.match(MARKUP, /\{#if globalWins\.length > 0 && !isMobile\}/);
+});

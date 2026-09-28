@@ -238,16 +238,20 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Skills</h2>
+    <h2 class="panel-title">Skills</h2>
     <span class="controls">
       <button type="button" disabled={busy} onclick={() => run(() => flow.loadSkills())}>
         Refresh
       </button>
     </span>
   </header>
+  <!-- ⚠ THE DESCRIPTION WENT, THE CLOCK STAYED. "What you know, and what you
+       are learning next" is the window's own title in a longer form; where the
+       training actually runs is the thing a player would otherwise assume
+       wrongly, and assume expensively. -->
   <p class="note">
-    What you know, and what you are learning next. Training runs on the server's
-    clock — it keeps going whether or not this page is open.
+    Training runs on the server's clock — it keeps going whether or not this
+    page is open.
   </p>
   {#if error}
     <p class="error">{error}</p>

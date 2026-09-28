@@ -265,7 +265,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Mining</h2>
+    <h2 class="panel-title">Mining</h2>
     <span class="controls">
       <button type="button" disabled={busy} onclick={() => run(() => flow.loadMiningHolds())}>
         Refresh

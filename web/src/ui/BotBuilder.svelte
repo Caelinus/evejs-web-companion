@@ -887,19 +887,39 @@
   {/each}
 {/snippet}
 
+<!-- ─── The window's strip, hoisted OUT of `.botbuilder` ──────────────────────
+     ⚠ `.botbuilder` IS A CSS CONTAINER, NOT THE WINDOW BODY. The stylesheet's
+     window rules (`.win-body > .panel > .panel-head`) only reach a panel that
+     is a DIRECT CHILD of the window body, and `.botbuilder` used to sit
+     between the two — so this head got none of that treatment: the status
+     badge and Save floated at the top-right inside the first bordered block
+     instead of sitting in a strip under the title bar. Only this section
+     moves. `.botbuilder` keeps everything else, because it is also
+     `container-name: botbuilder` in styles.css and the `@container botbuilder`
+     query further down targets `.builder-plan`, `.builder-watches` and
+     `.inspector-back` by name — none of which live in this head, so hoisting
+     it changes nothing about where the two-pane collapse fires. -->
+<section class="panel">
+  <header class="panel-head">
+    <h2 class="panel-title">Bot builder</h2>
+    <p class="stat-line">
+      {#if blockingCount === 0}
+        <span class="badge good">Ready</span>
+      {:else}
+        <span class="badge warn">{blockingCount} thing{blockingCount === 1 ? "" : "s"} to fix</span>
+      {/if}
+    </p>
+    <div class="controls">
+      <button type="button" class="primary" disabled={problemIndex.hasBlocking} onclick={saveBot}>Save</button>
+    </div>
+  </header>
+</section>
+
 <div class="botbuilder" class:sheet-open={inspectorTarget !== null}>
   <!-- ─── The bot itself ───────────────────────────────────────────────────── -->
   <section class="panel">
     <header class="panel-head">
-      <h2>Bot builder</h2>
-      <div class="controls">
-        {#if blockingCount === 0}
-          <span class="badge good">Ready</span>
-        {:else}
-          <span class="badge warn">{blockingCount} thing{blockingCount === 1 ? "" : "s"} to fix</span>
-        {/if}
-        <button type="button" class="primary" disabled={problemIndex.hasBlocking} onclick={saveBot}>Save</button>
-      </div>
+      <h2>This bot</h2>
     </header>
 
     <div class="controls identity-row">
@@ -1189,9 +1209,14 @@
     <header class="panel-head">
       <h2>Insert steps from a saved bot</h2>
     </header>
+    <!-- ⚠ THE FIRST SENTENCE WENT, THE SECOND IS THE WHOLE POINT. "Copy a saved
+         bot's steps onto the end of the plan you already have" is the heading
+         above it in a longer form. What a player cannot see anywhere is that the
+         copy is a SNAPSHOT and not a link — that is worth a line, and it is the
+         line that survived. -->
     <p class="note">
-      Copy a saved bot's steps onto the end of the plan you already have. This copies them once — later changes
-      to that saved bot will not change this one.
+      This copies the steps once — later changes to that saved bot will not
+      change this one.
     </p>
     {#if libraryError !== null}
       <p class="note error">{libraryError}</p>
@@ -1257,7 +1282,12 @@
     <header class="panel-head">
       <h2>Import or export</h2>
     </header>
-    <p class="note">Paste a bot and load it, or export this one to copy out.</p>
+    <!-- ⚠ "Paste a bot and load it, or export this one to copy out" IS GONE. It
+         is the heading, the textarea's own label and the two buttons, said a
+         fourth time: this block is already a box labelled "The bot, as text"
+         with "Load from box" and "Export to box" under it. A sentence that only
+         reads out the controls beneath it is one a player has to look past every
+         time they come here to do the thing it describes. -->
     <label class="io-label" for="bot-io">
       The bot, as text
       <textarea id="bot-io" class="io" rows="6" bind:value={importText} placeholder="Paste a bot here…"></textarea>

@@ -57,9 +57,19 @@
   }
 </script>
 
-<section>
-  <h2>Corp Wallet</h2>
-  <p class="note">Your corporation's wallet divisions.</p>
+<section class="panel">
+  <!-- ⚠ REFRESH LIVES IN THE STRIP, NOT AT THE BOTTOM OF THE PAGE. It used
+       to be a bare <p><button> after the last section, so this window put its
+       one action somewhere no other window puts one — below content of
+       unpredictable length, which on a full read meant scrolling past
+       everything to reach it. Nothing was added or taken away; the control
+       moved to the band every other window keeps its controls in. -->
+  <header class="panel-head">
+    <h2 class="panel-title">Corp Wallet</h2>
+    <span class="controls">
+      <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
+    </span>
+  </header>
 
   {#if error}
     <p class="error">Could not read the corp wallet: {error}</p>
@@ -93,7 +103,4 @@
     </table>
   {/if}
 
-  <p>
-    <button type="button" disabled={busy} onclick={refresh}>Refresh</button>
-  </p>
 </section>

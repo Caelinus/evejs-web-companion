@@ -106,7 +106,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Personal Assets</h2>
+    <h2 class="panel-title">Personal Assets</h2>
     <p class="controls">
       <button
         type="button"

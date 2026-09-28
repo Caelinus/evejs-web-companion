@@ -22,6 +22,7 @@ export type TabID =
   | "bots"
   | "botBuilder"
   | "botManager"
+  | "companion"
   | "inventory"
   | "market"
   | "industry"
@@ -111,6 +112,18 @@ export const TABS: readonly TabDef[] = [
   // subject in a rail that already has too many. `ServerBots.svelte` still
   // exists, mounted on character select, which has no Manager to hold it.
   { id: "botManager", label: "Bot Manager", where: "both" },
+  // ⚠ NOT A BOT, AND NOT IN THE RAIL. The fleet companion is a GLOBAL window
+  // (globalWindow.ts) over every pilot at once, and the one door onto it is the
+  // button beside the brand in the character bar — which is the only chrome
+  // that is on screen whichever pilot is active, and so the only honest place
+  // to hang a window that is about all of them. A rail entry would be a second
+  // door onto one window in a rail this file has already twice trimmed, and a
+  // per-pilot door onto a panel that is not per-pilot.
+  //
+  // It is still a TabID because every window is: the id keys the window, the
+  // title comes from `tabLabel`, and `NEOCOM_GLYPHS` is exhaustive over the
+  // union whether or not a glyph is ever rendered in the strip.
+  { id: "companion", label: "Fleet companions", where: "both", launchable: false },
   // In space only — flying, what's around the ship, mining.
   { id: "flight", label: "Flight", where: "in-space" },
   { id: "mining", label: "Mining", where: "in-space" },

@@ -38,7 +38,7 @@
 -->
 <section class="panel notice-log">
   <div class="panel-head">
-    <h2>Log</h2>
+    <h2 class="panel-title">Log</h2>
     <span class="controls">
       <button type="button" class="minor" disabled={$notices.length === 0} onclick={() => noticeBoard.clear()}>
         Clear

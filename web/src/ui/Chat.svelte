@@ -148,7 +148,7 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>Chat</h2>
+    <h2 class="panel-title">Chat</h2>
   </header>
   <nav class="tabs">
     {#each CHANNELS as channel (channel.id)}

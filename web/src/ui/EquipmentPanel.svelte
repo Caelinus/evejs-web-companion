@@ -207,7 +207,7 @@
 </script>
 
 <section class="panel equipment-panel">
-  <div class="panel-head"><h2>Your equipment</h2></div>
+  <div class="panel-head"><h2 class="panel-title">Your equipment</h2></div>
 
   <!--
     ⚠ R30 slice E — the sentence that used to be here told the player to go to

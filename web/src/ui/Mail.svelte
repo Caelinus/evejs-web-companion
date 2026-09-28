@@ -181,12 +181,14 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h2>
-      Mail
-      {#if $mail.unreadCount > 0}
-        <span class="badge accent">{$mail.unreadCount} unread</span>
-      {/if}
-    </h2>
+    <h2 class="panel-title">Mail</h2>
+    <!-- ⚠ THE COUNT LEAVES THE TITLE RATHER THAN GOING WITH IT. A host that
+         already says MAIL clips the title, and the unread badge was INSIDE it —
+         so the one fact on this strip that changes would have been hidden by
+         the rule that hides the word it sat next to. -->
+    {#if $mail.unreadCount > 0}
+      <p class="stat-line"><span class="badge accent">{$mail.unreadCount} unread</span></p>
+    {/if}
     <p class="controls">
       <button type="button" class="primary" disabled={busy} onclick={() => void run(() => flow.loadMail())}>
         Check for new mail

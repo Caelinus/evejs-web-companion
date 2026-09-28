@@ -5,12 +5,31 @@
   // clicking a chip switches which. All the pilots stay live on the BFF while
   // backgrounded — this bar just picks which one the workspace is driving.
   import CharacterChip from "./CharacterChip.svelte";
+  import { NEOCOM_GLYPHS } from "./neocomIcons.ts";
   import type { Session } from "../app/sessions.ts";
 
-  let { sessions, activeId, serverStatus, onSwitch, onAdd, onHangar }: {
+  let {
+    sessions,
+    activeId,
+    serverStatus,
+    companionCount = 0,
+    companionsOpen = false,
+    onSwitch,
+    onAdd,
+    onHangar,
+    onCompanions,
+  }: {
     sessions: Session[];
     activeId: string | null;
     serverStatus: "checking" | "online" | "offline";
+    /**
+     * How many pilots are flying as companions right now. Shown as a count on
+     * the Companions button, and absent when nothing is flying — a badge
+     * reading "0" is a badge that has to be read before it can be dismissed.
+     */
+    companionCount?: number;
+    /** The Fleet companions window is open (possibly put away). */
+    companionsOpen?: boolean;
     onSwitch: (id: string) => void;
     onAdd: () => void;
     /**
@@ -20,6 +39,17 @@
      * unreachable for the life of the tab.
      */
     onHangar: () => void;
+    /**
+     * Open the global Fleet companions window.
+     *
+     * ⚠ IT HANGS HERE RATHER THAN IN THE NEOCOM, and the reason is the same one
+     * that makes the window global: a companion squad is not a view of the
+     * pilot whose cockpit happens to be showing. This bar is the only chrome
+     * that survives a pilot switch, so it is the only place a door onto every
+     * pilot at once can honestly sit. Optional so the bar still renders in the
+     * tests and harnesses that mount it without the roster behind it.
+     */
+    onCompanions?: () => void;
   } = $props();
 
   /**
@@ -75,6 +105,39 @@
 
 <div class="char-bar" class:narrow>
   <span class="char-bar-brand">EVEJS</span>
+  <!--
+    THE FLEET COMPANIONS DOOR. Beside the brand, before the pilots: everything
+    to the right of it is about ONE pilot, and this is the one control up here
+    that is about all of them.
+
+    ⚠ THE GLYPH IS NEVER THE ONLY LABEL (neocomIcons.ts states the rule). The
+    word rides with it wherever there is room and the `aria-label` carries the
+    count in words regardless, so a narrow bar that drops the text still
+    announces "Fleet companions — 2 flying" rather than a picture.
+  -->
+  {#if onCompanions}
+    <button
+      type="button"
+      class="char-bar-companions"
+      class:open={companionsOpen}
+      aria-pressed={companionsOpen}
+      aria-label={companionCount > 0
+        ? `Fleet companions — ${companionCount} flying`
+        : "Fleet companions"}
+      title="Fleet companions — every pilot flying with a fleet"
+      onclick={onCompanions}
+    >
+      <svg class="char-bar-companions-glyph" viewBox="0 0 24 24" aria-hidden="true">
+        {#each NEOCOM_GLYPHS.companion as d (d)}
+          <path {d} />
+        {/each}
+      </svg>
+      <span class="char-bar-companions-text">Companions</span>
+      {#if companionCount > 0}
+        <span class="char-bar-companions-count" aria-hidden="true">{companionCount}</span>
+      {/if}
+    </button>
+  {/if}
   {#if narrow}
     <!--
       One pilot, and a way to change it. The chip is COMPACT here — dot and

@@ -6,7 +6,6 @@ import {
   activeBotHealthWords,
   activeBotHoldWords,
   activeBotVitalsWords,
-  companionFactsFor,
   endedRuns,
   lastAlertPhrase,
   mergeServerRosters,
@@ -21,13 +20,8 @@ import {
   serverRunState,
   tabRunState,
 } from "./pilotRoster.ts";
-import type {
-  ActiveBotVitals,
-  ActiveServerBot,
-  ServerBot,
-  ServerBotCompanion,
-} from "../app/api.ts";
-import type { BotsState, CustomBotState, FleetCompanionState } from "../store/types.ts";
+import type { ActiveBotVitals, ActiveServerBot, ServerBot } from "../app/api.ts";
+import type { BotsState, CustomBotState } from "../store/types.ts";
 
 // Synthetic identities only — no real EVE character name or id (per repo
 // policy). 90000001 is ESI's own published example CharacterID.
@@ -96,6 +90,7 @@ test("no runningBotID and an idle customBot is honestly 'none', not a stopped bo
     botName: null,
     statusWords: "Nothing is running",
     detail: null,
+    isCompanion: false,
   });
 });
 
@@ -546,106 +541,49 @@ test("activeBotVitalsWords joins health and holds, and is empty when there is no
 });
 
 
-// --- the companion badge's source selection ---------------------------------
+// --- a companion holds the hull, and that is ALL this module says about it ---
+//
+// The fleet readout that used to live on these rows is gone: a companion is not
+// a bot, it is not in `BOTS`, and the Bot Manager is not where a player looks
+// for what their fleet is doing (ui/FleetCompanions.svelte owns all of it now).
+// What CANNOT go is the ownership fact — a hull a companion is flying must
+// never read as free, or the Manager's next act is to start a script on top of
+// a pilot in a fleet fight.
 
-const COMPANION_ON_WIRE: ServerBotCompanion = {
-  inFleet: true,
-  followingOrderFrom: "broadcast",
-  lastOrderHeard: "the fleet's target call",
-  canTag: false,
-  fitWarnings: [],
-};
+test("a tab companion is named and flagged, though it is not in the bot catalogue", () => {
+  const state = tabRunState(bots({ runningBotID: "companion" }), customBot());
+  assert.equal(state.mode, "tab");
+  assert.equal(state.isCompanion, true);
+  assert.equal(state.botName, "Fleet companion");
+  assert.notEqual(state.statusWords, "Nothing is running");
+  assert.match(state.detail ?? "", /Fleet companions/);
+});
 
-function companionSlice(over: Partial<FleetCompanionState> = {}): FleetCompanionState {
-  return {
-    status: "running",
-    phase: "Obeying fleet",
-    action: null,
-    why: null,
-    inFleet: false,
-    followingOrderFrom: "own-ladder",
-    lastOrderHeard: null,
-    canTag: true,
-    fitWarnings: [],
-    abandonment: null,
-    startedAt: null,
-    startError: null,
-    failureReason: null,
-    ...over,
-  };
-}
-
-test("a script run has no companion badge, on either side", () => {
-  assert.equal(companionFactsFor("server", null, null, serverBot()), null);
-  assert.equal(
-    companionFactsFor("tab", bots({ runningBotID: "mining" }), companionSlice(), null),
-    null,
+test("a server companion is named by WHAT IT IS, not by the run's script name", () => {
+  const state = serverRunState(
+    serverBot({ kind: "companion", scriptName: "whatever the host called it" }),
   );
-  assert.equal(companionFactsFor("none", null, null, null), null);
+  assert.equal(state.isCompanion, true);
+  assert.equal(state.botName, "Fleet companion");
+  assert.match(state.detail ?? "", /Fleet companions/);
 });
 
-test("a server companion's badge comes off the wire", () => {
-  const facts = companionFactsFor(
-    "server",
-    null,
-    null,
-    serverBot({ kind: "companion", companion: COMPANION_ON_WIRE }),
-  );
-  assert.deepEqual(facts, COMPANION_ON_WIRE);
+test("a script run is never flagged as a companion, on either side", () => {
+  assert.equal(serverRunState(serverBot()).isCompanion, false);
+  assert.equal(tabRunState(bots({ runningBotID: "mining" }), customBot()).isCompanion, false);
+  assert.equal(tabRunState(bots(), customBot()).isCompanion, false);
 });
 
-test("a tab companion's badge comes off the store slice", () => {
-  const slice = companionSlice();
-  const facts = companionFactsFor("tab", bots({ runningBotID: "companion" }), slice, null);
-  assert.equal(facts?.inFleet, false);
-  assert.equal(facts?.followingOrderFrom, "own-ladder");
-});
-
-test("⚠ a row holding BOTH reads the SERVER, never the tab's stale slice", () => {
-  // THE TRAP THIS FUNCTION EXISTS FOR, and the one a render test can never
-  // catch: the row's store subscriptions live in an `$effect` that SSR skips,
-  // so a rendered row always sees a null slice and would pass this either way.
-  //
+test("⚠ a row holding BOTH reads the SERVER, never the tab's stale reading", () => {
   // BotManager.svelte looks a server bot up for EVERY held session, because a
   // pilot can have a tab open here while the host holds the hull. The two
-  // sources below disagree on every single field on purpose: the tab says a
-  // pilot taking its own decisions in no fleet, the server says one obeying
-  // broadcasts in a fleet. Read the wrong side and the badge is confidently
-  // wrong about all four.
-  const facts = companionFactsFor(
-    "server",
+  // sources below disagree on purpose.
+  const state = pilotRunState(
     bots({ runningBotID: "companion" }),
-    companionSlice(),
-    serverBot({ kind: "companion", companion: COMPANION_ON_WIRE }),
+    customBot(),
+    serverBot({ kind: "script", scriptName: "Hauling run" }),
   );
-  assert.deepEqual(facts, COMPANION_ON_WIRE, "the server bot is the truth for this row");
-  assert.notEqual(facts?.inFleet, false, "and the tab's stale fleet reading");
-});
-
-test("a companion that has not reported yet is all-unknown, not all-no", () => {
-  // ⚠ "NOT KNOWN" AND "NO" ARE DIFFERENT ANSWERS. A run that has just started
-  // has not read a roster, so saying `inFleet: false` would be an invention,
-  // and `canTag: false` would claim the server refuses a write nobody tried.
-  const fresh = companionFactsFor("server", null, null, serverBot({ kind: "companion" }));
-  assert.deepEqual(fresh, {
-    role: null,
-    inFleet: null,
-    followingOrderFrom: null,
-    lastOrderHeard: null,
-    canTag: null,
-    fitWarnings: [],
-  });
-  assert.notEqual(fresh?.inFleet, false);
-  assert.notEqual(fresh?.canTag, false);
-});
-
-test("the companion slice does not outlive its run", () => {
-  // ⚠ THE SLICE KEEPS ITS LAST READOUT AFTER A RUN ENDS. A pilot that has since
-  // started the mining bot must not still show the companion badge from a run
-  // that finished an hour ago, so the tab branch keys off `runningBotID` rather
-  // than off the slice having values in it.
-  const stale = companionSlice({ status: "stopped" });
-  assert.equal(companionFactsFor("tab", bots({ runningBotID: "mining" }), stale, null), null);
-  assert.equal(companionFactsFor("tab", bots({ runningBotID: null }), stale, null), null);
-  assert.equal(companionFactsFor("tab", null, stale, null), null);
+  assert.equal(state.mode, "server");
+  assert.equal(state.botName, "Hauling run");
+  assert.equal(state.isCompanion, false, "the server bot is the truth for this row");
 });

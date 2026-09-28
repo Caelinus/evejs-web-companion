@@ -205,11 +205,19 @@ test("in a fleet and already out in space: both requirements read Ready", () => 
 
 // --- 2. the setup form only offers what nobody could derive -----------------
 
-test("the setup form explains what the pilot uses without any control to switch it on", () => {
+test("the setup form offers no control for anything the pilot derives itself", () => {
+  // ⚠ THIS USED TO PIN THE PARAGRAPH THAT EXPLAINED ALL THAT, and the paragraph
+  // is gone at the operator's call: a "What it uses" section whose every line
+  // ended in "nothing here to switch on" is a page of settings that are not
+  // settings. The RULE it was protecting is unchanged and is what is pinned
+  // now — the fit and the order channels are read, never offered.
   const text = visibleText(renderPanel(readyStore()));
-  assert.match(text, /reads its own fit/i);
-  assert.match(text, /hardeners, repairers, remote repairers and weapons/i);
-  assert.match(text, /nothing here to switch on/i);
+  assert.doesNotMatch(text, /What it uses/i);
+  assert.doesNotMatch(text, /nothing here to switch on/i);
+  const body = renderPanel(readyStore());
+  for (const control of ["companion-role", "companion-module", "companion-order-source"]) {
+    assert.doesNotMatch(body, new RegExp(control));
+  }
 });
 
 test("the source builds Start's request as exactly a CompanionSetup, nothing invented", () => {
@@ -363,11 +371,17 @@ test("REGRESSION — no channel toggle renders anywhere in the panel", () => {
   }
 });
 
-test("REGRESSION — the safe-spot bookmark picker is gone; the panel names the star instead", () => {
+test("REGRESSION — the safe-spot bookmark picker is gone, and nothing replaced it", () => {
+  // The picker asked a player to choose where a fleeing pilot should hide. The
+  // loop answers that itself (a station, or this system's star when there is
+  // none in reach), so there was nothing left to pick.
+  //
+  // ⚠ THE PANEL NO LONGER SAYS SO EITHER, and that is deliberate: a sentence
+  // about a fallback with no control attached is a sentence a player reads once
+  // and looks past forever after. What must not come back is the CONTROL.
   const text = visibleText(renderPanel(readyStore()));
   assert.doesNotMatch(text, /companion-safe-spot/);
   assert.doesNotMatch(text, /nowhere - stop and say so/i);
-  assert.match(text, /warps to this system's star/i);
 });
 
 // --- 5. the standing invariants ---------------------------------------------

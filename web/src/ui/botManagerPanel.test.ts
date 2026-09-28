@@ -39,8 +39,13 @@ function renderPanel(): string {
 }
 
 test("the Bot Manager panel renders on first mount without throwing", () => {
+  // ⚠ "SAVED BOTS", NOT "BOT MANAGER". The library section used to be headed
+  // with the WINDOW's own name, sitting as a third block beside Pilots and
+  // Recent runs — so the window said its name twice and the block it actually
+  // labelled went unnamed. The word this asserts changed; what it is asserting
+  // (that the panel got as far as its library) did not.
   const text = visibleText(renderPanel());
-  assert.match(text, /Bot manager/i);
+  assert.match(text, /Saved bots/i);
 });
 
 test("deleting a bot says plainly that the library is shared, not private", () => {
@@ -85,7 +90,7 @@ test("the panel mounts fine with an explicit empty sessions array too", () => {
     props: { store, flow: fakeFlow(), sessions: [] },
   } as never);
   const text = visibleText(output.body);
-  assert.match(text, /Bot manager/i);
+  assert.match(text, /Saved bots/i);
   assert.match(text, /Pilots/i);
 });
 
@@ -104,7 +109,7 @@ test("the panel mounts fine with a held pilot session too (the new per-row Start
     props: { store, flow: fakeFlow(), sessions: [pilotSession] },
   } as never);
   const text = visibleText(output.body);
-  assert.match(text, /Bot manager/i);
+  assert.match(text, /Saved bots/i);
   assert.match(text, /Loading pilots/i);
 });
 

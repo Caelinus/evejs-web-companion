@@ -88,3 +88,50 @@ test("only the documented circles keep a radius, and they are all circles", () =
   ];
   assert.deepEqual(circleSelectors(CSS_NO_COMMENTS).sort(), [...allowed].sort());
 });
+
+test("⚠ A WINDOW FRAME KEEPS ITS FOUR CORNERS — nothing cut, nothing drawn on them", () => {
+  // R53 squared the RADII; this is the other way a corner stops being a
+  // corner. `.win` used to chamfer its top-right and bottom-left with a
+  // `clip-path` polygon, draw a hairline back along each cut, mark the two
+  // square corners with focus brackets, and put a grip angle in the fourth —
+  // four corners, four treatments. Every one of them was a seam: clipping
+  // removes the border along the cut without stroking anything in its place,
+  // and a bracket that meets a clip ends in mid-air. The operator asked for a
+  // plain rectangle, which is what a window had always been trying to be.
+  //
+  // Read off the real stylesheet, comments stripped, so the prose above cannot
+  // satisfy it.
+  const winRules = [...CSS_NO_COMMENTS.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => /(^|[\s,])\.win(\.|::|:|\s|,|$)/.test(selector ?? ""))
+    .map(([, selector, body]) => ({
+      selector: (selector ?? "").trim().replace(/\s+/g, " "),
+      body: body ?? "",
+    }));
+  assert.ok(winRules.length > 0, "the window frame rules are not where this test looks");
+
+  const clipped = winRules.filter((rule) => /clip-path\s*:\s*polygon/.test(rule.body));
+  assert.deepEqual(clipped.map((rule) => rule.selector), [], "a window corner is being cut again");
+
+  // The brackets and the drawn bevel were both corner-positioned background
+  // layers on a `.win` pseudo-element. Nothing on this frame paints a corner
+  // now, so any such layer coming back is the decoration coming back.
+  const cornerPainted = winRules.filter(
+    (rule) => /::(before|after)/.test(rule.selector) && /linear-gradient/.test(rule.body),
+  );
+  assert.deepEqual(
+    cornerPainted.map((rule) => rule.selector),
+    [],
+    "something is drawing on the window frame's corners again",
+  );
+});
+
+test("⚠ THE GUARD ABOVE WOULD ACTUALLY CATCH ONE", () => {
+  // Without this, a selector regex that matched nothing would pass both
+  // assertions by finding nothing to object to.
+  const sample = ".win { clip-path: polygon(0 0, 100% 0); } .win.focused::after { background: linear-gradient(red, red); }";
+  const rules = [...sample.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => /(^|[\s,])\.win(\.|::|:|\s|,|$)/.test(selector ?? ""));
+  assert.equal(rules.length, 2, "the window-rule matcher does not match window rules");
+  assert.ok(/clip-path\s*:\s*polygon/.test(rules[0]![2] ?? ""));
+  assert.ok(/linear-gradient/.test(rules[1]![2] ?? ""));
+});

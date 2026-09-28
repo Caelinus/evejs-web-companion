@@ -37,6 +37,8 @@
     onResize,
     onOpen,
     sessions,
+    globalWins,
+    onToggleGlobalMinimize,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -53,11 +55,37 @@
     // can show every held pilot, not just this session's active one. Optional:
     // every other caller/panel is unaffected. See PanelHost.svelte.
     sessions?: readonly Session[];
+    /**
+     * The GLOBAL windows (globalWindow.ts), listed in this desktop's strip.
+     *
+     * ⚠ THEY ARE NOT DRAWN HERE — App draws them on its own layer, above the
+     * pilot-switch remount. Only their CHIPS come down, and the reason is that
+     * putting a window away is ONE act and had grown two answers: a workspace
+     * window's chip appeared bottom-left in this strip, a global window's in a
+     * second strip of its own in the opposite corner. Two strips is two rules
+     * for the same gesture, and the player has to learn which windows obey
+     * which. One strip, in one corner, is the whole fix.
+     *
+     * Optional, because a desktop mounted without App above it (harnesses,
+     * tests) has no global layer to list.
+     */
+    globalWins?: readonly WinState[];
+    /** Put a global window away, or bring it back. Owned by App. */
+    onToggleGlobalMinimize?: (id: TabID) => void;
   } = $props();
 
   // Every window this state can show, minimized or not — the strip lists them
   // all, because a window with no visible handle is a window the player has lost.
   const openHere = $derived(wins.filter((w) => isWindowTab(w.id) && isTabVisible(w.id, isDocked)));
+  /**
+   * The global windows' chips, AFTER this pilot's own.
+   *
+   * ⚠ LAST, ON PURPOSE. The windows to the left of them belong to the pilot on
+   * screen and change with every switch; these do not. Keeping the changing
+   * half anchored at the left edge is what stops a chip a player is aiming for
+   * moving because another pilot happens to have more windows open.
+   */
+  const globalChips = $derived(globalWins ?? []);
   // Only the ones actually on the surface get drawn.
   const shown = $derived(openHere.filter((w) => !w.minimized));
 
@@ -128,12 +156,19 @@
       <PanelHost {store} {flow} tab={win.id} onOpen={onOpen} {sessions} />
     </DesktopWindow>
   {/each}
-  {#if openHere.length > 0}
+  {#if openHere.length > 0 || globalChips.length > 0}
     <!-- THE WINDOW STRIP. One chip per open window, whether it is on the
          surface or put away — the dot says which. It is the only way back to a
          minimized window that does not require remembering which launcher entry
          it was, and it doubles as "what have I got open" without counting
-         overlapping title bars. -->
+         overlapping title bars.
+
+         ⚠ THE GLOBAL WINDOWS ARE IN HERE TOO, though they are drawn on another
+         layer entirely. They used to have a strip of their own in the opposite
+         corner, which meant putting a window away landed its handle in one of
+         two places depending on which window it was — one gesture, two answers,
+         and nothing on screen explaining the difference. Where a chip is must
+         not depend on which layer happens to own the window. -->
     <div class="win-strip" role="group" aria-label="Open windows">
       {#each openHere as win (win.id)}
         <button
@@ -143,6 +178,18 @@
           aria-pressed={!win.minimized}
           title={win.minimized ? `Bring back ${tabLabel(win.id)}` : `Put away ${tabLabel(win.id)}`}
           onclick={() => onToggleMinimize(win.id)}
+        >
+          <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(win.id)}
+        </button>
+      {/each}
+      {#each globalChips as win (win.id)}
+        <button
+          type="button"
+          class="win-chip"
+          class:away={win.minimized}
+          aria-pressed={!win.minimized}
+          title={win.minimized ? `Bring back ${tabLabel(win.id)}` : `Put away ${tabLabel(win.id)}`}
+          onclick={() => onToggleGlobalMinimize?.(win.id)}
         >
           <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(win.id)}
         </button>

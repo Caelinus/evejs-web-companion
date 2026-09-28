@@ -1,30 +1,43 @@
-// THE GLOBAL WINDOW — the one window that does not belong to a pilot.
+// THE GLOBAL WINDOWS — the windows that do not belong to a pilot.
 //
 // Every other panel is a view of ONE character's store, so it is right that
 // switching pilots tears it down: App mounts a Workspace per active pilot under
 // a `{#key active.id}`, and the desktop, its windows and their saved layout all
-// live inside that. The Bot Manager is the exception, and not by preference:
+// live inside that. Two windows are the exception, and neither by preference:
 //
-//   • its pilots region is a table of EVERY held session plus every character
-//     with a server bot and no session here — it is a view of the roster, not
-//     of a pilot;
-//   • its library is the account-wide saved-bot list, the same rows whichever
-//     pilot is active;
-//   • and a bot it is watching keeps flying while you switch away. Being torn
-//     down mid-run is not a cosmetic loss: the roster refetches from scratch,
-//     the search box empties, an open export box closes, and — because the
-//     poll restarts — a server bot's alert can go unseen through the gap.
+//   • THE BOT MANAGER. Its pilots region is a table of EVERY held session plus
+//     every character with a server bot and no session here — it is a view of
+//     the roster, not of a pilot; its library is the account-wide saved-bot
+//     list, the same rows whichever pilot is active; and a bot it is watching
+//     keeps flying while you switch away. Being torn down mid-run is not a
+//     cosmetic loss: the roster refetches from scratch, the search box empties,
+//     an open export box closes, and — because the poll restarts — a server
+//     bot's alert can go unseen through the gap.
 //
-// So it is hoisted ABOVE that key, into App, and lives on its own layer over
-// whichever workspace is showing. This module is that window's model: which
-// tabs get this treatment, and where the one window sits. Pure data, same
-// shape and the same storage discipline as desktop.ts, whose `WinState` it
-// deliberately reuses so DesktopWindow.svelte can draw it with no special case.
+//   • FLEET COMPANIONS. A companion is not a bot and is not set up against one
+//     ship: the window is a roster of every pilot signed in here (plus every
+//     companion the server is flying for this account), because the question it
+//     answers — "who is following whom, and who has stopped" — is a question
+//     about the whole squad. Tearing it down on a pilot switch would be worse
+//     here than for the Manager: the very act of checking on another pilot is
+//     what would destroy the view you were checking with.
+//
+// So they are hoisted ABOVE that key, into App, onto their own layer over
+// whichever workspace is showing. This module is that layer's model: which tabs
+// get the treatment, where a new one lands, and how the layer is persisted.
+//
+// ⚠ A LIST, NOT ONE WINDOW. It held exactly one until the companion arrived,
+// and a second member would have made the two windows evict each other — open
+// the companions roster and the Bot Manager you were reading vanishes. So the
+// reducers below take and return a list, the same `WinState[]` shape the
+// desktop model uses, and App drives moves, closes, focus and put-away through
+// desktop.ts's own generic reducers. Only OPENING is here, because only opening
+// needs to know which tabs are global and where a global window belongs.
 //
 // ⚠ DESKTOP ONLY. A phone has no floating windows at all — MobileWorkspace is
 // one panel at a time — so there is nothing for this layer to hold there and
-// App does not mount it. On mobile the Bot Manager is a panel selection like
-// any other; see App.svelte.
+// App does not mount it. On mobile a global tab is a panel selection like any
+// other; see App.svelte.
 
 // ⚠ A TYPE-ONLY IMPORT FROM desktop.ts, AND IT HAS TO STAY ONE. desktop.ts
 // imports `isGlobalTab` from here, so the two modules form a cycle; a type is
@@ -36,108 +49,174 @@ import type { WinState } from "./desktop.ts";
 import type { TabID } from "./tabs.ts";
 
 /**
- * The tabs that open as THE global window rather than a workspace window.
+ * The tabs that open on the global layer rather than a pilot's desktop.
  *
- * ⚠ A SET, FOR ONE MEMBER, ON PURPOSE. The rule "is this tab global?" is asked
- * in four places (the rail's open-state, both open paths in Workspace, and
- * desktop.ts's guard); a set makes adding a second one a single edit here
- * instead of four `=== "botManager"` comparisons to find and keep in step.
+ * ⚠ THE RULE "is this tab global?" IS ASKED IN FOUR PLACES (the rail's
+ * open-state, both open paths in Workspace, and desktop.ts's guard), which is
+ * exactly why it is a set here rather than a comparison spelled out four times
+ * and kept in step by hand.
  */
-export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager"]);
+export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion"]);
 
-/** True when this tab opens as the global window, not a workspace window. */
+/** True when this tab opens as a global window, not a workspace window. */
 export function isGlobalTab(id: TabID): boolean {
   return GLOBAL_TABS.has(id);
 }
 
 /**
- * Where the global window first appears: offset from the top-left of its layer,
- * and roomier than a default workspace window because its first region is a
- * five-column table of pilots.
+ * Where a global window first appears: offset from the top-left of its layer,
+ * and roomier than a default workspace window because both of these lead with a
+ * multi-column table of pilots.
  */
 export const DEFAULT_GLOBAL_POS = { x: 64, y: 48 };
 const DEFAULT_GLOBAL_W = 720;
 const DEFAULT_GLOBAL_H = 520;
+/** The second window lands clear of the first rather than exactly on it. */
+const GLOBAL_CASCADE_STEP = 32;
+
+/** The highest z on the layer (0 when it is empty). */
+function topGlobalZ(wins: readonly WinState[]): number {
+  return wins.reduce((max, w) => (w.z > max ? w.z : max), 0);
+}
 
 /**
- * Open `id` as the global window, keeping where it already sat if it is the
- * same window reopening. `z` is a constant: there is one window on this layer,
- * so there is no stack to order — the field exists only because `WinState` is
- * shared with the desktop model.
+ * Open `id` on the global layer, or bring it forward if it is already there.
+ *
+ * Reopening what is already open never MOVES it — the button that opens a
+ * global window is a way back onto a window that may simply be put away, and a
+ * window that jumped back to its default corner every time you pressed that
+ * would be a window you could not keep anywhere. So an existing one is raised
+ * and un-put-away where it stands; only a genuinely new one is placed.
+ *
+ * A tab that is not global is refused rather than placed here: it belongs to a
+ * pilot's desktop, and drawing it on this layer would put a character-scoped
+ * panel above the character bar that switches characters.
  */
-export function openGlobal(current: WinState | null, id: TabID): WinState {
-  if (current !== null && current.id === id) {
-    // Reopening what is already open un-puts-it-away rather than moving it —
-    // the rail entry is a toggle onto a window that may simply be in the strip.
-    return { ...current, minimized: false };
+export function openGlobal(wins: readonly WinState[], id: TabID): WinState[] {
+  if (!isGlobalTab(id)) return wins.slice();
+  const z = topGlobalZ(wins) + 1;
+  const existing = wins.find((w) => w.id === id);
+  if (existing) {
+    return wins.map((w) => (w.id === id ? { ...w, z, minimized: false } : w));
   }
-  return {
-    id,
-    x: DEFAULT_GLOBAL_POS.x,
-    y: DEFAULT_GLOBAL_POS.y,
-    w: DEFAULT_GLOBAL_W,
-    h: DEFAULT_GLOBAL_H,
-    z: 1,
-    minimized: false,
-  };
+  const step = GLOBAL_CASCADE_STEP * wins.length;
+  return [
+    ...wins,
+    {
+      id,
+      x: DEFAULT_GLOBAL_POS.x + step,
+      y: DEFAULT_GLOBAL_POS.y + step,
+      w: DEFAULT_GLOBAL_W,
+      h: DEFAULT_GLOBAL_H,
+      z,
+      minimized: false,
+    },
+  ];
 }
 
 // ── persistence ────────────────────────────────────────────────────────────
 //
 // ⚠ NOT KEYED BY CHARACTER, AND THAT IS THE WHOLE POINT. desktop.ts stores a
-// layout per characterID because a desktop belongs to a pilot. This window does
+// layout per characterID because a desktop belongs to a pilot. These windows do
 // not belong to one, so a per-character key would give a player one Bot Manager
 // position per pilot — the same window jumping around as they switch, which is
 // exactly the behaviour being removed.
 
-const STORAGE_KEY = "evejs-web-global-window:v1";
+const STORAGE_KEY = "evejs-web-global-windows:v2";
+/**
+ * The key v2 replaced, holding ONE window object.
+ *
+ * ⚠ READ, NOT IGNORED. A player has a Bot Manager sitting where they put it,
+ * and shipping a new key without reading the old one would silently throw that
+ * away and reopen it in the default corner. It is migrated on the first load
+ * and then removed, so this fallback cannot drift back into use.
+ */
+const LEGACY_STORAGE_KEY = "evejs-web-global-window:v1";
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
 /**
- * Read the saved global window, or null when there is none or it is unusable.
+ * One stored window, rebuilt field by field, or null when it is unusable.
  *
- * Rebuilt field by field rather than spread, for desktop.ts's reason: a stale
- * key riding in on a `{ ...parsed }` is written straight back out on the next
- * save and lives forever. An id that is no longer global is dropped — that is
- * the migration path if a tab ever leaves `GLOBAL_TABS`.
+ * Rebuilt rather than spread, for desktop.ts's reason: a stale key that rides in
+ * on a `{ ...parsed }` is written straight back out on the next save and lives
+ * forever. An id that is no longer global is dropped — that is the migration
+ * path if a tab ever leaves `GLOBAL_TABS`.
  */
-export function loadGlobalWindow(): WinState | null {
-  if (typeof localStorage === "undefined") return null;
+function readWin(v: unknown): WinState | null {
+  if (!v || typeof v !== "object") return null;
+  const w = v as Record<string, unknown>;
+  if (typeof w.id !== "string" || !isGlobalTab(w.id as TabID)) return null;
+  if (!isFiniteNumber(w.x) || !isFiniteNumber(w.y) || !isFiniteNumber(w.w) || !isFiniteNumber(w.h)) {
+    return null;
+  }
+  return {
+    id: w.id as TabID,
+    x: w.x,
+    y: w.y,
+    w: w.w,
+    h: w.h,
+    // Absent in everything written while this layer held one window, where a
+    // stack of one needed no order. One is a fine z for a returning window:
+    // `openGlobal` raises whatever is opened next above it.
+    z: isFiniteNumber(w.z) ? w.z : 1,
+    minimized: w.minimized === true,
+  };
+}
+
+/**
+ * Read the saved global windows. Empty when there are none or none are usable.
+ *
+ * ⚠ ONE WINDOW PER TabID, ENFORCED ON THE WAY IN. That is this model's core
+ * invariant and the reducers all keep it — but storage is not a reducer, and a
+ * duplicate id makes App's keyed `{#each … (win.id)}` throw on every render
+ * from then on, permanently, because the bad list is written straight back out.
+ * First one wins; the rest are dropped.
+ */
+export function loadGlobalWindows(): WinState[] {
+  if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const o = JSON.parse(raw) as unknown;
-    if (!o || typeof o !== "object") return null;
-    const w = o as Record<string, unknown>;
-    if (typeof w.id !== "string" || !isGlobalTab(w.id as TabID)) return null;
-    if (!isFiniteNumber(w.x) || !isFiniteNumber(w.y) || !isFiniteNumber(w.w) || !isFiniteNumber(w.h)) {
-      return null;
+    if (!raw) return migrateLegacy();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<TabID>();
+    const wins: WinState[] = [];
+    for (const entry of parsed) {
+      const win = readWin(entry);
+      if (win === null || seen.has(win.id)) continue;
+      seen.add(win.id);
+      wins.push(win);
     }
-    return {
-      id: w.id as TabID,
-      x: w.x,
-      y: w.y,
-      w: w.w,
-      h: w.h,
-      z: 1,
-      minimized: w.minimized === true,
-    };
+    return wins;
   } catch {
-    return null;
+    return [];
   }
 }
 
-/** Persist the global window (null clears it). Best-effort, never fatal. */
-export function saveGlobalWindow(win: WinState | null): void {
+/** The v1 single-window key, read once and then cleared. */
+function migrateLegacy(): WinState[] {
+  try {
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return [];
+    const win = readWin(JSON.parse(raw) as unknown);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return win === null ? [] : [win];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the global windows. Best-effort, never fatal. */
+export function saveGlobalWindows(wins: readonly WinState[]): void {
   if (typeof localStorage === "undefined") return;
   try {
-    if (win === null) {
+    if (wins.length === 0) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(win));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(wins));
     }
   } catch {
     // storage full or blocked — window persistence is best-effort.
