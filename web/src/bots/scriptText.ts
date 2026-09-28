@@ -215,10 +215,14 @@ export function conditionSentence(condition: Condition): string {
   }
 }
 
-/** A "run one of my saved bots" row, in plain words. */
+/**
+ * A "run another saved bot" row, in plain words. Deliberately not possessive:
+ * the library is platform-wide, so the bot this points at may well have been
+ * saved by someone else.
+ */
 export function subBotSentence(node: { readonly name: string | null }): string {
   return node.name !== null && node.name.length > 0
-    ? `Run your saved bot "${node.name}"`
+    ? `Run the saved bot "${node.name}"`
     : "Run a saved bot you pick";
 }
 

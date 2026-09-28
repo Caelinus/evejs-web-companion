@@ -41,8 +41,24 @@
   } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import type { Session } from "../app/sessions.ts";
 
-  let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
+  let {
+    store,
+    flow,
+    sessions,
+  }: {
+    store: ClientStore;
+    flow: AppFlow;
+    /**
+     * EVERY held pilot, not just this workspace's own. A Workspace is otherwise
+     * a pure reader of ONE pilot's store (see the R107 note above), and this is
+     * the deliberate exception: the Bot Manager has to show what all of them are
+     * flying. It is passed straight through to PanelHost, which hands it to that
+     * one panel and no other.
+     */
+    sessions?: readonly Session[];
+  } = $props();
 
   // The store's identity is stable for this component's lifetime (App keys each
   // Workspace by session id, so store/flow never change under a mounted one);
@@ -186,7 +202,7 @@
        it would be strange for only one of them to acknowledge it. -->
   <DockWipe {isDocked} />
   <Toasts />
-  <MobileWorkspace {store} {flow} {isDocked} />
+  <MobileWorkspace {store} {flow} {isDocked} {sessions} />
 {:else}
   <DockWipe {isDocked} />
   <!-- Mounted once for the whole workspace: a notice raised inside a panel the
@@ -212,6 +228,7 @@
           <Desktop
             {store}
             {flow}
+            {sessions}
             {wins}
             {focused}
             {isDocked}

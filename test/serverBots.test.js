@@ -104,10 +104,21 @@ async function startTestServer(log, suppliedBotHost = null) {
     eveGatewayClient: fakeGateway(log),
     webAuth,
     botHost: suppliedBotHost || fakeBotHost(log),
+    // The script library is platform-wide, so get() looks up by scriptID alone
+    // and every account sees the same record; `authorAccountID` is display-only
+    // and grants nothing. AUTHORITY over the hull is still per-account, and the
+    // route proves it through getCharacterForAccount above, not through here.
     botScriptStore: {
-      get: (accountID, scriptID) =>
-        Number(accountID) === FARMER.accountID && scriptID === "s1"
-          ? { scriptID: "s1", name: "Miner", rev: 1, doc: { format: "evejs-bot-script" } }
+      get: (scriptID) =>
+        scriptID === "s1"
+          ? {
+              scriptID: "s1",
+              authorAccountID: FARMER.accountID,
+              authorName: FARMER.username,
+              name: "Miner",
+              rev: 1,
+              doc: { format: "evejs-bot-script" },
+            }
           : null,
       list: () => [],
     },

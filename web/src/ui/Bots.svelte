@@ -1,11 +1,16 @@
 <script lang="ts">
-  // THE LAUNCHER (goal R43).
+  // THE BUILT-IN BOTS PANEL (goal R43).
   //
-  // One place a player goes to say "run something". Until now each bot was
-  // reachable only from inside whichever panel it happened to live in — the
-  // mining bot embedded in Around Your Ship, the mission bot in its own tab —
-  // so there was no answer to "what can I run?" and no answer to "is anything
-  // running?" once you had switched panels.
+  // One place a player goes to say "run something the client already ships
+  // with". It answers "what can I run?" and "is anything running?" for the
+  // two built-in bots — mining and mission — with the same checklist and
+  // running-status treatment either way.
+  //
+  // What USED to live here has moved to the Bot Manager: the saved-bot
+  // library (any account's saved scripts, run here or handed to the server),
+  // which pilot is flying what, and starting a bot on any held pilot rather
+  // than only the one active in this tab. This panel could never reach those
+  // other pilots; the Bot Manager can, so it owns that surface now.
   //
   // ⚠ IT EMBEDS THE REAL COMPONENTS AND FORKS NOTHING. `MiningBot.svelte` and
   // `MissionBot.svelte` are rendered here exactly as they are rendered where
@@ -20,21 +25,6 @@
   import { onMount } from "svelte";
   import MiningBot from "./MiningBot.svelte";
   import MissionBot from "./MissionBot.svelte";
-  import ServerBots from "./ServerBots.svelte";
-  import {
-    listBotScripts,
-    getBotScript,
-    startServerBot,
-    type BotScriptSummary,
-  } from "../app/api.ts";
-  import { decodeScriptValue } from "../bots/scriptCodec.ts";
-  import {
-    analyzeBotRunPolicy,
-    BOT_RISK_LABELS,
-    createBotLaunchGrant,
-    DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
-    type BotRunPolicy,
-  } from "../bots/runPolicy.ts";
   import {
     BOTS,
     MINING_BOT_REQUIREMENTS,
@@ -69,124 +59,8 @@
   // svelte-ignore state_referenced_locally
   const customBot = store.customBot;
 
-  /** Direct api.ts calls must ride THIS pilot's full flow options. */
-  const botOpts = () => flow.requestOptions();
-
   /** Which bot's controls are open. Local view state, never the store's. */
   let opened = $state<BotID | null>(null);
-
-  // The player's saved bots (from the web server) that can be launched here.
-  let savedBots = $state<BotScriptSummary[]>([]);
-  let savedError = $state<string | null>(null);
-  async function refreshSavedBots(): Promise<void> {
-    try {
-      savedBots = await listBotScripts(botOpts());
-      savedError = null;
-    } catch {
-      savedBots = [];
-      savedError = "Could not load your saved bots — are you still logged in?";
-    }
-  }
-  async function startSaved(scriptID: string): Promise<void> {
-    try {
-      const record = await getBotScript(scriptID, botOpts());
-      if (record === null) {
-        savedError = "That bot could not be found.";
-        return;
-      }
-      const decoded = decodeScriptValue(record.doc);
-      if (!decoded.ok) {
-        savedError = decoded.refusal;
-        return;
-      }
-      const policy = analyzeBotRunPolicy(decoded.doc);
-      if (!approveRun(decoded.doc.name, policy, null)) {
-        return;
-      }
-      await flow.startCustomBot(decoded.doc, record.scriptID);
-    } catch {
-      savedError = "Could not start that bot.";
-    }
-  }
-
-  /** Which saved bot a server start is in flight for (disables its buttons). */
-  let serverStartBusy = $state<string | null>(null);
-  let serverRunMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
-
-  function approveRun(name: string, policy: BotRunPolicy, runtimeMinutes: number | null): boolean {
-    const permissions =
-      policy.riskClasses.length === 0
-        ? "No spending, destructive, social, fleet, mission, colony, inventory, or combat permission was found."
-        : `This run may ${policy.riskClasses.map((risk) => BOT_RISK_LABELS[risk]).join("; ")}.`;
-    const included = policy.containsSubBots
-      ? "\n\nIt includes other saved bots, whose current contents will be loaded when it starts."
-      : "";
-    const limit =
-      runtimeMinutes === null
-        ? ""
-        : `\n\nThe server will stop it after ${runtimeMinutes < 60 ? `${runtimeMinutes} minutes` : `${runtimeMinutes / 60} hours`}.`;
-    return window.confirm(`Run “${name}”?\n\n${permissions}${included}${limit}`);
-  }
-
-  /**
-   * Run a saved bot ON THE SERVER, flying THIS TAB's current character.
-   *
-   * The handover is the SERVER's, in one request: /api/bots/start releases the
-   * caller's own held session and claims the character for the bot atomically.
-   * Started-first matters twice over — the login/select screens this tab falls
-   * to poll the bot-flying marks, and a bot that already exists is on their
-   * FIRST read (release-first left them blank until the next poll); and a
-   * refused start changes nothing, so the tab just keeps flying (no take-the-
-   * hull-back dance). The releaseSession afterwards only syncs THIS tab's UI —
-   * its server-side session is already gone.
-   */
-  async function startSavedOnServer(scriptID: string): Promise<void> {
-    if (serverStartBusy !== null) {
-      return;
-    }
-    const current = store.station.get().online;
-    if (current === null) {
-      savedError = "Bring a character online first — the server bot flies your current character.";
-      return;
-    }
-    serverStartBusy = scriptID;
-    savedError = null;
-    try {
-      const record = await getBotScript(scriptID, botOpts());
-      if (record === null) {
-        savedError = "That bot could not be found.";
-        serverStartBusy = null;
-        return;
-      }
-      const decoded = decodeScriptValue(record.doc);
-      if (!decoded.ok) {
-        savedError = decoded.refusal;
-        serverStartBusy = null;
-        return;
-      }
-      const policy = analyzeBotRunPolicy(decoded.doc);
-      if (!approveRun(decoded.doc.name, policy, serverRunMinutes)) {
-        serverStartBusy = null;
-        return;
-      }
-      const grant = createBotLaunchGrant(record.rev, policy, serverRunMinutes);
-      await startServerBot(current.characterID, scriptID, grant, botOpts());
-    } catch (cause) {
-      savedError = cause instanceof Error ? cause.message : "Could not start that bot on the server.";
-      serverStartBusy = null;
-      return;
-    }
-    try {
-      await flow.releaseSession();
-    } catch {
-      // The bot has the hull either way; the tab's next read notices.
-    } finally {
-      serverStartBusy = null;
-    }
-  }
-  onMount(() => {
-    void refreshSavedBots();
-  });
 
   /**
    * The reads BEHIND THE CHECKLIST, and they are deliberately the store's.
@@ -345,7 +219,12 @@
     your ship finishes what it was last told to do and sits. Only one bot can fly
     your ship at a time — starting one stops whatever else was running. A saved
     bot can instead run <em>on the server</em>, which keeps flying after this tab
-    is gone.
+    is gone. Saved bots are shared: anyone with a character here can run any of
+    them.
+  </p>
+  <p class="note">
+    Saved bots, every pilot's current run, and starting one on a pilot you are
+    not sitting in right now — that all lives in the Bot Manager tab.
   </p>
   {#if runningName}
     <p class="stat-line">
@@ -356,53 +235,6 @@
     <p class="note">Nothing is running.</p>
   {/if}
 </section>
-
-<section>
-  <h2>Your bots</h2>
-  <label class="run-limit">
-    Server run limit
-    <select bind:value={serverRunMinutes} disabled={serverStartBusy !== null}>
-      <option value={60}>1 hour</option>
-      <option value={240}>4 hours</option>
-      <option value={720}>12 hours</option>
-      <option value={1440}>24 hours</option>
-    </select>
-  </label>
-  {#if savedError}<p class="note error">{savedError}</p>{/if}
-  {#if savedBots.length === 0}
-    <p class="note">No saved bots yet. Build one in the Bot Builder tab, then Save it.</p>
-  {:else}
-    <ul class="saved-bots">
-      {#each savedBots as meta (meta.scriptID)}
-        <li class="saved-bot">
-          <span class="saved-name">{meta.name}</span>
-          <span class="saved-actions">
-            <!--
-              Two very different promises. "Run here" is the in-tab runner:
-              close the tab and the ship sits. "Run on server" hands the hull
-              to the BFF: the tab (and the phone it is on) stops mattering.
-            -->
-            <button
-              class="primary"
-              disabled={serverStartBusy !== null}
-              onclick={() => startSaved(meta.scriptID)}
-            >
-              Run here
-            </button>
-            <button
-              disabled={serverStartBusy !== null}
-              onclick={() => startSavedOnServer(meta.scriptID)}
-            >
-              {serverStartBusy === meta.scriptID ? "Handing over…" : "Run on server"}
-            </button>
-          </span>
-        </li>
-      {/each}
-    </ul>
-  {/if}
-</section>
-
-<ServerBots />
 
 <section>
   <h2>What you can run</h2>
@@ -523,45 +355,6 @@
   }
   /* R8 — a comfortable target on a phone. */
   .bot-card button {
-    min-height: 40px;
-  }
-  .saved-bots {
-    list-style: none;
-    margin: 0.4rem 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  .run-limit {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0.4rem 0 0.7rem;
-  }
-  .run-limit select {
-    min-height: 40px;
-  }
-  .saved-bot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    border: 1px solid var(--color-row-line);
-    border-radius: 4px;
-    background: var(--color-panel-3);
-    padding: 0.5rem 0.6rem;
-  }
-  .saved-name {
-    color: var(--color-text-bright);
-  }
-  .saved-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-  .saved-bot button {
     min-height: 40px;
   }
 </style>

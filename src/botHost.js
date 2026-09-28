@@ -31,7 +31,9 @@
 // LIFECYCLE. A bot ends when its script finishes, hits an error, loses its
 // session, or is stopped; ending always releases the character (logout), so
 // the hull is immediately flyable from a tab. Finished records stay listable
-// until the next bot starts on that character.
+// in a bounded ring of the last MAX_ENDED_RUNS ended runs, GLOBAL across every
+// account and character (see that constant's comment) — not one-per-character
+// as before, and not a durable log.
 //
 // DURABLE ACROSS RESTARTS. The RUNNING roster (who/what, never a token) is
 // mirrored to `persistPath` on every start and end. The immutable script
@@ -58,6 +60,17 @@ const ENDED_STATUSES = new Set(["stopped", "error", "idle"]);
 // readout. Plain reads through the bot's own flow — the same polls an open
 // tab would be making — never a world call.
 const VITALS_SAMPLE_MS = 15_000;
+
+// Ended runs are kept for the "recent runs" strip, not as a log: this is a
+// MEMORY BOUND, so the ring holds the last MAX_ENDED_RUNS finalized records
+// and nothing more. The cap is GLOBAL across every account, not per
+// character — a busy account can age a quiet account's history out of the
+// ring entirely. That is acceptable in a single-operator deployment (there is
+// no tenant here to shortchange) and it is exactly why this is not a durable
+// record: anyone who needs guaranteed history should look elsewhere, because
+// this file already promises ended runs live in memory only and vanish on
+// restart (see persistRoster below).
+const MAX_ENDED_RUNS = 20;
 
 // The browser stack, imported once per process and shared by every bot. Kept
 // lazy so `require("./botHost")` stays cheap and the BFF boots even if the
@@ -143,9 +156,19 @@ function createBotHost(options) {
   // and the reads resume() needs to rebuild a bot from its persisted row.
   const persistPath = options.persistPath || null;
   const loadAccount = options.loadAccount || (async () => null);
+  // The saved-script library is platform-wide: any account's characters may
+  // run any account's script. `loadScript(scriptID) -> Record | null` looks a
+  // script up by ID alone — it does NOT check who authored it. Authority over
+  // characters and running bots stays account-scoped elsewhere in this file
+  // (claims, list(), stop()); only the script lookup is global.
   const loadScript = options.loadScript || (() => null);
 
-  /** botID -> record, running and ended alike (ended pruned per character). */
+  /**
+   * botID -> record, running and ended alike. Ended (finalized) records are
+   * bounded to MAX_ENDED_RUNS by evictOldEndedRuns(), a global ring across
+   * every account and character — see the constant's comment for why.
+   * Running records are never touched by that ring.
+   */
   const records = new Map();
   /** characterID -> botID for RUNNING bots only — the claim the guards read. */
   const claims = new Map();
@@ -251,6 +274,28 @@ function createBotHost(options) {
     }
   }
 
+  // The ring: keep at most MAX_ENDED_RUNS finalized records, evicting the
+  // OLDEST by endedAt — not by Map insertion order, which is start order and
+  // can disagree with finish order (a long-running bot can finalize well
+  // after a short one that started later). Running records are excluded from
+  // both the count and the eviction; they are never subject to this cap.
+  function evictOldEndedRuns() {
+    const ended = [];
+    for (const record of records.values()) {
+      if (record.finalized) {
+        ended.push(record);
+      }
+    }
+    if (ended.length <= MAX_ENDED_RUNS) {
+      return;
+    }
+    ended.sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt)));
+    const excess = ended.length - MAX_ENDED_RUNS;
+    for (let i = 0; i < excess; i++) {
+      records.delete(ended[i].botID);
+    }
+  }
+
   // End of a run, from EITHER side (script finished/errored, or stop()):
   // release the claim and the character. Idempotent — the store subscription
   // and an explicit stop can both land here.
@@ -276,6 +321,10 @@ function createBotHost(options) {
     // The roster on disk must stop naming this bot BEFORE the slow logout —
     // a crash mid-teardown must not resurrect a bot that already ended.
     persistRoster();
+    // Now that this record is finalized, keep the ended-run ring within
+    // MAX_ENDED_RUNS. Purely an in-memory trim — it never touches the disk
+    // roster, which only ever held running bots.
+    evictOldEndedRuns();
     const flow = record.flow;
     record.flow = null;
     record.store = null;
@@ -414,12 +463,6 @@ function createBotHost(options) {
     // Claim BEFORE the first await — two concurrent starts must not both win,
     // and the select guard must already know this bot when its select arrives.
     claims.set(characterID, botID);
-    // One retained record per character: starting anew drops the old story.
-    for (const [id, old] of records) {
-      if (old.characterID === characterID && old.finalized) {
-        records.delete(id);
-      }
-    }
     records.set(botID, record);
 
     try {
@@ -620,15 +663,9 @@ function createBotHost(options) {
   }
 
   // A bot that could not come back must SAY SO where the player looks, not
-  // silently drop off the roster: a finished error record, replacing any older
-  // finished story for that character (the same one-record-per-character rule
-  // start applies).
+  // silently drop off the roster: a finished error record, subject to the
+  // same ended-run ring as any other finalized record (evicted below).
   function recordResumeFailure(row, message) {
-    for (const [id, old] of records) {
-      if (old.characterID === Number(row.characterID) && old.finalized) {
-        records.delete(id);
-      }
-    }
     const botID = crypto.randomUUID();
     records.set(botID, {
       botID,
@@ -662,6 +699,7 @@ function createBotHost(options) {
       claimSecret: null,
       deadlineTimer: null,
     });
+    evictOldEndedRuns();
   }
 
   /**
@@ -680,7 +718,7 @@ function createBotHost(options) {
           recordResumeFailure(row, "the account is gone or banned.");
           continue;
         }
-        const script = loadScript(Number(account.accountID), String(row.scriptID || ""));
+        const script = loadScript(String(row.scriptID || ""));
         if (!script) {
           recordResumeFailure(row, "the saved bot no longer exists.");
           continue;
@@ -747,4 +785,4 @@ function createBotHost(options) {
   };
 }
 
-module.exports = { createBotHost, BOT_HEADER };
+module.exports = { createBotHost, BOT_HEADER, MAX_ENDED_RUNS };

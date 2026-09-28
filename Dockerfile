@@ -22,6 +22,12 @@ RUN apt-get update \
 
 COPY tsconfig.json vite.config.ts ./
 COPY web ./web
+# The starter-bot seeds are BFF data, but only the browser's codec can prove
+# they are valid documents — the server is plain JS and cannot run it. So the
+# web-side test that decodes them lives here and needs the file, even though
+# nothing in the bundle imports it. Copied alone rather than all of src/: the
+# web build has no business seeing the rest of the server.
+COPY src/starterBots.json ./src/starterBots.json
 RUN npm run build:web
 
 
@@ -48,6 +54,13 @@ WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node scripts ./scripts
+# The server bot host runs the BROWSER stack in this process: src/botHost.js
+# imports web/src/app/flow.ts and friends at runtime, letting Node strip the
+# types. Without the sources every bot start fails BOT_STACK_UNAVAILABLE, and
+# only there -- the BFF still boots, so the gap is invisible until someone
+# presses start. Source only, and the graph it pulls is relative-import-only,
+# so this needs nothing from the pruned devDependencies.
+COPY --chown=node:node web/src ./web/src
 COPY --from=node-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=web-build --chown=node:node /app/public/dist ./public/dist
 

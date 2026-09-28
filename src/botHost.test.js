@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createBotHost } = require("./botHost");
+const { createBotHost, MAX_ENDED_RUNS } = require("./botHost");
 
 // The host is exercised with a FAKE browser stack (the loadStack seam): the
 // real one is the shipping web/src modules, proven live; these tests pin the
@@ -305,15 +305,16 @@ test("a script that ends on its own releases the character", async () => {
   assert.notEqual(after.endedAt, null);
 });
 
-test("a fresh start on the character replaces the finished record", async () => {
+test("a fresh start on the character keeps the finished record — the ring replaces per-character pruning", async () => {
   const host = makeHost();
   const first = await host.start(START);
   await host.stop(first.bot.botID, 7);
   const second = await host.start(START);
   assert.equal(second.ok, true);
   const listed = host.list(7);
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0].botID, second.bot.botID);
+  assert.equal(listed.length, 2, "the finished run must not be dropped just because the character restarted");
+  assert.ok(listed.some((row) => row.botID === first.bot.botID && row.status === "stopped"));
+  assert.ok(listed.some((row) => row.botID === second.bot.botID && row.status === "running"));
 });
 
 // The fake stack hands each start a fresh store; tests that poke the store
@@ -368,10 +369,8 @@ test("resume restarts a persisted bot on a fresh host (the restart path)", async
   const after = makeHost({
     persistPath: rosterPath,
     loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
-    loadScript: (accountID, scriptID) =>
-      accountID === 7 && scriptID === "s1"
-        ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } }
-        : null,
+    loadScript: (scriptID) =>
+      scriptID === "s1" ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } } : null,
   });
   await after.resume();
   const listed = after.list(7);
@@ -383,6 +382,34 @@ test("resume restarts a persisted bot on a fresh host (the restart path)", async
   const persisted = readRosterFile(rosterPath);
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].startedAt, listed[0].startedAt);
+});
+
+test("resume looks up the script by ID alone — authorship is not account-scoped", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  await before.start(START);
+  // The saved bot library is platform-wide: this script's record was authored
+  // by a DIFFERENT account (99) than the one flying it (7, from ACCOUNT/START).
+  // loadScript takes scriptID alone and must not be asked to filter by account.
+  const after = makeHost({
+    persistPath: rosterPath,
+    loadAccount: async (username) => (username === "test" ? { ...ACCOUNT } : null),
+    loadScript: (scriptID) =>
+      scriptID === "s1"
+        ? { scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true }, authorAccountID: 99 }
+        : null,
+  });
+  await after.resume();
+  const listed = after.list(7);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].status, "running");
+  // Authority over the running bot stays with the flying account (7), not the
+  // script's author (99): visible to 7, invisible and unstoppable by 99.
+  assert.equal(after.list(99).length, 0);
+  const stoppedByAuthor = await after.stop(listed[0].botID, 99);
+  assert.equal(stoppedByAuthor.ok, false);
+  assert.equal(stoppedByAuthor.code, "BOT_NOT_FOUND");
+  assert.notEqual(after.claimedBy(140000001), null);
 });
 
 test("resume refuses a script whose saved revision changed after launch", async () => {
@@ -544,4 +571,125 @@ test("a later progress tick with no alert does NOT clear one already recorded", 
   const row = host.list(7)[0];
   assert.equal(row.lastAlert && row.lastAlert.message, "Trouble.", "an unseen alert must not be erased");
   assert.equal(row.phase, "Mining", "while the rest of the readout still updates");
+});
+
+// ── The ended-run ring (M4: a bounded memory-only history, not a log) ──────
+
+test("more than MAX_ENDED_RUNS ended runs keeps exactly MAX_ENDED_RUNS, evicting the oldest first", async () => {
+  const clock = { value: 0 };
+  const host = makeHost({ now: () => clock.value });
+  const botIDs = [];
+  for (let i = 0; i < MAX_ENDED_RUNS + 5; i++) {
+    clock.value = i + 1;
+    const started = await host.start({ ...START, characterID: 900_100_000 + i });
+    const stopped = await host.stop(started.bot.botID, 7);
+    botIDs.push(stopped.bot.botID);
+  }
+  const listed = host.list(7);
+  assert.equal(listed.length, MAX_ENDED_RUNS);
+  const survivingIDs = new Set(listed.map((row) => row.botID));
+  for (let i = 0; i < 5; i++) {
+    assert.equal(survivingIDs.has(botIDs[i]), false, `run ${i} (the oldest) should have aged out`);
+  }
+  for (let i = 5; i < botIDs.length; i++) {
+    assert.equal(survivingIDs.has(botIDs[i]), true, `run ${i} should still be in the ring`);
+  }
+});
+
+test("eviction picks the globally oldest endedAt, not the oldest by start (Map insertion) order", async () => {
+  const clock = { value: 0 };
+  const host = makeHost({ now: () => clock.value });
+
+  // This bot STARTS first (first into the records Map) but is stopped LAST,
+  // so it ends up with the NEWEST endedAt of anyone here. If eviction ever
+  // regressed to Map/insertion order it would pick this one to evict; sorting
+  // by endedAt must spare it instead.
+  clock.value = 0;
+  const lateFinisher = await host.start({ ...START, characterID: 900_150_000 });
+  assert.equal(lateFinisher.ok, true);
+
+  // Fill the ring to capacity with runs that both start AND end after
+  // lateFinisher started, but whose endedAt values are all earlier than the
+  // one lateFinisher will get.
+  let oldestBotID = null;
+  for (let i = 0; i < MAX_ENDED_RUNS; i++) {
+    clock.value = i + 1;
+    const started = await host.start({ ...START, characterID: 900_150_001 + i });
+    const stopped = await host.stop(started.bot.botID, 7);
+    if (i === 0) {
+      oldestBotID = stopped.bot.botID;
+    }
+  }
+
+  // Now finalize lateFinisher with the largest endedAt of the batch — its
+  // finish pushes the ended count past the cap and forces an eviction.
+  clock.value = 1000;
+  await host.stop(lateFinisher.bot.botID, 7);
+
+  const listed = host.list(7);
+  assert.equal(listed.length, MAX_ENDED_RUNS);
+  const survivingIDs = new Set(listed.map((row) => row.botID));
+  assert.equal(survivingIDs.has(oldestBotID), false, "the run with the oldest endedAt is evicted");
+  assert.equal(
+    survivingIDs.has(lateFinisher.bot.botID),
+    true,
+    "the run that started earliest but ENDED latest must survive",
+  );
+});
+
+test("a running bot is never evicted, even once the ring is full", async () => {
+  const clock = { value: 0 };
+  const host = makeHost({ now: () => clock.value });
+  for (let i = 0; i < MAX_ENDED_RUNS; i++) {
+    clock.value = i + 1;
+    const started = await host.start({ ...START, characterID: 900_200_000 + i });
+    await host.stop(started.bot.botID, 7);
+  }
+  assert.equal(host.list(7).length, MAX_ENDED_RUNS);
+
+  clock.value = 1000;
+  const running = await host.start({ ...START, characterID: 900_299_000 });
+  assert.equal(running.ok, true);
+
+  // One more finalized run pushes the ended count past the cap, forcing an
+  // eviction while `running` is still in flight.
+  clock.value = 1001;
+  const another = await host.start({ ...START, characterID: 900_299_001 });
+  await host.stop(another.bot.botID, 7);
+
+  const listed = host.list(7);
+  const runningRows = listed.filter((row) => row.status === "running");
+  const endedRows = listed.filter((row) => row.status !== "running");
+  assert.equal(runningRows.length, 1);
+  assert.equal(runningRows[0].botID, running.bot.botID, "the ring's cap never touches a running record");
+  assert.equal(endedRows.length, MAX_ENDED_RUNS, "the ended-only ring still holds exactly the cap");
+});
+
+test("two ended runs for the SAME character both survive (the old one-per-character rule would have dropped one)", async () => {
+  const host = makeHost();
+  const first = await host.start(START);
+  await host.stop(first.bot.botID, 7);
+  const second = await host.start(START);
+  await host.stop(second.bot.botID, 7);
+  const listed = host.list(7);
+  assert.equal(listed.length, 2);
+  assert.ok(listed.some((row) => row.botID === first.bot.botID && row.status === "stopped"));
+  assert.ok(listed.some((row) => row.botID === second.bot.botID && row.status === "stopped"));
+});
+
+test("list(accountID) stays account-filtered, ended runs included", async () => {
+  const host = makeHost();
+  const ownedByOwner = await host.start(START);
+  await host.stop(ownedByOwner.bot.botID, 7);
+  const other = { accountID: 8, username: "other" };
+  const ownedByOther = await host.start({ ...START, account: other, characterID: 140_099_999 });
+  await host.stop(ownedByOther.bot.botID, 8);
+
+  const ownerRows = host.list(7);
+  assert.equal(ownerRows.length, 1);
+  assert.equal(ownerRows[0].botID, ownedByOwner.bot.botID);
+
+  const otherRows = host.list(8);
+  assert.equal(otherRows.length, 1);
+  assert.equal(otherRows[0].botID, ownedByOther.bot.botID);
 });

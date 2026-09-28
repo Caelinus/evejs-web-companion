@@ -25,6 +25,7 @@
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
   import ServerBots from "./ServerBots.svelte";
+  import BotManager from "./BotManager.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
   import Standings from "./Standings.svelte";
@@ -36,18 +37,24 @@ import NoticeLog from "./NoticeLog.svelte";
   import { tabLabel, type TabID } from "./tabs.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import type { Session } from "../app/sessions.ts";
 
   let {
     store,
     flow,
     tab,
     onOpen,
+    sessions,
   }: {
     store: ClientStore;
     flow: AppFlow;
     tab: TabID;
     // Lets a panel navigate to another tab (e.g. Agent Finder -> Travel).
     onOpen?: (tab: TabID) => void;
+    // R107 — the full pilot roster (every session, not just the active one).
+    // Optional and forwarded only to the Bot Manager panel, which is the only
+    // one that needs to see pilots beyond its own store/flow.
+    sessions?: readonly Session[];
   } = $props();
 </script>
 
@@ -97,6 +104,8 @@ import NoticeLog from "./NoticeLog.svelte";
   <BotBuilder {store} {flow} />
 {:else if tab === "serverBots"}
   <ServerBots />
+{:else if tab === "botManager"}
+  <BotManager {store} {flow} {sessions} onOpen={(id) => onOpen?.(id)} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

@@ -36,11 +36,8 @@
     type BlockCategory,
   } from "../bots/macroCatalogView.ts";
   import { EXAMPLE_BOTS, type ExampleBot } from "../bots/exampleBots.ts";
-  import {
-    BLOCK_SNIPPET_LIST,
-    appendBlockSnippet,
-    type BlockSnippetID,
-  } from "../bots/blockSnippets.ts";
+  import { insertSavedBotSteps, type FlatProgramNode } from "../bots/scriptEdit.ts";
+  import { watchBuilderEdits } from "../bots/builderHandoff.ts";
   import { branchSentence, stepSentence, subBotSentence } from "../bots/scriptText.ts";
   import { validateScript, type ScriptProblem } from "../bots/validateScript.ts";
   import { decodeScriptText, decodeScriptValue, encodeScriptDoc } from "../bots/scriptCodec.ts";
@@ -103,8 +100,7 @@
   ]);
   let importText = $state("");
   let importNote = $state<string | null>(null);
-  let snippetNote = $state<string | null>(null);
-  let snippetFittingID = $state<number | null>(null);
+  let insertNote = $state<string | null>(null);
 
   // Branches and sub-bots are authored right in the list now. This still catches
   // the shapes the one-list editor cannot hold — several loops, or a loop beside
@@ -133,7 +129,8 @@
     });
   });
 
-  // Saved bots — kept per account on the web server (src/botScriptStore.js).
+  // Saved bots — kept platform-wide on the web server (src/botScriptStore.js);
+  // every account can see and load every saved bot.
   let savedList = $state<BotScriptSummary[]>([]);
   let currentSavedId = $state<string | null>(null);
   let currentRev = $state(0);
@@ -378,36 +375,47 @@
     advancedProgram = null;
     steps = [...steps, newStepFor(macro)];
   }
-  function addBlockGroup(id: BlockSnippetID): void {
-    // Like adding one palette block, choosing a group edits the visible list
-    // from this point onward. The pure helper APPENDS and reserves every nested
-    // id already in the bot, so repeated groups cannot collide with each other
-    // or with a loaded/imported branch.
-    const group = BLOCK_SNIPPET_LIST.find((entry) => entry.id === id);
-    const fitting =
-      id === "dock-refit-repair"
-        ? savedFittings.find((row) => row.fittingID === snippetFittingID)
-        : undefined;
-    if (id === "dock-refit-repair" && fitting === undefined) {
-      snippetNote = "Choose a saved fitting before adding the turnaround group.";
-      return;
-    }
-    advancedProgram = null;
-    steps = [
-      ...appendBlockSnippet(
+  /**
+   * Copy another saved bot's steps onto the end of this one — a BY-VALUE insert,
+   * not a live reference. Unlike [+ Saved bot] (which creates a `SubBotNode`
+   * pointing at the other bot, is top-level only, and forces this bot to run
+   * once), this appends independent copies of its steps right into the flat
+   * list: the repeat control keeps working, and later edits to that saved bot
+   * never change this one — because nothing here still points at it.
+   *
+   * The pure helper APPENDS and reserves every id already in the bot (steps +
+   * watches), so repeated inserts cannot collide with each other or with a
+   * loaded/imported branch. A source bot's repeating group (how the editor saves
+   * any repeating bot) has its steps copied in once; this bot's own repeat
+   * setting then governs them, and `insertNote` says so.
+   */
+  async function insertSavedBot(meta: BotScriptSummary): Promise<void> {
+    try {
+      const record = await getBotScript(meta.scriptID, botOpts());
+      if (record === null) {
+        insertNote = "That saved bot could not be found.";
+        return;
+      }
+      const decoded = decodeScriptValue(record.doc);
+      if (!decoded.ok) {
+        insertNote = decoded.refusal;
+        return;
+      }
+      advancedProgram = null;
+      const result = insertSavedBotSteps(
         steps,
-        id,
+        decoded.doc,
         makeId,
-        {
-          bindings: fitting === undefined ? {} : { fitting },
-          reservedIDs: new Set(["main-loop", ...watches.map((row) => row.id)]),
-        },
-      ),
-    ];
-    snippetNote =
-      group === undefined
-        ? "Added the block group."
-        : `Added “${group.label}” to the end of this bot.`;
+        new Set(["main-loop", ...watches.map((row) => row.id)]),
+      );
+      steps = result.steps as EditorNode[];
+      insertNote =
+        result.left.length > 0
+          ? `Copied “${decoded.doc.name}”’s steps to the end of this bot. ${result.left.join(" ")}`
+          : `Copied “${decoded.doc.name}”’s steps to the end of this bot. Later changes to that saved bot will not change this one.`;
+    } catch {
+      insertNote = "Could not load that saved bot.";
+    }
   }
   function moveStep(i: number, delta: number): void {
     const j = i + delta;
@@ -444,7 +452,7 @@
     };
     steps = [...steps, branch];
   }
-  /** Add a "run one of my saved bots" step. */
+  /** Add a "run another saved bot" step. */
   function addSubBot(): void {
     advancedProgram = null;
     steps = [...steps, { id: makeId(), kind: "sub-bot", scriptID: null, name: null }];
@@ -868,7 +876,7 @@
     );
   }
 
-  // ── Saved bots (per-account, on the web server) ──────────────────────────────
+  // ── Saved bots (platform-wide, on the web server) ────────────────────────────
   // Saved-bot calls are made directly from this component, so carry the ACTIVE
   // flow's complete options — token, base URL and injected fetch — exactly like
   // calls made inside flow.ts. Reconstructing just the token broke multibox test
@@ -880,7 +888,7 @@
       libraryError = null;
     } catch {
       savedList = [];
-      libraryError = "Could not reach your saved bots — are you still logged in?";
+      libraryError = "Could not reach the saved bots — are you still logged in?";
     }
   }
   async function saveBot(): Promise<void> {
@@ -893,7 +901,7 @@
         const { scriptID, rev } = await createBotScript(builtDoc, botOpts());
         currentSavedId = scriptID;
         currentRev = rev;
-        importNote = `Saved "${name}" to your account.`;
+        importNote = `Saved "${name}".`;
       }
       await refreshSaved();
     } catch (error) {
@@ -934,6 +942,10 @@
   }
   onMount(() => {
     void refreshSaved();
+    // "Edit" on a Bot Manager library row: load exactly the bot that was clicked.
+    return watchBuilderEdits(flow, (scriptID) => {
+      void loadSaved(scriptID);
+    });
   });
 </script>
 
@@ -1068,7 +1080,7 @@
         {/if}
       {/if}
       <button class="tiny" onclick={addBranch} title="Do one thing or another, depending on a check">+ Branch</button>
-      <button class="tiny" onclick={addSubBot} title="Run one of your other saved bots here">+ Saved bot</button>
+      <button class="tiny" onclick={addSubBot} title="Run another saved bot here">+ Saved bot</button>
     </span>
   </div>
   {#each problemsByPath.get("program") ?? [] as sentence}<p class="prob">{sentence}</p>{/each}
@@ -1355,7 +1367,7 @@
               </div>
             {/each}
           {:else}
-            <!-- Run one of my other saved bots here. -->
+            <!-- Run another saved bot here — anyone's, since the library is shared. -->
             <span class="sentence">{subBotSentence(node)}</span>
             <span class="inline-edit">
               run
@@ -1385,43 +1397,29 @@
     <button class="primary" onclick={saveBot}>Save</button>
   </div>
 
-  <!-- Ready-made groups append to (never replace) the current bot. -->
-  <h3>Add a ready-made group</h3>
-  <p class="subnote">Add a whole proven sequence to the end of the blocks you already have.</p>
-  <div class="snippet-grid">
-    {#each BLOCK_SNIPPET_LIST as group (group.id)}
-      <article class="snippet-card">
-        <div class="snippet-name">{group.label}</div>
-        <p>{group.adds}</p>
-        {#if group.id === "dock-refit-repair"}
-          <label class="snippet-setup">
-            {group.setup}
-            {#if savedFittings.length === 0}
-              <em>No saved fittings found.</em>
-            {:else}
-              <select bind:value={snippetFittingID}>
-                <option value={null} disabled>pick a saved fitting…</option>
-                {#each savedFittings as fitting (fitting.fittingID)}
-                  <option value={fitting.fittingID}>{fitting.name}</option>
-                {/each}
-              </select>
-            {/if}
-          </label>
-        {:else if group.setup}
-          <p class="snippet-setup">Before adding: {group.setup}</p>
-        {/if}
-        <button
-          class="primary tiny"
-          disabled={
-            group.id === "dock-refit-repair" &&
-            !savedFittings.some((fitting) => fitting.fittingID === snippetFittingID)
-          }
-          onclick={() => addBlockGroup(group.id)}
-        >Add group</button>
-      </article>
-    {/each}
-  </div>
-  {#if snippetNote}<p class="note snippet-note">{snippetNote}</p>{/if}
+  <!-- Copies another saved bot's steps onto the end of this one (never replaces
+       it) — a one-time copy, not a live link: later edits to that saved bot do
+       not change this one. That is the whole difference from [+ Saved bot]
+       above, which links to the other bot instead of copying it. -->
+  <h3>Insert steps from a saved bot</h3>
+  <p class="subnote">
+    Copy a saved bot's steps onto the end of the blocks you already have. This copies them once — later changes to
+    that saved bot will not change this one.
+  </p>
+  {#if savedList.length === 0}
+    <p class="empty">No saved bots yet. Save one below, then come back here to copy its steps.</p>
+  {:else}
+    <div class="snippet-grid">
+      {#each savedList as meta (meta.scriptID)}
+        <article class="snippet-card">
+          <div class="snippet-name">{meta.name}</div>
+          <p>Copy this bot's steps onto the end of the one you're editing.</p>
+          <button class="primary tiny" onclick={() => insertSavedBot(meta)}>Insert steps</button>
+        </article>
+      {/each}
+    </div>
+  {/if}
+  {#if insertNote}<p class="note snippet-note">{insertNote}</p>{/if}
 
   <!-- Palette -->
   <h3>Add a block</h3>
@@ -1463,8 +1461,8 @@
   {/if}
 
   <!-- Saved bots -->
-  <h3>Your saved bots</h3>
-  <p class="subnote">Kept on the server against your account, so they follow you to any browser or character.</p>
+  <h3>Saved bots</h3>
+  <p class="subnote">Kept on the server and shared by every account — anyone can load, edit, or delete a bot saved here.</p>
   {#if libraryError}<p class="prob">{libraryError}</p>{/if}
   {#if savedList.length === 0}
     <p class="empty">No saved bots yet. Press Save above to keep one.</p>
@@ -1707,13 +1705,6 @@
     color: var(--color-text);
     font-size: 0.85rem;
     flex: 1;
-  }
-  .snippet-card .snippet-setup {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    color: var(--color-muted);
-    font-size: 0.8rem;
   }
   .snippet-card button {
     align-self: flex-end;

@@ -17,8 +17,22 @@
   import { isWindowTab } from "./desktop.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
+  import type { Session } from "../app/sessions.ts";
 
-  let { store, flow, isDocked }: { store: ClientStore; flow: AppFlow; isDocked: boolean } = $props();
+  let {
+    store,
+    flow,
+    isDocked,
+    sessions,
+  }: {
+    store: ClientStore;
+    flow: AppFlow;
+    isDocked: boolean;
+    // R107 — the full pilot roster, threaded down only so the Bot Manager panel
+    // can show every held pilot, not just this session's active one. Optional:
+    // every other caller/panel is unaffected. See PanelHost.svelte.
+    sessions?: readonly Session[];
+  } = $props();
 
   // svelte-ignore state_referenced_locally
   const fitting = store.fitting;
@@ -47,7 +61,7 @@
 
   <main class="mobile-main">
     {#if effective !== null}
-      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} />
+      <PanelHost {store} {flow} tab={effective} onOpen={(id) => (selected = id)} {sessions} />
     {:else if isDocked}
       <!-- Docked home = the same tabbed dock content as the desktop's right
            panel (hangars + Station Services); the header above already names

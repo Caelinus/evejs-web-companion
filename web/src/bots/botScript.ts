@@ -584,7 +584,7 @@ export interface BranchBlock {
 export interface SubBotNode {
   readonly id: string;
   readonly kind: "sub-bot";
-  /** Exact per-account identity when known; never fall back if this id is stale. */
+  /** Exact library identity when known; never fall back if this id is stale. */
   readonly scriptID: string | null;
   readonly name: string | null;
 }
