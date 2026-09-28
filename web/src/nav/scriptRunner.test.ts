@@ -158,10 +158,45 @@ test("a run being refused over and over STOPS, in the server's own words", async
   const latest = h.progress[h.progress.length - 1]!;
   assert.match(latest.pauseReason ?? "", /refusals in a row/);
   assert.match(latest.pauseReason ?? "", /room/i, "and says WHAT was refused");
+  // It does not stop WHERE IT STANDS: the first refusal cap latches and flies
+  // the ship home, so the run only really stops once the way home is being
+  // refused too. That is two budgets, not one, and still nothing like 227.
   assert.ok(
-    h.issued.length <= MAX_CONSECUTIVE_REFUSALS,
+    h.issued.some((a) => a.kind === "warp"),
+    "it tried to get the ship home before giving up",
+  );
+  assert.ok(
+    h.issued.length <= MAX_CONSECUTIVE_REFUSALS * 2,
     `it gave up after ${h.issued.length} attempts, not 227`,
   );
+});
+
+test("a refusal storm heads home first, and only stops in space if the way home is refused too", async () => {
+  // Only the DELIVER call is refused; the flight home is not. The bot must not
+  // come to rest in the belt it was refused in.
+  const h = harness({
+    issueThrows: (a) => (a.kind === "unloadOre" ? new Error("CALL_REFUSED: NotEnoughCargoSpace") : null),
+  });
+  h.setObs(calm({ holdEmpty: false }));
+  h.runner.start(script([macroStep("a", "deliver-ore")]));
+
+  let guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 200 && !h.issued.some((a) => a.kind === "warp")) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.ok(h.issued.some((a) => a.kind === "warp"), "the refusal cap sends it home");
+  assert.equal(h.runner.getStatus(), "running", "and it is still flying, not parked");
+
+  // Docked: now it stops, with the refusal as the reason.
+  h.setObs(calm({ holdEmpty: false, docked: true, inSpace: false }));
+  guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 50) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.match(h.progress[h.progress.length - 1]!.pauseReason ?? "", /refusals in a row/);
 });
 
 test("the pause reason survives the decider's cheerful why", async () => {
@@ -319,6 +354,77 @@ test("repeated read failures give up with a plain reason", async () => {
   }
   assert.equal(runner.getStatus(), "paused");
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
+});
+
+test("reads that give up send the ship to the station the bot is configured to dock at", async () => {
+  // Blind, nothing can be DECIDED -- but the autopilot runs on its own reads, and
+  // the dock station is a SETTING on the script, not something read from the
+  // world. So the ship gets moving instead of floating where it went blind.
+  let reads = 0;
+  const issued: ScriptAction[] = [];
+  const progress: ScriptRunnerSnapshot[] = [];
+  const runner = createScriptRunner({
+    observe: async () => {
+      reads += 1;
+      if (reads > 1) {
+        throw new Error("read failed"); // not a session loss
+      }
+      return calm({ holdEmpty: false }); // note: no homeStationID on the read
+    },
+    issue: async (a) => { issued.push(a); },
+    refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
+    sleep: async () => {},
+    onProgress: (s) => progress.push(s),
+    isSessionLost: (e) => e instanceof SessionLost,
+    registry,
+    travelHome: home,
+  });
+  runner.start(script([macroStep("a", "deliver-ore")]));
+  // Generous: the one good read issues an action, and the settle between actions
+  // costs ticks before the failures even start counting.
+  for (let i = 0; i < 30 && runner.getStatus() === "running"; i += 1) {
+    await runner.tick();
+  }
+
+  assert.equal(runner.getStatus(), "paused");
+  const route = issued.find((a) => a.kind === "startRoute");
+  assert.ok(route !== undefined && route.kind === "startRoute" && route.stationID === 1, "sent to the script's own home");
+  assert.match(progress.at(-1)?.pauseReason ?? "", /sent it to a station/i);
+});
+
+test("reads that give up with NO station to send it to say the plain thing", async () => {
+  // Home is "wherever the ship started", the run started in space, and nothing
+  // was observed to fall back on -- so there is no honest destination.
+  const homeless: BotScript = {
+    ...script([macroStep("a", "deliver-ore")]),
+    home: { entity: "station", id: null, name: null, systemName: null, starting: true },
+  };
+  let reads = 0;
+  const issued: ScriptAction[] = [];
+  const progress: ScriptRunnerSnapshot[] = [];
+  const runner = createScriptRunner({
+    observe: async () => {
+      reads += 1;
+      if (reads > 1) {
+        throw new Error("read failed");
+      }
+      return calm({ holdEmpty: false });
+    },
+    issue: async (a) => { issued.push(a); },
+    refusalReason: (e) => (e instanceof Error ? e.message : String(e)),
+    sleep: async () => {},
+    onProgress: (s) => progress.push(s),
+    isSessionLost: (e) => e instanceof SessionLost,
+    registry,
+    travelHome: home,
+  });
+  runner.start(homeless);
+  for (let i = 0; i < 30 && runner.getStatus() === "running"; i += 1) {
+    await runner.tick();
+  }
+  assert.equal(runner.getStatus(), "paused");
+  assert.equal(issued.some((a) => a.kind === "startRoute"), false, "no guessed destination");
+  assert.match(progress.at(-1)?.pauseReason ?? "", /so the bot stopped/i);
 });
 
 test("run() drives to a clean finish and stops", async () => {
