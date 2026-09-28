@@ -12787,6 +12787,14 @@ app.get("/api/bridge/corp-assets", requireAuth, async (req, res, next) => {
   if (!held) {
     return;
   }
+  const call = (method, args) => heldTopLevelCall(held, req.webSessionID, "corpmgr", method, args, null);
+  await answerCorpAssets(held, call, req, res, next);
+});
+
+// The corpmgr asset reads behind both corp-asset routes, on whichever held
+// session `call` rides. Read-only by construction: three corpmgr reads, nothing
+// else.
+async function answerCorpAssets(held, call, req, res, next) {
   const corporationID = Number(held.corporationID) || 0;
   const which = stringQuery(req.query.which) || "offices";
   const locationID = nonNegativeIntQuery(req.query.locationID, 0);
@@ -12797,25 +12805,11 @@ app.get("/api/bridge/corp-assets", requireAuth, async (req, res, next) => {
   const wantLocation = locationID > 0;
   try {
     const [inventory, locationInventory, search] = await Promise.allSettled([
-      heldTopLevelCall(held, req.webSessionID, "corpmgr", "GetAssetInventory", [corporationID, which], null),
+      call("GetAssetInventory", [corporationID, which]),
       wantLocation
-        ? heldTopLevelCall(
-            held,
-            req.webSessionID,
-            "corpmgr",
-            "GetAssetInventoryForLocation",
-            [corporationID, locationID, which],
-            null,
-          )
+        ? call("GetAssetInventoryForLocation", [corporationID, locationID, which])
         : Promise.resolve({ result: null }),
-      heldTopLevelCall(
-        held,
-        req.webSessionID,
-        "corpmgr",
-        "SearchAssets",
-        [which, categoryID, groupID, typeID, minimumQuantity],
-        null,
-      ),
+      call("SearchAssets", [which, categoryID, groupID, typeID, minimumQuantity]),
     ]);
     for (const outcome of [inventory, locationInventory, search]) {
       if (outcome.status === "rejected" && outcome.reason && outcome.reason.code === "SESSION_NOT_FOUND") {
@@ -12850,7 +12844,7 @@ app.get("/api/bridge/corp-assets", requireAuth, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
 // GET /api/bridge/corp-lp?corpID= — the corp LP reads, as TWO independent reads
 // (Promise.allSettled; empty ≠ failed):
@@ -20317,6 +20311,41 @@ app.get("/api/bots/active", (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// GET /api/bots/corp-assets?characterID=&locationID= -- the PI board's corp
+// hangar read THROUGH A SERVER BOT: the same corpmgr reads as
+// /api/bridge/corp-assets, made on the game session a running bot of the
+// CALLER's account holds for that pilot.
+//
+// ⚠ A READ BESIDE THE BOT, NEVER A HAND ON IT. The host hands out only the
+// bot's web session id (botHost.readableSessionOf), for its own account and
+// only while the run is live. Nothing here selects, releases, stops or goes
+// through the bot's flow; the vitals sampler already makes reads on this same
+// session while the bot acts.
+//
+// ⚠ A LOST SESSION IS THE BOT'S TO FIND. heldTopLevelCall forgets the held
+// handle on SESSION_NOT_FOUND; a read made here must never drop a bot's
+// handle, so it calls the gateway directly and just answers the refusal.
+app.get("/api/bots/corp-assets", requireAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID || 0);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_CHARACTER", message: "A positive characterID is required." });
+    return;
+  }
+  const webSessionID = botHost.readableSessionOf(characterID, req.account.accountID);
+  const held = webSessionID ? bridgeSessions.get(webSessionID) || null : null;
+  if (!held || Number(held.characterID) !== characterID) {
+    res.status(409).json({
+      ok: false,
+      error: "NO_BOT_SESSION",
+      message: "No server bot of this account is flying this pilot.",
+    });
+    return;
+  }
+  const call = (method, args) =>
+    gateway.callMethod("corpmgr", method, args, null, { userid: held.accountID }, held.bridgeSessionID);
+  await answerCorpAssets(held, call, req, res, next);
 });
 
 app.post("/api/bots/start", requireAuth, async (req, res, next) => {

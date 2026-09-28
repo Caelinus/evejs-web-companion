@@ -50,6 +50,10 @@ function fakeStore() {
   };
 }
 
+// Bridge sessions the fake gateway has "lost": a call on one is refused the way
+// a reaped or taken-over session is.
+const lostSessions = new Set();
+
 function fakeGateway(log) {
   return {
     async selectCharacter(args) {
@@ -64,7 +68,10 @@ function fakeGateway(log) {
       log.push(["release", bridgeSessionID]);
       return { released: true };
     },
-    async callMethod(service, method) {
+    async callMethod(service, method, args, kwargs, identity, bridgeSessionID) {
+      if (lostSessions.has(bridgeSessionID)) {
+        throw Object.assign(new Error("Session not found."), { code: "SESSION_NOT_FOUND" });
+      }
       return { service, method, result: {}, notifications: [] };
     },
     openSessionEventStream(options) {
@@ -311,4 +318,86 @@ test("kind absent defaults to \"script\" — an old caller's request body still 
   const startCall = log.find((row) => row[0] === "start");
   assert.equal(startCall[1].kind, "script");
   assert.equal(startCall[1].scriptID, "s1");
+});
+
+// GET /api/bots/corp-assets: the PI board's corp hangar read through a RUNNING
+// bot's own game session. The held session a real bot would hold is stood up
+// here by an ordinary select; the fake host hands out its web session id the
+// way botHost.readableSessionOf does -- for the owning account only.
+async function botHeldSession(baseUrl, app, characterID) {
+  const botToken = await signInAndSelect(baseUrl, characterID);
+  const botSessionID = webAuth.verifySessionToken(botToken).sessionID;
+  assert.ok(app.locals.bridgeSessions.has(botSessionID));
+  return botSessionID;
+}
+
+async function signIn(baseUrl) {
+  const login = await request(baseUrl, "/api/login", {
+    method: "POST",
+    body: { username: FARMER.username, password: "x" },
+  });
+  return login.payload.sessionToken;
+}
+
+function readingHost(log, sessionOf) {
+  return { ...fakeBotHost(log), readableSessionOf: sessionOf };
+}
+
+test("a bot's corp read rides the bot's session and only reads corpmgr", async () => {
+  const log = [];
+  let botSessionID = null;
+  const asked = [];
+  const { baseUrl, app } = await startTestServer(
+    log,
+    readingHost(log, (characterID, accountID) => {
+      asked.push([characterID, accountID]);
+      return botSessionID;
+    }),
+  );
+  botSessionID = await botHeldSession(baseUrl, app, 7001);
+  const token = await signIn(baseUrl);
+
+  const { response, payload } = await request(baseUrl, "/api/bots/corp-assets?characterID=7001&locationID=60000004", { token });
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.requested.corporationID, 1000001);
+  assert.deepEqual(asked, [[7001, FARMER.accountID]]);
+  // The bot's hull is exactly where it was: nothing released, nothing started.
+  assert.equal(app.locals.bridgeSessions.get(botSessionID).characterID, 7001);
+  assert.deepEqual(log, []);
+});
+
+test("no bot flying the pilot is a plain 409, never a select", async () => {
+  const log = [];
+  const { baseUrl, app } = await startTestServer(log, readingHost(log, () => null));
+  const token = await signIn(baseUrl);
+  const { response, payload } = await request(baseUrl, "/api/bots/corp-assets?characterID=7001", { token });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "NO_BOT_SESSION");
+  assert.equal(app.locals.bridgeSessions.size, 0);
+});
+
+test("the bot corp read needs a sign-in", async () => {
+  const log = [];
+  const { baseUrl } = await startTestServer(log, readingHost(log, () => "anything"));
+  const { response } = await request(baseUrl, "/api/bots/corp-assets?characterID=7001");
+  assert.equal(response.status, 401);
+});
+
+test("a lost session on a bot corp read leaves the bot's handle in place", async () => {
+  const log = [];
+  let botSessionID = null;
+  const { baseUrl, app } = await startTestServer(log, readingHost(log, () => botSessionID));
+  botSessionID = await botHeldSession(baseUrl, app, 7001);
+  const token = await signIn(baseUrl);
+  // The gateway has lost the bot's game session; the select above predates it.
+  const bridgeSessionID = app.locals.bridgeSessions.get(botSessionID).bridgeSessionID;
+  lostSessions.add(bridgeSessionID);
+  try {
+    const { response } = await request(baseUrl, "/api/bots/corp-assets?characterID=7001", { token });
+    assert.notEqual(response.status, 200);
+  } finally {
+    lostSessions.delete(bridgeSessionID);
+  }
+  assert.ok(app.locals.bridgeSessions.has(botSessionID), "the bot must find its lost session itself");
 });

@@ -41,7 +41,7 @@ const IDLE_COMPANION_SLICE = Object.freeze({
   failureReason: null,
 });
 
-function makeFakeStack(log) {
+function makeFakeStack(log, extendFlow = null) {
   return async () => ({
     decodeScriptValue: (doc) =>
       doc && doc.valid === true
@@ -147,7 +147,7 @@ function makeFakeStack(log) {
     },
     createAppFlow: (store, options) => {
       log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken]);
-      return {
+      const flow = {
         async selectCharacter(characterID) {
           log.push(["selectCharacter", characterID]);
           store._set({ station: { online: { characterID, characterName: "Test Pilot" } } });
@@ -191,6 +191,7 @@ function makeFakeStack(log) {
           });
         },
       };
+      return extendFlow ? extendFlow(flow, store) : flow;
     },
   });
 }
@@ -294,6 +295,147 @@ test("the approved runtime deadline stops, logs out, and releases the character 
   assert.equal(host.claimedBy(START.characterID), null);
   assert.ok(log.some(([name]) => name === "stopCustomBot"));
   assert.ok(log.some(([name]) => name === "logout"));
+});
+
+// ── The deadline docks before it logs off ───────────────────────────────────
+// A bot whose run time ran out used to go offline wherever it was. These pin
+// the wind-down: fly in, dock, THEN release the pilot, bounded by a grace.
+
+function deadlineHost(log, extendFlow) {
+  let clock = 1_000;
+  let deadline = null;
+  const host = makeHost({
+    log,
+    loadStack: makeFakeStack(log, extendFlow),
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    },
+    setDeadlineTimeout(callback, delayMs) {
+      deadline = { callback, delayMs, unref() {} };
+      return deadline;
+    },
+    clearDeadlineTimeout() {},
+  });
+  return { host, fire: () => deadline.callback(), advance: (ms) => (clock += ms) };
+}
+
+test("a script whose run time ends flies home, and logs off only once docked", async () => {
+  const log = [];
+  let docked = false;
+  const { host, fire } = deadlineHost(log, (flow, store) => ({
+    ...flow,
+    headCustomBotHome(reason) {
+      log.push(["headCustomBotHome", reason]);
+      store._set({ customBot: { ...store.customBot.get(), phase: "Heading home", why: reason } });
+      return true;
+    },
+    async loadFlightStatus() {
+      store._set({ flight: { status: { docked, stationID: docked ? 60000001 : null } } });
+    },
+  }));
+  const started = await host.start(START);
+  assert.equal(started.ok, true);
+  const store = log.find((row) => row[0] === "_store")[1];
+
+  fire();
+  await settle();
+  // Still flying in: the pilot is held and nothing has logged it off.
+  assert.ok(log.some(([name]) => name === "headCustomBotHome"));
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+
+  // The runner arrives and pauses docked, exactly as its own safe stop does.
+  docked = true;
+  store._set({ customBot: { ...store.customBot.get(), status: "paused" } });
+  await settle();
+  await settle();
+
+  const [row] = host.list(ACCOUNT.accountID);
+  assert.equal(row.status, "stopped");
+  assert.match(row.why, /docked and logged off/i);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.ok(log.some(([name]) => name === "logout"));
+  assert.equal(log.some(([name]) => name === "panicRecallAndDock"), false);
+});
+
+test("a companion whose run time ends recalls drones and docks before logging off", async () => {
+  const log = [];
+  let docked = false;
+  const { host, fire } = deadlineHost(log, (flow, store) => ({
+    ...flow,
+    stopFleetCompanion() {
+      log.push(["stopFleetCompanion"]);
+      // The real stop pushes a stopped slice; mid-wind-down it must NOT end the run.
+      store._set({ companion: { ...store.companion.get(), status: "stopped" } });
+    },
+    async panicRecallAndDock() {
+      log.push(["panicRecallAndDock"]);
+    },
+    async loadFlightStatus() {
+      log.push(["loadFlightStatus"]);
+      store._set({ flight: { status: { docked, stationID: docked ? 60000001 : null } } });
+    },
+  }));
+  const started = await host.start(COMPANION_START);
+  assert.equal(started.ok, true);
+
+  fire();
+  await settle();
+  assert.ok(log.some(([name]) => name === "panicRecallAndDock"));
+  assert.equal(host.claimedBy(COMPANION_START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+
+  docked = true;
+  await settle();
+  await settle();
+
+  const [row] = host.list(ACCOUNT.accountID);
+  assert.equal(row.status, "stopped");
+  assert.match(row.why, /docked and logged off/i);
+  assert.equal(host.claimedBy(COMPANION_START.characterID), null);
+  assert.ok(log.some(([name]) => name === "logout"));
+});
+
+test("a ship that cannot dock within the grace is still logged off, and says so", async () => {
+  const log = [];
+  const { host, fire } = deadlineHost(log, (flow) => ({
+    ...flow,
+    async panicRecallAndDock() {
+      log.push(["panicRecallAndDock"]);
+    },
+  }));
+  const started = await host.start(START);
+  assert.equal(started.ok, true);
+
+  fire();
+  for (let i = 0; i < 400 && host.claimedBy(START.characterID) !== null; i += 1) {
+    await settle();
+  }
+
+  const [row] = host.list(ACCOUNT.accountID);
+  assert.equal(row.status, "stopped");
+  assert.match(row.why, /could not dock in time/i);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.ok(log.some(([name]) => name === "logout"));
+});
+
+test("a player's Stop during the wind-down logs off at once", async () => {
+  const log = [];
+  const { host, fire } = deadlineHost(log, (flow) => ({
+    ...flow,
+    async panicRecallAndDock() {
+      log.push(["panicRecallAndDock"]);
+    },
+  }));
+  const started = await host.start(START);
+  fire();
+  await settle();
+  const stopped = await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(stopped.ok, true);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
 });
 
 // ⚠ THE REGRESSION THIS PINS COST FIVE PILOTS HALF AN HOUR IN SPACE.
@@ -1217,4 +1359,46 @@ test("a script row never grows an abandonment field", async () => {
   const host = makeHost({ persistPath: rosterPath });
   await host.start(START);
   assert.equal("abandonment" in readRosterFile(rosterPath)[0], false);
+});
+
+// THE PI BOARD'S CORP READ: a read-only route may look up the session a running
+// bot holds, and only the bot's OWN account may. Nothing else leaves the host.
+function makeReadableHost() {
+  return makeHost({
+    webAuth: {
+      createSessionToken: () => "bot-token",
+      verifySessionToken: (token) => (token === "bot-token" ? { sessionID: "bot-web-session" } : null),
+    },
+  });
+}
+
+test("a running bot's session is readable by its own account", async () => {
+  const host = makeReadableHost();
+  assert.equal((await host.start(START)).ok, true);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), "bot-web-session");
+});
+
+test("another account's bot session is never handed out", async () => {
+  const host = makeReadableHost();
+  await host.start(START);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID + 1), null);
+});
+
+test("a character no bot claims has no readable session", () => {
+  const host = makeReadableHost();
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), null);
+});
+
+test("a stopped bot's session is no longer readable", async () => {
+  const host = makeReadableHost();
+  const started = await host.start(START);
+  await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(host.readableSessionOf(START.characterID, ACCOUNT.accountID), null);
+});
+
+test("the readable session never reaches the public rows", async () => {
+  const host = makeReadableHost();
+  await host.start(START);
+  const text = JSON.stringify([host.list(ACCOUNT.accountID), host.activeBots()]);
+  assert.equal(text.includes("bot-web-session"), false);
 });

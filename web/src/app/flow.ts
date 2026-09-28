@@ -1127,6 +1127,12 @@ export interface AppFlow {
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
   stopCustomBot(): void;
+  /**
+   * End it DOCKED: the running script flies home and pauses on arrival with
+   * `reason`. False when no script is running to send (see
+   * ScriptRunnerController.headHome).
+   */
+  headCustomBotHome(reason: string): boolean;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -11522,6 +11528,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     stopCustomBot() {
       stopCustomController();
+    },
+
+    headCustomBotHome(reason) {
+      return scriptRunner?.headHome(reason) ?? false;
     },
 
     panicRecallAndDock,

@@ -96,6 +96,27 @@ const VITALS_SAMPLE_MS = 15_000;
 // that has to wait on a slow gateway.
 const SESSION_TEARDOWN_MARGIN_MS = 5 * 60_000;
 
+// How long a bot whose approved run time has ended may spend getting DOCKED
+// before it is logged off wherever it is.
+//
+// ⚠ A DEADLINE IS NOT A REASON TO LEAVE A SHIP IN SPACE. The deadline used to
+// stop the loop and log out on the spot, so a miner whose twelve hours ran out
+// in a belt went offline in the belt, hull and cargo parked there unattended.
+// The run now ends the way every other stop ends (scriptDecide `stopSafely`):
+// fly in, dock, THEN release the pilot. Bounded, because a ship that is
+// tackled or cannot route must still let its pilot go eventually. The token is
+// minted to cover this too, and 72h plus this plus the teardown margin stays
+// inside webAuth's MAX_SESSION_TTL_MS.
+const DEADLINE_DOCK_GRACE_MS = 15 * 60_000;
+
+// How often the wind-down re-reads flight status while it waits to be docked.
+const DOCK_POLL_MS = 5_000;
+
+const DEADLINE_WHY_DOCKING = "The approved run time ended, so the bot is docking before it logs off.";
+const DEADLINE_WHY_DOCKED = "The approved run time ended, so the bot docked and logged off.";
+const DEADLINE_WHY_UNDOCKED =
+  "The approved run time ended and the ship could not dock in time, so the server logged it off in space.";
+
 // Ended runs are kept for the "recent runs" strip, not as a log: this is a
 // MEMORY BOUND, so the ring holds the last MAX_ENDED_RUNS finalized records
 // and nothing more. The cap is GLOBAL across every account, not per
@@ -198,6 +219,7 @@ function createBotHost(options) {
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const setDeadlineTimeout = options.setDeadlineTimeout || ((callback, delayMs) => setTimeout(callback, delayMs));
   const clearDeadlineTimeout = options.clearDeadlineTimeout || ((timer) => clearTimeout(timer));
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const nowISO = () => new Date(now()).toISOString();
   // Durability: where the running roster is mirrored (absent = memory-only),
   // and the reads resume() needs to rebuild a bot from its persisted row.
@@ -508,6 +530,13 @@ function createBotHost(options) {
         }
       } catch {}
       try {
+        // A deadline wind-down may have left a dock flight running (see
+        // endRunDocked); it has nothing left to fly for.
+        if (typeof flow.abortRoute === "function") {
+          flow.abortRoute();
+        }
+      } catch {}
+      try {
         // Releases the bridge session — the character goes offline and the
         // hull is immediately available to a tab.
         await flow.logout();
@@ -515,6 +544,83 @@ function createBotHost(options) {
         logError(error);
       }
     }
+  }
+
+  /** True only when flight status says the ship is docked right now. */
+  async function isDocked(record) {
+    const flow = record.flow;
+    const store = record.store;
+    if (!flow || !store) {
+      return false;
+    }
+    try {
+      await flow.loadFlightStatus();
+      const status = store.flight.get().status;
+      return Boolean(status && status.docked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The approved run time is over: get the ship DOCKED, then finalize.
+   *
+   * 1. A script flies itself in: the runner latches the deadline the way it
+   *    latches its own faults, flies to the script's home (or, if home cannot
+   *    be flown to, the nearest station) and pauses on arrival.
+   * 2. Anything still in space after that — a companion, which has no home,
+   *    or a script whose flight in failed — gets the readout's own "Recall
+   *    drones & dock": every loop stopped, drones home, dock at the nearest
+   *    station.
+   * 3. Log off once flight status says docked, or when DEADLINE_DOCK_GRACE_MS
+   *    runs out, and say which of the two it was.
+   *
+   * A player's Stop during any of this finalizes at once; every wait below
+   * checks `finalized` and steps aside.
+   */
+  async function endRunDocked(record) {
+    record.windingDown = true;
+    record.why = DEADLINE_WHY_DOCKING;
+    const giveUpAt = now() + DEADLINE_DOCK_GRACE_MS;
+    const stillWaiting = () => !record.finalized && now() < giveUpAt;
+    let docked = false;
+    try {
+      const flow = record.flow;
+      if (
+        flow &&
+        record.kind !== "companion" &&
+        typeof flow.headCustomBotHome === "function" &&
+        flow.headCustomBotHome(DEADLINE_WHY_DOCKING)
+      ) {
+        while (stillWaiting() && record.store && record.store.customBot.get().status === "running") {
+          await sleep(DOCK_POLL_MS);
+        }
+      }
+      docked = await isDocked(record);
+      if (!docked && stillWaiting() && record.flow && typeof record.flow.panicRecallAndDock === "function") {
+        if (record.kind === "companion") {
+          record.flow.stopFleetCompanion();
+        }
+        await record.flow.panicRecallAndDock();
+        while (stillWaiting()) {
+          docked = await isDocked(record);
+          if (docked) {
+            break;
+          }
+          await sleep(DOCK_POLL_MS);
+        }
+      }
+    } catch (error) {
+      logError(error);
+    }
+    if (record.finalized) {
+      return;
+    }
+    // Set immediately before finalize, which unsubscribes before its first
+    // await — no store push can overwrite these between here and there.
+    record.status = "stopped";
+    record.why = docked ? DEADLINE_WHY_DOCKED : DEADLINE_WHY_UNDOCKED;
+    await finalize(record);
   }
 
   async function start({
@@ -701,7 +807,14 @@ function createBotHost(options) {
       store: null,
       unsubscribe: null,
       claimSecret: createClaimSecret(),
+      // The web session the bot's own token names -- the key its held game
+      // session sits under in the server's bridgeSessions. Only ever handed
+      // out by readableSessionOf below, and never serialized.
+      webSessionID: null,
       deadlineTimer: null,
+      // Set once the deadline has fired and endRunDocked is bringing the ship
+      // in; the store subscription then leaves finalizing to it.
+      windingDown: false,
       // The roster row's authority for a companion (see persistRoster's
       // comment) — null for a script, which is authored by the library instead.
       companionRequest: isCompanion ? decodedRequest : null,
@@ -728,15 +841,19 @@ function createBotHost(options) {
     try {
       // The token covers the APPROVED RUN, not the web default: a bot flying
       // for an hour holds an hour's credential, and one approved for longer
-      // than a browser session lives (runPolicy allows up to 24h, the default
+      // than a browser session lives (runPolicy allows up to 72h, the default
       // sign-in is 12h) is no longer cut off in silence halfway through. See
-      // SESSION_TEARDOWN_MARGIN_MS for why it outlives the deadline, and
+      // SESSION_TEARDOWN_MARGIN_MS and DEADLINE_DOCK_GRACE_MS for why it
+      // outlives the deadline, and
       // webAuth.createSessionToken for the rail on how far this can be pushed.
       // A resumed bot asks for the time its ORIGINAL grant has left, because
       // `expiresAt` is the persisted deadline, not a fresh one.
       const token = auth.createSessionToken(account, {
-        ttlMs: deadlineMs - now() + SESSION_TEARDOWN_MARGIN_MS,
+        ttlMs: deadlineMs - now() + DEADLINE_DOCK_GRACE_MS + SESSION_TEARDOWN_MARGIN_MS,
       });
+      const tokenPayload =
+        typeof auth.verifySessionToken === "function" ? auth.verifySessionToken(token) : null;
+      record.webSessionID = tokenPayload && tokenPayload.sessionID ? String(tokenPayload.sessionID) : null;
       const store = stack.createClientStore();
       // Same fetch the server itself trusts, plus the bot's name on every
       // request so the select guard can tell the bot's own select from a tab's.
@@ -769,7 +886,9 @@ function createBotHost(options) {
         if (snapshot.status === "running" || snapshot.status === "paused") {
           sawRunning = true;
         }
-        if (sawRunning && ENDED_STATUSES.has(snapshot.status)) {
+        // ⚠ NOT WHILE WINDING DOWN: endRunDocked stops the loop on purpose to
+        // dock the ship, and that stop must not log the pilot off in space.
+        if (sawRunning && ENDED_STATUSES.has(snapshot.status) && !record.windingDown) {
           void finalize(record);
         }
       });
@@ -787,12 +906,11 @@ function createBotHost(options) {
       }
       const remainingMs = Math.max(1, Date.parse(record.expiresAt) - now());
       record.deadlineTimer = setDeadlineTimeout(() => {
-        if (record.finalized) {
+        record.deadlineTimer = null;
+        if (record.finalized || record.windingDown) {
           return;
         }
-        record.status = "stopped";
-        record.why = "The approved run time ended, so the server stopped this bot.";
-        void finalize(record);
+        void endRunDocked(record);
       }, remainingMs);
       if (typeof record.deadlineTimer.unref === "function") {
         record.deadlineTimer.unref();
@@ -856,6 +974,22 @@ function createBotHost(options) {
     const botID = claims.get(Number(characterID));
     const record = botID ? records.get(botID) : null;
     return Boolean(record && !record.finalized && sameSecret(record.claimSecret, secret));
+  }
+
+  /**
+   * The web session a RUNNING bot of THIS account holds for this character, or
+   * null. A read-only route (the PI board's corp hangar read) looks the bot's
+   * held game session up by it and makes one read on it, as the vitals sampler
+   * does. Deliberately only an id: no flow and no store leave the host, so
+   * nothing that asks can drive the bot, stop it or re-select its pilot.
+   */
+  function readableSessionOf(characterID, accountID) {
+    const botID = claims.get(Number(characterID));
+    const record = botID ? records.get(botID) : null;
+    if (!record || record.finalized || record.accountID !== Number(accountID)) {
+      return null;
+    }
+    return record.webSessionID;
   }
 
   /**
@@ -1095,6 +1229,7 @@ function createBotHost(options) {
     list,
     claimedBy,
     authorizesClaim,
+    readableSessionOf,
     activeCharacterIDs,
     activeBots,
     sampleAllVitals,

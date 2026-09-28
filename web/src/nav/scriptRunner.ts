@@ -199,6 +199,13 @@ export interface ScriptRunnerController {
   pause(): void;
   resume(): void;
   stop(): void;
+  /**
+   * End the run DOCKED: latch `reason` exactly as the runner's own faults do
+   * (`stopOrHeadHome`), so the decider flies the ship home and the run pauses
+   * on arrival with that reason. True when a running script is now heading
+   * home (or already was); false when there is no running script to send.
+   */
+  headHome(reason: string): boolean;
   tick(): Promise<void>;
   run(): Promise<void>;
   snapshot(): ScriptRunnerSnapshot;
@@ -716,6 +723,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
+    },
+    headHome(reason: string): boolean {
+      if (status !== "running" || memory === null) {
+        return false;
+      }
+      // Unlike stopOrHeadHome, an existing latch is NOT a second fault here:
+      // the ship is already on its way in, which is all this asks for.
+      if (memory.latched === null) {
+        memory = { ...memory, latched: { interruptID: null, reason } };
+        emit({ ...last, status: "running", phase: "Heading home", why: reason, pauseReason: null });
+      }
+      return true;
     },
     tick,
     run,

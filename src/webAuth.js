@@ -134,11 +134,11 @@ function signPayload(encodedPayload) {
 // The longest life any single token may be asked for, whatever the caller
 // says. A browser sign-in takes `config.sessionTtlMs`; the one caller that asks
 // for something else is the server bot host, whose own ceiling is
-// MAX_SERVER_BOT_RUNTIME_MINUTES (24h, web/src/bots/runPolicy.ts) plus the
-// margin it adds for its teardown. This rail is that ceiling rounded up, so a
+// MAX_SERVER_BOT_RUNTIME_MINUTES (72h, web/src/bots/runPolicy.ts) plus the
+// margin it adds for its teardown. This rail is that ceiling plus an hour, so a
 // mistake in a caller's arithmetic cannot mint a credential that outlives the
-// day it was made in.
-const MAX_SESSION_TTL_MS = 25 * 60 * 60 * 1000;
+// longest run anyone can approve.
+const MAX_SESSION_TTL_MS = 73 * 60 * 60 * 1000;
 
 /**
  * Mint a bearer token for `account`.

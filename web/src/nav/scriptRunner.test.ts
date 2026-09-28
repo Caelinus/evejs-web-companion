@@ -207,6 +207,40 @@ test("a refusal storm heads home first, and only stops in space if the way home 
   assert.match(h.progress[h.progress.length - 1]!.pauseReason ?? "", /refusals in a row/);
 });
 
+test("headHome flies the ship in and pauses docked with the given reason", async () => {
+  const h = harness();
+  h.setObs(calm({ holdEmpty: false }));
+  h.runner.start(script([macroStep("a", "deliver-ore")]));
+  await h.runner.tick();
+
+  assert.equal(h.runner.headHome("The approved run time ended."), true);
+  assert.equal(h.runner.headHome("The approved run time ended."), true, "already on its way is still yes");
+  let guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 50 && !h.issued.some((a) => a.kind === "warp")) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.ok(h.issued.some((a) => a.kind === "warp"), "it flies home rather than stopping in space");
+  assert.equal(h.runner.getStatus(), "running");
+
+  h.setObs(calm({ holdEmpty: false, docked: true, inSpace: false }));
+  guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 50) {
+    guard += 1;
+    await h.runner.tick();
+  }
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.match(h.progress[h.progress.length - 1]!.pauseReason ?? "", /approved run time ended/);
+});
+
+test("headHome has nothing to send when no script is running", () => {
+  const h = harness();
+  assert.equal(h.runner.headHome("The approved run time ended."), false);
+  h.runner.start(script([macroStep("a", "deliver-ore")]));
+  h.runner.pause();
+  assert.equal(h.runner.headHome("The approved run time ended."), false);
+});
+
 test("the pause reason survives the decider's cheerful why", async () => {
   // The decider's tick knows nothing about a refusal the issue then hit, so a
   // snapshot built from it alone would pause the run and still show "why".

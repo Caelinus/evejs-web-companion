@@ -165,3 +165,10 @@ test("a launch grant is exact-revision, exact-risk, and finite", () => {
   assert.equal(validateBotLaunchGrant({ ...grant, maxRuntimeMinutes: 0 }, 7, policy).ok, false);
   assert.equal(validateBotLaunchGrant(null, 7, policy).ok, false);
 });
+
+test("a run may be approved for up to 72 hours and no longer", () => {
+  const policy = analyzeBotRunPolicy(script([step("wait")]));
+  const grant = createBotLaunchGrant(7, policy, 72 * 60);
+  assert.equal(validateBotLaunchGrant(grant, 7, policy).ok, true);
+  assert.equal(validateBotLaunchGrant({ ...grant, maxRuntimeMinutes: 72 * 60 + 1 }, 7, policy).ok, false);
+});

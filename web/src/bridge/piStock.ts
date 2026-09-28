@@ -5,8 +5,9 @@
 //   • a colony's own storage — read in the roster's snapshot, pin by pin;
 //   • a pilot's hangars, ships and containers — the same snapshot's items;
 //   • corporation hangars — read through a pilot of that corporation who is
-//     online in this tab (app/piCorpRead.ts), because corp-owned goods are in
-//     no pilot's snapshot and the corp asset read needs a held session.
+//     online in this tab or flown by a server bot (app/piCorpRead.ts), because
+//     corp-owned goods are in no pilot's snapshot and the corp asset read needs
+//     a held session.
 //
 // ---------------------------------------------------------------------------
 // EVERY UNIT IS SAID WITH ITS PLACE.
@@ -70,12 +71,16 @@ export interface CorpStockRead {
   readonly corporationName: string | null;
   /**
    * - `read`         a pilot of it answered; `items` is the whole answer
-   * - `failed`       every pilot of it online here was tried and refused
-   * - `unreachable`  none of its pilots is online in this tab
+   * - `failed`       every pilot of it online here or flown by a server bot
+   *                  was tried and refused
+   * - `unreachable`  none of its pilots is online in this tab or flown by a
+   *                  server bot
    */
   readonly state: "read" | "failed" | "unreachable";
   /** The pilot whose session read it. */
   readonly viaCharacterID: number | null;
+  /** True when that session was a server bot's, not this tab's. */
+  readonly viaBot: boolean;
   /** The browser's clock when the read landed. */
   readonly readAtMs: number | null;
   readonly items: readonly CorpStockItem[];
@@ -404,7 +409,9 @@ export function stockSources(input: StockSourcesInput): StockSourceLine[] {
     const refused = corp.refusals.map((refusal) => `${nameOfPilot(refusal.characterID)} refused: ${refusal.reason}`);
     if (corp.state === "read") {
       const age = corp.readAtMs === null ? "" : ` ${formatDuration(input.browserNowMs - corp.readAtMs)} ago`;
-      const via = corp.viaCharacterID === null ? "" : ` through ${nameOfPilot(corp.viaCharacterID)}`;
+      const via = corp.viaCharacterID === null
+        ? ""
+        : ` through ${nameOfPilot(corp.viaCharacterID)}${corp.viaBot ? " (server bot)" : ""}`;
       lines.push({
         words: `${label} - read${via}${age}${refused.length > 0 ? ` (${refused.join("; ")})` : ""}`,
         warn: false,
@@ -413,7 +420,7 @@ export function stockSources(input: StockSourcesInput): StockSourceLine[] {
       lines.push({ words: `${label} - not read. ${refused.join("; ")}`, warn: true });
     } else {
       lines.push({
-        words: `${label} - not read: none of its pilots is online in this tab. Bring one online and Refresh.`,
+        words: `${label} - not read: none of its pilots is online in this tab or flown by a server bot. Bring one online and Refresh.`,
         warn: true,
       });
     }

@@ -433,6 +433,8 @@
                 <option value={240}>4 hours</option>
                 <option value={720}>12 hours</option>
                 <option value={1440}>24 hours</option>
+                <option value={2880}>48 hours</option>
+                <option value={4320}>72 hours</option>
               </select>
             </label>
           {/if}

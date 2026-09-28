@@ -78,6 +78,12 @@ test("a job longer than a sign-in gets a token longer than a sign-in", () => {
   assert.ok(webAuth.verifySessionToken(token), "and it verifies");
 });
 
+test("a 72-hour run gets a token that outlives it", () => {
+  const seventyTwoHours = 72 * 60 * 60 * 1000;
+  assert.equal(lifeOf(webAuth.createSessionToken(ACCOUNT, { ttlMs: seventyTwoHours })), seventyTwoHours);
+  assert.ok(webAuth.MAX_SESSION_TTL_MS > seventyTwoHours, "room left for the teardown margin");
+});
+
 test("an unusable or absurd life falls back rather than minting nonsense", () => {
   const config = require("../src/config");
   for (const ttlMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "soon", null, undefined]) {
@@ -89,7 +95,7 @@ test("an unusable or absurd life falls back rather than minting nonsense", () =>
   }
 });
 
-test("no caller can mint a token that outlives the day it was made in", () => {
+test("no caller can mint a token that outlives the longest approvable run", () => {
   const aYear = 365 * 24 * 60 * 60 * 1000;
   assert.equal(
     lifeOf(webAuth.createSessionToken(ACCOUNT, { ttlMs: aYear })),
