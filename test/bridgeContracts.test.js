@@ -518,6 +518,87 @@ test("⚠ a failed browse never hides the player's OWN contracts", async () => {
   assert.ok(payload.outstanding.result, "the player still sees their own contracts");
 });
 
+// --- the contracts OFFERED to this character --------------------------------
+//
+// ⚠ THE BUG THIS SECTION EXISTS FOR. GetLoginInfo COUNTS the contracts
+// assigned to you, and not one of the other four reads can return them:
+// GetMyCurrentContractList keys off issuerID and acceptorID, GetMyExpiredContractList
+// off contractNeedsAttention, and the browse asks for `availability: PUBLIC`
+// while a contract reserved for you is by definition not public. So the panel
+// said "1 waiting for you" above four empty lists, with no way to see or take
+// the contract. The route fetches the ids the count itself named.
+
+test("⚠ a contract assigned to this character is fetched IN FULL — no other read returns it", async () => {
+  const gateway = fakeGateway({
+    summaryResult: loginInfo({ assignedToMe: [[CONTRACT_ID, 140000009]] }),
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/contracts");
+
+  const fetched = gateway.calls.topLevel.filter(
+    (call) => call.service === "contractProxy" && call.method === "GetContract",
+  );
+  assert.deepEqual(fetched.map((call) => call.args), [[CONTRACT_ID]]);
+  assert.equal(payload.assigned.results.length, 1, "the contract the count referred to");
+  assert.equal(payload.assigned.numAssigned, 1);
+  assert.equal(payload.assigned.error, null);
+  // The point: every OTHER list is empty, and before this the panel had
+  // nowhere at all to show the contract it was counting.
+  assert.equal(payload.worldHasNoContracts, true);
+});
+
+test("⚠ the assigned ids come from the SUMMARY, never from the browser", async () => {
+  const gateway = fakeGateway({
+    summaryResult: loginInfo({ assignedToMe: [[CONTRACT_ID, 140000009]] }),
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  await apiRequest(baseUrl, `/api/bridge/contracts?page=0&contractID=999999`);
+
+  const fetched = gateway.calls.topLevel.filter(
+    (call) => call.service === "contractProxy" && call.method === "GetContract",
+  );
+  // A contractID in the query string is not a read the session was told about.
+  assert.deepEqual(
+    fetched.map((call) => Number(call.args[0])),
+    [CONTRACT_ID],
+    "only the ids GetLoginInfo itself named are fetched",
+  );
+});
+
+test("one assigned contract that cannot be fetched does not hide the others", async () => {
+  const gateway = fakeGateway({
+    // 999999 is not a contract the fake gateway knows, so GetContract answers
+    // null for it — the server's own "no such contract".
+    summaryResult: loginInfo({
+      assignedToMe: [[CONTRACT_ID, 140000009], [999999, 140000009]],
+    }),
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/contracts");
+
+  assert.equal(payload.assigned.results.length, 1, "the one that answered is kept");
+  // The shortfall is its own fact so the panel can say the list is incomplete
+  // rather than quietly showing fewer than the count promised.
+  assert.equal(payload.assigned.numAssigned, 2);
+  assert.equal(payload.assigned.error, "READ_FAILED");
+});
+
+test("a failed summary leaves the assigned list empty AND says why", async () => {
+  const gateway = fakeGateway({ failures: ["contractProxy.GetLoginInfo"] });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/contracts");
+
+  assert.equal(payload.summary.error, "CALL_FAILED");
+  assert.deepEqual(payload.assigned.results, []);
+  // "Nothing is offered to you" and "we could not find out" are different
+  // facts; an empty list with no error would assert the first one falsely.
+  assert.equal(payload.assigned.error, "CALL_FAILED");
+});
+
 test("each read keeps its OWN error", async () => {
   const gateway = fakeGateway({ failures: ["contractProxy.GetLoginInfo"] });
   const { baseUrl } = await startTestServer({ gateway });

@@ -43,6 +43,12 @@ export const CONTRACT_TYPE_ITEM_EXCHANGE = 1;
 export const CONTRACT_TYPE_AUCTION = 2;
 export const CONTRACT_TYPE_COURIER = 3;
 
+/**
+ * The one status that can still be taken on. Every other status means somebody
+ * already did, or the contract is over.
+ */
+export const CONTRACT_STATUS_OUTSTANDING = 0;
+
 /** What kind of contract this is, in words. */
 export const CONTRACT_TYPE_LABELS: Readonly<Record<number, string>> = {
   [CONTRACT_TYPE_ITEM_EXCHANGE]: "Item trade",

@@ -10465,12 +10465,28 @@ app.post("/api/bridge/fleet/reconnect", requireAuth, async (req, res, next) => {
 // silently DROPPED — a browse meant to show couriers would quietly answer
 // every contract type instead, with no error.
 //
-// ⚠ READS ONLY. Every contract MUTATOR (AcceptContract, CompleteContract,
-// CreateContract, DeleteContract, ...) sits on the SAME service and is refused
-// by the gateway. Accepting a contract transfers items and ISK; its signature
-// is unambiguous ([contractID, forCorp]) but there is nothing in this world to
-// accept, so an accept path could not be exercised end to end even once — and a
-// two-step confirm gate that has never been run is worse than no gate.
+// ⚠ THE COUNT AND THE LIST MUST AGREE. GetLoginInfo reports how many
+// contracts are ASSIGNED TO YOU, but NONE of the three "yours" lists contains
+// them: GetMyCurrentContractList keys off issuerID (what you issued) and
+// acceptorID (what you took on), and GetMyExpiredContractList off
+// contractNeedsAttention — an assignee is none of those. The public browse
+// cannot show them either, because a contract reserved for you is by definition
+// not `availability: PUBLIC`. So a contract handed to you personally was
+// COUNTED and then displayed NOWHERE, which reads as a broken panel.
+//
+// The count's own source is the fix: `assignedToMe` carries the contractIDs it
+// counted (buildLoginInfoRows keys off assigneeID against your character, your
+// corp AND your alliance), so the route fetches exactly those in full. Deriving
+// the list any other way re-derives the predicate and drifts from the number on
+// screen — a second unfiltered SearchContracts pages at 100 and drops
+// assignments past it, and GetContractListForOwner against your characterID
+// misses every corp- and alliance-assigned one.
+//
+// ⚠ THE WRITES LIVE ELSEWHERE (R91, POST /api/bridge/contracts/*), each
+// confirm-gated. This route stays a pure READ. Accepting moves ISK and items,
+// and contractRuntimeState guards it server-side (canAcceptContract, plus an
+// outright refusal of your own unassigned contract), so the browser cannot talk
+// its way into someone else's contract.
 
 /** contractType 3 = courier. availability 0 = public. */
 const CONTRACT_TYPE_COURIER = 3;
@@ -10486,17 +10502,54 @@ const CONTRACT_AVAILABILITY_PUBLIC = 0;
  */
 const CONTRACTS_PAGE_SIZE = 100;
 
+/**
+ * How many contracts assigned to you one panel load will fetch in full.
+ *
+ * Each one is its own GetContract, so the fan-out is BOUNDED rather than
+ * trusted to stay small. The route reports when it has been cut short, so the
+ * panel can say so rather than quietly showing fewer than the count promised.
+ */
+const ASSIGNED_CONTRACT_LIMIT = 50;
+
 function contractsListEmpty(result) {
   const contracts = readMailKeyVal(result, "contracts");
   return !contracts || !Array.isArray(contracts.items) || contracts.items.length === 0;
 }
 
 /**
- * GET /api/bridge/contracts?page= — the browse, the player's own, and the
- * summary, in one panel load.
+ * The contractIDs carried by one of GetLoginInfo's rowsets.
+ *
+ * ⚠ A ROWSET LINE IS A BARE ARRAY, not a marshalled row. buildRowset wraps
+ * the lines in a `list`, but each line is the plain positional array the
+ * handler pushed (`[contractID, issuerID]`) and JSON carries it through as an
+ * array. The `list`-wrapped form is accepted too, so a later marshalling change
+ * cannot silently empty this: an empty answer here is indistinguishable from
+ * "nothing is assigned to you", which is the one thing it must never fake.
+ */
+function readContractRowsetIDs(result, key) {
+  const lines = readMailKeyVal(readMailKeyVal(result, key), "lines");
+  const ids = [];
+  for (const line of mailListItems(lines)) {
+    const cells = Array.isArray(line) ? line : mailListItems(line);
+    const contractID = mailNumber(cells[0]);
+    if (contractID > 0 && !ids.includes(contractID)) {
+      ids.push(contractID);
+    }
+  }
+  return ids;
+}
+
+/**
+ * GET /api/bridge/contracts?page= — the browse, the player's own, the ones
+ * assigned to them, and the summary, in one panel load.
  *
  * Five INDEPENDENT reads (R2's rule): one failure never blanks the rest. A
  * player whose public browse fails still sees their own contracts.
+ *
+ * Then a SECOND phase, because it cannot start until the first has answered:
+ * the summary read is what NAMES the contracts assigned to this character, so
+ * the GetContract calls that fetch them can only be issued once it has landed.
+ * They then go out together — one extra round trip, not one per contract.
  */
 app.get("/api/bridge/contracts", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
@@ -10548,6 +10601,34 @@ app.get("/api/bridge/contracts", requireAuth, async (req, res, next) => {
     const worldHasNoContracts =
       browse.status === "fulfilled" && contractsListEmpty(browse.value.result);
 
+    // The contracts the summary just COUNTED as assigned to this character,
+    // fetched in full so the panel can list what the number refers to. The ids
+    // come from the summary read, never from the browser: nothing here can be
+    // pointed at a contract the session was not already told about.
+    const assignedIDs = readContractRowsetIDs(valueOf(summary), "assignedToMe");
+    const fetchedIDs = assignedIDs.slice(0, ASSIGNED_CONTRACT_LIMIT);
+    const assignedSettled = await Promise.allSettled(
+      fetchedIDs.map((contractID) =>
+        heldTopLevelCall(held, req.webSessionID, "contractProxy", "GetContract", [contractID], null),
+      ),
+    );
+    for (const entry of assignedSettled) {
+      if (entry.status === "rejected" && entry.reason && entry.reason.code === "SESSION_NOT_FOUND") {
+        next(entry.reason);
+        return;
+      }
+    }
+    // One contract that could not be fetched must not hide the others, so the
+    // successes are kept and the shortfall is reported as its own fact — the
+    // same rule the five reads above follow.
+    const assignedDetails = assignedSettled
+      .filter((entry) => entry.status === "fulfilled")
+      .map((entry) => entry.value.result)
+      .filter((result) => result !== null && result !== undefined);
+    const assignedError =
+      codeOf(summary) ||
+      (assignedDetails.length < fetchedIDs.length ? "READ_FAILED" : null);
+
     res.json({
       ok: true,
       characterID: held.characterID,
@@ -10558,6 +10639,14 @@ app.get("/api/bridge/contracts", requireAuth, async (req, res, next) => {
       accepted: { result: valueOf(accepted), error: codeOf(accepted) },
       expired: { result: valueOf(expired), error: codeOf(expired) },
       summary: { result: valueOf(summary), error: codeOf(summary) },
+      // Full GetContract bundles, one per contract assigned to this character.
+      // `numAssigned` is the count BEFORE the fan-out limit, so the panel can
+      // tell "that is all of them" from "that is the first 50 of them".
+      assigned: {
+        results: assignedDetails,
+        numAssigned: assignedIDs.length,
+        error: assignedError,
+      },
       worldHasNoContracts,
     });
   } catch (error) {

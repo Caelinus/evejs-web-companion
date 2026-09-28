@@ -95,11 +95,22 @@ function listBundle(rows: readonly unknown[]): unknown {
   return keyVal({ contracts: list(rows), items: { type: "dict", entries: [] } });
 }
 
-function loginInfo(): unknown {
+function loginInfo(assignedToMe: readonly unknown[] = []): unknown {
   return keyVal({
     needsAttention: rowset(["contractID", "state"], []),
     inProgress: rowset(["contractID", "startStationID", "endStationID", "expires"], []),
-    assignedToMe: rowset(["contractID", "issuerID"], []),
+    assignedToMe: rowset(["contractID", "issuerID"], assignedToMe),
+  });
+}
+
+/** One GetContract bundle — the shape the BFF hands back per assigned contract. */
+function detailBundle(overrides: Record<string, unknown> = {}): unknown {
+  return keyVal({
+    items: list([keyVal({ typeID: 34, quantity: 500, inCrate: true })]),
+    bids: list([]),
+    contract: contractRow(overrides),
+    startSolarSystemID: START_SYSTEM,
+    endSolarSystemID: END_SYSTEM,
   });
 }
 
@@ -114,6 +125,7 @@ function contractsPayload(overrides: Record<string, unknown> = {}) {
     accepted: { result: listBundle([]), error: null },
     expired: { result: listBundle([]), error: null },
     summary: { result: loginInfo(), error: null },
+    assigned: { results: [], numAssigned: 0, error: null },
     worldHasNoContracts: true,
     ...overrides,
   };
@@ -494,4 +506,245 @@ test("going offline CLEARS the contracts — they must not outlive the character
     false,
     "and the empty-world claim resets — it is only ever earned by a real browse",
   );
+});
+
+// --- contracts OFFERED to this character ------------------------------------
+//
+// ⚠ THE BUG THESE COVER. The summary counted contracts assigned to this
+// character and NOTHING on the page could show one: the browse holds public
+// contracts, `outstanding` holds what you issued, `accepted` what you took on.
+// A contract handed to you is in none of those, so the panel read "1 waiting
+// for you" over four empty lists.
+
+test("⚠ a contract offered to this character reaches a list of its OWN", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path) =>
+      path.startsWith("/api/bridge/contracts") && !path.includes("/detail")
+        ? {
+            status: 200,
+            body: contractsPayload({
+              summary: { result: loginInfo([[CONTRACT_ID, ISSUER_ID]]), error: null },
+              assigned: {
+                results: [detailBundle({ assigneeID: CHARACTER_ID, availability: 1 })],
+                numAssigned: 1,
+                error: null,
+              },
+            }),
+          }
+        : null,
+    ),
+  );
+  await flow.loadContracts(0);
+
+  const contracts = store.get().contracts;
+  assert.equal(contracts.assigned.length, 1);
+  assert.equal(contracts.assigned[0]?.contractID, CONTRACT_ID);
+  assert.equal(contracts.numAssigned, 1);
+  assert.equal(contracts.assignedError, null);
+  // The count says one is waiting, and now exactly one row backs it up.
+  assert.equal(contracts.summary?.assignedToMe, 1);
+  // Every other list is still empty — which is precisely why this one exists.
+  assert.deepEqual(contracts.browse, []);
+  assert.deepEqual(contracts.outstanding, []);
+  assert.deepEqual(contracts.accepted, []);
+  assert.deepEqual(contracts.expired, []);
+});
+
+test("a cut-short offered list keeps the BFF's total, not its own length", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path) =>
+      path.startsWith("/api/bridge/contracts") && !path.includes("/detail")
+        ? {
+            status: 200,
+            body: contractsPayload({
+              assigned: { results: [detailBundle()], numAssigned: 60, error: null },
+            }),
+          }
+        : null,
+    ),
+  );
+  await flow.loadContracts(0);
+
+  // The panel says "showing 1 of the 60 offered to you" on the strength of
+  // these two disagreeing. Recomputing the total from the rows would erase it.
+  assert.equal(store.get().contracts.assigned.length, 1);
+  assert.equal(store.get().contracts.numAssigned, 60);
+});
+
+test("a failed offered-to-you read never blanks the rest of the panel", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path) =>
+      path.startsWith("/api/bridge/contracts") && !path.includes("/detail")
+        ? {
+            status: 200,
+            body: contractsPayload({
+              outstanding: { result: listBundle([contractRow()]), error: null },
+              assigned: { results: [], numAssigned: 0, error: "CALL_FAILED" },
+            }),
+          }
+        : null,
+    ),
+  );
+  await flow.loadContracts(0);
+
+  assert.equal(store.get().contracts.assignedError, "CALL_FAILED");
+  assert.equal(store.get().contracts.outstanding.length, 1);
+});
+
+test("⚠ an offered contract's ids are asked for BY NAME like every other row", async () => {
+  const { store, flow, requests } = makeFlow(
+    respondOk((path) =>
+      path.startsWith("/api/bridge/contracts") && !path.includes("/detail")
+        ? {
+            status: 200,
+            body: contractsPayload({
+              assigned: {
+                results: [detailBundle({ assigneeID: CHARACTER_ID })],
+                numAssigned: 1,
+                error: null,
+              },
+            }),
+          }
+        : null,
+    ),
+  );
+  await flow.loadContracts(0);
+  await settleNames();
+
+  const nameRequest = requests.find((entry) => entry.path === "/api/names");
+  assert.ok(nameRequest, "names resolve in ONE batched round-trip");
+  const asked = (nameRequest.body.items as { kind: string; id: number }[]) ?? [];
+  const keys = new Set(asked.map((ref) => `${ref.kind}:${ref.id}`));
+  // Without these the row renders as "someone" running to "an unnamed
+  // station" — an id-shaped blank, which R7d forbids outright.
+  assert.ok(keys.has(`character:${ISSUER_ID}`), "who offered it");
+  assert.ok(keys.has(`station:${START_STATION}`), "where it collects from");
+  assert.ok(keys.has(`station:${END_STATION}`), "where it delivers to");
+  assert.ok(keys.has(`owner:${CHARACTER_ID}`), "and who it is reserved for");
+  assert.equal(store.get().contracts.assigned.length, 1);
+});
+
+// --- taking a contract on ----------------------------------------------------
+
+test("⚠ taking a contract on is CONFIRMED to the BFF, personally, by id", async () => {
+  const { flow, requests } = makeFlow(
+    respondOk((path, method) =>
+      path === "/api/bridge/contracts/accept" && method === "POST"
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              applied: true,
+              result: contractRow({ acceptorID: CHARACTER_ID, status: 1 }),
+            },
+          }
+        : null,
+    ),
+  );
+  await flow.acceptContract(CONTRACT_ID);
+
+  const accept = requests.find((entry) => entry.path === "/api/bridge/contracts/accept");
+  assert.ok(accept, "the write went out");
+  assert.equal(accept.method, "POST");
+  assert.equal(accept.body.contractID, CONTRACT_ID);
+  // ⚠ The BFF refuses this route outright without it. A stray POST cannot
+  // move ISK.
+  assert.equal(accept.body.confirm, true);
+  // Accepting for a corporation needs a role this panel cannot see; guessing
+  // would spend the corporation's ISK instead of the player's.
+  assert.equal(accept.body.forCorp, false);
+});
+
+test("a contract taken on RELOADS the panel rather than guessing the new lists", async () => {
+  const { store, flow, requests } = makeFlow(
+    respondOk((path, method) =>
+      path === "/api/bridge/contracts/accept" && method === "POST"
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              applied: true,
+              result: contractRow({ acceptorID: CHARACTER_ID, status: 1 }),
+            },
+          }
+        : null,
+    ),
+  );
+  await flow.acceptContract(CONTRACT_ID);
+
+  assert.equal(store.get().contracts.acceptedContractID, CONTRACT_ID);
+  assert.equal(store.get().contracts.acceptError, null);
+  // An accepted contract leaves "offered to you", joins "taken on" and changes
+  // every count in the summary. Only the server knows all of that.
+  assert.ok(
+    requests.some(
+      (entry) => entry.path.startsWith("/api/bridge/contracts?") ||
+        entry.path === "/api/bridge/contracts",
+    ),
+    "the panel reloaded",
+  );
+  assert.equal(store.get().contracts.accepting, null, "the button is live again");
+});
+
+test("⚠ an ack with no contract in it is a DECLINE, not a success", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path, method) =>
+      path === "/api/bridge/contracts/accept" && method === "POST"
+        ? // AcceptContract answers the accepted row, and NULL when the
+          // settlement did not go through. A 200 is not proof.
+          { status: 200, body: { ok: true, applied: true, result: null } }
+        : null,
+    ),
+  );
+  await flow.acceptContract(CONTRACT_ID);
+
+  assert.equal(store.get().contracts.acceptedContractID, null);
+  assert.match(String(store.get().contracts.acceptError), /not taken on/i);
+  assert.equal(store.get().contracts.accepting, null);
+});
+
+test("a refusal is surfaced in the SERVER's words, not reworded", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path, method) =>
+      path === "/api/bridge/contracts/accept" && method === "POST"
+        ? {
+            status: 500,
+            body: {
+              ok: false,
+              error: "CUSTOM_INFO",
+              message: "You do not have enough ISK to cover the collateral.",
+            },
+          }
+        : null,
+    ),
+  );
+  await flow.acceptContract(CONTRACT_ID);
+
+  // "Not enough ISK" and "no room for the cargo" are different problems with
+  // different fixes; a house sentence would throw that away.
+  assert.equal(
+    store.get().contracts.acceptError,
+    "You do not have enough ISK to cover the collateral.",
+  );
+  assert.equal(store.get().contracts.acceptedContractID, null);
+});
+
+test("⚠ opening a DIFFERENT contract drops the last accept's verdict", async () => {
+  const { store, flow } = makeFlow(
+    respondOk((path, method) =>
+      path === "/api/bridge/contracts/accept" && method === "POST"
+        ? {
+            status: 500,
+            body: { ok: false, error: "CUSTOM_INFO", message: "Someone got there first." },
+          }
+        : null,
+    ),
+  );
+  await flow.acceptContract(CONTRACT_ID);
+  assert.match(String(store.get().contracts.acceptError), /got there first/);
+
+  // A refusal belongs to the contract it was about. Left in place it would sit
+  // under the next contract the player opens, saying something untrue of it.
+  await flow.openContract(CONTRACT_ID);
+  assert.equal(store.get().contracts.acceptError, null);
 });

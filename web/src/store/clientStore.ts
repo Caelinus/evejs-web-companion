@@ -383,12 +383,18 @@ const INITIAL_CONTRACTS: ContractsState = Object.freeze({
   outstanding: Object.freeze([]) as readonly ContractRow[],
   accepted: Object.freeze([]) as readonly ContractRow[],
   expired: Object.freeze([]) as readonly ContractRow[],
+  assigned: Object.freeze([]) as readonly ContractRow[],
+  numAssigned: 0,
   summary: null as ContractSummary | null,
   detail: null as ContractDetail | null,
   loaded: false,
   browseError: null,
   mineError: null,
+  assignedError: null,
   detailError: null,
+  accepting: null as number | null,
+  acceptError: null,
+  acceptedContractID: null as number | null,
   worldHasNoContracts: false,
 });
 
@@ -1425,18 +1431,58 @@ export function createClientStore(): ClientStore {
           outstanding: [...event.outstanding],
           accepted: [...event.accepted],
           expired: [...event.expired],
+          assigned: [...event.assigned],
+          numAssigned: event.numAssigned,
           summary: event.summary,
           loaded: true,
           browseError: event.browseError,
           mineError: event.mineError,
+          assignedError: event.assignedError,
           worldHasNoContracts: event.worldHasNoContracts,
         });
         break;
-      case "contracts/detail":
-        contracts.set({ ...contracts.get(), detail: event.detail, detailError: null });
+      case "contracts/detail": {
+        // ⚠ THE ACCEPT VERDICT BELONGS TO THE CONTRACT THAT WAS OPEN. Opening
+        // a different one must not leave "that was refused" — or worse, "you
+        // have taken this on" — sitting under a contract it says nothing about.
+        // The one detail that keeps it is the contract just taken on — which
+        // is exactly the one the accept reopens, so the player sees the
+        // outcome of what they pressed.
+        const previous = contracts.get();
+        const aboutThisContract =
+          event.detail !== null &&
+          previous.acceptedContractID !== null &&
+          event.detail.contract.contractID === previous.acceptedContractID;
+        contracts.set({
+          ...previous,
+          detail: event.detail,
+          detailError: null,
+          acceptError: aboutThisContract ? previous.acceptError : null,
+          acceptedContractID: aboutThisContract ? previous.acceptedContractID : null,
+        });
         break;
+      }
       case "contracts/detail-error":
         contracts.set({ ...contracts.get(), detailError: event.message });
+        break;
+      case "contracts/accepting":
+        // Starting an attempt clears the last one's verdict: a stale "that was
+        // refused" next to a running accept says nothing true about either.
+        contracts.set({
+          ...contracts.get(),
+          accepting: event.contractID,
+          ...(event.contractID === null ? {} : { acceptError: null, acceptedContractID: null }),
+        });
+        break;
+      case "contracts/accepted":
+        contracts.set({
+          ...contracts.get(),
+          acceptedContractID: event.contractID,
+          acceptError: null,
+        });
+        break;
+      case "contracts/accept-error":
+        contracts.set({ ...contracts.get(), acceptError: event.message });
         break;
       case "contracts/cleared":
         contracts.set(INITIAL_CONTRACTS);
