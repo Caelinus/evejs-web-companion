@@ -37,6 +37,7 @@
   } from "../bots/macroCatalogView.ts";
   import { EXAMPLE_BOTS, type ExampleBot } from "../bots/exampleBots.ts";
   import { insertSavedBotSteps, type FlatProgramNode } from "../bots/scriptEdit.ts";
+  import { watchBuilderEdits } from "../bots/builderHandoff.ts";
   import { branchSentence, stepSentence, subBotSentence } from "../bots/scriptText.ts";
   import { validateScript, type ScriptProblem } from "../bots/validateScript.ts";
   import { decodeScriptText, decodeScriptValue, encodeScriptDoc } from "../bots/scriptCodec.ts";
@@ -384,8 +385,9 @@
    *
    * The pure helper APPENDS and reserves every id already in the bot (steps +
    * watches), so repeated inserts cannot collide with each other or with a
-   * loaded/imported branch. A source bot with a top-level repeating group is
-   * not silently flattened — that part is left out and named in `insertNote`.
+   * loaded/imported branch. A source bot's repeating group (how the editor saves
+   * any repeating bot) has its steps copied in once; this bot's own repeat
+   * setting then governs them, and `insertNote` says so.
    */
   async function insertSavedBot(meta: BotScriptSummary): Promise<void> {
     try {
@@ -940,6 +942,10 @@
   }
   onMount(() => {
     void refreshSaved();
+    // "Edit" on a Bot Manager library row: load exactly the bot that was clicked.
+    return watchBuilderEdits(flow, (scriptID) => {
+      void loadSaved(scriptID);
+    });
   });
 </script>
 

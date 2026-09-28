@@ -33,6 +33,7 @@
   import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
   import { lastSavedPhrase, libraryView, savedByLabel } from "../bots/libraryView.ts";
+  import { requestBuilderEdit } from "../bots/builderHandoff.ts";
   import {
     serverBotFor,
     serverOnlyBots,
@@ -129,7 +130,11 @@
   const view = $derived(libraryView(loaded, error, scripts, query));
   const filtered = $derived(view.kind === "rows" ? view.rows : []);
 
-  function edit(_scriptID: string): void {
+  function edit(scriptID: string): void {
+    // The tab switch carries no payload, so the script rides this pilot's
+    // one-shot mailbox; the Builder loads it on open (or at once, if its
+    // window is already up).
+    requestBuilderEdit(flow, scriptID);
     onOpen?.("botBuilder");
   }
 
