@@ -467,25 +467,8 @@ app.use((req, res, next) => {
 // confirmation-gated BFF route. The BFF also projects browser session fields
 // onto an explicit presentation-only allowlist; `userid` always comes from the
 // signed login session. Wire contract: docs/bridge-wire-contract.md.
-const RETIRED_WEB_COMPANION_CHAT_CALLS = new Set([
-  "LSC.GetChannels",
-  "LSC.SendMessage",
-]);
-
 app.post("/api/bridge/call", requireAuth, async (req, res, next) => {
   const body = req.body || {};
-  if (
-    typeof body.service === "string" &&
-    typeof body.method === "string" &&
-    RETIRED_WEB_COMPANION_CHAT_CALLS.has(`${body.service}.${body.method}`)
-  ) {
-    res.status(404).json({
-      ok: false,
-      error: "BRIDGE_METHOD_UNAVAILABLE",
-      message: `${body.service}.${body.method} is not available in the web companion.`,
-    });
-    return;
-  }
   if (isBridgeWritePair(body.service, body.method)) {
     res.status(403).json({
       ok: false,
@@ -540,6 +523,13 @@ function forgetBridgeSession(webSessionID) {
   bridgeSessions.delete(webSessionID);
   publishStreamStatus(held, "ended", "session_released");
   closeHeldStream(held);
+  // The chat connection is this character's presence in Local: it has to go
+  // when the character does, or a pilot nobody is flying stays in the member
+  // list until the stub reaps a half-open socket.
+  if (held.chat) {
+    held.chat.close();
+    held.chat = null;
+  }
   for (const subscriber of [...held.streamSubscribers]) {
     held.streamSubscribers.delete(subscriber);
     try {
@@ -872,7 +862,14 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       streamSubscribers: new Set(),
       streamCursor: null,
       streamRetryTimer: null,
+      // R7 chat: the XMPP connection this character speaks Local and Corp on.
+      // Opened right below, as a retail client does at login — see
+      // joinHeldChat.
+      chat: null,
     });
+    // The character is online; put it in its rooms. Fire-and-forget: a chat
+    // server that is down must never stop a pilot coming online.
+    joinHeldChat(bridgeSessions.get(req.webSessionID));
     res.json({
       ok: true,
       character: {
@@ -5826,13 +5823,14 @@ app.post("/api/bridge/bookmarks/move", requireAuth, async (req, res, next) => {
 //     later); confirm-gated here.
 //
 // ⚠ EXTRA-CARE writes — reachable + confirm-gated, NEVER fired on the live world
-// in this plumbing pass: CreateCharacterWithDoll (creates a whole character) and
-// CancelCharacterDeletePrepare (char-lifecycle).
+// in this plumbing pass: CreateCharacterWithDoll (creates a whole character),
+// LSC.SendMessage (sends an OUTWARD chat message), CancelCharacterDeletePrepare
+// (char-lifecycle).
 //
 // FAST-MODE educated-guess responses: every handler returns null except
 // AddOwnerNote (a new noteID), ToggleValidation (a bool) and CreateCharacterWithDoll
 // (the new characterID) — dispatchBridgeWrite surfaces `result` for those; the
-// decoders (web/src/bridge/{characterProfile,charAccount}.ts) read the acks.
+// decoders (web/src/bridge/{characterProfile,charAccount,chat}.ts) read the acks.
 
 // --- charMgr WRITES (12) — all SESSION-scoped -------------------------------
 
@@ -6277,6 +6275,24 @@ app.post("/api/bridge/gm/slash", requireAuth, async (req, res, next) => {
     return;
   }
   await dispatchBridgeWrite(req, res, next, "slash", "SlashCmd", [command]);
+});
+
+// --- LSC WRITES (1) ---------------------------------------------------------
+
+// ⚠ EXTRA-CARE (OUTWARD — sends a live chat message) — reachable + gated, NEVER
+// fired live. SendMessage(channelID, message).
+app.post("/api/bridge/chat/send-message", requireAuth, async (req, res, next) => {
+  if (!requireWriteConfirmation(req, res, "This sends a message to that channel. This must be confirmed explicitly.")) {
+    return;
+  }
+  const body = req.body || {};
+  const message = typeof body.message === "string" ? body.message : "";
+  if (!message.trim()) {
+    res.status(400).json({ ok: false, error: "MESSAGE_EMPTY", message: "A message is required." });
+    return;
+  }
+  const channelID = body.channelID !== undefined ? Number(body.channelID) || 0 : 0;
+  await dispatchBridgeWrite(req, res, next, "LSC", "SendMessage", [channelID, message]);
 });
 
 // --- R89 FINANCIAL WRITES ---------------------------------------------------
@@ -12307,16 +12323,16 @@ app.get("/api/bridge/calendar", requireAuth, async (req, res, next) => {
   }
 });
 
-// --- R60 plumbing sweep: lookup / presence reads (no UI) ---------------------
-// PLUMBING ONLY: two routes make the lookupSvc SEARCH and onlineStatus presence
-// reads reachable + decodable so a later goal builds UI
+// --- R60 plumbing sweep: lookup / presence / social reads (no UI) -------------
+// PLUMBING ONLY: three routes make the lookupSvc SEARCH, onlineStatus presence,
+// and LSC/account social READS reachable + decodable so a later goal builds UI
 // cheaply. No panel/tab/store slice ships. Every read is an allowlisted
 // TOP-LEVEL call on the held session, scoped to the logged-in character
 // server-side; each route batches its reads with Promise.allSettled (empty ≠
 // failed; each read carries its own error code), and a SESSION_NOT_FOUND on any
 // read surfaces via next() so the page returns to character select. The raw
 // retail-shaped results ship out; the browser decodes them
-// (web/src/bridge/{lookup,presence}.ts).
+// (web/src/bridge/{lookup,presence,social}.ts).
 
 // A trimmed string from a query param, or "". Used for the lookup search term.
 function stringQuery(value) {
@@ -12464,6 +12480,49 @@ app.get("/api/bridge/presence", requireAuth, async (req, res, next) => {
         onlineStatus: settledCode(onlineStatus),
         initialState: settledCode(initialState),
         prime: settledCode(prime),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/bridge/social — two unrelated social reads (Promise.allSettled):
+//   • LSC.GetChannels() -> a Rowset with the 16 channel-info columns, one line
+//     per channel the session is in (the docked Local channel). ownerID kept as
+//     data (R7d); the message/join/leave LSC writers stay refused.
+//   • account.GetDefaultContactCost() -> ⚠ null in this world (a `return null`
+//     stub; the CSPA contact charge is not modelled). A legitimate "no default
+//     cost" answer, not a failure.
+app.get("/api/bridge/social", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  try {
+    const [channels, defaultContactCost] = await Promise.allSettled([
+      heldTopLevelCall(held, req.webSessionID, "LSC", "GetChannels", [], null),
+      heldTopLevelCall(held, req.webSessionID, "account", "GetDefaultContactCost", [], null),
+    ]);
+    for (const outcome of [channels, defaultContactCost]) {
+      if (outcome.status === "rejected" && outcome.reason && outcome.reason.code === "SESSION_NOT_FOUND") {
+        next(outcome.reason);
+        return;
+      }
+    }
+    const settledCode = (outcome) =>
+      outcome.status === "rejected"
+        ? String((outcome.reason && outcome.reason.code) || "READ_FAILED")
+        : null;
+    const settledValue = (outcome) =>
+      outcome.status === "fulfilled" ? outcome.value.result : null;
+    res.json({
+      ok: true,
+      channels: settledValue(channels),
+      defaultContactCost: settledValue(defaultContactCost),
+      errors: {
+        channels: settledCode(channels),
+        defaultContactCost: settledCode(defaultContactCost),
       },
     });
   } catch (error) {
@@ -14671,6 +14730,213 @@ app.get("/api/bridge/killboard", requireAuth, async (req, res, next) => {
   }
 });
 
+// --- R7 Local + Corp chat ---------------------------------------------------
+// The browser reads a channel's member roster + recent messages and sends
+// messages to Local or Corp on the held session. The BFF holds the connection
+// server-side (never in browser JS); the browser addresses channels by name
+// only. Wire contract: docs/bridge-wire-contract.md.
+//
+// ⚠ THE TRANSPORT CHANGED UNDER THESE ROUTES, THEIR SHAPE DID NOT. Until EveJS
+// v0.12.8 both routes proxied `POST /_evejs-web/v1/chat/read|send`, which read
+// the server's backlog store. That drop deleted those routes, deleted
+// `runtime.readChat`/`sendChat` and `gatewayServices/webChatGatewayService.js`,
+// and marked every browser-backed session as having left Local
+// (`session._localChatDeparted = true`). The reads began answering 404 on every
+// companion tick and every chat-ordered behaviour went silently dead.
+//
+// They are now served by an XMPP client (`src/evejsXmppChat.js`) speaking to the
+// same stub server the retail client speaks to, joined as the held character.
+// The response envelope is unchanged, so `web/src/bridge/chat.ts`, the Chat
+// panel and the fleet companion's order rung all read exactly what they read
+// before.
+//
+// Two honest differences from the backlog-store era:
+//   • `notifications` is always empty. The old route drained the gateway's
+//     capture buffer as a side effect of asking it for chat; this transport
+//     never touches the gateway, and every other bridge call still drains.
+//   • READ returns what was said WHILE THIS SESSION WAS LISTENING, plus (for
+//     Corp) the join-time backlog the room replays. Local has no history in
+//     retail and the stub matches it, so a Local read right after connecting is
+//     empty until somebody speaks. The old store-backed read could answer with
+//     lines from before the browser existed.
+
+const CHAT_CHANNELS = new Set(["local", "corp"]);
+
+/**
+ * The held session's chat connection, opened on first use.
+ *
+ * ⚠ THE CHARACTER ID COMES OFF THE HELD SESSION AND NOWHERE ELSE. The stub
+ * authenticates SASL PLAIN without checking the secret — the JID's local part IS
+ * the identity — so the only thing standing between this BFF and impersonating
+ * an arbitrary pilot in Local is that this line reads `held.characterID`. It
+ * must never take an id from a request.
+ */
+function heldChatSession(held) {
+  if (!held.chat) {
+    // ⚠ FROM THE INJECTED GATEWAY CLIENT, NOT IMPORTED DIRECTLY, and that is
+    // load-bearing rather than tidy. Chat is a second port on the same EveJS
+    // process, so it belongs to the same injected dependency as every other
+    // call to that server — which means an app built with a FAKE gateway (every
+    // test but the chat one) has no chat at all and cannot open a socket to
+    // whatever happens to be listening on the real 5222. Importing the client
+    // here instead made a character select in any unrelated test connect to the
+    // live game server and put a phantom pilot in somebody's Local.
+    if (typeof gateway.createChatSession !== "function") {
+      return null;
+    }
+    held.chat = gateway.createChatSession({
+      characterID: held.characterID,
+      log: (line) => console.log(line),
+    });
+  }
+  return held.chat;
+}
+
+/** The error a chat route answers with when this app has no chat transport. */
+function chatUnavailable(res) {
+  res.status(503).json({
+    ok: false,
+    error: "CHAT_NOT_AVAILABLE",
+    message: "This server has no chat transport configured.",
+  });
+}
+
+/**
+ * Put this character in its chat rooms, the way a retail client does at login.
+ *
+ * ⚠ EAGER, NOT LAZY, AND THAT IS A CORRECTION. The first cut opened the chat
+ * connection on the first chat READ, reasoning that a session nobody reads chat
+ * for should not appear in anyone's Local. That is not how a pilot works: the
+ * retail client connects and joins Local and Corp in the same breath as
+ * selecting a character (its own login is two `<presence to='local_…'>` /
+ * `to='corp_…'` stanzas about a hundred milliseconds after the bind), and a
+ * character who is online but in no room is a pilot nobody in the system can
+ * see or talk to. Worse for this project's own purpose: nothing read chat until
+ * a companion was actually RUNNING, so an idle-but-online companion could not
+ * even be addressed.
+ *
+ * ⚠ NEVER FAILS THE CALLER. A chat server that is down must not stop a
+ * character coming online — this is fire-and-forget by design, and a read is
+ * still the thing that reports the failure to whoever asked for chat.
+ */
+function joinHeldChat(held) {
+  const chat = heldChatSession(held);
+  if (chat === null) {
+    return;
+  }
+  const context = { solarSystemID: Number(held.solarSystemID) || 0 };
+  for (const channel of ["local", "corp"]) {
+    chat
+      .ensureChannel(channel, context)
+      .catch((error) => {
+        console.warn(
+          `[chat] ${channel} join failed for character ${held.characterID}: ${error.message}`,
+        );
+      });
+  }
+}
+
+/**
+ * Keep an ALREADY-CONNECTED session in the right rooms as its pilot moves.
+ *
+ * Called from the flight-status read, which is the one call every session makes
+ * continuously and the place `held.solarSystemID` is kept current. Retail's own
+ * auto-move (`chatHub.moveLocalSession`) rides on `sendSessionChange`, a capture
+ * stub for a browser-backed session, so without this a pilot that jumps keeps
+ * listening to the system it left.
+ *
+ * ⚠ SILENT, AND ONLY FOR A SESSION THAT ALREADY HAS A CONNECTION. It runs on
+ * every poll, so it must neither open a connection for a session that never
+ * wanted one nor log a line each time a down chat server stays down. The client
+ * throttles its own reconnects; the read route is where a failure is reported.
+ */
+function followHeldChat(held) {
+  if (!held.chat) {
+    return;
+  }
+  const context = { solarSystemID: Number(held.solarSystemID) || 0 };
+  for (const channel of ["local", "corp"]) {
+    held.chat.ensureChannel(channel, context).catch(() => {});
+  }
+}
+
+function chatContext(held, req) {
+  return {
+    // The system the held session is in RIGHT NOW, kept current by every
+    // flight-status read. Used only to notice that this pilot has MOVED — the
+    // room itself is resolved server-side from the session, so nothing here
+    // computes a room name. See ensureChannel in src/evejsXmppChat.js.
+    solarSystemID: Number(held.solarSystemID) || 0,
+    limit: Number(req.query?.limit) || undefined,
+  };
+}
+
+function normalizeChatChannel(res, value) {
+  const channel = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!CHAT_CHANNELS.has(channel)) {
+    res.status(400).json({
+      ok: false,
+      error: "INVALID_CHANNEL",
+      message: "channel must be 'local' or 'corp'.",
+    });
+    return null;
+  }
+  return channel;
+}
+
+app.get("/api/bridge/chat/:channel", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  const channel = normalizeChatChannel(res, req.params.channel);
+  if (!channel) {
+    return;
+  }
+  const session = heldChatSession(held);
+  if (session === null) {
+    chatUnavailable(res);
+    return;
+  }
+  try {
+    const chat = await session.read(channel, chatContext(held, req));
+    res.json({ ok: true, chat, notifications: [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bridge/chat/:channel/send", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  const channel = normalizeChatChannel(res, req.params.channel);
+  if (!channel) {
+    return;
+  }
+  const message = typeof req.body?.message === "string" ? req.body.message : "";
+  if (!message.trim()) {
+    res.status(400).json({
+      ok: false,
+      error: "EMPTY_MESSAGE",
+      message: "message must be a non-empty string.",
+    });
+    return;
+  }
+  const session = heldChatSession(held);
+  if (session === null) {
+    chatUnavailable(res);
+    return;
+  }
+  try {
+    const chat = await session.send(channel, message, chatContext(held, req));
+    res.json({ ok: true, chat, notifications: [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // R5a flight (manually-stepped space movement): undock -> warp -> jump -> dock,
 // each an explicit step the browser issues (no timer loop — the autopilot
 // decide-loop is R5b). EveJS's space handlers stay authoritative for every
@@ -14820,6 +15086,11 @@ async function readHeldFlight(held, webSessionID) {
     if (Number(flight.solarSystemID) > 0) {
       held.solarSystemID = Number(flight.solarSystemID);
     }
+    // The pilot's chat rooms follow the pilot. This is the one read every
+    // session makes continuously, and the place the system id above is kept
+    // current, so it is where a jump turns into a Local re-join — retail's own
+    // auto-move never fires for a browser-backed session. See followHeldChat.
+    followHeldChat(held);
     // A latched ("failed") transition is resolved by exactly this kind of
     // fresh authoritative read — the write either landed (adopt it) or never
     // took (release the latch). Every client polls flight status continuously,
@@ -15279,6 +15550,57 @@ app.post("/api/bridge/station/repair", requireAuth, async (req, res, next) => {
   }
 });
 
+// Warp to a FLEET MEMBER — beyonce.CmdWarpToStuff("char", characterID), the
+// retail "warp to" on a fleet-window row.
+//
+// ⚠ THE ONLY WARP THAT WORKS WHEN THE DESTINATION IS NOT ON THIS GRID, which is
+// the whole reason it exists: every other variant takes something the pilot can
+// already see. The server resolves the member's position itself
+// (`resolveFleetMemberWarpTarget`, beyonceService.js) and enforces the rules
+// this route therefore does not restate: both characters must be in the SAME
+// FLEET, the target must be online, and an Abyssal runner is refused outright.
+// Those refusals arrive as the handler's own CALL_REFUSED, so a stale or wrong
+// character id fails loudly instead of warping the ship somewhere nobody named.
+app.post("/api/bridge/flight/warp-member", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  const characterID = Number(req.body && req.body.characterID) || 0;
+  if (characterID <= 0) {
+    res.status(400).json({
+      ok: false,
+      error: "INVALID_TARGET",
+      message: "A positive characterID is required.",
+    });
+    return;
+  }
+  const minRange = Number(req.body && req.body.minRange) || 0;
+  try {
+    const before = await readHeldFlight(held, req.webSessionID);
+    if (!requireInSpace(res, before.flight)) {
+      return;
+    }
+    const outcome = await boundCall(
+      held,
+      req.webSessionID,
+      parkBindSpec(before.flight.solarSystemID),
+      "CmdWarpToStuff",
+      ["char", characterID],
+      minRange > 0 ? { minRange } : null,
+    );
+    const after = await readHeldFlightAfterCommand(held, req.webSessionID, before);
+    res.json({
+      ok: true,
+      result: outcome.result,
+      flight: after.flight,
+      notifications: [...outcome.notifications, ...after.notifications],
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Warp to a SAVED BOOKMARK — beyonce.CmdWarpToStuff("bookmark", bookmarkID).
 // The server resolves the bookmark itself (site entity, raw point, or a
 // mission-scoped instance via its metadata) and refuses one that is not the
@@ -15330,8 +15652,19 @@ app.post("/api/bridge/flight/jump", requireAuth, async (req, res, next) => {
   }
   const fromGateID = Number(req.body && req.body.fromGateID) || 0;
   const toGateID = Number(req.body && req.body.toGateID) || 0;
-  if (fromGateID <= 0 || toGateID <= 0) {
-    res.status(400).json({ ok: false, error: "INVALID_GATE", message: "Positive fromGateID and toGateID are required." });
+  // ⚠ `toGateID` IS OPTIONAL, AND THIS CHECK USED TO PRETEND OTHERWISE. It
+  // demanded a positive far-side gate, which made a jump impossible for any
+  // caller that knows which gate it is sitting on but has not solved a route --
+  // the fleet companion answering a `JumpTo` broadcast is exactly that caller,
+  // and it stopped at the gate for a whole phase because of this line.
+  //
+  // The GAME never required it: `jumpSessionViaStargate` resolves the
+  // destination from `sourceGate.destinationID` when the far id is absent and
+  // rejects only a MISMATCHED one (STARGATE_DESTINATION_MISMATCH), so passing 0
+  // through is both safe and exactly what the server expects. A stargate knows
+  // where it goes.
+  if (fromGateID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_GATE", message: "A positive fromGateID is required." });
     return;
   }
   try {
@@ -18899,12 +19232,14 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
 
 // ── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies: it keeps running when the tab that started it goes
-// away. Start names a saved Bot Builder script; the host runs it on a session
-// of its own. Everything is account-scoped through requireAuth, same as the
+// away. Start names a saved Bot Builder script, OR (kind: "companion") carries
+// a fleet companion's own typed request — the host runs either on a session of
+// its own. Everything is account-scoped through requireAuth, same as the
 // script library above.
 const BOT_START_STATUS = {
   BOTSCRIPT_INVALID: 400,
   BOTSCRIPT_REVISION_REQUIRED: 400,
+  BOTCOMPANION_INVALID: 400,
   BOT_GRANT_REQUIRED: 400,
   BOT_GRANT_INVALID: 400,
   BOT_GRANT_STALE: 409,
@@ -19111,22 +19446,36 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
   try {
     const body = req.body || {};
     const characterID = Number(body.characterID || 0);
-    const scriptID = String(body.scriptID || "");
+    // Absent = "script", matching botHost's own default for an unmarked
+    // request — the same compatibility rule a persisted roster row with no
+    // `kind` field gets on resume.
+    const kind = body.kind === "companion" ? "companion" : "script";
     if (!Number.isSafeInteger(characterID) || characterID <= 0) {
       res.status(400).json({ ok: false, error: "INVALID_CHARACTER", message: "A positive characterID is required." });
       return;
     }
     // The character must be the caller's — the same ownership read select does.
+    // Identical for both kinds: owning the character is the one gate that
+    // never differs by what is about to fly it.
     const character = await store.getCharacterForAccount(req.account.accountID, characterID);
     if (!character) {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
-    const record = botScripts.get(scriptID);
-    if (!record) {
-      res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
-      return;
+
+    let record = null;
+    if (kind === "script") {
+      const scriptID = String(body.scriptID || "");
+      record = botScripts.get(scriptID);
+      if (!record) {
+        res.status(404).json({ ok: false, error: "BOTSCRIPT_NOT_FOUND", message: "That bot could not be found." });
+        return;
+      }
     }
+    // A companion has no library entry to look up here — its "record" is the
+    // request in the body, and botHost.start() is the one place that decodes
+    // and trusts it (decodeFleetCompanionRequestValue).
+
     // THE HANDOVER IS SERVER-SIDE AND ATOMIC: when the caller's OWN session is
     // the one flying this character, release it here — then the bot exists the
     // moment this request answers. The old shape (tab releases itself, THEN
@@ -19134,20 +19483,31 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
     // login screen while no bot was registered yet, so its bot-flying marks
     // polled empty until the next tick. Only the caller's own hull moves:
     // any OTHER session flying the character is still refused by the host's
-    // CHARACTER_IN_USE check below.
+    // CHARACTER_IN_USE check below. Identical for a script or a companion —
+    // this is a hull handover, not a behaviour choice.
     const callerHeld = bridgeSessions.get(req.webSessionID);
     if (callerHeld && Number(callerHeld.characterID) === characterID) {
       await releaseHeldBridgeSession(req.webSessionID);
     }
-    const outcome = await botHost.start({
-      account: req.account,
-      characterID,
-      scriptID: record.scriptID,
-      scriptName: record.name,
-      scriptRev: record.rev,
-      doc: record.doc,
-      grant: body.grant,
-    });
+    const outcome =
+      kind === "companion"
+        ? await botHost.start({
+            account: req.account,
+            characterID,
+            kind: "companion",
+            request: body.request,
+            grant: body.grant,
+          })
+        : await botHost.start({
+            account: req.account,
+            characterID,
+            kind: "script",
+            scriptID: record.scriptID,
+            scriptName: record.name,
+            scriptRev: record.rev,
+            doc: record.doc,
+            grant: body.grant,
+          });
     if (!outcome.ok) {
       res.status(BOT_START_STATUS[outcome.code] || 500).json({
         ok: false,
@@ -19389,16 +19749,6 @@ app.use("/assets", express.static(path.join(webAppDir, "assets"), {
   immutable: true,
   maxAge: "30d",
 }));
-
-// API requests must never fall through to the SPA document. In particular, a
-// retired endpoint needs a real refusal rather than index.html with a 200.
-app.use("/api", (req, res) => {
-  res.status(404).json({
-    ok: false,
-    error: "API_ROUTE_NOT_FOUND",
-    message: "This web companion API route is not available.",
-  });
-});
 
 app.use(express.static(webAppDir));
 app.get(/.*/, (req, res) => {

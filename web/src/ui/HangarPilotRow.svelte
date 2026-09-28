@@ -34,6 +34,8 @@
     onStopBot,
     onToggleSquadMenu,
     onToggleSquad,
+    companionEnabledFor = () => false,
+    onToggleCompanion = () => {},
   }: {
     pilot: HangarPilot;
     selected: boolean;
@@ -59,6 +61,21 @@
     onStopBot?: () => void;
     onToggleSquadMenu: () => void;
     onToggleSquad: (squadID: string) => void;
+    /**
+     * Whether this pilot is set up to fly a companion in one squad.
+     *
+     * ⚠ PRESENCE IS THE WHOLE SETTING NOW. There used to be a role here, and
+     * the role doubled as this same yes/no -- picking one meant "yes, and this
+     * is the job"; picking none meant "no". With the role gone
+     * (docs/fleet-companion-simplification.md, "The one-line version"), the
+     * yes/no is asked directly: a companion setup either exists for this pilot
+     * in this squad or it does not, and there is nothing left in the hangar to
+     * tune -- the setup it starts with is the shipped default. See
+     * `companionConfigFor` in hangarPrefs.ts.
+     */
+    companionEnabledFor?: (squadID: string) => boolean;
+    /** Turn a companion setup on (shipped defaults) or off (remove it) for one squad. */
+    onToggleCompanion?: (squadID: string) => void;
   } = $props();
 
   // Manage mode deliberately makes the row inert: it is the mode where you
@@ -202,6 +219,18 @@
             <div class="hangar-squadmenu-list">
               {#each squads as squad (squad.id)}
                 {@const member = memberOf.has(squad.id)}
+                <!--
+                  ⚠ THE TICK STAYS ITS OWN BUTTON AND THE SETUP SITS BENEATH IT.
+                  A control nested inside that button would be invalid HTML and
+                  would fire the membership toggle on every click, so the
+                  companion toggle is a sibling, not a child.
+
+                  ⚠ AND IT APPEARS ONLY FOR A SQUAD THIS PILOT IS IN. Growing
+                  EVERY row was tried before and rejected -- at eleven squads it
+                  made each row about 230px tall (docs/pilot-hangar.md). A pilot
+                  is typically in one or two squads, so this grows the one or
+                  two rows that have something to say.
+                -->
                 <button
                   type="button"
                   class="hangar-squadmenu-row"
@@ -213,6 +242,29 @@
                   <span class="hangar-swatch" style:background={squad.color}></span>
                   <span class="hangar-squadmenu-name">{squad.name}</span>
                 </button>
+                {#if member}
+                  <!--
+                    ⚠ A TOGGLE, NOT A PICKER, AND THAT IS THE WHOLE OF WHAT
+                    LIVES HERE NOW. There used to be a role select (setting
+                    both "is this pilot a companion here" and "what job") and a
+                    second checkbox underneath it for tagging. The role is gone
+                    (docs/fleet-companion-simplification.md) and tagging is
+                    every pilot's, gated by the server's own commander check --
+                    so the only question left is yes/no, and this is the whole
+                    of it. Ticking it writes the shipped default setup; there
+                    is nothing in the hangar left to tune.
+                  -->
+                  <div class="hangar-squadmenu-setup">
+                    <label class="hangar-squadmenu-setuprow">
+                      <input
+                        type="checkbox"
+                        checked={companionEnabledFor(squad.id)}
+                        onchange={() => onToggleCompanion(squad.id)}
+                      />
+                      <span>Flies as companion</span>
+                    </label>
+                  </div>
+                {/if}
               {/each}
               {#if squads.length === 0}
                 <div class="hangar-picker-empty">No squads yet.</div>

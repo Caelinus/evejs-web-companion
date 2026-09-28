@@ -1,6 +1,7 @@
 "use strict";
 
 const { WebSocket } = require("ws");
+const { createXmppChatSession } = require("./evejsXmppChat");
 
 const DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:26002/_evejs-web/v1";
 const DEFAULT_TIMEOUT_MS = 1500;
@@ -546,10 +547,31 @@ async function callBoundMethod(service, method, args = [], kwargs = null, sessio
   };
 }
 
+/**
+ * The chat connection this BFF speaks Local and Corp on (goal R7, revised
+ * 2026-09-12).
+ *
+ * ⚠ THIS REPLACES `readChat`/`sendChat`, WHICH WERE DELETED RATHER THAN LEFT TO
+ * ROT. They posted to `/_evejs-web/v1/chat/read|send`, and EveJS v0.12.8 removed
+ * those routes, `runtime.readChat`/`sendChat` and the whole
+ * `webChatGatewayService` behind them — so every call answered 404 on a
+ * two-second tick while the failure was swallowed upstream. Keeping a helper
+ * whose only possible outcome is a 404 would just leave the next reader a trap.
+ *
+ * ⚠ IT LIVES ON THE GATEWAY CLIENT BECAUSE IT IS THE SAME SERVER, a second port
+ * on the same process (`tls://<host>:5222`, the chat edge). That placement is
+ * also what keeps chat OUT of every test that injects a fake gateway: an app
+ * built with a client that has no `createChatSession` simply has no chat, so
+ * nothing but the chat tests themselves ever opens a socket to a real server.
+ */
+function createChatSession(options) {
+  return createXmppChatSession(options);
+}
+
 // --- R10 live event channel (gateway push) ---------------------------------
 // The one non-request surface the BFF holds: a WebSocket on the gateway's
-// bridge-session event path. It carries session notifications live, so the
-// browser stops depending on polls for liveness. The BFF
+// bridge-session event path. It carries the session's notification captures and
+// its chat live, so the browser stops depending on polls for liveness. The BFF
 // holds at most ONE of these per held bridge session and republishes it to the
 // browser as SSE (see /api/bridge/events in server.js) — the bridgeSessionID
 // never leaves the server, exactly as on the request routes.
@@ -749,7 +771,7 @@ module.exports = {
   EveGatewayError,
   openSessionEventStream,
   // Bridge surface (the live path): the retail call tuple, bound objects, the
-  // persistent session, and flight status.
+  // persistent session, flight status, and chat.
   callMethod,
   bindObject,
   callBoundMethod,
@@ -758,6 +780,7 @@ module.exports = {
   readFlightStatus,
   readScannerState,
   readSpaceSnapshot,
+  createChatSession,
   // The four v1 reads the auth/health surface still needs (goal R9b): account
   // lookup + the character list for login, the one-row snapshot the
   // /api/bridge/select ownership check reads, and gateway status for

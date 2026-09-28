@@ -247,11 +247,15 @@ test("R43 — every registered bot is reachable by the exclusion machinery", () 
   // BotID (it takes an exhaustive Record). This asserts the OTHER half: the
   // registry is not empty and carries no duplicate, so a bot cannot be
   // registered twice and stop itself.
-  assert.ok(BOT_IDS.length >= 2, "both live-proven bots are registered");
+  assert.ok(BOT_IDS.length >= 2, "the live-proven bots are registered");
   assert.equal(new Set(BOT_IDS).size, BOT_IDS.length, "no bot is registered twice");
   assert.deepEqual(
     [...SHIP_CONTROLLER_IDS].sort(),
-    ["custom", "mining", "mission"],
-    "the ownership registry includes the player-authored controller",
+    ["companion", "custom", "mining", "mission"],
+    "the ownership registry includes the player-authored controller and the fleet companion",
+  );
+  assert.ok(
+    SHIP_CONTROLLER_IDS.includes("companion"),
+    "the fleet companion holds the ship the same way every other loop does",
   );
 });

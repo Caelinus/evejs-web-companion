@@ -667,6 +667,21 @@ export type MacroID =
   // ── The fleet-support set. Remote-repair friendly ships on grid (logistics).
   | "remote-rep"
   | "orbit-and-boost"
+  // orbit-and-boost's named-target twin: orbits the fleet-mate the player
+  // PICKS rather than whichever friendly is nearest. Plain escort, no remote
+  // module required — see the decider (nav/scriptMacros.ts) for why it carries
+  // no rep logic of its own.
+  | "orbit-fleet-mate"
+  // orbit-fleet-mate's stand-off twin: holds a set distance off the named
+  // fleet-mate (api.keepAtRange) instead of circling them — the escort a ship
+  // wants when it should NOT be turning through the mate's own firing arc.
+  | "follow-fleet-mate"
+  // Set a fleet target tag on the top-priority hostile — a SINGLE-LETTER,
+  // SINGLE-PILOT capability, not squad-wide "smart" tagging (see the decider's
+  // header in nav/scriptMacros.ts for why). Skips outright on a pilot who is
+  // not the fleet's commander; the gate is client-side because the server
+  // drops a non-commander's write silently (bridge/fleetCommand.ts).
+  | "fleet-tag-target"
   // ── The fleet-management set. Form up / invite / join (multibox alt-fleeting).
   | "create-fleet"
   | "invite-to-fleet"
@@ -725,6 +740,9 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "sell-item",
   "remote-rep",
   "orbit-and-boost",
+  "orbit-fleet-mate",
+  "follow-fleet-mate",
+  "fleet-tag-target",
   "create-fleet",
   "invite-to-fleet",
   "join-fleet",

@@ -124,6 +124,10 @@ export function describeAction(action: ScriptAction): string {
       return `align to ${action.targetID}`;
     case "orbit":
       return `orbit ${action.targetID} at ${action.range}m`;
+    case "keepAtRange":
+      return `keep range off ${action.targetID} at ${action.range}m`;
+    case "setFleetTargetTag":
+      return `set fleet tag "${action.tag}" on ${action.targetID}`;
     case "jump":
       return `jump ${action.fromGateID} -> ${action.toGateID}`;
     case "lock":

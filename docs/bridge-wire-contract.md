@@ -1,8 +1,6 @@
 # Bridge wire contract (v1) — whitelisted `callMethod` path
 
-**Status:** Active, established by goal R1 (2026-07-18); extended by goal R2 (persistent browser-backed sessions, same date), goal R3 (2026-07-19, the bound-object bridge — see "Bound-object bridge (R3)"), goal R4 (agents/missions + deferred call responses), goal R5a (2026-07-19, the space bridge — see "Space bridge & session-into-space (R5a)"), goal R5b (2026-07-19, the client-side route solver + browser autopilot decide-loop — see "Client-side route solver & browser autopilot (R5b)"), goal R6 (2026-07-19, courier completion + the Step-12 reward readout — see "Courier completion & reward readout (R6)"), goal R6a (2026-07-19, the Agent Finder — a static agent-list route + client-side jump-distance sort; see "Agent Finder static route (R6a)"), and goal R35 (2026-07-21, the distribution-mission rail measured on the live server — the refused-`DoAction` shape, why the journal cannot report success, and the courier package load re-pointed from `/inventory/move` to the verifying `/inventory/transfer`; see "The distribution-mission rail, as measured live (R35)"). Later goals build on this contract; change it deliberately and update this file with the change.
-
-> **Current scope update (2026-09-07):** The web companion's Local/Corp chat integration is retired. There are no companion `/chat/read`, `/chat/send`, or `/api/bridge/chat/*` routes; `LSC.GetChannels` and `LSC.SendMessage` are not browser calls; and no synthetic web-session XMPP bridge remains. Retail/XMPP chat is unaffected. The R7 material below is retained as historical architecture and execution context only.
+**Status:** Active, established by goal R1 (2026-07-18); extended by goal R2 (persistent browser-backed sessions, same date), goal R3 (2026-07-19, the bound-object bridge — see "Bound-object bridge (R3)"), goal R4 (agents/missions + deferred call responses), goal R5a (2026-07-19, the space bridge — see "Space bridge & session-into-space (R5a)"), goal R5b (2026-07-19, the client-side route solver + browser autopilot decide-loop — see "Client-side route solver & browser autopilot (R5b)"), goal R6 (2026-07-19, courier completion + the Step-12 reward readout — see "Courier completion & reward readout (R6)"), goal R6a (2026-07-19, the Agent Finder — a static agent-list route + client-side jump-distance sort; see "Agent Finder static route (R6a)"), and goal R7 (2026-07-19, Local + Corp chat — presence/read/send for the browser session; see "Local + Corp chat (R7)"), and goal R35 (2026-07-21, the distribution-mission rail measured on the live server — the refused-`DoAction` shape, why the journal cannot report success, and the courier package load re-pointed from `/inventory/move` to the verifying `/inventory/transfer`; see "The distribution-mission rail, as measured live (R35)"). Later goals build on this contract; change it deliberately and update this file with the change.
 
 This is the transport seam that lets the browser drive real EveJS `Handle_*` calls. The unit it mirrors is the retail call tuple **(service, method, args, kwargs)**; the gateway dispatches it through the same seam a retail client hits: `serviceManager.lookup(service).callMethod(method, args, session, kwargs)`.
 
@@ -1846,21 +1844,55 @@ reconciles the docked station:
 
 ## Local + Corp chat (R7)
 
-> **Retired from the web companion on 2026-09-07.** This section records the former R7 design; it is not part of the current wire contract.
-
 Retail chat runs over XMPP, and its delivery **deliberately bypasses** the
 `sendServiceNotification`/`sendNotification`/`sendSessionChange` surfaces the
-bridge drains — so polling the notification drain yields **zero** chat. Chat
-**READ** therefore comes from the **backlog store** every channel writes to
-(`chatRuntime.getChannelBacklog(roomName)`); there is no RPC that returns
-messages. The browser **polls** the read route on a modest interval (~4s) while
-the Chat panel is open and stops when it closes (full chat push is G6).
+bridge drains — so polling the notification drain yields **zero** chat.
 
-This goal has an operator-authorized broader eve.js footprint: the gateway
-runtime/routes **and** a new chat-gateway helper
+> ### ⚠ The transport changed at EveJS v0.12.8 (2026-09-12)
+>
+> Everything below the next heading describes how this worked until that drop,
+> and is kept because it explains what the routes used to promise. **None of it
+> is live.** v0.12.8 deleted `POST /_evejs-web/v1/chat/read`, `/chat/send`,
+> `runtime.readChat`, `runtime.sendChat` and
+> `gatewayServices/webChatGatewayService.js` outright, and in the same drop added
+> one line to `evejsWebGatewayRuntime.js` immediately after character selection:
+>
+> ```js
+> // Browser-backed sessions still participate in ordinary online, station,
+> // and space authority, but the companion no longer participates in Local
+> // or Corp chat.
+> session._localChatDeparted = true;
+> ```
+>
+> `chatRuntime.js` filters departed sessions out of Local membership, so the
+> decision was deliberate and complete: no route to read chat, and no membership
+> to read it from. The BFF's reads answered `GATEWAY_ROUTE_NOT_FOUND` on every
+> companion tick, `flow.ts` swallowed it (`.catch(() => null)`), and every
+> chat-ordered companion behaviour — `follow`, `stop`, `target`, `salvage`,
+> `loot`, `destination` — was silently dead while the readout still said the
+> pilot was flying.
+>
+> **The chat itself never moved.** `chatHub.js` states where it lives: "Local/
+> corp/fleet chat runs over XMPP MUC (member roster + messages) and the protobuf
+> local-chat gateway". So the BFF now speaks XMPP to `xmppStubServer` — the same
+> door the retail client comes through — instead of asking the gateway. See
+> **Local + Corp chat over XMPP (R7, revised)** below for the live contract.
+>
+> The R10 push path lost its chat frames in the same drop (`event.kind: "chat"`
+> is documented below and is no longer emitted); chat is a poll again.
+
+### How it worked until v0.12.8 (historical)
+
+Chat **READ** came from the **backlog store** every channel writes to
+(`chatRuntime.getChannelBacklog(roomName)`); there was no RPC that returned
+messages. The browser **polled** the read route on a modest interval (~4s) while
+the Chat panel was open and stopped when it closed.
+
+That goal had an operator-authorized broader eve.js footprint: the gateway
+runtime/routes **and** a chat-gateway helper
 (`gatewayServices/webChatGatewayService.js`) for the corp session-derived path.
 Core chat mechanics (`chatRuntime`/`chatHub`/`xmppStubServer`/`channelRules`
-delivery internals) are **not** modified — the helper only *calls* them.
+delivery internals) were **not** modified — the helper only *called* them.
 
 **Presence (a gateway side-effect).** The browser session's `sendSessionChange`
 is a capture stub, so retail's auto chat-sync never fires; the gateway syncs
@@ -1943,6 +1975,128 @@ send. A channel access failure or mute surfaces as the core handler's own
 Success (200): `{ "ok": true, "chat": { "channel", "roomName", "sent": true,
 "entry": { "characterID", "characterName", "message", "createdAtMs" } },
 "notifications": [...] }`.
+
+## Local + Corp chat over XMPP (R7, revised 2026-09-12)
+
+The BFF joins the game's own chat server as the held character. No gateway route
+is involved, which is the point: the two that existed were deleted by a vendor
+drop, and the protocol the retail client speaks cannot be.
+
+```
+browser --GET /api/bridge/chat/local--> web BFF --XMPP MUC--> xmppStubServer:5222
+```
+
+**Connection.** One TCP connection per held bridge session, opened lazily by the
+first chat read or send and closed when the character is released — so a session
+that never looks at chat never joins a room and never appears in anyone's Local.
+Implementation: `src/evejsXmppChat.js`; wiring: the two routes below.
+
+`EVEJS_XMPP_HOST` (default: the host in `EVEJS_GATEWAY_URL` — they are the same
+process), `EVEJS_XMPP_PORT` (5222), `EVEJS_XMPP_DOMAIN` (`localhost`),
+`EVEJS_XMPP_CONFERENCE_DOMAIN` (`conference.<domain>`). The defaults are the
+server's own `config/server.json` defaults, so a stock server needs no
+configuration.
+
+**The listener is TLS, not STARTTLS.** `edge/chat/chatEdgeProcess.worker.js`
+builds it with `tls.createServer({...readXmppTlsCredentials(), minVersion:
+"TLSv1"})` and logs it as `tls://<host>:<port>`, so the first byte on the wire is
+a ClientHello. A plaintext stream header is dropped with **nothing** sent back
+and **nothing** written to `logs/xmpp-stub.log` — the edge never hands the socket
+to the stub. The certificate is the server's own locally generated credential and
+is not verified by default (`EVEJS_XMPP_TLS_REJECT_UNAUTHORIZED=1` turns
+verification on); `EVEJS_XMPP_TLS=0` drops to plain TCP for a pre-TLS server or a
+test.
+
+**Identity.** SASL PLAIN, where the JID's local part **is** the identity:
+`findSessionForClient` parses it as a character id and looks up that character's
+live session. The secret is **not checked** (`parsePlainAuth` ignores it).
+
+> ⚠ Therefore the character id must come from the **held session** and from
+> nothing a browser sent. There is no credential to get wrong here, which is
+> exactly why the identity must be got right. `heldChatSession(held)` reads
+> `held.characterID`; no route accepts one.
+
+**Rooms are resolved by the server, never named by the client.** The stub accepts
+`local@conference.<domain>`, `corp@conference.<domain>` and
+`fleet@conference.<domain>` as aliases and resolves each from the session
+(`normalizeRoomJid`). The BFF joins the alias and learns the real room
+(`local_30000142`, `wormhole_31000005`, `corp_98000000`, …) from the
+self-presence it gets back — which is what keeps wormhole, Triglavian and
+no-local systems correct without copying `channelRules.js` into this repo.
+`fleet` is reachable by the same mechanism and is **not** wired up yet.
+
+**A join un-does the v0.12.8 departure.** `handleJoinPresence` calls
+`chatRuntime.joinLocalLsc(session)`, whose first act is
+`markSessionLocalDeparted(session, false)`. The companion is in Local because it
+joined Local — nothing is patched server-side.
+
+> ⚠ **This is visible in the world.** A joined companion appears in other
+> players' Local member list and its presence is broadcast to the room, like any
+> other pilot in the system. The ship really is there, but this is a change other
+> people can see.
+
+**Moving between systems.** Retail's auto-move (`chatHub.moveLocalSession`) rides
+on `sendSessionChange`, which is a capture stub for a browser-backed session and
+never fires. The BFF therefore watches the held session's `solarSystemID` — kept
+current by every flight-status read — and when it changes, leaves the old room
+and re-joins the `local` alias, letting the server name the new room. The system
+id is a **change detector only**; it never becomes a room name.
+
+**Attribution.** A MUC nick **is** the speaker's character id, filled in
+server-side from their session (`handleGroupMessage`), so a chat order's sender
+is as unspoofable over this transport as it was over the backlog store — which is
+what the fleet companion's `isChatCommandSenderAllowed` gate keys on. The room's
+own voice (MOTD, notices, refusals) arrives as nick `admin` carrying a JSON
+`{cmd:"speak", charid, messageText}` and is surfaced as a message from that
+`charid`; other admin commands are ignored.
+
+**Timestamps are arrival times, and honest.** The stub sends no `<delay>`, so
+there is no server clock on the wire. Live delivery is immediate, so arrival time
+is accurate for every line said while the session was listening. Local has **no
+join history** (`handleJoinPresence` skips backlog for local rooms, matching
+retail), so the channel the chat orders live on has no older-than-we-know case;
+Corp does replay its backlog on join and those lines land stamped with the join
+instant.
+
+### `GET /api/bridge/chat/:channel` (`local` | `corp`)
+
+Query: `limit?`. Ensures the connection and the room, then answers with the
+roster and the message tail.
+
+Success (200): `{ "ok": true, "chat": { "channel", "roomName", "solarSystemID",
+"corporationID", "roster": [ { "characterID", "name", "corporationID",
+"allianceID", "solarSystemID" } ], "messages": [ { "characterID",
+"characterName", "message", "createdAtMs" } ] }, "notifications": [] }`.
+
+Two honest differences from the backlog-store era, both deliberate:
+
+- **`notifications` is always empty.** The old route drained the gateway's
+  capture buffer as a side effect of asking it for chat; this transport never
+  touches the gateway, and every other bridge call still drains.
+- **A read returns what was said while this session was listening** (plus, for
+  Corp, the join-time backlog the room replays), not the store's history.
+
+**A chat server that is not reachable FAILS the read** — `502` with a
+`CHAT_TRANSPORT_*` code — rather than answering with an empty message list. That
+distinction is the whole lesson of the silent 404s: "deaf" and "nobody said
+anything" must never look the same. A failed chat read never drops the held
+session; an unreachable chat server says nothing about whether the character is
+online.
+
+### `POST /api/bridge/chat/:channel/send`
+
+Body: `{ "message" }`. Speaks in the room as the held character
+(`<message type='groupchat'>`, which the server routes through
+`chatRuntime.broadcastLocalMessage` for Local).
+
+Success (200): `{ "ok": true, "chat": { "channel", "roomName", "sent": true,
+"entry": { "characterID", "characterName", "message", "createdAtMs" } },
+"notifications": [] }`. The `entry` is **provisional** — an acknowledgement that
+the write went out. The server echoes the real line back to every occupant
+including us, and that echo is what a later read returns.
+
+Empty message → `400 EMPTY_MESSAGE`; unknown channel → `400 INVALID_CHANNEL`; no
+character online → `409 NO_LIVE_SESSION`.
 
 ## Live event channel — the push path (R10 / roadmap G6)
 
@@ -2159,6 +2313,17 @@ are refused with `SESSION_CHANGE_IN_PROGRESS`.
   retail's offered distances `[0, 10000, 20000, 30000, 50000, 70000, 100000]`
   metres (anything else is `400 INVALID_RANGE`). Retail's own default for that
   menu is **0**, not 10 km.
+- `POST /api/bridge/flight/warp-member` `{ characterID, minRange? }` → `{ ok,
+  result, flight, notifications }`. Binds the park and dispatches
+  `beyonce.CmdWarpToStuff(["char", characterID], {minRange}?)` — the retail
+  "warp to" on a fleet-window row. **The only warp whose destination need not be
+  on this grid**, which is the whole reason it exists: the server resolves where
+  the member is (`resolveFleetMemberWarpTarget`, `beyonceService.js`) and
+  enforces the rules this route does not restate — both characters in the SAME
+  FLEET, the target online, an Abyssal runner refused. Those come back as the
+  handler's own `CALL_REFUSED`, so a wrong or stale character id fails loudly
+  rather than flying the ship somewhere nobody named. Used by the fleet
+  companion's `warp <character link>` chat order (rung e2).
 - `POST /api/bridge/flight/jump` `{ fromGateID, toGateID }` →
   `beyonce.CmdStargateJump([fromGateID, toGateID, shipID])`. The system
   response waits until the destination system, scene and ego are ready.

@@ -102,7 +102,7 @@ function makeFakeEventSource(): {
   return { factory, sources };
 }
 
-function notificationFrame(method: string, sequence: number) {
+function notificationFrame(method: string, sequence: number, args: readonly unknown[] = []) {
   return {
     source: "evejs-web-gateway",
     apiVersion: 1,
@@ -110,7 +110,7 @@ function notificationFrame(method: string, sequence: number) {
     cursor: { epoch: "fleet-epoch", sequence },
     event: {
       kind: "notification",
-      notification: { kind: "client", service: null, method, args: [], kwargs: null },
+      notification: { kind: "client", service: null, method, args, kwargs: null },
     },
   };
 }
@@ -336,4 +336,186 @@ test("an invalidation during a Fleet read queues one non-concurrent follow-up", 
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(state.fleetReads, 2);
   assert.equal(state.peakFleetReads, 1, "Fleet bound reads must remain single-flight");
+});
+
+// --- R24: the two pushed notifications with a real payload, plus the
+// __MultiEvent unwrap that was silently dropping fleet member-change batches
+// before applyPushedNotification learned to open them. ------------------------
+
+test("a pushed OnFleetBroadcast lands on the fleet slice", async () => {
+  const { store, source } = await onlineFleetFlow();
+  assert.equal(store.get().fleet.lastBroadcast, null);
+
+  source.emit(
+    notificationFrame("OnFleetBroadcast", 1, [
+      "EnemySpotted",
+      3,
+      "90000002",
+      30000142,
+      1000000000042,
+      32872,
+    ]),
+  );
+
+  await waitFor(
+    () => store.get().fleet.lastBroadcast !== null,
+    "the pushed OnFleetBroadcast never landed on the fleet slice",
+  );
+  const broadcast = store.get().fleet.lastBroadcast;
+  assert.equal(broadcast?.name, "EnemySpotted");
+  assert.equal(broadcast?.scope, 3);
+  // The bare decimal string case (⚠ in fleetBroadcasts.ts) — our own gateway's
+  // actual shape for a passthrough id, not the {type:"long"} wrapper.
+  assert.equal(broadcast?.senderCharID, 90000002);
+  assert.equal(broadcast?.senderSolarSystemID, 30000142);
+  assert.equal(broadcast?.itemID, 1000000000042);
+  assert.equal(broadcast?.typeID, 32872);
+});
+
+test("a pushed OnFleetStateChange lands, and an empty tag map stays distinct from null", async () => {
+  const { store, source } = await onlineFleetFlow();
+  assert.equal(store.get().fleet.targetTags, null);
+
+  source.emit(
+    notificationFrame("OnFleetStateChange", 1, [
+      keyVal([["targetTags", { type: "dict", entries: [[1000000000042, "A"]] }]]),
+    ]),
+  );
+  await waitFor(
+    () => store.get().fleet.targetTags !== null,
+    "the pushed target-tag map never landed on the fleet slice",
+  );
+  assert.equal(store.get().fleet.targetTags?.get(1000000000042), "A");
+  assert.equal(store.get().fleet.targetTags?.size, 1);
+
+  // A second push with NOTHING tagged must still land as an EMPTY MAP, never
+  // null — null means "never received", and this fleet plainly has.
+  source.emit(
+    notificationFrame("OnFleetStateChange", 2, [
+      keyVal([["targetTags", { type: "dict", entries: [] }]]),
+    ]),
+  );
+  await waitFor(
+    () => store.get().fleet.targetTags?.size === 0,
+    "the empty tag map never replaced the populated one",
+  );
+  assert.notEqual(store.get().fleet.targetTags, null);
+});
+
+test("a __MultiEvent batching two OnFleetMemberChanged pairs coalesces into one dropped-today refresh", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  // The server's only call site for __MultiEvent (notifyFleetMultiEvent) wraps
+  // exactly this: more than one OnFleetMemberChanged landing in the same tick.
+  // Member-change args are irrelevant to the invalidation path (it only ever
+  // schedules a reread), so placeholders are enough here.
+  source.emit(
+    notificationFrame("__MultiEvent", 1, [
+      ["OnFleetMemberChanged", []],
+      ["OnFleetMemberChanged", []],
+    ]),
+  );
+
+  await waitFor(
+    () =>
+      state.fleetReads === 1 && store.get().fleet.loaded && !store.get().fleet.loading,
+    "the __MultiEvent batch never triggered a Fleet reread — the bug this fixes",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.fleetReads,
+    1,
+    "two member-changed pairs in one batch must coalesce to ONE reread, not two",
+  );
+  assert.equal(state.peakFleetReads, 1);
+});
+
+test("a nested __MultiEvent is refused, not expanded, while its sibling pair still dispatches", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  source.emit(
+    notificationFrame("__MultiEvent", 1, [
+      // Pathological: the server never actually wraps its own wrapper.
+      ["__MultiEvent", [["OnFleetMemberChanged", []]]],
+      ["OnFleetMemberChanged", []],
+    ]),
+  );
+
+  await waitFor(
+    () =>
+      state.fleetReads === 1 && store.get().fleet.loaded && !store.get().fleet.loading,
+    "the sibling OnFleetMemberChanged pair never triggered its reread",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.fleetReads,
+    1,
+    "a nested __MultiEvent must be refused outright, never expanded into its own reread",
+  );
+});
+
+test("an unrecognised method still invents no refresh (unaffected by the new dispatch)", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  source.emit(notificationFrame("OnFleetInviteExpired", 1));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(state.fleetReads, 0, "an unrecognised Fleet-like event must not invent a roster invalidation");
+  assert.equal(store.get().fleet.lastBroadcast, null);
+  assert.equal(store.get().fleet.targetTags, null);
+});
+
+// --- fleet-companion phase 7: the jam pushes -------------------------------
+//
+// OnJamStart/OnJamEnd reach the browser on the same SSE channel as the fleet
+// notifications (the gateway's stub suppresses only DoDestinyUpdate), so this
+// needs no gateway patch. It is the only read anywhere that says WHO is
+// holding this ship down.
+
+test("a pushed OnJamStart lands on the space slice, naming the aggressor", async () => {
+  const { store, source } = await onlineFleetFlow();
+  assert.deepEqual([...store.get().space.jams], []);
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "warpScramblerMWD", 0, 5000]),
+  );
+
+  await waitFor(
+    () => store.get().space.jams.length === 1,
+    "the pushed OnJamStart never landed on the space slice",
+  );
+  const jam = store.get().space.jams[0];
+  assert.equal(jam?.sourceBallID, 9001, "the aggressor names itself and must survive the trip");
+  assert.equal(jam?.jammingType, "warpScramblerMWD");
+  assert.equal(jam?.durationMs, 5000);
+});
+
+test("the matching OnJamEnd takes it off again", async () => {
+  const { store, source } = await onlineFleetFlow();
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "warpScrambler", 0, 5000]),
+  );
+  await waitFor(() => store.get().space.jams.length === 1, "the jam never landed");
+
+  source.emit(notificationFrame("OnJamEnd", 2, [9001, 9002, 90000001, "warpScrambler"]));
+  await waitFor(() => store.get().space.jams.length === 0, "the jam was never released");
+});
+
+// A jam push must not be mistaken for a roster invalidation - it carries its
+// own payload and there is no route to re-read it from.
+test("a jam push triggers no fleet reread", async () => {
+  const { store, source, state } = await onlineFleetFlow();
+
+  source.emit(
+    notificationFrame("OnJamStart", 1, [9001, 9002, 90000001, "webify", 0, 5000]),
+  );
+  await waitFor(() => store.get().space.jams.length === 1, "the jam never landed");
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(state.fleetReads, 0, "a jam is not a roster invalidation");
+  // ⚠ EVERY JAM TYPE IS KEPT, not just tackle. Narrowing to the two tackle
+  // types is a READ-time job (tacklersHolding), so a later reader that wants to
+  // know it is being webbed does not have to re-plumb the wire.
+  assert.equal(store.get().space.jams[0]?.jammingType, "webify");
 });

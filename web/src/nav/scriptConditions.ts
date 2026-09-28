@@ -30,6 +30,7 @@ import type { SavedFitting } from "../bridge/fittings.ts";
 import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import type { RefusalRecord } from "./refusalLedger.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -152,6 +153,22 @@ export interface ScriptObservation {
   readonly salvageDroneBayItemIDs?: readonly number[] | null;
   readonly combatDroneIDs?: readonly number[] | null;
   readonly salvageDroneIDs?: readonly number[] | null;
+  /**
+   * Logistic (remote-repair) drones, same two shapes as the pairs above.
+   *
+   * ⚠ FILLED FOR THE FLEET COMPANION, WHICH IS SO FAR THE ONLY THING THAT USES
+   * THEM. The scripted blocks have no repair job to do, so nothing in
+   * `scriptMacros.ts` reads these -- they are here rather than on the companion's
+   * own observation because every other drone role already lives on this type
+   * and splitting one role out would mean two places to look.
+   *
+   * ⚠ THE SERVER WILL NOT REPAIR AN OUT-OF-CORP FLEET-MATE. `isFriendlyRepairTarget`
+   * tests character, owner, corporation and alliance, never fleet membership, so
+   * an engage aimed at a fleet-mate outside the corp is accepted and does
+   * nothing. Anything reading these must not promise otherwise.
+   */
+  readonly logisticDroneBayItemIDs?: readonly number[] | null;
+  readonly logisticDroneIDs?: readonly number[] | null;
   /** Bay stacks whose type or group could not be read this tick — in no role. */
   readonly unclassifiedDroneBayItemIDs?: readonly number[] | null;
   /**
@@ -213,6 +230,39 @@ export interface ScriptObservation {
    * presence of another player ship on grid.
    */
   readonly fleetMemberCharacterIDs?: readonly number[] | null;
+  /**
+   * Fleet target tags, itemID -> tag, from the last `OnFleetStateChange`. Read
+   * straight off the store, never a fresh call — so unlike the gated fleet
+   * reads above this is never behind a macro gate.
+   *
+   * ⚠ `null` = never received or unreadable; an EMPTY MAP = received and
+   * nothing is tagged. Those are different answers and both are real — the
+   * decoder (`decodeFleetStateChangeNotification`) is careful about this and
+   * an observation that collapsed them would undo that care. Moved up from
+   * `FleetCompanionObservation`, which declared this field first; kept here
+   * because any script (not only the fleet companion) may want to read it.
+   */
+  readonly fleetTargetTags?: ReadonlyMap<number, string> | null;
+  /**
+   * Whether THIS character may set a fleet target tag right now — three states,
+   * not two (see `bridge/fleetCommand.ts`'s header, which this mirrors exactly).
+   * `null` = the roster could not be read (or this character's own row was not
+   * in it) — WAIT, never guess "no". `false` = read cleanly, and this pilot is
+   * not the fleet boss or a wing/squad commander — a settled, safe-to-remember
+   * "no". `true` = go ahead. Populated from the SAME bound-fleet read that fills
+   * `fleetMemberCharacterIDs` (gated the same way, behind the tagging block
+   * being the active step) — not a second roster call.
+   */
+  readonly canTag?: boolean | null;
+  /**
+   * The most recent `OnFleetBroadcast` call ("shoot that"), read off the
+   * store and ALREADY freshness-filtered against `FLEET_BROADCAST_TTL_MS` at
+   * observation build time — never here, and never in the store's reducer.
+   * `null` covers both "never received" and "received, but the call has gone
+   * stale"; a follower whose call has lapsed falls back to its own ladder,
+   * which is a working bot, not a stopped one.
+   */
+  readonly fleetBroadcast?: FleetBroadcast | null;
   /** Fitted hardeners + damage controls, refreshed when the active hull or fit changes. */
   readonly hardenerModuleIDs?: readonly number[];
   /** Fitted WEAPONS (turrets/launchers), resolved once at start (the fight block runs these). */

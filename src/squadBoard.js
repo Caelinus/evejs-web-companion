@@ -15,9 +15,40 @@
 // SHARED, NOT PERSISTED, AND NOT A GAME WRITE. This is BFF-local bookkeeping,
 // exactly like src/beltMemory.js: no gateway call in either direction, nothing
 // the game validates, nothing that survives a restart. It coordinates clients;
-// it does not touch the world. (The in-game equivalent — a fleet broadcast or
-// a fleet target tag — is a separate, later job: the write side is plumbed but
-// nothing in the client can READ a tag back yet.)
+// it does not touch the world.
+//
+// ⚠ THE IN-GAME EQUIVALENT NOW EXISTS, AND THIS BOARD IS THE FALLBACK.
+// This comment used to say a fleet broadcast or a target tag was "a separate,
+// later job: the write side is plumbed but nothing in the client can READ a
+// tag back yet". Both halves are now read: web/src/bridge/fleetBroadcasts.ts
+// decodes OnFleetBroadcast and the OnFleetStateChange target tags. So a
+// following pilot's precedence is in-game tag first, then a Target broadcast,
+// then THIS board, then its own ladder — because a real fleet mechanism is
+// visible to every pilot in the fleet including the humans, and this board is
+// visible only to bots on one BFF.
+//
+// It is not obsolete and should not be deleted. It is the answer when nobody
+// is broadcasting or tagging at all, which is most of the time in a fleet of
+// bots with no human FC driving it.
+//
+// ⚠ THE 30s TTL BELOW IS DUPLICATED, NOT SHARED, AND SOMEBODY SHOULD DECIDE
+// WHICH IT OUGHT TO BE. `DEFAULT_TTL_MS` here and `FLEET_BROADCAST_TTL_MS` in
+// web/src/bridge/fleetBroadcasts.ts are two constants holding 30000 in two
+// languages, for the same reason (a call goes stale in seconds), with nothing
+// that fails if one of them changes.
+//
+// That is the shape of a bug this project has already been bitten by once --
+// see COMPANION_GRANT_SCRIPT_REV in web/src/bots/companionRunPolicy.ts, which
+// was a bare 1 copied into src/botHost.js until the copies were collapsed into
+// one home. The consequence here is milder than that one was: a drift would
+// mean a follower treats a board call and a fleet broadcast as lapsing at
+// different moments, which reads as a bot obeying one order source and
+// ignoring the other for a few seconds -- confusing, not wrong.
+//
+// It is left duplicated for now because this module is loaded at BFF start and
+// pulling a TypeScript constant in here means a type-stripped dynamic import
+// (the mechanism botHost.js uses), which is real machinery for one number.
+// Recorded rather than silently accepted.
 //
 // ONE CALL PER FLEET, LAST CALL WINS. There is no queue and no arbitration: the
 // FC is whoever spoke most recently, which is what "primary" means over voice

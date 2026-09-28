@@ -22,6 +22,8 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "approach", targetID: 1001 },
   { kind: "align", targetID: 1001 },
   { kind: "orbit", targetID: 1001, range: 5000 },
+  { kind: "keepAtRange", targetID: 1001, range: 2000 },
+  { kind: "setFleetTargetTag", targetID: 1001, tag: "1" },
   { kind: "jump", fromGateID: 1, toGateID: 2 },
   { kind: "lock", targetID: 1001 },
   { kind: "unlock", targetID: 1001 },

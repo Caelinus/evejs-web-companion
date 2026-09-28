@@ -10,6 +10,7 @@ import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
+import { decodeBeyonceWriteAck, type BeyonceWriteAck } from "../bridge/boundBeyonceWrites.ts";
 import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
 import {
   decodeCharCreationTables,
@@ -39,6 +40,11 @@ import type {
 } from "../store/types.ts";
 import type { NameRef } from "../store/names.ts";
 import type { BotLaunchGrant, BotRiskClass } from "../bots/runPolicy.ts";
+import {
+  type CompanionSetup,
+  type CompanionOrderAuthority,
+  type FleetCompanionRequest,
+} from "../nav/fleetCompanionLoop.ts";
 import type {
   ScannerOperationsSnapshot,
   ScannerProbeOperation,
@@ -1924,6 +1930,38 @@ function asFoundAgent(value: JsonValue): FoundAgent {
   };
 }
 
+/**
+ * Whether `characterID` is a member of the SESSION character's corporation.
+ *
+ * ⚠ SESSION-CORP-SCOPED AND NOT REDIRECTABLE. The underlying `GetMember` looks
+ * the id up in the session corp's own member table and answers null for anyone
+ * outside it, so a caller cannot ask about somebody else's corporation by
+ * passing a different id -- the worst a bad id can do is answer "no".
+ *
+ * ⚠ THREE-STATE, AND THE THIRD MATTERS. `null` is "could not tell" -- the read
+ * failed or returned nothing usable -- and a caller acting on membership must
+ * treat it as NO, never as yes. Auto-accepting a fleet invitation on an
+ * unreadable answer would join whatever asked.
+ */
+export async function isInMyCorporation(
+  characterID: number,
+  options: ApiOptions = {},
+): Promise<boolean | null> {
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    return null;
+  }
+  try {
+    const data = await getJson(`/api/bridge/corp-members?memberID=${characterID}`, options);
+    const member = (data as Record<string, JsonValue>).member ?? null;
+    if (member === null || member === undefined) {
+      return false;
+    }
+    return true;
+  } catch {
+    return null;
+  }
+}
+
 /** Find agents from the static reference table (filtered + capped server-side). */
 export async function findAgents(
   filters: FindAgentsFilters = {},
@@ -2123,6 +2161,31 @@ export async function loadCharacterSheet(
   };
 }
 
+// --- R7 Local + Corp chat --------------------------------------------------
+// The BFF holds the bridgeSessionID; the browser addresses channels by name.
+// READ is a backlog poll (chat delivery bypasses the notification drain), so
+// the panel polls /api/bridge/chat/:channel while open. The raw `chat` object
+// (roster + backlog) is decoded in the flow with bridge/chat.ts.
+
+/** Read a chat channel's roster + recent backlog (raw; decoded in the flow). */
+export async function readChat(
+  channel: "local" | "corp",
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await getJson(`/api/bridge/chat/${channel}`, options);
+  return data.chat ?? null;
+}
+
+/** Send a message to a chat channel; returns the raw send echo. */
+export async function sendChat(
+  channel: "local" | "corp",
+  message: string,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/bridge/chat/${channel}/send`, { message }, options);
+  return data.chat ?? null;
+}
+
 // --- R10 Live event channel (SSE) ------------------------------------------
 // The BFF republishes its gateway push WebSocket to the browser as Server-Sent
 // Events on GET /api/bridge/events (same-origin, cookie-authed). Frames are
@@ -2320,6 +2383,24 @@ export async function warpTo(
 }
 
 /**
+ * Warp to a FLEET MEMBER (CmdWarpToStuff("char", characterID)) — the retail
+ * "warp to" on a fleet-window row.
+ *
+ * ⚠ A CHARACTER ID, NOT AN OBJECT ID, and that is the point: this is the only
+ * warp whose destination need not be on this grid. The server resolves where
+ * the member is, and refuses a character who is not in the same fleet or is not
+ * online — so a wrong id fails rather than flying the ship somewhere.
+ */
+export async function warpToFleetMember(
+  characterID: number,
+  minRange: number | null = null,
+  options: ApiOptions = {},
+): Promise<FlightStepResult> {
+  const body = minRange === null ? { characterID } : { characterID, minRange };
+  return readFlightStep(await postJson("/api/bridge/flight/warp-member", body, options));
+}
+
+/**
  * Approach a gate/target at full speed (beyonce.CmdSetSpeedFraction(1) +
  * CmdFollowBall). The range is retail's: the menu approach uses 50 m, and the
  * autopilot's close-the-gap step uses 0.
@@ -2370,9 +2451,18 @@ export async function stopShip(options: ApiOptions = {}): Promise<FlightStepResu
 }
 
 /** Jump through an NPC stargate (beyonce.CmdStargateJump). */
+/**
+ * Jump through a stargate.
+ *
+ * ⚠ `toGateID` IS OPTIONAL — PASS 0 AND THE SERVER RESOLVES IT. A stargate
+ * record carries its own `destinationID`, and `jumpSessionViaStargate` uses it
+ * whenever the far id is absent; it rejects only a far id that CONTRADICTS the
+ * source gate. A caller that knows which gate it is at -- the autopilot has a
+ * solved route, the fleet companion has only a broadcast -- does not need one.
+ */
 export async function jump(
   fromGateID: number,
-  toGateID: number,
+  toGateID = 0,
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(
@@ -2386,6 +2476,55 @@ export async function dock(
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(await postJson("/api/bridge/flight/dock", { stationID }, options));
+}
+
+/**
+ * SET (or CLEAR, `tag: null`) the fleet target tag on an entity
+ * (beyonce.CmdFleetTagTarget). Confirm-gated at the BFF.
+ *
+ * ⚠ THE ACK IS NOT PROOF. The server silently refuses a non-commander by
+ * returning a plain `false` from CmdFleetTagTarget, and its only caller
+ * (D:\evet\server\src\services\ship\beyonceService.js:3320) discards that
+ * boolean and returns null unconditionally — so `{ok: true, applied: true}`
+ * comes back identically whether the tag landed or was dropped on the floor.
+ * A caller MUST confirm by seeing the tag show up in a later `targetTags`
+ * read; this call's own success tells you nothing.
+ */
+export async function setFleetTargetTag(
+  itemID: number,
+  tag: string | null,
+  options: ApiOptions = {},
+): Promise<BeyonceWriteAck> {
+  const data = await postJson(
+    "/api/bridge/flight/fleet-tag-target",
+    { itemID, tag, confirm: true },
+    options,
+  );
+  return decodeBeyonceWriteAck(data as unknown as JsonValue);
+}
+
+/**
+ * JUMP through a fleet-mate's cyno bridge (beyonce.CmdJumpThroughFleet).
+ * Confirm-gated at the BFF; consumes bridge fuel and transitions the session
+ * to a new system, so it also waits out the route-transition handshake there.
+ *
+ * `otherCharID`/`otherShipID` name the bridge owner's character and ship; the
+ * BFF validates both against the session's own fleet membership server-side,
+ * so a foreign (non-fleet) ship cannot be named here to hijack a bridge.
+ */
+export async function jumpThroughFleet(
+  otherCharID: number,
+  otherShipID: number,
+  beaconID: number,
+  solarSystemID: number,
+  options: ApiOptions = {},
+): Promise<BeyonceWriteAck> {
+  const data = await postJson(
+    "/api/bridge/flight/jump-through-fleet",
+    { otherCharID, otherShipID, beaconID, solarSystemID, confirm: true },
+    options,
+  );
+  return decodeBeyonceWriteAck(data as unknown as JsonValue);
 }
 
 // --- R11 Space overview + ship HUD -----------------------------------------
@@ -2918,6 +3057,44 @@ export async function deleteBotScript(scriptID: string, options: ApiOptions = {}
 // script on a character, watch its readout, stop it. Account-scoped like the
 // script library above.
 
+/**
+ * What a running fleet companion is DOING, as the Bot Manager badge shows it.
+ *
+ * ⚠ THIS EXISTS BECAUSE A HEADLESS COMPANION HAS NO STORE TO READ. A companion
+ * running in a tab reports through that tab's `companion` slice; one running on
+ * the bot host has no session here at all, so without these five fields its row
+ * can say only "running" and the player cannot tell a pilot obeying its fleet
+ * from one sitting in an empty one.
+ *
+ * Null on this type means "not reported", NEVER "no" -- see `canTag`.
+ */
+export interface ServerBotCompanion {
+  /** Whether the pilot is in a fleet at all. Null while the roster is unread. */
+  readonly inFleet: boolean | null;
+  /** Which authority its last decision came from. Null before it decided one. */
+  readonly followingOrderFrom: CompanionOrderAuthority | null;
+  readonly lastOrderHeard: string | null;
+  /**
+   * Whether this pilot's tag write would land.
+   *
+   * ⚠ THREE STATES, AND FLATTENING THEM IS THE BUG. The server drops a
+   * non-commander's tag write while answering ok, so `false` (the write would
+   * be dropped) and `null` (the roster has not been read) are different facts,
+   * and a row that showed both as "no" would state a confident falsehood on
+   * every tick before the first roster read.
+   */
+  readonly canTag: boolean | null;
+  /**
+   * What was missing or unusable about this pilot's fit when it started.
+   *
+   * ⚠ ADVISORY, AND THIS IS THEIR ONLY ROUTE TO A PLAYER ON A HEADLESS RUN.
+   * Nothing here refused the start: a human loads the missing thing or ignores
+   * it and flies. Empty means nothing worth saying, which is also what an
+   * unreadable fit produces.
+   */
+  readonly fitWarnings: readonly string[];
+}
+
 export interface ServerBot {
   readonly botID: string;
   readonly characterID: number;
@@ -2945,6 +3122,25 @@ export interface ServerBot {
    * no browser to notify, so this readout IS the alert's delivery.
    */
   readonly lastAlert: { readonly message: string; readonly atMs: number } | null;
+  /**
+   * What this run IS, as against what it is doing.
+   *
+   * ⚠ THE HOST HAS ALWAYS SENT THIS AND THIS TYPE ALWAYS DROPPED IT.
+   * `publicBot()` in src/botHost.js has carried `kind` since the companion
+   * first ran headless; `asServerBot` never decoded it, so the browser could
+   * not tell a companion run from a script run except by the convention that
+   * `scriptID` happens to be the literal "companion".
+   */
+  readonly kind: "companion" | "script";
+  /**
+   * The companion badge's facts, or null.
+   *
+   * ⚠ NULL MEANS TWO DIFFERENT THINGS AND `kind` SEPARATES THEM: on a script
+   * run it means "not a companion at all"; on a companion run it means "this
+   * companion has not pushed progress yet". Reading this alone would merge the
+   * two.
+   */
+  readonly companion: ServerBotCompanion | null;
 }
 
 function asServerBot(value: JsonValue): ServerBot {
@@ -2973,7 +3169,56 @@ function asServerBot(value: JsonValue): ServerBot {
     endedAt: typeof row.endedAt === "string" ? row.endedAt : null,
     resumedAt: typeof row.resumedAt === "string" ? row.resumedAt : null,
     lastAlert: asLastAlert(row.lastAlert),
+    // Anything that is not the companion literal is a script, matching the
+    // host's own default for a roster row written before `kind` existed.
+    kind: row.kind === "companion" ? "companion" : "script",
+    companion: asServerBotCompanion(row.companion),
   };
+}
+
+/**
+ * One companion's badge facts off the wire.
+ *
+ * ⚠ EVERY FIELD FAILS TO NULL, NEVER TO A CONFIDENT VALUE. A field this decoder
+ * cannot read is one the badge must report as "not known" -- the alternative is
+ * a row that says "not in a fleet" because a key was missing.
+ */
+function asServerBotCompanion(value: JsonValue | undefined): ServerBotCompanion | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const row = value as Record<string, JsonValue>;
+  return {
+    inFleet: typeof row.inFleet === "boolean" ? row.inFleet : null,
+    followingOrderFrom: asCompanionOrderAuthority(row.followingOrderFrom),
+    lastOrderHeard: typeof row.lastOrderHeard === "string" ? row.lastOrderHeard : null,
+    canTag: typeof row.canTag === "boolean" ? row.canTag : null,
+    fitWarnings: Array.isArray(row.fitWarnings)
+      ? row.fitWarnings.filter((line): line is string => typeof line === "string")
+      : [],
+  };
+}
+
+/**
+ * An authority we actually know, or null.
+ *
+ * ⚠ CHECKED AGAINST A LIST, NOT `typeof === "string"`. The readout turns this
+ * into a phrase with a `switch`, and an unrecognised value would fall through
+ * that switch to "nothing yet" -- reporting a pilot as taking no orders at the
+ * precise moment it started taking them from something this build cannot name.
+ * Null says the same thing honestly and does it here, once.
+ */
+function asCompanionOrderAuthority(value: JsonValue | undefined): CompanionOrderAuthority | null {
+  return value === "broadcast" ||
+    value === "tag" ||
+    value === "chat" ||
+    // ⚠ `squad-board` USED TO BE ACCEPTED HERE AND IS NOT ANY MORE. Nothing in
+    // the companion ever emitted it -- it was a settings checkbox no decision
+    // rung read -- so a row carrying it is a row from an older build, and null
+    // ("not reported") is the honest reading of it.
+    value === "own-ladder"
+    ? value
+    : null;
 }
 
 /** Decode a bot's last alert; a malformed or absent one reads as no alert. */
@@ -3075,6 +3320,38 @@ export async function startServerBot(
   const data = await postJson(
     "/api/bots/start",
     { characterID, scriptID, grant: grant as unknown as JsonValue },
+    options,
+  );
+  return asServerBot(data.bot ?? null);
+}
+
+/**
+ * The companion sibling of `startServerBot` — same route, same shape, same
+ * grant handling; only what is being launched differs. A companion request
+ * has no script library entry to name by id, so this carries the flat
+ * request itself in place of a `scriptID`, and `kind: "companion"` tells
+ * `/api/bots/start` (src/server.js) which branch to take. `botHost.start()`
+ * (src/botHost.js) is the one place that decodes and trusts it.
+ */
+export async function startServerCompanion(
+  characterID: number,
+  // ⚠ A SETUP, NOT A REQUEST. What is sent over the wire and persisted in the
+  // BFF's roster is only what an operator saved; the eight module lists are
+  // filled in by the HOST, from the hull the pilot turns out to be sitting in,
+  // because a squad start has nobody to ask and a list saved earlier would be
+  // stale the moment that pilot refits.
+  request: CompanionSetup,
+  grant: BotLaunchGrant,
+  options: ApiOptions = {},
+): Promise<ServerBot> {
+  const data = await postJson(
+    "/api/bots/start",
+    {
+      characterID,
+      kind: "companion",
+      request: request as unknown as JsonValue,
+      grant: grant as unknown as JsonValue,
+    },
     options,
   );
   return asServerBot(data.bot ?? null);

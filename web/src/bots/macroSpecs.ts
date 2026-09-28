@@ -194,6 +194,22 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   //     its own (stopped by a watch or by hand), so no `until` is forced.
   "remote-rep": { args: [], untilRequired: false },
   "orbit-and-boost": { args: [], untilRequired: false },
+  // orbit-and-boost's named-target twin. `who` is REQUIRED — "orbit nobody" is
+  // not a meaningful step, unlike orbit-and-boost's argless "whoever is nearest".
+  "orbit-fleet-mate": {
+    args: [{ key: "who", kind: "character", required: true }],
+    untilRequired: false,
+  },
+  // Same shape as orbit-fleet-mate — a named pilot, required for the same reason.
+  "follow-fleet-mate": {
+    args: [{ key: "who", kind: "character", required: true }],
+    untilRequired: false,
+  },
+  // Argless: it picks its own target off the same priority ladder the combat
+  // blocks use (targetPriorityOf's default when unset) and reads its own
+  // commander status off the fleet roster — nothing here for a player to pick.
+  // Sustained like orbit-and-boost: never finishes on its own.
+  "fleet-tag-target": { args: [], untilRequired: false },
   // ── The fleet-management set (multibox alt-fleeting). create/join are argless;
   // invite names WHO to bring in (a character from your known-pilots roster).
   "create-fleet": { args: [], untilRequired: false },

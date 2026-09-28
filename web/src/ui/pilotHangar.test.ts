@@ -26,6 +26,8 @@ const HangarSquadAssign = (await import("./HangarSquadAssign.svelte")).default;
 const HangarSquadPicker = (await import("./HangarSquadPicker.svelte")).default;
 
 const ROSTER_KEY = "evejs-web-known-characters:v1";
+import { DEFAULT_COMPANION_SETUP } from "../nav/fleetCompanionLoop.ts";
+
 const PREFS_KEY = "evejs-web-hangar-prefs:v1";
 
 function storage(seed: Record<string, string> = {}) {
@@ -283,6 +285,23 @@ test("an empty picker says so rather than showing an empty box", () => {
 
 // --- the row on its own -----------------------------------------------------
 
+/** The same pilot `renderRow` builds by default, for tests that vary it. */
+function basePilot() {
+  return {
+    characterID: 90000001,
+    name: "Ore Farmer",
+    accountName: "Test Account",
+    shipName: "Venture",
+    locationName: "Jita",
+    skillPoints: 134_900_000,
+    balance: 4.82e9,
+    training: "Mining Barge V - 4d 6h",
+    online: false,
+    pinned: false,
+    squads: [] as { id: string; name: string; color: string }[],
+  };
+}
+
 function renderRow(overrides: Record<string, unknown> = {}): string {
   const pilot = {
     characterID: 90000001,
@@ -431,4 +450,118 @@ test("with no squads yet the chooser is straight to naming a new one", () => {
   assert.doesNotMatch(body, /Create a new squad/, "nothing to choose between");
   assert.match(body, /Squad name/);
   assert.match(body, /Create squad with 2 pilots/);
+});
+
+
+// --- starting a squad's companions on the server ----------------------------
+
+const SQUAD = { id: "s-fly", name: "Strike Wing", color: "#52d9a3" };
+
+function prefsWithSquad(configured: boolean): string {
+  return JSON.stringify({
+    squads: [SQUAD],
+    members: { [SQUAD.id]: [90000001] },
+    pinnedSquads: [SQUAD.id],
+    pinnedPilots: [],
+    collapsedAccounts: [],
+    companionConfigs: configured ? { [SQUAD.id]: { "90000001": DEFAULT_COMPANION_SETUP } } : {},
+  });
+}
+
+test("a squad with nobody set up offers no FLY control at all", () => {
+  // ⚠ THE CONTROL IS GATED ON THERE BEING SOMETHING TO START. A squad start
+  // works from the saved per-pilot setups; a squad with none would start
+  // nothing, and a button that does nothing is worse than no button.
+  setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
+  setHangarPrefsStorage(storage({ [PREFS_KEY]: prefsWithSquad(false) }));
+  const body = renderHangar();
+  assert.match(body, /Strike Wing/, "the squad chip is there either way");
+  assert.doesNotMatch(body, />FLY</);
+});
+
+test("a squad with a configured pilot offers FLY, and says how it differs from ALL", () => {
+  // ⚠ TWO DIFFERENT THINGS, ONE CHIP ROW. "ALL" signs pilots into THIS TAB and
+  // they stop when it closes. "FLY" starts their companions on the bot host,
+  // which keeps flying with the tab shut and does not need them signed in here
+  // at all. A player who cannot tell those apart will close the tab on a fleet.
+  setKnownCharacterStorage(storage({ [ROSTER_KEY]: ROSTER }));
+  setHangarPrefsStorage(storage({ [PREFS_KEY]: prefsWithSquad(true) }));
+  const body = renderHangar();
+  assert.match(body, />FLY</);
+  assert.match(body, />. ALL</, "the tab launch is still there");
+  assert.match(
+    body,
+    /keep flying when this tab closes/,
+    "the difference must be stated on the control itself",
+  );
+});
+
+
+// --- the per-pilot companion setup, in the squad popover --------------------
+//
+// ⚠ THERE IS NO ROLE PICKER ANY MORE, AND NO SEPARATE TAGGING CHECKBOX.
+// docs/fleet-companion-simplification.md removes the role entirely and makes
+// the PRESENCE of a companion setup the only marker that a pilot is a
+// companion in a squad -- see `companionConfigFor`'s own comment in
+// hangarPrefs.ts. What used to be a role select plus a tagging checkbox is now
+// one plain "Flies as companion" toggle.
+
+test("a ticked squad offers a companion toggle; only that squad does", () => {
+  // ⚠ ONLY THE SQUADS THIS PILOT IS IN GROW A SECOND LINE. Growing EVERY row
+  // was tried before and rejected: at eleven squads it made each row about
+  // 230px tall (docs/pilot-hangar.md). A pilot is typically in one or two.
+  const inOne = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD, { id: "s-other", name: "Scout Net", color: "#6fb4e8" }],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+  });
+  assert.match(inOne, /Flies as companion/, "the squad it is in offers the toggle");
+  assert.equal(
+    (inOne.match(/Flies as companion/g) ?? []).length,
+    1,
+    "and only that one does",
+  );
+});
+
+test("the tick and the companion toggle are SEPARATE controls", () => {
+  // ⚠ A CONTROL NESTED IN THE TICK WOULD BE INVALID HTML AND WOULD FIRE THE
+  // MEMBERSHIP TOGGLE ON EVERY CLICK. The row is a <button>; the companion
+  // toggle is its sibling. This asserts the checkbox is not inside the button
+  // element.
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+  });
+  const rowStart = body.indexOf('class="hangar-squadmenu-row');
+  assert.ok(rowStart >= 0, "the membership button is there");
+  const rowEnd = body.indexOf("</button>", rowStart);
+  const checkboxAt = body.indexOf('type="checkbox"', rowStart);
+  assert.ok(checkboxAt > rowEnd, "the companion toggle must sit AFTER the button closes");
+});
+
+test("a pilot with no companion setup shows the toggle unticked", () => {
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+    companionEnabledFor: () => false,
+  });
+  assert.match(body, /Flies as companion/);
+  assert.doesNotMatch(body, /checked/, "nothing on this row is ticked");
+});
+
+test("a pilot set up as a companion shows the toggle ticked", () => {
+  const body = renderRow({
+    manage: true,
+    squadMenuOpen: true,
+    squads: [SQUAD],
+    pilot: { ...basePilot(), squads: [SQUAD] },
+    companionEnabledFor: () => true,
+  });
+  assert.match(body, /Flies as companion/);
+  assert.match(body, /checked/, "the toggle reflects what is stored");
 });

@@ -5,8 +5,8 @@
     "bffWritePolicy": "evejs-web-poc/src/bridgeCallPolicy.js#BRIDGE_WRITE_PAIR_KEYS"
   },
   "gatewayAllowlist": {
-    "count": 717,
-    "sha256": "c257ca8d4c2bdb11011aef822039da6851aa19145e7efb746b39cf876533a6f4",
+    "count": 719,
+    "sha256": "7d95e332238765859e2114d4891a464ad2578a6a66552f06d88a81f61d53db67",
     "pairs": [
       "LPStoreMgr.GetAvailableOffersFromCorp",
       "LPStoreMgr.TakeOfferForCharacter",
@@ -19,6 +19,8 @@
       "LPSvc.GetLPsForCharacter",
       "LPSvc.TransferLPFromMyCorpWalletToOtherCorp",
       "LPSvc.TransferLPFromMyWalletToOtherCorp",
+      "LSC.GetChannels",
+      "LSC.SendMessage",
       "abyssalMgr.AbyssalEndGateActivation",
       "abyssalMgr.AbyssalEntranceDeployment",
       "abyssalMgr.AbyssalEntranceGateActivation",
@@ -728,14 +730,15 @@
     ]
   },
   "bffWritePolicy": {
-    "count": 351,
-    "sha256": "efd8bc4a72f3d96cf5af01cf8d39572c30ce0fec660ec476959442d958a47498",
+    "count": 352,
+    "sha256": "e3c0fe838d587aa159e2ebcf683ce43fd356f1a94c2b201f6da7d05dceba888a",
     "pairs": [
       "LPStoreMgr.TakeOfferForCharacter",
       "LPStoreMgr.TakeOfferForCorporation",
       "LPSvc.ExchangeConcordLP",
       "LPSvc.TransferLPFromMyCorpWalletToOtherCorp",
       "LPSvc.TransferLPFromMyWalletToOtherCorp",
+      "LSC.SendMessage",
       "abyssalMgr.AbyssalEndGateActivation",
       "abyssalMgr.AbyssalEntranceDeployment",
       "abyssalMgr.AbyssalEntranceGateActivation",

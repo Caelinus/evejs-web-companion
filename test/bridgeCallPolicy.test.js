@@ -27,7 +27,7 @@ test("the generic-call write policy covers the complete canonical plumbing inven
   const declaredCount = [...phaseBody.matchAll(/^## PHASE [34].*\((\d+)\)/gm)]
     .reduce((total, match) => total + Number(match[1]), 0);
 
-  assert.equal(declaredCount, 300, "the canonical worklist declares 151 + 149 writes");
+  assert.equal(declaredCount, 301, "the canonical worklist declares 152 + 149 writes");
   assert.equal(PLUMBING_SWEEP_WRITE_PAIR_KEYS.length, declaredCount);
   for (const key of PLUMBING_SWEEP_WRITE_PAIR_KEYS) {
     const separator = key.indexOf(".");
@@ -48,7 +48,7 @@ test("the generic-call write policy covers the complete canonical plumbing inven
 test("the write policy adds every pre-sweep and post-sweep write without duplicates", () => {
   assert.equal(EARLIER_WRITE_PAIR_KEYS.length, 49);
   assert.deepEqual(FEATURE_WRITE_PAIR_KEYS, ["repairSvc.RepairItems", "slash.SlashCmd"]);
-  assert.equal(BRIDGE_WRITE_PAIR_KEYS.length, 351);
+  assert.equal(BRIDGE_WRITE_PAIR_KEYS.length, 352);
   assert.equal(new Set(BRIDGE_WRITE_PAIR_KEYS).size, BRIDGE_WRITE_PAIR_KEYS.length);
 
   assert.equal(isBridgeWritePair("charUnboundMgr", "SelectCharacterID"), true);
@@ -56,7 +56,6 @@ test("the write policy adds every pre-sweep and post-sweep write without duplica
   assert.equal(isBridgeWritePair("repairSvc", "RepairItems"), true);
   assert.equal(isBridgeWritePair("repairSvc", "GetRepairQuotes"), false);
   assert.equal(isBridgeWritePair("map", "GetStationInfo"), false);
-  assert.equal(isBridgeWritePair("LSC", "SendMessage"), false);
   // ⚠⚠ The GM console. Listed as a write for one reason: so the generic
   // /api/bridge/call route cannot become a second, UNCONFIRMED way to run
   // /giveitem, /npc or /suicide against the live world.

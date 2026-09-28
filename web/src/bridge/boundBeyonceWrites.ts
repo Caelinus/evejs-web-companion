@@ -1,8 +1,10 @@
 // R103 Phase-4 BOUND WRITE acks — WB-BEYONCE: the 7 nav/bookmark writes
 // (CmdGotoPoint / CmdGotoBookmark / CmdAbandonLoot / CmdFleetTagTarget /
 // CmdJumpThroughFleet / BookmarkLocation / BookmarkScanResult) that hang off the
-// R5a beyonce remote-park bind (Moniker("beyonce", solarSystemID)). PLUMBING ONLY
-// — no UI.
+// R5a beyonce remote-park bind (Moniker("beyonce", solarSystemID)). Two of the
+// seven (CmdFleetTagTarget / CmdJumpThroughFleet) now have api.ts wrappers
+// (setFleetTargetTag / jumpThroughFleet) — the rest are still plumbing only,
+// with no UI caller yet.
 //
 // Each write dispatches as a BOUND method off parkBindSpec(solarSystemID) — the
 // BFF reads the session's OWN live flight to recover the current system, binds the

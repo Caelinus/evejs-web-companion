@@ -24,6 +24,9 @@ import type {
   AgentFinderRow,
   AgentFinderTarget,
   AgentRow,
+  ChatChannel,
+  ChatChannelState,
+  ChatMessage,
   CharacterSummary,
   CharStanding,
   Colony,
@@ -89,9 +92,16 @@ import type {
 } from "./types.ts";
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { JamEvent } from "../bridge/jamNotifications.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
+import type {
+  CompanionAbandonmentRecord,
+  CompanionOrderAuthority,
+  FleetCompanionRunState,
+} from "../nav/fleetCompanionLoop.ts";
 
 export type FeedStatus = "idle" | "connecting" | "connected" | "disconnected";
 
@@ -330,6 +340,13 @@ export type FeedEvent =
   | { readonly type: "fleet/action-started"; readonly action: FleetAction }
   | { readonly type: "fleet/action-finished"; readonly error: string | null }
   | { readonly type: "fleet/pending-invite"; readonly invite: FleetPendingInvite }
+  // A one-shot fleet call (OnFleetBroadcast). Pure push-to-store, same shape
+  // as fleet/pending-invite: last-write-wins, no reducer-side interpretation.
+  | { readonly type: "fleet/broadcast"; readonly broadcast: FleetBroadcast }
+  // The standing itemID -> tag dict from OnFleetStateChange. `tags` is
+  // whatever decodeFleetStateChangeNotification produced — an empty map is a
+  // legitimate "received, nothing tagged" answer, not "not received".
+  | { readonly type: "fleet/target-tags"; readonly tags: ReadonlyMap<number, string> }
   | { readonly type: "fleet/cleared" }
   // Scanner / Exploration Center. Both reads are independent; a failed scan is
   // unknown, never a successful empty current system.
@@ -584,6 +601,11 @@ export type FeedEvent =
       readonly gateLinks?: readonly GateLink[];
     }
   | { readonly type: "space/gate-map-error"; readonly message: string }
+  // Fleet-companion phase 7 — one `OnJamStart` / `OnJamEnd` push, already
+  // decoded. Carries the event rather than the folded set on purpose: the fold
+  // is identity-sensitive (a jam IS the source/module pair) and belongs in one
+  // place, beside the decoder that knows the wire, not in each producer.
+  | { readonly type: "space/jam"; readonly event: JamEvent }
   // Goal R23 slice A — the GENERIC in-space action layer. Nothing here names
   // mining or combat: these five events carry a target, a module and an effect
   // name, and a later combat goal reuses them unchanged.
@@ -842,6 +864,35 @@ export type FeedEvent =
     }
   | { readonly type: "mission-bot/start-error"; readonly message: string | null }
   | { readonly type: "mission-bot/cleared" }
+  // The fleet companion's readout (fleet-companion phase 0). Same construction
+  // as the two bots above: the loop pushes, this slice records.
+  | {
+      readonly type: "companion/started";
+      readonly startedAt: number;
+      /** What is missing or unusable about this pilot's fit. Advisory, never fatal. */
+      readonly fitWarnings: readonly string[];
+    }
+  | {
+      readonly type: "companion/progress";
+      readonly status: FleetCompanionRunState;
+      readonly phase: string | null;
+      readonly action: string | null;
+      readonly why: string | null;
+      readonly inFleet: boolean | null;
+      readonly followingOrderFrom: CompanionOrderAuthority | null;
+      readonly lastOrderHeard: string | null;
+      readonly canTag: boolean | null;
+      /**
+       * Decision 5's abandonment, or null. Carried through the slice rather
+       * than kept in the loop because the BFF's bot host reads it off the
+       * store to persist the thirty-minute clock — see
+       * FLEET_COMPANION_ABANDONMENT_WAIT_MS.
+       */
+      readonly abandonment: CompanionAbandonmentRecord | null;
+      readonly failureReason: string | null;
+    }
+  | { readonly type: "companion/start-error"; readonly message: string | null }
+  | { readonly type: "companion/cleared" }
   // The player Bot Builder runner's readout (pushed each tick; survives the shell switch).
   | { readonly type: "custom-bot/started"; readonly name: string }
   | {
@@ -861,6 +912,27 @@ export type FeedEvent =
   /** An "alert me" watch fired: what it said, and when (epoch ms). */
   | { readonly type: "custom-bot/alert"; readonly message: string; readonly atMs: number }
   | { readonly type: "custom-bot/cleared" }
+  // Goal R7 — the Chat panel (Local + Corp). A channel read completed (roster +
+  // recent backlog) — the panel polls while open (READ is a backlog poll).
+  | {
+      readonly type: "chat/loaded";
+      readonly channel: ChatChannel;
+      readonly channelState: ChatChannelState;
+    }
+  // The active channel tab changed (Local <-> Corp).
+  | { readonly type: "chat/active"; readonly channel: ChatChannel }
+  // A chat read/send failed non-fatally; null clears it after success.
+  | { readonly type: "chat/error"; readonly message: string | null }
+  // Drop the chat state (character offline / logged out).
+  | { readonly type: "chat/cleared" }
+  // Goal R10 — one chat message pushed over the live channel (gateway chat
+  // emitter -> WS -> BFF SSE), appended to the channel's backlog. Deduplicated
+  // against what a poll already delivered, so live and poll can coexist.
+  | {
+      readonly type: "chat/message";
+      readonly channel: ChatChannel;
+      readonly message: ChatMessage;
+    }
   // Goal R10 — the live push channel's connection state. Drives poll cadence
   // (fast when the channel is down, slow safety net when it is live); it is not
   // a correctness signal, since every bridge response still drains

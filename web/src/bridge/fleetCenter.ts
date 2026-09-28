@@ -10,6 +10,12 @@
 
 import { decodeBoundFleet, type BoundFleet, type BoundFleetResult } from "./boundFleet.ts";
 import { unwrapLong, type JsonValue } from "./wire.ts";
+// ⚠ A VALUE IMPORT INTO A MODULE THAT IMPORTS US BACK, and it is safe because
+// the edge going the other way is TYPE-ONLY (`import type { FleetCenterSnapshot }`)
+// and is erased before it can become a runtime cycle. Kept this way round
+// because `isFleetCommander` is the single mirrored copy of the server's own
+// commander gate, and a second copy here is precisely what must not happen.
+import { isFleetCommander } from "./fleetCommand.ts";
 
 export type FleetAvailability = "ready" | "not-in-fleet" | "unavailable";
 
@@ -83,6 +89,48 @@ export function authoritativeFleetMemberCharacterIDs(
   }
   const ids = new Set<number>();
   for (const member of snapshot.fleet.initState.value.members) {
+    const characterID = positiveSafeID(member.charID);
+    if (characterID !== null) {
+      ids.add(characterID);
+    }
+  }
+  return Object.freeze([...ids]);
+}
+
+/**
+ * The character ids the roster says are COMMANDERS — fleet creator, boss, wing
+ * commander or squad commander.
+ *
+ * ⚠ THE SAME TEST `canTagInFleet` APPLIES TO ONE ROW, APPLIED TO ALL OF THEM.
+ * `isFleetCommander` is the single definition of "commander" in this client, and
+ * it is mirrored from the server's own gate. Two questions are answered from it:
+ * "may I tag" (one row, this pilot) and "whose chat orders do I obey" (every
+ * row). Inventing a second idea of authority for the second question is exactly
+ * how the two would drift.
+ *
+ * ⚠ `null` IS "COULD NOT READ THE ROSTER" AND MUST NOT COLLAPSE TO EMPTY. A
+ * companion takes chat orders from this list and from nobody else, so an
+ * unreadable roster has to mean "obey nobody" rather than "obey anybody" — and
+ * an empty array is a real, different answer: a fleet with no commander in it.
+ *
+ * Ids that do not decode to a safe positive integer are dropped, the same rule
+ * `authoritativeFleetMemberCharacterIDs` above applies, because an id we cannot
+ * represent exactly is one we cannot compare a chat sender against.
+ */
+export function fleetCommanderCharacterIDs(
+  snapshot: FleetCenterSnapshot,
+): readonly number[] | null {
+  if (snapshot.availability === "unavailable") {
+    return null;
+  }
+  if (snapshot.availability === "not-in-fleet") {
+    return Object.freeze([]);
+  }
+  const ids = new Set<number>();
+  for (const member of snapshot.fleet.initState.value.members) {
+    if (!isFleetCommander(member)) {
+      continue;
+    }
     const characterID = positiveSafeID(member.charID);
     if (characterID !== null) {
       ids.add(characterID);

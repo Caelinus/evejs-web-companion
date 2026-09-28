@@ -972,3 +972,124 @@ test("a trip that DOES help puts the whole cap back", () => {
   const { results } = run(s, [hurt, hurt, well, hurt, hurt, hurt], withShop);
   assert.deepEqual(results.map((r) => r.status), Array(6).fill("running"));
 });
+
+// ─── In warp, nothing is decided ─────────────────────────────────────────────
+
+// The guard at the top of `decideScriptAction`. Until it existed the macros each
+// carried their own `obs.inWarp === true` check and the interrupt scan carried
+// NONE, so a watch could fire in mid-flight and issue a module, drone or lock
+// call against a grid the ship had already left.
+
+/**
+ * One tank layer's watch, the repairer it would switch on, and a hurt reading.
+ *
+ * ⚠ THE TABLE IS THE TEST. A ship may be shield-tanked, armour-tanked or hull
+ * -tanked, and a guard proven against `shield-below` alone would look correct on
+ * every fixture anybody happened to write while leaving the armour boat issuing
+ * repairer calls into warp. `repairersFor` is already symmetric across the
+ * three, so the guard above it has to be proven symmetric too.
+ */
+const LAYER_WATCHES: readonly {
+  readonly layer: string;
+  readonly when: Condition;
+  readonly hurt: Partial<ScriptObservation>;
+  readonly moduleID: number;
+}[] = [
+  { layer: "shield", when: { kind: "shield-below", fraction: 0.5 },
+    hurt: { shieldRatio: 0.2, shieldRepairerIDs: [11] }, moduleID: 11 },
+  { layer: "armour", when: { kind: "armor-below", fraction: 0.5 },
+    hurt: { armorRatio: 0.2, armorRepairerIDs: [12] }, moduleID: 12 },
+  { layer: "hull", when: { kind: "hull-below", fraction: 0.5 },
+    hurt: { hullRatio: 0.2, hullRepairerIDs: [13] }, moduleID: 13 },
+];
+
+test("a repair watch fires in space and is SILENT in warp - every tank layer, not just shields", () => {
+  for (const w of LAYER_WATCHES) {
+    const row: InterruptRow = { id: `r-${w.layer}`, when: w.when, respond: "repair" };
+    const s = script([macroStep("m", "mine-at-belt")], [row]);
+    const mem = initialMemory(s);
+
+    // The in-space half is not decoration: without it a guard that silenced the
+    // watch for some unrelated reason would pass the warp half every time.
+    const acting = decideScriptAction(s, obs({ ...w.hurt, inWarp: false }), mem, registry, home);
+    assert.deepEqual(acting.action, { kind: "activate", moduleID: w.moduleID, targetID: 0 },
+      `${w.layer}: the watch has to actually fire, or the warp half proves nothing`);
+    assert.equal(acting.interruptID, row.id);
+
+    const warping = decideScriptAction(s, obs({ ...w.hurt, inWarp: true }), mem, registry, home);
+    assert.deepEqual(warping.action, { kind: "wait" }, `${w.layer}: no module call in warp`);
+    assert.equal(warping.phase, "In warp");
+    assert.equal(warping.status, "running", `${w.layer}: waiting out a warp is not a stop`);
+    assert.equal(warping.interruptID, null, `${w.layer}: the row never got as far as firing`);
+  }
+});
+
+test("the same guard silences the capacitor watch and the drone watch", () => {
+  // Two more shapes of world call the scan could have issued mid-flight: a
+  // latching trip home, and a drone launch. Neither is tank-layer specific, and
+  // neither gets a tick in warp.
+  const trip: InterruptRow = { id: "cap", when: { kind: "capacitor-below", fraction: 0.3 }, respond: "dock-and-pause" };
+  const sCap = script([macroStep("m", "mine-at-belt")], [trip]);
+  const flat = { capacitorRatio: 0.1 };
+  assert.equal(decideScriptAction(sCap, obs({ ...flat, inWarp: false }), initialMemory(sCap), registry, home).action.kind,
+    "warp", "the capacitor watch fires in space");
+  assert.deepEqual(decideScriptAction(sCap, obs({ ...flat, inWarp: true }), initialMemory(sCap), registry, home).action,
+    { kind: "wait" }, "and issues nothing in warp");
+
+  const drones: InterruptRow = { id: "dro", when: { kind: "drone-health-below", fraction: 0.5 }, respond: "launch-drones" };
+  const sDro = script([macroStep("m", "mine-at-belt")], [drones]);
+  const hurtDrone = { lowestDroneHealth: 0.2, combatDroneBayItemIDs: [21], dronesOut: false };
+  assert.equal(decideScriptAction(sDro, obs({ ...hurtDrone, inWarp: false }), initialMemory(sDro), registry, home).action.kind,
+    "launchDrones", "the drone watch fires in space");
+  assert.deepEqual(decideScriptAction(sDro, obs({ ...hurtDrone, inWarp: true }), initialMemory(sDro), registry, home).action,
+    { kind: "wait" }, "and issues nothing in warp");
+});
+
+test("an UNREADABLE inWarp fails OPEN - null is not 'in warp'", () => {
+  // Same tri-state rule as every other read here. A null that blocked the tick
+  // would let one unreadable field mute every watch the ship has.
+  const row: InterruptRow = { id: "r", when: { kind: "armor-below", fraction: 0.5 }, respond: "repair" };
+  const s = script([macroStep("m", "mine-at-belt")], [row]);
+  const r = decideScriptAction(
+    s, obs({ armorRatio: 0.2, armorRepairerIDs: [12], inWarp: null }), initialMemory(s), registry, home);
+  assert.deepEqual(r.action, { kind: "activate", moduleID: 12, targetID: 0 });
+});
+
+test("the guard hands the memory back UNTOUCHED, so a latched trip resumes on the tick the warp clears", () => {
+  // This is the whole reason the guard may sit above the latch. A warp that
+  // spent the trip - or the alert release, or a repair tally - would turn a
+  // safety response into a coin flip on how far the ship happened to be flying.
+  const row: InterruptRow = { id: "trip", when: { kind: "hull-below", fraction: 0.5 }, respond: "dock-and-pause" };
+  const s = script([macroStep("m", "mine-at-belt")], [row]);
+  const hurt = { hullRatio: 0.2 };
+
+  const latched = decideScriptAction(s, obs({ ...hurt, inWarp: false }), initialMemory(s), registry, home);
+  assert.equal(latched.action.kind, "warp", "the trip starts");
+  assert.notEqual(latched.memory.latched, null);
+
+  const warping = decideScriptAction(s, obs({ ...hurt, inWarp: true }), latched.memory, registry, home);
+  assert.deepEqual(warping.action, { kind: "wait" }, "the trip does not steer mid-warp");
+  assert.equal(warping.memory, latched.memory, "the SAME memory object, not a rebuilt one");
+
+  const landed = decideScriptAction(s, obs({ ...hurt, inWarp: false }), warping.memory, registry, home);
+  assert.equal(landed.action.kind, "warp", "and picks the trip straight back up");
+  assert.equal(landed.interruptID, "trip");
+});
+
+test("a finished program still reports done in warp", () => {
+  // The guard sits AFTER the `done` check on purpose. `done()` issues nothing,
+  // so a warp cannot make it unsafe, and going first would hold a finished run
+  // "running" for the length of a warp it has no stake in.
+  const s = script([macroStep("a", "undock")]);
+  const mem = { ...initialMemory(s), position: { kind: "done" as const } };
+  assert.equal(decideScriptAction(s, obs({ inWarp: true }), mem, registry, home).status, "done");
+});
+
+test("the ordinary program issues nothing in warp either", () => {
+  // Not just the watches: the step under them is held too, which is what makes
+  // this one guard the whole precedence rule rather than an interrupt patch.
+  const s = script([macroStep("m", "mine-at-belt")], []);
+  const r = decideScriptAction(s, obs({ inWarp: true }), initialMemory(s), registry, home);
+  assert.deepEqual(r.action, { kind: "wait" });
+  assert.equal(r.stepPath, null);
+});

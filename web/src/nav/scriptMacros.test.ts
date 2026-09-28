@@ -9,6 +9,7 @@ import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, 
 import type { MacroMemory } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
@@ -53,6 +54,11 @@ function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
     systemName: "Test System",
     ...over,
   };
+}
+
+/** A `Target`-shaped default so a test only spells out the fields it cares about. */
+function broadcast(over: Partial<FleetBroadcast> & { name: FleetBroadcast["name"] }): FleetBroadcast {
+  return { scope: 3, senderCharID: null, senderSolarSystemID: null, itemID: null, typeID: null, receivedAtMs: 1, ...over };
 }
 
 const mineStep: MacroStep = { id: "m", kind: "macro", macro: "mine-at-belt", args: { belt: { kind: "belt", belt: { mode: "nearest" } } }, until: { kind: "ore-hold-at-least", fraction: 0.9 } };
@@ -2453,3 +2459,144 @@ test("off: a block that never mentions the fleet never calls anything", () => {
   assert.ok(tick.action.kind === "activate" && tick.action.targetID === 6661, "and a call it is not following is ignored");
 });
 
+// ── the "follow" precedence resolver: tag, then broadcast, then board ───────
+//
+// calledOnGrid tries three sources in order, each falling through to the next
+// when its own candidate is not among the rows this pilot can act on. Pinned
+// through fight-the-rats' `follow` role.
+
+test("follow: a fleet tag outranks a squad-board call", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetTargetTags: new Map([[6661, "A"]]),
+      squadPrimaryTargetID: 6662,
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "the tag wins, not the board");
+});
+
+test("follow: a fleet tag outranks a conflicting Target broadcast", () => {
+  // ⚠ Authority, not freshness: setFleetTargetTag refuses any writer who is
+  // not a fleet commander, so a tag that exists is PROVABLY a commander's.
+  // sendBroadcast checks only fleet membership, so any member can broadcast
+  // Target — receiving one says nothing about who sent it. The tag is the
+  // one signal here guaranteed to come from command, so it wins even though
+  // the broadcast is the fresher, more deliberate-looking act.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetTargetTags: new Map([[6661, "A"]]),
+      fleetBroadcast: broadcast({ name: "Target", itemID: 6662 }),
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "the tag wins, not the broadcast");
+});
+
+test("follow: a Target broadcast outranks a squad-board call", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetBroadcast: broadcast({ name: "Target", itemID: 6662 }),
+      squadPrimaryTargetID: 6661,
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "the broadcast wins, not the board");
+});
+
+test("follow: a tag for a ship NOT here falls through to a broadcast that is", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetTargetTags: new Map([[999999, "A"]]), // the tagged ship is two systems away
+      fleetBroadcast: broadcast({ name: "Target", itemID: 6662 }),
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "no tag on this grid — the broadcast is still followed");
+});
+
+test("follow: a broadcast for a ship NOT here falls through to the board", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetBroadcast: broadcast({ name: "Target", itemID: 999999 }), // the broadcast ship is elsewhere
+      squadPrimaryTargetID: 6662,
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "no broadcast on this grid — the board is still followed");
+});
+
+test("follow: a non-Target broadcast is never read as a primary call", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetBroadcast: broadcast({ name: "AlignTo", itemID: 6662 }),
+      squadPrimaryTargetID: 6661,
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "AlignTo is not a target call — the board is followed instead");
+});
+
+test("follow: an unrecognised tag string is still obeyed", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+      weaponModuleIDs: [500],
+      fleetTargetTags: new Map([[6662, "Bloop"]]), // not in the stock tag menu
+      squadPrimaryTargetID: 6661,
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "not a stock tag, but still a tag — it wins");
+});
+
+test("off: a block not set to follow ignores tags, broadcasts, and the board alike", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const state = obs({
+    snapshot: snapshot([RAT_NEAR, RAT_FAR]),
+    weaponModuleIDs: [500],
+    lockedTargetIDs: [6661],
+    fleetTargetTags: new Map([[6662, "A"]]),
+    fleetBroadcast: broadcast({ name: "Target", itemID: 6662 }),
+    squadPrimaryTargetID: 6662,
+  });
+  const tick = fight(fightStep("off"), state, { targetID: 6661, lockIssued: true, waited: 0, dronesOn: null }, {});
+  assert.notEqual(tick.action.kind, "callPrimary");
+  assert.ok(
+    tick.action.kind === "activate" && tick.action.targetID === 6661,
+    "not following — the fleet's tag, broadcast, and board call are all ignored",
+  );
+});

@@ -496,7 +496,7 @@
     border-color: var(--color-line-strong);
     color: var(--color-text);
   }
-  /* Active/selected state (nav tabs and selected-agent chip). */
+  /* Active/selected state (nav tabs, chat sub-tabs, selected agent chip). */
   button.active {
     background: linear-gradient(180deg, var(--color-accent-bright) 0%, var(--color-accent) 100%);
     border-color: var(--color-accent-bright);
@@ -7043,6 +7043,29 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     text-align: left;
+  }
+  /* The per-pilot companion setup, under the squad it belongs to. Indented to
+     the swatch so it reads as belonging to that row rather than the next one.
+     Only ticked squads render this, so the popover grows by the one or two
+     squads a pilot is actually in -- never by all of them. */
+  .hangar-squadmenu-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 3px 7px 6px 24px;
+  }
+  .hangar-squadmenu-setuprow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--hangar-text-dim);
+  }
+  .hangar-squadmenu-setuprow select {
+    flex: 1;
+    min-width: 0;
+    height: 22px;
+    font-size: 11px;
   }
   .hangar-squadmenu-done {
     width: 100%;

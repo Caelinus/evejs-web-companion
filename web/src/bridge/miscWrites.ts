@@ -17,7 +17,7 @@
 //
 // Server return shapes (educated guesses — Farmer is DOCKED; the destructive/
 // outward writes were NEVER fired live):
-//   • the nav / petition / cancel / description / asset-safety writes → null
+//   • the nav / chat / cancel / description / asset-safety writes → null
 //   • CreatePetition            → false (a stub rejection in this world)
 //   • CompleteManyJobs          → {type:"list", items:[<delivered job payload>, …]}
 //

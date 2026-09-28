@@ -34,7 +34,7 @@ import {
   packageAboard,
 } from "./missionBotLoop.ts";
 import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotLoop.ts";
-import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./targetPriority.ts";
+import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } from "./targetPriority.ts";
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
@@ -122,21 +122,97 @@ function squadRoleOf(step: MacroStep): SquadRoleArg {
 
 /**
  * The called ship, IF it is one of the rows this block could shoot right now.
- * A call for something that is not on this pilot's grid (or is out of its
- * targeting range — the rows are already filtered to reach) is not a target for
- * this pilot, so it answers null and the block picks for itself. That is what
- * keeps a follower flying while the FC is two systems away.
+ *
+ * Three sources, in precedence order — tag, then broadcast, then board:
+ *   1. `obs.fleetTargetTags` — the fleet's in-game target tags.
+ *   2. `obs.fleetBroadcast` — a `Target` fleet broadcast.
+ *   3. `obs.squadPrimaryTargetID` — the shared squad board.
+ *
+ * ⚠ A SOURCE WHOSE SHIP IS NOT AMONG `rows` FALLS THROUGH TO THE NEXT SOURCE,
+ * NOT TO NULL. The rows are already filtered to this grid and to targeting
+ * reach, so "the FC tagged something two systems away" must not blind the
+ * pilot to a broadcast or a board call it CAN act on — only when none of the
+ * three names a ship this pilot can act on does this answer null and the
+ * block picks for itself. That is what keeps a follower flying while the FC
+ * is two systems away.
+ *
+ * ⚠ TAG OUTRANKS BROADCAST, WHICH LOOKS BACKWARDS — a broadcast is the
+ * fresher, more deliberate act, so someone will want to swap this order.
+ * Don't: the reason is AUTHORITY, and it lives in the server, not in
+ * freshness. `setFleetTargetTag` refuses any writer who is not a fleet
+ * commander, so a tag that exists is PROVABLY a commander's. `sendBroadcast`
+ * checks fleet membership and nothing else, so any fleet member may
+ * broadcast `Target` — receiving one tells you nothing about who sent it. A
+ * tag is the one signal here guaranteed to come from command; a broadcast is
+ * not, so it ranks below.
  */
 function calledOnGrid<T>(
   obs: ScriptObservation,
   rows: readonly T[],
   itemIDOf: (row: T) => number,
 ): T | null {
+  const byTag = calledByTag(obs, rows, itemIDOf);
+  if (byTag !== null) {
+    return byTag;
+  }
+  const byBroadcast = calledByBroadcast(obs, rows, itemIDOf);
+  if (byBroadcast !== null) {
+    return byBroadcast;
+  }
   const called = obs.squadPrimaryTargetID ?? null;
   if (called === null) {
     return null;
   }
   return rows.find((row) => itemIDOf(row) === called) ?? null;
+}
+
+/**
+ * Source 1: the fleet's in-game target tags, ranked by `fleetTagRank` (lower
+ * ranks first; an unrecognised tag string still gets a finite rank there, so
+ * it is still obeyed here). Only rows the tag map actually names are
+ * candidates — an untagged row is not "ranked worst", it is simply not this
+ * source's business.
+ *
+ * ⚠ TAGS ARE RESOLVED HERE, ONE RUNG ABOVE `pickPrimary`, AND NEVER PASSED
+ * INTO IT. `pickPrimary` already accepts an optional `tagOf` for this exact
+ * ranking, but every call site in this file still passes none — wiring tags
+ * through there too would be a second mechanism deciding the one thing this
+ * function already decided. Keep the tag read confined to this rung.
+ */
+function calledByTag<T>(obs: ScriptObservation, rows: readonly T[], itemIDOf: (row: T) => number): T | null {
+  const tags = obs.fleetTargetTags ?? null;
+  if (tags === null || tags.size === 0) {
+    return null;
+  }
+  let best: T | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const row of rows) {
+    const tag = tags.get(itemIDOf(row));
+    if (tag === undefined) {
+      continue; // not named in the tag map — not this source's candidate
+    }
+    const rank = fleetTagRank(tag);
+    if (rank < bestRank) {
+      best = row;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/**
+ * Source 2: a `Target` fleet broadcast. `obs.fleetBroadcast` is already
+ * freshness-filtered upstream against the broadcast TTL (null once a call has
+ * lapsed) — no TTL check here. Only the name "Target" is a primary call;
+ * every other broadcast name (AlignTo, WarpTo, ...) means something else
+ * entirely and must never be read as one.
+ */
+function calledByBroadcast<T>(obs: ScriptObservation, rows: readonly T[], itemIDOf: (row: T) => number): T | null {
+  const broadcast = obs.fleetBroadcast ?? null;
+  if (broadcast === null || broadcast.name !== "Target" || broadcast.itemID === null) {
+    return null;
+  }
+  return rows.find((row) => itemIDOf(row) === broadcast.itemID) ?? null;
 }
 
 /** Tell the fleet what this pilot is on — once per primary. Null when there is nothing to say. */
@@ -3114,6 +3190,224 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
   return tick(WAIT, "Boosting - everyone's healthy for now.", "Boosting", ACTING, false, mem);
 };
 
+/**
+ * A plain formation-orbit distance for the NAMED-mate variants (orbit-fleet-mate,
+ * and follow-fleet-mate later). Deliberately NOT `ORBIT_BOOST_RANGE_M` — that
+ * constant's value is pinned to remote-module reach, and this pilot may carry no
+ * remote module at all (the whole point of these two blocks is that they do not
+ * require one). Same numeric value, different reason: close enough to stay on
+ * the mate's grid interaction — inside a web or scram's own reach, should either
+ * carry one — without literally sitting on top of them.
+ */
+const FLEET_MATE_ESCORT_RANGE_M = 2000;
+
+// ── orbit-fleet-mate ──────────────────────────────────────────────────────────
+// orbit-and-boost's named-target twin: same standing orbit, no rep ladder of its
+// own (see FLEET_MATE_ESCORT_RANGE_M above) — a plain "stick to this one pilot"
+// escort a player can pair with whatever else the ship is doing (its own
+// hardeners-on, its own combat block). Orbits ONCE per anchor (memory-gated,
+// same idiom as orbit-and-boost), never finishes on its own.
+const orbitFleetMate: MacroDecider = (step, obs, mem) => {
+  const who = step.args["who"];
+  if (who === undefined || who.kind !== "character" || who.charID === null) {
+    return tick(WAIT, "No fleet-mate picked to orbit.", "Orbiting", {
+      kind: "blocked",
+      reason: "Pick the fleet-mate this block orbits.",
+    });
+  }
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp - nothing decided mid-warp.", "Orbiting", ACTING, false, mem);
+  }
+  if (obs.inSpace !== true || obs.snapshot == null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", "Orbiting", ACTING, false, mem);
+  }
+  if ((obs.fleetMemberCharacterIDs ?? null) === null) {
+    return tick(WAIT, "Reading the authoritative fleet roster.", "Orbiting", ACTING, false, mem);
+  }
+  const mateName = who.name !== null && who.name.length > 0 ? who.name : null;
+  const friendlies = fleetMatesOnGrid(obs) ?? [];
+  const anchor = friendlies.find((e) => e.characterID === who.charID) ?? null;
+  if (anchor === null) {
+    return tick(
+      WAIT,
+      mateName !== null ? `${mateName} is not on this grid yet.` : "That fleet-mate is not on this grid yet.",
+      "Orbiting",
+      ACTING,
+      false,
+      mem,
+    );
+  }
+  if (num(mem, "orbiting") === anchor.itemID) {
+    return tick(WAIT, mateName !== null ? `Orbiting ${mateName}.` : "Orbiting the fleet-mate.", "Orbiting", ACTING, false, mem);
+  }
+  return tick(
+    { kind: "orbit", targetID: anchor.itemID, range: FLEET_MATE_ESCORT_RANGE_M },
+    mateName !== null ? `Orbiting ${mateName}.` : "Orbiting the fleet-mate.",
+    "Orbiting",
+    ACTING,
+    false,
+    { ...mem, orbiting: anchor.itemID },
+  );
+};
+
+// ── follow-fleet-mate ─────────────────────────────────────────────────────────
+// orbit-fleet-mate's stand-off twin: `api.keepAtRange` (CmdFollowBall with a
+// non-zero range) instead of `orbit` (CmdOrbit) — holds station off the named
+// mate rather than circling them. The difference matters to a ship that should
+// not be turning through the mate's own firing arc (a hauler staying with a
+// gate camp's anchor, say) where a circling escort would be actively wrong.
+// Same memory-gated re-issue as orbit-fleet-mate; shares its escort range.
+const followFleetMate: MacroDecider = (step, obs, mem) => {
+  const who = step.args["who"];
+  if (who === undefined || who.kind !== "character" || who.charID === null) {
+    return tick(WAIT, "No fleet-mate picked to follow.", "Following", {
+      kind: "blocked",
+      reason: "Pick the fleet-mate this block follows.",
+    });
+  }
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp - nothing decided mid-warp.", "Following", ACTING, false, mem);
+  }
+  if (obs.inSpace !== true || obs.snapshot == null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", "Following", ACTING, false, mem);
+  }
+  if ((obs.fleetMemberCharacterIDs ?? null) === null) {
+    return tick(WAIT, "Reading the authoritative fleet roster.", "Following", ACTING, false, mem);
+  }
+  const mateName = who.name !== null && who.name.length > 0 ? who.name : null;
+  const friendlies = fleetMatesOnGrid(obs) ?? [];
+  const anchor = friendlies.find((e) => e.characterID === who.charID) ?? null;
+  if (anchor === null) {
+    return tick(
+      WAIT,
+      mateName !== null ? `${mateName} is not on this grid yet.` : "That fleet-mate is not on this grid yet.",
+      "Following",
+      ACTING,
+      false,
+      mem,
+    );
+  }
+  if (num(mem, "following") === anchor.itemID) {
+    return tick(WAIT, mateName !== null ? `Holding range off ${mateName}.` : "Holding range off the fleet-mate.", "Following", ACTING, false, mem);
+  }
+  return tick(
+    { kind: "keepAtRange", targetID: anchor.itemID, range: FLEET_MATE_ESCORT_RANGE_M },
+    mateName !== null ? `Holding range off ${mateName}.` : "Holding range off the fleet-mate.",
+    "Following",
+    ACTING,
+    false,
+    { ...mem, following: anchor.itemID },
+  );
+};
+
+// ═══ Fleet tagging ══════════════════════════════════════════════════════════
+// Set a fleet target tag on the top-priority hostile, so a tagged squad can see
+// the primary without a broadcast — reusing the same DEFAULT_TARGET_PRIORITY /
+// pickPrimary ladder the combat blocks already rank hostiles with.
+//
+// ⚠ THE GATE IS THREE-STATE AND CLIENT-SIDE, AND THAT IS NOT OPTIONAL. The
+// server's own gate (fleetRuntime.js) checks commander-ness and returns a bare
+// `false` for a non-commander, but its only caller throws that boolean away —
+// the HTTP ack this block would see is identical whether the tag landed or was
+// silently dropped (see bridge/fleetCommand.ts's header, in full). `obs.canTag`
+// is populated from the SAME bound-fleet read this pilot's own row lives in, so
+// this decider never re-derives commander-ness itself — it only reacts to the
+// three answers: null (cannot tell — wait), false (not a commander — skip and
+// keep fighting), true (go ahead).
+//
+// ⚠ WHAT THIS HONESTLY IS: a SINGLE-LETTER, SINGLE-PILOT capability, not smart
+// fleet-wide tagging. Nothing in a snapshot or a roster read says whether the
+// FC, or another companion running this SAME block on another hull, already
+// lettered a ship — there is no such list to read. The only thing stopping a
+// re-tag is THIS block's own memory of what IT last wrote (`taggedTargetID`
+// below). Two pilots running this block in the same fleet would fight each
+// other's tags every time their own picks disagree. It is safe only when
+// exactly one pilot in the squad runs it — say so if this ever grows a
+// player-facing description, never "smart tagging".
+const FLEET_TAG_PRIMARY = "1"; // the stock menu's clearest "shoot this now"
+
+/** Same reasoning as MAX_REMOTE_ASSIST_ATTEMPTS: bound a write that may never confirm. */
+const MAX_FLEET_TAG_ATTEMPTS = 3;
+
+const fleetTagTarget: MacroDecider = (step, obs, mem) => {
+  if (obs.flightStatus?.docked === true) {
+    return tick(WAIT, "Docked - tagging happens out in space.", "Tagging", {
+      kind: "blocked",
+      reason: "Undock first - put a Leave-the-station block before this one.",
+    });
+  }
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp - nothing decided mid-warp.", "Tagging", ACTING, false, mem);
+  }
+  if (obs.inSpace !== true || obs.snapshot == null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", "Tagging", ACTING, false, mem);
+  }
+
+  // THREE STATES. `null` is "could not look" — WAIT, never guess "no" (that
+  // would silently skip a real commander for as long as the read stays flaky).
+  const canTag = obs.canTag ?? null;
+  if (canTag === null) {
+    return tick(WAIT, "Checking whether this pilot can set fleet tags.", "Tagging", ACTING, false, mem);
+  }
+  if (canTag === false) {
+    // SKIP, NOT BLOCKED — this pilot simply cannot do this one job; the rest of
+    // its bot (fighting, looting, whatever runs after this block) keeps going.
+    return tick(WAIT, "Not the fleet commander.", "Tagging", {
+      kind: "skipped",
+      reason:
+        "This pilot is not the fleet boss or a wing or squad commander, so it cannot set fleet target tags. It keeps working without tagging.",
+    });
+  }
+
+  const snapshot = obs.snapshot;
+  const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
+  const hostiles = hostileRows(snapshot, origin);
+  if (hostiles.length === 0) {
+    return tick(WAIT, "No hostile here to tag.", "Tagging", ACTING, false, mem);
+  }
+  const primary =
+    pickPrimary(hostiles, (row) => row.typeID, (row) => row.distance, targetGroupOf(obs), targetPriorityOf(step)) ??
+    hostiles[0]!;
+
+  // Confirmed by SEEING the tag in a later `fleetTargetTags` read — never by the
+  // write's own ack, which reads `{ok: true}` whether the server kept the tag or
+  // dropped it (see api.ts's setFleetTargetTag and fleetCommand.ts's header).
+  const tags = obs.fleetTargetTags ?? null;
+  const landed = tags !== null && tags.get(primary.itemID) === FLEET_TAG_PRIMARY;
+  const taggedID = num(mem, "taggedTargetID");
+
+  if (taggedID !== primary.itemID) {
+    // A NEW primary — fresh target, fresh attempt budget, issue right away
+    // (the memory-gating idiom: re-stamp once per target, same as orbit-and-boost).
+    return tick(
+      { kind: "setFleetTargetTag", targetID: primary.itemID, tag: FLEET_TAG_PRIMARY },
+      "Marking the top target for the fleet.",
+      "Tagging",
+      ACTING,
+      false,
+      { ...mem, taggedTargetID: primary.itemID, tagTries: 1 },
+    );
+  }
+  if (landed) {
+    return tick(WAIT, "The top target is tagged for the fleet.", "Tagging", ACTING, false, mem);
+  }
+  const tries = num(mem, "tagTries") ?? 0;
+  if (tries >= MAX_FLEET_TAG_ATTEMPTS) {
+    // Stop resending — a write that never confirms must not spend the tick
+    // budget on refusals it cannot see the reason for (MAX_REMOTE_ASSIST_ATTEMPTS's
+    // own reasoning). The block keeps watching in case a later read confirms it.
+    return tick(WAIT, "The tag has not shown up yet - watching without resending.", "Tagging", ACTING, false, mem);
+  }
+  return tick(
+    { kind: "setFleetTargetTag", targetID: primary.itemID, tag: FLEET_TAG_PRIMARY },
+    "Marking the top target for the fleet.",
+    "Tagging",
+    ACTING,
+    false,
+    { ...mem, tagTries: tries + 1 },
+  );
+};
+
 // ═══ The fleet-management set ═══════════════════════════════════════════════
 // Form up / invite / join — the multibox alt-fleeting loop. All confirm-gated
 // server-side; each confirms by re-reading the bound-fleet state (`obs.inFleet`,
@@ -3905,6 +4199,9 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "sell-item": sellItem,
   "remote-rep": remoteRep,
   "orbit-and-boost": orbitAndBoost,
+  "orbit-fleet-mate": orbitFleetMate,
+  "follow-fleet-mate": followFleetMate,
+  "fleet-tag-target": fleetTagTarget,
   "create-fleet": createFleet,
   "invite-to-fleet": inviteToFleet,
   "join-fleet": joinFleet,

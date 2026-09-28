@@ -21,10 +21,15 @@
 // encodes this by taking the server bot as an explicit, checked-first input
 // rather than leaving callers to reconcile the two themselves.
 
-import type { ActiveBotVitals, ActiveServerBot, ServerBot } from "../app/api.ts";
+import type {
+  ActiveBotVitals,
+  ActiveServerBot,
+  ServerBot,
+  ServerBotCompanion,
+} from "../app/api.ts";
 import { BOTS } from "../nav/botRegistry.ts";
 import { BOT_RISK_LABELS } from "./runPolicy.ts";
-import type { BotsState, CustomBotState } from "../store/types.ts";
+import type { BotsState, CustomBotState, FleetCompanionState } from "../store/types.ts";
 
 /** How a pilot is currently being flown by a bot, or that nothing is. */
 export type RunMode = "tab" | "server" | "none";
@@ -242,6 +247,57 @@ export function mergeServerRosters<S>(reads: readonly RosterRead<S>[]): MergedRo
  * bots are excluded (they are history, not a running pilot); see
  * `serverBotFor` for why `endedAt` is the signal rather than `status`.
  */
+/**
+ * A companion that is running but has not pushed progress yet: every fact
+ * unknown, which is a different thing from every fact being "no".
+ */
+const UNREPORTED_COMPANION: ServerBotCompanion = Object.freeze({
+  role: null,
+  inFleet: null,
+  followingOrderFrom: null,
+  lastOrderHeard: null,
+  canTag: null,
+  fitWarnings: Object.freeze([]),
+});
+
+/**
+ * The companion badge's facts for one row, read from WHICHEVER SIDE OWNS THE
+ * RUN -- or null when this row is not a companion at all.
+ *
+ * ⚠ A ROW CAN CARRY BOTH A SESSION AND A SERVER BOT, AND READING THE WRONG ONE
+ * PRINTS A CONFIDENT FALSEHOOD. `BotManager.svelte` looks a server bot up for
+ * every held session precisely because a pilot can have a tab open here while
+ * the HOST holds the hull. This module's own header already states the rule
+ * that settles it -- a server bot always wins, and the tab reading is simply
+ * stale -- so this follows `mode`, which `pilotRunState` has already resolved,
+ * rather than deciding the same question a second time and risking a different
+ * answer. Read the tab's idle companion slice for a row whose run is on the
+ * server and the badge says "not in a fleet, standing by" about a pilot that is
+ * in a fleet obeying broadcasts.
+ *
+ * ⚠ THE TAB BRANCH CHECKS `runningBotID`, NOT MERELY THAT THE SLICE HAS
+ * VALUES. The companion slice keeps its last readout after a run ends, so a
+ * pilot now flying the MINING bot would otherwise still show the companion
+ * badge from a run that finished an hour ago.
+ */
+export function companionFactsFor(
+  mode: RunMode,
+  bots: BotsState | null,
+  companion: FleetCompanionState | null,
+  serverBot: ServerBot | null,
+): ServerBotCompanion | null {
+  if (mode === "server") {
+    if (serverBot === null || serverBot.kind !== "companion") {
+      return null;
+    }
+    return serverBot.companion ?? UNREPORTED_COMPANION;
+  }
+  if (mode === "tab" && bots?.runningBotID === "companion") {
+    return companion ?? UNREPORTED_COMPANION;
+  }
+  return null;
+}
+
 export function serverOnlyBots(
   serverBots: readonly ServerBot[],
   heldCharacterIDs: readonly number[],

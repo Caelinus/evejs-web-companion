@@ -351,6 +351,24 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Orbits the nearest friendly ship up close and keeps your remote repairers running on whoever is hurt — the stay-with-the-fleet logistics loop. Keeps going for as long as it is left on; a watch or your own hand stops it.",
     "Being in space, with a remote repairer fitted",
   ),
+  "orbit-fleet-mate": entry(
+    "orbit-fleet-mate",
+    "fleet",
+    "Orbits the fleet-mate you name, close enough to stay with them wherever the fight moves - a designated pairing rather than whoever is nearest. Keeps going for as long as it is left on; a watch or your own hand stops it.",
+    "Being in space, in a fleet with the pilot you pick",
+  ),
+  "follow-fleet-mate": entry(
+    "follow-fleet-mate",
+    "fleet",
+    "Holds a set distance off the fleet-mate you name, instead of circling them - the stand-off escort for a ship that should not be turning through their firing arc. Keeps going for as long as it is left on; a watch or your own hand stops it.",
+    "Being in space, in a fleet with the pilot you pick",
+  ),
+  "fleet-tag-target": entry(
+    "fleet-tag-target",
+    "fleet",
+    "Marks the top-priority hostile with a fleet target tag, so a tagged fleet can see the primary without a broadcast. Only works while you are the fleet's boss or one of its wing or squad commanders - on any other seat it does nothing and keeps fighting anyway. It only tracks its own tag, so running this on more than one pilot at once will have them fight each other's tags.",
+    "Being in space, in a fleet, as its commander",
+  ),
   "create-fleet": entry(
     "create-fleet",
     "fleet",

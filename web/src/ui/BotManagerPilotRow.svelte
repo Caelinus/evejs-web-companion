@@ -20,9 +20,17 @@
   // subscribing explicitly rather than with `$store` sugar) instead of once
   // at the top level.
   import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
+  // The same words the pilot's own companion panel uses, off the shared layer,
+  // so one run never reads two different ways in two places.
+  import {
+    canTagWords,
+    inFleetWords,
+    orderFromWords,
+  } from "../bots/companionReadout.ts";
   import type { Session } from "../app/sessions.ts";
   import type { AppFlow } from "../app/flow.ts";
   import {
+    companionFactsFor,
     lastAlertPhrase,
     pilotRunState,
     resumedNote,
@@ -34,7 +42,12 @@
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
-  import type { BotsState, CustomBotState, FlightState } from "../store/types.ts";
+  import type {
+    BotsState,
+    CustomBotState,
+    FleetCompanionState,
+    FlightState,
+  } from "../store/types.ts";
   import ActionButton from "./ActionButton.svelte";
 
   let {
@@ -85,6 +98,7 @@
   let flight = $state<FlightState | null>(null);
   let bots = $state<BotsState | null>(null);
   let customBot = $state<CustomBotState | null>(null);
+  let companion = $state<FleetCompanionState | null>(null);
 
   $effect(() => {
     if (!session) {
@@ -92,6 +106,7 @@
       flight = null;
       bots = null;
       customBot = null;
+      companion = null;
       return;
     }
     const unsubs = [
@@ -106,6 +121,9 @@
       }),
       session.store.customBot.subscribe((value) => {
         customBot = value;
+      }),
+      session.store.companion.subscribe((value) => {
+        companion = value;
       }),
     ];
     return () => {
@@ -141,6 +159,19 @@
   const modeLabel = $derived(
     runState.mode === "server" ? "On the server" : runState.mode === "tab" ? "In this tab" : null,
   );
+
+  /**
+   * This row's companion facts, or null when the row is not a companion run.
+   *
+   * ⚠ THE CHOICE OF SOURCE IS NOT MADE HERE. `companionFactsFor` owns it, in
+   * the pure view layer, because it is the one part of this badge a render test
+   * can never exercise: this component's store subscriptions live in an
+   * `$effect` that SSR skips, so a rendered row always sees a null `companion`
+   * slice and a "does it read the tab or the server" test would pass either
+   * way. See that function's header for the rule and pilotRoster.test.ts for
+   * the cases.
+   */
+  const companionFacts = $derived(companionFactsFor(runState.mode, bots, companion, serverBot));
 
   // Decision 3's honest lifetime copy, plain enough to sit right under the badge.
   const lifetimeNote = $derived(
@@ -329,7 +360,35 @@
         {#if modeLabel}
           <span class="badge" class:accent={runState.mode === "server"}>{modeLabel}</span>
         {/if}
+        <!--
+          ⚠ THE ROLE BADGE IS GONE, AND NOTHING REPLACES IT. A companion had a
+          role that picked exactly one threshold and that no decision rung ever
+          read, so it was deleted with the rest of the settings surface
+          (docs/fleet-companion-simplification.md). A badge saying "DPS" while
+          the pilot was repairing a fleet-mate would have been worse than no
+          badge -- and the line below already says what it is ACTUALLY doing and
+          whose order it is following, which is the thing a player wants.
+        -->
       </div>
+      {#if companionFacts}
+        <p class="note why">
+          In fleet: {inFleetWords(companionFacts.inFleet)} - following {orderFromWords(
+            companionFacts.followingOrderFrom,
+          )} - can tag: {canTagWords(companionFacts.canTag)}
+        </p>
+        {#if companionFacts.lastOrderHeard}
+          <p class="note why">Last order heard: {companionFacts.lastOrderHeard}</p>
+        {/if}
+        <!--
+          ⚠ THE ONLY PLACE A HEADLESS PILOT'S FIT WARNINGS REACH ANYONE. There
+          is no panel open for a run on the bot host, and a squad start is
+          exactly the case these were written for. Advisory: the run is already
+          flying, and a human loads the missing thing or leaves it.
+        -->
+        {#each companionFacts.fitWarnings as warning (warning)}
+          <p class="alert">{warning}</p>
+        {/each}
+      {/if}
       {#if lifetimeNote}
         <p class="note why">{lifetimeNote}</p>
       {/if}

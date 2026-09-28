@@ -238,3 +238,68 @@ test("the R7d sweep would actually catch a leaked id", () => {
   // Keeps the assertion above from passing vacuously.
   assert.match(visibleText(`<td>${PILOT_ID}</td>`), /\b\d{4,}\b/);
 });
+
+
+test("a headless companion's row says what it is doing, not just that it is running", () => {
+  // ⚠ THE SERVER SIDE IS THE ONLY SIDE THIS FILE CAN RENDER. A tab companion
+  // reaches the row through a store subscription in an `$effect`, which SSR
+  // skips (see this file's header) -- so the tab branch, and the choice of
+  // source between the two, are covered in bots/pilotRoster.test.ts against the
+  // pure `companionFactsFor` instead. What is proven here is that the facts
+  // actually reach the markup.
+  const text = visibleText(
+    renderRow({
+      serverBot: fakeServerBot({
+        kind: "companion",
+        scriptID: "companion",
+        scriptName: "Fleet companion (Logistics)",
+        companion: {
+          role: "logi",
+          inFleet: true,
+          followingOrderFrom: "broadcast",
+          lastOrderHeard: "the fleet's target call",
+          canTag: false,
+        },
+      }),
+    }),
+  );
+  assert.match(text, /In fleet: yes/);
+  assert.match(text, /following a fleet broadcast/);
+  assert.match(text, /Last order heard: the fleet's target call/);
+  assert.match(text, /Logistics/);
+});
+
+test("a companion that cannot tag says so, and one that has not looked says something else", () => {
+  // ⚠ THE THREE-STATE, END TO END. A pilot the server would silently refuse
+  // looks identical to one with nothing to tag unless the row distinguishes
+  // them -- and neither may read like the third case, a roster not yet seen.
+  const refused = visibleText(
+    renderRow({
+      serverBot: fakeServerBot({
+        kind: "companion",
+        companion: {
+          role: null,
+          inFleet: true,
+          followingOrderFrom: null,
+          lastOrderHeard: null,
+          canTag: false,
+        },
+      }),
+    }),
+  );
+  assert.match(refused, /can tag: no - not a fleet commander/);
+
+  const unread = visibleText(
+    renderRow({ serverBot: fakeServerBot({ kind: "companion", companion: null }) }),
+  );
+  assert.match(unread, /can tag: not known/);
+  assert.doesNotMatch(unread, /can tag: no/, "an unread roster is not a refusal");
+  assert.match(unread, /In fleet: not known/);
+});
+
+test("a plain script row grows no companion badge", () => {
+  const text = visibleText(renderRow({ serverBot: fakeServerBot() }));
+  assert.doesNotMatch(text, /In fleet:/);
+  assert.doesNotMatch(text, /can tag:/);
+  assert.doesNotMatch(text, /Last order heard/);
+});

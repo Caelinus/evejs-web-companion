@@ -274,14 +274,14 @@ test("attaching opens ONE gateway stream, keyed to the held session, and serves 
     source: "evejs-web-gateway",
     type: "event",
     cursor: { epoch: "e1", sequence: 1 },
-    event: { kind: "notification", notification: { kind: "service", method: "OnX" } },
+    event: { kind: "chat", channel: "local", entry: { message: "hi" } },
   });
 
   const frames = await client.waitForFrames(3);
-  const event = frames.find((f) => f.type === "event");
-  assert.ok(event, `expected a forwarded gateway frame; saw ${JSON.stringify(frames)}`);
-  assert.equal(event.event.event ?? event.event.kind, "notification");
-  assert.equal(event.event.notification.kind, "service");
+  const chat = frames.find((f) => f.type === "event");
+  assert.ok(chat, `expected a forwarded gateway frame; saw ${JSON.stringify(frames)}`);
+  assert.equal(chat.event.event ?? chat.event.kind, "chat");
+  assert.equal(chat.event.entry.message, "hi");
 
   // The opaque handle never reaches the browser.
   assert.ok(

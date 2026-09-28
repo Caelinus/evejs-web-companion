@@ -279,6 +279,45 @@ test("POST /api/bridge/flight/warp binds the park and dispatches CmdWarpToStuffA
   assert.equal(payload.flight.shipMode, "WARP");
 });
 
+test("POST /api/bridge/flight/warp-member dispatches CmdWarpToStuff(\"char\", characterID)", async () => {
+  // The one warp whose destination need not be on this grid: the server
+  // resolves where the fleet member is (resolveFleetMemberWarpTarget) and
+  // enforces same-fleet/online itself, which is why this route carries a
+  // CHARACTER id and no location at all.
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/flight/warp-member", {
+    method: "POST",
+    body: { characterID: 90000001 },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+
+  const warp = gateway.calls.boundCall.find((c) => c.method === "CmdWarpToStuff");
+  assert.ok(warp, "CmdWarpToStuff dispatched");
+  assert.deepEqual(warp.args, ["char", 90000001]);
+  assert.equal(warp.bridgeSessionID, BRIDGE_SESSION_ID);
+});
+
+test("warp-member refuses a missing character id (INVALID_TARGET)", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/flight/warp-member", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(response.status, 400);
+  assert.equal(payload.error, "INVALID_TARGET");
+  assert.equal(gateway.calls.boundCall.length, 0, "nothing dispatched without a target");
+});
+
 test("warp is refused when docked (NOT_IN_SPACE)", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });

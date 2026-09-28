@@ -4,6 +4,8 @@
 
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
+import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { ActiveJam } from "../bridge/jamNotifications.ts";
 import type {
   FleetAvailability,
   FleetPendingInvite,
@@ -18,6 +20,11 @@ import type {
 import type { GateLink } from "../space/gateLinks.ts";
 import type { BotID, ShipControllerID } from "../nav/botRegistry.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
+import type {
+  CompanionAbandonmentRecord,
+  CompanionOrderAuthority,
+  FleetCompanionRunState,
+} from "../nav/fleetCompanionLoop.ts";
 
 export type { GateLink };
 export type { BotID };
@@ -810,6 +817,14 @@ export type FleetAction = "form" | "invite" | "accept" | "leave";
  * `availability` keeps a real FleetNotFound distinct from a failed read. The
  * pending invite comes from the existing OnFleetInvite live payload because an
  * invitee cannot discover the fleetID through the own-fleet read before joining.
+ *
+ * `lastBroadcast` and `targetTags` (below) live on THIS slice rather than a
+ * new one on purpose: `fleet.set(INITIAL_FLEET)` in clientStore.ts already
+ * fires from every place a fleet resets (logout, character online/offline,
+ * fleet/cleared), so folding these fields into `INITIAL_FLEET` inherits that
+ * reset wiring for free. A dedicated slice would need each of those call
+ * sites updated by hand, and would silently drift the first time one of them
+ * was missed.
  */
 export interface FleetCenterState {
   readonly loaded: boolean;
@@ -821,6 +836,35 @@ export interface FleetCenterState {
   readonly readError: string | null;
   readonly actionError: string | null;
   readonly refreshedAtMs: number | null;
+  /** The most recent OnFleetBroadcast call ("shoot that"). Last-write-wins. */
+  readonly lastBroadcast: FleetBroadcast | null;
+  /**
+   * itemID -> standing target tag, from the last OnFleetStateChange.
+   * ⚠ `null` and an empty map mean different things and must stay distinct:
+   * `null` = never received (or unreadable) this fleet; an empty map =
+   * received, and the fleet has tagged nothing. Same convention
+   * `authoritativeFleetMemberCharacterIDs` uses in bridge/fleetCenter.ts — a
+   * pilot that may WRITE tags reads "received, nothing tagged" as permission
+   * to assign a letter, so collapsing the two would let it collide with a tag
+   * that was really there.
+   */
+  readonly targetTags: ReadonlyMap<number, string> | null;
+  /**
+   * The fleet id of the last read that could actually SEE the fleet, used only
+   * to decide whether the tags and the broadcast above still belong to the
+   * fleet this pilot is in.
+   *
+   * ⚠ IT EXISTS BECAUSE `fleet.fleetID` CANNOT DO THIS JOB, and the reason is
+   * subtle enough that it was got wrong once. An "unavailable" read (every
+   * bridge call failed) is stored like any other: `fleet` is overwritten with
+   * the decoded-but-empty value, whose `fleetID` is `null`. Refusing to CLEAR
+   * on that read is not enough, because the read still destroys the id the
+   * NEXT read compares against -- so a recovery to the very same fleet then
+   * looks like a switch, and wipes tags nobody ever left behind.
+   *
+   * Updated only by an authoritative read, so a transport blip cannot move it.
+   */
+  readonly authoritativeFleetID: number | null;
 }
 
 // --- Scanner / Exploration Center -----------------------------------------
@@ -1717,6 +1761,25 @@ export interface SpaceState {
    * these gates go" are different facts and a player acts differently on each.
    */
   readonly gateLinksError: string | null;
+  /**
+   * Fleet-companion phase 7 — every hostile module cycle currently landing on
+   * THIS ship, folded from the `OnJamStart` / `OnJamEnd` pushes
+   * (`bridge/jamNotifications.ts`). The aggressor names itself in each one,
+   * which is the only read anywhere that says who is holding this ship down.
+   *
+   * ⚠ EVERY JAM TYPE, NOT JUST TACKLE. Webs, paints, damps and neuts land here
+   * too. Narrowing to the two tackle types is `tacklersHolding`'s job, at read
+   * time, so a later reader that wants to know it is being neuted does not have
+   * to re-plumb the wire.
+   *
+   * ⚠ NOT SELF-EXPIRING. The slice keeps what the wire said; whether a jam is
+   * still believed is answered by `isJamLive` when somebody ASKS — the same
+   * split `lastBroadcast` and `isFleetBroadcastFresh` make on the fleet slice.
+   *
+   * Cleared with the rest of the slice on `space/cleared`, which is right: a
+   * docked ship is not being scrambled by anything.
+   */
+  readonly jams: readonly ActiveJam[];
 }
 
 // --- R23 slice A: targeting + module activation ----------------------------
@@ -2245,6 +2308,60 @@ export interface MiningBotState {
  * which no client can tell apart). Reporting that as success would be a lie;
  * reporting it as a failure would be wrong too.
  */
+/**
+ * The fleet companion's panel state (fleet-companion phase 0).
+ *
+ * The companion is a sibling decide-loop, not a bot script, so this slice is
+ * shaped like `MiningBotState`/`MissionBotState` and for the same reason: the
+ * loop lives in the browser and pushes its readout here, and this slice records
+ * it without deciding anything.
+ *
+ * The last four fields are the Bot Manager badge the plan doc asks for — in
+ * fleet, following whom, last order heard, and whether this pilot can tag.
+ *
+ * ⚠ `canTag` IS THREE-STATE, and the third state matters. `null` means the fleet
+ * roster could not be read; `false` means this pilot genuinely holds no
+ * commander role. A pilot silently unable to tag looks identical to one with
+ * nothing to tag, which is exactly why the readout carries it.
+ */
+export interface FleetCompanionState {
+  readonly status: FleetCompanionRunState;
+  /** Where in the ladder it is ("In warp", "Standing by"). */
+  readonly phase: string | null;
+  /** What it last did. */
+  readonly action: string | null;
+  /** WHY it did that — always present while running. */
+  readonly why: string | null;
+  readonly inFleet: boolean | null;
+  /** Which authority the last decision came from, for the readout. */
+  readonly followingOrderFrom: CompanionOrderAuthority | null;
+  readonly lastOrderHeard: string | null;
+  readonly canTag: boolean | null;
+  /**
+   * What was missing or unusable about this pilot's fit when it started: no
+   * ammunition loaded, an empty drone bay, nothing that defends the ship.
+   *
+   * ⚠ ADVISORY, AND MEASURED ONCE AT START. Nothing here ever refused a start
+   * -- the operator's rule is that a human loads the missing thing or ignores
+   * it and flies. Empty means nothing worth saying, which is ALSO what an
+   * unreadable fit produces: this list only speaks when it is confident.
+   */
+  readonly fitWarnings: readonly string[];
+  /**
+   * Non-null while decision 5's abandonment protocol is running: nobody in the
+   * fleet this host is not flying, so the pilot got safe, dropped fleet, and is
+   * waiting out a bounded thirty minutes for a human to invite it back.
+   *
+   * ⚠ IT IS HERE SO IT CAN BE PERSISTED. The BFF's bot host projects this slice
+   * onto its durable roster row; without the clock on the row, a restart hands
+   * the companion a fresh thirty minutes and the bound stops being one.
+   */
+  readonly abandonment: CompanionAbandonmentRecord | null;
+  readonly startedAt: number | null;
+  readonly startError: string | null;
+  readonly failureReason: string | null;
+}
+
 export interface MissionBotState {
   readonly status: MiningBotRunState;
   /** Where in the loop it is ("Flying", "Loading", "Handing it in"). */
@@ -2307,6 +2424,51 @@ export interface DestinationMatch {
   readonly solarSystemName: string | null;
   /** Jumps from the player's current system; null = unreachable / unknown origin. */
   readonly jumps: number | null;
+}
+
+// --- R7 Local + Corp chat --------------------------------------------------
+
+/** One member of a chat channel (Local occupants / Corp members). */
+export interface ChatMember {
+  readonly characterID: number;
+  readonly name: string;
+  readonly corporationID: number | null;
+  readonly allianceID: number | null;
+  readonly solarSystemID: number | null;
+}
+
+/** One backlog message in a chat channel. */
+export interface ChatMessage {
+  readonly characterID: number;
+  readonly characterName: string;
+  readonly message: string;
+  readonly createdAtMs: number;
+}
+
+/** One channel's decoded state: its room, roster, and recent backlog. */
+export interface ChatChannelState {
+  readonly roomName: string | null;
+  readonly corporationID: number | null;
+  readonly solarSystemID: number | null;
+  readonly roster: readonly ChatMember[];
+  readonly messages: readonly ChatMessage[];
+  readonly loaded: boolean;
+}
+
+export type ChatChannel = "local" | "corp";
+
+/**
+ * The Chat panel state (goal R7): Local and Corp sub-channels, each with a
+ * member roster + message backlog, plus the active tab and any send/read error.
+ * READ is a backlog poll (chat delivery bypasses the notification drain), so the
+ * panel polls while open and the flow pushes each fresh read here; the panel is
+ * a pure reader.
+ */
+export interface ChatState {
+  readonly activeChannel: ChatChannel;
+  readonly local: ChatChannelState;
+  readonly corp: ChatChannelState;
+  readonly error: string | null;
 }
 
 // --- R10 live event channel ------------------------------------------------

@@ -342,6 +342,41 @@ export function hostileRows(
 }
 
 /**
+ * Is a PLAYER holding a lock on this hull right now?
+ *
+ * ⚠ THE ONLY EVIDENCE OF A PURE PvP ENGAGEMENT THIS CLIENT HAS.
+ * `isHostile` just above answers NPC-or-not, so `hostileRows` counts rats and
+ * nothing else: a fleet fight against players is invisible to it. A player ship
+ * whose own lock points at this hull has classified itself, and no other read
+ * agrees with it.
+ *
+ * Free — it reads the space snapshot already in hand and makes no call of its
+ * own, which is why every loop that has a snapshot can afford to ask every tick.
+ *
+ * `null` is WE COULD NOT LOOK (no snapshot), never "nobody is". A `false`
+ * means the whole grid was read and no player lock pointed here. Not knowing
+ * our own hull's id is a `false` rather than a `null` on purpose: there is a
+ * grid to compare against, and every row on it failed to match.
+ */
+export function isTargetedByPlayer(
+  snapshot: SpaceSnapshot | null,
+  myShipID: number | null,
+): boolean | null {
+  if (!snapshot) {
+    return null;
+  }
+  return snapshot.entities.some(
+    (entity) =>
+      entity.kind === "ship" &&
+      entity.isNpc === false &&
+      entity.isSelf === false &&
+      entity.characterID !== null &&
+      myShipID !== null &&
+      entity.targetEntityID === myShipID,
+  );
+}
+
+/**
  * Which hostiles are NEW since the last look — the ones worth interrupting the
  * player for ("A pirate has arrived").
  *

@@ -9,7 +9,7 @@ Complete enumeration of every retail-client `{service, method}` that has an eve.
 > cross-repo manifest is the authority for what is currently allowlisted; feature-level
 > Latest source review is still required. Do not repeat “588/588” as a full-parity claim.
 
-> **🏁 STATUS 2026-09-07 — CURRENT BROWSER SURFACE: 585 pairs.** 285 reads (R57–R85) + 300 writes (R86–R106), after retiring the unused companion chat/social plumbing (`LSC.GetChannels`, `LSC.SendMessage`, and its bundled contact-cost route). The historical 588-pair sweep record remains in `docs/afk-session-log.md`. All remaining writes are confirm-gated; NOT ONE was fired live in fast mode. Open follow-ups: (1) the live QA pass over fast-mode writes; (2) the arg-injection handoff; (3) UI.
+> **🏁 STATUS 2026-07-23 — SWEEP COMPLETE: 588/588 plumbed.** 287/287 reads (R57–R85) + 301/301 writes (R86–R106), every batch orchestrator-verified, zero de-allowlisted. The final 3 (marketProxy PLEX/instant-buy financials, R106) were operator-authorized and plumbed reachability-only. All writes confirm-gated; NOT ONE fired live (fast mode — educated-guess decoders/args, QA deferred by operator directive). No UI built (bridge-only). Open follow-ups: (1) the live QA pass over all fast-mode writes (the 3 marketProxy financials need extra care — reachability-only so far); (2) the 30 read + 18 write arg-injection leaks + 1 bind-gateway in `docs/arg-injection-leak-handoff.md` (flag-only, separate session); (3) UI. See `docs/afk-session-log.md` for the full per-batch record.
 
 ## Orchestrator plan & scale (READ THIS FIRST)
 
@@ -46,11 +46,11 @@ Paths without a leading `server/src/...` are relative to `eve.js/server/src/serv
 
 | | reads | writes | total |
 |---|---|---|---|
-| **top-level** | 174 | 151 | 325 |
+| **top-level** | 176 | 152 | 328 |
 | **bound** | 111 | 149 | 260 |
-| **total** | **285** | **300** | **585** |
+| **total** | **287** | **301** | **588** |
 
-**585 pairs are currently exposed through the browser companion** (excludes the 5 verify-first pairs below).
+**588 plumbable pairs remain** (excludes the 5 verify-first pairs below, which are NOT in the 588).
 
 Excluded as unplumbable (do not spend a worker on these): `charMgr.GetLocation`, `standingMgr.GetStandingMatrix`, `standingMgr.IsKnownToBeAPlayerCorp`, `crimewatch.GetSafetyLevel`, `skillMgr.GetSkillBundleInfo` (all NO HANDLER), and `securityMgr.get_modified_security_level` (NAME MISMATCH — server only has `Handle_get_modified_systems`; the exact method the client calls does not exist).
 
@@ -93,6 +93,8 @@ Excluded as unplumbable (do not spend a worker on these): `charMgr.GetLocation`,
 **R-LOOKUP lookupSvc (9):** LookupCharacters (lookupSvcService.js:445), LookupOwners (:498), LookupPCOwners (:515), LookupEvePlayerCharacters (:454), LookupCorporations (:480), LookupFactions (:489), LookupKnownLocationsByGroup (:553), LookupNoneNPCAccountOwners (:531), LookupWarableCorporationsOrAlliances (:576).
 
 **R-ONLINE onlineStatus (3):** GetOnlineStatus (:31), GetInitialState (:41), Prime (:48).
+
+**R-SOCIAL (2):** LSC.GetChannels (lscService.js:46); account.GetDefaultContactCost (accountService.js:628).
 
 **R-LP (2):** LPSvc.GetAllMyCorporationWalletLPBalances (lpService.js:100); LPStoreMgr.GetAvailableOffersFromCorp (lpStoreMgrService.js:520).
 
@@ -158,7 +160,7 @@ Excluded as unplumbable (do not spend a worker on these): `charMgr.GetLocation`,
 
 ---
 
-## PHASE 3 — TOP-LEVEL WRITES (151) — confirm-gated
+## PHASE 3 — TOP-LEVEL WRITES (152) — confirm-gated
 
 Reads must be wired before these. **Bold = extra-danger** (irreversible / financial — enforce explicit confirm even beyond normal write-gating).
 
@@ -183,6 +185,8 @@ Reads must be wired before these. **Bold = extra-danger** (irreversible / financ
 **W-BOUNTY (5):** bountyProxy **AddToBounty** (bountyProxyService.js:376, spends ISK), SellKillRight (:525), CancelSellKillRight (:554); killRightMgr **ActivateKillRight** (killRightMgrService.js:171), **BuyKillRight** (:197, spends ISK).
 
 **W-PET petitioner (3):** CreatePetition (petitionerService.js:203), PetitionerChat (:226), CancelPetition (:249).
+
+**W-SOCIAL (1):** LSC.SendMessage (lscService.js:80).
 
 **W-ISK account (3):** SetContactCost (accountService.js:632), **GiveCash** (:697, ISK transfer), **GiveCashFromCorpAccount** (:739, corp ISK transfer).
 
@@ -257,4 +261,4 @@ Reads must be wired before these. **Bold = extra-danger** (irreversible / financ
 - **Gateway ordering dependency:** RB-SKILL depends on R-SKILLGW; RB-DOGMA/WB-DOGMA on dogmaIM.MachoBindObject; RB-SCAN/WB-SCAN on GetSystemScanMgr; RB-FLEET/WB-FLEET on fleetObjectHandler.MachoBindObject; WB-ENTITY on entity.MachoBindObject; RB-INV/WB-INV on the already-allowlisted invbroker binds. Wire the gateway pair in the same or an earlier batch than its dependents.
 - **Wire-trap batches** (need response-shape handling beyond a passthrough): R-CORPMGR (CRowset/cachedMethodCall on GetAssetInventory*), R-MARKET CorpGetTransactions (bigint), and every bound batch (Moniker/bind step). The existing standings/wallet handlers in `server.js` are the pattern for CRowset + cachedMethodCall.
 - **Role/gate 403s are not wiring failures:** corpRegistry/allianceRegistry writes, corpStationMgr, sovMgr fuel/skyhook, and GM_* will reject on a session lacking roles. Don't let a worker "fix" a 403 by loosening the handler — that's correct server behavior.
-- **The count to hold against:** 585 browser-exposed pairs (285 read / 300 write; 325 top-level / 260 bound), plus 5 verify-first pairs held out of the total, plus 6 confirmed-unplumbable pairs to never touch.
+- **The count to hold against:** 588 plumbable pairs (287 read / 301 write; 328 top-level / 260 bound), plus 5 verify-first pairs held out of the total, plus 6 confirmed-unplumbable pairs to never touch.
