@@ -59,9 +59,32 @@ test("no non-zero border-radius survives, except the documented ring circle", ()
   }
 });
 
-test("exactly one radius exception remains — the fit-ring guide circle", () => {
-  // A geometric guide CIRCLE, not a rounded corner. Pinned to one, so a new
-  // circle (or re-squaring this one) surfaces for review rather than sliding in.
-  const circles = borderRadiusDecls(CSS_NO_COMMENTS).filter((d) => /50%/.test(d));
-  assert.equal(circles.length, 1, "only .fit-ring-guide may keep a radius (50% circle)");
+/**
+ * Every rule whose `border-radius` is `50%`, by its selector. A `50%` radius is
+ * how CSS spells "a circle", so these are the DOTS and RINGS in the UI — not
+ * rounded corners, which is what R53 squared off.
+ */
+function circleSelectors(css: string): string[] {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, , body]) => /border-radius\s*:\s*[^;]*50%/.test(body ?? ""))
+    .map(([, selector]) => (selector ?? "").trim().replace(/\s+/g, " "));
+}
+
+test("only the documented circles keep a radius, and they are all circles", () => {
+  // Pinned BY SELECTOR, not by count: a new circle has to be named here, which
+  // is the review. Each one below is a shape that is round in the world — a
+  // status dot or a geometric guide — never a corner someone softened.
+  const allowed = [
+    // The radial fitting window's dashed guide circle (R21). Decoration, and
+    // aria-hidden; see the note beside the rule.
+    ".fit-ring-guide",
+    // The Pilot Hangar's three status dots: the pulsing "in client" indicator in
+    // the header, a pilot's squad colour dots, and the launch queue's per-pilot
+    // state dot. Each carries a text label or a title beside it, so none of them
+    // is the only way to read what it means.
+    ".hangar-online-dot",
+    ".hangar-tag",
+    ".hangar-queue-dot",
+  ];
+  assert.deepEqual(circleSelectors(CSS_NO_COMMENTS).sort(), [...allowed].sort());
 });
