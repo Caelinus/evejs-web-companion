@@ -2708,9 +2708,9 @@ function isAlreadyLocked(
  * every rung beneath it needs.
  *
  * ⚠ THE SAME GAP IS LIVE IN THE DSL, and is deliberately not fixed from here.
- * `fightTheRats` and `engagePrey` both do the naive `find` over
+ * `fightTheRats` does the naive `find` over
  * `activeModuleIDs`, and nothing under `nav/` reads `weaponBanks` at all --
- * only the manual rack does. It costs them less, because their tick has nowhere
+ * only the manual rack does. It costs it less, because its tick has nowhere
  * else to be, so it reads there as wasted calls rather than as a stall. Worth
  * fixing; not worth a companion rung quietly changing what the ratting block
  * does.
