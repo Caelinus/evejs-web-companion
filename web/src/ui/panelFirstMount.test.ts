@@ -83,6 +83,7 @@ const PANELS = [
   "BotBuilder",
   // The global bot script store manager.
   "BotManager",
+  "Chat",
   // R50 — the two wallet tabs.
   "Wallet",
   "CorpWallet",

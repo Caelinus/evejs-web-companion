@@ -2309,6 +2309,51 @@ export interface DestinationMatch {
   readonly jumps: number | null;
 }
 
+// --- R7 Local + Corp chat --------------------------------------------------
+
+/** One member of a chat channel (Local occupants / Corp members). */
+export interface ChatMember {
+  readonly characterID: number;
+  readonly name: string;
+  readonly corporationID: number | null;
+  readonly allianceID: number | null;
+  readonly solarSystemID: number | null;
+}
+
+/** One backlog message in a chat channel. */
+export interface ChatMessage {
+  readonly characterID: number;
+  readonly characterName: string;
+  readonly message: string;
+  readonly createdAtMs: number;
+}
+
+/** One channel's decoded state: its room, roster, and recent backlog. */
+export interface ChatChannelState {
+  readonly roomName: string | null;
+  readonly corporationID: number | null;
+  readonly solarSystemID: number | null;
+  readonly roster: readonly ChatMember[];
+  readonly messages: readonly ChatMessage[];
+  readonly loaded: boolean;
+}
+
+export type ChatChannel = "local" | "corp";
+
+/**
+ * The Chat panel state (goal R7): Local and Corp sub-channels, each with a
+ * member roster + message backlog, plus the active tab and any send/read error.
+ * READ is a backlog poll (chat delivery bypasses the notification drain), so the
+ * panel polls while open and the flow pushes each fresh read here; the panel is
+ * a pure reader.
+ */
+export interface ChatState {
+  readonly activeChannel: ChatChannel;
+  readonly local: ChatChannelState;
+  readonly corp: ChatChannelState;
+  readonly error: string | null;
+}
+
 // --- R10 live event channel ------------------------------------------------
 
 /**

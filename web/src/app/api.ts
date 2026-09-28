@@ -2123,6 +2123,31 @@ export async function loadCharacterSheet(
   };
 }
 
+// --- R7 Local + Corp chat --------------------------------------------------
+// The BFF holds the bridgeSessionID; the browser addresses channels by name.
+// READ is a backlog poll (chat delivery bypasses the notification drain), so
+// the panel polls /api/bridge/chat/:channel while open. The raw `chat` object
+// (roster + backlog) is decoded in the flow with bridge/chat.ts.
+
+/** Read a chat channel's roster + recent backlog (raw; decoded in the flow). */
+export async function readChat(
+  channel: "local" | "corp",
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await getJson(`/api/bridge/chat/${channel}`, options);
+  return data.chat ?? null;
+}
+
+/** Send a message to a chat channel; returns the raw send echo. */
+export async function sendChat(
+  channel: "local" | "corp",
+  message: string,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/bridge/chat/${channel}/send`, { message }, options);
+  return data.chat ?? null;
+}
+
 // --- R10 Live event channel (SSE) ------------------------------------------
 // The BFF republishes its gateway push WebSocket to the browser as Server-Sent
 // Events on GET /api/bridge/events (same-origin, cookie-authed). Frames are

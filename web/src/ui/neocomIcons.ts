@@ -82,6 +82,7 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   // --- people ---
   fleet: ["M12 3l4 8-4-2-4 2z", "M6 13l3 7-3-1.5-3 1.5z", "M18 13l3 7-3-1.5-3 1.5z"],
   mail: ["M4 6h16v12H4z", "M4 7.5l8 6 8-6"],
+  chat: ["M4 5h16v10H9l-5 4z"],
   activity: ["M6 17h12l-1.5-2v-4a4.5 4.5 0 0 0-9 0v4z", "M10 20h4"],
 
   // --- the app itself ---

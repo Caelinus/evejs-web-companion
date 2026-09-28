@@ -546,10 +546,54 @@ async function callBoundMethod(service, method, args = [], kwargs = null, sessio
   };
 }
 
+/**
+ * Chat read (goal R7) — the held session's Local/Corp member roster + recent
+ * backlog. POST /_evejs-web/v1/chat/read. Chat delivery bypasses the
+ * notification drain, so READ is a backlog poll; the browser polls this while
+ * the Chat panel is open. See docs/bridge-wire-contract.md.
+ */
+async function readChat(bridgeSessionID, channel, sessionFields = {}, options = {}) {
+  const body = { bridgeSessionID: String(bridgeSessionID || ""), channel: String(channel || "") };
+  if (sessionFields && typeof sessionFields === "object" && !Array.isArray(sessionFields)) {
+    body.session = sessionFields;
+  }
+  if (Number.isFinite(Number(options.limit)) && Number(options.limit) > 0) {
+    body.limit = Number(options.limit);
+  }
+  const data = await postJson("/chat/read", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
+  return {
+    chat: data.chat && typeof data.chat === "object" ? data.chat : {},
+    notifications: Array.isArray(data.notifications) ? data.notifications : [],
+  };
+}
+
+/**
+ * Chat send (goal R7) — broadcast a message to Local or Corp on the held
+ * session. POST /_evejs-web/v1/chat/send. Local goes through
+ * chatRuntime.broadcastLocalMessage; Corp is a session-derived corp broadcast
+ * that writes the corp_<id> backlog (NOT an XMPP send). See
+ * docs/bridge-wire-contract.md.
+ */
+async function sendChat(bridgeSessionID, channel, message, sessionFields = {}) {
+  const body = {
+    bridgeSessionID: String(bridgeSessionID || ""),
+    channel: String(channel || ""),
+    message: String(message === undefined || message === null ? "" : message),
+  };
+  if (sessionFields && typeof sessionFields === "object" && !Array.isArray(sessionFields)) {
+    body.session = sessionFields;
+  }
+  const data = await postJson("/chat/send", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
+  return {
+    chat: data.chat && typeof data.chat === "object" ? data.chat : {},
+    notifications: Array.isArray(data.notifications) ? data.notifications : [],
+  };
+}
+
 // --- R10 live event channel (gateway push) ---------------------------------
 // The one non-request surface the BFF holds: a WebSocket on the gateway's
-// bridge-session event path. It carries session notifications live, so the
-// browser stops depending on polls for liveness. The BFF
+// bridge-session event path. It carries the session's notification captures and
+// its chat live, so the browser stops depending on polls for liveness. The BFF
 // holds at most ONE of these per held bridge session and republishes it to the
 // browser as SSE (see /api/bridge/events in server.js) — the bridgeSessionID
 // never leaves the server, exactly as on the request routes.
@@ -749,7 +793,7 @@ module.exports = {
   EveGatewayError,
   openSessionEventStream,
   // Bridge surface (the live path): the retail call tuple, bound objects, the
-  // persistent session, and flight status.
+  // persistent session, flight status, and chat.
   callMethod,
   bindObject,
   callBoundMethod,
@@ -758,6 +802,8 @@ module.exports = {
   readFlightStatus,
   readScannerState,
   readSpaceSnapshot,
+  readChat,
+  sendChat,
   // The four v1 reads the auth/health surface still needs (goal R9b): account
   // lookup + the character list for login, the one-row snapshot the
   // /api/bridge/select ownership check reads, and gateway status for

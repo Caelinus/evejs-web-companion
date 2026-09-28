@@ -112,6 +112,7 @@ import type {
   ActivityCalendarResponseRow,
   ActivityNotificationRow,
   AgentAction,
+  ChatChannel,
   ContractDetail,
   DestinationMatch,
   DroneInSpace,
@@ -128,6 +129,11 @@ import type {
   SpaceVector,
   StationStatic,
 } from "../store/types.ts";
+import {
+  decodeChatChannel,
+  decodeChatChannelName,
+  decodeMessageEntry,
+} from "../bridge/chat.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
 import type { BotLogDraft, BotLogSink } from "../nav/botLog.ts";
 import {
@@ -996,6 +1002,17 @@ export interface AppFlow {
   /** Abort the autopilot loop (it stops and never calls the bridge again). */
   abortRoute(): void;
   /**
+   * R7 — read a chat channel's member roster + recent backlog (Local or Corp)
+   * and push it to the store. The panel polls this while open (READ is a backlog
+   * poll). A lost session unwinds to offline; any other failure surfaces through
+   * the chat slice.
+   */
+  loadChat(channel: ChatChannel): Promise<void>;
+  /** R7 — send a message to a chat channel, then refresh its backlog. */
+  sendChatMessage(channel: ChatChannel, message: string): Promise<void>;
+  /** R7 — switch the active chat tab (Local <-> Corp). */
+  setChatChannel(channel: ChatChannel): void;
+  /**
    * R7c — request display names for a set of `{kind, id}` refs (names-everywhere).
    * Fire-and-forget: unresolved refs are batched into one /api/names round-trip,
    * cached (including a definitive "unknown" so they never refetch), and pushed
@@ -1013,7 +1030,7 @@ export interface AppFlow {
    * forever in the browser's request queue. The roster owner (App.svelte)
    * keeps push on for the ACTIVE pilot only. A pilot without push still works:
    * every bridge response carries its notification drain and the panels poll;
-   * only live notification push waits until the pilot is active again.
+   * only live chat/notification push waits until the pilot is active again.
    * Enabling while the character is online (re-)opens the stream immediately.
    */
   setLivePush(enabled: boolean): void;
@@ -1140,10 +1157,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   // --- R10 live event channel ---------------------------------------------
   // One SSE subscription per online character, opened when select succeeds and
-  // closed when the character goes offline. It feeds the store session
-  // notifications the page used to discard. Liveness only: every bridge response
-  // still carries its notification drain, so a channel that never opens costs
-  // latency, not data.
+  // closed when the character goes offline. It feeds the store the session
+  // notifications the page used to discard and the chat messages the Chat panel
+  // used to poll for. Liveness only: every bridge response still carries its
+  // notification drain, so a channel that never opens costs latency, not data.
   let liveStream: api.BridgeEventSubscription | null = null;
 
   function applyLiveFrame(frame: unknown): void {
@@ -1172,10 +1189,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const epoch = typeof cursor.epoch === "string" ? cursor.epoch : null;
     const sequence = typeof cursor.sequence === "number" ? cursor.sequence : 0;
 
-    // The gateway could not replay from our cursor: reset the live cursor rather
-    // than pretending the notification history is continuous.
+    // The gateway could not replay from our cursor: what we hold may have gaps,
+    // so re-read the active chat channel rather than pretend the backlog is
+    // continuous.
     if (record.type === "snapshot") {
       store.apply({ type: "live/resynchronize", epoch, sequence });
+      if (record.reason === "cursor_not_replayable") {
+        void loadChat(store.chat.get().activeChannel);
+      }
       return;
     }
     if (record.type !== "event") {
@@ -1183,6 +1204,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
 
     const event = (record.event ?? {}) as Record<string, JsonValue>;
+    if (event.kind === "chat") {
+      const channel = event.channel === "corp" ? "corp" : "local";
+      const message = decodeMessageEntry(event.entry);
+      if (message) {
+        store.apply({ type: "chat/message", channel, message });
+      }
+      return;
+    }
     if (event.kind === "notification") {
       const notification = (event.notification ?? {}) as Record<string, JsonValue>;
       const method = typeof notification.method === "string" ? notification.method : null;
@@ -3326,6 +3355,49 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       }
     }
     requestNames(refs);
+  }
+
+  // R7 — read a chat channel's roster + backlog and push it to the store. The
+  // panel polls this while open (READ is a backlog poll). A lost session unwinds
+  // to offline; any other failure surfaces through the chat slice so the panel
+  // stays put and shows the reason.
+  async function loadChat(channel: ChatChannel): Promise<void> {
+    try {
+      const raw = await api.readChat(channel, callOptions);
+      store.apply({
+        type: "chat/loaded",
+        channel: decodeChatChannelName(raw, channel),
+        channelState: decodeChatChannel(raw),
+      });
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      store.apply({ type: "chat/error", message: errorWords(error) });
+    }
+  }
+
+  async function sendChatMessage(channel: ChatChannel, message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      await api.sendChat(channel, trimmed, callOptions);
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      store.apply({ type: "chat/error", message: errorWords(error) });
+      return;
+    }
+    // Reflect the sent message immediately by re-reading the channel backlog
+    // (loadChat clears the error on success).
+    await loadChat(channel);
   }
 
   // Load the docked station's agent roster (agentMgr.GetAgents, filtered to the
@@ -8441,6 +8513,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     abortRoute() {
       autopilot?.abort();
+    },
+
+    loadChat,
+
+    sendChatMessage,
+
+    setChatChannel(channel) {
+      store.apply({ type: "chat/active", channel });
     },
 
     requestNames,

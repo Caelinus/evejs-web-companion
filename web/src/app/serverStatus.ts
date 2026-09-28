@@ -46,7 +46,8 @@ export type ServerStatus = "checking" | "online" | "offline";
  * Not zero. The poll still keeps a slow watch on the BFF itself, and a held
  * bridge session has an idle TTL that benefits from an occasional beat. But at
  * this cadence it is a background check rather than a competitor for the four
- * lanes the player's own reads need.
+ * lanes the player's own reads need. Mirrors app/chatPoll.ts, which made the
+ * same live-vs-fallback split for the same reason.
  */
 export const HEALTH_POLL_LIVE_MS = 30_000;
 
