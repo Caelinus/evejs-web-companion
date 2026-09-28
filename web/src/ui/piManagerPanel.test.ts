@@ -1,0 +1,281 @@
+// R108 slice 3: the Planetary Industry window, rendered.
+//
+// The board's logic is pinned in bridge/piBoard.test.ts; this proves the
+// window actually PRINTS it — from a roster and readings stored the way the
+// window stores them, through the same decoder — and that what it prints obeys
+// the house rules: every colony row with its own age, the four per-pilot
+// outcomes in words, no id as data (R7d), no machinery words (R9a), and no
+// character select anywhere in the source.
+//
+// (`onMount` does not run under the server generator, so rendering here never
+// reads; that is also why these tests can hold stored readings still.)
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { register } from "node:module";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+register("./svelteSsrHook.ts", import.meta.url);
+
+const { render } = await import("svelte/server");
+const PiManager = (await import("./PiManager.svelte")).default;
+const { setKnownCharacterStorage } = await import("../app/knownCharacters.ts");
+const { setHangarPrefsStorage, saveHangarPrefs, addSquad, EMPTY_PREFS } = await import(
+  "../app/hangarPrefs.ts"
+);
+const { setPiRosterStorage, savePiRoster, recordPiAnswer, addPiMembers, EMPTY_PI_ROSTER } =
+  await import("../app/piRosterPrefs.ts");
+
+const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = readFileSync(path.join(UI_DIR, "PiManager.svelte"), "utf8");
+
+const FARMER = 90000001;
+const NEWBIE = 90000002;
+const STRANGER = 90000003;
+const SPARE = 90000004;
+const MINUTE = 60_000;
+
+function memoryStorage() {
+  const data = new Map<string, string>();
+  return {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      data.set(key, value);
+    },
+  };
+}
+
+function knownPilot(characterID: number, characterName: string) {
+  return {
+    accountName: "alpha",
+    characterID,
+    characterName,
+    shipName: null,
+    skillPoints: null,
+    balance: null,
+    lastSeen: 1,
+  };
+}
+
+function colonyWire(planetID: number, planetName: string, expiresAtMs: number) {
+  return {
+    planetID,
+    planetName,
+    solarSystemID: 30000001,
+    solarSystemName: "Alpha",
+    planetTypeID: 2016,
+    planetTypeName: "Planet (Barren)",
+    commandCenterLevel: 5,
+    lastSimulatedAtMs: expiresAtMs - 10 * MINUTE,
+    linkCount: 0,
+    links: [],
+    routes: [],
+    pins: [
+      {
+        pinID: 900000000000,
+        typeID: 2848,
+        typeName: "Barren Extractor Control Unit",
+        kind: "extractor-control",
+        contents: [],
+        usedM3: null,
+        capacityM3: null,
+        schematicID: null,
+        schematicName: null,
+        hasReceivedInputs: null,
+        receivedInputsLastCycle: null,
+        lastRunAtMs: null,
+        lastLaunchAtMs: null,
+        program: {
+          resourceTypeID: 2268,
+          resourceTypeName: "Aqueous Liquids",
+          cycleTimeSeconds: 7200,
+          quantityPerCycle: 4591,
+          installedAtMs: expiresAtMs - 48 * 60 * MINUTE,
+          expiresAtMs,
+          headCount: 7,
+        },
+      },
+    ],
+  };
+}
+
+/** Seed all three stores the window reads, then render it. */
+function renderSeeded(): string {
+  const shared = memoryStorage();
+  setKnownCharacterStorage(shared);
+  setHangarPrefsStorage(shared);
+  setPiRosterStorage(shared);
+  shared.setItem(
+    "evejs-web-known-characters:v1",
+    JSON.stringify([
+      knownPilot(FARMER, "Ada Farmer"),
+      knownPilot(NEWBIE, "Cy Newbie"),
+      knownPilot(SPARE, "Eve Spare"),
+    ]),
+  );
+  saveHangarPrefs(addSquad(EMPTY_PREFS, { id: "sq1", name: "Miners", color: "#fff" }, [SPARE]));
+
+  const now = Date.now();
+  // Read two hours ago: one colony's program already ran out, one is running.
+  const readAt = now - 2 * 60 * MINUTE;
+  const answer = {
+    ok: true,
+    serverNowMs: readAt,
+    pilots: [
+      {
+        characterID: FARMER,
+        readAtMs: readAt,
+        coloniesReadable: true,
+        colonies: [
+          colonyWire(40000002, "Alpha I", now + 30 * 60 * MINUTE),
+          colonyWire(40000004, "Alpha II", now - 30 * MINUTE),
+        ],
+      },
+      { characterID: NEWBIE, readAtMs: readAt, coloniesReadable: true, colonies: [] },
+    ],
+  };
+  savePiRoster(recordPiAnswer(addPiMembers(EMPTY_PI_ROSTER, [FARMER, NEWBIE, STRANGER]), answer, readAt));
+  try {
+    return render(PiManager as never, { props: {} } as never).body;
+  } finally {
+    setKnownCharacterStorage(null);
+    setHangarPrefsStorage(null);
+    setPiRosterStorage(null);
+  }
+}
+
+function visibleText(body: string): string {
+  return body
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/\s+/g, " ");
+}
+
+test("an empty roster says what to do, and offers the hangar's pilots", () => {
+  setKnownCharacterStorage(null);
+  setPiRosterStorage(null);
+  const text = visibleText(render(PiManager as never, { props: {} } as never).body);
+  assert.match(text, /No pilots are on planetary industry yet\. Add one below\./);
+  assert.match(text, /Pilots come from the Pilot hangar/);
+});
+
+test("stored readings are printed by pilot: worst first, under the pilot's age", () => {
+  const text = visibleText(renderSeeded());
+  // The age of a pilot's one reading is said once, on the line above its rows.
+  assert.match(text, /Ada Farmer - 2 colonies, Alpha Read 2 hours ago/);
+  // What needs you is said on the colony's own row, and that row comes first.
+  const stopped = text.indexOf("Alpha II Barren - CC 5");
+  const running = text.indexOf("Alpha I Barren - CC 5");
+  assert.ok(stopped >= 0 && running > stopped, text);
+  assert.match(text, /Alpha II Barren - CC 5 Aqueous Liquids 1 extractor has finished its program/);
+  assert.match(text, /Alpha I Barren - CC 5 Aqueous Liquids Ends in (\d+d )?\d+h/);
+});
+
+test("the strip counts the estate before any row", () => {
+  const text = visibleText(renderSeeded());
+  assert.match(text, /Colonies 2 Extracting 1 Need you now 1 Next program ends (\d+d )?\d+h/);
+});
+
+test("⚠ the window draws one frame, not a box per section", () => {
+  // The components layer frames every `section`; this window resets its own.
+  assert.match(SOURCE, /\.pi-manager section \{\s*border: 0;/);
+});
+
+test("⚠ each pilot's outcome is said about that pilot", () => {
+  const text = visibleText(renderSeeded());
+  assert.match(text, /Cy Newbie Cy Newbie has not built on a planet yet\./);
+  assert.match(
+    text,
+    /A pilot no longer in the hangar This pilot is no longer in the hangar, so there is no account to read with\./,
+  );
+});
+
+test("taking a pilot off the list is called Remove, never 'Take off'", () => {
+  // In a game about ships "Take off" reads as launching the ship. This button
+  // only edits the list: nothing is signed in, selected or undocked.
+  const text = visibleText(renderSeeded());
+  assert.match(text, /\bRemove\b/);
+  assert.doesNotMatch(text, /take off/i);
+});
+
+test("the add list offers pilots not yet on it, and a squad with someone new", () => {
+  const body = renderSeeded();
+  assert.match(body, /<option value="pilot:90000004">Eve Spare<\/option>/);
+  assert.doesNotMatch(body, /<option value="pilot:90000001">/, "already on the roster");
+  assert.match(body, /<option value="squad:sq1">Miners<\/option>/);
+});
+
+test("no id as data and no machinery words in anything a player reads", () => {
+  const text = visibleText(renderSeeded());
+  assert.doesNotMatch(text, /\d{5,}/, "no id-length number is printed");
+  assert.doesNotMatch(text, /schematic|\bpins?\b|\bECU\b|character ?ID/i);
+  // And the sweep does catch an id when one is there.
+  assert.match(`Pilot ${FARMER}`, /\d{5,}/);
+});
+
+test("a pilot with an ended extractor is offered a restart, said before the button", () => {
+  const text = visibleText(renderSeeded());
+  assert.match(
+    text,
+    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
+  );
+  // Only one pilot has anything to restart.
+  assert.equal(text.match(/Restart extractors/g)?.length, 1);
+});
+
+test("⚠ a restart goes through the server bot host, never a select in this tab", () => {
+  assert.match(SOURCE, /restartExtractorsFor\(accountName, characterID\)/);
+  assert.doesNotMatch(SOURCE, /startLocal|runHere|flow\.start/);
+  // The flying-bot list loads in onMount, which SSR never runs, so the
+  // disabled state is pinned where it is decided: the board's own verdict.
+  assert.match(SOURCE, /disabled=\{!pilot\.restart\.enabled\}/);
+});
+
+test("the board is given the recipe table the read fetched", () => {
+  // onMount does not run under the server generator, so this is pinned at the
+  // source: without it the board judges starved factories by routes alone.
+  assert.match(SOURCE, /buildPiBoard\(\{[^}]*\brecipes\b[^}]*\}\)/);
+  assert.match(SOURCE, /onRecipes:/);
+});
+
+test("⚠ the window never selects a character, and never reads on a timer", () => {
+  assert.doesNotMatch(SOURCE, /selectCharacter|\/api\/bridge\/select|flow\.select/);
+  // The one interval moves the ages on; it must not be the thing that reads.
+  const interval = SOURCE.match(/setInterval\(([^;]*)\);/);
+  assert.ok(interval, "the age tick exists");
+  assert.doesNotMatch(interval![1]!, /refresh|readPiRoster/);
+});
+
+test("the window has its own menu, and shows one view at a time", () => {
+  const body = renderSeeded();
+  for (const id of ["colonies", "pilots", "planner"]) {
+    assert.match(body, new RegExp(`<button[^>]*role="tab"[^>]*id="pi-tab-${id}"`));
+  }
+  // A roster with pilots opens on Colonies; the other views are hidden, not
+  // left out, so a restart already started keeps saying so.
+  assert.match(body, /id="pi-tab-colonies"[^>]*aria-selected="true"/);
+  assert.doesNotMatch(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-pilots"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-planner"[^>]*hidden/);
+});
+
+test("the menu badges say what waits in each view", () => {
+  const text = visibleText(renderSeeded());
+  // One colony needs you; one pilot has a restart to offer.
+  assert.match(text, /Colonies 1 Pilots 1 Planner/);
+});
+
+test("an empty roster opens on Pilots, where a pilot is added", () => {
+  setKnownCharacterStorage(null);
+  setPiRosterStorage(null);
+  const body = render(PiManager as never, { props: {} } as never).body;
+  assert.match(body, /id="pi-tab-pilots"[^>]*aria-selected="true"/);
+  assert.match(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
+});
+
+test("the planner says it is not built, rather than pretending to plan", () => {
+  assert.match(visibleText(renderSeeded()), /The planner is not built yet\./);
+});

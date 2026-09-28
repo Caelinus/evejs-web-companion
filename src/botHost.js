@@ -82,6 +82,20 @@ const COMPANION_SCRIPT_NAME = "Fleet companion";
 // tab would be making — never a world call.
 const VITALS_SAMPLE_MS = 15_000;
 
+// How far past its own deadline a bot's session token is minted to live.
+//
+// ⚠ THE MARGIN IS THE WHOLE POINT — A TOKEN THAT DIES WITH THE RUN IS A TOKEN
+// THAT CANNOT END IT. `finalize` releases the bridge session by calling
+// `/api/logout` through the bot's own flow, and that route reads the token to
+// find the session to release: an expired one is indistinguishable from no
+// session at all, so it answers ok and releases nothing. The pilot stays
+// online, holding a hull no tab can take, until the gateway's own idle sweep
+// notices half an hour later. Five miners ended a twelve-hour run that way.
+//
+// Fifteen seconds would do; five minutes costs nothing and covers a teardown
+// that has to wait on a slow gateway.
+const SESSION_TEARDOWN_MARGIN_MS = 5 * 60_000;
+
 // Ended runs are kept for the "recent runs" strip, not as a log: this is a
 // MEMORY BOUND, so the ring holds the last MAX_ENDED_RUNS finalized records
 // and nothing more. The cap is GLOBAL across every account, not per
@@ -712,7 +726,17 @@ function createBotHost(options) {
     records.set(botID, record);
 
     try {
-      const token = auth.createSessionToken(account);
+      // The token covers the APPROVED RUN, not the web default: a bot flying
+      // for an hour holds an hour's credential, and one approved for longer
+      // than a browser session lives (runPolicy allows up to 24h, the default
+      // sign-in is 12h) is no longer cut off in silence halfway through. See
+      // SESSION_TEARDOWN_MARGIN_MS for why it outlives the deadline, and
+      // webAuth.createSessionToken for the rail on how far this can be pushed.
+      // A resumed bot asks for the time its ORIGINAL grant has left, because
+      // `expiresAt` is the persisted deadline, not a fresh one.
+      const token = auth.createSessionToken(account, {
+        ttlMs: deadlineMs - now() + SESSION_TEARDOWN_MARGIN_MS,
+      });
       const store = stack.createClientStore();
       // Same fetch the server itself trusts, plus the bot's name on every
       // request so the select guard can tell the bot's own select from a tab's.

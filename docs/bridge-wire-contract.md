@@ -3597,6 +3597,9 @@ the character; it is not used to *call* anything). Answers:
       "commandCenterLevel": 5,
       "lastSimulatedAtMs": 1784233384726,
       "linkCount": 3,
+      "links": [                   // endpoints are pin ids, for matching, not display
+        { "endpoint1": 1, "endpoint2": 4, "level": 1 }
+      ],
       "pins": [
         {
           "pinID": 1054656331522,
@@ -3604,6 +3607,14 @@ the character; it is not used to *call* anything). Answers:
           "typeName": "Barren Launchpad",
           "kind": "launchpad",     // command | extractor-control | extractor | factory | storage | launchpad | other
           "contents": [ { "typeID": 2396, "typeName": "Biofuels", "quantity": 40 } ],
+          "usedM3": 7.6,           // null when ANY content type has no volume — see below
+          "capacityM3": 10000,     // null when the static table cannot say — NEVER 0
+          "schematicID": null,     // a factory's recipe; the id is for the name beside it
+          "schematicName": null,   // "Superconductors"
+          "hasReceivedInputs": null,        // three-state; null on every non-factory pin
+          "receivedInputsLastCycle": null,  // false = starved last cycle, a real alarm
+          "lastRunAtMs": 1784659559723,
+          "lastLaunchAtMs": null,  // "0" on the wire is "never", not 1601
           "program": null          // only ever set on an extractor control unit
         }
       ],
@@ -3647,12 +3658,87 @@ caught it. The BFF now converts, and a test drives that exact live value.
 `"0"` is EveJS's **"never"** (a launchpad that has never launched), not the year
 1601: every instant leaves the BFF as epoch ms **or null**, never 0.
 
+### ⚠ A FILL IS A VOLUME, AND UNKNOWN IS NULL BECAUSE THE BROWSER DIVIDES
+
+`usedM3 / capacityM3` is the only arithmetic the panel does with these, so both
+follow the same rule as the instants: **absent is null, never 0.**
+
+- `capacityM3` comes from the gameStore's `itemTypes.capacity` — the same field
+  `planetRuntimeStore.getPinCapacity` reads, which treats a non-finite one as no
+  limit at all. A storage facility is 12,000, a launchpad 10,000, a command
+  centre 500. An **extractor control unit and an industry facility really carry
+  0**: they are not holds, and the BFF answers `null` for them so nothing
+  divides by zero and reports every one of them as full.
+- `usedM3` is all-or-nothing. One commodity the static table has no volume for
+  makes the **whole pin's** used volume `null`, because a partial sum is not a
+  smaller number — it is a wrong one, and it would be shown as a percentage.
+- `0` itself survives: an empty command centre really holds 0 m³.
+
+Unit counts cannot answer "nearly full". 12,000 Aqueous Liquids at 0.005 m³ is
+60 m³ of a 12,000 m³ facility — the largest unit count on the planet, and 0.5%
+of the hold.
+
+### ⚠ THE TWO PROCESSOR FLAGS ARE THREE-STATE
+
+`normalizePin` writes `hasReceivedInputs` / `receivedInputsLastCycle` onto
+**process pins only**. So `false` means the emulator fed this factory nothing
+last cycle — a real alarm worth showing — while `null` means the pin has no such
+state, which every extractor, launchpad and storage facility answers.
+Collapsing the two starves every colony on screen.
+
+### `GET /api/roster/planets?characterIDs=a,b,…` (this repo) — R108 slice 3
+
+The PI Manager's read: several pilots' colonies with **none of them selected**.
+Web login only — **no held bridge session**. The held session on
+`/api/bridge/planets` above is that route's own shape, not the gateway's:
+`GET /snapshot` is gated by `validateOwnedCharacter` alone and its colony table
+is filtered by `ownerID` out of persisted state. Proved live on 2026-09-23
+against a logged-out pilot that owned colonies — they came back, owner-filtered,
+while a pilot on the same account with none came back with a table that was
+present and empty.
+
+Shaped exactly like `/api/roster/training`: every id is asked with the
+**caller's** accountID, at most 12 per ask (`TOO_MANY_CHARACTERS`), and a pilot
+the gateway refused or failed on is **left out**, never answered empty.
+
+```jsonc
+{
+  "ok": true,
+  "serverNowMs": 1790239800000,   // ONE clock sample, taken as the answer leaves
+  "pilots": [
+    {
+      "characterID": 90000001,
+      "readAtMs": 1790239799100,   // when THIS pilot was read — per pilot, never shared
+      "coloniesReadable": true,    // the same rule as /api/bridge/planets
+      "colonies": [ /* exactly the /api/bridge/planets colony shape */ ]
+    }
+  ]
+}
+```
+
+- **`readAtMs` is per pilot on purpose.** Several pilots read in parallel are
+  several moments; a board that merged them under one stamp would present them
+  as a snapshot they never were. `serverNowMs` is a different instant — the one
+  the browser corrects its clock against — and folding the two together would
+  skew that correction by the slowest read.
+- **Left out means "could not be read", not "has not built".** The client knows
+  what it asked for; `unansweredPilots` names the difference so the board can say
+  so for that pilot and keep the reading it had.
+- **Reading only.** Acting on a colony needs a selected character; that goes
+  through the bot host, never through a select from here.
+
 ### Client modules
 
 | File | What it holds |
 | --- | --- |
 | `web/src/bridge/planets.ts` | Decoder + pure arranging: `decodeColonyReport`, `summarizeColony`, `programProgress`, `programHasExpired`, `pooledContents`, `colonyPlaceWords`, `formatDuration`. Nothing simulates a colony. |
-| `web/src/store/types.ts` | `Colony`, `ColonyPin`, `ColonyExtractionProgram`, `ColonyRoute`, `ColonyStoredItem`, `PlanetsState`. |
+| `web/src/bridge/piRoster.ts` | `decodeRosterColonies` for `/api/roster/planets` — each pilot through `decodeColonyReport`, its own `readAtMs` kept, the clock offset from the envelope — and `unansweredPilots`. |
+| `web/src/bridge/piBoard.ts` | `buildPiBoard`: the PI Manager's board — four outcomes per pilot, every colony worst first across pilots with its own read age, and the "read at different times" line. |
+| `web/src/app/piRosterPrefs.ts` / `piRosterRead.ts` | The PI roster (members + each pilot's last entry, decoded on the way out of storage) and its read: one throwaway sign-in per account, never a select. |
+| `web/src/app/piDispatch.ts` | Slice 4: "Restart extractors" for one pilot, as a SERVER run through `POST /api/bots/start` on a throwaway sign-in — never a select. The board keeps one ordinary saved bot, "Planetary: restart extractors", found by name or saved once; a copy someone changed is refused, not overwritten. The grant is derived by the same policy analysis the bot host runs, and the host's refusal (`CHARACTER_IN_USE`, `BOT_ALREADY_RUNNING`) is shown in its own words. |
+| `web/src/bridge/colonySupply.ts` | Whether an unfed factory has anything feeding it, walked along the colony's routes. A factory that went unfed last cycle is only a finding when an input has no live source (no route, or every route leads back to nothing); slower than it could use says nothing, and a chain that dies at a stopped extractor is left to that extractor's own finding. |
+| `web/src/bridge/colonyAttention.ts` | The monitor's judgement: `colonyFindings`, `attentionByColony`, `colonyAttentionWords`, `attentionSummaryWords`, `pinFill`. Raises a finding only from a fact the server stated — a null raises nothing, so a quiet colony is genuinely quiet. |
+| `web/src/store/types.ts` | `Colony`, `ColonyPin`, `ColonyLink`, `ColonyExtractionProgram`, `ColonyRoute`, `ColonyStoredItem`, `PlanetsState`. |
 | `web/src/store/clientStore.ts` | `planets` slice; `hasNoColonies` is set **only** from `coloniesReadable && colonies.length === 0`. |
 | `web/src/app/flow.ts` | `loadPlanets()`, `selectColony()`. One GET, no write. |
 | `web/src/ui/Planets.svelte` | The panel. Four outcomes, four sentences. |

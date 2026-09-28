@@ -100,6 +100,7 @@ import type {
 import type { NamesState } from "./names.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import { applyJamEvent, type ActiveJam } from "../bridge/jamNotifications.ts";
+import { EMPTY_RECIPE_BOOK } from "../bridge/piRecipes.ts";
 import { applyTargetEvent } from "../bridge/targetNotifications.ts";
 
 // --- Typed state slices ----------------------------------------------------
@@ -694,7 +695,22 @@ const INITIAL_PLANETS: PlanetsState = Object.freeze({
   loaded: false,
   error: null,
   hasNoColonies: false,
+  // Unread, and honest about it: EMPTY_RECIPE_BOOK carries `readable: false`,
+  // which is NOT the same as a table that makes nothing.
+  recipes: EMPTY_RECIPE_BOOK,
 });
+
+/**
+ * Wipe a character's colonies while KEEPING the recipe book.
+ *
+ * ⚠ THE TWO HAVE DIFFERENT OWNERS. Colonies belong to the character that just
+ * went away and must not be shown to the next one. The recipes are static
+ * reference data that is the same for every character on this server, so
+ * dropping them would only buy a pointless re-read on every character switch.
+ */
+function clearedPlanets(previous: PlanetsState): PlanetsState {
+  return { ...INITIAL_PLANETS, recipes: previous.recipes };
+}
 
 const INITIAL_TRAVEL: TravelState = Object.freeze({
   status: "idle" as TravelState["status"],
@@ -954,7 +970,7 @@ export function createClientStore(): ClientStore {
         mining.set(INITIAL_MINING);
         drones.set(INITIAL_DRONES);
         skills.set(INITIAL_SKILLS);
-        planets.set(INITIAL_PLANETS);
+        planets.set(clearedPlanets(planets.get()));
         travel.set(INITIAL_TRAVEL);
         bot.set(INITIAL_BOT);
         customBot.set(INITIAL_CUSTOM_BOT);
@@ -2227,7 +2243,12 @@ export function createClientStore(): ClientStore {
         planets.set({ ...planets.get(), selectedPlanetID: event.planetID });
         break;
       case "planets/cleared":
-        planets.set(INITIAL_PLANETS);
+        planets.set(clearedPlanets(planets.get()));
+        break;
+      // The recipe table, read once and kept. It is not the player's data, so
+      // it never arrives with a character and never leaves with one.
+      case "planets/recipes":
+        planets.set({ ...planets.get(), recipes: event.recipes });
         break;
       case "travel/planned":
         travel.set({

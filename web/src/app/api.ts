@@ -3570,6 +3570,30 @@ export async function resolveNames(
   return { names, unresolved };
 }
 
+// --- R108 slice 3: the PI Manager's read, with no character selected ---------
+// GET /api/roster/planets?characterIDs=a,b,c answers each of those pilots'
+// colonies through the gateway's ownership check alone. The body goes back RAW:
+// the PI roster stores each pilot's entry as it arrived and decodes it with
+// bridge/piRoster.ts on the way out, so a live answer and a stored one pass
+// through one decoder.
+
+/** At most this many pilots per ask — the route refuses more. */
+export const ROSTER_PLANETS_MAX_IDS = 12;
+
+export async function loadRosterPlanets(
+  characterIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const ids = characterIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (ids.length === 0) {
+    return { ok: true, pilots: [] };
+  }
+  return getJson(
+    `/api/roster/planets?characterIDs=${encodeURIComponent(ids.join(","))}`,
+    options,
+  );
+}
+
 // --- R107 The hangar's training column, for pilots who are NOT signed in ----
 // GET /api/roster/training?characterIDs=a,b,c answers what each of those pilots
 // is training, read from the gateway's live queue snapshot.
@@ -4085,13 +4109,46 @@ export async function restartExtractorProgram(
   planetID: number,
   pinID: number,
   resourceTypeID: number,
+  headRadius: number,
   options: ApiOptions = {},
 ): Promise<void> {
-  // Command 13 = INSTALLPROGRAM(pinID, programTypeID, headRadius). A null head
-  // radius keeps the pin's existing drill area — a pure "run it again".
+  // Command 13 = INSTALLPROGRAM(pinID, programTypeID, headRadius).
+  //
+  // ⚠ THE RADIUS IS THE PIN'S OWN, SENT BACK. It is not "how wide": it is what
+  // sets how long the program runs, and the emulator refuses anything that is
+  // not a real number inside the drill-area bounds — null included, which is
+  // what this used to send on the belief that it meant "keep the current one".
+  // Every restart came back "Cannot install a program with a completely
+  // bonkers radius". The retail client reinstalls with the ECU's current
+  // headRadius too.
   await postJson(
     "/api/bridge/planet/network/update",
-    { planetID, changes: [[13, [pinID, resourceTypeID, null]]], confirm: true },
+    { planetID, changes: [[13, [pinID, resourceTypeID, headRadius]]], confirm: true },
+    options,
+  );
+}
+
+/**
+ * Launch what a colony's command centre is holding into orbit.
+ *
+ * ⚠ ONLY A COMMAND CENTRE CAN LAUNCH. The emulator refuses every other pin
+ * with `CanOnlyLaunchFromCommandCenters`, and refuses the same centre twice
+ * inside a minute with `CannotLaunchCommandPinNotReady`. It also debits
+ * planetary export tax from the wallet and drops a container in space beside
+ * the planet, so this is a costly, externally visible write — the BFF
+ * confirm-gates it and the caller is expected to have a reason.
+ *
+ * `commodities` is typeID -> quantity, as the planetMgr handler wants it.
+ */
+export async function launchCommodities(
+  planetID: number,
+  commandPinID: number,
+  commodities: Readonly<Record<number, number>>,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson(
+    "/api/bridge/planet/commodities/launch",
+    { planetID, commandPinID, commodities: { ...commodities }, confirm: true },
     options,
   );
 }
@@ -4398,4 +4455,23 @@ export interface PlanetsResult {
 export async function getPlanets(options: ApiOptions = {}): Promise<PlanetsResult> {
   const data = await getJson("/api/bridge/planets", options);
   return { planets: data as JsonValue };
+}
+
+/** The planetary production recipes, decoded by bridge/piRecipes.ts. */
+export interface PiSchematicsResult {
+  /** The whole recipe table; ids in it are for lookups, never for display. */
+  readonly recipes: JsonValue;
+}
+
+/**
+ * Every planetary production recipe (goal R108 slice 1).
+ *
+ * ⚠ NOT A BRIDGE CALL. Like resolveNames and loadBaseCycleTimes this is static
+ * reference data the BFF already has on disk: no gateway round trip, no held
+ * session, nothing about the player in the question or the answer. It is the
+ * same table for everyone, so a caller may read it once and keep it.
+ */
+export async function getPiSchematics(options: ApiOptions = {}): Promise<PiSchematicsResult> {
+  const data = await getJson("/api/pi/schematics", options);
+  return { recipes: data as JsonValue };
 }

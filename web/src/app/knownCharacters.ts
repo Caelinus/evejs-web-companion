@@ -159,6 +159,54 @@ function write(entries: readonly KnownCharacter[]): void {
   }
 }
 
+// --- the accounts ------------------------------------------------------------
+//
+// ⚠ AN ACCOUNT IS NOT THE SAME AS "THE ACCOUNT OF SOME PILOT". The pilot rows
+// above can only name an account that has pilots, so an account added with none
+// (a brand-new name, which the server mints on the spot) left no trace at all:
+// the hangar's login closed, nothing appeared, and the player had no header to
+// hang "+ Add character" off. This list is what a sign-in saw, pilots or not.
+
+const ACCOUNTS_KEY = `evejs-web-known-accounts:v${STORAGE_VERSION}`;
+
+function readAccounts(): string[] {
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(ACCOUNTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((name): name is string => typeof name === "string" && name.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function writeAccounts(names: readonly string[]): void {
+  if (!storage) return;
+  try {
+    storage.setItem(ACCOUNTS_KEY, JSON.stringify(names.slice(0, MAX_ENTRIES)));
+  } catch {
+    // storage full or blocked — as above, a convenience.
+  }
+}
+
+function rememberAccount(accountName: string): void {
+  const names = readAccounts();
+  if (!names.includes(accountName)) writeAccounts([...names, accountName]);
+}
+
+/**
+ * Every account this browser has signed into: the recorded list, plus any
+ * account a pilot row still names. The union is what makes a roster written
+ * before this list existed come through whole, with no migration step.
+ */
+export function loadKnownAccounts(): string[] {
+  const names = new Set(readAccounts());
+  for (const row of loadKnownCharacters()) names.add(row.accountName);
+  return [...names];
+}
+
 /**
  * Record the character list a sign-in returned for `accountName`. The account's
  * previous rows are replaced wholesale (a character removed from the account
@@ -179,7 +227,10 @@ export function rememberCharacters(
   resolved: ReadonlyMap<number, ResolvedRosterNames> = new Map(),
 ): void {
   const name = accountName.trim();
-  if (!name || characters.length === 0) return;
+  if (!name) return;
+  // The ACCOUNT is recorded even when it has no pilots — see `loadKnownAccounts`.
+  rememberAccount(name);
+  if (characters.length === 0) return;
   const now = Date.now();
   const previous = loadKnownCharacters();
   const others = previous.filter((k) => k.accountName !== name);
@@ -281,6 +332,7 @@ export function forgetKnownCharacter(characterID: number): void {
  * went, so the caller can strip them out of the squads too.
  */
 export function forgetKnownAccount(accountName: string): number[] {
+  writeAccounts(readAccounts().filter((name) => name !== accountName));
   const roster = loadKnownCharacters();
   const gone = roster.filter((k) => k.accountName === accountName);
   write(roster.filter((k) => k.accountName !== accountName));

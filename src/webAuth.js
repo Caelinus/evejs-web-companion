@@ -131,14 +131,46 @@ function signPayload(encodedPayload) {
     .digest("base64url");
 }
 
-function createSessionToken(account) {
+// The longest life any single token may be asked for, whatever the caller
+// says. A browser sign-in takes `config.sessionTtlMs`; the one caller that asks
+// for something else is the server bot host, whose own ceiling is
+// MAX_SERVER_BOT_RUNTIME_MINUTES (24h, web/src/bots/runPolicy.ts) plus the
+// margin it adds for its teardown. This rail is that ceiling rounded up, so a
+// mistake in a caller's arithmetic cannot mint a credential that outlives the
+// day it was made in.
+const MAX_SESSION_TTL_MS = 25 * 60 * 60 * 1000;
+
+/**
+ * Mint a bearer token for `account`.
+ *
+ * ⚠ `ttlMs` IS NOT DECORATION — READ WHY BEFORE SHORTENING OR IGNORING IT.
+ * A token whose life is shorter than the work it was minted for dies mid-job,
+ * and the failure is quiet: every call the holder makes answers 401 and
+ * whatever catch is nearest swallows it. That happened. Five server bots were
+ * approved for a twelve-hour run and given the twelve-hour default here at the
+ * same instant, so the credential expired exactly when the run's own deadline
+ * fired — the teardown's `/api/logout` could no longer be authenticated, the
+ * bridge sessions were never released, and five pilots sat online in space for
+ * another half hour until the gateway's idle reaper collected them.
+ *
+ * So a caller that knows how long it needs says so, and gets a token that
+ * outlives the job rather than one that ends with it.
+ */
+function createSessionToken(account, options) {
   const now = Date.now();
+  // Read rather than destructured: a caller that passes an explicit `null` for
+  // "no opinion" gets the default, not a TypeError out of the mint.
+  const requested = Number(options && options.ttlMs);
+  const life =
+    Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), MAX_SESSION_TTL_MS)
+      : config.sessionTtlMs;
   const payload = {
     username: normalizeUsername(account.username),
     accountID: Number(account.accountID),
     sessionID: crypto.randomBytes(32).toString("base64url"),
     iat: now,
-    exp: now + config.sessionTtlMs,
+    exp: now + life,
   };
   const encodedPayload = base64UrlJson(payload);
   const signature = signPayload(encodedPayload);
@@ -188,6 +220,7 @@ function countConfiguredUsers() {
 module.exports = {
   countConfiguredUsers,
   createSessionToken,
+  MAX_SESSION_TTL_MS,
   verifySessionToken,
   verifyWebPassword,
   upsertWebPassword,

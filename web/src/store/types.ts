@@ -6,6 +6,7 @@ import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { ActiveJam } from "../bridge/jamNotifications.ts";
+import type { PiRecipeBook } from "../bridge/piRecipes.ts";
 import type {
   FleetAvailability,
   FleetPendingInvite,
@@ -2737,6 +2738,12 @@ export interface ColonyExtractionProgram {
   readonly installedAtMs: number | null;
   readonly expiresAtMs: number | null;
   readonly headCount: number;
+  /**
+   * The drill area the program was installed with — which is also what sets
+   * how long it runs. A restart sends it back unchanged. Null or absent when
+   * the server gave none (an older BFF), and then nothing may guess one.
+   */
+  readonly headRadius?: number | null;
 }
 
 /** What a pin IS, decided by the BFF from the type's group. */
@@ -2756,8 +2763,36 @@ export interface ColonyPin {
   readonly typeName: string;
   readonly kind: ColonyPinKind;
   readonly contents: readonly ColonyStoredItem[];
+  /**
+   * What this pin holds and what it can hold, in m³ — EITHER may be null when
+   * the static table could not say. Null is never 0: an unknown capacity that
+   * read as 0 would make every pin look full.
+   */
+  readonly usedM3: number | null;
+  readonly capacityM3: number | null;
+  /** A factory's recipe. The id is for the name beside it, nothing else. */
+  readonly schematicID: number | null;
+  readonly schematicName: string | null;
+  /**
+   * Whether the emulator's last simulated cycles fed this processor. Null on
+   * every pin that is not a factory — the emulator sets these flags only on
+   * process pins, so null means "no such state", NOT "starved".
+   */
+  readonly hasReceivedInputs: boolean | null;
+  readonly receivedInputsLastCycle: boolean | null;
+  /** When this pin last ran, and (launchpads, command centres) last launched. */
+  readonly lastRunAtMs: number | null;
+  readonly lastLaunchAtMs: number | null;
   /** Only ever set on an extractor control unit. */
   readonly program: ColonyExtractionProgram | null;
+}
+
+/** One link between two pins. Endpoints are pin ids, for matching, not display. */
+export interface ColonyLink {
+  readonly endpoint1: number;
+  readonly endpoint2: number;
+  /** The upgrade level the emulator multiplies the link's bandwidth by. */
+  readonly level: number;
 }
 
 /** One route moving a commodity between two pins. */
@@ -2784,6 +2819,7 @@ export interface Colony {
   readonly lastSimulatedAtMs: number | null;
   readonly pins: readonly ColonyPin[];
   readonly linkCount: number;
+  readonly links: readonly ColonyLink[];
   readonly routes: readonly ColonyRoute[];
 }
 
@@ -2811,4 +2847,19 @@ export interface PlanetsState {
    * nothing whatsoever — both leave this false (the worldHasNoContracts rule).
    */
   readonly hasNoColonies: boolean;
+  /**
+   * The planetary production recipes (goal R108 slice 1).
+   *
+   * ⚠ NOT THE PLAYER'S DATA, which is why it lives here but does not follow
+   * the rest of this slice's lifetime. Colonies belong to one character and
+   * are dropped the moment that character goes away; the recipe table is the
+   * same for everybody and is kept across a character change rather than
+   * re-read for each one.
+   *
+   * ⚠ ITS `readable` FLAG IS NOT `loaded`. An unread book and a book the
+   * server could not supply both leave every factory rendering exactly as it
+   * did before this slice — see bridge/piFactoryWords.ts, which degrades to
+   * the colony read's own name rather than blanking a line.
+   */
+  readonly recipes: PiRecipeBook;
 }

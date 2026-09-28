@@ -824,6 +824,13 @@ export type MacroID =
   | "find-combat-agent"
   | "fly-to-mission-site"
   | "restart-extractors"
+  // Goods leave a colony ONLY from its command centre pin — the emulator
+  // refuses every other pin with CanOnlyLaunchFromCommandCenters. Watches
+  // each colony's command centre and launches what it holds once the centre
+  // is at least `fullPercent` full (default 80 when unset), dropping a
+  // container in space beside the planet for a hauler to collect. The server
+  // charges planetary export tax for the launch.
+  | "launch-commodities"
   | "repair-ship"
   // ── The market set. Place orders at the station's market (server confirm-gated).
   | "buy-item"
@@ -901,6 +908,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "find-combat-agent",
   "fly-to-mission-site",
   "restart-extractors",
+  "launch-commodities",
   "repair-ship",
   "buy-item",
   "sell-item",

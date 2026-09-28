@@ -296,6 +296,56 @@ test("the approved runtime deadline stops, logs out, and releases the character 
   assert.ok(log.some(([name]) => name === "logout"));
 });
 
+// ⚠ THE REGRESSION THIS PINS COST FIVE PILOTS HALF AN HOUR IN SPACE.
+// The bot used to be minted the plain web default (12h) at the same instant its
+// 12h deadline clock started, so the credential died as the deadline fired:
+// `finalize`'s logout could not be authenticated, no bridge session was
+// released, and the characters stayed online until the gateway's idle sweep.
+test("the bot's token outlives its own deadline, so the teardown can still authenticate", async () => {
+  const minted = [];
+  const host = makeHost({
+    now: () => 1_000,
+    webAuth: {
+      createSessionToken: (account, options) => {
+        minted.push(options);
+        return "bot-token";
+      },
+    },
+  });
+
+  const started = await host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: 30 } });
+  assert.equal(started.ok, true);
+  assert.equal(minted.length, 1);
+  assert.ok(
+    minted[0].ttlMs > 30 * 60_000,
+    `a ${minted[0].ttlMs}ms token cannot end a ${30 * 60_000}ms run`,
+  );
+});
+
+test("a resumed bot's token covers what its ORIGINAL grant has left, not a fresh run", async () => {
+  const minted = [];
+  const host = makeHost({
+    now: () => 1_000,
+    webAuth: {
+      createSessionToken: (account, options) => {
+        minted.push(options);
+        return "bot-token";
+      },
+    },
+  });
+
+  // Ten minutes left of a twelve-hour grant: the token is minted for those ten
+  // minutes, never for another twelve hours.
+  const started = await host.start({
+    ...START,
+    resumed: true,
+    expectedExpiresAt: new Date(1_000 + 10 * 60_000).toISOString(),
+  });
+  assert.equal(started.ok, true);
+  assert.ok(minted[0].ttlMs > 10 * 60_000, "still enough to log out with");
+  assert.ok(minted[0].ttlMs < 60 * 60_000, "but nowhere near a fresh grant");
+});
+
 test("a second bot may not take a claimed character", async () => {
   const host = makeHost();
   assert.equal((await host.start(START)).ok, true);

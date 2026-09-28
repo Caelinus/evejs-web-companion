@@ -184,6 +184,10 @@ export function describeAction(action: ScriptAction): string {
       return `apply fitting ${action.fittingID}`;
     case "restartExtractor":
       return `restart extractor ${action.pinID} on planet ${action.planetID} for ${action.resourceTypeID}`;
+    case "launchCommodities":
+      return `launch ${Object.entries(action.commodities)
+        .map(([typeID, quantity]) => `${typeID}x${quantity}`)
+        .join(",")} from command centre ${action.commandPinID} on planet ${action.planetID}`;
     case "repairItems":
       return `repair ${action.itemIDs.join(",")}`;
     case "rememberBeltDry":

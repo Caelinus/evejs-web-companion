@@ -8,7 +8,6 @@ import {
   activeBotVitalsWords,
   endedRuns,
   lastAlertPhrase,
-  mergeServerRosters,
   pilotRunState,
   RECENT_RUNS_ARE_NOT_DURABLE,
   resumedNote,
@@ -421,42 +420,6 @@ test("resumedNote is null for a bot that never restarted, and a sentence for one
 
 test("the recent-runs caveat is exported once, and says the history is not durable", () => {
   assert.match(RECENT_RUNS_ARE_NOT_DURABLE, /restart/i);
-});
-
-// ─── merging per-pilot roster reads ─────────────────────────────────────────
-
-test("mergeServerRosters shows every account's bots, each owned by the pilot that listed it", () => {
-  // Pilots on two accounts: the server lists each account's bots only to that
-  // account, so neither read alone sees both.
-  const accountA = serverBot({ botID: "bot-a", characterID: PILOT_ONE_ID });
-  const accountB = serverBot({ botID: "bot-b", characterID: PILOT_TWO_ID });
-  const merged = mergeServerRosters([
-    { source: "pilot-a", ok: true, bots: [accountA] },
-    { source: "pilot-b", ok: true, bots: [accountB] },
-  ]);
-  assert.deepEqual(merged.bots.map((b) => b.botID), ["bot-a", "bot-b"]);
-  assert.equal(merged.ownerOf.get("bot-a"), "pilot-a");
-  assert.equal(merged.ownerOf.get("bot-b"), "pilot-b", "a stop must ride the listing pilot's login");
-  assert.equal(merged.failed, 0);
-});
-
-test("mergeServerRosters lists a bot once when two pilots share an account", () => {
-  const shared = serverBot({ botID: "bot-a" });
-  const merged = mergeServerRosters([
-    { source: "pilot-1", ok: true, bots: [shared] },
-    { source: "pilot-2", ok: true, bots: [shared] },
-  ]);
-  assert.equal(merged.bots.length, 1);
-  assert.equal(merged.ownerOf.get("bot-a"), "pilot-1");
-});
-
-test("mergeServerRosters keeps what it could read and counts what it could not", () => {
-  const merged = mergeServerRosters([
-    { source: "pilot-a", ok: false },
-    { source: "pilot-b", ok: true, bots: [serverBot({ botID: "bot-b" })] },
-  ]);
-  assert.deepEqual(merged.bots.map((b) => b.botID), ["bot-b"]);
-  assert.equal(merged.failed, 1, "a partial read is not an empty roster, and not a total failure");
 });
 
 // ─── the landing screens' readout (region D) ─────────────────────────────────

@@ -297,3 +297,19 @@ test("the scope label says what is on screen, and names the squad by name", () =
   // A deleted squad must not print its raw id at the player (R7d).
   assert.equal(scopeLabel({ kind: "squad", value: "gone" }, squads), "Squad");
 });
+
+test("an account with no pilots gets a section full of slots on the unfiltered view", () => {
+  const rows = [pilot({ characterID: 1, accountName: "Busy" })];
+  const grouped = groupByAccount(rows, { padSlots: true, accounts: ["Busy", "Fresh"] });
+  assert.deepEqual(grouped.map((g) => g.name), ["Busy", "Fresh"]);
+  assert.deepEqual(grouped[1]?.pilots, []);
+  assert.equal(grouped[1]?.emptySlots, MAX_SLOTS);
+});
+
+test("an account with no pilots is left out of a filtered view", () => {
+  const rows = [pilot({ characterID: 1, accountName: "Busy" })];
+  assert.deepEqual(
+    groupByAccount(rows, { padSlots: false, accounts: ["Busy", "Fresh"] }).map((g) => g.name),
+    ["Busy"],
+  );
+});

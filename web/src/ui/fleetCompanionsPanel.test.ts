@@ -254,7 +254,8 @@ test("the headless half is polled, not read once and trusted", () => {
   // A server companion changes phase, joins a fleet and hits its runtime cap
   // with no local event to notice; a frozen "Running" is a lie a player acts on.
   assert.match(SOURCE, /SERVER_ROSTER_POLL_MS/);
-  assert.match(SOURCE, /listServerBots/);
+  // Read as EVERY account (app/pilotReach.ts), not as the active pilot.
+  assert.match(SOURCE, /reach\.readServerBots\(\)/);
 });
 
 test("⚠ a headless companion can still be STOPPED from here", () => {

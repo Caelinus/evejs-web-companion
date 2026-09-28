@@ -81,6 +81,9 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   finder: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14", "M16.5 16.5L21 21"],
   skills: ["M5 20v-4M10 20v-8M15 20v-12M20 20v-16"],
   planets: ["M12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12", "M3 14c6 3.5 12 3.5 18 0"],
+  // Planetary Industry: a small world over a row of three, the whole roster's
+  // colonies rather than one planet.
+  piManager: ["M12 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10", "M4 20h.01M12 20h.01M20 20h.01", "M4 17h16"],
   characterSheet: ["M5 3h14v18H5z", "M12 8a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5", "M8 18a4 4 0 0 1 8 0"],
   standings: ["M4 9h10M4 9l3-3M4 9l3 3", "M20 15H10M20 15l-3-3M20 15l-3 3"],
 

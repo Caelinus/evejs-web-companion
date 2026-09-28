@@ -123,6 +123,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   // own answer looked wrong on screen.
   holdRangeKm: "Hold this far off (km)",
   propulsion: "Prop mod",
+  fullPercent: "Launch once this full (%)",
 };
 
 function paramView(arg: MacroArgSpec): MacroParamView {
@@ -341,6 +342,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "planets",
     "Checks every planet colony you own and restarts each extractor whose program has run out, on the same resource it was already pulling. Works from anywhere.",
     "A planet colony with extractors",
+  ),
+  "launch-commodities": entry(
+    "launch-commodities",
+    "planets",
+    "Watches the command centre of every colony you own and launches what it is holding once the centre is full enough, dropping a container in space beside the planet for a hauler to collect. The server charges planetary export tax for the launch.",
+    "A planet colony whose command centre is holding goods",
   ),
   "repair-ship": entry(
     "repair-ship",

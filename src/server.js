@@ -18155,14 +18155,20 @@ async function answerWithSkillSheet(res, account, characterID, extra = {}) {
  */
 const ROSTER_TRAINING_MAX_IDS = 12;
 
-app.get("/api/roster/training", requireAuth, async (req, res, next) => {
+/** A roster route's `characterIDs`: comma-separated, junk and repeats dropped. */
+function rosterCharacterIDs(value) {
   const characterIDs = [];
-  for (const part of String(req.query.characterIDs || "").split(",")) {
+  for (const part of String(value || "").split(",")) {
     const characterID = Number(part.trim()) || 0;
     if (characterID > 0 && !characterIDs.includes(characterID)) {
       characterIDs.push(characterID);
     }
   }
+  return characterIDs;
+}
+
+app.get("/api/roster/training", requireAuth, async (req, res, next) => {
+  const characterIDs = rosterCharacterIDs(req.query.characterIDs);
   if (characterIDs.length === 0) {
     res.json({ ok: true, training: [] });
     return;
@@ -18399,6 +18405,55 @@ function projectPinContents(staticDataSource, contents) {
 }
 
 /**
+ * How much this pin can hold, in m³ — or NULL when the static table cannot say.
+ *
+ * The emulator asks the same question of the same field: planetRuntimeStore's
+ * getPinCapacity reads `type.capacity` and treats a non-finite one as no limit
+ * at all. A storage facility is 12,000, a launchpad 10,000, a command centre
+ * 500, and a commodity 0 (it holds nothing).
+ *
+ * ⚠ NULL, NEVER 0. "We could not read the capacity" and "this pin holds
+ * nothing" are different statements, and only the second one may ever be
+ * divided into. A 0 here would make every unknown pin read as full.
+ */
+function pinCapacityM3(staticDataSource, typeID) {
+  const type = staticDataSource.getType(typeID);
+  const capacity = Number(type && type.capacity);
+  return Number.isFinite(capacity) && capacity > 0 ? capacity : null;
+}
+
+/**
+ * How much this pin's contents occupy, in m³ — or NULL when any one of them has
+ * no volume in the static table.
+ *
+ * All-or-nothing on purpose: a partial sum is not a smaller number, it is a
+ * WRONG one, and it would be divided by the capacity and shown as a fill
+ * percentage. One unnameable commodity makes the whole answer "we cannot say".
+ */
+function pinUsedM3(staticDataSource, contents) {
+  if (!contents || typeof contents !== "object" || Array.isArray(contents)) {
+    return null;
+  }
+  let total = 0;
+  for (const [typeIDText, quantity] of Object.entries(contents)) {
+    const typeID = Number(typeIDText) || 0;
+    const count = Number(quantity) || 0;
+    if (typeID <= 0 || count <= 0) {
+      continue;
+    }
+    const type = staticDataSource.getType(typeID);
+    const volume = Number(type && type.volume);
+    if (!Number.isFinite(volume) || volume <= 0) {
+      return null;
+    }
+    total += volume * count;
+  }
+  // Rounded to the millilitre: the sum of 0.005 m³ units is otherwise a float
+  // with a tail no player wants to see and no caller wants to compare against.
+  return Math.round(total * 1000) / 1000;
+}
+
+/**
  * One extraction program, or null when this pin has none.
  *
  * NOTHING IS SIMULATED HERE. The cycle time, the quantity per cycle and both
@@ -18421,6 +18476,13 @@ function projectExtractionProgram(staticDataSource, pin) {
     installedAtMs,
     expiresAtMs,
     headCount: Array.isArray(pin && pin.heads) ? pin.heads.length : 0,
+    // The drill area the program was installed with. It is what sets how long a
+    // program runs (the emulator's getProgramLengthFromHeadRadius), and a
+    // restart has to send it back: InstallProgram refuses anything that is not
+    // a real number inside the drill-area bounds ("completely bonkers radius").
+    headRadius: Number.isFinite(Number(pin && pin.headRadius)) && Number(pin.headRadius) > 0
+      ? Number(pin.headRadius)
+      : null,
   };
 }
 
@@ -18431,12 +18493,37 @@ function projectColony(staticDataSource, colony) {
   const pins = (Array.isArray(colony && colony.pins) ? colony.pins : []).map((pin) => {
     const typeID = Number(pin && pin.typeID) || 0;
     const kind = planetPinKind(staticDataSource, typeID);
+    // ⚠ A FLAG THE EMULATOR DID NOT SET IS NOT `false`. normalizePin only
+    // writes hasReceivedInputs / receivedInputsLastCycle onto PROCESS pins, so
+    // reading them off an extractor would turn "this pin has no such state"
+    // into "this pin is starved". Undefined stays null all the way to the
+    // panel, which then says nothing rather than raising a false alarm.
+    const flag = (value) => (value === true ? true : value === false ? false : null);
+    const schematicID = Number(pin && pin.schematicID) || 0;
     return {
       pinID: Number(pin && pin.pinID) || 0,
       typeID,
       typeName: staticDataSource.getTypeName(typeID),
       kind,
       contents: projectPinContents(staticDataSource, pin && pin.contents),
+      // What it can hold and what is in it, so the browser can say "nearly
+      // full" without knowing a single type's volume. Either may be null.
+      capacityM3: pinCapacityM3(staticDataSource, typeID),
+      usedM3: pinUsedM3(staticDataSource, pin && pin.contents),
+      // A factory's recipe: the id is for nothing but the name beside it.
+      schematicID: schematicID > 0 ? schematicID : null,
+      schematicName: schematicID > 0
+        ? staticDataSource.getPlanetSchematicName(schematicID)
+        : null,
+      // Whether the emulator's last simulated cycle fed this processor. The
+      // second one is the interesting one: a factory that ran once and has
+      // been dry since carries hasReceivedInputs true and this false.
+      hasReceivedInputs: flag(pin && pin.hasReceivedInputs),
+      receivedInputsLastCycle: flag(pin && pin.receivedInputsLastCycle),
+      // Instants, epoch ms against the same serverNowMs as everything else.
+      // "0" — a pad that has never launched — comes back null, not 1601.
+      lastRunAtMs: fileTimeToEpochMs(pin && pin.lastRunTime),
+      lastLaunchAtMs: fileTimeToEpochMs(pin && pin.lastLaunchTime),
       program: kind === "extractor-control"
         ? projectExtractionProgram(staticDataSource, pin)
         : null,
@@ -18465,8 +18552,46 @@ function projectColony(staticDataSource, colony) {
     lastSimulatedAtMs: fileTimeToEpochMs(colony && colony.currentSimTime),
     pins,
     linkCount: (Array.isArray(colony && colony.links) ? colony.links : []).length,
+    // The links themselves, not just how many. `level` is the upgrade level the
+    // emulator multiplies the link's bandwidth by (getLinkBandwidthCapacity:
+    // logisticalCapacity × 2^level), so a colony whose routes outgrow their
+    // links can be told apart from one that is merely busy. Endpoints are pin
+    // ids — for matching against `pins`, never for display.
+    links: (Array.isArray(colony && colony.links) ? colony.links : []).map((link) => ({
+      endpoint1: Number(link && link.endpoint1) || 0,
+      endpoint2: Number(link && link.endpoint2) || 0,
+      level: Number(link && link.level) || 0,
+    })).filter((link) => link.endpoint1 > 0 && link.endpoint2 > 0),
     routes,
   };
+}
+
+/**
+ * The colony table a gateway snapshot carries, projected and ordered.
+ *
+ * ⚠ THE FACT, NOT A GUESS (the worldHasNoContracts rule). "The snapshot carried
+ * a colony table and none of it is yours" is a different statement from "this
+ * gateway did not report colonies at all", and only the first one justifies
+ * telling a player they have no colonies. `coloniesReadable` carries which one
+ * happened.
+ */
+function coloniesFromSnapshot(snapshot) {
+  const runtime = snapshot && snapshot.planetRuntimeState;
+  const coloniesReadable = Boolean(
+    runtime && typeof runtime === "object" && !Array.isArray(runtime)
+    && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
+    && !Array.isArray(runtime.coloniesByKey),
+  );
+  const colonies = coloniesReadable
+    ? Object.values(runtime.coloniesByKey)
+      .map((colony) => projectColony(staticData, colony))
+      .filter((colony) => colony.planetID > 0)
+      .sort((left, right) => (
+        String(left.planetName || "").localeCompare(String(right.planetName || ""))
+        || left.planetID - right.planetID
+      ))
+    : [];
+  return { coloniesReadable, colonies };
 }
 
 /**
@@ -18493,27 +18618,87 @@ app.get("/api/bridge/planets", requireAuth, async (req, res, next) => {
       });
       return;
     }
-    const runtime = snapshot.planetRuntimeState;
-    const coloniesReadable = Boolean(
-      runtime && typeof runtime === "object" && !Array.isArray(runtime)
-      && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
-      && !Array.isArray(runtime.coloniesByKey),
-    );
-    const colonies = coloniesReadable
-      ? Object.values(runtime.coloniesByKey)
-        .map((colony) => projectColony(staticData, colony))
-        .filter((colony) => colony.planetID > 0)
-        .sort((left, right) => (
-          String(left.planetName || "").localeCompare(String(right.planetName || ""))
-          || left.planetID - right.planetID
-        ))
-      : [];
+    const { coloniesReadable, colonies } = coloniesFromSnapshot(snapshot);
     res.json({
       ok: true,
       characterID: held.characterID,
       serverNowMs: Date.now(),
       coloniesReadable,
       colonies,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/roster/planets — the PI Manager's read (R108 slice 3): the colonies
+ * of every pilot asked about, with NONE of them selected.
+ *
+ * ⚠ NO HELD SESSION, AND THAT WAS PROVED, NOT ASSUMED. /api/bridge/planets
+ * above takes its character from the tab's selection because it was written
+ * that way; the gateway underneath does not need one. GET /snapshot is gated by
+ * validateOwnedCharacter alone, and its colony table is filtered by ownerID out
+ * of persisted state — no session map, no online flag. Probed live on
+ * 2026-09-23 against a logged-out pilot that owned colonies: they came back,
+ * owner-filtered, while a pilot on the same account with none came back with a
+ * table that was present and empty. Selecting a character is for ACTING on a
+ * colony, and that goes through the bot host, never through here.
+ *
+ * The shape is /api/roster/training's, deliberately: `characterIDs` from the
+ * browser, each asked with the CALLER's accountID so the gateway refuses what
+ * the account does not own, and a refused or failed pilot LEFT OUT — the board
+ * keeps the reading it had rather than wiping a farmer's colonies on one bad
+ * read. Present-with-no-colonies is the positive statement "has not built".
+ *
+ * EVERY PILOT CARRIES ITS OWN READ INSTANT. `readAtMs` is stamped when THAT
+ * pilot's read landed, not once for the answer: several pilots read in
+ * parallel are still several moments, and a board that merged them under one
+ * stamp would present them as a snapshot they never were. The envelope's
+ * `serverNowMs` is a different thing — the clock sample taken as the answer
+ * leaves, which is what the browser corrects its own clock against. Folding
+ * the two together would skew that correction by however long the slowest
+ * read took.
+ */
+const ROSTER_PLANETS_MAX_IDS = 12;
+
+app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
+  const characterIDs = rosterCharacterIDs(req.query.characterIDs);
+  if (characterIDs.length === 0) {
+    res.json({ ok: true, pilots: [] });
+    return;
+  }
+  if (characterIDs.length > ROSTER_PLANETS_MAX_IDS) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_CHARACTERS",
+      message: `Ask about at most ${ROSTER_PLANETS_MAX_IDS} pilots at a time.`,
+    });
+    return;
+  }
+  try {
+    const pilots = await Promise.all(
+      characterIDs.map(async (characterID) => {
+        let snapshot = null;
+        try {
+          snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
+        } catch (error) {
+          // Not ours, not there, or the gateway stumbled. Say nothing about this
+          // pilot; the board keeps the reading it had.
+          void error;
+          return null;
+        }
+        const readAtMs = Date.now();
+        if (!snapshot) {
+          return null;
+        }
+        return { characterID, readAtMs, ...coloniesFromSnapshot(snapshot) };
+      }),
+    );
+    res.json({
+      ok: true,
+      serverNowMs: Date.now(),
+      pilots: pilots.filter((pilot) => pilot !== null),
     });
   } catch (error) {
     next(error);
@@ -19300,6 +19485,104 @@ app.get("/api/types/cycle-times", requireAuth, async (req, res, next) => {
       baseCycleMs,
       capped: requested.length > CYCLE_TIME_TYPE_LIMIT,
       limit: CYCLE_TIME_TYPE_LIMIT,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PI PLANNER — the planetary production recipe table, from static reference
+ * data.
+ *
+ * Every recipe a colony factory can run lives in the gameStore's
+ * `planetSchematics` table (68 rows), and it never varies by player, by
+ * colony or by planet: schematic 65 makes Superconductors from Plasmoids and
+ * Water everywhere in New Eden, forever. So unlike
+ * /api/colonies, which projects one player's live pins, this route carries NO
+ * colony, no planetID, no character context at all — it is the recipe BOOK,
+ * not a page out of anyone's copy of it, which is also why it needs no
+ * gateway call and no held session to answer.
+ *
+ * Raw `cycleTime` is renamed to `cycleTimeSeconds` on the wire on purpose: the
+ * gameStore rows carry 1800 and 3600, which are seconds, and this repo has
+ * already shipped a duration field once with the unit left to the reader's
+ * imagination and watched a 285-year cycle render with every test agreeing.
+ * Naming the unit is the guard this time.
+ *
+ * Every one of the 68 real rows carries exactly one `outputs` entry, but nothing
+ * requires that of the table, so a row that does not is not something a
+ * planner can turn into a recipe card — it is SKIPPED rather than guessed at.
+ */
+app.get("/api/pi/schematics", requireAuth, async (req, res, next) => {
+  try {
+    const typeNameOrNull = (typeID) => {
+      const type = staticData.getType(typeID);
+      const name = type && type.name;
+      // null, never a stringified id (R7d) — a raw resource this reader has
+      // not been taught to name is a fact the caller has to see, not a
+      // "Type 2268" typo waiting to happen on screen.
+      return typeof name === "string" && name.length > 0 ? name : null;
+    };
+
+    const schematics = [];
+    for (const row of staticData.getAllPlanetSchematics()) {
+      const rawOutputs = Array.isArray(row && row.outputs) ? row.outputs : [];
+      if (rawOutputs.length !== 1) {
+        continue;
+      }
+      const outputTypeID = Number(rawOutputs[0] && rawOutputs[0].typeID) || 0;
+      const outputQuantity = Number(rawOutputs[0] && rawOutputs[0].quantity) || 0;
+      if (outputTypeID <= 0 || outputQuantity <= 0) {
+        continue;
+      }
+
+      const inputs = (Array.isArray(row.inputs) ? row.inputs : [])
+        .map((input) => ({
+          typeID: Number(input && input.typeID) || 0,
+          typeName: typeNameOrNull(Number(input && input.typeID) || 0),
+          quantity: Number(input && input.quantity) || 0,
+        }))
+        .filter((input) => input.typeID > 0 && input.quantity > 0);
+
+      schematics.push({
+        schematicID: Number(row.schematicID) || 0,
+        name: typeof row.name === "string" && row.name.length > 0 ? row.name : null,
+        cycleTimeSeconds: Number(row.cycleTime) || 0,
+        factoryTypeIDs: (Array.isArray(row.pinTypeIDs) ? row.pinTypeIDs : [])
+          .map((typeID) => Number(typeID) || 0)
+          .filter((typeID) => typeID > 0),
+        inputs,
+        output: {
+          typeID: outputTypeID,
+          typeName: typeNameOrNull(outputTypeID),
+          quantity: outputQuantity,
+        },
+      });
+    }
+
+    // Keyed by every typeID this table names anywhere, inputs and outputs
+    // alike — a raw resource only ever shows up as an input, and the planner
+    // still needs its tier to explain why it cannot be manufactured further.
+    const commodities = {};
+    for (const schematic of schematics) {
+      commodities[String(schematic.output.typeID)] = {
+        typeName: schematic.output.typeName,
+        tier: staticData.getCommodityTier(schematic.output.typeID),
+      };
+      for (const input of schematic.inputs) {
+        commodities[String(input.typeID)] = {
+          typeName: input.typeName,
+          tier: staticData.getCommodityTier(input.typeID),
+        };
+      }
+    }
+
+    res.json({
+      ok: true,
+      source: "static-data",
+      schematics,
+      commodities,
     });
   } catch (error) {
     next(error);

@@ -37,6 +37,7 @@
   import HangarLaunchProgress from "./HangarLaunchProgress.svelte";
   import {
     loadKnownCharacters,
+    loadKnownAccounts,
     forgetKnownCharacter,
     forgetKnownAccount,
     type KnownCharacter,
@@ -87,6 +88,7 @@
     listActiveServerBots,
     startServerCompanion,
     type ActiveServerBot,
+    type ApiOptions,
   } from "../app/api.ts";
   import {
     squadStartSummary,
@@ -101,17 +103,64 @@
     COMPANION_GRANT_SCRIPT_REV,
   } from "../bots/companionRunPolicy.ts";
   import { stopServerBotFor } from "../app/stopBotFor.ts";
+  import { startCompanionFor } from "../app/startCompanionFor.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
+  import GlobalLaunchers from "./GlobalLaunchers.svelte";
+  import type { TabID } from "./tabs.ts";
 
   let {
     onlineIDs = new Set<number>(),
     onLaunch,
     onShowPilot,
     onClose = null,
+    optionsFor = () => null,
+    onHandedOver = async () => {},
+    globalOpenIds = new Set<TabID>(),
+    companionCount = 0,
+    onOpenGlobal,
   }: {
+    /** The global windows open right now, so their doors light up. */
+    globalOpenIds?: ReadonlySet<TabID>;
+    /** Pilots flying as companions, for the Companions door's count. */
+    companionCount?: number;
+    /**
+     * Open a global window — Bot Manager, Planetary Industry, Fleet companions —
+     * over this screen. They are about every pilot, so they open here with
+     * nobody in the client just as they do over a cockpit. Absent in tests and
+     * harnesses, which then draw no doors.
+     */
+    onOpenGlobal?: (id: TabID) => void;
     /** Character IDs already in the client, from App's live session list. */
     onlineIDs?: Set<number>;
+    /**
+     * The token a call about THIS pilot must ride (R107 multibox), or NULL when
+     * no session in this tab is flying it.
+     *
+     * ⚠ WITHOUT IT A SQUAD START SPEAKS FOR ONE ACCOUNT AND REFUSES THE REST.
+     * Every pilot in this tab has its OWN session token; a call made with no
+     * options falls back to the per-tab cookie, which names exactly one of them.
+     * A squad whose pilots sit on different accounts then reaches the gateway as
+     * the wrong owner and comes back "Character does not belong to the supplied
+     * account" for every member but one — and that one is refused too, with
+     * "A web session is flying this character", because `/api/bots/start`
+     * hands over the CALLER's held session and the caller was somebody else.
+     *
+     * ⚠ NULL IS A DIFFERENT ANSWER FROM AN EMPTY OPTIONS OBJECT, which is why
+     * this returns one. A pilot with no session here has no hull to hand over
+     * and no token to borrow, so the start signs in as that pilot's own account
+     * for the length of the call (app/startCompanionFor.ts) instead of riding
+     * whatever the tab happens to be.
+     */
+    optionsFor?: (characterID: number) => ApiOptions | null;
+    /**
+     * Catch this tab's own UI up after the host took a hull a session here held.
+     *
+     * ⚠ NOT THE HANDOVER — `/api/bots/start` already did that, atomically, as
+     * part of the start. A failure here is not a failed start: the bot has the
+     * hull either way, and the tab's next read notices.
+     */
+    onHandedOver?: (characterID: number) => Promise<void>;
     /**
      * Bring these pilots online, reporting each one as it lands. App owns the
      * session roster, so it owns this; the hangar only says who.
@@ -137,6 +186,12 @@
   // --- persisted state, read once and written back on every edit -------------
 
   let known = $state<KnownCharacter[]>(loadKnownCharacters());
+  // Re-read whenever `known` is: every path that records or forgets an account
+  // (sign-in, refresh, remove) already reassigns `known` straight after.
+  const knownAccounts = $derived.by(() => {
+    void known;
+    return loadKnownAccounts();
+  });
   let prefs = $state<HangarPrefs>(loadHangarPrefs());
 
   function commit(next: HangarPrefs): void {
@@ -197,7 +252,9 @@
   const pilots = $derived(toHangarPilots(known, prefs, onlineIDs, now));
   const visible = $derived(visiblePilots(pilots, scope, query));
   const padSlots = $derived(scope.kind === "all" && query.trim().length === 0);
-  const accounts = $derived(groupByAccount(visible, { padSlots }));
+  const accounts = $derived(
+    groupByAccount(visible, { padSlots, accounts: knownAccounts }),
+  );
   const knownIDs = $derived(new Set(known.map((row) => row.characterID)));
   const selectedPilots = $derived(pilots.filter((p) => selected.has(p.characterID)));
   const onlineCount = $derived(pilots.filter((p) => p.online).length);
@@ -225,7 +282,9 @@
   $effect(() => {
     if (refreshStarted) return;
     refreshStarted = true;
-    const accountNames = [...new Set(loadKnownCharacters().map((row) => row.accountName))];
+    // Accounts with no pilots are refreshed too: a pilot made on one elsewhere
+    // shows up here on the next open.
+    const accountNames = loadKnownAccounts();
     if (accountNames.length === 0) {
       // First run: nothing to refresh, and nothing to look at either — open the
       // login straight away rather than leaving the player on an empty page
@@ -337,6 +396,20 @@
       }));
   }
 
+  /**
+   * The account to speak as for a pilot with no session in this tab.
+   *
+   * Read from the remembered roster, which is where the launch path and the
+   * Stop control both get it (`targetsFor`, `stopServerBotFor`) — a pilot this
+   * screen can show is a pilot this browser has signed in at least once, so the
+   * name is there. An empty string is the honest miss: the server then refuses
+   * the login and that pilot's row carries the refusal, which beats guessing an
+   * account and starting a bot on the wrong one.
+   */
+  function accountNameFor(characterID: number): string {
+    return known.find((row) => row.characterID === characterID)?.accountName ?? "";
+  }
+
   // --- bringing a squad's companions online, on the SERVER -----------------
   //
   // ⚠ THIS IS NOT `launch`, AND THE DIFFERENCE MATTERS TO A PLAYER. `launch`
@@ -387,7 +460,23 @@
               analyzeCompanionRunPolicy(setup),
               DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
             );
-            await startServerCompanion(characterID, setup, grant);
+            // ⚠ THAT PILOT'S OWN IDENTITY, NOT THE TAB'S — see `optionsFor`.
+            // Signed in here: its own session must be the caller, because the
+            // start hands that session's hull over. Not signed in here: sign in
+            // as its account for the length of the call.
+            const held = optionsFor(characterID);
+            if (held === null) {
+              await startCompanionFor(accountNameFor(characterID), characterID, setup, grant);
+              return;
+            }
+            // START FIRST, then sync: a refused start must change nothing, so
+            // the tab only lets go of a hull the host has actually taken.
+            await startServerCompanion(characterID, setup, grant, held);
+            try {
+              await onHandedOver(characterID);
+            } catch {
+              // The bot has the hull either way; the tab's next read notices.
+            }
           },
         },
         targets,
@@ -577,7 +666,8 @@
     loginOpen = false;
     known = loadKnownCharacters();
     // A brand-new account arrives with no characters; say nothing about it here,
-    // the empty slots under its header already do.
+    // the empty slots under its header already do (its header comes from the
+    // accounts list, app/knownCharacters.ts, not from its pilots).
     void accountName;
   }
 </script>
@@ -588,10 +678,9 @@
   <header class="hangar-head">
     <div class="hangar-brand">
       <span class="hangar-wordmark">EveJS Web</span>
-      <span class="hangar-online-count">
-        <span class="hangar-online-dot" aria-hidden="true"></span>
-        <span>{onlineCount} in client</span>
-      </span>
+      {#if onOpenGlobal}
+        <GlobalLaunchers openIds={globalOpenIds} {companionCount} onOpen={onOpenGlobal} />
+      {/if}
     </div>
 
     <div class="hangar-search">
@@ -806,14 +895,14 @@
           >{collapsed ? "▶" : "▼"}</button>
           <span class="hangar-account-name">{account.name}</span>
           <span class="hangar-account-count">{pilotCountLabel(account.pilots.length)}</span>
-          {#if !manage}
+          {#if !manage && account.pilots.length > 0}
             <button
               type="button"
               class="hangar-launch is-account"
               title={`Bring every pilot in ${account.name} online`}
               onclick={() => launch(account.pilots)}
             >▶ ALL</button>
-          {:else}
+          {:else if manage}
             <button
               type="button"
               class="hangar-remove"
@@ -884,7 +973,7 @@
     {/each}
   </main>
 
-  {#if pilots.length === 0}
+  {#if accounts.length === 0 && pilots.length === 0}
     <div class="hangar-empty-screen">
       <div class="hangar-empty-title">No pilots yet</div>
       <p class="hangar-empty-copy">

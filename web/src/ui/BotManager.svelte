@@ -36,12 +36,10 @@
     listBotScripts,
     getBotScript,
     deleteBotScript,
-    listServerBots,
     type BotScriptSummary,
     type ServerBot,
   } from "../app/api.ts";
-  import type { ClientStore } from "../store/clientStore.ts";
-  import type { AppFlow } from "../app/flow.ts";
+  import { createPilotReach } from "../app/pilotReach.ts";
   import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
   import { lastSavedPhrase, libraryView, savedByLabel } from "../bots/libraryView.ts";
@@ -49,30 +47,31 @@
   import {
     serverBotFor,
     serverOnlyBots,
-    mergeServerRosters,
-    type RosterRead,
     endedRuns,
     runOutcomePhrase,
     lastAlertPhrase,
     RECENT_RUNS_ARE_NOT_DURABLE,
   } from "../bots/pilotRoster.ts";
   import { loadHangarPrefs } from "../app/hangarPrefs.ts";
-  import { loadKnownCharacters } from "../app/knownCharacters.ts";
+  import { loadKnownAccounts, loadKnownCharacters } from "../app/knownCharacters.ts";
   import { companionGroupRoster, pilotGroups } from "../bots/pilotGroups.ts";
   import BotManagerGroupRow from "./BotManagerGroupRow.svelte";
   import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
   import ActionButton from "./ActionButton.svelte";
 
   let {
-    store: _store,
-    flow,
     onOpen,
     sessions,
+    canOpenBuilder = true,
   }: {
-    store: ClientStore;
-    flow: AppFlow;
     onOpen?: (tab: TabID, sessionID?: string) => void;
     sessions?: readonly Session[];
+    /**
+     * False when no pilot is in the client. The Bot Builder is a panel on a
+     * pilot's workspace, so with nobody signed in there is nowhere to open it,
+     * and New / Edit say so instead of doing nothing.
+     */
+    canOpenBuilder?: boolean;
   } = $props();
 
   /**
@@ -89,8 +88,19 @@
    */
   const SERVER_ROSTER_POLL_MS = 3000;
 
-  /** Direct api.ts calls must ride THIS pilot's full flow options. */
-  const botOpts = () => flow.requestOptions();
+  // --- whose token a call rides ---------------------------------------------
+  //
+  // ⚠ NEVER THE ACTIVE PILOT'S. This window opens from the Pilot Hangar with
+  // nobody in the client, and over a cockpit it is about every pilot. Each call
+  // is made by the account it is about — see app/pilotReach.ts.
+  const reach = createPilotReach({
+    held: () => heldSessions,
+    known: () => known,
+    accounts: () => accounts,
+  });
+  onMount(() => () => void reach.release());
+  const ownerOptions = (characterID: number) => reach.ownerOptions(characterID);
+  const libraryOptions = () => reach.libraryOptions();
 
   // --- region A: pilots -------------------------------------------------
   // Three honest states, same as region B below: loading, empty ("no pilots
@@ -98,45 +108,28 @@
   // never collapse into "nothing running" (a player could act on that lie).
   let pilotsLoaded = $state(false);
   let pilotsError = $state<string | null>(null);
-  let pilotsWarning = $state<string | null>(null);
-  let serverBots = $state<readonly ServerBot[]>([]);
-  /** botID -> the pilot flow whose account listed it, and so may stop it. */
-  let botOwners = $state<ReadonlyMap<string, AppFlow>>(new Map());
+  /** Accounts whose bots could not be read this beat, when others could. */
+  let pilotsMissing = $state<readonly string[]>([]);
+  let serverBots = $state<ServerBot[]>([]);
 
-  const heldSessions = $derived(sessions ?? []);
-
-  // The server lists (and stops) bots PER ACCOUNT, and pilots here may be on
-  // different accounts — so ask once per pilot, each with its own login, and
-  // merge (see mergeServerRosters). With no roster threaded in, the panel's
-  // own flow is the only pilot there is.
   async function refreshPilots(): Promise<void> {
-    const flows = [...new Set(heldSessions.length > 0 ? heldSessions.map((s) => s.flow) : [flow])];
     try {
-      const reads = await Promise.all(
-        flows.map(async (source): Promise<RosterRead<AppFlow>> => {
-          try {
-            return { source, ok: true, bots: await listServerBots(source.requestOptions()) };
-          } catch {
-            return { source, ok: false };
-          }
-        }),
-      );
-      const merged = mergeServerRosters(reads);
-      if (merged.failed === reads.length) {
-        pilotsError = "Could not load the server's bot roster - are you still logged in?";
-        return;
+      // Every account this browser knows, not just the one on screen.
+      const read = await reach.readServerBots();
+      if (read.allFailed) {
+        pilotsError = "Could not load the server's bot roster — is the server up?";
+        pilotsMissing = [];
+      } else {
+        serverBots = [...read.bots];
+        pilotsError = null;
+        pilotsMissing = read.missing;
       }
-      serverBots = merged.bots;
-      botOwners = merged.ownerOf;
-      pilotsError = null;
-      pilotsWarning =
-        merged.failed === 0
-          ? null
-          : `Could not read the server bots for ${merged.failed} of your pilots, so a bot one of them started may be missing below.`;
     } finally {
       pilotsLoaded = true;
     }
   }
+
+  const heldSessions = $derived(sessions ?? []);
   // Characters a held session already covers, so a server-only row is never
   // shown twice for a pilot whose tab happens to be open right here.
   const heldCharacterIDs = $derived(
@@ -157,10 +150,12 @@
   // being clever about.
   let prefs = $state(loadHangarPrefs());
   let known = $state(loadKnownCharacters());
+  let accounts = $state(loadKnownAccounts());
 
   function refreshGroups(): void {
     prefs = loadHangarPrefs();
     known = loadKnownCharacters();
+    accounts = loadKnownAccounts();
   }
 
   const groups = $derived(pilotGroups(prefs));
@@ -215,12 +210,12 @@
 
   async function refresh(): Promise<void> {
     try {
-      scripts = await listBotScripts(botOpts());
+      scripts = await listBotScripts(await libraryOptions());
       error = null;
     } catch {
       // Keep whatever was last known on screen; say the read is failing —
       // never let a failed read collapse into "no bots saved" (see below).
-      error = "Could not load the bot library — are you still logged in?";
+      error = "Could not load the bot library — is the server up?";
     } finally {
       loaded = true;
     }
@@ -343,6 +338,10 @@
    * already open on a saved bot would otherwise answer this button by showing
    * that bot, and the player would edit it thinking it was their new one.
    */
+  /** Why New and Edit are greyed out on the hangar with nobody in the client. */
+  const BUILDER_NEEDS_A_PILOT =
+    "The Bot Builder opens on a pilot's screen. Bring a pilot into the client to write or edit a bot.";
+
   function newBot(): void {
     newInBuilder();
     onOpen?.("botBuilder");
@@ -363,7 +362,7 @@
     exportText = "";
     exportError = null;
     try {
-      const record = await getBotScript(scriptID, botOpts());
+      const record = await getBotScript(scriptID, await libraryOptions());
       if (record === null) {
         exportError = "That bot could not be found — it may have just been deleted.";
       } else {
@@ -390,7 +389,7 @@
     }
     busyID = script.scriptID;
     try {
-      await deleteBotScript(script.scriptID, botOpts());
+      await deleteBotScript(script.scriptID, await libraryOptions());
       if (exportID === script.scriptID) {
         exportID = null;
         exportText = "";
@@ -456,7 +455,8 @@
             {group}
             {scripts}
             {serverBots}
-            {flow}
+            {ownerOptions}
+            {libraryOptions}
             {companionSetups}
             {nameOf}
             sessions={heldSessions}
@@ -473,6 +473,13 @@
     <h2>Pilots</h2>
   </header>
 
+  {#if pilotsMissing.length > 0}
+    <!-- ⚠ NAMED, NOT DROPPED: a bot on an account that could not be read is
+         missing from the rows below, and that must not read as "not running". -->
+    <p class="note error">
+      Could not read the bots on {pilotsMissing.join(", ")} — any running there are not listed.
+    </p>
+  {/if}
   {#if pilotsError}
     <p class="note error">{pilotsError}</p>
   {:else if !pilotsLoaded}
@@ -480,7 +487,6 @@
   {:else if heldSessions.length === 0 && extraServerBots.length === 0}
     <p class="empty">No pilots online.</p>
   {:else}
-    {#if pilotsWarning}<p class="note error">{pilotsWarning}</p>{/if}
     <div class="table-wrap overflow-x-auto">
       <table class="guests reflow">
         <thead>
@@ -503,17 +509,13 @@
               {session}
               serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
               {scripts}
+              {ownerOptions}
               onChanged={refreshPilots}
               onSetUpBuiltIn={() => onOpen?.("bots", session.id)}
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}
-            <BotManagerPilotRow
-              serverBot={bot}
-              ownerFlow={botOwners.get(bot.botID)}
-              {scripts}
-              onChanged={refreshPilots}
-            />
+            <BotManagerPilotRow serverBot={bot} {scripts} {ownerOptions} onChanged={refreshPilots} />
           {/each}
         </tbody>
       </table>
@@ -580,8 +582,17 @@
         bind:value={query}
       />
     </label>
-    <button type="button" class="primary" onclick={newBot}>New bot</button>
+    <button
+      type="button"
+      class="primary"
+      disabled={!canOpenBuilder}
+      title={canOpenBuilder ? undefined : BUILDER_NEEDS_A_PILOT}
+      onclick={newBot}>New bot</button
+    >
   </div>
+  {#if !canOpenBuilder}
+    <p class="note">{BUILDER_NEEDS_A_PILOT}</p>
+  {/if}
 
   <!-- One switch over the pure view, so "a failed read is never 'no bots
        saved'" is decided in libraryView.ts and merely rendered here. -->
@@ -621,7 +632,7 @@
                   <ActionButton
                     action="edit"
                     primary
-                    disabled={busyID !== null}
+                    disabled={busyID !== null || !canOpenBuilder}
                     onclick={() => edit(script.scriptID)}
                   />
                   <ActionButton

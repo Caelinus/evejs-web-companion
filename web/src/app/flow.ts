@@ -98,6 +98,7 @@ import {
 } from "../bridge/drones.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
+import { decodeRecipeBook } from "../bridge/piRecipes.ts";
 import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
 import type { RequestPriority } from "./transport.ts";
@@ -5334,29 +5335,65 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // between "you have built nothing" and "we could not see whether you have",
   // and the panel words those two differently.
 
-  async function loadPlanets(): Promise<void> {
-    let result;
-    try {
-      result = await api.getPlanets(callOptions);
-    } catch (error) {
-      if (isSessionLost(error)) {
-        stopLiveStream();
-        store.apply({ type: "character/offline" });
-        throw error;
-      }
-      store.apply({
-        type: "planets/error",
-        message: `Your colonies could not be read: ${errorWords(error)}`,
-      });
+  /**
+   * Fetch the planetary recipe table, once per session (goal R108).
+   *
+   * ⚠ A FAILURE HERE IS NOT A FAILED COLONY READ, and must never be reported
+   * as one. The recipes are static reference data fetched beside the colony,
+   * not part of it: without them a factory still renders exactly as it did
+   * before this slice, naming what it makes from the colony read's own words.
+   * So this swallows its error rather than surfacing a second, confusing
+   * failure on a panel whose real read succeeded.
+   *
+   * ⚠ NOT RETRIED AND NOT RE-READ. The table cannot change while the app is
+   * open, so a book already in the store is left alone — including across a
+   * character change, which is why the store keeps it (see clearedPlanets).
+   */
+  async function ensurePiRecipes(): Promise<void> {
+    if (store.planets.get().recipes.readable) {
       return;
     }
-    const report = decodeColonyReport(result.planets, Date.now());
-    store.apply({
-      type: "planets/loaded",
-      colonies: report.colonies,
-      coloniesReadable: report.coloniesReadable,
-      clockOffsetMs: report.clockOffsetMs,
-    });
+    try {
+      const result = await api.getPiSchematics(callOptions);
+      store.apply({ type: "planets/recipes", recipes: decodeRecipeBook(result.recipes) });
+    } catch {
+      // Deliberately silent — see above. The panel degrades, it does not break.
+    }
+  }
+
+  async function loadPlanets(): Promise<void> {
+    // Started alongside the colony read rather than before it: the colony is
+    // what the player asked for, and the recipes only enrich what it says.
+    const recipes = ensurePiRecipes();
+    try {
+      let result;
+      try {
+        result = await api.getPlanets(callOptions);
+      } catch (error) {
+        if (isSessionLost(error)) {
+          stopLiveStream();
+          store.apply({ type: "character/offline" });
+          throw error;
+        }
+        store.apply({
+          type: "planets/error",
+          message: `Your colonies could not be read: ${errorWords(error)}`,
+        });
+        return;
+      }
+      const report = decodeColonyReport(result.planets, Date.now());
+      store.apply({
+        type: "planets/loaded",
+        colonies: report.colonies,
+        coloniesReadable: report.coloniesReadable,
+        clockOffsetMs: report.clockOffsetMs,
+      });
+    } finally {
+      // Settled on every path, including the session-lost throw: a caller that
+      // awaits this read has awaited the whole of it, and a test never races a
+      // store write against its own assertions.
+      await recipes;
+    }
   }
 
   function selectColony(planetID: number | null): void {
@@ -9273,7 +9310,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             damagedItemIDs = null;
           }
         }
-        if (macro === "restart-extractors") {
+        if (macro === "restart-extractors" || macro === "launch-commodities") {
           try {
             const readAt = Date.now();
             const report = decodeColonyReport((await api.getPlanets(callOptions)).planets, readAt);
@@ -9286,11 +9323,32 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 .map((pin) => ({
                   pinID: pin.pinID,
                   resourceTypeID: pin.program?.resourceTypeID ?? null,
+                  headRadius: pin.program?.headRadius ?? null,
                   expiresAtMs:
                     pin.program?.expiresAtMs === null || pin.program?.expiresAtMs === undefined
                       ? null
                       : pin.program.expiresAtMs - report.clockOffsetMs,
                 })),
+              // Every structure, for the blocks that act on a hold. The two
+              // volumes are carried across UNCHANGED, nulls included: null is
+              // "the server could not say", and a decider that reads it as 0
+              // would call an unreadable hold empty (or divide by it).
+              pins: colony.pins.map((pin) => ({
+                pinID: pin.pinID,
+                kind: pin.kind,
+                usedM3: pin.usedM3,
+                capacityM3: pin.capacityM3,
+                contents: pin.contents.map((item) => ({
+                  typeID: item.typeID,
+                  quantity: item.quantity,
+                })),
+                // On the SERVER's clock, like the expiries above — a launch
+                // cooldown measured against a wrong browser clock would either
+                // fire early into a refusal or stall a ready colony.
+                lastLaunchAtMs: pin.lastLaunchAtMs === null
+                  ? null
+                  : pin.lastLaunchAtMs - report.clockOffsetMs,
+              })),
             }));
           } catch {
             colonies = null;
@@ -10094,7 +10152,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             await api.warpToBookmark(action.bookmarkID, 0, callOptions);
             return;
           case "restartExtractor":
-            await api.restartExtractorProgram(action.planetID, action.pinID, action.resourceTypeID, callOptions);
+            await api.restartExtractorProgram(
+              action.planetID,
+              action.pinID,
+              action.resourceTypeID,
+              action.headRadius,
+              callOptions,
+            );
+            return;
+          case "launchCommodities":
+            await api.launchCommodities(
+              action.planetID,
+              action.commandPinID,
+              action.commodities,
+              callOptions,
+            );
             return;
           case "repairItems":
             if (action.itemIDs.length > 0) {

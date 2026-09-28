@@ -46,6 +46,8 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const Planets = (await import("./Planets.svelte")).default;
+const { EMPTY_RECIPE_BOOK } = await import("../bridge/piRecipes.ts");
+import type { PiIngredient, PiRecipeBook, PiSchematic } from "../bridge/piRecipes.ts";
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "Planets.svelte"), "utf8");
@@ -116,6 +118,25 @@ interface SceneOptions {
   readonly open?: boolean;
   /** Only the companion test sets this, to prove the offset is load-bearing. */
   readonly clockOffsetMs?: number;
+  /** A different world, for the monitor tests. Defaults to the one colony. */
+  readonly colonies?: readonly unknown[];
+}
+
+/** A pin with every field the BFF answers, so nothing reads as undefined. */
+function pinState(overrides: Record<string, unknown>): unknown {
+  return {
+    contents: [],
+    usedM3: 0,
+    capacityM3: null,
+    schematicID: null,
+    schematicName: null,
+    hasReceivedInputs: null,
+    receivedInputsLastCycle: null,
+    lastRunAtMs: NOW - 60_000,
+    lastLaunchAtMs: null,
+    program: null,
+    ...overrides,
+  };
 }
 
 function colonyState(): unknown {
@@ -129,13 +150,14 @@ function colonyState(): unknown {
     commandCenterLevel: 3,
     lastSimulatedAtMs: NOW - 60_000,
     linkCount: 4,
+    links: [],
     pins: [
-      {
+      pinState({
         pinID: PIN_ID_RUNNING,
         typeID: ECU_TYPE_ID,
         typeName: "Temperate Extractor Control Unit",
         kind: "extractor-control",
-        contents: [],
+        capacityM3: null,
         program: {
           resourceTypeID: AQUEOUS_TYPE_ID,
           resourceTypeName: "Aqueous Liquids",
@@ -149,13 +171,12 @@ function colonyState(): unknown {
           expiresAtMs: NOW + 21 * HOUR + HOUR / 2,
           headCount: 3,
         },
-      },
-      {
+      }),
+      pinState({
         pinID: PIN_ID_FINISHED,
         typeID: ECU_TYPE_ID,
         typeName: "Temperate Extractor Control Unit",
         kind: "extractor-control",
-        contents: [],
         program: {
           resourceTypeID: 2073,
           resourceTypeName: "Microorganisms",
@@ -165,8 +186,8 @@ function colonyState(): unknown {
           expiresAtMs: NOW - 2 * HOUR,
           headCount: 1,
         },
-      },
-      {
+      }),
+      pinState({
         pinID: PIN_ID_STORAGE,
         typeID: STORAGE_TYPE_ID,
         typeName: "Temperate Storage Facility",
@@ -174,16 +195,19 @@ function colonyState(): unknown {
         contents: [
           { typeID: AQUEOUS_TYPE_ID, typeName: "Aqueous Liquids", quantity: 12000 },
         ],
-        program: null,
-      },
-      {
+        // 12,000 units of a 0.005 m³ commodity: the biggest pile on the
+        // planet, and 60 m³ of a 12,000 m³ facility.
+        usedM3: 60,
+        capacityM3: 12000,
+      }),
+      pinState({
         pinID: PIN_ID_COMMAND,
         typeID: COMMAND_TYPE_ID,
         typeName: "Temperate Command Center",
         kind: "command",
-        contents: [],
-        program: null,
-      },
+        usedM3: 0,
+        capacityM3: 500,
+      }),
     ],
     routes: [
       {
@@ -203,7 +227,9 @@ function scene(options: SceneOptions = {}) {
     if (options.loaded !== false) {
       store.apply({
         type: "planets/loaded",
-        colonies: (options.empty ? [] : [colonyState()]) as never,
+        colonies: (options.empty
+          ? []
+          : (options.colonies ?? [colonyState()])) as never,
         coloniesReadable: options.coloniesReadable ?? true,
         // The panel's "now" is Date.now() + this. Date.now() is pinned to a
         // browser five hours behind, so this offset is what puts "now" on NOW.
@@ -265,6 +291,277 @@ test("a colony is a place with a name, and its state in a sentence", () => {
   assert.match(text, /Tanoo/);
   // One extractor has finished; that is what a player needs to know first.
   assert.match(text, /finished its program/i);
+});
+
+// --- 2b. The monitor: which planet needs you, without opening one -----------
+
+/** A colony of exactly these pins, for the monitor's own scenes. */
+function worldColony(pins: readonly unknown[], overrides: Record<string, unknown> = {}): unknown {
+  return {
+    ...(colonyState() as Record<string, unknown>),
+    pins,
+    routes: [],
+    linkCount: pins.length,
+    links: [],
+    ...overrides,
+  };
+}
+
+function healthyExtractor(): unknown {
+  return pinState({
+    pinID: PIN_ID_RUNNING,
+    typeID: ECU_TYPE_ID,
+    typeName: "Temperate Extractor Control Unit",
+    kind: "extractor-control",
+    program: {
+      resourceTypeID: AQUEOUS_TYPE_ID,
+      resourceTypeName: "Aqueous Liquids",
+      cycleTimeSeconds: 3600,
+      quantityPerCycle: 2841,
+      installedAtMs: NOW - 3 * HOUR,
+      expiresAtMs: NOW + 48 * HOUR,
+      headCount: 3,
+    },
+  });
+}
+
+test("the page names the planet that needs you before anything is opened", () => {
+  const { text } = scene();
+  assert.match(text, /One planet needs you now/i);
+  assert.match(text, /Tanoo I/);
+  // The REASON, not just the alarm: which extractor, and what it was pulling.
+  assert.match(text, /finished pulling Microorganisms/i);
+  // And how stale it is, on the server's clock — the browser's is 5h wrong.
+  assert.match(text, /2 hours ago/);
+});
+
+test("a full hold is visible even when every extractor is healthy", () => {
+  // ⚠ THE CASE THE OLD LINE COULD NOT DESCRIBE. Before the monitor, this
+  // colony read as "Extracting — next program ends in 2 days" and the pad
+  // backing up behind it was invisible until the player opened the planet.
+  const { text } = scene({
+    colonies: [worldColony([
+      healthyExtractor(),
+      pinState({
+        pinID: PIN_ID_STORAGE,
+        typeID: STORAGE_TYPE_ID,
+        typeName: "Temperate Launchpad",
+        kind: "launchpad",
+        usedM3: 9900,
+        capacityM3: 10000,
+      }),
+    ])],
+  });
+
+  assert.match(text, /One planet needs you now/i);
+  assert.match(text, /Temperate Launchpad is 99% full/);
+  assert.match(text, /1 hold is full/);
+  assert.doesNotMatch(text, /next program ends/i);
+});
+
+test("a colony with nothing waiting gets no notice at all", () => {
+  // Silence is the answer a player has to be able to trust — no "all good"
+  // banner, because a banner that is always there stops being read.
+  const { text } = scene({
+    colonies: [worldColony([
+      healthyExtractor(),
+      pinState({
+        pinID: PIN_ID_COMMAND,
+        typeID: COMMAND_TYPE_ID,
+        typeName: "Temperate Command Center",
+        kind: "command",
+        usedM3: 0,
+        capacityM3: 500,
+      }),
+    ])],
+  });
+
+  assert.doesNotMatch(text, /needs you/i);
+  assert.doesNotMatch(text, /coming up/i);
+  assert.doesNotMatch(text, /% full/);
+  // The colony is still listed, with the sentence it always had.
+  assert.match(text, /Tanoo I/);
+  assert.match(text, /next program ends/i);
+});
+
+test("a hold reads as a volume, not only as a pile of units", () => {
+  const { text } = scene({ open: true });
+  // ⚠ The separator is deliberately loose: this repo's host renders grouped
+  // numbers with a narrow no-break space and CI with a comma, and that
+  // difference is not what this test is about.
+  assert.match(text, /60 of 12.000 m3 - 0% full/);
+  // The unit count is still there beside it — both readings are useful, and
+  // only together do they say "the biggest pile here is half a percent".
+  assert.match(text, /Aqueous Liquids \(12.000 units\)/);
+  // A pin with no capacity at all (an extractor) says nothing about fill.
+  assert.doesNotMatch(text, /Temperate Extractor Control Unit[\s\S]{0,120}% full/);
+});
+
+test("a factory says what it makes, and is only called starved when the server said so", () => {
+  const fed = pinState({
+    pinID: 4,
+    typeID: 2481,
+    typeName: "Temperate Basic Industry Facility",
+    kind: "factory",
+    schematicID: 65,
+    schematicName: "Superconductors",
+    hasReceivedInputs: true,
+    receivedInputsLastCycle: true,
+  });
+  const openScene = scene({ open: true, colonies: [worldColony([healthyExtractor(), fed])] });
+  assert.match(openScene.text, /Making Superconductors/);
+  assert.doesNotMatch(openScene.text, /fed nothing/i);
+
+  // ⚠ Only an explicit false. A null flag — which every non-factory pin
+  // carries — must never render as starvation.
+  const starved = pinState({
+    pinID: 4,
+    typeID: 2481,
+    typeName: "Temperate Basic Industry Facility",
+    kind: "factory",
+    schematicID: 65,
+    schematicName: "Superconductors",
+    hasReceivedInputs: true,
+    receivedInputsLastCycle: false,
+  });
+  const dry = scene({ open: true, colonies: [worldColony([healthyExtractor(), starved])] });
+  // No route and no recipe table: nothing can be feeding it, which is a fault.
+  assert.match(dry.text, /No route brings anything to the factory making Superconductors/);
+  assert.match(dry.text, /1 factory has nothing coming in/);
+});
+
+// --- 2c. R108 slice 2: a factory's recipe (rate and ingredients) ------------
+
+const FACTORY_PIN_ID = 4;
+const FACTORY_TYPE_ID = 2481;
+const SCHEMATIC_ID = 65;
+const OUTPUT_TYPE_ID = 9838;
+const INGREDIENT_TYPE_ID = 2389;
+
+/** A factory pin with sane defaults, matching the fixture already used above. */
+function factoryPin(overrides: Record<string, unknown> = {}): unknown {
+  return pinState({
+    pinID: FACTORY_PIN_ID,
+    typeID: FACTORY_TYPE_ID,
+    typeName: "Temperate Basic Industry Facility",
+    kind: "factory",
+    schematicID: SCHEMATIC_ID,
+    schematicName: "Superconductors",
+    hasReceivedInputs: true,
+    receivedInputsLastCycle: null,
+    ...overrides,
+  });
+}
+
+/** A recipe book that names Superconductors' rate and one ingredient. */
+function recipeBook(): PiRecipeBook {
+  const input: PiIngredient = { typeID: INGREDIENT_TYPE_ID, typeName: "Plasmoids", quantity: 40 };
+  const output: PiIngredient = { typeID: OUTPUT_TYPE_ID, typeName: "Superconductors", quantity: 5 };
+  const sch: PiSchematic = {
+    schematicID: SCHEMATIC_ID,
+    name: "Superconductors",
+    cycleTimeSeconds: 3600,
+    factoryTypeIDs: [],
+    inputs: [input],
+    output,
+  };
+  return {
+    schematics: Object.freeze([sch]),
+    bySchematicID: new Map([[SCHEMATIC_ID, sch]]),
+    byOutputTypeID: new Map([[OUTPUT_TYPE_ID, sch]]),
+    commodities: new Map(),
+    readable: true,
+  };
+}
+
+/**
+ * An open colony holding exactly these pins, with the recipe book applied
+ * (or not) AFTER the colony read — mirroring how the real app lands the two
+ * reads separately (see bridge/piFactoryWords.ts's header).
+ */
+function sceneWithRecipes(pins: readonly unknown[], recipes: PiRecipeBook | null) {
+  return atFrozenBrowserClock(() => {
+    const store = createClientStore();
+    store.apply({
+      type: "planets/loaded",
+      colonies: [worldColony(pins)] as never,
+      coloniesReadable: true,
+      clockOffsetMs: CLOCK_OFFSET,
+    });
+    if (recipes) {
+      store.apply({ type: "planets/recipes", recipes });
+    }
+    store.apply({ type: "planets/selected", planetID: PLANET_ID });
+    const output = render(Planets as never, { props: { store, flow: fakeFlow() } } as never);
+    return { body: output.body, text: visibleText(output.body) };
+  });
+}
+
+test("a factory with a recipe in the book renders what it makes, its rate and its ingredients", () => {
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], recipeBook());
+  assert.match(text, /Making Superconductors/);
+  assert.match(text, /5 every 1 hour/);
+  assert.match(text, /needs 40 Plasmoids/);
+});
+
+test("an unreadable recipe book still shows Making <name> exactly as before, with no rate and no ingredients line", () => {
+  // ⚠ THE DEGRADE CASE. A missing/empty book must never blank the line that
+  // already worked — it may only take away the rate and the ingredients.
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], EMPTY_RECIPE_BOOK);
+  assert.match(text, /Making Superconductors/);
+  assert.doesNotMatch(text, /every/);
+  assert.doesNotMatch(text, /needs \d/);
+});
+
+test('"fed nothing last cycle" still appears alongside the new clauses when the server said false, and not when it is null', () => {
+  const starved = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ receivedInputsLastCycle: false })],
+    recipeBook(),
+  );
+  assert.match(starved.text, /Making Superconductors/);
+  assert.match(starved.text, /5 every 1 hour/);
+  assert.match(starved.text, /fed nothing last cycle/i);
+  // With the recipe table the panel judges by what the factory NEEDS, so the
+  // missing input is named rather than "anything".
+  assert.match(starved.text, /No route brings \S.* to the factory making Superconductors/);
+  assert.doesNotMatch(starved.text, /No route brings anything/);
+
+  const fed = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ receivedInputsLastCycle: null })],
+    recipeBook(),
+  );
+  assert.doesNotMatch(fed.text, /fed nothing/i);
+});
+
+test("a factory with no recipe set at all still reads No recipe set", () => {
+  const { text } = sceneWithRecipes(
+    [healthyExtractor(), factoryPin({ schematicID: null, schematicName: null })],
+    recipeBook(),
+  );
+  assert.match(text, /No recipe set/);
+  assert.doesNotMatch(text, /every/);
+  assert.doesNotMatch(text, /needs \d/);
+});
+
+test("COMPANION: the factory id sweep's regex really does match a string containing an id", () => {
+  // ⚠ Same trap as the sweep below: a template-literal `\b` is the BACKSPACE
+  // character, not a word boundary, and would match nothing at all.
+  const pattern = new RegExp(`\\b${SCHEMATIC_ID}\\b`);
+  assert.match(` schematic ${SCHEMATIC_ID} here `, pattern);
+  assert.doesNotMatch(" schematic Superconductors here ", pattern);
+  assert.equal(pattern.source.charCodeAt(0), "\\".charCodeAt(0));
+  assert.notEqual(pattern.source.charCodeAt(0), 8);
+});
+
+test("no schematicID or ingredient typeID leaks onto the factory line", () => {
+  const { text } = sceneWithRecipes([healthyExtractor(), factoryPin()], recipeBook());
+  for (const id of [SCHEMATIC_ID, INGREDIENT_TYPE_ID, OUTPUT_TYPE_ID, FACTORY_TYPE_ID]) {
+    assert.doesNotMatch(
+      text,
+      new RegExp(`\\b${id}\\b`),
+      `id ${id} leaked to the player`,
+    );
+  }
 });
 
 test("opening a colony shows what is on the planet, in player words", () => {

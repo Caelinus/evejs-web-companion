@@ -21,6 +21,7 @@ import type { RatThreat } from "./ratThreat.ts";
 import { pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
+import { launchFullPercent } from "../bots/macroSpecs.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
@@ -3944,9 +3945,16 @@ const flyToMissionSite: MacroDecider = (_step, obs, mem) => {
 
 // ── restart-extractors ───────────────────────────────────────────────────────
 // Walk every colony and restart each extractor whose program has EXPIRED — on
-// the SAME resource it was already pulling (never a guess). One restart per
+// the SAME resource it was already pulling, over the SAME drill area (never a
+// guess — the area is what sets how long the program runs). One restart per
 // tick, confirmed by the next colonies re-read (the expiry moves into the
-// future); a pin with no known last resource is left alone and said so.
+// future); a pin with no known last resource or area is left alone and said so.
+//
+// ⚠ A RESTART THAT DID NOT TAKE ENDS THE RUN BLOCKED, NOT DONE. Each pin is
+// tried once per run, so after the walk every tried pin must read as running
+// again. One still expired was refused — and a run that tried four extractors,
+// had all four refused and then said "Every extractor is running." is exactly
+// what this used to do.
 const restartExtractors: MacroDecider = (_step, obs, mem) => {
   const colonies = obs.colonies ?? null;
   if (colonies === null) {
@@ -3973,6 +3981,11 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         skippedUnknown += 1;
         continue; // no last resource to reuse — never guess what to pull
       }
+      const headRadius = pin.headRadius ?? null;
+      if (headRadius === null) {
+        skippedUnknown += 1;
+        continue; // no last drill area — never guess how long it should run
+      }
       const attempts = (num(mem, "attempts") ?? 0) + 1;
       if (attempts > MAX_BLOCK_ATTEMPTS * 4) {
         return tick(WAIT, "The restarts kept not landing.", "Restarting extractors", {
@@ -3981,7 +3994,13 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         });
       }
       return tick(
-        { kind: "restartExtractor", planetID: colony.planetID, pinID: pin.pinID, resourceTypeID: pin.resourceTypeID },
+        {
+          kind: "restartExtractor",
+          planetID: colony.planetID,
+          pinID: pin.pinID,
+          resourceTypeID: pin.resourceTypeID,
+          headRadius,
+        },
         colony.planetName !== null ? `Restarting an extractor at ${colony.planetName}.` : "Restarting an extractor.",
         "Restarting extractors",
         ACTING,
@@ -3989,6 +4008,23 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
         { ...mem, attempts, restarted: [...restarted, pin.pinID] },
       );
     }
+  }
+  // Every tried pin must now read as running. This read is the one taken
+  // AFTER the last restart, so a pin still expired here was refused.
+  let notTaken = 0;
+  for (const colony of colonies) {
+    for (const pin of colony.extractors) {
+      if (restarted.has(pin.pinID) && (pin.expiresAtMs === null || pin.expiresAtMs <= now)) {
+        notTaken += 1;
+      }
+    }
+  }
+  if (notTaken > 0) {
+    const noun = notTaken === 1 ? "restart" : "restarts";
+    return tick(WAIT, `${notTaken} extractor ${noun} did not take.`, "Restarting extractors", {
+      kind: "blocked",
+      reason: `${notTaken} of ${restarted.size} extractor ${restarted.size === 1 ? "restart" : "restarts"} did not take - the server refused ${notTaken === 1 ? "it" : "them"}. The bot log names the reason.`,
+    });
   }
   if (skippedUnknown > 0) {
     return tick(
@@ -3999,6 +4035,93 @@ const restartExtractors: MacroDecider = (_step, obs, mem) => {
     );
   }
   return tick(WAIT, "Every extractor is running.", "Restarting extractors", { kind: "done" });
+};
+
+// ── launch-commodities ───────────────────────────────────────────────────────
+// Walk every colony and launch what its command centre is holding into orbit,
+// one launch per tick. ONLY a "command" pin is ever targeted - the emulator
+// refuses every other pin with CanOnlyLaunchFromCommandCenters, so a
+// launchpad or storage pin sitting full of goods is left alone by design, no
+// matter how full it reads. A centre inside 60s of its own last launch is
+// refused with CannotLaunchCommandPinNotReady; that is not a block failure,
+// just a "not yet" for this tick, so it is skipped without stopping the run.
+// Fired centres are remembered in mem so the same one is not fired again
+// before a fresh colonies re-read shows it emptied - exactly the guard
+// restartExtractors keeps for restarted pins.
+const launchCommodities: MacroDecider = (step, obs, mem) => {
+  const colonies = obs.colonies ?? null;
+  if (colonies === null) {
+    return tick(WAIT, "Reading your planet colonies.", "Launching commodities", ACTING, false, mem);
+  }
+  if (colonies.length === 0) {
+    return tick(WAIT, "You have no planet colonies.", "Launching commodities", { kind: "done" });
+  }
+  const now = Date.now();
+  // ⚠ THE EDITOR'S OWN SENTENCE READS THIS SAME FUNCTION. The block's
+  // description says "once it is N% full", and nothing bounds a count arg, so
+  // a second clamp here would eventually drift from the one on screen - and a
+  // bot doing something its own description denied is the defect that matters.
+  const fullPercent = launchFullPercent(step.args["fullPercent"]);
+  const doneRaw = mem["launched"];
+  const launched = new Set<number>(Array.isArray(doneRaw) ? (doneRaw as number[]) : []);
+  let waitingOnCooldown = 0;
+  for (const colony of colonies) {
+    for (const pin of colony.pins) {
+      if (pin.kind !== "command") {
+        continue; // goods reach orbit ONLY from the command centre - never a launchpad or storage pin
+      }
+      if (launched.has(pin.pinID)) {
+        continue;
+      }
+      if (pin.contents.length === 0) {
+        continue; // nothing aboard to launch
+      }
+      // ⚠ Both volumes may be null (bridge/planets.ts) - never divide then.
+      // The contents check above already established "holding something",
+      // which is the fallback answer when the fill fraction can't be stated.
+      const ready =
+        pin.capacityM3 !== null && pin.capacityM3 > 0 && pin.usedM3 !== null
+          ? pin.usedM3 / pin.capacityM3 >= fullPercent / 100
+          : true;
+      if (!ready) {
+        continue;
+      }
+      if (pin.lastLaunchAtMs !== null && now - pin.lastLaunchAtMs < 60_000) {
+        waitingOnCooldown += 1;
+        continue; // CannotLaunchCommandPinNotReady - not yet, not a block
+      }
+      const attempts = (num(mem, "attempts") ?? 0) + 1;
+      if (attempts > MAX_BLOCK_ATTEMPTS * 4) {
+        return tick(WAIT, "The launches kept not landing.", "Launching commodities", {
+          kind: "blocked",
+          reason: "The commodity launches kept not taking, so the bot stopped.",
+        });
+      }
+      const commodities: Record<number, number> = {};
+      for (const item of pin.contents) {
+        commodities[item.typeID] = item.quantity;
+      }
+      return tick(
+        { kind: "launchCommodities", planetID: colony.planetID, commandPinID: pin.pinID, commodities },
+        colony.planetName !== null ? `Launching commodities from ${colony.planetName}.` : "Launching commodities.",
+        "Launching commodities",
+        ACTING,
+        false,
+        { ...mem, attempts, launched: [...launched, pin.pinID] },
+      );
+    }
+  }
+  if (waitingOnCooldown > 0) {
+    return tick(
+      WAIT,
+      `Waiting on ${waitingOnCooldown} command centre${waitingOnCooldown === 1 ? "" : "s"} to clear ${waitingOnCooldown === 1 ? "its" : "their"} launch cooldown.`,
+      "Launching commodities",
+      ACTING,
+      false,
+      mem,
+    );
+  }
+  return tick(WAIT, "Every command centre is empty or below the launch threshold.", "Launching commodities", { kind: "done" });
 };
 
 // ── repair-ship ──────────────────────────────────────────────────────────────
@@ -5405,6 +5528,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "find-combat-agent": findCombatAgent,
   "fly-to-mission-site": flyToMissionSite,
   "restart-extractors": restartExtractors,
+  "launch-commodities": launchCommodities,
   "repair-ship": repairShip,
   "buy-item": buyItem,
   "sell-item": sellItem,

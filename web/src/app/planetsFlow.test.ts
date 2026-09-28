@@ -101,7 +101,12 @@ function planetsBody(colonies: unknown[], coloniesReadable = true): unknown {
   };
 }
 
-test("one GET lands the colonies, and nothing is written anywhere", async () => {
+// Two GETs since R108: the colonies, and beside them the static recipe table
+// the panel names a factory's ingredients from. The count is not the point and
+// never was - what this test guards is that LOOKING AT A COLONY WRITES
+// NOTHING, which is now asserted directly rather than implied by there being
+// exactly one request.
+test("the colonies land by GET alone, and nothing is written anywhere", async () => {
   const store = createClientStore();
   const { fetch, requests } = makeFakeFetch(() => ({
     status: 200,
@@ -111,7 +116,16 @@ test("one GET lands the colonies, and nothing is written anywhere", async () => 
 
   await flow.loadPlanets();
 
-  assert.deepEqual(requests, [{ path: "/api/bridge/planets", method: "GET" }]);
+  assert.deepEqual(
+    requests.filter((request) => request.path === "/api/bridge/planets"),
+    [{ path: "/api/bridge/planets", method: "GET" }],
+    "the colonies are read exactly once",
+  );
+  assert.deepEqual(
+    requests.filter((request) => request.method !== "GET"),
+    [],
+    "nothing about looking at a colony writes anything",
+  );
   const planets = store.get().planets;
   assert.equal(planets.loaded, true);
   assert.equal(planets.error, null);

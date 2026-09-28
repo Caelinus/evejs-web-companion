@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 import {
   loadKnownCharacters,
+  loadKnownAccounts,
   rememberCharacters,
   forgetKnownCharacter,
   forgetKnownAccount,
@@ -309,4 +310,33 @@ test("forgetting an account drops all of its pilots and names which went", () =>
     loadKnownCharacters().map((k) => k.characterID),
     [8001],
   );
+});
+
+// --- the accounts list --------------------------------------------------------
+
+test("an account signed into with NO pilots is still known", () => {
+  // The bug this pins: the hangar's login added a brand-new account, recorded
+  // nothing because it had no pilots, and the account vanished.
+  rememberCharacters("fresh", []);
+  assert.deepEqual(loadKnownCharacters(), []);
+  assert.deepEqual(loadKnownAccounts(), ["fresh"]);
+});
+
+test("known accounts include every account a pilot row names", () => {
+  rememberCharacters("farmer", [char(7001, "Ore Farmer", "Procurer", 500)]);
+  rememberCharacters("fresh", []);
+  assert.deepEqual(loadKnownAccounts().sort(), ["farmer", "fresh"]);
+});
+
+test("forgetting an account drops it from the accounts list too", () => {
+  rememberCharacters("fresh", []);
+  rememberCharacters("farmer", [char(7001, "Ore Farmer", "Procurer", 500)]);
+  forgetKnownAccount("fresh");
+  forgetKnownAccount("farmer");
+  assert.deepEqual(loadKnownAccounts(), []);
+});
+
+test("a blank account name records no account", () => {
+  rememberCharacters("   ", []);
+  assert.deepEqual(loadKnownAccounts(), []);
 });
