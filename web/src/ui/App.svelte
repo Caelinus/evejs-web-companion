@@ -29,6 +29,12 @@
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import { healthPollIntervalMs, resolveServerStatus } from "../app/serverStatus.ts";
   import type { LiveStreamStatus } from "../store/types.ts";
+  import DesktopWindow from "./DesktopWindow.svelte";
+  import PanelHost from "./PanelHost.svelte";
+  import { tabLabel, type TabID } from "./tabs.ts";
+  import { MIN_H, MIN_W, type WinState } from "./desktop.ts";
+  import { isGlobalTab, loadGlobalWindow, openGlobal, saveGlobalWindow } from "./globalWindow.ts";
+  import { watchIsMobile } from "./viewport.ts";
 
   // Read the roster retained across a refresh ONCE, before any write effect can
   // clobber it, so a reload can bring the same pilots back online.
@@ -341,6 +347,109 @@
       clearInterval(handle);
     };
   });
+
+  // ── the global window layer ───────────────────────────────────────────────
+  //
+  // ⚠ IT LIVES HERE, ABOVE THE `{#key active.id}` BELOW, AND THAT IS THE WHOLE
+  // FEATURE. A Workspace is remounted on every pilot switch, so anything inside
+  // one is torn down with it. The Bot Manager is a view of the ROSTER — every
+  // held pilot plus every character with a server bot — and of the account-wide
+  // bot library, so it is the one panel for which that teardown is a loss and
+  // not a correctness measure: it refetches from scratch, empties its search,
+  // closes an open export box, and restarts the roster poll that is a running
+  // server bot's only alert delivery. See globalWindow.ts.
+  let globalWin = $state<WinState | null>(null);
+  let globalLoaded = false;
+
+  // ⚠ NOT MOUNTED ON A PHONE. MobileWorkspace is one panel at a time with no
+  // windows at all, so a floating window over it would be the only draggable
+  // thing on a screen that has none. There the Bot Manager stays an ordinary
+  // panel selection, and switching pilots resets it like everything else — the
+  // honest limit of a UI with nowhere to float.
+  let isMobile = $state(false);
+  $effect(() => watchIsMobile((value) => { isMobile = value; }));
+
+  // Restore where the window was left, once, before any save effect can write
+  // over it — the same ordering `retained` above relies on.
+  $effect(() => {
+    if (globalLoaded) return;
+    globalLoaded = true;
+    globalWin = loadGlobalWindow();
+  });
+  $effect(() => {
+    const win = globalWin;
+    if (!globalLoaded) return;
+    const handle = setTimeout(() => saveGlobalWindow(win), 300);
+    return () => clearTimeout(handle);
+  });
+
+  const globalOpenIds = $derived(
+    new Set<TabID>(globalWin === null ? [] : [globalWin.id]),
+  );
+  const openGlobalTab = (id: TabID): void => {
+    if (!isGlobalTab(id)) return;
+    globalWin = openGlobal(globalWin, id);
+  };
+
+  /**
+   * A panel the global window asked to be opened on a pilot's workspace — the
+   * Bot Manager asking for the Bot Builder, or for the built-in bots panel.
+   *
+   * ⚠ IT NAMES THE PILOT IT IS FOR. Only one workspace is mounted, and it is
+   * remounted per pilot, so an unaddressed request is ambiguous: a workspace
+   * cannot tell "asked for before I existed" from "asked for as I was being
+   * created". Both cases happen here — see Workspace.svelte's effect for the two
+   * bugs that came of guessing — so the request carries a session id, the
+   * matching workspace serves it, and it is dropped the moment it is served.
+   *
+   * The counter is what makes asking TWICE work: the same panel requested again
+   * must still be raised, and it may have been closed or buried in between.
+   */
+  let openRequest = $state<{ id: TabID; n: number; sessionID: string } | null>(null);
+  let openRequestCount = 0;
+  /**
+   * Open `id` on `sessionID`'s workspace, making that pilot active first when it
+   * is not already — the panels reached this way read the MOUNTED pilot's store,
+   * so opening one for a pilot who is not on screen would show the wrong ship.
+   */
+  const requestOpenInWorkspace = (id: TabID, sessionID?: string): void => {
+    // A global tab would be asking a workspace for something it does not own.
+    if (isGlobalTab(id)) {
+      openGlobalTab(id);
+      return;
+    }
+    const target = sessionID ?? activeId;
+    if (target === null) return;
+    if (target !== activeId) switchTo(target);
+    openRequestCount += 1;
+    openRequest = { id, n: openRequestCount, sessionID: target };
+  };
+  // The layer spans the viewport, so a window dragged or sized for a bigger one
+  // can end up with its title bar and resize handles past the edge, with nothing
+  // on screen to pull it back. Desktop.svelte reconciles its own windows the same
+  // way; this is that rule for the one window App owns.
+  let globalLayerEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = globalLayerEl;
+    const win = globalWin;
+    if (!el || win === null) return;
+    const reconcile = (): void => {
+      const areaW = el.clientWidth;
+      const areaH = el.clientHeight;
+      if (areaW <= 0 || areaH <= 0) return;
+      const w = Math.min(win.w, Math.max(MIN_W, areaW));
+      const h = Math.min(win.h, Math.max(MIN_H, areaH));
+      const x = Math.min(Math.max(0, win.x), Math.max(0, areaW - w));
+      const y = Math.min(Math.max(0, win.y), Math.max(0, areaH - h));
+      if (w !== win.w || h !== win.h || x !== win.x || y !== win.y) {
+        globalWin = { ...win, x, y, w, h };
+      }
+    };
+    reconcile();
+    const ro = new ResizeObserver(reconcile);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 </script>
 
 {#if active}
@@ -361,9 +470,72 @@
          boundary inside; this one only catches what escapes them all, so one
          pilot's cockpit can never take the character bar down with it. -->
     <ErrorBoundary name="Cockpit">
-      <Workspace store={active.store} flow={active.flow} {sessions} />
+      <Workspace
+        store={active.store}
+        flow={active.flow}
+        {sessions}
+        {globalOpenIds}
+        {openRequest}
+        sessionID={active.id}
+        onOpenRequestServed={() => (openRequest = null)}
+        onOpenGlobal={openGlobalTab}
+      />
     </ErrorBoundary>
   {/key}
+  {#if globalWin !== null && !isMobile}
+    <!-- ONE window, on its own layer over whichever workspace is showing.
+         `pointer-events: none` on the layer and `auto` on the window is what
+         keeps a full-viewport overlay from swallowing every click meant for the
+         cockpit underneath it.
+
+         It is given the ACTIVE pilot's store and flow, which change under it
+         rather than remounting it — that is exactly the difference from a
+         workspace window, and why the panel keeps its roster, its search box and
+         its poll across a switch. -->
+    <div class="global-layer" bind:this={globalLayerEl}>
+      {#if globalWin.minimized}
+        <!-- ⚠ A PUT-AWAY WINDOW MUST ALWAYS HAVE A WAY BACK (desktop.ts states
+             the rule; Desktop.svelte's strip is its other implementation). This
+             layer holds one window, so it gets one chip rather than a strip —
+             but it must have it: the rail entry alone would light up "open"
+             with nothing on screen to match. -->
+        <div class="win-strip global-strip" role="group" aria-label="Put-away windows">
+          <button
+            type="button"
+            class="win-chip away"
+            aria-pressed="false"
+            title={`Bring back ${tabLabel(globalWin.id)}`}
+            onclick={() =>
+              (globalWin = globalWin === null ? null : { ...globalWin, minimized: false })}
+          >
+            <span class="win-chip-dot" aria-hidden="true"></span>{tabLabel(globalWin.id)}
+          </button>
+        </div>
+      {:else}
+      <ErrorBoundary name={tabLabel(globalWin.id)}>
+        <DesktopWindow
+          win={globalWin}
+          title={tabLabel(globalWin.id)}
+          focused={true}
+          onFocus={() => {}}
+          onClose={() => (globalWin = null)}
+          onToggleMinimize={() =>
+            (globalWin = globalWin === null ? null : { ...globalWin, minimized: !globalWin.minimized })}
+          onMove={(x, y) => (globalWin = globalWin === null ? null : { ...globalWin, x, y })}
+          onResize={(w, h) => (globalWin = globalWin === null ? null : { ...globalWin, w, h })}
+        >
+          <PanelHost
+            store={active.store}
+            flow={active.flow}
+            tab={globalWin.id}
+            onOpen={requestOpenInWorkspace}
+            {sessions}
+          />
+        </DesktopWindow>
+      </ErrorBoundary>
+      {/if}
+    </div>
+  {/if}
 {:else if restoring}
   <!-- Refresh restore in flight and no cockpit up yet: bringing pilots back. -->
   <h1>EveJS Web</h1>

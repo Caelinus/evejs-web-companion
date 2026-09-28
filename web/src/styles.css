@@ -3510,6 +3510,39 @@
   .win-chip.away .win-chip-dot { background: #3a4a5c; }
   .win-chip:hover { border-color: var(--color-accent-bright); }
 
+  /* ================================================ the GLOBAL window layer --
+   * The one window that does not belong to a pilot (the Bot Manager) floats
+   * here, over whichever workspace is showing, because App mounts it above the
+   * `{#key active.id}` that remounts everything else on a character switch.
+   * See web/src/ui/globalWindow.ts.
+   *
+   * ⚠ IT NEVER EATS A CLICK. The layer spans the work area, so without
+   * `pointer-events: none` it would swallow every click meant for the cockpit
+   * underneath — the rail, the overview, the HUD. The window inside takes
+   * `auto` back for itself.
+   *
+   * ⚠ AND IT STOPS BELOW THE CHARACTER BAR (z-index 40, `--char-bar-h` tall).
+   * The bar is how you switch pilots, and surviving a pilot switch is this
+   * window's entire reason to exist — covering the control that does the
+   * switching would be a strange way to deliver that. Same inset as
+   * `.workspace`, and a lower z-index than the bar. */
+  .global-layer {
+    position: fixed;
+    inset: var(--char-bar-h) 0 0 0;
+    z-index: 30;
+    pointer-events: none;
+  }
+  .global-layer > * {
+    pointer-events: auto;
+  }
+  /* The put-away chip sits bottom-RIGHT, where a desktop's own strip is bottom-
+   * left: they are two different strips on two different layers, and stacking
+   * them in one corner would read as one strip whose chips behave differently. */
+  .global-strip {
+    left: auto;
+    right: 0.6rem;
+  }
+
   /* Drag-to-resize the dock panel from its left edge (the "expandable" panel). */
   .dock-resize {
     position: absolute;

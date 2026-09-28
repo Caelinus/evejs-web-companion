@@ -22,7 +22,15 @@
   import { getBotScript, startServerBot as apiStartServerBot, stopServerBot, type BotScriptSummary, type ServerBot } from "../app/api.ts";
   import type { Session } from "../app/sessions.ts";
   import type { AppFlow } from "../app/flow.ts";
-  import { pilotRunState, serverRunState, type PilotRunState } from "../bots/pilotRoster.ts";
+  import {
+    lastAlertPhrase,
+    pilotRunState,
+    resumedNote,
+    serverBotProvenance,
+    serverRunState,
+    type PilotRunState,
+  } from "../bots/pilotRoster.ts";
+  import { BOTS } from "../nav/botRegistry.ts";
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
@@ -35,6 +43,7 @@
     ownerFlow,
     scripts,
     onChanged,
+    onSetUpBuiltIn,
   }: {
     session?: Session;
     serverBot: ServerBot | null;
@@ -48,6 +57,11 @@
     scripts: readonly BotScriptSummary[];
     /** Fires after a stop OR a start, so the panel refreshes the roster and server-bot list either way. */
     onChanged: () => void;
+    /**
+     * Go to this pilot and open the built-in bots panel. Absent on a row with
+     * no session — there is no pilot here to go to.
+     */
+    onSetUpBuiltIn?: () => void;
   } = $props();
 
   // A tab run with no server claim reads as "nothing running" here — the same
@@ -147,6 +161,33 @@
   );
   const customStatus = $derived(customBot?.status ?? null);
 
+  // ⚠ A LIVE SERVER BOT SAYS MORE THAN ITS STATUS WORD. These three lines are
+  // what the standalone Server Bots panel showed and this row did not, and they
+  // are the reason that panel could not simply be deleted:
+  //
+  //  • the ALERT is the whole delivery. A server bot has no browser to notify,
+  //    so if this row does not print `lastAlert`, an "alert me" watch that fired
+  //    an hour ago reaches nobody at all. `runState.detail` cannot carry it —
+  //    that is pauseReason/phase/why, none of which an alert is.
+  //  • RESUMED says the server restarted mid-run and picked this bot back up.
+  //  • PROVENANCE says which revision is flying, what it was permitted to do,
+  //    and when the server will stop it regardless of anything here.
+  //
+  // Only for a bot that is still flying: an ended run is region C's subject, and
+  // `serverBotFor` has already excluded ended bots from a held pilot's row.
+  const liveServerBot = $derived(
+    serverBot !== null && serverBot.endedAt === null ? serverBot : null,
+  );
+  // Date.now() at render: the phrase is relative ("4 minutes ago") and this row
+  // re-renders on every roster poll, which is exactly when it can change.
+  const serverAlert = $derived(
+    liveServerBot === null ? null : lastAlertPhrase(liveServerBot, Date.now()),
+  );
+  const serverResumed = $derived(liveServerBot === null ? null : resumedNote(liveServerBot));
+  const serverProvenance = $derived(
+    liveServerBot === null ? null : serverBotProvenance(liveServerBot),
+  );
+
   function pause(): void {
     session?.flow.pauseCustomBot();
   }
@@ -190,7 +231,25 @@
   // not any `store`/`flow` belonging to the panel around it. Getting this
   // backwards would start a bot on whatever pilot happens to be active
   // instead of the one this row is showing.
-  let selectedScriptID = $state<string | null>(null);
+  /**
+   * What the picker is set to: a saved script's id, or a built-in bot's id.
+   *
+   * ⚠ THE TWO KINDS DO NOT START THE SAME WAY, which is why the picker cannot
+   * simply be a longer list of scripts. A saved script has a scriptID, so it can
+   * be handed to `startCustomBot` here or to the server. A built-in has no
+   * script at all — it is code in `nav/botRegistry.ts` — so the server path,
+   * which takes a scriptID, cannot express it, and its setup (which belt, which
+   * station, which agent) lives in its own per-pilot panel. So picking one
+   * offers exactly one action, and that action is to go there.
+   */
+  const BUILT_IN_PREFIX = "built-in:";
+  let selectedValue = $state<string | null>(null);
+  const selectedBuiltIn = $derived(
+    selectedValue !== null && selectedValue.startsWith(BUILT_IN_PREFIX)
+      ? selectedValue.slice(BUILT_IN_PREFIX.length)
+      : null,
+  );
+  const selectedScriptID = $derived(selectedBuiltIn === null ? selectedValue : null);
   let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
   let startError = $state<string | null>(null);
 
@@ -283,6 +342,17 @@
     {#if runState.detail}
       <p class="note why">{runState.detail}</p>
     {/if}
+    {#if serverAlert}
+      <!-- Above the quieter lines and marked: this is the only notification a
+           server bot ever gives. -->
+      <p class="alert">{serverAlert}</p>
+    {/if}
+    {#if serverResumed}
+      <p class="note why">{serverResumed}</p>
+    {/if}
+    {#if serverProvenance}
+      <p class="note why">{serverProvenance}</p>
+    {/if}
   </td>
   <td data-label="Actions">
     <span class="row-actions">
@@ -313,13 +383,38 @@
         <div class="pilot-launch">
           <label class="pilot-launch-bot">
             Bot
-            <select bind:value={selectedScriptID} disabled={busy}>
+            <!-- ⚠ TWO GROUPS, NAMED. The built-ins ship with the client and the
+                 saved ones were written by somebody here; they start differently
+                 (see `selectedValue` above), so a flat list would offer two
+                 kinds of thing under one word and then change the buttons
+                 underneath without explaining why. -->
+            <select bind:value={selectedValue} disabled={busy}>
               <option value={null}>Choose a bot</option>
-              {#each scripts as script (script.scriptID)}
-                <option value={script.scriptID}>{script.name}</option>
-              {/each}
+              <optgroup label="Built in">
+                {#each BOTS as builtIn (builtIn.id)}
+                  <option value={`${BUILT_IN_PREFIX}${builtIn.id}`}>{builtIn.name}</option>
+                {/each}
+              </optgroup>
+              {#if scripts.length > 0}
+                <optgroup label="Saved">
+                  {#each scripts as script (script.scriptID)}
+                    <option value={script.scriptID}>{script.name}</option>
+                  {/each}
+                </optgroup>
+              {/if}
             </select>
           </label>
+          {#if selectedBuiltIn !== null}
+            <!-- A built-in needs setting up against THIS pilot's ship before it
+                 can start, and that is a panel, not a row. Going there is the
+                 only honest action to offer. -->
+            <div class="pilot-launch-run">
+              <button type="button" class="primary" disabled={busy} onclick={() => onSetUpBuiltIn?.()}>
+                Set up
+              </button>
+              <span class="pilot-launch-where">check its requirements and start it</span>
+            </div>
+          {:else}
           <div class="pilot-launch-run">
             <ActionButton
               action="run-here"
@@ -347,6 +442,7 @@
               </select>
             </label>
           </div>
+          {/if}
         </div>
       {:else if runState.mode === "none"}
         <!-- A server-only row: no tab is open here to hold this character, so
@@ -363,3 +459,16 @@
     {/if}
   </td>
 </tr>
+
+<style>
+  /* The one line in this row worth interrupting the eye for. A server bot has no
+     browser to notify, so an alert reaching the player at all depends on it not
+     looking like the muted notes around it — same treatment the standalone
+     Server Bots panel gave the same fact. */
+  .alert {
+    margin: 0.3rem 0 0;
+    color: var(--color-accent);
+    border-left: 2px solid var(--color-accent);
+    padding-left: 0.4rem;
+  }
+</style>

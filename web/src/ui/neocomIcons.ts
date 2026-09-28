@@ -57,10 +57,9 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   // --- automation ---
   bots: ["M7 8h10v9H7z", "M12 5v3", "M10 12h.01M14 12h.01"],
   botBuilder: ["M4 5h7v5H4z", "M13 5h7v5h-7z", "M8 14h8v5H8z"],
-  serverBots: ["M4 6h16v4H4z", "M4 14h16v4H4z", "M7 8h.01M7 16h.01"],
   // A shelf of saved bots: the frame is the library, the two ragged lines are
-  // rows in it. Deliberately NOT a bot head (that is `bots`) or racks (that is
-  // `serverBots`) — this panel is the catalogue, not the things running.
+  // rows in it. Deliberately NOT a bot head — that is `bots`, the built-in
+  // launchers; this panel is the catalogue and the roster.
   botManager: ["M4 5h16v14H4z", "M8 10h8M8 14h5"],
 
   // --- goods and money ---

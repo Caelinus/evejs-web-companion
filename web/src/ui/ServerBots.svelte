@@ -5,13 +5,25 @@
   // running when the tab closes or a phone locks. So this component owns no
   // bot state at all — it POLLS the server's list and renders it verbatim, the
   // same words the in-tab readout would use (the host projects the same
-  // customBot slice). It is mounted in two places deliberately: the Bots panel
-  // (online) and the character-select screen (offline) — a player who just
-  // handed their hull to a bot lands on character select and must still be
-  // able to see and stop it from there.
+  // customBot slice).
+  //
+  // ⚠ IT IS THE OFFLINE SURFACE ONLY NOW. While a pilot is online the Bot
+  // Manager owns this subject — its pilots region shows every server bot beside
+  // the tab runs and the pilots that could take one — so this panel lost its
+  // launcher entry rather than being duplicated in the rail. It stays mounted on
+  // character select, which has no session, no roster and no Bot Manager: a
+  // player who just handed their hull to a bot lands there and must still be
+  // able to see and stop it. Every word it renders comes from
+  // bots/pilotRoster.ts, shared with the Manager, so two readouts of one fact
+  // cannot drift apart.
   import { onMount } from "svelte";
   import { listServerBots, stopServerBot, type ServerBot } from "../app/api.ts";
-  import { BOT_RISK_LABELS } from "../bots/runPolicy.ts";
+  import {
+    lastAlertPhrase,
+    resumedNote,
+    serverBotProvenance,
+    serverRunState,
+  } from "../bots/pilotRoster.ts";
   import { skipWhileBusy } from "../app/skipWhileBusy.ts";
 
   const POLL_MS = 3000;
@@ -62,46 +74,6 @@
     return bot.status === "starting" || bot.status === "running" || bot.status === "paused";
   }
 
-  /**
-   * How long ago an alert fired, in words. Relative, because "4 minutes ago" is
-   * what a player actually wants to know when they pick their phone back up — and
-   * because a clock time would need a timezone the readout does not have.
-   */
-  function alertWhen(atMs: number): string {
-    const seconds = Math.max(0, Math.round((Date.now() - atMs) / 1000));
-    if (seconds < 60) {
-      return "just now";
-    }
-    const minutes = Math.round(seconds / 60);
-    if (minutes < 60) {
-      return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
-    }
-    const hours = Math.round(minutes / 60);
-    return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  }
-
-  /** What the badge says. Plain language, never the raw state word (R9a). */
-  function statusWords(bot: ServerBot): string {
-    if (bot.status === "starting") {
-      return "Starting";
-    }
-    if (bot.status === "running") {
-      return "Running";
-    }
-    if (bot.status === "paused") {
-      return "Paused";
-    }
-    if (bot.status === "error") {
-      return "Stopped after a problem";
-    }
-    return "Finished";
-  }
-
-  function riskWords(bot: ServerBot): string {
-    return bot.riskClasses.length === 0
-      ? "No consequential permissions"
-      : bot.riskClasses.map((risk) => BOT_RISK_LABELS[risk]).join("; ");
-  }
 </script>
 
 <section>
@@ -122,7 +94,7 @@
         <li class="server-bot" class:active={isActive(bot)}>
           <div class="row">
             <span class="name">{bot.scriptName}</span>
-            <span class="badge">{statusWords(bot)}</span>
+            <span class="badge">{serverRunState(bot).statusWords}</span>
           </div>
           <div class="row">
             <span class="detail">
@@ -142,15 +114,15 @@
             {/if}
           </div>
           <p class="note why">
-            Revision {bot.scriptRev} · {riskWords(bot)} · limit {bot.maxRuntimeMinutes < 60 ? `${bot.maxRuntimeMinutes} min` : `${bot.maxRuntimeMinutes / 60} hr`}
+            {serverBotProvenance(bot)}
           </p>
-          {#if bot.resumedAt}
-            <p class="note why">Restarted with the server after its saved revision and safe steps were checked.</p>
+          {#if resumedNote(bot)}
+            <p class="note why">{resumedNote(bot)}</p>
           {/if}
           {#if bot.lastAlert}
             <!-- A server bot has no browser to notify, so this line IS the alert.
                  Above `why` and marked, because it is the thing worth reading. -->
-            <p class="alert">⚠ {bot.lastAlert.message} <span class="when">{alertWhen(bot.lastAlert.atMs)}</span></p>
+            <p class="alert">⚠ {lastAlertPhrase(bot, Date.now())}</p>
           {/if}
           {#if bot.why}
             <p class="note why">{bot.why}</p>
@@ -204,10 +176,6 @@
     color: var(--color-accent);
     border-left: 2px solid var(--color-accent);
     padding-left: 0.4rem;
-  }
-  .alert .when {
-    color: var(--color-text-dim);
-    white-space: nowrap;
   }
   /* R8 — a comfortable target on a phone. */
   .server-bot button {

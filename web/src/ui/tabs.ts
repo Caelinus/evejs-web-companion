@@ -21,7 +21,6 @@ export type TabID =
   | "travel"
   | "bots"
   | "botBuilder"
-  | "serverBots"
   | "botManager"
   | "inventory"
   | "market"
@@ -82,13 +81,34 @@ export const TABS: readonly TabDef[] = [
   // all; it was only ever labelled that way because route planning was assumed
   // to happen before undocking.
   { id: "travel", label: "Travel", where: "both" },
-  // Bots run IN SPACE (mining/mission loops), so their commands must stay
-  // reachable after undocking — available in both states.
-  { id: "bots", label: "Bots", where: "both" },
-  { id: "botBuilder", label: "Bot Builder", where: "both" },
-  // Server-side bots keep flying with the tab closed, so the readout that
-  // watches them must be reachable from anywhere, in any state.
-  { id: "serverBots", label: "Server Bots", where: "both" },
+  // The two BUILT-IN bots (mining, mission): their live requirement checklists
+  // and their setup forms. Runs in space, so it stays available in both states.
+  //
+  // ⚠ NOT LAUNCHABLE — reached from the Bot Manager, the one door onto bots.
+  // The Manager's pilot rows offer the built-ins in the same picker as the saved
+  // scripts and open this panel to set one up. It could not simply be DELETED
+  // along with its entry: the Manager can start a saved script on any pilot
+  // because a script has an id to hand to a runner, but a built-in is code in
+  // nav/botRegistry.ts with no id and a setup form of its own (which belt, which
+  // agent), read against one pilot's fitting and holds. That does not compress
+  // into a row of a multi-pilot table, so it stays a panel and the Manager
+  // points at it.
+  { id: "bots", label: "Bots", where: "both", launchable: false },
+  // ⚠ NOT LAUNCHABLE — reached from the Bot Manager, which is the ONE door onto
+  // bots. It is not contextual in Show Info's sense (it opens perfectly well on
+  // nothing: a new, empty bot), so this is a grouping decision rather than a
+  // structural one: four bot entries in the rail was three too many, and the
+  // Builder is the one a player reaches for AFTER deciding to write or change a
+  // bot — which is a decision made while looking at the library. The Manager
+  // offers "New bot" and an Edit on every saved row; those are the two ways in.
+  { id: "botBuilder", label: "Bot Builder", where: "both", launchable: false },
+  // ⚠ THERE IS NO "Server Bots" ENTRY, AND THAT IS NOT AN OVERSIGHT. Server-side
+  // bots keep flying with the tab closed, so a readout that watches them must be
+  // reachable from anywhere — and the Bot Manager IS that readout: its pilots
+  // region lists every server bot beside the tab runs and the pilots that could
+  // take one. A second entry for the same rows only ever meant two ways into one
+  // subject in a rail that already has too many. `ServerBots.svelte` still
+  // exists, mounted on character select, which has no Manager to hold it.
   { id: "botManager", label: "Bot Manager", where: "both" },
   // In space only — flying, what's around the ship, mining.
   { id: "flight", label: "Flight", where: "in-space" },

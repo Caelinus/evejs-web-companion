@@ -20,6 +20,7 @@
   // and error/empty/loading kept as three distinguishable states rather than
   // collapsed into one "nothing to show".
   import { onMount } from "svelte";
+  import { skipWhileBusy } from "../app/skipWhileBusy.ts";
   import {
     listBotScripts,
     getBotScript,
@@ -55,9 +56,23 @@
   }: {
     store: ClientStore;
     flow: AppFlow;
-    onOpen?: (tab: TabID) => void;
+    onOpen?: (tab: TabID, sessionID?: string) => void;
     sessions?: readonly Session[];
   } = $props();
+
+  /**
+   * How often the server roster is re-read.
+   *
+   * ⚠ THE SERVER ROSTER IS THE ONE LIST HERE THAT CHANGES BY ITSELF. Every other
+   * list in this panel only moves when somebody acts — in this tab or another —
+   * so an onMount read is enough for them. A server bot is running on a machine
+   * nobody in this browser is driving: it changes phase, raises an alert and hits
+   * its runtime cap with no local event to notice. Without this the roster would
+   * be frozen at whenever the panel was opened, which is worse than showing
+   * nothing — a stale "Running" is a lie a player will act on. 3s matches what
+   * the standalone Server Bots panel polled at.
+   */
+  const SERVER_ROSTER_POLL_MS = 3000;
 
   /** Direct api.ts calls must ride THIS pilot's full flow options. */
   const botOpts = () => flow.requestOptions();
@@ -150,7 +165,12 @@
 
   onMount(() => {
     void refresh();
-    void refreshPilots();
+    // Guarded, like every other periodic read — see app/skipWhileBusy.ts. Only
+    // the roster repeats; the library is not a self-changing list.
+    const beat = skipWhileBusy(refreshPilots);
+    void beat();
+    const timer = setInterval(() => void beat(), SERVER_ROSTER_POLL_MS);
+    return () => clearInterval(timer);
   });
 
   // Which of the honest states we are in, decided by the pure module so the
@@ -163,6 +183,20 @@
     // one-shot mailbox; the Builder loads it on open (or at once, if its
     // window is already up).
     requestBuilderEdit(flow, scriptID);
+    onOpen?.("botBuilder");
+  }
+
+  /**
+   * Open the Bot Builder with nothing selected — "I want a bot that does not
+   * exist yet".
+   *
+   * ⚠ THIS IS THE ONLY WAY TO REACH THE BUILDER WITH AN EMPTY LIBRARY, and that
+   * is why it exists. The Builder has no launcher entry of its own any more (it
+   * is reached through this panel, which is the one door onto bots); before this
+   * button the only route here was the Edit action on a saved row, so a player
+   * with no saved bots had no way to write their first one.
+   */
+  function newBot(): void {
     onOpen?.("botBuilder");
   }
 
@@ -229,12 +263,6 @@
   <header class="panel-head">
     <h2>Pilots</h2>
   </header>
-  <p class="note">
-    Every pilot you have open in this browser tab, plus every character with a
-    bot still running on the server even if it has no tab open here. A bot
-    running in a tab stops when that tab closes; a bot running on the server
-    keeps flying.
-  </p>
 
   {#if pilotsError}
     <p class="note error">{pilotsError}</p>
@@ -258,11 +286,16 @@
         <tbody>
           {#each heldSessions as session (session.id)}
             {@const characterID = session.store.station.get().online?.characterID ?? null}
+            <!-- ⚠ `onSetUpBuiltIn` NAMES THIS ROW'S PILOT, never the active one.
+                 The panel it opens reads the MOUNTED pilot's ship, so an
+                 unaddressed open would show one pilot's hull under another's
+                 name — a requirement checklist about the wrong ship. -->
             <BotManagerPilotRow
               {session}
               serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
               {scripts}
               onChanged={refreshPilots}
+              onSetUpBuiltIn={() => onOpen?.("bots", session.id)}
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}
@@ -323,11 +356,6 @@
   <header class="panel-head">
     <h2>Bot manager</h2>
   </header>
-  <p class="note">
-    Every bot saved on this server, by any account. Loading, editing or
-    deleting a bot here affects everyone who uses it — the library is shared,
-    not private to whoever saved it.
-  </p>
 
   <div class="controls">
     <label>
@@ -338,6 +366,7 @@
         bind:value={query}
       />
     </label>
+    <button type="button" class="primary" onclick={newBot}>New bot</button>
   </div>
 
   <!-- One switch over the pure view, so "a failed read is never 'no bots
@@ -347,7 +376,11 @@
   {:else if view.kind === "loading"}
     <p class="note">Loading the bot library…</p>
   {:else if view.kind === "empty"}
-    <p class="empty">No bots saved yet. Build one in the Bot Builder, then save it here.</p>
+    <!-- ⚠ IT NAMES THE BUTTON, NOT A LAUNCHER ENTRY. This used to read "Build
+         one in the Bot Builder", which was a direction to a rail entry that no
+         longer exists — the worst kind of empty state, one that sends a player
+         somewhere they cannot go. -->
+    <p class="empty">No bots saved yet. Choose <strong>New bot</strong> above to write your first one.</p>
   {:else if view.kind === "no-matches"}
     <p class="empty">No saved bots match “{query}”.</p>
   {:else}

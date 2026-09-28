@@ -26,7 +26,6 @@
   import Travel from "./Travel.svelte";
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
-  import ServerBots from "./ServerBots.svelte";
   import BotManager from "./BotManager.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
@@ -51,8 +50,16 @@
     store: ClientStore;
     flow: AppFlow;
     tab: TabID;
-    // Lets a panel navigate to another tab (e.g. Agent Finder -> Travel).
-    onOpen?: (tab: TabID) => void;
+    /**
+     * Lets a panel navigate to another tab (e.g. Agent Finder -> Travel).
+     *
+     * The optional `sessionID` says WHICH pilot's workspace to open it on, and
+     * exists for the Bot Manager: it lists every held pilot, and setting up a
+     * built-in bot on one of them has to happen on that pilot's workspace,
+     * because the panel reads the mounted pilot's fitting and holds. Omitted
+     * means the active pilot, which is what every other caller wants.
+     */
+    onOpen?: (tab: TabID, sessionID?: string) => void;
     // R107 — the full pilot roster (every session, not just the active one).
     // Optional and forwarded only to the Bot Manager panel, which is the only
     // one that needs to see pilots beyond its own store/flow.
@@ -124,10 +131,8 @@
   <Bots {store} {flow} />
 {:else if tab === "botBuilder"}
   <BotBuilder {store} {flow} />
-{:else if tab === "serverBots"}
-  <ServerBots />
 {:else if tab === "botManager"}
-  <BotManager {store} {flow} {sessions} onOpen={(id) => onOpen?.(id)} />
+  <BotManager {store} {flow} {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

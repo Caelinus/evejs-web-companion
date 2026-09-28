@@ -26,6 +26,7 @@
   import CustomBotReadout from "./CustomBotReadout.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import { deriveDocked, type TabID } from "./tabs.ts";
+  import { isGlobalTab } from "./globalWindow.ts";
   import {
     openWindow,
     focusWindow,
@@ -48,6 +49,11 @@
     store,
     flow,
     sessions,
+    globalOpenIds,
+    onOpenGlobal,
+    openRequest,
+    onOpenRequestServed,
+    sessionID,
   }: {
     store: ClientStore;
     flow: AppFlow;
@@ -59,6 +65,29 @@
      * one panel and no other.
      */
     sessions?: readonly Session[];
+    /**
+     * The global-layer tabs currently on screen, so the rail can light their
+     * entries like any other open window. App owns that layer (globalWindow.ts);
+     * a workspace only reads it.
+     */
+    globalOpenIds?: ReadonlySet<TabID>;
+    /** Hand a global tab up to App, which owns the layer it opens on. */
+    onOpenGlobal?: (id: TabID) => void;
+    /**
+     * A panel App wants opened HERE, as a counter that App bumps.
+     *
+     * ⚠ A COUNTER, NOT AN ID, for the reason the Show Info effect below spells
+     * out: the global Bot Manager's Edit button asks for the Bot Builder, and
+     * asking a second time for the panel already open must still raise it. This
+     * is the one path INTO a workspace from above it, and it is deliberately a
+     * prop rather than a registered callback — data flows down, the same shape
+     * `dockInventoryPing` already uses.
+     */
+    openRequest?: { readonly id: TabID; readonly n: number; readonly sessionID: string } | null;
+    /** Tell App this workspace has served the request, so it can drop it. */
+    onOpenRequestServed?: () => void;
+    /** This workspace's own session id, so it can tell whose request is whose. */
+    sessionID?: string;
   } = $props();
 
   // The store's identity is stable for this component's lifetime (App keys each
@@ -120,6 +149,15 @@
   // Ship" there folds into the dock panel instead of opening a window, and that
   // pick must not throw the expansion away.
   const open = (id: TabID): void => {
+    // ⚠ A GLOBAL TAB NEVER LANDS ON THIS DESKTOP. It opens on App's layer above
+    // every workspace, because it outlives the pilot switch that tears this one
+    // down (globalWindow.ts). It also must not clear the station expansion:
+    // nothing was added to the hidden desktop, so there is nothing to give the
+    // work area back for.
+    if (isGlobalTab(id)) {
+      onOpenGlobal?.(id);
+      return;
+    }
     expandPreferred = false;
     wins = openWindow(wins, id);
   };
@@ -142,8 +180,15 @@
   // The rail highlights what is on screen. While docked, the expanded dock
   // panel IS the Inventory & Ship content, so its entry lights up like an
   // open window's would (openIds itself only tracks floating windows).
+  // The global layer's windows are on screen too, so they light up in the rail
+  // exactly like a workspace window — from here the distinction is invisible,
+  // which is the point.
   const neocomOpenIds = $derived(
-    isDocked && !dockCollapsed ? new Set<TabID>([...openIds, "inventory"]) : openIds,
+    new Set<TabID>([
+      ...openIds,
+      ...(globalOpenIds ?? []),
+      ...(isDocked && !dockCollapsed ? (["inventory"] as TabID[]) : []),
+    ]),
   );
   const focus = (id: TabID): void => { wins = focusWindow(wins, id); };
   const close = (id: TabID): void => { wins = closeWindow(wins, id); };
@@ -217,6 +262,53 @@
     if (count > 0) open("showInfo");
   });
 
+  // A panel App asked to be opened on THIS desktop — today, the Bot Builder,
+  // requested by the Edit button in the global Bot Manager. Watches the counter
+  // and not the id, for the same reason the Show Info effect above does: asking
+  // twice for the same panel must still raise it, and it may have been closed or
+  // buried in between.
+  let mobileOpenRequest = $state<{ id: TabID; n: number } | null>(null);
+  // A panel App wants opened on THIS workspace — the Bot Manager asking for the
+  // Bot Builder, or for the built-in bots panel on a particular pilot.
+  //
+  // ⚠ IT IS ADDRESSED, NOT MERELY TIMED, and two bugs are the reason why.
+  //
+  // The request lives in App, above the `{#key active.id}` that remounts a
+  // workspace per pilot, so a bare counter is ambiguous in both directions:
+  //
+  //  • Serving any request whose number we had not seen replayed OLD ones. A
+  //    workspace mounted later started at zero, read a counter bumped for some
+  //    earlier pilot, and opened that panel too — so opening the Bot Builder and
+  //    then switching pilots opened it again on the pilot switched TO, and on
+  //    every pilot after that.
+  //
+  //  • Seeding the mark from the counter AS IT STANDS AT MOUNT fixed that and
+  //    broke the opposite case. "Set up this built-in on that pilot" switches
+  //    pilots and asks for the panel in ONE tick, so by the time the new
+  //    workspace mounts the counter already includes the request meant for it —
+  //    which it then read as ancient history and ignored. The pilot switched and
+  //    no panel opened.
+  //
+  // Neither is a timing problem, so neither has a timing fix. The request names
+  // the pilot it is for; a workspace serves only its own and says so, and App
+  // drops it once served, which is what stops a later remount finding it again.
+  let servedOpenRequest = 0;
+  $effect(() => {
+    const request = openRequest;
+    if (!request || request.sessionID !== sessionID) return;
+    if (request.n === servedOpenRequest) return;
+    servedOpenRequest = request.n;
+    // ⚠ THE MOBILE WORKSPACE HAS NO WINDOWS TO OPEN INTO. `open()` puts a window
+    // on the desktop, which on a phone nothing renders — the request would be
+    // silently swallowed. There the panel is a SELECTION, so the request is
+    // handed down for MobileWorkspace to apply to its own.
+    if (isMobile) {
+      mobileOpenRequest = { id: request.id, n: request.n };
+    } else {
+      open(request.id);
+    }
+    onOpenRequestServed?.();
+  });
   // Read flight status once online so the docked/in-space flag is authoritative
   // (character select does not read it). Subsequent flight steps keep it fresh.
   $effect(() => {
@@ -237,7 +329,7 @@
   <DockWipe {isDocked} />
   <NoticeBridge {store} />
   <Toasts />
-  <MobileWorkspace {store} {flow} {isDocked} {sessions} />
+  <MobileWorkspace {store} {flow} {isDocked} {sessions} openRequest={mobileOpenRequest} />
 {:else}
   <DockWipe {isDocked} />
   <!-- Mounted once for the whole workspace, and once each: the bridge is what
