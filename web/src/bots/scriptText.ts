@@ -21,6 +21,8 @@ import type {
   MacroID,
   MacroStep,
   Repeat,
+  TargetClassArg,
+  SquadRoleArg,
   WorldRef,
 } from "./botScript.ts";
 
@@ -296,9 +298,25 @@ export function alertSentence(row: InterruptRow): string {
   return `Your bot noticed: ${conditionSentence(row.when)}.`;
 }
 
+/**
+ * How a fight-back watch fights, when the player has said: which hostile first,
+ * and what it does about the fleet's call. Empty for every other response and
+ * for a watch left at the shipped ladder, so an ordinary row reads exactly as
+ * it always did.
+ */
+function watchFightPhrase(row: InterruptRow): string {
+  if (row.respond !== "fight-back") {
+    return "";
+  }
+  const classes = row.targets ?? [];
+  const order = classes.length === 0 ? "" : `, ${classes.map((cls) => TARGET_CLASS_WORD[cls]).join(" then ")} first`;
+  const squad = row.squad === undefined || row.squad === "off" ? "" : `, ${SQUAD_ROLE_WORD[row.squad]}`;
+  return `${order}${squad}`;
+}
+
 /** A whole "always watching" row: "If shields drop below 30%, dock at home and stop". */
 export function interruptSentence(row: InterruptRow): string {
-  return `If ${conditionSentence(row.when)}, ${responseSentence(row.respond)}`;
+  return `If ${conditionSentence(row.when)}, ${responseSentence(row.respond)}${watchFightPhrase(row)}`;
 }
 
 /** A whole step: its macro, its bound slots, and its "until" when it carries one. */
@@ -308,6 +326,54 @@ export function stepSentence(step: MacroStep): string {
     return `${base} until ${conditionSentence(step.until)}`;
   }
   return base;
+}
+
+/** What each target class is CALLED to a player — never the stored token (R9a). */
+const TARGET_CLASS_WORD: Readonly<Record<TargetClassArg, string>> = {
+  tackle: "tacklers",
+  ewar: "jammers",
+  logi: "logistics",
+  other: "everything else",
+};
+
+/** What each fleet-fire role is called on screen. */
+const SQUAD_ROLE_WORD: Readonly<Record<SquadRoleArg, string>> = {
+  off: "on its own",
+  call: "calling the primary for the fleet",
+  follow: "on the fleet's primary",
+};
+
+/** The role words, for the picker. "off" is the default and says nothing. */
+export function squadRoleWord(role: SquadRoleArg): string {
+  return SQUAD_ROLE_WORD[role];
+}
+
+/** ", calling the primary for the fleet" — empty when the block flies alone. */
+function squadPhrase(step: MacroStep): string {
+  const arg = step.args["squad"];
+  if (arg === undefined || arg.kind !== "squadRole" || arg.role === "off") {
+    return "";
+  }
+  return `, ${SQUAD_ROLE_WORD[arg.role]}`;
+}
+
+/** What one target class is called on screen — the picker reads it from here. */
+export function targetClassWord(cls: TargetClassArg): string {
+  return TARGET_CLASS_WORD[cls];
+}
+
+/**
+ * ", tacklers then jammers first" — the same shape the ore priority reads in,
+ * and empty when the step leaves the ladder at its default, so an untouched
+ * combat step still reads as the one plain sentence it always did.
+ */
+function targetPhrase(step: MacroStep): string {
+  const arg = step.args["targets"];
+  const classes = arg !== undefined && arg.kind === "targetList" ? arg.classes : [];
+  if (classes.length === 0) {
+    return "";
+  }
+  return `, ${classes.map((cls) => TARGET_CLASS_WORD[cls]).join(" then ")} first`;
 }
 
 function macroPhrase(step: MacroStep): string {
@@ -400,7 +466,7 @@ function macroPhrase(step: MacroStep): string {
     case "hardeners-on":
       return "Switch every hardener and damage control on";
     case "fight-the-rats":
-      return "Fight the rats until the grid is clear";
+      return `Fight the rats until the grid is clear${targetPhrase(step)}${squadPhrase(step)}`;
     case "warp-to-anomaly":
       return "Warp to the next pirate den the scanner shows";
     case "refit-ship": {

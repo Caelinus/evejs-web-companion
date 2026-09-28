@@ -33,6 +33,9 @@
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
+    TARGET_CLASS_ARGS,
+    type TargetClassArg,
+    type SquadRoleArg,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
   import {
@@ -53,7 +56,7 @@
     WATCH_CONDITION_KINDS,
   } from "../bots/editorOptions.ts";
   import { MACRO_CATALOG_LIST, macroEntry } from "../bots/macroCatalogView.ts";
-  import { interruptSentence } from "../bots/scriptText.ts";
+  import { interruptSentence, targetClassWord } from "../bots/scriptText.ts";
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
   import StationPicker from "./StationPicker.svelte";
@@ -83,6 +86,7 @@
     onArg,
     onCondition,
     onRespond,
+    onWatchFight,
     onAddToSide,
     onSubBot,
     onClose,
@@ -110,6 +114,7 @@
      * from a step whose `until` is optional. */
     onCondition: (condition: Condition | undefined) => void;
     onRespond: (respond: InterruptResponse) => void;
+    onWatchFight: (patch: { squad?: SquadRoleArg | null; targets?: readonly TargetClassArg[] | null }) => void;
     onAddToSide: (side: "then" | "else", macro: MacroID) => void;
     onSubBot: (scriptID: string) => void;
     onClose: () => void;
@@ -178,6 +183,10 @@
   function rockPickValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "rockPick" ? arg.pick : "nearest";
+  }
+  function squadRoleValue(step: MacroStep, key: string): string {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "squadRole" ? arg.role : "off";
   }
   function oreListValue(step: MacroStep, key: string): readonly { groupID: number; name: string }[] {
     const arg = argOf(step, key);
@@ -340,6 +349,26 @@
     // so an untouched step exports exactly as it was imported.
     onArg(key, raw === "biggest" ? { kind: "rockPick", pick: "biggest" } : undefined);
   }
+  // ── A fight-back WATCH fights like a block, so it edits like one ───────────
+  function addWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    if (chosen.includes(cls)) return;
+    onWatchFight({ targets: [...chosen, cls] });
+  }
+  function removeWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    onWatchFight({ targets: chosen.filter((c) => c !== cls) });
+  }
+  function moveWatchTarget(chosen: readonly TargetClassArg[], index: number, delta: -1 | 1): void {
+    const target = index + delta;
+    if (target < 0 || target >= chosen.length) return;
+    const classes = [...chosen];
+    [classes[index], classes[target]] = [classes[target], classes[index]];
+    onWatchFight({ targets: classes });
+  }
+  function setSquadRole(key: string, raw: string): void {
+    // "off" is the default, so it is DROPPED rather than stored — an untouched
+    // step exports exactly as it was imported, same rule as the rock pick.
+    onArg(key, raw === "call" || raw === "follow" ? { kind: "squadRole", role: raw } : undefined);
+  }
   function setWorldRef(arg: ArgDescriptor, ref: WorldRef): void {
     onArg(arg.key, arg.kind === "destination" ? { kind: "destination", ref } : { kind: "station", ref });
   }
@@ -378,6 +407,30 @@
     // Back to the default: an emptied list is dropped rather than saved empty,
     // so an untouched — or fully cleared — step exports exactly as imported.
     onArg(key, ores.length === 0 ? undefined : { kind: "oreList", ores });
+  }
+  // ── Target priority: an ORDERED pick over a fixed four-word vocabulary, so
+  // there is nothing to search — the classes not yet in the ladder are offered
+  // as buttons, and the ones in it are ordered exactly like the ore list.
+  function targetListValue(step: MacroStep, key: string): readonly TargetClassArg[] {
+    const arg = step.args[key];
+    return arg !== undefined && arg.kind === "targetList" ? arg.classes : [];
+  }
+  function addTargetClass(key: string, chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    if (chosen.includes(cls)) return;
+    onArg(key, { kind: "targetList", classes: [...chosen, cls] });
+  }
+  function removeTargetClass(key: string, chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
+    const classes = chosen.filter((c) => c !== cls);
+    // An emptied ladder is DROPPED rather than saved empty — the step goes back
+    // to the shipped order, which is what clearing the picker asks for.
+    onArg(key, classes.length === 0 ? undefined : { kind: "targetList", classes });
+  }
+  function moveTargetClass(key: string, chosen: readonly TargetClassArg[], index: number, delta: -1 | 1): void {
+    const target = index + delta;
+    if (target < 0 || target >= chosen.length) return;
+    const classes = [...chosen];
+    [classes[index], classes[target]] = [classes[target], classes[index]];
+    onArg(key, { kind: "targetList", classes });
   }
   function moveOre(key: string, chosen: readonly { groupID: number; name: string }[], index: number, delta: -1 | 1): void {
     const target = index + delta;
@@ -652,6 +705,58 @@
         First is mined first. Every grade of an ore counts; richer grades are mined before poorer ones.
       </span>
     </div>
+  {:else if arg.widget === "target-list-picker"}
+    {@const chosenTargets = targetListValue(step, arg.key)}
+    {@const offered = TARGET_CLASS_ARGS.filter((cls) => !chosenTargets.includes(cls))}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> — optional</span>{/if}
+      </span>
+      {#if offered.length > 0}
+        <ul class="market-picker">
+          {#each offered as cls (cls)}
+            <li>
+              <button type="button" class="pick-row" onclick={() => addTargetClass(arg.key, chosenTargets, cls)}>
+                <span class="pick-main"><span class="pick-name">{targetClassWord(cls)}</span></span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if chosenTargets.length > 0}
+        <ol class="ore-priority-list">
+          {#each chosenTargets as cls, index (cls)}
+            <li>
+              <span class="ore-priority-rank">{index + 1}.</span>
+              <span class="ore-priority-name">{targetClassWord(cls)}</span>
+              <button
+                type="button"
+                class="minor"
+                disabled={index === 0}
+                onclick={() => moveTargetClass(arg.key, chosenTargets, index, -1)}
+              >
+                Move up
+              </button>
+              <button
+                type="button"
+                class="minor"
+                disabled={index === chosenTargets.length - 1}
+                onclick={() => moveTargetClass(arg.key, chosenTargets, index, 1)}
+              >
+                Move down
+              </button>
+              <button type="button" class="danger" onclick={() => removeTargetClass(arg.key, chosenTargets, cls)}>
+                Remove
+              </button>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+      <span class="inspector-suffix">
+        First is shot first; the nearest one wins inside a group. Anything you leave out is still
+        shot, just last. Left empty: tacklers, then jammers, then logistics, then everything else.
+      </span>
+    </div>
   {:else}
     <label class="inspector-field" for={fieldId}>
       <span class="inspector-label">
@@ -729,6 +834,12 @@
         <select id={fieldId} value={rockPickValue(step, arg.key)} onchange={(e) => setRockPick(arg.key, e.currentTarget.value)}>
           <option value="nearest">the nearest rock first</option>
           <option value="biggest">the biggest rock first</option>
+        </select>
+      {:else if arg.widget === "squad-role-select"}
+        <select id={fieldId} value={squadRoleValue(step, arg.key)} onchange={(e) => setSquadRole(arg.key, e.currentTarget.value)}>
+          <option value="off">pick its own target</option>
+          <option value="call">call the primary for the fleet</option>
+          <option value="follow">shoot what the fleet calls</option>
         </select>
       {:else if arg.widget === "corp-picker"}
         <input
@@ -844,6 +955,74 @@
         {#each RESPONSE_OPTIONS as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
       </select>
     </label>
+    {#if watch.respond === "fight-back"}
+      {@const chosenWatchTargets = watch.targets ?? []}
+      {@const offeredWatch = TARGET_CLASS_ARGS.filter((cls) => !chosenWatchTargets.includes(cls))}
+      <label class="inspector-field" for={`watch-${watch.id}-squad`}>
+        <span class="inspector-label">
+          With the fleet<span class="inspector-optional"> — optional</span>
+        </span>
+        <select
+          id={`watch-${watch.id}-squad`}
+          value={watch.squad ?? "off"}
+          onchange={(e) => onWatchFight({ squad: e.currentTarget.value as SquadRoleArg })}
+        >
+          <option value="off">pick its own target</option>
+          <option value="call">call the primary for the fleet</option>
+          <option value="follow">shoot what the fleet calls</option>
+        </select>
+      </label>
+      <div class="inspector-field">
+        <span class="inspector-label">
+          Shoot first<span class="inspector-optional"> — optional</span>
+        </span>
+        {#if offeredWatch.length > 0}
+          <ul class="market-picker">
+            {#each offeredWatch as cls (cls)}
+              <li>
+                <button type="button" class="pick-row" onclick={() => addWatchTarget(chosenWatchTargets, cls)}>
+                  <span class="pick-main"><span class="pick-name">{targetClassWord(cls)}</span></span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if chosenWatchTargets.length > 0}
+          <ol class="ore-priority-list">
+            {#each chosenWatchTargets as cls, index (cls)}
+              <li>
+                <span class="ore-priority-rank">{index + 1}.</span>
+                <span class="ore-priority-name">{targetClassWord(cls)}</span>
+                <button
+                  type="button"
+                  class="minor"
+                  disabled={index === 0}
+                  onclick={() => moveWatchTarget(chosenWatchTargets, index, -1)}
+                >
+                  Move up
+                </button>
+                <button
+                  type="button"
+                  class="minor"
+                  disabled={index === chosenWatchTargets.length - 1}
+                  onclick={() => moveWatchTarget(chosenWatchTargets, index, 1)}
+                >
+                  Move down
+                </button>
+                <button type="button" class="danger" onclick={() => removeWatchTarget(chosenWatchTargets, cls)}>
+                  Remove
+                </button>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+        <span class="inspector-suffix">
+          This is the watch that actually fights while the bot is busy mining or hauling, so the
+          fleet settings live here too. Left alone: tacklers, then jammers, then logistics, then
+          everything else, and no word to the fleet.
+        </span>
+      </div>
+    {/if}
   {/if}
 
   {#each problems as problem (problem.sentence)}

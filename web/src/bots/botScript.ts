@@ -242,6 +242,18 @@ export type Arg =
    * Empty or absent = any rock, the shipped behaviour. */
   | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] }
   /**
+   * An ORDERED target priority list for the combat blocks (first = shot first).
+   * Empty or absent = the shipped ladder (tackle, ewar, logi, everything else).
+   *
+   * ⚠ UNLIKE THE ORE LIST, THIS RANKS RATHER THAN FILTERS. The mine block mines
+   * only the ores it names; a combat block that shot only the classes it named
+   * would sit still while the battleship it had no line for killed it. A class
+   * left off ranks last, never unshootable (nav/targetPriority.ts).
+   */
+  | { readonly kind: "targetList"; readonly classes: readonly TargetClassArg[] }
+  /** Whether this block calls the fleet's primary, follows it, or neither. */
+  | { readonly kind: "squadRole"; readonly role: SquadRoleArg }
+  /**
    * Bays the block must LEAVE ALONE. Empty or absent = leave nothing alone,
    * which is the shipped behaviour.
    *
@@ -315,6 +327,51 @@ export const ITEM_PLACES: readonly ItemPlace[] = Object.freeze<ItemPlace[]>(["ha
  */
 export type RockPick = "nearest" | "biggest";
 export const ROCK_PICKS: readonly RockPick[] = Object.freeze<RockPick[]>(["nearest", "biggest"]);
+
+/**
+ * Which hostile a combat block shoots FIRST, by the job the hull was built for.
+ *
+ * A closed vocabulary, like the place and rock ones above: these four are all a
+ * grid read can tell apart, and the runtime decides which hull is which from
+ * the game's own ship-group name (nav/targetPriority.ts, which owns the mapping
+ * and the shipped default order). The format only carries the player's
+ * ORDERING of them — never the group names behind it, which are the game's to
+ * change.
+ */
+export type TargetClassArg = "tackle" | "ewar" | "logi" | "other";
+export const TARGET_CLASS_ARGS: readonly TargetClassArg[] = Object.freeze<TargetClassArg[]>([
+  "tackle",
+  "ewar",
+  "logi",
+  "other",
+]);
+
+/** Four classes exist, so a list longer than four is a repeat, not a choice. */
+export const MAX_TARGET_LIST = 4;
+
+/**
+ * What a combat block does about the FLEET's call — the squad board (the BFF's
+ * shared, in-process call board, src/squadBoard.js).
+ *
+ *   • "off"    — the shipped behaviour, and still the default: this pilot picks
+ *                for itself and says nothing.
+ *   • "call"   — pick as normal, and TELL the fleet what this pilot is on, so
+ *                the followers converge on it. Costs one tick per new primary.
+ *   • "follow" — shoot what the fleet has called, whenever that ship is on this
+ *                pilot's own grid and in reach; otherwise pick as normal. A
+ *                follower is never stuck: no call, or a call for a ship that is
+ *                not here, is simply its own ladder again.
+ *
+ * A fleet with nobody calling is every pilot on "off" with extra steps, and a
+ * fleet where everyone calls is last-call-wins — both are the player's to
+ * arrange, and neither can wedge a bot.
+ */
+export type SquadRoleArg = "off" | "call" | "follow";
+export const SQUAD_ROLE_ARGS: readonly SquadRoleArg[] = Object.freeze<SquadRoleArg[]>([
+  "off",
+  "call",
+  "follow",
+]);
 
 // ─── Conditions ──────────────────────────────────────────────────────────────
 
@@ -488,6 +545,25 @@ export interface InterruptRow {
   readonly id: string;
   readonly when: Condition;
   readonly respond: InterruptResponse;
+  /**
+   * FIGHT-BACK ONLY: how this watch fights, exactly as a combat BLOCK would.
+   *
+   * ⚠ THE WATCH IS WHERE A FIGHT ACTUALLY HAPPENS, so it is where these belong.
+   * A combat block only looks at the grid while it is the ACTIVE STEP, and a
+   * working bot is almost never on that step — it is mining until the hold is
+   * full, or hauling, or flying somewhere. Rats arrive during THAT, which is
+   * why the response to "a pirate shows up" is a watch in the first place.
+   * Leaving the fleet ordering on blocks alone meant the one handler that fires
+   * in time was the one that could not call or follow: caught live, 2026-09-08,
+   * with two fleeted miners sitting through a Guristas spawn inside a wait
+   * block until their shield watch pulled them home, never having fought.
+   *
+   * Both are optional and mean exactly what they mean on a block: `squad` calls
+   * the fleet's primary or shoots the one it called, `targets` orders which
+   * kind of hostile dies first. Absent = fly alone, shipped ladder.
+   */
+  readonly squad?: SquadRoleArg;
+  readonly targets?: readonly TargetClassArg[];
 }
 
 // ─── Program nodes ───────────────────────────────────────────────────────────

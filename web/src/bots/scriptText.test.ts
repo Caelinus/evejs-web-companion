@@ -177,3 +177,74 @@ test("a chosen world slot shows its name, never its id (R7d)", () => {
   assert.doesNotMatch(stepSentence(unnamed), LOOKS_LIKE_ID);
   assert.match(stepSentence(unnamed), /a station you pick/);
 });
+
+test("a combat step with a target priority names it, in order and in play words", () => {
+  const step: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["tackle", "ewar"] } },
+  };
+  assert.match(stepSentence(step), /Fight the rats until the grid is clear, tacklers then jammers first/);
+  const hunt: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["logi"] } },
+  };
+  assert.match(stepSentence(hunt), /logistics first/);
+});
+
+test("a combat step at the default ladder says nothing about order", () => {
+  const bare: MacroStep = { id: "s1", kind: "macro", macro: "fight-the-rats", args: {} };
+  assert.doesNotMatch(stepSentence(bare), /first/);
+  const emptied: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: [] } },
+  };
+  assert.doesNotMatch(stepSentence(emptied), /first/);
+});
+
+test("a combat step flying with the fleet says which part it plays", () => {
+  const calling: MacroStep = {
+    id: "s1",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { squad: { kind: "squadRole", role: "call" } },
+  };
+  assert.match(stepSentence(calling), /calling the primary for the fleet/);
+
+  const following: MacroStep = {
+    id: "s2",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { squad: { kind: "squadRole", role: "follow" } },
+  };
+  assert.match(stepSentence(following), /on the fleet's primary/);
+
+  const alone: MacroStep = {
+    id: "s3",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { squad: { kind: "squadRole", role: "off" } },
+  };
+  assert.doesNotMatch(stepSentence(alone), /fleet/, "flying alone is the default and says nothing");
+});
+
+test("a fight-back watch says how it fights, and an ordinary one still does not", () => {
+  const coordinated = interruptSentence({
+    id: "w1",
+    when: { kind: "hostile-on-grid" },
+    respond: "fight-back",
+    squad: "call",
+    targets: ["tackle"],
+  });
+  assert.match(coordinated, /If a pirate shows up/i);
+  assert.match(coordinated, /tacklers first/);
+  assert.match(coordinated, /calling the primary for the fleet/);
+
+  const plain = interruptSentence({ id: "w2", when: { kind: "hostile-on-grid" }, respond: "fight-back" });
+  assert.doesNotMatch(plain, /fleet|first/);
+});

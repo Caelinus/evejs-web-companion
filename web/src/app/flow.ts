@@ -124,9 +124,11 @@ import type {
   MiningHold,
   ShipBay,
   SlotFamily,
+  SpaceVector,
   StationStatic,
 } from "../store/types.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
+import type { BotLogDraft, BotLogSink } from "../nav/botLog.ts";
 import {
   buildSystemGraph,
   distancesFrom,
@@ -5790,6 +5792,50 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     };
   }
 
+  /**
+   * The game's own GROUP NAME for every ship on grid a combat block might shoot
+   * — the resolve half of nav/targetPriority.ts's resolve-then-judge pass, the
+   * same shape `classifyDroneRoles` uses for the drone bay.
+   *
+   * ⚠ NOT GATED ON A COMBAT BLOCK, gated on HOSTILES BEING THERE. The
+   * fight-back watch runs over whatever step is active — a mining step, a
+   * hauling step — so gating this on the active macro would leave the watch
+   * picking its primary blind, which is the one moment prioritising matters
+   * most. Only NPC hostiles are resolved: no script block targets a player.
+   *
+   * Cheap after the first look: `requestNames` skips ids already cached or in
+   * flight, so this costs one round trip per NEW ship type, not one per tick,
+   * and nothing at all on an empty grid.
+   */
+  async function classifyTargetGroups(
+    snapshot: ReturnType<typeof decodeSpaceSnapshot>,
+    origin: SpaceVector,
+  ): Promise<Readonly<Record<number, string | null>> | null> {
+    if (snapshot === null) {
+      return null;
+    }
+    const typeIDs = new Set<number>();
+    for (const row of hostileRows(snapshot, origin)) {
+      if (row.typeID !== null) {
+        typeIDs.add(row.typeID);
+      }
+    }
+    if (typeIDs.size === 0) {
+      return null;
+    }
+    try {
+      await resolveNamesNow([...typeIDs].map((id) => ({ kind: "typeGroup" as const, id })));
+    } catch {
+      // An unresolved group ranks with "everything else"; the next tick asks again.
+    }
+    const resolved = store.names.get().resolved;
+    const groups: Record<number, string | null> = {};
+    for (const typeID of typeIDs) {
+      groups[typeID] = resolved[nameKey("typeGroup", typeID)] ?? null;
+    }
+    return groups;
+  }
+
   function resolveSalvageModuleIDs(): readonly number[] {
     const fit = store.fitting.get();
     if (fit.slotsError !== null) {
@@ -6047,6 +6093,58 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
+  /**
+   * The flight recorder's sink (nav/botLog.ts): buffer the runner's lines and
+   * ship them to this character's log on the BFF.
+   *
+   * ⚠ IT MUST NEVER COST THE RUN ANYTHING. Nothing here is awaited by the
+   * runner, a failed flush drops its batch rather than retrying forever, and
+   * the buffer is capped — a recorder that cannot reach the BFF must not grow
+   * until the tab dies. A `start` line flushes at once, because it is what
+   * rotates the previous run's log and a run that ends badly must not take its
+   * own header with it.
+   */
+  const BOT_LOG_FLUSH_MS = 3000;
+  const BOT_LOG_MAX_BUFFER = 200;
+  let botLogBuffer: BotLogDraft[] = [];
+  let botLogTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function flushBotLog(): Promise<void> {
+    if (botLogTimer !== null) {
+      clearTimeout(botLogTimer);
+      botLogTimer = null;
+    }
+    if (botLogBuffer.length === 0) {
+      return;
+    }
+    const batch = botLogBuffer;
+    botLogBuffer = [];
+    try {
+      await api.appendBotLog(batch, callOptions);
+    } catch {
+      // The lines are gone. That is the deal: a diary that cannot be written
+      // must not become a queue that grows, or a reason a bot stops.
+    }
+  }
+
+  const botLogSink: BotLogSink = {
+    write(draft) {
+      botLogBuffer.push(draft);
+      if (botLogBuffer.length > BOT_LOG_MAX_BUFFER) {
+        botLogBuffer = botLogBuffer.slice(-BOT_LOG_MAX_BUFFER);
+      }
+      if (draft.kind === "start" || draft.kind === "end") {
+        void flushBotLog();
+        return;
+      }
+      if (botLogTimer === null) {
+        botLogTimer = setTimeout(() => {
+          void flushBotLog();
+        }, BOT_LOG_FLUSH_MS);
+      }
+    },
+  };
+
   function makeScriptRunnerDeps(
     initialCapabilities: ScriptModuleCapabilities,
     startingStationID: number | null,
@@ -6186,6 +6284,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
+        const targetGroupNames = await classifyTargetGroups(snapshot, origin);
+        // The fleet's called primary, for a block that asked to follow one. Every
+        // failure — no fleet, no call, a stale call, a refused read — lands as
+        // null, which reads as "pick for yourself" rather than as a fault: a
+        // follower whose fleet has gone quiet is still a working bot.
+        let squadPrimaryTargetID: ScriptObservation["squadPrimaryTargetID"] = null;
+        // A following WATCH needs the call too — and it is the handler that
+        // actually fights in a working bot, since the program is mining or
+        // hauling when the rats arrive. It is armed every tick, so it is paired
+        // with hostiles being on grid: no rats, no read, no cost.
+        if (hint.squadRole === "follow" || (hint.watchSquadRole === "follow" && hostileOnGrid === true)) {
+          try {
+            squadPrimaryTargetID = (await api.readSquadPrimary(callOptions))?.targetID ?? null;
+          } catch {
+            squadPrimaryTargetID = null;
+          }
+        }
         const boardAgentID =
           typeof hint.board["agentID"] === "number" ? (hint.board["agentID"] as number) : null;
         let conversation: ScriptObservation["conversation"] = null;
@@ -6582,6 +6697,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           remoteCapModuleIDs: capabilities.remoteReps.cap,
           inFleet,
           fleetMemberCharacterIDs,
+          targetGroupNames,
+          squadPrimaryTargetID,
           hardenerModuleIDs: capabilities.defense.hardeners,
           weaponModuleIDs: capabilities.defense.weapons,
           maxTargetRangeM: capabilities.maxTargetRangeM,
@@ -6670,6 +6787,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 throw new Error("Nothing moved to your hangar, and the server gave no reason.");
               }
             }
+            return;
+          case "callPrimary":
+            await api.callSquadPrimary(action.targetID, callOptions);
             return;
           case "rememberBeltDry":
             await api.rememberBeltDry(action.systemName, action.beltName, action.groupID, callOptions);
@@ -6945,6 +7065,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       refusalReason: readRefusalReason,
       registry: SCRIPT_MACROS,
       travelHome: scriptTravelHome,
+      log: botLogSink,
     };
   }
 

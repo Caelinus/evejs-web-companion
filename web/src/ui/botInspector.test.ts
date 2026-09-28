@@ -87,6 +87,8 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   { macro: "mine-at-belt", key: "equipment", expect: /use everything fitted/, why: "equipment-picker" },
   { macro: "mine-at-belt", key: "pick", expect: /the biggest rock first/, why: "rock-pick-select" },
   { macro: "mine-at-belt", key: "ores", expect: /search ore by name/, why: "ore-list-picker" },
+  { macro: "fight-the-rats", key: "targets", expect: /tacklers/, why: "target-list-picker" },
+  { macro: "fight-the-rats", key: "squad", expect: /shoot what the fleet calls/, why: "squad-role-select" },
   { macro: "request-mission", key: "agent", expect: /use the agent your bot finds/, why: "agent-picker" },
   { macro: "find-distribution-agent", key: "corporation", expect: /placeholder="any corporation"/, why: "corp-picker" },
   { macro: "refit-ship", key: "fitting", expect: /Test Fitting/, why: "fitting-picker" },
@@ -347,4 +349,27 @@ test("no world id reaches the screen (R7d)", () => {
   // Every picker renders NAMES; the ids in OPTIONS are only ever option values.
   const text = visibleText(renderInspector({ kind: "step", step: step("invite-to-fleet") }));
   assert.doesNotMatch(text, /90000001/, "a character id was rendered as text");
+});
+
+// ── The target priority ladder ───────────────────────────────────────────────
+
+test("chosen target classes render in priority order, in play words", () => {
+  const text = visibleText(
+    renderInspector({
+      kind: "step",
+      step: step("fight-the-rats", { args: { targets: { kind: "targetList", classes: ["logi", "tackle"] } } }),
+    }),
+  );
+  const logi = text.indexOf("1. logistics");
+  const tackle = text.indexOf("2. tacklers");
+  assert.ok(logi >= 0 && tackle > logi, "the chosen ladder should render in the order it was set");
+});
+
+test("a class already in the ladder is not offered again", () => {
+  const html = renderInspector({
+    kind: "step",
+    step: step("fight-the-rats", { args: { targets: { kind: "targetList", classes: ["tackle"] } } }),
+  });
+  const offers = html.match(/pick-name">tacklers</g) ?? [];
+  assert.equal(offers.length, 0, "a chosen class was still offered as something to add");
 });

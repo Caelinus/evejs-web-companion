@@ -18,10 +18,12 @@
 //   • Session loss is the one error allowed to end the run; any other failed read
 //     becomes a wait, never a confident empty.
 
-import type { BotScript } from "../bots/botScript.ts";
+import type { BotScript, SquadRoleArg } from "../bots/botScript.ts";
 import { resolveStationRef } from "./scriptMacros.ts";
 import {
   activeMacroID,
+  activeSquadRole,
+  watchSquadRole,
   decideScriptAction,
   describeBoard,
   initialMemory,
@@ -33,6 +35,7 @@ import {
   type ScriptMemory,
 } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
+import { describeAction, newRunID, type BotLogDraft, type BotLogSink } from "./botLog.ts";
 import {
   createRefusalLedger,
   MAX_CONSECUTIVE_REFUSALS,
@@ -49,6 +52,14 @@ import {
  */
 export interface ObserveHint {
   readonly activeMacro: string | null;
+  /** Whether that block follows the fleet's called primary (see activeSquadRole). */
+  readonly squadRole: SquadRoleArg;
+  /**
+   * Whether a fight-back WATCH follows one (see watchSquadRole). Read on every
+   * tick, so the flow pairs it with hostiles actually being on grid before it
+   * pays for a board read.
+   */
+  readonly watchSquadRole: SquadRoleArg;
   readonly board: ScriptBoard;
 }
 
@@ -139,6 +150,12 @@ export interface ScriptRunnerDeps {
   refusalReason(error: unknown): string;
   readonly registry: MacroRegistry;
   readonly travelHome: HomeTravelDecider;
+  /**
+   * The flight recorder (nav/botLog.ts). OPTIONAL: a runner with no sink runs
+   * exactly as it always did, which is what keeps every existing caller and
+   * every pure test unchanged.
+   */
+  readonly log?: BotLogSink;
 }
 
 export interface ScriptRunnerController {
@@ -190,9 +207,75 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    * seconds ago is still a station id — see `sendToStationThenStop`.
    */
   let lastObs: ScriptObservation | null = null;
+  /** This run's id, minted by `start` — what groups a log's lines. */
+  let runID = "";
+  /** The last decision actually written, so a quiet bot writes nothing. */
+  let loggedDecision = "";
+  /**
+   * Whether this run's end line is already written. A run ends ONCE: stopping a
+   * bot that has already finished emits another terminal snapshot, and a log
+   * that says a run ended twice is a log nobody can count runs in.
+   */
+  let loggedEnd = false;
+
+  /**
+   * ⚠ RULE 4: THE RECORDER NEVER BREAKS THE RUN. A sink that throws — a full
+   * disk, a dead route, a bug of its own — loses its line and nothing else. It
+   * is never awaited either: a slow writer must not add latency to a tick that
+   * is flying a ship.
+   */
+  function record(draft: BotLogDraft): void {
+    const sink = deps.log;
+    if (sink === undefined) {
+      return;
+    }
+    try {
+      sink.write(draft);
+    } catch {
+      // A line lost is the correct price; a ship stopped is not.
+    }
+  }
+
+  function now(): string {
+    return new Date().toISOString();
+  }
+
+  /**
+   * One line per CHANGE, not per tick. At a two-second cadence a verbatim log is
+   * an hour of "Mining / Mining / Mining"; what a reader wants is the moments it
+   * became something else. A run that ends writes its end line instead.
+   */
+  function recordProgress(next: ScriptRunnerSnapshot): void {
+    if (deps.log === undefined) {
+      return;
+    }
+    if (next.status === "stopped" || next.status === "error") {
+      if (loggedEnd) {
+        return;
+      }
+      loggedEnd = true;
+      record({
+        t: now(), kind: "end", run: runID, status: next.status,
+        reason: next.pauseReason ?? next.why ?? null,
+      });
+      loggedDecision = "";
+      return;
+    }
+    const key = [next.status, next.phase, next.why, next.stepPath, next.interruptID].join(" | ");
+    if (key === loggedDecision) {
+      return;
+    }
+    loggedDecision = key;
+    record({
+      t: now(), kind: "decide", run: runID, status: next.status,
+      phase: next.phase, why: next.why, stepPath: next.stepPath, interruptID: next.interruptID,
+      reason: next.pauseReason ?? null,
+    });
+  }
 
   function emit(next: ScriptRunnerSnapshot): void {
     last = next;
+    recordProgress(next);
     deps.onProgress(next);
   }
 
@@ -217,7 +300,12 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
     let obs: ScriptObservation;
     try {
-      obs = await deps.observe({ activeMacro: activeMacroID(script, memory), board: memory.board });
+      obs = await deps.observe({
+        activeMacro: activeMacroID(script, memory),
+        squadRole: activeSquadRole(script, memory),
+        watchSquadRole: watchSquadRole(script),
+        board: memory.board,
+      });
     } catch (error) {
       if (deps.isSessionLost(error)) {
         setError(SESSION_LOST);
@@ -279,9 +367,17 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       let issuedSuccessfully = false;
       // Set only by a refusal, so a healthy call keeps the ordinary settle.
       let backoffTicks: number | null = null;
+      // ⚠ WRITTEN BEFORE THE CALL, DELIBERATELY. A line after the fact says
+      // nothing when the process dies mid-action; this is the one that tells
+      // you what the ship was about to do when everything stopped.
+      record({
+        t: now(), kind: "issue", run: runID, action: result.action, says: describeAction(result.action),
+        stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
+      });
       try {
         await deps.issue(result.action);
         issuedSuccessfully = true;
+        record({ t: now(), kind: "result", run: runID, ok: true, says: describeAction(result.action) });
         // It worked: the streak is over. Without this a key that failed twice
         // and then recovered would carry those two forever and stop the run
         // early on an unrelated blip much later.
@@ -306,15 +402,20 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           targetID === null || snapshot === null
             ? null
             : snapshot.entities.some((entity) => entity.itemID === targetID);
-        const record = ledger.note(key, deps.refusalReason(error), Date.now(), stillOnGrid);
-        if (record.count >= MAX_CONSECUTIVE_REFUSALS) {
+        const reason = deps.refusalReason(error);
+        record({
+          t: now(), kind: "result", run: runID, ok: false, refusal: reason,
+          says: describeAction(result.action), stepPath: result.stepPath,
+        });
+        const record_ = ledger.note(key, reason, Date.now(), stillOnGrid);
+        if (record_.count >= MAX_CONSECUTIVE_REFUSALS) {
           stopOrHeadHome(
-            `Stopped after ${record.count} refusals in a row. ${record.words}`,
+            `Stopped after ${record_.count} refusals in a row. ${record_.words}`,
             result,
           );
           return;
         }
-        backoffTicks = settleTicksForRefusals(record.count);
+        backoffTicks = settleTicksForRefusals(record_.count);
       }
       if (token !== runToken || status !== "running") {
         return;
@@ -381,8 +482,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       pauseWith(READ_GAVE_UP);
       return;
     }
+    const homeRoute = { kind: "startRoute", stationID } as const;
+    record({ t: now(), kind: "issue", run: runID, action: homeRoute, says: describeAction(homeRoute), why: "sending the ship home" });
     try {
-      await deps.issue({ kind: "startRoute", stationID });
+      await deps.issue(homeRoute);
     } catch {
       pauseWith(READ_GAVE_UP); // could not even ask — say the plain thing
       return;
@@ -453,6 +556,13 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       script = next;
       memory = initialMemory(next);
+      // A fresh run id BEFORE the first emit, so every line of this run —
+      // starting with its own header — is grouped under it. The header is also
+      // what tells a store to rotate the previous run's log out.
+      runID = newRunID(Date.now());
+      loggedDecision = "";
+      loggedEnd = false;
+      record({ t: now(), kind: "start", run: runID, script: next.name, status: "running" });
       settle = 0;
       readFailures = 0;
       lastObs = null;
