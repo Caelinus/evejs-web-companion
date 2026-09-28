@@ -4,8 +4,10 @@
 //
 //   • a loop repeats a bounded count OR forever (decision 1);
 //   • a belt is a runtime "nearest" binding or a chosen one (decision 2);
-//   • the safety floor is a non-deletable interrupt row (decision 3);
 //   • a hostile interrupt can answer with drones or with a run (decision 5).
+//
+// (Decision 3 — a non-deletable, auto-injected safety-floor interrupt — was
+// reversed on 2026-07-23: watches are entirely the player's now.)
 //
 // There is no runtime behaviour to test yet — the codec (A2) and the decide
 // function (A4) come next. What is testable is that the golden document is
@@ -23,11 +25,9 @@ import {
   conditionSites,
   countSteps,
   findStep,
-  hasSafetyFloor,
   isLoop,
   isMacroStep,
   repeatCountInRange,
-  safetyFloorRow,
   type BotScript,
   type InterruptRow,
   type LoopBlock,
@@ -49,7 +49,6 @@ function beltRunner(): BotScript {
     interrupts: [
       {
         id: "i0",
-        builtIn: "safety-floor",
         when: { kind: "health-below", fraction: 0.5 },
         respond: "dock-and-pause",
       },
@@ -129,23 +128,6 @@ test("node guards discriminate loop from macro", () => {
   const body = (loop as LoopBlock).body[0];
   assert.ok(body);
   assert.ok(isMacroStep(body));
-});
-
-test("the safety floor is present, non-deletable, and dock-and-pause (decision 3)", () => {
-  const s = beltRunner();
-  assert.ok(hasSafetyFloor(s));
-  const floor = safetyFloorRow(s);
-  assert.ok(floor);
-  assert.equal(floor.builtIn, "safety-floor");
-  assert.equal(floor.respond, "dock-and-pause");
-  assert.equal(floor.when.kind, "health-below");
-});
-
-test("a document without the built-in row has no safety floor", () => {
-  const s = beltRunner();
-  const stripped: BotScript = { ...s, interrupts: s.interrupts.filter((r) => !r.builtIn) };
-  assert.equal(hasSafetyFloor(stripped), false);
-  assert.equal(safetyFloorRow(stripped), null);
 });
 
 test("a loop may repeat forever (decision 1)", () => {

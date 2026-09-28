@@ -45,6 +45,7 @@
     RECENT_RUNS_ARE_NOT_DURABLE,
   } from "../bots/pilotRoster.ts";
   import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
+  import ActionButton from "./ActionButton.svelte";
 
   let {
     store: _store,
@@ -370,33 +371,30 @@
               <td data-label="Last saved">{lastSavedPhrase(script.updatedAt, Date.now())}</td>
               <td data-label="Actions">
                 <span class="row-actions">
-                  <button
-                    type="button"
-                    class="primary"
+                  <ActionButton
+                    action="edit"
+                    primary
                     disabled={busyID !== null}
                     onclick={() => edit(script.scriptID)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <ActionButton
+                    action="export"
                     disabled={busyID !== null && busyID !== script.scriptID}
-                    onclick={() => toggleExport(script.scriptID)}
-                  >
-                    {exportID === script.scriptID
+                    expanded={exportID === script.scriptID}
+                    label={exportID === script.scriptID
                       ? "Hide export"
                       : busyID === script.scriptID
                         ? "Loading…"
-                        : "Export"}
-                  </button>
-                  <button
-                    type="button"
-                    class="danger"
+                        : undefined}
+                    onclick={() => toggleExport(script.scriptID)}
+                  />
+                  <ActionButton
+                    action="delete"
+                    danger
                     disabled={busyID !== null}
+                    label={busyID === script.scriptID ? "Deleting…" : undefined}
                     onclick={() => remove(script)}
-                  >
-                    {busyID === script.scriptID ? "Deleting…" : "Delete"}
-                  </button>
+                  />
                 </span>
               </td>
             </tr>

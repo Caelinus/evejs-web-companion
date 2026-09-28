@@ -1,5 +1,6 @@
-// C (pure part) — the editor operations. The two that matter most for safety:
-// the safety floor cannot be deleted, and a loop cannot be emptied into a no-op.
+// C (pure part) — the editor operations. The one that matters most for safety:
+// a loop cannot be emptied into a no-op (every interrupt is deletable — the old
+// non-deletable safety floor was removed on 2026-07-23).
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +18,7 @@ import {
   newLoop,
   newMacroStep,
   removeFromLoop,
+  moveInterrupt,
   removeInterrupt,
   removeNode,
   setInterruptFraction,
@@ -30,7 +32,7 @@ function counter(): () => string {
 }
 
 const floor: InterruptRow = {
-  id: "floor", builtIn: "safety-floor",
+  id: "floor",
   when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause",
 };
 
@@ -169,17 +171,17 @@ test("loop-body edits work, and emptying a loop removes it", () => {
   assert.equal(afterBoth.length, 0, "removing the loop's last step removes the loop");
 });
 
-test("the safety floor cannot be deleted, but other interrupts can", () => {
+test("every interrupt can be deleted, including one shaped like the old safety floor", () => {
   const make = counter();
   const shields = newInterrupt({ kind: "shield-below", fraction: 0.3 }, "dock-and-pause", make);
   const list = addInterrupt([floor], shields);
   assert.equal(list.length, 2);
 
-  assert.deepEqual(removeInterrupt(list, floor.id), list, "removing the safety floor is refused");
+  assert.deepEqual(removeInterrupt(list, floor.id).map((r) => r.id), [shields.id]);
   assert.deepEqual(removeInterrupt(list, shields.id).map((r) => r.id), [floor.id]);
 });
 
-test("setInterruptFraction edits the threshold, including on the safety floor", () => {
+test("setInterruptFraction edits the threshold on any fraction-bearing interrupt", () => {
   const updated = setInterruptFraction([floor], floor.id, 0.35);
   const row = updated[0];
   assert.ok(row && row.when.kind === "health-below");
@@ -316,4 +318,26 @@ test("insertSavedBotSteps re-ids a copied branch's both sides too", () => {
   assert.notEqual(copy.id, "br");
   assert.notEqual(copy.then[0]?.id, "t1");
   assert.notEqual(copy.else[0]?.id, "e1");
+});
+
+// ─── Watch order is behaviour, so it has to be changeable ───────────────────
+//
+// Watches are first-match-wins at runtime: the row above another one fires
+// INSTEAD of it when both are true. That is why the editor inserts a paired
+// "let me know" row ABOVE the row it pairs with, and it is why a player who
+// can see the order must be able to change it.
+
+test("moveInterrupt reorders by id, and is a no-op at the edges and on a stranger", () => {
+  const rows: InterruptRow[] = [
+    { id: "a", when: { kind: "shield-below", fraction: 0.3 }, respond: "alert" },
+    { id: "b", when: { kind: "shield-below", fraction: 0.3 }, respond: "dock-and-pause" },
+    { id: "c", when: { kind: "hostile-on-grid" }, respond: "launch-drones" },
+  ];
+  assert.deepEqual(moveInterrupt(rows, "b", -1).map((r) => r.id), ["b", "a", "c"]);
+  assert.deepEqual(moveInterrupt(rows, "b", 1).map((r) => r.id), ["a", "c", "b"]);
+  assert.deepEqual(moveInterrupt(rows, "a", -1).map((r) => r.id), ["a", "b", "c"], "top row cannot rise");
+  assert.deepEqual(moveInterrupt(rows, "c", 1).map((r) => r.id), ["a", "b", "c"], "bottom row cannot sink");
+  assert.deepEqual(moveInterrupt(rows, "nobody", -1).map((r) => r.id), ["a", "b", "c"]);
+  // Immutable, like every other operation here.
+  assert.deepEqual(rows.map((r) => r.id), ["a", "b", "c"], "the input was mutated");
 });

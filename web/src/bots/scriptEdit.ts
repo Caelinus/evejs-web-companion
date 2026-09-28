@@ -2,11 +2,11 @@
 // The Svelte editor (later, live) calls these; here they are plain functions with
 // a node --test file, so the reorder/insert/delete logic is proven without a DOM.
 //
-// ⚠ TWO STRUCTURAL RULES ARE ENFORCED HERE, NOT LEFT TO THE UI:
-//   • The safety floor cannot be deleted (decision 3). `removeInterrupt` refuses
-//     it, so no sequence of clicks can produce a bot with no health cut-off.
+// ⚠ ONE STRUCTURAL RULE IS ENFORCED HERE, NOT LEFT TO THE UI:
 //   • A loop cannot be left with an empty body (the codec would refuse it, and an
 //     empty loop is a no-op). Removing a loop's last step removes the loop.
+// (The old auto-injected, non-deletable safety-floor watch was removed on
+// 2026-07-23 — every interrupt row is player-made and player-deletable now.)
 //
 // Everything is immutable: each function returns a new array, never mutating its
 // input, so the editor can keep an undo/draft history cheaply.
@@ -189,19 +189,34 @@ export function addInterrupt(interrupts: readonly InterruptRow[], row: Interrupt
   return [...interrupts, row];
 }
 
-/**
- * Remove an interrupt — EXCEPT the safety floor, which is not deletable. Asking
- * to remove it returns the list unchanged, so no edit path can strip it.
- */
+/** Remove an interrupt by id. Every watch is deletable. */
 export function removeInterrupt(interrupts: readonly InterruptRow[], id: string): readonly InterruptRow[] {
-  const row = interrupts.find((r) => r.id === id);
-  if (row !== undefined && row.builtIn === "safety-floor") {
-    return interrupts;
-  }
   return interrupts.filter((r) => r.id !== id);
 }
 
-/** Set the threshold on a fraction-bearing interrupt (including the safety floor). */
+/**
+ * Move a watch up (delta -1) or down (delta +1); a no-op at the edges.
+ *
+ * ⚠ ORDER IS BEHAVIOUR HERE, not presentation. Watches are first-match-wins at
+ * runtime, so the row that sits above another one fires INSTEAD of it when both
+ * are true — which is why `BotBuilder.svelte` inserts a paired "let me know"
+ * row ABOVE the row it pairs with rather than below. A player who can see that
+ * order must be able to change it, so the watch region's row menu needs this
+ * the same way the plan's row menu needs `moveNode`.
+ */
+export function moveInterrupt(
+  interrupts: readonly InterruptRow[],
+  id: string,
+  delta: number,
+): readonly InterruptRow[] {
+  const index = interrupts.findIndex((r) => r.id === id);
+  if (index < 0) {
+    return interrupts;
+  }
+  return moveBy(interrupts, index, delta);
+}
+
+/** Set the threshold on a fraction-bearing interrupt. */
 export function setInterruptFraction(
   interrupts: readonly InterruptRow[],
   id: string,

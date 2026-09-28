@@ -22,11 +22,30 @@ import {
 } from "./botScript.ts";
 import { MACRO_SPECS } from "./macroSpecs.ts";
 
-/** One fixable problem, anchored to a row by its id (or a script-level key). */
+/**
+ * One fixable — or merely worth-mentioning — problem, anchored to a row by its
+ * id (or a script-level key).
+ *
+ * `severity` splits what the editor already reported one flat list of into two
+ * tiers (decision, `bot-builder-interface.md` §5.4):
+ * - `"blocking"` — the bot cannot run as written. Marks the row amber, disables
+ *   Save. Every check this module reported before severities existed stays
+ *   blocking; nothing that used to stop a player is quietly downgraded.
+ * - `"advisory"` — worth saying, never fatal. A grey note on the row.
+ */
 export interface ScriptProblem {
-  /** The step / loop / interrupt id, or "name" / "home" / "program". */
+  /** The step / loop / interrupt id, or "name" / "home" / "program" / "watches". */
   readonly path: string;
   readonly sentence: string;
+  readonly severity: "blocking" | "advisory";
+}
+
+function blocking(path: string, sentence: string): ScriptProblem {
+  return { path, sentence, severity: "blocking" };
+}
+
+function advisory(path: string, sentence: string): ScriptProblem {
+  return { path, sentence, severity: "advisory" };
 }
 
 /** Plain words for each argument, for "This step needs …". */
@@ -41,6 +60,10 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   channel: "a channel to talk in",
   message: "a message to send",
   destination: "somewhere to go",
+  fitting: "a fitting to switch to",
+  bookmark: "a saved bookmark to warp to",
+  from: "where to move items from",
+  to: "where to move items to",
 };
 
 /** Every fixable problem in a draft, in reading order. Empty means ready to start. */
@@ -48,7 +71,7 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   const problems: ScriptProblem[] = [];
 
   if (script.name.trim().length === 0) {
-    problems.push({ path: "name", sentence: "Give your bot a name." });
+    problems.push(blocking("name", "Give your bot a name."));
   }
   const someWatchDocks = script.interrupts.some((row) => row.respond === "dock-and-pause");
   if (
@@ -57,15 +80,24 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
     script.home.starting !== true &&
     script.home.slot === undefined
   ) {
-    problems.push({ path: "home", sentence: "Pick where the bot docks when a watch tells it to." });
+    problems.push(blocking("home", "Pick where the bot docks when a watch tells it to."));
   }
   if (script.program.length === 0) {
-    problems.push({ path: "program", sentence: "Add at least one step for the bot to do." });
+    problems.push(blocking("program", "Add at least one step for the bot to do."));
   }
+
+  // NO BLANKET "this bot has no watches" ADVISORY. Watches are the right answer
+  // for a bot that flies unattended, and the wrong answer for one that never
+  // leaves the station: "Operations closeout" docks, unloads, repairs and tidies
+  // once, and has nothing to watch FOR. Warning there fires on correct work, and
+  // an advisory that cries wolf on a good bot is how a player learns to stop
+  // reading advisories. The risk that is actually worth naming — repeating with
+  // no way to stop — is caught per-loop below, where it can be stated precisely.
+  const hasWatches = script.interrupts.length > 0;
 
   for (const node of script.program) {
     if (node.kind === "loop") {
-      validateLoop(node, problems);
+      validateLoop(node, hasWatches, problems);
     } else if (node.kind === "branch") {
       validateBranch(node, problems);
     } else if (node.kind === "sub-bot") {
@@ -73,7 +105,7 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
         (node.scriptID === null || node.scriptID.trim().length === 0) &&
         (node.name === null || node.name.trim().length === 0)
       ) {
-        problems.push({ path: node.id, sentence: "Pick which saved bot this step runs." });
+        problems.push(blocking(node.id, "Pick which saved bot this step runs."));
       }
     } else {
       validateStep(node, problems);
@@ -87,18 +119,23 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   return problems;
 }
 
-function validateLoop(loop: LoopBlock, problems: ScriptProblem[]): void {
+function validateLoop(loop: LoopBlock, hasWatches: boolean, problems: ScriptProblem[]): void {
   if (loop.body.length === 0) {
-    problems.push({ path: loop.id, sentence: "This loop has no steps inside it." });
+    problems.push(blocking(loop.id, "This loop has no steps inside it."));
   }
   if (loop.repeat.kind === "times") {
     const count = loop.repeat.count;
     if (!Number.isInteger(count) || count < MIN_REPEAT_TIMES || count > MAX_REPEAT_TIMES) {
-      problems.push({
-        path: loop.id,
-        sentence: `A loop can repeat between ${MIN_REPEAT_TIMES} and ${MAX_REPEAT_TIMES} times.`,
-      });
+      problems.push(
+        blocking(loop.id, `A loop can repeat between ${MIN_REPEAT_TIMES} and ${MAX_REPEAT_TIMES} times.`),
+      );
     }
+  }
+  // Advisory: a loop that repeats forever with no `until` of its own relies
+  // entirely on a watch to ever end. With no watch in the whole script either,
+  // nothing will ever stop it.
+  if (loop.repeat.kind === "forever" && loop.until === undefined && !hasWatches) {
+    problems.push(advisory(loop.id, "This loop repeats forever and has no watch that can stop it."));
   }
   if (loop.until !== undefined) {
     validateCondition(loop.until, "until", loop.id, problems);
@@ -121,45 +158,48 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     if (arg === undefined) {
       if (argSpec.required) {
         const label = ARG_LABEL[argSpec.key] ?? "something it needs";
-        problems.push({ path: step.id, sentence: `This step needs ${label}.` });
+        problems.push(blocking(step.id, `This step needs ${label}.`));
       }
       continue;
     }
     // A station is unset only when it is neither pinned NOR a runtime binding
     // (the starting station, or a named board slot an earlier block fills in).
     if (arg.kind === "station" && arg.ref.id === null && arg.ref.starting !== true && arg.ref.slot === undefined) {
-      problems.push({ path: step.id, sentence: "Pick the station for this step." });
+      problems.push(blocking(step.id, "Pick the station for this step."));
     }
     if (arg.kind === "belt" && arg.belt.mode === "chosen" && arg.belt.ref.id === null) {
-      problems.push({ path: step.id, sentence: "Pick a belt for this step, or choose the nearest one." });
+      problems.push(blocking(step.id, "Pick a belt for this step, or choose the nearest one."));
     }
     // An agent slot the player ADDED but never filled. Leaving the slot out
     // entirely is fine — the step then uses the agent the find block remembered.
     if (arg.kind === "bookmark" && arg.bookmarkID === null && (arg.name === null || arg.name === "")) {
-      problems.push({ path: step.id, sentence: "Pick the saved spot for this step." });
+      problems.push(blocking(step.id, "Pick the saved spot for this step."));
     }
     if (arg.kind === "itemType" && arg.typeID === null) {
-      problems.push({ path: step.id, sentence: "Pick the item for this step." });
+      problems.push(blocking(step.id, "Pick the item for this step."));
     }
     if (arg.kind === "fitting" && arg.fittingID === null && (arg.name === null || arg.name === "")) {
-      problems.push({ path: step.id, sentence: "Pick the saved fitting for this step." });
+      problems.push(blocking(step.id, "Pick the saved fitting for this step."));
     }
     if (arg.kind === "agent" && arg.ref.id === null) {
-      problems.push({ path: step.id, sentence: "Pick the agent for this step, or remove the pick to use the one your bot finds." });
+      problems.push(
+        blocking(step.id, "Pick the agent for this step, or remove the pick to use the one your bot finds."),
+      );
     }
     if (arg.kind === "character" && arg.charID === null) {
       // The invite's pilot is mandatory; a PvP `only` filter left unfilled just
       // needs the half-made pick resolved (pick someone, or clear it for "any").
-      problems.push({
-        path: step.id,
-        sentence:
+      problems.push(
+        blocking(
+          step.id,
           argSpec.key === "only"
             ? "Pick the pilot to hunt, or clear the pick to go after any player."
             : "Pick the pilot to invite.",
-      });
+        ),
+      );
     }
     if (arg.kind === "destination" && arg.ref.id === null) {
-      problems.push({ path: step.id, sentence: "Pick where this step sets the destination to." });
+      problems.push(blocking(step.id, "Pick where this step sets the destination to."));
     }
   }
 
@@ -171,14 +211,11 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     fromArg.kind === "place" && toArg.kind === "place" &&
     fromArg.place === toArg.place
   ) {
-    problems.push({ path: step.id, sentence: "This step moves items to the same place they already are." });
+    problems.push(blocking(step.id, "This step moves items to the same place they already are."));
   }
 
   if (spec.untilRequired && step.until === undefined) {
-    problems.push({
-      path: step.id,
-      sentence: "This mining step needs something to stop it, like the ore hold being full.",
-    });
+    problems.push(blocking(step.id, "This mining step needs something to stop it, like the ore hold being full."));
   }
   if (step.until !== undefined) {
     validateCondition(step.until, "until", step.id, problems);
@@ -188,7 +225,7 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
 function validateBranch(branch: BranchBlock, problems: ScriptProblem[]): void {
   validateCondition(branch.when, "until", branch.id, problems);
   if (branch.then.length === 0 && branch.else.length === 0) {
-    problems.push({ path: branch.id, sentence: "This branch needs at least one step in one of its choices." });
+    problems.push(blocking(branch.id, "This branch needs at least one step in one of its choices."));
   }
   for (const step of [...branch.then, ...branch.else]) {
     validateStep(step, problems);
@@ -206,19 +243,13 @@ function validateCondition(
   problems: ScriptProblem[],
 ): void {
   if (!conditionAllowedAt(condition.kind, site)) {
-    problems.push({
-      path,
-      sentence: "This check only works out in space, so it can't be used to stop a step.",
-    });
+    problems.push(blocking(path, "This check only works out in space, so it can't be used to stop a step."));
     return;
   }
   if ("fraction" in condition) {
     const max = condition.kind === "ore-hold-at-least" ? MAX_ORE_HOLD_FRACTION : MAX_CONDITION_FRACTION;
     if (condition.fraction < MIN_CONDITION_FRACTION || condition.fraction > max) {
-      problems.push({
-        path,
-        sentence: `That percentage must be between ${pct(MIN_CONDITION_FRACTION)} and ${pct(max)}.`,
-      });
+      problems.push(blocking(path, `That percentage must be between ${pct(MIN_CONDITION_FRACTION)} and ${pct(max)}.`));
     }
   }
 }

@@ -49,7 +49,21 @@ for (const example of EXAMPLE_BOTS) {
     assert.ok(decoded.ok, decoded.ok ? "" : decoded.refusal);
     if (!decoded.ok) return;
     assert.deepEqual(decoded.warnings, [], "a bundled example must need no tidying");
-    assert.deepEqual(validateScript(decoded.doc), [], "the editor must find nothing to fix");
+    // BLOCKING problems only. A bundled example must be runnable as shipped —
+    // nothing left unset, nothing out of range. An ADVISORY is a different
+    // thing: it names a real trade-off the author made on purpose, and
+    // "Planet keeper" makes one, looping forever with no watch that can stop it.
+    // Demanding zero advisories would force every example into the same shape
+    // and turn the advisory into a rule, which is exactly what it is not.
+    const problems = validateScript(decoded.doc);
+    assert.deepEqual(
+      problems.filter((problem) => problem.severity === "blocking"),
+      [],
+      "the editor must find nothing to FIX",
+    );
+    for (const problem of problems) {
+      assert.ok(problem.sentence.trim().length > 0, "an advisory must still say something");
+    }
 
     // And the TEXT round-trip (export → import), so sharing an example works.
     const reimported = decodeScriptText(encodeScriptDoc(decoded.doc));

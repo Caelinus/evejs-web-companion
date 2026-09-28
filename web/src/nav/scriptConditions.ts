@@ -13,9 +13,6 @@
 //     keep working blind next to a pirate. This only applies when no player
 //     interrupt already handled the hostile — if the player chose "launch drones
 //     on a pirate", that fires first and defends the ship.
-//   • THE CHRONIC GUARD: when the safety floor's own read keeps coming back
-//     unreadable, `resolveInterrupt` flags it (`safetyBlind`) so the runner can
-//     count the streak and pause before the blindness becomes a habit.
 
 import type { Condition, InterruptRow } from "../bots/botScript.ts";
 import type {
@@ -266,14 +263,12 @@ export const SENTENCE = {
  *   • "fire"            — this row's condition is met; the runner runs its response.
  *   • "safety-override" — the acute rule: a pirate is here and health is
  *                         unreadable, and nothing else handled it → pause now.
- *   • "none"            — nothing fired. `safetyBlind` is true when the SAFETY
- *                         FLOOR itself read cannot-tell this tick, so the runner
- *                         can count the streak toward a chronic-blindness pause.
+ *   • "none"            — nothing fired.
  */
 export type InterruptResolution =
   | { readonly kind: "fire"; readonly row: InterruptRow }
   | { readonly kind: "safety-override"; readonly reason: string }
-  | { readonly kind: "none"; readonly safetyBlind: boolean };
+  | { readonly kind: "none" };
 
 /**
  * Decide which interrupt (if any) fires this tick.
@@ -289,7 +284,6 @@ export function resolveInterrupt(
   obs: ScriptObservation,
   spentAlerts: readonly string[] = [],
 ): InterruptResolution {
-  let safetyBlind = false;
   for (const row of interrupts) {
     const verdict = evaluateCondition(row.when, obs);
     if (verdict === "met") {
@@ -304,14 +298,11 @@ export function resolveInterrupt(
       }
       return { kind: "fire", row };
     }
-    if (verdict === "cannot-tell" && row.builtIn === "safety-floor") {
-      safetyBlind = true;
-    }
   }
   if (obs.hostileOnGrid === true && obs.health === null) {
     return { kind: "safety-override", reason: SENTENCE.safetyBlind };
   }
-  return { kind: "none", safetyBlind };
+  return { kind: "none" };
 }
 
 // ─── The cannot-tell streak ──────────────────────────────────────────────────

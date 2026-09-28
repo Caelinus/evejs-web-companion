@@ -18,8 +18,11 @@
 //
 // The refusal and warning sentences are player-facing, so they are plain and —
 // critically — they NEVER echo an attacker's string unsanitised (an unknown
-// macro name is stripped to a short safe token before it is quoted). The safety
-// floor is guaranteed here: a document that arrives without it leaves with it.
+// macro name is stripped to a short safe token before it is quoted). There is no
+// injected safety floor any more — watches are entirely the player's — but an
+// OLD document that still carries the retired `builtIn` flag on an interrupt
+// must still LOAD: the key is accepted and simply dropped, never preserved and
+// never grounds for refusal.
 
 import {
   MAX_DOC_BYTES,
@@ -284,18 +287,15 @@ function readInterruptRow(raw: unknown, ctx: Ctx): InterruptRow {
   if (typeof respond !== "string" || !KNOWN_RESPONSES.has(respond as InterruptResponse)) {
     refuse(SAY.badResponse);
   }
-  // `builtIn` is legacy (the old auto-injected safety floor). It is still accepted
-  // so old files load, but nothing injects or requires it — watches are entirely
-  // the player's now.
+  // `builtIn` is legacy (the old auto-injected, non-deletable safety floor, removed
+  // 2026-07-23). An old document may still carry it — accepted so the file still
+  // loads, then simply dropped: nothing in the current format reads it, and a
+  // round-trip through this codec never writes it back.
   const builtIn = obj["builtIn"];
   if (builtIn !== undefined && builtIn !== "safety-floor") {
     refuse(SAY.unknownKey);
   }
-  const row: InterruptRow =
-    builtIn === "safety-floor"
-      ? { id, when, respond: respond as InterruptResponse, builtIn: "safety-floor" }
-      : { id, when, respond: respond as InterruptResponse };
-  return row;
+  return { id, when, respond: respond as InterruptResponse };
 }
 
 // ─── Program ─────────────────────────────────────────────────────────────────
@@ -1034,15 +1034,11 @@ function orderCondition(condition: Condition): unknown {
 }
 
 function orderInterrupt(row: InterruptRow): unknown {
-  const base: Record<string, unknown> = {
+  return {
     id: row.id,
     when: orderCondition(row.when),
     respond: row.respond,
   };
-  if (row.builtIn !== undefined) {
-    base["builtIn"] = row.builtIn;
-  }
-  return base;
 }
 
 function orderArg(arg: Arg): unknown {

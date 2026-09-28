@@ -32,8 +32,10 @@ function obs(over: Partial<ScriptObservation> = {}): ScriptObservation {
   };
 }
 
+// A plain player-made health watch, reused across tests — not privileged in any
+// way (the old non-deletable, auto-injected safety floor was removed 2026-07-23).
 const floor: InterruptRow = {
-  id: "floor", builtIn: "safety-floor",
+  id: "floor",
   when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause",
 };
 
@@ -345,7 +347,7 @@ test("a plain-pause interrupt stops with the condition as its reason", () => {
 
 test("a dock-and-pause interrupt flies home and then stops", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
-  // Health below the floor fires the safety floor (dock-and-pause).
+  // Health below the watch's threshold fires it (dock-and-pause).
   const start = initialMemory(s);
   const flying = decideScriptAction(s, obs({ health: 0.2, docked: false }), start, registry, home);
   assert.equal(flying.status, "running");
@@ -472,13 +474,14 @@ test("alert: an UNREADABLE check does not re-arm the row (no crying wolf on a bl
   assert.equal(step(obs({ shieldRatio: 0.4 })).action.kind, "activate", "so it does not alert again");
 });
 
-test("alert: the safety floor still fires with a spent alert row sitting above it", () => {
-  // The floor is the row that must never be silenceable. Alert on health above it.
+test("alert: a dock-and-pause row still fires with a spent alert row sitting above it", () => {
+  // A spent alert must never silence a real response sitting under it. Alert on
+  // health above the plain health-below dock-and-pause watch.
   const alertHealth: InterruptRow = { id: "tellhealth", when: { kind: "health-below", fraction: 0.5 }, respond: "alert" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [alertHealth, floor]);
   const dying = obs({ health: 0.2 });
   const { results } = run(s, [dying, dying, obs({ health: 0.2, docked: true })]);
   assert.equal(results[0]?.action.kind, "alert");
-  assert.equal(results[1]?.interruptID, "floor", "the safety floor is reached");
+  assert.equal(results[1]?.interruptID, "floor", "the dock-and-pause row is reached");
   assert.equal(results[2]?.status, "paused");
 });

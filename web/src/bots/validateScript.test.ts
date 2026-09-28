@@ -4,7 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { BotScript, MacroStep, ProgramNode } from "./botScript.ts";
+import type { BotScript, MacroID, MacroStep, ProgramNode } from "./botScript.ts";
+import { MACRO_SPECS } from "./macroSpecs.ts";
 import { validateScript, type ScriptProblem } from "./validateScript.ts";
 
 // A complete, ready-to-start draft: a loop of [mine until full, haul], with the
@@ -13,7 +14,7 @@ function ready(): BotScript {
   return {
     format: "evejs-bot-script", version: 1, name: "Belt runner", notes: "",
     home: { entity: "station", id: 60000004, name: "Home", systemName: "Aunia" },
-    interrupts: [{ id: "floor", builtIn: "safety-floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
+    interrupts: [{ id: "floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
     program: [
       {
         id: "L", kind: "loop", repeat: { kind: "times", count: 50 },
@@ -44,9 +45,11 @@ test("a complete draft has no problems", () => {
   assert.deepEqual(validateScript(ready()), []);
 });
 
-test("a blank name and unbound home are each flagged", () => {
+test("a blank name and unbound home are each flagged, and both are blocking", () => {
   const draft = { ...ready(), name: "  ", home: { entity: "station" as const, id: null, name: null, systemName: null } };
-  assert.deepEqual(paths(validateScript(draft)).sort(), ["home", "name"]);
+  const problems = validateScript(draft);
+  assert.deepEqual(paths(problems).sort(), ["home", "name"]);
+  assert.ok(problems.every((p) => p.severity === "blocking"));
 });
 
 test("a board-slot home is a runtime binding, not an unbound home", () => {
@@ -71,9 +74,11 @@ test("an exact sub-bot scriptID is sufficient even if its display hint is absent
   assert.equal(validateScript(draft).some((problem) => problem.path === "include"), false);
 });
 
-test("an empty program is flagged", () => {
+test("an empty program is flagged, and it is blocking", () => {
   const draft = { ...ready(), program: [] };
-  assert.ok(validateScript(draft).some((p) => p.path === "program"));
+  const problem = validateScript(draft).find((p) => p.path === "program");
+  assert.ok(problem);
+  assert.equal(problem.severity, "blocking");
 });
 
 test("a mining step without equipment is fine — the bot auto-uses fitted miners", () => {
@@ -89,14 +94,17 @@ test("a mining step without equipment is fine — the bot auto-uses fitted miner
   assert.deepEqual(validateScript(withStripped), [], "equipment is optional now");
 });
 
-test("a mining step with no until is flagged", () => {
+test("a mining step with no until is flagged — blocking, since mine-at-belt declares untilRequired", () => {
   const draft = ready();
   const loop = draft.program[0];
   assert.ok(loop && loop.kind === "loop");
   const mine = loop.body[0] as MacroStep;
   const noUntil: MacroStep = { id: mine.id, kind: "macro", macro: "mine-at-belt", args: mine.args };
   const draft2: BotScript = { ...draft, program: [{ ...loop, body: [noUntil, loop.body[1] as MacroStep] }] };
-  assert.ok(validateScript(draft2).some((p) => p.path === "m" && /stop it/i.test(p.sentence)));
+  const problem = validateScript(draft2).find((p) => p.path === "m" && /stop it/i.test(p.sentence));
+  assert.ok(problem);
+  assert.equal(problem.severity, "blocking");
+  assert.equal(MACRO_SPECS["mine-at-belt"].untilRequired, true, "the blocking classification tracks this flag");
 });
 
 test("a chosen belt with no id asks the player to pick, but nearest does not", () => {
@@ -109,7 +117,9 @@ test("a chosen belt with no id asks the player to pick, but nearest does not", (
     args: { ...mine.args, belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: null, systemName: null } } } },
   };
   const draft2: BotScript = { ...draft, program: [{ ...loop, body: [unbound, loop.body[1] as MacroStep] }] };
-  assert.ok(validateScript(draft2).some((p) => p.path === "m" && /pick a belt/i.test(p.sentence)));
+  const problem = validateScript(draft2).find((p) => p.path === "m" && /pick a belt/i.test(p.sentence));
+  assert.ok(problem);
+  assert.equal(problem.severity, "blocking");
 });
 
 test("an out-of-range threshold is flagged", () => {
@@ -119,7 +129,9 @@ test("an out-of-range threshold is flagged", () => {
   const mine = loop.body[0] as MacroStep;
   const tooFull: MacroStep = { ...mine, until: { kind: "ore-hold-at-least", fraction: 0.99 } };
   const draft2: BotScript = { ...draft, program: [{ ...loop, body: [tooFull, loop.body[1] as MacroStep] }] };
-  assert.ok(validateScript(draft2).some((p) => p.path === "m" && /between/i.test(p.sentence)));
+  const problem = validateScript(draft2).find((p) => p.path === "m" && /between/i.test(p.sentence));
+  assert.ok(problem);
+  assert.equal(problem.severity, "blocking");
 });
 
 test("a deliver step with an unbound station is flagged", () => {
@@ -129,5 +141,97 @@ test("a deliver step with an unbound station is flagged", () => {
   const haul = loop.body[1] as MacroStep;
   const unbound: MacroStep = { ...haul, args: { station: { kind: "station", ref: { entity: "station", id: null, name: null, systemName: null } } } };
   const draft2: BotScript = { ...draft, program: [{ ...loop, body: [loop.body[0] as MacroStep, unbound] }] };
-  assert.ok(validateScript(draft2).some((p) => p.path === "h" && /pick the station/i.test(p.sentence)));
+  const problem = validateScript(draft2).find((p) => p.path === "h" && /pick the station/i.test(p.sentence));
+  assert.ok(problem);
+  assert.equal(problem.severity, "blocking");
+});
+
+// ── Advisories (bot-builder-interface.md §5.4: two severities) ──────────────
+// Advisories describe a bot that runs as written but looks unwise. None of
+// them may ever disable Start, so every assertion below checks `severity`
+// explicitly rather than just presence.
+
+test("a bot that runs once and never leaves the station is NOT nagged about watches", () => {
+  // Deliberately no blanket "you have no watches" advisory. Watches are the
+  // wrong answer for a bot that docks, unloads and stops — the shipped
+  // "Operations closeout" example is exactly that, and warning on correct work
+  // teaches a player to ignore advisories. The real risk (repeating with no way
+  // to stop) is caught per-loop instead, where it can be said precisely.
+  const draft: BotScript = { ...ready(), interrupts: [] };
+  assert.equal(
+    validateScript(draft).some((p) => p.path === "watches"),
+    false,
+    "no blanket watches advisory",
+  );
+});
+
+test("a forever loop with no until and no watch anywhere is advisory", () => {
+  const draft: BotScript = {
+    ...ready(),
+    interrupts: [],
+    program: [
+      { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [{ id: "u", kind: "macro", macro: "undock", args: {} }] },
+    ],
+  };
+  const problems = validateScript(draft);
+  const loopProblem = problems.find((p) => p.path === "L");
+  assert.ok(loopProblem);
+  assert.equal(loopProblem.severity, "advisory");
+  assert.ok(problems.every((p) => p.severity === "advisory"), "nothing about this draft is fatal");
+});
+
+test("a forever loop with its own until does not need a watch to stop it", () => {
+  const draft: BotScript = {
+    ...ready(),
+    interrupts: [],
+    program: [
+      {
+        id: "L",
+        kind: "loop",
+        repeat: { kind: "forever" },
+        until: { kind: "hold-empty" },
+        body: [{ id: "u", kind: "macro", macro: "undock", args: {} }],
+      },
+    ],
+  };
+  const problems = validateScript(draft);
+  assert.equal(problems.some((p) => p.path === "L"), false, "the loop's own until can stop it");
+});
+
+test("a forever loop is fine when the bot has a watch elsewhere", () => {
+  const draft: BotScript = {
+    ...ready(),
+    program: [
+      { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [{ id: "u", kind: "macro", macro: "undock", args: {} }] },
+    ],
+  };
+  assert.deepEqual(validateScript(draft), []);
+});
+
+// ── ARG_LABEL sweep — the bug this pass fixes ────────────────────────────────
+// ARG_LABEL used to be missing `fitting`, `bookmark`, `from` and `to`, so a
+// draft missing one of those produced the literal, useless sentence "This step
+// needs something it needs." This sweep drives every required arg of every
+// macro in MACRO_SPECS through the missing-arg path and asserts a real label
+// came out — so the next macro added with a required arg and no label fails
+// here instead of reaching a player.
+test("every required arg on every macro gets a real label, never 'something it needs'", () => {
+  for (const macro of Object.keys(MACRO_SPECS) as MacroID[]) {
+    const spec = MACRO_SPECS[macro];
+    const requiredKeys = spec.args.filter((a) => a.required).map((a) => a.key);
+    if (requiredKeys.length === 0) continue;
+
+    const step: MacroStep = { id: `step-${macro}`, kind: "macro", macro, args: {} };
+    const draft: BotScript = { ...ready(), program: [step] };
+    const stepProblems = validateScript(draft).filter((p) => p.path === step.id);
+
+    assert.ok(
+      stepProblems.length >= requiredKeys.length,
+      `${macro}: expected a problem per required arg (${requiredKeys.join(", ")}), got ${stepProblems.length}`,
+    );
+    for (const problem of stepProblems) {
+      assert.ok(problem.sentence.trim().length > 0, `${macro} produced an empty sentence`);
+      assert.doesNotMatch(problem.sentence, /something it needs/, `${macro}: "${problem.sentence}"`);
+    }
+  }
 });
