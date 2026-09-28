@@ -496,6 +496,45 @@ export type InterruptResolution =
   | { readonly kind: "none" };
 
 /**
+ * The first row at or below `fromIndex` whose condition is MET and which is not
+ * a spent alert, or null when there is none.
+ *
+ * ⚠ A SPENT ALERT ROW IS TRANSPARENT. It has already said its piece for this
+ * episode, and first-match-wins would otherwise park on it forever — so an
+ * "alert me" row above a dock-and-pause row would silence the dock. Skipping it
+ * lets the rest of the ladder work, which is what makes "tell me AND dock" two
+ * rows that both fire.
+ *
+ * `fromIndex` is the OTHER half of that same transparency, and it is the
+ * runner's to use: a row whose response turns out to do nothing this tick (a
+ * repair watch with no repairer for its layer, a launch-drones watch whose
+ * drones are already out) is just as silencing as a spent alert, and it cannot
+ * be recognised here because whether a response has work is a question about
+ * modules and drones, not about conditions. So the runner fires a row, finds it
+ * did nothing, and asks again from the row BELOW it (nav/scriptDecide
+ * `fallThrough`). Scanning from an index rather than re-scanning from the top is
+ * what keeps that from re-firing the same inert row for ever.
+ */
+export function firstArmedInterrupt(
+  interrupts: readonly InterruptRow[],
+  obs: ScriptObservation,
+  spentAlerts: readonly string[] = [],
+  fromIndex = 0,
+): InterruptRow | null {
+  for (let index = Math.max(fromIndex, 0); index < interrupts.length; index += 1) {
+    const row = interrupts[index]!;
+    if (evaluateCondition(row.when, obs) !== "met") {
+      continue;
+    }
+    if (row.respond === "alert" && spentAlerts.includes(row.id)) {
+      continue;
+    }
+    return row;
+  }
+  return null;
+}
+
+/**
  * Decide which interrupt (if any) fires this tick.
  *
  * Order matters and is the behaviour: the FIRST row whose condition is met wins,
@@ -503,26 +542,22 @@ export type InterruptResolution =
  * the thing watching the pirate fires before the acute pause can. Only when
  * nothing fired and a pirate is present with unreadable health does the sealed
  * pause take over. A cannot-tell never fires a row.
+ *
+ * ⚠ A ROW THAT FIRES BUT DOES NOTHING STILL COUNTS AS FIRED HERE, so the sealed
+ * pause stays exactly as narrow as it was: it is for a ladder that said nothing
+ * at all about a pirate, not for one whose answer happened to be a no-op this
+ * tick. The runner handles that case by carrying the scan on below the row
+ * (`firstArmedInterrupt`'s `fromIndex`), which reaches every row the player
+ * wrote without widening the one rule they did not write.
  */
 export function resolveInterrupt(
   interrupts: readonly InterruptRow[],
   obs: ScriptObservation,
   spentAlerts: readonly string[] = [],
 ): InterruptResolution {
-  for (const row of interrupts) {
-    const verdict = evaluateCondition(row.when, obs);
-    if (verdict === "met") {
-      // ⚠ A SPENT ALERT ROW IS TRANSPARENT. It has already said its piece for this
-      // episode, and first-match-wins would otherwise park on it forever — so an
-      // "alert me" row above a dock-and-pause row would silence the dock. Skipping
-      // it lets the rest of the ladder work, which is what makes "tell me AND
-      // dock" two rows that both fire. Only "alert" is ever skipped: every other
-      // response DOES something to the ship and must keep winning while it holds.
-      if (row.respond === "alert" && spentAlerts.includes(row.id)) {
-        continue;
-      }
-      return { kind: "fire", row };
-    }
+  const row = firstArmedInterrupt(interrupts, obs, spentAlerts);
+  if (row !== null) {
+    return { kind: "fire", row };
   }
   if (obs.hostileOnGrid === true && obs.health === null) {
     return { kind: "safety-override", reason: SENTENCE.safetyBlind };

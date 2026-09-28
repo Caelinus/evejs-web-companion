@@ -59,6 +59,7 @@
   import {
     builderTarget,
     decideHandoff,
+    isStillSaved,
     libraryChanged,
     noteLibraryChanged,
     waitingSentence,
@@ -773,10 +774,33 @@
     try {
       savedList = await listBotScripts(botOpts());
       libraryError = null;
+      noticeOpenBotIsGone();
     } catch {
       savedList = [];
       libraryError = "Could not reach the saved bots — are you still logged in?";
     }
+  }
+
+  /**
+   * The bot open here was deleted from the library — by the Bot Manager, which
+   * is the only thing that can delete one now.
+   *
+   * ⚠ THE DRAFT IS KEPT, THE LINK IS DROPPED. The builder went on saying
+   * `Editing "X"` about a row that no longer exists, and Save would have tried
+   * to update a script id the server cannot find — an error, over work still on
+   * screen, at the one moment the player wants it kept. It becomes an unsaved
+   * bot instead, which is exactly what it now is: Save puts it back as a new
+   * one. Nothing is loaded, cleared or reverted; only the id goes.
+   *
+   * ⚠ A FAILED READ MUST NEVER REACH HERE. `savedList` is emptied when the read
+   * throws, and an empty list would then say every open bot had been deleted.
+   * The caller only calls this on the success path, and this is the reason.
+   */
+  function noticeOpenBotIsGone(): void {
+    if (isStillSaved(currentSavedId, savedList)) return;
+    currentSavedId = null;
+    currentRev = 0;
+    importNote = `“${name}” was deleted from the library. What is on screen is still here — saving puts it back as a new bot.`;
   }
   async function saveBot(): Promise<void> {
     saveConflict = null;

@@ -11,10 +11,15 @@
 //     that was mid-await when the player pressed pause stops driving.
 //   • STATUS IS RE-CHECKED AFTER EVERY await — pause/stop can fire during a read
 //     or an issue, and nothing may be issued afterwards.
-//   • SETTLE TICKS after ordinary world calls — a few ticks of not-deciding so
-//     asynchronous movement/writes can become observable (a 200 is not proof).
-//     Ready-returning session changes skip this: their BFF promise resolves only
-//     after authoritative location + ship/scene readiness can be re-read.
+//   • SETTLE TICKS after a world call — ticks of not-deciding so asynchronous
+//     movement/writes can become observable (a 200 is not proof). HOW MANY is
+//     per action kind, and scriptDecide's `settleTicksFor` carries the argument
+//     for every reduction; a kind it does not name pays DEFAULT_SETTLE_TICKS,
+//     which is the flat number this loop used to charge for everything. Ready-
+//     returning session changes pay nothing, because their BFF promise resolves
+//     only after authoritative location + ship/scene readiness can be re-read.
+//     ⚠ A settle tick returns BEFORE observe, so it buys no read either — which
+//     is why cutting one is worth the care taken over each entry in that table.
 //   • Session loss is the one error allowed to end the run; any other failed read
 //     becomes a wait, never a confident empty.
 
@@ -28,6 +33,8 @@ import {
   describeBoard,
   initialMemory,
   isWorldCall,
+  settleTicksFor,
+  DEFAULT_SETTLE_TICKS,
   type HomeTravelDecider,
   type MacroRegistry,
   type ScriptAction,
@@ -65,7 +72,17 @@ export interface ObserveHint {
 }
 
 export const SCRIPT_CADENCE_MS = 2000;
-export const SETTLE_TICKS = 2;
+/**
+ * The settle a world call costs unless `settleTicksFor` knows it can cost less.
+ *
+ * ⚠ KEPT UNDER ITS OLD NAME ON PURPOSE. This is the number `refusalLedger.ts`
+ * means by "Base settle, matching the runner's own SETTLE_TICKS", and the number
+ * the runner's own tests import to assert that an ordinary write still settles.
+ * It is an alias now rather than a definition — the per-kind table in
+ * scriptDecide.ts owns the reasoning — but the name has to go on meaning the
+ * default, or both of those become quietly wrong.
+ */
+export const SETTLE_TICKS = DEFAULT_SETTLE_TICKS;
 export const MAX_READ_FAILURES = 5;
 
 /**
@@ -100,14 +117,6 @@ function actionTargetID(action: ScriptAction): number | null {
     return action.containerID;
   }
   return null;
-}
-
-/** Session-changing BFF calls whose successful return includes ready state. */
-function returnsAuthoritativeSessionReadiness(action: ScriptAction): boolean {
-  return action.kind === "undock"
-    || action.kind === "dock"
-    || action.kind === "jump"
-    || action.kind === "boardShip";
 }
 
 export type ScriptRunnerStatus = "idle" | "running" | "paused" | "stopped" | "error";
@@ -498,13 +507,22 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       if (token !== runToken || status !== "running") {
         return;
       }
-      // Successful session-changing routes return only after observation is
-      // authoritative, so the very next tick should consume that truth. Keep
-      // the existing debounce for ordinary calls, and the GROWN one after a
-      // refusal.
+      // ⚠ THE SETTLE IS PER ACTION KIND NOW, and `settleTicksFor` is where the
+      // whole argument lives — every entry there names the thing that stops the
+      // runner re-issuing on a read that has not caught up yet. It is an
+      // ALLOWLIST OF REDUCTIONS: an action kind it has never heard of gets
+      // DEFAULT_SETTLE_TICKS, which is the flat number this line used to apply
+      // to everything. The four ready-returning session changes (undock, dock,
+      // jump, boardShip) are the table's first four entries and carry the
+      // reasoning that used to sit in this file.
+      //
+      // A REFUSAL IS UNTOUCHED BY ANY OF THAT. A call that did not land settles
+      // on the GROWN backoff the ledger worked out, or on the default when there
+      // is none — a failed call is not evidence about how fast its kind may be
+      // repeated, it is evidence the world said no.
       settle = issuedSuccessfully
-        ? (returnsAuthoritativeSessionReadiness(result.action) ? 0 : SETTLE_TICKS)
-        : (backoffTicks ?? SETTLE_TICKS);
+        ? settleTicksFor(result.action)
+        : (backoffTicks ?? DEFAULT_SETTLE_TICKS);
     }
 
     emit(toSnapshot(result, "running", ledger.records()));

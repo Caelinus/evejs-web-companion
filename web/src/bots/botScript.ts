@@ -524,8 +524,10 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
  *   • "fight-back"     — TANK UP AND ACTUALLY FIGHT the pirate, then keep
- *                        working. Every fitted hardener and damage control goes
- *                        on first — one tick each, the instant self-targeted
+ *                        working. Every fitted hardener that HAS a cycle goes
+ *                        on first (an ordinary damage control has none — it is
+ *                        already working, and is never reached for) — one tick
+ *                        each, the instant self-targeted
  *                        move a player makes before they touch the guns — and
  *                        then the fight: drones out, lock the nearest hostile
  *                        inside targeting range, drones onto it, every idle gun
@@ -570,6 +572,22 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *     alert row sitting above a dock-and-pause row would silence it forever.
  *     Once spent, the scan skips the row and carries on down the ladder — so
  *     "tell me, AND dock" is two rows that both work.
+ *
+ * ⚠ AND THAT TRANSPARENCY IS NOT THE ALERT ROW'S PRIVILEGE — it is the rule for
+ * ANY row that fires and then turns out to have no work this tick: a repair
+ * watch for a layer with no repairer fitted (or whose repairers are all already
+ * running), a launch-drones watch whose drones are out, a fight-back watch with
+ * nothing in reach to shoot. Such a row hands the tick on DOWN THE LADDER rather
+ * than to the program, so the rows under it still fire (nav/scriptDecide
+ * `fallThrough`). Without that, the most ordinary safety layout a player writes
+ * —
+ *
+ *     shield-below 0.10 -> repair          (on an armour boat: no shield booster)
+ *     armor-below  0.45 -> dock-and-pause
+ *
+ * — is a flee rule that never fires, because the row above it wins every tick
+ * and does nothing with the win. A row only holds the ship while it is acting
+ * on it.
  */
 export type InterruptResponse =
   | "pause"

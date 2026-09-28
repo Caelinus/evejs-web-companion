@@ -17,6 +17,8 @@ import {
   activeMacroID,
   activeSquadRole,
   watchSquadRole,
+  DEFAULT_SETTLE_TICKS,
+  settleTicksFor,
   type HomeTravelDecider,
   type MacroDecider,
   type MacroMemory,
@@ -784,6 +786,97 @@ test("alert: a dock-and-pause row still fires with a spent alert row sitting abo
   assert.equal(results[2]?.status, "paused");
 });
 
+// ─── A row that DOES NOTHING is transparent ──────────────────────────────────
+//
+// The spent-alert rule just above, generalised to every response that can fire
+// and then have no work. Interrupts are first-match-wins, so such a row used to
+// win the scan every tick and answer by running the program — which silenced
+// every row UNDER it for as long as its condition held. Each test below is one
+// response that can do nothing, with a flee row beneath it that MUST be reached;
+// "activate" (the mine step) is the bug, "warp" is the fix.
+
+/** The row that has to survive an inert watch sitting on top of it. */
+const fleeArmor: InterruptRow = {
+  id: "flee", when: { kind: "armor-below", fraction: 0.45 }, respond: "dock-and-pause",
+};
+
+/** The mining step every test here runs under, so "kept working" is visible. */
+function underWatches(interrupts: readonly InterruptRow[]): BotScript {
+  return script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], interrupts);
+}
+
+test("repair: a layer with no repairer fitted does not silence the flee row under it", () => {
+  // The shape that costs a ship. An armour-tanked hull with a shield watch on
+  // top: `shield-below -> repair` reaches for shield boosters this fit does not
+  // have, and shields under 10% is exactly when the armour row was meant to run.
+  const rep: InterruptRow = { id: "rep", when: { kind: "shield-below", fraction: 0.1 }, respond: "repair" };
+  const s = underWatches([rep, fleeArmor]);
+  const r = decideScriptAction(s, obs({ shieldRatio: 0.05, armorRatio: 0.2 }), initialMemory(s), registry, home);
+  assert.equal(r.interruptID, "flee", "the armour row under the inert repair row fires");
+  assert.equal(r.action.kind, "warp", "and it flies home");
+});
+
+test("repair: repairers that are ALL already running do not silence it either", () => {
+  // A thermostat doing everything it can is still a thermostat doing nothing
+  // this tick — and the ship is losing armour anyway, which is what the row
+  // below is for.
+  const rep: InterruptRow = { id: "rep", when: { kind: "armor-below", fraction: 0.9 }, respond: "repair" };
+  const s = underWatches([rep, fleeArmor]);
+  const hurt = { armorRatio: 0.2, armorRepairerIDs: [12], capacitorRatio: 0.9 };
+
+  const saturated = decideScriptAction(s, obs({ ...hurt, snapshot: running(12) }), initialMemory(s), registry, home);
+  assert.equal(saturated.interruptID, "flee");
+  assert.equal(saturated.action.kind, "warp");
+
+  // ⚠ AND THE OTHER WAY. Transparency must not turn into "the repair row never
+  // wins": with the repairer idle it is the one with work, and it keeps the tick.
+  const idle = decideScriptAction(s, obs({ ...hurt, snapshot: running() }), initialMemory(s), registry, home);
+  assert.equal(idle.interruptID, "rep");
+  assert.deepEqual(idle.action, { kind: "activate", moduleID: 12, targetID: 0 });
+});
+
+test("launch-drones: a watch whose drones are already out stands aside", () => {
+  const launch: InterruptRow = { id: "dro", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
+  const s = underWatches([launch, fleeArmor]);
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, dronesOut: true, combatDroneIDs: [1, 2], armorRatio: 0.2 }),
+    initialMemory(s),
+    registry,
+    home,
+  );
+  assert.equal(r.interruptID, "flee", "drones already out is no answer to an armour reading");
+  assert.equal(r.action.kind, "warp");
+});
+
+test("fight-back: a watch with nothing left to fight stands aside", () => {
+  // The release rung: the pirate is on the grid (so the row still fires) but
+  // nothing is inside targeting range, so the ladder reports it is not acting.
+  const clearLadder: MacroDecider = () => tick({ kind: "wait" }, { kind: "done" });
+  const s = underWatches([fightBack, fleeArmor]);
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, armorRatio: 0.2 }),
+    initialMemory(s),
+    { ...registry, "fight-the-rats": clearLadder },
+    home,
+  );
+  assert.equal(r.interruptID, "flee");
+  assert.equal(r.action.kind, "warp");
+});
+
+test("standing aside ends at the program when no row below fires — it cannot loop", () => {
+  // The bottom of the fall-through: one inert row and nothing under it is the
+  // behaviour that always shipped, and the recursion has to come to rest there.
+  const rep: InterruptRow = { id: "rep", when: { kind: "shield-below", fraction: 0.1 }, respond: "repair" };
+  const s = underWatches([rep]);
+  const r = decideScriptAction(s, obs({ shieldRatio: 0.05 }), initialMemory(s), registry, home);
+  assert.equal(r.action.kind, "activate", "the step keeps working");
+  assert.equal(r.stepPath, "m");
+  assert.equal(r.interruptID, null);
+  assert.equal(r.status, "running");
+});
+
 // ── The observe hint's fleet half ────────────────────────────────────────────
 //
 // A board read per tick is only paid for by a block that asked to FOLLOW one, so
@@ -1092,4 +1185,41 @@ test("the ordinary program issues nothing in warp either", () => {
   const r = decideScriptAction(s, obs({ inWarp: true }), initialMemory(s), registry, home);
   assert.deepEqual(r.action, { kind: "wait" });
   assert.equal(r.stepPath, null);
+});
+
+// ─── The per-kind settle ─────────────────────────────────────────────────────
+
+test("settleTicksFor is an ALLOWLIST: a kind it does not name keeps the default", () => {
+  // ⚠ THE PROPERTY THE WHOLE TABLE RESTS ON. The map is deliberately PARTIAL, so
+  // silence means "unchanged" and an action kind added later by somebody who
+  // never read the table inherits today's safe behaviour without doing anything.
+  // `unlock` and the asset-moving group are named in the table's own comment as
+  // never-cut entries; `createFleet` is simply one it has never heard of. All three
+  // must come back the same.
+  assert.equal(settleTicksFor({ kind: "unlock", targetID: 4001 }), DEFAULT_SETTLE_TICKS);
+  assert.equal(settleTicksFor({ kind: "jettison", itemIDs: [1] }), DEFAULT_SETTLE_TICKS);
+  assert.equal(
+    settleTicksFor({ kind: "createFleet" }),
+    DEFAULT_SETTLE_TICKS,
+    "a kind with no entry at all is not a special case — it is the default",
+  );
+});
+
+test("settleTicksFor cuts the guarded actions to nothing and the unconfirmed ones to one", () => {
+  // 0: `lock` is guard-(a) at every call site (`lockIssued` written in the tick
+  // the lock goes out), so a duplicate is structurally impossible and the runner
+  // owes it no waiting at all.
+  assert.equal(settleTicksFor({ kind: "lock", targetID: 4001 }), 0);
+  // 1: `activate` has only an observation-derived guard, and a duplicate comes
+  // back as EffectAlreadyActive2 — a refusal the ledger books, ten of which on
+  // one key end the run. One tick, not zero, and not two.
+  assert.equal(settleTicksFor({ kind: "activate", moduleID: 7, targetID: 4001 }), 1);
+});
+
+test("⚠ warp is NOT in the table — the one movement action that is not idempotent", () => {
+  // Its neighbours in the 0 bucket are standing server-side orders; a warp is a
+  // one-shot, and travelToBelt / mineNoTargetRocks / dockAtNearest / compressOre
+  // all emit it with no memory guard at all. If this assertion ever fails,
+  // somebody has tidied warp in for symmetry and bought a double warp with it.
+  assert.equal(settleTicksFor({ kind: "warp", targetID: 4002 }), DEFAULT_SETTLE_TICKS);
 });
