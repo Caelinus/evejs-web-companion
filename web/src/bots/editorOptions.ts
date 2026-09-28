@@ -20,10 +20,12 @@ import {
   ITEM_PLACES,
   INTERRUPT_RESPONSES,
   MAX_COUNT_ARG,
+  MAX_DISTANCE_KM_ARG,
   MAX_ISK_ARG,
   MAX_QTY_ARG,
   MAX_CONDITION_FRACTION,
   MIN_COUNT_ARG,
+  MIN_DISTANCE_KM_ARG,
   MIN_ISK_ARG,
   MIN_QTY_ARG,
   MIN_CONDITION_FRACTION,
@@ -68,6 +70,8 @@ export type WidgetKind =
   | "squad-role-select"
   | "bay-list-picker"
   | "item-list-picker"
+  | "distance-input"
+  | "prop-mode-select"
   | "text-input";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
@@ -93,6 +97,10 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   squadRole: "squad-role-select",
   bayList: "bay-list-picker",
   itemList: "item-list-picker",
+  // A plain number box like `count`/`isk`/`qty` — the unit belongs to the LABEL
+  // and to the arg kind's name, never to the value the player types.
+  distanceKm: "distance-input",
+  propMode: "prop-mode-select",
   text: "text-input",
 };
 
@@ -119,6 +127,8 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   squadRole: "Fleet fire",
   bayList: "Leave alone",
   itemList: "Keep aboard",
+  distanceKm: "Distance (km)",
+  propMode: "Prop mod",
   text: "Text",
 };
 
@@ -155,6 +165,12 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   system: "Solar system",
   fleetName: "Fleet name",
   pick: "Which rock first",
+  // ⚠ THE UNIT IS PART OF THE LABEL, NOT A SUFFIX SOMEBODY MIGHT DROP. The
+  // number a player types here is kilometres and everything under it is metres;
+  // a box labelled just "Hold range" invites the metres, and a drone boat told
+  // to hold at twenty-five thousand parks a thousand times too far out.
+  holdRangeKm: "Hold this far off (km)",
+  propulsion: "Prop mod",
 };
 
 /**
@@ -263,6 +279,18 @@ export const COUNT_ARG_BOUNDS: NumericBounds = Object.freeze({ min: MIN_COUNT_AR
 export const ISK_ARG_BOUNDS: NumericBounds = Object.freeze({ min: MIN_ISK_ARG, max: MAX_ISK_ARG });
 export const QTY_ARG_BOUNDS: NumericBounds = Object.freeze({ min: MIN_QTY_ARG, max: MAX_QTY_ARG });
 
+/**
+ * A stand-off distance, in KILOMETRES — the same 1..300 the codec clamps to.
+ *
+ * ⚠ THESE ARE KILOMETRES AND THE RUNTIME IS METRES. The widget shows the range
+ * it enforces, so a player reading "1 to 300" is being told the unit as well as
+ * the bound; the one conversion lives in the block's adapter.
+ */
+export const DISTANCE_KM_ARG_BOUNDS: NumericBounds = Object.freeze({
+  min: MIN_DISTANCE_KM_ARG,
+  max: MAX_DISTANCE_KM_ARG,
+});
+
 /** The bounds for a numeric argument kind, or null when that kind is not a plain number. */
 export function numericArgBounds(kind: Arg["kind"]): NumericBounds | null {
   switch (kind) {
@@ -272,6 +300,8 @@ export function numericArgBounds(kind: Arg["kind"]): NumericBounds | null {
       return ISK_ARG_BOUNDS;
     case "qty":
       return QTY_ARG_BOUNDS;
+    case "distanceKm":
+      return DISTANCE_KM_ARG_BOUNDS;
     default:
       return null;
   }
@@ -378,6 +408,9 @@ export const CONDITION_NOUN_LABEL: Readonly<Record<ConditionKind, string>> = {
   "cargo-full": "Cargo hold",
   "targeted-by-player": "Being targeted",
   "drone-health-below": "A drone's health",
+  // Not "Scrambled": the label has to say what it COSTS, because the response a
+  // player reaches for depends on knowing that leaving is off the table.
+  tackled: "Held down, cannot warp",
 };
 
 /**
@@ -401,6 +434,9 @@ export const CONDITION_UNTIL_LABEL: Readonly<Record<ConditionKind, string>> = {
   "cargo-full": "the cargo hold is nearly full",
   "targeted-by-player": "another player locks onto your ship",
   "drone-health-below": "one of your drones drops below…",
+  // Present for exhaustiveness only — `tackled` is interrupt-only, so no until
+  // picker ever offers it (see UNTIL_CONDITION_KINDS above).
+  tackled: "something has your ship scrambled and it cannot warp out",
 };
 
 /**
@@ -462,7 +498,9 @@ export function conditionUsesFraction(kind: ConditionKind): boolean {
     kind !== "hostile-on-grid" &&
     kind !== "wallet-below" &&
     kind !== "wallet-above" &&
-    kind !== "targeted-by-player"
+    kind !== "targeted-by-player" &&
+    // "Held" is not a quantity: there is no percentage of being scrammed.
+    kind !== "tackled"
   );
 }
 

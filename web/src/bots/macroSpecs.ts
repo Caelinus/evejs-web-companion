@@ -122,6 +122,25 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     ],
     untilRequired: false,
   },
+  // The drone boat's combat block. EVERY argument is optional by design and a
+  // bare block is valid: unset, it runs the shipped target ladder, flies alone,
+  // computes its own stand-off band from what the pirates on grid can reach, and
+  // uses a prop mod only to close a gap. The two overrides exist for the pilot
+  // whose fit the read cannot describe — `holdRangeKm` because drone control
+  // range is skill-derived and frequently unreadable, `propulsion` because a
+  // burner's signature bloom is sometimes a worse trade than the distance.
+  //
+  // ⚠ `holdRangeKm` IS KILOMETRES. The block's decision core takes metres; the
+  // adapter multiplies. See the arg kind's own comment in botScript.ts.
+  "fight-with-drones": {
+    args: [
+      { key: "targets", kind: "targetList", required: false },
+      { key: "squad", kind: "squadRole", required: false },
+      { key: "holdRangeKm", kind: "distanceKm", required: false },
+      { key: "propulsion", kind: "propMode", required: false },
+    ],
+    untilRequired: false,
+  },
   // Warp to the next unvisited COMBAT anomaly in this system (the scanner's own
   // list, filtered by the site's scan-strength attribute). Done on arrival;
   // blocked when the system has none left this run.

@@ -60,7 +60,7 @@
   } from "../bots/editorOptions.ts";
   import { MACRO_CATALOG_LIST, macroEntry } from "../bots/macroCatalogView.ts";
   import { MAX_WORLD_NAME_LEN } from "../bots/scriptCodec.ts";
-  import { interruptSentence, targetClassWord } from "../bots/scriptText.ts";
+  import { conditionAdvice, interruptSentence, targetClassWord } from "../bots/scriptText.ts";
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
   import StationPicker from "./StationPicker.svelte";
@@ -129,7 +129,12 @@
   function numberValue(step: MacroStep, key: string): number | string {
     const arg = argOf(step, key);
     if (arg === undefined) return "";
-    return arg.kind === "count" || arg.kind === "isk" || arg.kind === "qty" ? arg.value : "";
+    // `distanceKm` shares the numeric shape on purpose (its value field is
+    // `value`, like every other number), so it edits through the same box. The
+    // UNIT is in the label, never in the value.
+    return arg.kind === "count" || arg.kind === "isk" || arg.kind === "qty" || arg.kind === "distanceKm"
+      ? arg.value
+      : "";
   }
   function textValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -412,6 +417,16 @@
     const classes = [...chosen];
     [classes[index], classes[target]] = [classes[target], classes[index]];
     onWatchFight({ targets: classes });
+  }
+  function propModeValue(step: MacroStep, key: string): string {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "propMode" ? arg.mode : "auto";
+  }
+  function setPropMode(key: string, raw: string): void {
+    // "auto" is the default, so it is DROPPED rather than stored — an untouched
+    // step exports exactly as it was imported, same rule as the rock pick and
+    // the squad role above.
+    onArg(key, raw === "off" ? { kind: "propMode", mode: "off" } : undefined);
   }
   function setSquadRole(key: string, raw: string): void {
     // "off" is the default, so it is DROPPED rather than stored — an untouched
@@ -908,6 +923,11 @@
           <option value="call">call the primary for the fleet</option>
           <option value="follow">shoot what the fleet calls</option>
         </select>
+      {:else if arg.widget === "prop-mode-select"}
+        <select id={fieldId} value={propModeValue(step, arg.key)} onchange={(e) => setPropMode(arg.key, e.currentTarget.value)}>
+          <option value="auto">burn in to close the distance</option>
+          <option value="off">never switch it on</option>
+        </select>
       {:else if arg.widget === "corp-picker"}
         <input
           id={fieldId}
@@ -1021,6 +1041,14 @@
     {@const watch = target.watch}
     <p class="note">{interruptSentence(watch)}</p>
     {@render conditionEditor(`watch-${watch.id}`, "Watch for", WATCH_CONDITION_KINDS, CONDITION_NOUN_LABEL, null)}
+    <!-- The one condition whose obvious response cannot work (a held ship cannot
+         warp, so it cannot dock either) says so HERE, between the check and the
+         response picker, rather than in a rule that refuses the pairing.
+         `conditionAdvice` is null for every other kind, so no other watch grows
+         a line. -->
+    {#if conditionAdvice(watch.when.kind) !== null}
+      <p class="note">{conditionAdvice(watch.when.kind)}</p>
+    {/if}
     <label class="inspector-field" for={`watch-${watch.id}-respond`}>
       <span class="inspector-label">Then</span>
       <select

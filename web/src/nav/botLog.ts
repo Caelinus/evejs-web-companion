@@ -120,6 +120,8 @@ export function describeAction(action: ScriptAction): string {
       return `warp to ${action.targetID}`;
     case "approach":
       return `approach ${action.targetID}`;
+    case "stopShip":
+      return "stop the ship";
     case "align":
       return `align to ${action.targetID}`;
     case "orbit":

@@ -47,6 +47,17 @@ import {
 // re-derived for the same reason the get-safe helpers above are: one answer to
 // "where does this tag rank", shared with the combat priority list.
 import { fleetTagRank, pickPrimary } from "./targetPriority.ts";
+// The prop-mod policy (rung 3b), imported for the third time the same reason
+// holds: the drone-boat block wants the identical answer to "light it, stop it,
+// or leave the rack alone", and a scram rule that lived in two files would be
+// fixed in one of them. What stays HERE is the question this loop answers for
+// itself -- "am I travelling, or did a commander type `props on`?" -- and the
+// words it says about the answer.
+import {
+  decidePropulsionModule,
+  type PropulsionInputs,
+  type PropulsionModule,
+} from "./propulsion.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { ChatMessage } from "../store/types.ts";
 import {
@@ -98,12 +109,13 @@ export type CompanionOrderAuthority = "broadcast" | "tag" | "chat" | "own-ladder
  * did not answer" — and the rung that reads it fails OPEN, running the module
  * and assuming the scram-vulnerable half. See `propulsionModules` on the
  * request.
+ *
+ * ⚠ THIS IS AN ALIAS AND NOT A SECOND SHAPE. The prop-mod policy is shared with
+ * the drone-boat block (`nav/propulsion.ts`), and a module that had to be
+ * re-packed on the way into it would be a copy with nothing to fail if one side
+ * grew a field. The name stays because four other files import it.
  */
-export interface CompanionPropulsionModule {
-  readonly itemID: number;
-  readonly typeID: number;
-  readonly kind: "afterburner" | "microwarpdrive" | null;
-}
+export type CompanionPropulsionModule = PropulsionModule;
 
 /**
  * What one companion run actually FLIES WITH: the operator's few settings, plus
@@ -5398,32 +5410,17 @@ function isUnderWay(obs: FleetCompanionObservation): boolean {
  * standing instruction in either direction. Reading null as off would ship every
  * companion with a permanent order never to use its prop mod.
  *
- * ⚠ A SCRAM STANDS DOWN A MICROWARPDRIVE AND ONLY A MICROWARPDRIVE. The server
- * turns an MWD off under a warp scrambler, so re-activating one every tick is a
- * call spent to be refused; an AFTERBURNER is untouched by any jam in that
- * vocabulary and is exactly what a tackled ship needs. This is the whole reason
- * `propulsionModules` carries a `kind` at all -- SDE group 46 holds both and no
- * group name can separate them. `obs.scrammed` is three-state and only an
- * explicit `true` gates, so a jam slice that could not be read never takes the
- * speed off a ship.
- *
- * ⚠ AN UNKNOWN `kind` IS TREATED AS A MICROWARPDRIVE, which is the cheap half of
- * the wrong answer. The alternative -- assume afterburner -- keeps re-activating
- * a dead MWD under a scram; this one costs at most a stationary afterburner on a
- * pilot that is already tackled and that a commander can re-light by typing.
- *
- * ⚠ THE CAPACITOR FLOOR GATES ONLY THE LIGHTING, NEVER THE STOPPING. An MWD
- * runs at roughly ninety per cent of a frigate's capacitor per cycle, so
- * lighting one below the operator's own floor is how a companion caps itself out
- * and then cannot warp. But a module already running must always be stoppable:
- * gating the off-half on the same floor would strand a burner ON at exactly the
- * capacitor level that made it dangerous. Null capacitor is unreadable and does
- * not gate, the same fail-open rule the rest of this file follows.
- *
- * ⚠ IT ISSUES ONE CALL AND THEN FALLS THROUGH. Like tank-up, this rung has
- * something to do only while the rack disagrees with what is wanted, so the cost
- * to every rung below it is a tick or two after the state changes and nothing at
- * all the rest of the time.
+ * ⚠ THE REST OF THE POLICY IS `nav/propulsion.ts` AND ITS HEADER IS THE
+ * AUTHORITY. The scram that stands down a microwarpdrive and ONLY a
+ * microwarpdrive, the unknown `kind` treated as the scram-vulnerable half, the
+ * capacitor floor that gates the lighting and never the stopping, and the
+ * one-call-then-fall-through shape all moved there WORD FOR WORD when the
+ * drone-boat block turned out to want the identical answer. They are not
+ * summarised back here: two copies of a scram rule with nothing to fail if one
+ * drifted is the bug this file warns about elsewhere. What this rung still owns
+ * is the question above -- travelling, or told to burn -- plus the latch that
+ * keeps a deactivate from being issued twice, which is about calls already
+ * spent rather than about what the rack should look like.
  */
 function decidePropulsion(
   request: FleetCompanionRequest,
@@ -5437,29 +5434,33 @@ function decidePropulsion(
   // ⚠ `activeModuleIDs` IS THE AUTHORITY AND `null` MEANS "CANNOT SAY". An
   // unreadable snapshot must not be read as "nothing is running" -- that would
   // have this rung re-activate a burner that is already lit, every tick, for as
-  // long as the read stayed down.
+  // long as the read stayed down. The shared policy takes a Set and no null,
+  // which is why this test stays on THIS side of the call: a companion that
+  // cannot see its own rack has nothing to ask.
   const active = obs.snapshot?.ship?.activeModuleIDs ?? null;
   if (active === null) {
     return { decision: null, memory };
   }
-  const running = new Set(active);
 
-  const wanted = memory.propsHeld ?? isUnderWay(obs);
-  const scrammed = obs.scrammed === true;
+  // ⚠ `wantBurn` IS THE WHOLE OF WHAT THIS LOOP STILL DECIDES ABOUT PROPULSION.
+  // The standing chat order beats the travel test and `null` is not "off"; see
+  // this rung's header. Everything downstream of the question -- the scram, the
+  // unknown kind, the floor, which module -- is `decidePropulsionModule`.
+  const inputs: PropulsionInputs = {
+    modules: fitted,
+    activeModuleIDs: new Set(active),
+    capacitorRatio: obs.capacitorRatio ?? null,
+    scrammed: obs.scrammed ?? null,
+    wantBurn: memory.propsHeld ?? isUnderWay(obs),
+    capFloor: request.capacitorFloor,
+  };
+  const call = decidePropulsionModule(inputs);
 
-  if (!wanted) {
-    // The off-half. Only what is actually cycling, one module per tick, and once
-    // per module until the snapshot proves it stopped.
-    const lit = fitted.find((module) => running.has(module.itemID));
-    if (lit === undefined) {
-      // Nothing is running, so nothing is being stopped -- clearing the latch
-      // here is what lets a REFUSED deactivate be retried rather than stick.
-      return {
-        decision: null,
-        memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
-      };
-    }
-    if (memory.propsStoppingID === lit.itemID) {
+  if (call.kind === "stop") {
+    // One module per tick, and once per module until the snapshot proves it
+    // stopped -- the latch is this loop's, because it is about calls already
+    // spent and not about what the rack should look like.
+    if (memory.propsStoppingID === call.module.itemID) {
       return { decision: null, memory };
     }
     return {
@@ -5468,13 +5469,13 @@ function decidePropulsion(
         // mod only when it names the propulsion effect, and the BFF resolves
         // that name from the typeID -- without it the call returns success and
         // the burner keeps cycling. See the action's own header.
-        action: { kind: "deactivate", moduleID: lit.itemID, typeID: lit.typeID },
+        action: { kind: "deactivate", moduleID: call.module.itemID, typeID: call.module.typeID },
         phase: "Propulsion",
         why:
           memory.propsHeld === false
             ? "A commander said props off in chat. Standing the prop mod down."
             : "Not travelling any more. Standing the prop mod down.",
-        memory: { ...memory, propsStoppingID: lit.itemID },
+        memory: { ...memory, propsStoppingID: call.module.itemID },
         ...(memory.propsHeld === false
           ? {
               followingOrderFrom: "chat" as const,
@@ -5486,42 +5487,51 @@ function decidePropulsion(
     };
   }
 
-  // The on-half. A scrammed MWD is skipped rather than the whole rung, so a ship
-  // carrying both keeps its afterburner.
-  const idle = fitted.find(
-    (module) => !running.has(module.itemID) && !(scrammed && module.kind !== "afterburner"),
-  );
-  if (idle === undefined) {
+  if (call.kind === "light") {
     return {
-      decision: null,
-      memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
+      decision: {
+        // ⚠ SELF-TARGETED, so no `targetID` -- `0` is this codebase's sentinel for
+        // "run it on the caster", the same form the hardeners use.
+        action: { kind: "activate", moduleID: call.module.itemID, targetID: 0 },
+        phase: "Propulsion",
+        why:
+          memory.propsHeld === true
+            ? "A commander said props on in chat. Lighting the prop mod."
+            : "Travelling. Lighting the prop mod.",
+        memory: { ...memory, propsStoppingID: null },
+        ...(memory.propsHeld === true
+          ? {
+              followingOrderFrom: "chat" as const,
+              lastOrderHeard: "a chat order to run the prop mod",
+            }
+          : {}),
+      },
+      memory,
     };
   }
-  // ⚠ THE FLOOR IS THE OPERATOR'S OWN, the same one the flee rung reads, and it
-  // gates lighting ONLY. Unreadable capacitor does not gate.
-  const capacitor = obs.capacitorRatio ?? null;
-  if (capacitor !== null && capacitor < request.capacitorFloor) {
+
+  // Nothing to do: the rack already agrees with what is wanted. Clearing the
+  // latch here is what lets a REFUSED deactivate be retried rather than stick --
+  // nothing is being stopped, so nothing is outstanding.
+  //
+  // ⚠ EXCEPT WHEN THE FLOOR IS THE ONLY THING HOLDING THE LIGHT BACK, which is
+  // not the same "nothing to do" and must not clear the latch: a burner that
+  // was told to stop, is still cycling, and is being waited on across a tick or
+  // two of low capacitor has a deactivate outstanding the whole time, and
+  // clearing the latch would spend a second one. The policy is asked rather
+  // than re-implemented -- it fails open on an unreadable capacitor, so
+  // re-asking with `null` is exactly "would you have lit one but for the floor?".
+  const heldBackByTheFloor =
+    inputs.wantBurn &&
+    inputs.capacitorRatio !== null &&
+    inputs.capacitorRatio < inputs.capFloor &&
+    decidePropulsionModule({ ...inputs, capacitorRatio: null }).kind === "light";
+  if (heldBackByTheFloor) {
     return { decision: null, memory };
   }
   return {
-    decision: {
-      // ⚠ SELF-TARGETED, so no `targetID` -- `0` is this codebase's sentinel for
-      // "run it on the caster", the same form the hardeners use.
-      action: { kind: "activate", moduleID: idle.itemID, targetID: 0 },
-      phase: "Propulsion",
-      why:
-        memory.propsHeld === true
-          ? "A commander said props on in chat. Lighting the prop mod."
-          : "Travelling. Lighting the prop mod.",
-      memory: { ...memory, propsStoppingID: null },
-      ...(memory.propsHeld === true
-        ? {
-            followingOrderFrom: "chat" as const,
-            lastOrderHeard: "a chat order to run the prop mod",
-          }
-        : {}),
-    },
-    memory,
+    decision: null,
+    memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
   };
 }
 

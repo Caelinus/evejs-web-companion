@@ -17,6 +17,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CONDITION_KINDS,
   MAX_ORE_HOLD_FRACTION,
   MAX_REPEAT_TIMES,
   SCRIPT_FORMAT,
@@ -181,6 +182,16 @@ test("hostile-on-grid is interrupt-only; own-ship reads work at both sites", () 
   assert.deepEqual(conditionSites("ore-hold-at-least"), ["until", "interrupt"]);
   assert.ok(conditionAllowedAt("shield-below", "until"));
   assert.ok(conditionAllowedAt("shield-below", "interrupt"));
+});
+
+test("tackled is interrupt-only, like every other grid read", () => {
+  // Sharper than the rest of its class: nothing can hold a ship that is already
+  // in warp, so as a step's `until` it would read not-met for the whole flight
+  // and the tick it matters would arrive on a step that never asked.
+  assert.deepEqual(conditionSites("tackled"), ["interrupt"]);
+  assert.equal(conditionAllowedAt("tackled", "until"), false);
+  assert.equal(conditionAllowedAt("tackled", "interrupt"), true);
+  assert.ok(CONDITION_KINDS.includes("tackled"));
 });
 
 test("the ore-hold ceiling stays at 0.9 (the mixed-hold trap stays shut)", () => {

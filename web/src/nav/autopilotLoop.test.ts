@@ -344,6 +344,64 @@ test("the loop pauses (does not guess) on an injected warp-scramble refusal", as
   );
 });
 
+// The server has ONE sentence for every warp refusal it cannot name — the
+// transient WARP_LANDING_PENDING and the fatal TARGET_NOT_FOUND arrive in the
+// same words — so the loop cannot read the reason and must instead be patient a
+// bounded number of times. These two tests pin both halves of that bargain.
+test("an unnamed warp refusal is retried rather than ending the route", async () => {
+  let turnedDown = 0;
+  const mock = makeMock({
+    warpBehavior: (dest) => {
+      // Three refusals, then it takes — the shape of a handoff that retires.
+      if (dest === GATE_ORIGIN && turnedDown < 3) {
+        turnedDown += 1;
+        throw refusal("You cannot warp there right now.");
+      }
+    },
+  });
+  const { deps } = makeDeps(mock);
+  const controller = createAutopilot(deps);
+
+  controller.start(PLAN);
+  await drive(controller, 200);
+
+  assert.equal(turnedDown, 3, "the warp really was turned down three times");
+  assert.equal(
+    controller.snapshot().status,
+    "arrived",
+    "a refusal that clears must not leave the pilot stopped in space",
+  );
+});
+
+test("an unnamed warp refusal that never clears pauses on the bound, not the first try", async () => {
+  let turnedDown = 0;
+  const mock = makeMock({
+    warpBehavior: (dest) => {
+      if (dest === GATE_ORIGIN) {
+        turnedDown += 1;
+        throw refusal("You cannot warp there right now.");
+      }
+    },
+  });
+  const { deps } = makeDeps(mock);
+  const controller = createAutopilot(deps);
+
+  controller.start(PLAN);
+  await drive(controller, 200);
+
+  const snap = controller.snapshot();
+  assert.equal(snap.status, "paused", "it still has to stop eventually");
+  assert.ok(
+    turnedDown > 1,
+    `one refusal must not be the end of the trip (tried ${turnedDown})`,
+  );
+  assert.match(
+    snap.failureReason ?? "",
+    /turned down \d+ times running/i,
+    "the pause must say it kept being refused, not imply a one-off",
+  );
+});
+
 test("abort stops the loop and it never calls the bridge afterward", async () => {
   const mock = makeMock();
   const { deps } = makeDeps(mock);

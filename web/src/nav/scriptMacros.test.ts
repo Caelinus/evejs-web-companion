@@ -6,11 +6,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import type { MacroMemory } from "./scriptDecide.ts";
+import type { MacroMemory, MacroTick, ScriptBoard } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
+import {
+  emptyLedger,
+  encodeLedger,
+  enterSite,
+  LEDGER_KEYS,
+  MAX_SITE_RETURNS,
+  STALL_TICKS,
+} from "./siteProgress.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
 
@@ -197,6 +206,52 @@ test("mine: rock locked but still out of range, not yet approached -> close in",
   assert.equal(t.action.kind, "orbit");
   assert.ok(t.action.kind === "orbit" && t.action.targetID === 50001 && t.action.range === 5000);
   assert.equal(t.nextMem["approachedRockID"], 50001);
+});
+
+// ⚠ THE ORBIT HALF OF THE SILENT-REFUSAL RUNG. `CmdOrbit` is gated and thrown
+// away exactly like `CmdFollowBall`, and a belt is where it bites: the first
+// order after the warp in is the orbit, on the very tick eve.js still has the
+// hull landingPending. GOTO is the deadlock's signature — SetSpeedFraction(1.0)
+// took, the orbit after it did not.
+test("⚠ mine: an orbit the server accepted and ignored -> re-order, STOP, re-order, then blocked", () => {
+  const rock = entity({ itemID: 50001, name: "Veldspar", miningYieldTypeID: 1230, position: { x: 15000, y: 0, z: 0 } });
+  const world = obs({
+    snapshot: snapshot([rock], { activeModuleIDs: [], mode: "GOTO" }),
+    lockedTargetIDs: [50001],
+    miningModuleIDs: [700, 701],
+  });
+  let mem: MacroMemory = { rockID: 50001, lockIssued: true, waited: 0, approachedRockID: 50001 };
+  const script: string[] = [];
+  for (let i = 0; i < 20; i += 1) {
+    const t = mine(mineStep, world, mem, {});
+    script.push(t.action.kind);
+    if (t.outcome.kind === "blocked") {
+      assert.match(t.outcome.reason, /takes move orders and does not move/);
+      break;
+    }
+    mem = t.nextMem;
+  }
+  assert.deepEqual(
+    script.filter((kind) => kind !== "wait"),
+    ["orbit", "stopShip", "orbit"],
+    "it re-sends its OWN order — an orbit, never an approach",
+  );
+  assert.ok(script.length < 20, "a miner that cannot reach the belt says so");
+});
+
+test("mine: a hull already ORBITING is never stopped — an orbit IS closing", () => {
+  const rock = entity({ itemID: 50001, name: "Veldspar", miningYieldTypeID: 1230, position: { x: 15000, y: 0, z: 0 } });
+  const world = obs({
+    snapshot: snapshot([rock], { activeModuleIDs: [], mode: "ORBIT" }),
+    lockedTargetIDs: [50001],
+    miningModuleIDs: [700, 701],
+  });
+  let mem: MacroMemory = { rockID: 50001, lockIssued: true, waited: 0, approachedRockID: 50001 };
+  for (let i = 0; i < 20; i += 1) {
+    const t = mine(mineStep, world, mem, {});
+    assert.equal(t.action.kind, "wait", `tick ${i} disturbed an orbit that was running`);
+    mem = t.nextMem;
+  }
 });
 
 test("mine: rock locked, out of range, already closing in -> wait rather than activate", () => {
@@ -783,6 +838,51 @@ test("salvage: no drones, salvager fitted -> approach, lock, run it on the wreck
   assert.ok(run.action.kind === "activate" && run.action.moduleID === 800 && run.action.targetID === 70001);
 });
 
+// ⚠ THE SILENT-REFUSAL TESTS. `CmdFollowBall` answers 200 whether the server
+// flew the order or threw it away — a hull with a pending warp landing has every
+// approach refused while the approach route's own SetSpeedFraction leaves it
+// coasting in GOTO, which is the deadlock that used to leave this block saying
+// "Flying to the wreck" all night. The hull's MODE is the only evidence, so
+// these two pin both readings of it.
+const farWreck = () => entity({ itemID: 70001, kind: "wreck", position: { x: 30000, y: 0, z: 0 } });
+
+test("salvage: a hull that IS following is left alone — no re-order, however long the leg", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const world = obs({ snapshot: snapshot([farWreck()], { mode: "FOLLOW" }), salvageModuleIDs: [800] });
+  let mem: MacroMemory = { wreckID: 70001, lockIssued: false, waited: 0 };
+  for (let i = 0; i < 20; i += 1) {
+    const t = salvage(s, world, mem, {});
+    assert.equal(t.action.kind, "wait", `tick ${i} re-ordered a flight that was already running`);
+    assert.equal(t.why, "Flying to the wreck.");
+    mem = t.nextMem;
+  }
+});
+
+test("⚠ salvage: an approach the server accepted and ignored -> re-order, STOP, re-order, then blocked", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  // GOTO is the deadlock's own signature: full speed on a straight line, which
+  // is what SetSpeedFraction(1.0) leaves behind when the FollowBall after it is
+  // refused for the pending landing.
+  const world = obs({ snapshot: snapshot([farWreck()], { mode: "GOTO" }), salvageModuleIDs: [800] });
+  let mem: MacroMemory = { wreckID: 70001, lockIssued: false, waited: 0 };
+  const script: string[] = [];
+  for (let i = 0; i < 20; i += 1) {
+    const t = salvage(s, world, mem, {});
+    script.push(t.action.kind);
+    if (t.outcome.kind === "blocked") {
+      assert.match(t.outcome.reason, /takes move orders and does not move/);
+      assert.match(t.outcome.reason, /Sign this pilot in again/);
+      break;
+    }
+    mem = t.nextMem;
+  }
+  const ordered = script.filter((kind) => kind !== "wait");
+  assert.deepEqual(ordered, ["approach", "stopShip", "approach"], "the stop is what frees a stuck landing");
+  assert.ok(script.length < 20, "it gives up rather than narrating a flight that is not happening");
+});
+
 test("salvage: nothing to salvage with -> SKIPPED with a plain reason, not a stop", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
@@ -1169,6 +1269,81 @@ test("tackled: once the grid is clear the trip home is asked for again", () => {
   assert.equal(clear.nextMem["recalled"], false, "the drones are called in again before the next warp");
 });
 
+// ─── The last door: a trip home that cannot fly ──────────────────────────────
+//
+// `stopSafely` is explicit that docked is the only place a bot may come to rest,
+// and it flies the ship home to get there. When THAT flight is blocked and there
+// is nothing to shoot, the old code paused anyway — in space, guns off — which
+// is the exact state the doctrine exists to prevent. Home being unreachable
+// says nothing about the station on this grid.
+
+/** The autopilot's leftovers when the route home failed for a non-combat reason. */
+const routeDead = {
+  status: "paused" as const,
+  destinationStationID: HOME,
+  remainingJumps: 2,
+  failureReason: "The warp was turned down 5 times running and the ship has not moved.",
+};
+
+test("stranded: a trip home that cannot fly docks at the station on THIS grid", () => {
+  const station = entity({ itemID: 7001, kind: "station", position: { x: 1_000, y: 0, z: 0 } });
+
+  const out = scriptTravelHome(
+    obs({ snapshot: snapshot([station]), travel: routeDead, homeStationID: HOME }),
+    {},
+  );
+
+  assert.notEqual(out.outcome.kind, "blocked", "stopping in space is the bug, not the answer");
+  assert.ok(
+    out.action.kind === "dock" && out.action.stationID === 7001,
+    `it must take the door on this grid (got ${out.action.kind})`,
+  );
+});
+
+test("stranded: with no door in sight it stops, and the reason names BOTH failures", () => {
+  const out = scriptTravelHome(
+    obs({ snapshot: snapshot([]), travel: routeDead, homeStationID: HOME }),
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked", "nowhere to go really is a stop");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  // Both halves, because "the trip home failed" alone sends a reader looking at
+  // the route when the ship could not have docked ten metres away either.
+  assert.match(reason, /turned down 5 times running/i, "the trip's own failure survives");
+  assert.match(reason, /could not dock here either/i, "and the fallback says it tried");
+});
+
+test("tackled: the way out is fought against the ship HOLDING it, not the nearest one", () => {
+  // ⚠ THE LOSS THIS PARCEL EXISTS FOR, END TO END. The watch fired, the drones
+  // came home, the warp was refused — and the escape shot the nearest rat while
+  // the one with the point sat at 30 km untouched. `fightTheWayOut` needed
+  // nothing of its own to fix: it borrows `fight-the-rats` whole, so repairing
+  // the pick repaired the escape. This asserts that the borrowing is real.
+  const near = entity({ itemID: 6661, typeID: 30100, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5_000, y: 0, z: 0 } });
+  const holding = entity({ itemID: 6662, typeID: 30100, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 30_000, y: 0, z: 0 } });
+  const held = scriptTravelHome(
+    obs({
+      snapshot: snapshot([near, holding]),
+      travel: scrambled,
+      homeStationID: HOME,
+      weaponModuleIDs: [500],
+      // The server's own OnJamStart fold: THAT frigate is the one on us.
+      jammingSourceIDs: [6662],
+    }),
+    {},
+  );
+  assert.equal(held.phase, "Fighting free");
+  assert.ok(held.action.kind === "lock" && held.action.targetID === 6662, "the one whose death frees the ship");
+
+  // And with nothing on the wire it is the old behaviour, unchanged.
+  const blind = scriptTravelHome(
+    obs({ snapshot: snapshot([near, holding]), travel: scrambled, homeStationID: HOME, weaponModuleIDs: [500] }),
+    {},
+  );
+  assert.ok(blind.action.kind === "lock" && blind.action.targetID === 6661);
+});
+
 test("tackled: the escape is bounded — a trip that keeps failing eventually stops", () => {
   const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
   const spent = scriptTravelHome(
@@ -1254,9 +1429,9 @@ test("fight: target died -> next rat; grid clear -> recall drones, then done", (
   assert.ok(next.action.kind === "lock" && next.action.targetID === 6662);
 
   // All dead, drones out -> recall; drones home -> done.
-  const recall = fight(s, obs({ snapshot: snapshot([drone]), dronesOut: true }), {}, {});
+  const recall = fightUntilClear(fight, s, obs({ snapshot: snapshot([drone]), dronesOut: true }));
   assert.ok(recall.action.kind === "recallDrones");
-  const done = fight(s, obs({ snapshot: snapshot([]) }), {}, {});
+  const done = fightUntilClear(fight, s, obs({ snapshot: snapshot([]) }));
   assert.equal(done.outcome.kind, "done");
 });
 
@@ -1279,11 +1454,10 @@ test("fight: a rat beyond the hull's targeting range is not a target at all", ()
   // Only the far one left: nothing is reachable, so the block FINISHES rather
   // than locking-and-giving-up forever. As a watch response, that hands the ship
   // back to the step under it.
-  const unreachable = fight(
+  const unreachable = fightUntilClear(
+    fight,
     s,
     obs({ snapshot: snapshot([far]), weaponModuleIDs: [500], maxTargetRangeM: 30_000 }),
-    {},
-    {},
   );
   assert.equal(unreachable.outcome.kind, "done");
 });
@@ -2380,6 +2554,184 @@ test("fight: the player's own ladder is followed", () => {
   assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "battleships first, because that is what was asked");
 });
 
+// ── the rat's own dogma, and the live jam feed ───────────────────────────────
+//
+// ⚠ THE PARCEL A HULL PAID FOR. Live run, 2026-09-14: the armour watch fired at
+// its threshold and did everything right — drones home, aligned out, course set
+// — and the warp came back REFUSED, because a frigate had the ship scrammed.
+// The escape borrowed `fight-the-rats`, which is the correct answer in
+// principle, and `fight-the-rats` shot the NEAREST rat. The frigate with the
+// point on it was never touched, and the ship died forty seconds later killing
+// something whose death freed nothing.
+//
+// Two reads were missing from the pick, and the server had both of them:
+//
+//   `threatByTypeID` — the rat's OWN dogma. Every NPC's group name is an
+//   "Asteroid Serpentis Frigate", which the group classifier calls "other", so
+//   without the dogma the WHOLE grid ties and the player's target priority is
+//   decoration. That is a second real bug this fixes, for every ratting bot and
+//   not only for the escape.
+//
+//   `jammingSourceIDs` — the server naming, on this ship's own wire, the exact
+//   entities whose hostile modules are landing on it RIGHT NOW. Not a guess
+//   about a type: ground truth about this fight.
+
+const PLAIN_RAT_TYPE = 30100; // a rat whose dogma says it does nothing to us
+const SCRAM_RAT_TYPE = 30101; // its sibling, one attribute apart, that holds us
+// Same faction, same size, same words in the name bar — and the group name the
+// game gives both of them is one the player-hull classifier has never heard of.
+const RAT_GROUPS = {
+  [PLAIN_RAT_TYPE]: "Asteroid Serpentis Frigate",
+  [SCRAM_RAT_TYPE]: "Asteroid Serpentis Frigate",
+};
+const SCRAMMER: RatThreat = { scram: true, scramRangeM: 20_000, web: false, ewar: false };
+const HARMLESS: RatThreat = { scram: false, scramRangeM: null, web: false, ewar: false };
+
+/** A rat at a distance, hostile the way `hostileRows` reads hostility. */
+function rat(itemID: number, metres: number, typeID = PLAIN_RAT_TYPE): SpaceEntity {
+  return entity({ itemID, typeID, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: metres, y: 0, z: 0 } });
+}
+
+test("fight: the rat that is HOLDING the ship is primary over a nearer one", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const world = {
+    snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+    weaponModuleIDs: [500],
+    targetGroupNames: RAT_GROUPS,
+    threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+  } satisfies Partial<ScriptObservation>;
+
+  // Same type, same class, same sub-rank: distance alone decides, so the near
+  // one is primary. This is the pick that killed a ship.
+  const quiet = fight(step, obs(world), {}, {});
+  assert.ok(quiet.action.kind === "lock" && quiet.action.targetID === 6661);
+
+  // Now the server says the FAR one is the thing actually holding us.
+  const held = fight(step, obs({ ...world, jammingSourceIDs: [6662] }), {}, {});
+  assert.ok(held.action.kind === "lock" && held.action.targetID === 6662, "shoot what is holding the ship");
+});
+
+test("fight: with no dogma and no jam fold the pick is exactly the old nearest-first", () => {
+  // ⚠ THE REGRESSION GUARD FOR EVERY BOT ALREADY FLYING. Both new readers are
+  // three-state and both default to "nobody looked": an observation that never
+  // resolved a dogma map and never folded a jam push must collapse the ordering
+  // back to (class, distance) and pick byte-for-byte what it picked before.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const blind = fight(step, obs({ snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]), weaponModuleIDs: [500] }), {}, {});
+  assert.ok(blind.action.kind === "lock" && blind.action.targetID === 6661);
+
+  // An EMPTY jam fold is a different statement — "we looked, nothing is on us"
+  // — and it must not move the pick either.
+  const looked = fight(
+    step,
+    obs({ snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]), weaponModuleIDs: [500], jammingSourceIDs: [] }),
+    {},
+    {},
+  );
+  assert.ok(looked.action.kind === "lock" && looked.action.targetID === 6661);
+});
+
+test("fight: a rat whose dogma says it scrams outranks one that does not, same group and same distance", () => {
+  // The two rows are indistinguishable to every other read on the grid: same
+  // faction group name, same distance, and the harmless one is listed FIRST so
+  // a tie would keep it. Only attribute 504 separates them.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const grid = snapshot([rat(6661, 10_000, PLAIN_RAT_TYPE), rat(6662, 10_000, SCRAM_RAT_TYPE)]);
+
+  const withoutDogma = fight(step, obs({ snapshot: grid, weaponModuleIDs: [500], targetGroupNames: RAT_GROUPS }), {}, {});
+  assert.ok(withoutDogma.action.kind === "lock" && withoutDogma.action.targetID === 6661, "the group name cannot tell them apart");
+
+  const withDogma = fight(
+    step,
+    obs({
+      snapshot: grid,
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS, [SCRAM_RAT_TYPE]: SCRAMMER },
+    }),
+    {},
+    {},
+  );
+  assert.ok(withDogma.action.kind === "lock" && withDogma.action.targetID === 6662, "the scrammer dies first");
+});
+
+test("fight: a class the player left off is still shot — the ladder RANKS, it never filters", () => {
+  // ⚠ THE RULE THAT MUST SURVIVE THE DOGMA READER. Now that a rat can actually
+  // be classified, a priority list that omits its class could plausibly be read
+  // as "do not shoot that" — and a combat block that refused to shoot would sit
+  // there being killed by the only thing on the grid. A list the scrammer is
+  // absent from ranks it LAST, never out.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const step = {
+    id: "f",
+    kind: "macro",
+    macro: "fight-the-rats",
+    args: { targets: { kind: "targetList", classes: ["logi"] } },
+  } as const;
+  const tick = fight(
+    step,
+    obs({
+      snapshot: snapshot([rat(6662, 10_000, SCRAM_RAT_TYPE)]),
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [SCRAM_RAT_TYPE]: SCRAMMER },
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6662, "nothing on the list, so the tackle is still shot");
+});
+
+test("follow: the fleet's TAG still outranks the live jam feed", () => {
+  // ⚠ AUTHORITY, AND IT IS THE ONE PRECEDENCE THE JAM FOLD DOES NOT WIN. A jam
+  // source is a fact about the grid; a tag is a fleet commander LOOKING at the
+  // fight and saying "this one, now", and the server proves that authorship
+  // (setFleetTargetTag refuses any writer who is not a commander). So the human
+  // wins — the tagged near rat is locked even though the server says the far one
+  // is what is holding this ship.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const tick = fight(
+    fightStep("follow"),
+    obs({
+      snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+      weaponModuleIDs: [500],
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+      fleetTargetTags: new Map([[6661, "A"]]),
+      jammingSourceIDs: [6662],
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "lock" && tick.action.targetID === 6661, "the FC's tag, not the jam feed");
+  assert.match(tick.why, /fleet called/i);
+});
+
+test("fleet-tag-target: the tag marks what the fight block would shoot, jam feed included", () => {
+  // Two ladders in one squad is one ladder too many: whatever this block writes
+  // is read straight back by every follower's `calledByTag`, where a tag
+  // outranks the jam fold. A tag block still picking nearest-first would hand
+  // the squad a commander-authority instruction to shoot the wrong rat.
+  const tagBlock = SCRIPT_MACROS["fleet-tag-target"]!;
+  const step = { id: "t", kind: "macro", macro: "fleet-tag-target", args: {} } as const;
+  const tick = tagBlock(
+    step,
+    obs({
+      snapshot: snapshot([rat(6661, 5_000), rat(6662, 30_000)]),
+      canTag: true,
+      targetGroupNames: RAT_GROUPS,
+      threatByTypeID: { [PLAIN_RAT_TYPE]: HARMLESS },
+      jammingSourceIDs: [6662],
+    }),
+    {},
+    {},
+  );
+  assert.ok(tick.action.kind === "setFleetTargetTag" && tick.action.targetID === 6662);
+});
+
 // ── flying with the fleet (the shared squad board) ───────────────────────────
 //
 // `squad: follow` shoots what the fleet called WHEN that ship is here; `squad:
@@ -2451,11 +2803,11 @@ test("call: the fleet is told once per primary, then the fight goes on", () => {
 
 test("call: the call is stood down when the grid clears", () => {
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
-  const cleared = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: 6661 }, {});
+  const cleared = fightUntilClear(fight, fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: 6661 });
   assert.ok(cleared.action.kind === "callPrimary" && cleared.action.targetID === null);
 
   // …and once it is down, the block finishes as it always did.
-  const done = fight(fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: null }, {});
+  const done = fightUntilClear(fight, fightStep("call"), obs({ snapshot: snapshot([]) }), { calledTargetID: null });
   assert.equal(done.outcome.kind, "done");
 });
 
@@ -2607,4 +2959,574 @@ test("off: a block not set to follow ignores tags, broadcasts, and the board ali
     tick.action.kind === "activate" && tick.action.targetID === 6661,
     "not following — the fleet's tag, broadcast, and board call are all ignored",
   );
+});
+
+// ── §13: effort without progress — giving up on a site ───────────────────────
+//
+// The loop under test: the bot warps into a den it cannot beat, fights until a
+// watch pulls it home, repairs PERFECTLY, comes back to the same den, and does
+// it again until somebody notices. `MAX_RECOVER_TRIPS` cannot catch it, because
+// `releaseRecoverTrips` drops its whole tally the moment the watched condition
+// reads not-met — a repair that WORKS resets the cap, every one of these repairs
+// works, and the thing that is broken is not the ship.
+//
+// The arithmetic is nav/siteProgress.ts and is tested there. These pin the
+// WIRING: what the fight block feeds it, what it does with the answer, and how
+// the anomaly block counts arrivals and stops touring dens it has given up on.
+// The first test is the most important one in the group — a bot that is winning
+// must behave exactly as it did before any of this existed.
+
+const GIVE_UP_STEP: MacroStep = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} };
+
+// ─── Arriving, when the macro is never told the ship warped ──────────────────
+//
+// ⚠ THE REGRESSION THAT COST A LIVE RUN. `decideScriptAction` holds every macro
+// while the ship is in warp, so a block is NOT CALLED AT ALL between the tick it
+// issues a warp and the tick the ship lands. These blocks used to decide they
+// had arrived by watching for `inWarp === true`, which they can therefore never
+// see: caught live on 2026-09-14 as a ratting bot that warped into a den, sat
+// there with its guns off reporting "the warp never started", took the damage,
+// went home on a watch, repaired, and did it again — the fight block after it
+// never once ran. The fix is `obs.completedWarps`, which the OBSERVATION counts
+// because the observation is read on every tick and a macro is not.
+//
+// The drive loop below is the guard's behaviour, and it is the whole point of
+// the test: while `inWarp` is true the macro is SKIPPED, exactly as the runner
+// skips it.
+
+test("⚠ warp-to-anomaly: it arrives even though it is never called during the warp", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  let warps = 0;
+  const fly = (inWarp: boolean): MacroTick | null => {
+    if (inWarp) {
+      return null; // the runner's in-warp guard: the macro is not called
+    }
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: warps }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+
+  const issued = fly(false);
+  assert.equal(issued?.action.kind, "warpScan", "it issues the warp");
+
+  // The flight: the macro is skipped for every tick of it, and the warp ends.
+  for (let i = 0; i < 12; i += 1) {
+    assert.equal(fly(true), null);
+  }
+  warps += 1;
+
+  const landed = fly(false);
+  assert.deepEqual(landed?.outcome, { kind: "done" }, "the tick after the warp ends is an arrival");
+  assert.equal(landed?.phase, "Arrived");
+});
+
+test("⚠ warp-to-anomaly: a warp that truly never starts is still reported, not waited on for ever", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  const still = () => {
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: 7 }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+  assert.equal(still().action.kind, "warpScan");
+  let last = still();
+  for (let i = 0; i < 20 && last.outcome.kind === "acting"; i += 1) {
+    last = still();
+  }
+  assert.equal(last.outcome.kind, "blocked", "the count never moved, so the warp never started");
+});
+
+test("an unreadable warp count is never an arrival — the block waits its budget out", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  let mem: MacroMemory = {};
+  const blind = () => {
+    const r = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], inWarp: false, completedWarps: null }), mem, {});
+    mem = r.nextMem;
+    return r;
+  };
+  assert.equal(blind().action.kind, "warpScan");
+  const next = blind();
+  assert.equal(next.outcome.kind, "acting", "a null count decides nothing");
+  assert.notEqual(next.phase, "Arrived");
+});
+
+// ─── A refused warp to a site is not a slow one ──────────────────────────────
+//
+// Four pilots parked INSIDE the den they had been stranded in each started a
+// run, and each stopped at this block: "warp to the den" came back
+// WARP_DISTANCE_TOO_CLOSE — already there — and the block, which never looked at
+// what came back, waited out its budget and reported that the warp never
+// started. They sat docked while rats floated in front of them.
+
+/** The ledger row the runner leaves after the server turns a site warp down. */
+const warpRefused = (words: string) => [{
+  key: "w:warpScan:-",
+  count: 1,
+  firstAt: 0,
+  lastAt: 0,
+  words,
+  kind: "refused" as const,
+}];
+
+const CANNOT_WARP = "You cannot warp there right now.";
+
+test("warp-to-anomaly: refused with rats already on the grid is an ARRIVAL, not a stop", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  assert.equal(issued.action.kind, "warpScan", "it still issues the warp");
+
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({
+      anomalies: [den("QEE-288")],
+      completedWarps: 3,          // no warp ever happened
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: true,        // ...because the den is already underfoot
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.deepEqual(out.outcome, { kind: "done" }, "standing in the den is arriving at it");
+  assert.equal(out.phase, "Arrived");
+});
+
+test("warp-to-anomaly: refused with nothing on the grid stops, carrying the SERVER's words", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({
+      anomalies: [den("QEE-288")],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: false,
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked");
+  const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
+  assert.match(reason, /cannot warp there right now/i, "what the server said must survive");
+  assert.doesNotMatch(reason, /never started/i, "it was refused, not ignored — do not send the reader at the ship");
+});
+
+test("warp-to-anomaly: a refusal is read on the NEXT tick, not after the whole wait budget", () => {
+  // The point of reading the ledger at all: the answer was already on the wire.
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  const out = anomMacro(
+    ANOM_STEP,
+    obs({ anomalies: [den("QEE-288")], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), hostileOnGrid: null }),
+    issued.nextMem,
+    {},
+  );
+  assert.notEqual(out.outcome.kind, "acting", "one tick, not WARP_START_WAIT_TICKS of them");
+});
+
+test("warp-to-ore-anomaly: cannot tell it is standing in an ore site, so it never claims to be", () => {
+  // ⚠ Rock on the grid is NOT evidence of an ore site — a plain belt looks the
+  // same from here. A reading the block cannot make is one it must not act on,
+  // however convenient the shortcut would be.
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [rocks("ABC-123")], completedWarps: 3 }), {}, {});
+
+  const out = oreMacro(
+    ORE_ANOM_STEP,
+    obs({
+      anomalies: [rocks("ABC-123")],
+      completedWarps: 3,
+      refusals: warpRefused(CANNOT_WARP),
+      hostileOnGrid: true,   // even this must not be read as "in the ore site"
+    }),
+    issued.nextMem,
+    {},
+  );
+
+  assert.equal(out.outcome.kind, "blocked", "no shortcut without a reading to justify it");
+});
+
+/**
+ * Hand `fight-the-rats` the same empty-grid answer until it believes it.
+ *
+ * ⚠ AN EMPTY GRID IS NOT BELIEVED ON THE FIRST READ. The tick just after a warp
+ * lands reads a grid that has not populated yet, and believing that one is what
+ * sent a live bot through three dens in ninety seconds calling each of them
+ * clear while the rats in them shot its shields off. Tests that want the FINISH
+ * have to pay the same confirmation a real arrival does.
+ */
+function fightUntilClear(
+  fight: (typeof SCRIPT_MACROS)["fight-the-rats"],
+  step: MacroStep,
+  observation: ScriptObservation,
+  startMem: MacroMemory = {},
+  board: ScriptBoard = {},
+): MacroTick {
+  let mem = startMem;
+  let last = fight!(step, observation, mem, board);
+  for (let read = 1; read < 3; read += 1) {
+    mem = last.nextMem;
+    last = fight!(step, observation, mem, board);
+  }
+  return last;
+}
+
+const ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-anomaly", args: {} } as MacroStep;
+const ORE_ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-ore-anomaly", args: {} } as MacroStep;
+const den = (label: string) => ({ label, kind: "combat" as const });
+const rocks = (label: string) => ({ label, kind: "ore" as const });
+
+/** The board a run would be carrying after `visits` arrivals at one label. */
+function ledgerBoard(label: string, visits: number): ScriptBoard {
+  let ledger = emptyLedger();
+  for (let i = 0; i < visits; i += 1) {
+    ledger = enterSite(ledger, label);
+  }
+  return encodeLedger(ledger);
+}
+
+/** One rat at `distanceM` with `health` in each layer, and one combat drone out.
+ *  The gun is already running, so the ladder settles on its "holding it" rung. */
+function ratGrid(over: { health?: number; distanceM?: number } = {}): SpaceSnapshot {
+  const rat = entity({
+    itemID: 6661,
+    kind: "ship",
+    isNpc: true,
+    npcEntityType: "npc",
+    position: { x: over.distanceM ?? 5000, y: 0, z: 0 },
+    shieldRatio: over.health ?? 1,
+    armorRatio: 1,
+    hullRatio: 1,
+  });
+  const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  return snapshot([rat, drone], { activeModuleIDs: [500] });
+}
+
+/** Drive fight-the-rats for `ticks` ticks, threading BOTH its step memory and
+ *  the run board the way the runner does — the ledger only works if the board
+ *  it publishes comes back to it on the next tick. */
+function runFight(
+  world: (i: number) => ScriptObservation,
+  ticks: number,
+  board: ScriptBoard = {},
+): { readonly out: readonly MacroTick[]; readonly board: ScriptBoard } {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const out: MacroTick[] = [];
+  let mem: MacroMemory = {};
+  let carried: ScriptBoard = board;
+  for (let i = 0; i < ticks; i += 1) {
+    const t = fight(GIVE_UP_STEP, world(i), mem, carried);
+    out.push(t);
+    mem = t.nextMem;
+    carried = { ...carried, ...(t.boardPatch ?? {}) };
+  }
+  return { out, board: carried };
+}
+
+/** Everything about a tick EXCEPT the ledger's own board write. */
+const fightShape = (t: MacroTick) => ({
+  action: t.action,
+  why: t.why,
+  phase: t.phase,
+  armed: t.armed,
+  outcome: t.outcome,
+  nextMem: t.nextMem,
+});
+
+const dronesOnIt = (over: Partial<ScriptObservation> = {}): ScriptObservation =>
+  obs({
+    snapshot: ratGrid(),
+    dronesOut: true,
+    combatDroneIDs: [111],
+    lockedTargetIDs: [6661],
+    weaponModuleIDs: [500],
+    droneControlRangeM: 45_000,
+    ...over,
+  });
+
+test("fight: a bot that is WINNING is untouched — the ledger only ever speaks when nothing is dying", () => {
+  // The rat's health bar moves down a hundredth of a layer per tick: slow, but
+  // moving, which is the whole test the ledger applies ("not going down AT ALL",
+  // never "not dead yet"). A block that abandoned this would abandon every
+  // battlecruiser rat in the game.
+  const winning = (i: number) => dronesOnIt({ snapshot: ratGrid({ health: Math.max(0.05, 1 - i * 0.01) }) });
+  const ticksRun = STALL_TICKS * 3;
+
+  // Run it with NO site on the board (a belt spawn) and with a den's label on
+  // it: the two have to be the same sequence, action for action and word for
+  // word. Nothing about a fight that is going well may depend on the ledger.
+  const bare = runFight(winning, ticksRun);
+  const atADen = runFight(winning, ticksRun, ledgerBoard("QEE-288", 1));
+  assert.deepEqual(bare.out.map(fightShape), atADen.out.map(fightShape));
+
+  // …and it is the fight it always was: lock it, set the drones on it, hold it.
+  assert.equal(bare.out[0]!.action.kind, "lock");
+  assert.equal(bare.out[1]!.action.kind, "engageDrones");
+  for (const t of bare.out.slice(2)) {
+    assert.equal(t.action.kind, "wait");
+    assert.equal(t.outcome.kind, "acting");
+    assert.match(t.why, /Fighting it/, "no verdict, no leaving, no new words");
+  }
+  assert.equal(atADen.board[LEDGER_KEYS.stall], 0, "health going down at all keeps the counter pinned at zero");
+});
+
+test("fight: nothing dying with the drones ON it -> leave the den, drones first, reason in the readout", () => {
+  const run = runFight(() => dronesOnIt(), STALL_TICKS + 5, ledgerBoard("QEE-288", 1));
+  const leaving = run.out.findIndex((t) => t.action.kind === "recallDrones");
+
+  // ⚠ THE BUDGET IS APPLYING TICKS, NOT ELAPSED ONES. The first tick locks and
+  // the second orders the drones; neither has applied any damage, so the counter
+  // starts on the third and the verdict lands exactly STALL_TICKS later.
+  assert.equal(leaving, STALL_TICKS + 1, "not one tick sooner than the drones earned");
+  assert.match(run.out[leaving]!.why, /Nothing here was dying/, "WHICH evidence fired, in the player's words");
+  assert.match(run.out[leaving]!.why, /QEE-288/, "against the label the anomaly block published, not 'this den'");
+  // ⚠ It must not pause the run: one bad den is not a broken bot, and the block
+  // that decides the whole SYSTEM is finished is warp-to-anomaly.
+  assert.notEqual(run.out[leaving]!.outcome.kind, "blocked");
+
+  // With the drones home it finishes the way a cleared grid finishes — even
+  // though the rat is still very much alive on the grid.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const rat = entity({
+    itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc",
+    position: { x: 5000, y: 0, z: 0 }, shieldRatio: 1, armorRatio: 1, hullRatio: 1,
+  });
+  const home = fight(
+    GIVE_UP_STEP,
+    obs({ snapshot: snapshot([rat]), weaponModuleIDs: [500], lockedTargetIDs: [6661], droneControlRangeM: 45_000 }),
+    run.out[leaving]!.nextMem,
+    run.board,
+  );
+  assert.equal(home.outcome.kind, "done");
+  assert.equal(home.action.kind, "wait", "nothing left in space to call in");
+});
+
+test("⚠ fight: the stall counter runs ONLY while the drones are on the primary, locked and inside their leash", () => {
+  const ticksRun = STALL_TICKS * 3;
+  const site = () => ledgerBoard("QEE-288", 1);
+  const gave = (run: { readonly out: readonly MacroTick[] }) =>
+    run.out.some((t) => t.action.kind === "recallDrones" || t.outcome.kind === "done");
+
+  // (a) A GUN BOAT. Guns are never counted: this block cannot see a turret's
+  //     optimal, its falloff, its tracking, or an empty charge bay, so the only
+  //     honest thing it could say about one is "I pressed the button".
+  const bareRat = entity({
+    itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc",
+    position: { x: 5000, y: 0, z: 0 }, shieldRatio: 1, armorRatio: 1, hullRatio: 1,
+  });
+  const guns = runFight(
+    () => obs({ snapshot: snapshot([bareRat], { activeModuleIDs: [500] }), lockedTargetIDs: [6661], weaponModuleIDs: [500] }),
+    ticksRun,
+    site(),
+  );
+  assert.equal(guns.board[LEDGER_KEYS.stall], 0);
+  assert.ok(!gave(guns), "a gun boat never blames the den for what the block cannot measure");
+
+  // (b) THE RAT IS OUTSIDE THE DRONE LEASH. fight-the-rats has no range control
+  //     at all, so this is our own position and never the site's difficulty —
+  //     and a pilot told "this den is too hard" never goes looking for the
+  //     drones that were sitting 60 km out doing nothing.
+  const far = runFight(() => dronesOnIt({ snapshot: ratGrid({ distanceM: 60_000 }) }), ticksRun, site());
+  assert.equal(far.board[LEDGER_KEYS.stall], 0);
+  assert.ok(!gave(far));
+
+  // (c) NOTHING IS LOCKED. Waiting on a lock is our end of the problem too.
+  const unlocked = runFight(() => dronesOnIt({ lockedTargetIDs: [] }), ticksRun, site());
+  assert.equal(unlocked.board[LEDGER_KEYS.stall], 0);
+  assert.ok(!gave(unlocked));
+
+  // (d) THE DRONES ARE IN THE BAY. Nothing is being applied by a flight that
+  //     has not launched, however long the ship sits there.
+  const inTheBay = runFight(
+    () => obs({ snapshot: snapshot([bareRat], { activeModuleIDs: [500] }), combatDroneBayItemIDs: [111], droneBayItemIDs: [111], lockedTargetIDs: [6661], weaponModuleIDs: [500] }),
+    ticksRun,
+    site(),
+  );
+  assert.equal(inTheBay.board[LEDGER_KEYS.stall], 0);
+});
+
+test("⚠ fight: an unreadable drone leash is read as the 20 km no-skills base, never as infinity", () => {
+  // Control range is skill-derived and rides a fitting read a bot run does not
+  // force, so null is the COMMON case. Guessing LOW only ever refuses to count
+  // ticks; guessing high would count every long-range tick as damage going in.
+  const at30km = (control: number | null) => () =>
+    dronesOnIt({ snapshot: ratGrid({ distanceM: 30_000 }), droneControlRangeM: control });
+  const guessed = runFight(at30km(null), STALL_TICKS * 2, ledgerBoard("QEE-288", 1));
+  assert.equal(guessed.board[LEDGER_KEYS.stall], 0, "30 km is outside the guessed 20 km leash — no evidence either way");
+  const known = runFight(at30km(45_000), STALL_TICKS * 2, ledgerBoard("QEE-288", 1));
+  assert.equal(known.board[LEDGER_KEYS.stall], STALL_TICKS, "a leash that READS 45 km puts the rat well inside it");
+});
+
+test("fight: a den that has sent the ship home its allowance of times is left on arrival", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const board = ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1);
+  const arrival = fight(GIVE_UP_STEP, dronesOnIt({ lockedTargetIDs: [] }), {}, board);
+  assert.equal(arrival.action.kind, "recallDrones", "drones first — the block never comes to rest leaving them in space");
+  assert.match(arrival.why, /third time/i, "the OTHER evidence, and a different sentence for it");
+  assert.match(arrival.why, /QEE-288/);
+  assert.notEqual(arrival.outcome.kind, "blocked");
+  // ⚠ THE VERDICT LIVES ON THE BOARD AND NOWHERE ELSE. Step memory is wiped
+  // every time the step is left, so a budget kept there would hand a failing den
+  // a fresh allowance on every lap — this codebase has paid for that lesson once
+  // already (227 refusals in repeating bursts of five).
+  assert.ok(Object.keys(arrival.nextMem).every((key) => !key.startsWith("siteProgress")));
+});
+
+test("fight: a den the bot keeps CLEARING is never given up on, however many times it is flown to", () => {
+  // ⚠ THE TALLY COUNTS CONSECUTIVE BAD VISITS, NOT ARRIVALS. §13's words are
+  // "the same site keeps SENDING US HOME", and the two readings differ in
+  // exactly the case a working bot lives in: a visit that ended with the den
+  // CLEARED. Counting arrivals would retire the only den in a system from a bot
+  // that was farming it happily — a bot that stops working, which is the mirror
+  // image of the bug this whole feature exists to fix.
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const sites = [den("QEE-288")];
+  let board: ScriptBoard = {};
+
+  for (let visit = 1; visit <= MAX_SITE_RETURNS + 2; visit += 1) {
+    const go = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+    assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288", `visit ${visit} is still flown to`);
+    board = { ...board, ...(go.boardPatch ?? {}) };
+    assert.equal(board[LEDGER_KEYS.sites], "QEE-288:1", `visit ${visit} arrives with a clean sheet`);
+
+    // The den dies: an empty grid with the drones aboard is the block's own
+    // "I finished this site", and the only success it is able to observe.
+    const cleared = fightUntilClear(fight, GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, board);
+    assert.equal(cleared.outcome.kind, "done", `visit ${visit} clears the den`);
+    assert.equal(cleared.why, "The grid is clear.", "and it finishes the way it always did");
+    board = { ...board, ...(cleared.boardPatch ?? {}) };
+    assert.equal(board[LEDGER_KEYS.sites], "", `visit ${visit}: a cleared den is held against nobody`);
+  }
+});
+
+test("fight: clears buy no extra allowance — three CONSECUTIVE bad visits still end the den", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const sites = [den("QEE-288")];
+  // A den cleared twice, and then it stops dying. The two clears are spent
+  // history: the count that matters starts again at the first bad visit.
+  let board: ScriptBoard = {};
+  for (let good = 0; good < 2; good += 1) {
+    board = { ...board, ...(anom(ANOM_STEP, obs({ anomalies: sites }), {}, board).boardPatch ?? {}) };
+    board = { ...board, ...(fight(GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, board).boardPatch ?? {}) };
+  }
+
+  let gaveUp: MacroTick | null = null;
+  for (let bad = 1; bad <= MAX_SITE_RETURNS + 1; bad += 1) {
+    const go = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+    assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288", `bad visit ${bad} is still flown to`);
+    board = { ...board, ...(go.boardPatch ?? {}) };
+    // Driven off: the ship leaves with the rats still on the grid, so nothing
+    // about this visit says the den was winnable.
+    const t = fight(GIVE_UP_STEP, dronesOnIt({ lockedTargetIDs: [] }), {}, board);
+    board = { ...board, ...(t.boardPatch ?? {}) };
+    if (/third time/i.test(t.why)) {
+      gaveUp = t;
+    }
+  }
+  assert.ok(gaveUp !== null, "the third consecutive bad visit is the one that gives up");
+  assert.equal(gaveUp!.action.kind, "recallDrones");
+  const stop = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+  assert.equal(stop.outcome.kind, "blocked", "and the tour stops touring it");
+});
+
+test("⚠ fight: a grid that clears with a stall already pending -> the clear wins, and the den keeps no tally", () => {
+  // The interaction worth pinning: the budget has run out and the block is on
+  // its way out of the den when the last rat finally dies. An empty grid is the
+  // strongest evidence obtainable that the site was winnable, so it has to
+  // outrank the verdict — and it does so twice over, because siteProgress reads
+  // the hostile count going down as progress AND the ladder tests "grid clear"
+  // before it tests the verdict.
+  const stalled = runFight(() => dronesOnIt(), STALL_TICKS + 5, ledgerBoard("QEE-288", 1));
+  assert.equal(stalled.board[LEDGER_KEYS.stall], STALL_TICKS, "the stall really is pending");
+
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const clear = fightUntilClear(fight, GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, stalled.board);
+  assert.equal(clear.outcome.kind, "done");
+  assert.equal(clear.why, "The grid is clear.", "not a leaving sentence — the bot won");
+  const after: ScriptBoard = { ...stalled.board, ...clear.boardPatch };
+  assert.equal(after[LEDGER_KEYS.sites], "", "the visits that led up to a clear are not a pattern");
+  assert.equal(after[LEDGER_KEYS.stall], 0, "and no spent stall counter leaves the den with the ship");
+});
+
+test("warp-to-anomaly: the arrival is counted on the BOARD, where a repair trip cannot wipe it", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const go = anom(ANOM_STEP, obs({ anomalies: [den("QEE-288"), den("ABC-123")] }), {}, {});
+  assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
+  assert.equal(go.boardPatch?.["anomsVisited"], "QEE-288", "the lap list still works exactly as it always did");
+  assert.equal(go.boardPatch?.[LEDGER_KEYS.sites], "QEE-288:1", "and the arrival is counted beside it");
+  assert.equal(go.boardPatch?.[LEDGER_KEYS.label], "QEE-288", "which is also how the fight block learns where it is");
+  // ⚠ THE COUNT BELONGS TO THIS BLOCK, NOT THE FIGHT BLOCK. After a
+  // dock-and-repair the runner resumes at the very step it was interrupted on
+  // and carries macroMem across, so an "already counted this visit" flag kept in
+  // the fight block's step memory would SURVIVE the round trip and the return
+  // would never be counted — zero returns, for precisely the loop this exists
+  // to catch. This block issued the warp, so it knows an arrival happened.
+  assert.ok(Object.keys(go.nextMem).every((key) => !key.startsWith("siteProgress")));
+});
+
+test("warp-to-anomaly: a den the run has given up on is skipped the way a visited one is", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const t = anom(
+    ANOM_STEP,
+    obs({ anomalies: [den("QEE-288"), den("ABC-123")] }),
+    {},
+    ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1),
+  );
+  assert.ok(t.action.kind === "warpScan" && t.action.target === "ABC-123");
+});
+
+test("⚠ warp-to-anomaly: the lap restart wipes the VISITED list and never the given-up one", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const sites = [den("QEE-288"), den("ABC-123")];
+  // QEE-288 has beaten the bot its allowance of times; both dens have been
+  // worked on this lap, so the tour restarts.
+  const board: ScriptBoard = {
+    ...ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1),
+    anomsVisited: "QEE-288,ABC-123",
+  };
+  const lap = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+  assert.ok(lap.action.kind === "warpScan" && lap.action.target === "ABC-123", "the new lap starts at the den that has NOT beaten it");
+  assert.equal(lap.boardPatch?.["anomsVisited"], "ABC-123", "the lap list is replaced, as it always was");
+  // The whole point: the count that says "this den has beaten me" survives the
+  // wipe. §13 calls a lap restart that forgets it the same loop closing again
+  // with extra steps, and it is right — the tour would fly straight back into
+  // the den it walked out of an hour ago.
+  assert.match(String(lap.boardPatch?.[LEDGER_KEYS.sites]), /QEE-288:3/);
+  const after: ScriptBoard = { ...board, ...lap.boardPatch };
+  const nextLap = anom(ANOM_STEP, obs({ anomalies: sites }), {}, after);
+  assert.ok(nextLap.action.kind === "warpScan" && nextLap.action.target === "ABC-123", "still skipped on the lap after that");
+});
+
+test("warp-to-anomaly: every den given up on -> blocked with a sentence a player can act on", () => {
+  const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const t = anom(ANOM_STEP, obs({ anomalies: [den("QEE-288")] }), {}, ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1));
+  assert.equal(t.outcome.kind, "blocked", "not a silent tour of dens it has already given up on");
+  const reason = t.outcome.kind === "blocked" ? t.outcome.reason : "";
+  assert.match(reason, /given up on/);
+  assert.match(reason, /Move the bot to another system/, "something the player can actually do");
+  // …and it is NOT the "there is nothing of this kind here" sentence: that is a
+  // different problem with a different fix, and saying the same words for both
+  // leaves the player unable to choose between them.
+  assert.ok(!reason.includes("not one of them is a den"));
+});
+
+test("warp-to-ore-anomaly: the ore tour never gives up on a site — the miner decides a cluster is empty", () => {
+  // ⚠ The ledger counts ARRIVALS and abandons a label on its third one, whoever
+  // made them. Mine-at-a-belt never fights and never feeds it, so an ore tour
+  // that kept the ledger would retire perfectly good clusters purely for having
+  // been flown to three times — and a completed lap starting another one is that
+  // block's whole documented behaviour.
+  const ore = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  let board: ScriptBoard = {};
+  for (let lap = 0; lap < MAX_SITE_RETURNS + 3; lap += 1) {
+    const t = ore(ORE_ANOM_STEP, obs({ anomalies: [rocks("ORE-111")] }), {}, board);
+    assert.ok(t.action.kind === "warpScan" && t.action.target === "ORE-111", `lap ${lap} still flies to the ore site`);
+    board = { ...board, ...(t.boardPatch ?? {}) };
+  }
+  assert.equal(board[LEDGER_KEYS.sites], undefined, "the ore tour writes no site ledger at all");
 });

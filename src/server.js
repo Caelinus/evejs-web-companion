@@ -19087,6 +19087,82 @@ app.get("/api/types/cycle-times", requireAuth, async (req, res, next) => {
 });
 
 /**
+ * NPC THREAT DOGMA — the static half of the drone-boat block's target priority.
+ *
+ * POST /api/types/dogma takes `{ typeIDs, attributeIDs }` and answers the RAW
+ * attribute values each of those types carries. The drone-boat combat block
+ * (docs/drone-boat-block-spec.md section 6) has to know, for a rat it can see
+ * on the grid, whether that rat scrams (504 `entityWarpScrambleChance`, with
+ * 103 `warpScrambleRange` as its reach), webs (20 `speedFactor`, negative), or
+ * runs ewar (931 neut / 932 damp / 935 paint) — and every one of those numbers
+ * is already sitting in the SDE's typeDogma table this BFF reads for charges.
+ *
+ * ZERO BRIDGE CALLS, no live session, no upstream server change. Like
+ * /api/names, /api/ore/families and /api/types/cycle-times this is read-only
+ * reference data that cannot vary by player, so the grid's NEW types cost one
+ * round trip each and the caller caches everything it has already seen.
+ *
+ * ⚠ IT RETURNS NUMBERS AND NOTHING ELSE. No `isTackle`, no class, no ranking.
+ * The classifier is one pure browser module (§6's table), and a second opinion
+ * living here would be a second thing to keep in step with that table. The
+ * route is deliberately dumb, and it stays that way.
+ *
+ * ⚠ A POST where its twin /api/types/cycle-times is a GET, only because the
+ * request is TWO lists: a grid's worth of typeIDs crossed with the attribute
+ * set overflows a sane query string. Nothing here mutates anything.
+ */
+// Read off the REAL module, not the injectable `staticData`, so the cap the
+// route enforces is a fixed number a test double cannot move.
+const TYPE_DOGMA_TYPE_LIMIT = staticDataModule.TYPE_ATTRIBUTES_MAX_TYPES;
+const TYPE_DOGMA_ATTRIBUTE_LIMIT = staticDataModule.TYPE_ATTRIBUTES_MAX_ATTRIBUTES;
+
+app.post("/api/types/dogma", requireAuth, async (req, res, next) => {
+  const body = req.body || {};
+  const { typeIDs, attributeIDs } = body;
+  if (!Array.isArray(typeIDs) || !Array.isArray(attributeIDs)) {
+    res.status(400).json({
+      ok: false,
+      error: "INVALID_REQUEST",
+      message: "typeIDs and attributeIDs must both be arrays.",
+    });
+    return;
+  }
+  // ⚠ REJECTED, NOT TRUNCATED — the opposite of what /api/names does with an
+  // oversized batch, and on purpose. A NAME that falls past a cap shows up as a
+  // raw id on screen and the player shrugs; a TYPE that falls past this one
+  // comes back carrying no attributes at all, which is exactly what a type with
+  // no threat attributes looks like. The classifier would read it as "harmless"
+  // and the block would park a drone boat next to a scram. A short answer here
+  // cannot be told from a true one, so it must never be sent.
+  if (typeIDs.length > TYPE_DOGMA_TYPE_LIMIT || attributeIDs.length > TYPE_DOGMA_ATTRIBUTE_LIMIT) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_IDS",
+      message:
+        `At most ${TYPE_DOGMA_TYPE_LIMIT} typeIDs and ` +
+        `${TYPE_DOGMA_ATTRIBUTE_LIMIT} attributeIDs per request.`,
+    });
+    return;
+  }
+  try {
+    const result = staticData.readTypeAttributes({ typeIDs, attributeIDs });
+    res.json({
+      ok: true,
+      source: "static-data",
+      count: Object.keys(result.attributes).length,
+      limit: TYPE_DOGMA_TYPE_LIMIT,
+      attributeLimit: TYPE_DOGMA_ATTRIBUTE_LIMIT,
+      // Keyed typeID -> attributeID -> value. An id the tables do not know is
+      // present with an EMPTY object, never missing and never null, so the
+      // caller caches "asked, got nothing" the way it does for /api/names.
+      attributes: result.attributes,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * R15 industry RECIPES — the static half of the industry panel.
  *
  * Every NAME the panel needs is already reachable through /api/names: a

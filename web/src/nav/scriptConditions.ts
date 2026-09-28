@@ -31,6 +31,8 @@ import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import type { RefusalRecord } from "./refusalLedger.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { RatThreat } from "./ratThreat.ts";
+import type { PropulsionModule } from "./propulsion.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -128,6 +130,27 @@ export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
   readonly inWarp: boolean | null;
+  /**
+   * How many warps this pilot has COMPLETED since the run's app session began —
+   * monotonic, bumped on the tick a warp ends.
+   *
+   * ⚠ READ IT INSTEAD OF WATCHING FOR `inWarp`, because a macro cannot watch for
+   * `inWarp`. The orchestrator holds every watch and every macro while the ship
+   * is warping (`decideScriptAction`'s guard returns before the program), so no
+   * macro is ever called on a tick where `inWarp` is true. Three blocks tried
+   * anyway and each one silently lost its arrival check the day that guard
+   * landed: they issued a warp, sat out the flight unasked, resumed having
+   * witnessed nothing, and reported that the warp had never started while the
+   * ship sat on the destination grid. A block records this count when it issues
+   * its warp and compares it afterwards; a count that has gone up is an arrival,
+   * and one that has not, after a generous wait, is a warp that truly never
+   * began. Those two were indistinguishable before.
+   *
+   * Optional and nullable like every other read here: `null`/absent is "nobody
+   * counted", and a block must fall back to its own wait budget rather than
+   * treat it as zero.
+   */
+  readonly completedWarps?: number | null;
   readonly shieldRatio: number | null;
   readonly armorRatio: number | null;
   readonly hullRatio: number | null;
@@ -401,6 +424,152 @@ export interface ScriptObservation {
       readonly expiresAtMs: number | null;
     }[];
   }[] | null;
+  // ── The drone-boat block's reads (docs/drone-boat-block-spec.md §8). Every
+  //    one of them is OPTIONAL, because this type is built in two places (the
+  //    script runner's `observe` and the fleet companion's) and the pure tests
+  //    construct partial observations by hand — an absent field is "nobody
+  //    looked", which is the same answer as `null` to every decider and must
+  //    never be read as a fact. Nothing in `scriptMacros.ts` reads these yet;
+  //    the block that does arrives in a later parcel.
+  /**
+   * How far this ship's DRONES still answer, in metres — attribute 458, off the
+   * fit's own `stats.bays.droneControlRange`. The stand-off band's drone leash
+   * (nav/kiteBand.ts).
+   *
+   * ⚠ NULL IS THE COMMON CASE AND IT IS NOT A ZERO. Control range is
+   * SKILL-derived and is not on a hull's own SDE row, so an unknown `Stat` has
+   * to arrive here as `null` — a 0 would tell `kiteBand` the drones answer
+   * nowhere and collapse the ceiling onto the hull. Null means "we could not
+   * read your drone leash", which is exactly the case `kiteBand`'s fallback
+   * path (the player's override, else a no-skills guess) exists to fly, and the
+   * reason that reason has to reach the player's readout intact.
+   *
+   * ⚠ IT IS NOT A SUBSTITUTE FOR `maxTargetRangeM` AND `maxTargetRangeM` IS NOT
+   * A SUBSTITUTE FOR IT. The two leashes are resolved separately and a `min`
+   * over "whichever is readable" silently swaps one for the other — see the
+   * warning at the top of nav/kiteBand.ts, which records what that cost.
+   */
+  readonly droneControlRangeM?: number | null;
+  /**
+   * How many targets this hull can hold at once — dogma attribute 192, off the
+   * fit's own `stats.targeting.maxLockedTargets`. The drone boat's pre-lock rung
+   * fills the SPARE slots so the next primary is already locked when this one
+   * dies (a Tristan holds five; the gun ladder uses one and pays a fresh lock
+   * after every kill).
+   *
+   * ⚠ NULL IS "DO NOT PRE-LOCK", NEVER A GUESSED FIVE. A hull's lock count is a
+   * real limit and the server REFUSES the lock past it — and a refusal is booked
+   * in the ledger, where enough of them on one key END THE RUN. Guessing five
+   * because a frigate holds five would spend that refusal every tick on every
+   * destroyer nobody had measured. The rung reads unreadable as "do not", which
+   * costs a few seconds a kill and nothing else.
+   *
+   * ⚠ AND AN UNKNOWN `Stat` ARRIVES AS `null`, NEVER AS 0 — the same discipline
+   * the two range fields above keep. A zero here is the claim "this ship cannot
+   * lock anything", which is a different and much worse statement than "nobody
+   * looked".
+   */
+  readonly maxLockedTargets?: number | null;
+  /**
+   * What each ship TYPE on this grid does to a ship it has decided to fight,
+   * from the type's own dogma (nav/ratThreat.ts). Keyed by typeID because a
+   * threat belongs to a type, not to a hull sitting in space — the same shape
+   * and the same reasoning as `targetGroupNames` above.
+   *
+   * ⚠ IT EXISTS BECAUSE NO NAME AND NO GROUP CAN SEE THE DIFFERENCE. Every NPC
+   * shares a group with harmless siblings; only attribute 504 separates the rat
+   * that will hold the ship on the field from the one that will not.
+   *
+   * A type MISSING from the map is one whose dogma has not been read: the
+   * caller must treat it the way `UNKNOWN_THREAT` is meant to be treated — "the
+   * dogma said nothing, ask something else" — and never as "this rat is safe".
+   * `null` (or absent) for the whole field means no read was made this tick,
+   * which is the same thing said about every type at once.
+   */
+  readonly threatByTypeID?: Readonly<Record<number, RatThreat>> | null;
+  /**
+   * The entity ids of everything whose hostile module cycle is landing on THIS
+   * ship right now — scrams, disruptors, webs, damps, neuts, paints, tracking
+   * and guidance disruptors alike, already freshness-filtered at observation
+   * build time (`isJamLive`), deduplicated, and NOT narrowed to tackle.
+   *
+   * ⚠ GROUND TRUTH, AND IT BEATS THE DOGMA. `threatByTypeID` above is a static
+   * guess about a TYPE; this is the server naming the aggressor on this ship's
+   * own wire. A source id in this list is a rat that is demonstrably holding us,
+   * whatever its attributes said — including a type whose dogma we read wrong.
+   *
+   * An ARRAY and not a Set, matching `lockedTargetIDs`: the consumer builds its
+   * own Set once rather than every reader inheriting one it did not ask for.
+   * `[]` is a real answer ("nothing is on us") because the jam slice is a fold
+   * of pushes that always exists; absent means nobody looked.
+   */
+  readonly jammingSourceIDs?: readonly number[];
+  /**
+   * THIS ship's drones out in space, one row each — the per-drone half of
+   * `lowestDroneHealth` above, which stays exactly as it is for the existing
+   * watch. Both are folded from the same single walk of the snapshot, so a
+   * rack can never be judged two different ways in one tick.
+   *
+   * ⚠ ONLY DRONES THIS SHIP CAN ORDER (`canMyShipOrderDrone === true`), never
+   * merely "mine". An abandoned drone answers a recall with a 200 and does not
+   * move, so counting one would make a rung wait for a recall that can never
+   * land — the narrower test is the right one and it is the one the existing
+   * fold uses.
+   *
+   * Each ratio is three-state on its own: `null` is a layer that did not read,
+   * never a layer at zero. A drone whose three layers are all unreadable is
+   * still listed — it is out, and it can still be recalled.
+   */
+  readonly myDrones?: readonly {
+    readonly itemID: number;
+    readonly shieldRatio: number | null;
+    readonly armorRatio: number | null;
+    readonly hullRatio: number | null;
+  }[];
+  /**
+   * Fitted weapons that DEMONSTRABLY take a charge and have none loaded.
+   *
+   * ⚠ `takesCharge` IS THREE-STATE AND A NULL IS NOT AN UNLOADED GUN.
+   * `decodeChargeFits` answers `{}` both for a module that takes no charge and
+   * for a fit whose charge data never arrived, so only an explicit "this has
+   * somewhere to load something" plus an empty chamber lands here. Reporting a
+   * gun as unloaded when it is merely unreadable would silence a working
+   * weapon — and the block skips exactly these, so a false positive is a gun
+   * that never fires again for the whole run.
+   *
+   * The point of reporting it at all: activating an empty gun is refused, and a
+   * refusal is booked in the ledger where `MAX_CONSECUTIVE_REFUSALS` on one key
+   * ENDS THE RUN. A drone boat whose guns are all empty should fight with its
+   * drones and say so once, not stop.
+   */
+  readonly unloadedWeaponIDs?: readonly number[];
+  /**
+   * The fitted afterburners and microwarpdrives, each carrying the `typeID` a
+   * deactivate has to name and the `kind` only the SDE's own dogma effects
+   * (6730/6731) can supply — the input to `decidePropulsionModule`
+   * (nav/propulsion.ts), which is the fleet companion's own policy shared
+   * rather than re-derived.
+   *
+   * `kind: null` is a third state, not a default: "the group said prop mod and
+   * the effect read did not answer". The policy fails open on it and treats the
+   * module as the scram-vulnerable half; see that module's header for why that
+   * is the cheap direction to be wrong in. An EMPTY array is a real and common
+   * answer — plenty of hulls fly without one.
+   */
+  readonly propulsionModules?: readonly PropulsionModule[];
+  /**
+   * Whether a live WARP SCRAMBLER — not a disruptor — is on this ship, from the
+   * same jam fold as `jammingSourceIDs` above
+   * (`scrammedByWarpScrambler`). The one jam that turns a microwarpdrive off.
+   *
+   * ⚠ THREE-STATE, AND ONLY AN EXPLICIT `true` STANDS A MODULE DOWN. `false` is
+   * "the jam fold was read and carries no live scram"; `null` is "no jam fold
+   * was read at all". `decidePropulsionModule` gates on `true` alone, so an
+   * observation that could not look never takes the speed off a ship — and
+   * never reads a disruptor as an MWD kill, which is the mistake
+   * `tacklersHolding` would make here.
+   */
+  readonly scrammed?: boolean | null;
 }
 
 // ─── Tri-state condition evaluation ──────────────────────────────────────────
@@ -466,6 +635,46 @@ export function evaluateCondition(condition: Condition, obs: ScriptObservation):
       // No drones out reads as null (nothing to judge), NOT as "healthy" — the
       // same rule as everywhere: a missing reading is never a verdict.
       return below(obs.lowestDroneHealth ?? null, condition.fraction);
+    case "tackled":
+      // ⚠ IT READS `scrammed`, NOT `jammingSourceIDs`, AND THE CHOICE IS THE
+      // WHOLE CONDITION. Both halves are on the observation and they answer two
+      // different questions:
+      //
+      //   • `jammingSourceIDs` is EVERY hostile cycle landing on this ship —
+      //     scrams, disruptors, webs, damps, neuts, paints, tracking and
+      //     guidance disruptors alike (its own header says so). A watch named
+      //     "cannot leave" wired to that list fires on a webbing frigate, which
+      //     slows a ship and does not stop it warping off. That is a watch that
+      //     cries wolf, and a player who has been woken by one twice deletes it
+      //     — taking the one row that would have saved the ship with it.
+      //   • `scrammed` is the fold of the server's own `OnJamStart` pushes
+      //     narrowed to a live WARP SCRAMBLER (`scrammedByWarpScrambler`). It is
+      //     the jam that actually pins a ship to the grid, which is the fact the
+      //     2026-09-14 loss turned on.
+      //
+      // ⚠ SO THIS ERRS SILENT, NEVER LOUD, AND THAT IS DELIBERATE. A pure warp
+      // DISRUPTOR (a "point") also stops a warp, and it is NOT in `scrammed` —
+      // the server's two names are the wrong way round and only
+      // `warpScramblerMWD` is the scram (see bridge/jamNotifications.ts). So a
+      // ship held by a disruptor alone reads not-met here: a MISS, not a false
+      // alarm. That is the cheap direction to be wrong in for a watch a player
+      // has to trust, and the fix when it is wanted is to widen the OBSERVATION
+      // with a disruptor-or-scram read — never to widen this to every jam.
+      //
+      // ⚠ AND AGAINST RATS THAT MISS CANNOT HAPPEN, which is checked rather than
+      // hoped: the server maps an NPC's `entityWarpScrambleChance` (504) to its
+      // "scram" family, and that family is the one that sends `warpScramblerMWD`
+      // (space/npc/npcEntityEwarCatalog.js -> `warpscrambleforentity`, and the
+      // `scram` definition in space/modules/hostileModuleRuntime.js). Every rat
+      // that can pin a ship therefore trips this watch. The gap above is a PvP
+      // one — only another player can hold you with a disruptor — so a ratting
+      // bot gets the honest answer and a PvP bot gets a watch that is quiet
+      // about half of what could be holding it. Worth knowing before this is
+      // leaned on for the second thing.
+      //
+      // Three-state like every other read here: `null`/absent is "no jam fold
+      // was read at all", which never fires the watch.
+      return fromBool(obs.scrammed ?? null);
   }
 }
 

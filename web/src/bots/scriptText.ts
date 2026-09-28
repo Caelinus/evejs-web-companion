@@ -16,10 +16,12 @@ import type {
   BoardSlot,
   BranchBlock,
   Condition,
+  ConditionKind,
   InterruptResponse,
   InterruptRow,
   MacroID,
   MacroStep,
+  PropModeArg,
   Repeat,
   TargetClassArg,
   SquadRoleArg,
@@ -108,6 +110,8 @@ export function macroName(macro: MacroID): string {
       return "Hardeners on";
     case "fight-the-rats":
       return "Fight the rats";
+    case "fight-with-drones":
+      return "Fight with drones";
     case "warp-to-anomaly":
       return "Fly to a pirate den";
     case "warp-to-ore-anomaly":
@@ -257,6 +261,50 @@ export function conditionSentence(condition: Condition): string {
       return "another player locks onto your ship";
     case "drone-health-below":
       return `one of your drones drops below ${pct(condition.fraction)} health`;
+    // ⚠ THE CLAUSE SAYS "AND IT CANNOT WARP OUT" ON PURPOSE, AND THAT IS THE
+    // WHOLE STEER. A watch reads back as one sentence ("If <this>, <that>"), so
+    // naming the consequence inside the condition makes the wrong pairing
+    // audible the moment a player picks it: "If something has your ship
+    // scrambled and it cannot warp out, dock at home and stop" contradicts
+    // itself out loud, while "...harden up, fight back, and stand down when it
+    // is over" reads like the answer it is. Nothing is forbidden — the format
+    // does not police which response goes with which condition and must not
+    // start — the words simply stop hiding the contradiction.
+    //
+    // "something", not "a pirate": the jam pushes this rides name whoever is
+    // holding the ship, and in low-sec that is as likely to be another player.
+    case "tackled":
+      return "something has your ship scrambled and it cannot warp out";
+  }
+}
+
+/**
+ * The extra line a condition needs a player to read BEFORE they pick a response
+ * — null for every kind that needs none, which is nearly all of them.
+ *
+ * ⚠ IT EXISTS FOR EXACTLY ONE PROBLEM: A WATCH THAT CAN ONLY EVER FAIL. Most
+ * conditions pair sensibly with most responses, so the editor rightly offers
+ * every combination. `tackled` is the exception a run was lost to on
+ * 2026-09-14: the obvious response to trouble is "go home", and going home is
+ * the one thing a held ship cannot do, because the warp is what is being
+ * prevented. A player who wires `tackled -> dock-and-pause` has written a row
+ * that will fire on time, try the impossible, and change nothing.
+ *
+ * ⚠ IT ADVISES, IT DOES NOT REFUSE. A blocking rule here would be the codec's
+ * job and the codec has no business ranking responses: `alert` on a tackle is a
+ * perfectly sane row for a player watching their screen, and a row that tries
+ * and fails costs a tick, not a ship. So this is a sentence, not a gate.
+ */
+export function conditionAdvice(kind: ConditionKind): string | null {
+  switch (kind) {
+    case "tackled":
+      return (
+        "A scrambled ship cannot warp, so it cannot reach home either - the trip a dock response asks for " +
+        "is the exact thing being prevented. Fight back is the response that frees it: it kills what is " +
+        "holding you, and it shoots the tackler first. Once you are loose, a health watch can take you home."
+      );
+    default:
+      return null;
   }
 }
 
@@ -374,6 +422,50 @@ function squadPhrase(step: MacroStep): string {
 /** What one target class is called on screen — the picker reads it from here. */
 export function targetClassWord(cls: TargetClassArg): string {
   return TARGET_CLASS_WORD[cls];
+}
+
+/** What each prop-mod setting is called on screen. */
+const PROP_MODE_WORD: Readonly<Record<PropModeArg, string>> = {
+  auto: "using the prop mod to close the distance",
+  off: "leaving the prop mod alone",
+};
+
+/** The prop-mod words, for the picker. "auto" is the default and says nothing. */
+export function propModeWord(mode: PropModeArg): string {
+  return PROP_MODE_WORD[mode];
+}
+
+/**
+ * ", leaving the prop mod alone" — empty on the default, so an untouched drone
+ * boat still reads as one plain sentence.
+ *
+ * ⚠ "off" NEVER READS AS "IGNORES THE PROP MOD". It means the block will not
+ * LIGHT one; a burner an earlier block left running is still shut down, because
+ * a ship holding station with its signature bloomed is being shot for nothing.
+ * "Leaving it alone" is the honest short way to say "will not reach for it".
+ */
+function propPhrase(step: MacroStep): string {
+  const arg = step.args["propulsion"];
+  if (arg === undefined || arg.kind !== "propMode" || arg.mode === "auto") {
+    return "";
+  }
+  return `, ${PROP_MODE_WORD[arg.mode]}`;
+}
+
+/**
+ * ", holding at 25 km off" — empty when the block works its own band out, which
+ * is the case a player should normally be in.
+ *
+ * ⚠ THE NUMBER IS PRINTED IN THE UNIT IT WAS TYPED IN. The stored value is
+ * kilometres; nothing here converts, because a sentence that quietly showed
+ * metres would teach the player the wrong unit for the box they typed into.
+ */
+function holdRangePhrase(step: MacroStep): string {
+  const arg = step.args["holdRangeKm"];
+  if (arg === undefined || arg.kind !== "distanceKm") {
+    return "";
+  }
+  return `, holding at ${arg.value} km off`;
 }
 
 /**
@@ -503,6 +595,16 @@ function macroPhrase(step: MacroStep): string {
       return "Switch every hardener on";
     case "fight-the-rats":
       return `Fight the rats until the grid is clear${targetPhrase(step)}${squadPhrase(step)}`;
+    // ⚠ THE SENTENCE SAYS "FROM A DISTANCE", WHICH IS THE WHOLE DIFFERENCE FROM
+    // THE LINE ABOVE. Two combat blocks sitting side by side in the palette have
+    // to be told apart by their sentences or a player picks the wrong one and
+    // watches a drone boat sit inside a scram it could have stayed out of. The
+    // band, the give-up verdict and the fit fault get their own sentences from
+    // the block itself while it runs (nav/droneBoatLadder.ts); this line is the
+    // STILL one, read in the editor before anything is on grid, so it says what
+    // the block will do and never guesses a number it has not computed yet.
+    case "fight-with-drones":
+      return `Fight the rats with your drones from a distance${holdRangePhrase(step)}${propPhrase(step)}${targetPhrase(step)}${squadPhrase(step)}`;
     case "warp-to-anomaly":
       return "Warp to the next pirate den the scanner shows";
     case "warp-to-ore-anomaly":
