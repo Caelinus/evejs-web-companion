@@ -1534,6 +1534,17 @@ export interface SpaceEntity {
    */
   readonly oreGrade: number | null;
   /**
+   * What the rock's ore is WORTH, in ISK per cubic metre — the number behind the
+   * retail client's Mining Surveyor "Ore Value" gradient, computed by the BFF
+   * from static data (reprocessed material value ÷ portion size ÷ unit volume).
+   *
+   * Per m³ and not per unit, because a hold is a volume: this is what one trip
+   * is worth, which is the only ranking a miner can act on. null when the row is
+   * not a rock, or when a price, a portion size or a volume was missing — and a
+   * null is never a zero, which would rank a rock as worthless.
+   */
+  readonly oreValuePerM3: number | null;
+  /**
    * R25 slice B — SHIP rows only. The only thing that separates a pirate from a
    * person.
    *

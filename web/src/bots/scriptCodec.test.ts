@@ -11,7 +11,15 @@ import {
   decodeScriptValue,
   encodeScriptDoc,
 } from "./scriptCodec.ts";
-import { MAX_DOC_BYTES, MAX_ORE_LIST, SCRIPT_FORMAT, SCRIPT_VERSION, type BotScript } from "./botScript.ts";
+import {
+  MAX_DOC_BYTES,
+  MAX_ORE_LIST,
+  ROCK_PICKS,
+  SCRIPT_FORMAT,
+  SCRIPT_VERSION,
+  type BotScript,
+} from "./botScript.ts";
+import { validateScript } from "./validateScript.ts";
 
 // A clean, warning-free document — the design's "Belt runner". Each test that
 // needs a malformed one clones this and breaks exactly one thing.
@@ -196,6 +204,84 @@ function everyArgKind(): BotScript {
     ],
   };
 }
+
+test("every rock order the editor can offer survives a round trip", () => {
+  // The codec validates the pick against ROCK_PICKS, so this is what stops a new
+  // order being offered in the editor and then REFUSED on the next import.
+  for (const pick of ROCK_PICKS) {
+    const doc: BotScript = {
+      format: "evejs-bot-script",
+      version: 1,
+      name: "t",
+      notes: "",
+      home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+      interrupts: [],
+      program: [
+        {
+          id: "m1",
+          kind: "macro",
+          macro: "mine-at-belt",
+          args: {
+            belt: { kind: "belt", belt: { mode: "nearest" } },
+            pick: { kind: "rockPick", pick },
+          },
+          until: { kind: "ore-hold-at-least", fraction: 0.9 },
+        },
+      ],
+    };
+    const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+    const step = round.program[0];
+    assert.ok(step !== undefined && step.kind === "macro");
+    const arg = step.args["pick"];
+    assert.ok(arg !== undefined && arg.kind === "rockPick", `the ${pick} order was dropped`);
+    assert.equal(arg.pick, pick);
+  }
+});
+
+test("a belt SAVED BY THE OLD EDITOR still opens, id and system name and all", () => {
+  // ⚠ WHAT THIS PINS. The editor used to pick a belt off the live grid and
+  // store its entity id and the system it was read in; it now stores the NAME
+  // alone (see BotInspector.svelte), because the id is grid-local and the
+  // runtime never matched on it. Bots saved before that change are still in
+  // players' libraries, and the codec must keep taking them: the two dead
+  // fields ride along untouched, and nothing downstream reads them.
+  const doc = JSON.parse(encodeScriptDoc(golden())) as Record<string, unknown>;
+  const program = structuredClone(doc["program"]) as Record<string, unknown>[];
+  const loop = program.find((n) => n["kind"] === "loop") as Record<string, unknown>;
+  const body = loop["body"] as Record<string, unknown>[];
+  const mine = body.find((n) => n["macro"] === "mine-at-belt") as Record<string, unknown>;
+  (mine["args"] as Record<string, unknown>)["belt"] = {
+    kind: "belt",
+    belt: {
+      mode: "chosen",
+      ref: {
+        entity: "belt",
+        id: 40000001,
+        name: "Test System VI - Asteroid Belt 1",
+        systemName: "Test System",
+      },
+    },
+  };
+  doc["program"] = program;
+
+  const { doc: decoded, warnings } = mustAccept(decodeScriptValue(doc));
+  assert.deepStrictEqual([...warnings], [], "an old document must not be warned about");
+  const decodedLoop = decoded.program.find((n) => n.kind === "loop");
+  assert.ok(decodedLoop !== undefined && decodedLoop.kind === "loop");
+  const step = decodedLoop.body.find((n) => n.kind === "macro" && n.macro === "mine-at-belt");
+  assert.ok(step !== undefined && step.kind === "macro");
+  const arg = step.args["belt"];
+  assert.ok(arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen");
+  // The NAME is the part the editor shows and the runtime matches on, so it is
+  // the part that has to survive.
+  assert.equal(arg.belt.ref.name, "Test System VI - Asteroid Belt 1");
+  // And the document is not blocked for having the two dead fields on it.
+  assert.deepStrictEqual(
+    validateScript(decoded).filter((p) => p.severity === "blocking"),
+    [],
+    "an old set-belt bot cannot be opened only to be refused",
+  );
+});
 
 test("a SYSTEM destination keeps its own entity; a belt in that slot is refused", () => {
   const doc = everyArgKind();

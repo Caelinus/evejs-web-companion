@@ -82,6 +82,7 @@ function spaceStore(): unknown {
           miningYieldTypeID: ORE_TYPE_ID,
           beltID: 1,
           oreGrade: null,
+          oreValuePerM3: 52.8,
           isNpc: false,
           npcEntityType: null,
           controllerID: null,
@@ -115,6 +116,9 @@ test("a thing on the grid shows its distance, condition and what is left of it",
   assert.match(body, /50%/, "condition from the snapshot's own ratios");
   assert.match(body, /Ore left/);
   assert.match(body, /4,200/);
+  // What the client's Mining Surveyor shows as a colour, said as a number.
+  assert.match(body, /Ore value/);
+  assert.match(body, /53 ISK\/m³/);
 });
 
 test("a layer with NO reading is absent, not rendered as zero", () => {

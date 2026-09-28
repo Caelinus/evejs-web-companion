@@ -171,8 +171,13 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     if (arg.kind === "station" && arg.ref.id === null && arg.ref.starting !== true && arg.ref.slot === undefined) {
       problems.push(blocking(step.id, "Pick the station for this step."));
     }
-    if (arg.kind === "belt" && arg.belt.mode === "chosen" && arg.belt.ref.id === null) {
-      problems.push(blocking(step.id, "Pick a belt for this step, or choose the nearest one."));
+    // A pinned belt is identified by its NAME, never its id: belt entity ids
+    // are grid-local, so the runtime re-matches the name against the grid it
+    // arrives on (see `beltTarget` in nav/scriptMacros.ts). A belt named by
+    // hand therefore has no id at all, and demanding one — as this used to —
+    // would block every belt a player typed.
+    if (arg.kind === "belt" && arg.belt.mode === "chosen" && (arg.belt.ref.name ?? "").trim().length === 0) {
+      problems.push(blocking(step.id, "Type the belt's name for this step, or choose the nearest one."));
     }
     // An agent slot the player ADDED but never filled. Leaving the slot out
     // entirely is fine — the step then uses the agent the find block remembered.

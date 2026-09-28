@@ -124,6 +124,7 @@ import type {
   MiningHold,
   ShipBay,
   SlotFamily,
+  SpaceSnapshot,
   SpaceVector,
   StationStatic,
 } from "../store/types.ts";
@@ -187,6 +188,16 @@ import {
   type CapabilityScope,
 } from "../nav/scriptCapabilities.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
+import {
+  EMPTY_SURVEY_MEMORY,
+  decideSurveyScan,
+  forgetSurvey,
+  rememberSurveyFailure,
+  rememberSurveyScan,
+  surveyForShip,
+  surveyedSnapshot,
+  type SurveyMemory,
+} from "../nav/surveyScan.ts";
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
 import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
@@ -3972,6 +3983,47 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     });
   }
 
+  // ── The surveyor, run FOR a mining bot ─────────────────────────────────────
+  //
+  // A player presses the Mining Surveyor button; a bot has to decide for itself,
+  // and the deciding is `nav/surveyScan.ts` — the real client's own rules (an
+  // 8 s busy window while the scan wave is travelling, ten calls a minute, never
+  // in warp, and no re-asking about a rock already covered). Everything this
+  // adds is the round trip and the two places the answer lands: the ship's own
+  // memory of the grid, and the store, so the overview shows what the bot saw.
+  //
+  // ⚠ IT MERGES, IT DOES NOT REPLACE. `surveyedSnapshot` only fills rock rows
+  // the server left blank, so a scan can never overwrite a live number with a
+  // stale one — and a grid nobody scanned looks exactly as it did before.
+  let surveyMemory: SurveyMemory = EMPTY_SURVEY_MEMORY;
+
+  async function surveyForBot(snapshot: SpaceSnapshot): Promise<SpaceSnapshot> {
+    if (!snapshot.inSpace) {
+      // Docked or jumping — the client's `OnSessionChanged`, which clears the
+      // scan data because it described a grid the ship has left.
+      surveyMemory = forgetSurvey(surveyMemory);
+      return snapshot;
+    }
+    // A hull swap re-arms the scanner: a Venture with no upgrade fitted must
+    // not condemn the Procurer the pilot boards next.
+    surveyMemory = surveyForShip(surveyMemory, snapshot.ship?.itemID ?? snapshot.shipID ?? null);
+    const now = Date.now();
+    if (decideSurveyScan(snapshot, surveyMemory, now).scan) {
+      try {
+        const survey = decodeSurveyResults((await api.runSurveyScan(callOptions)).results);
+        surveyMemory = rememberSurveyScan(surveyMemory, snapshot, survey, now);
+        store.apply({ type: "mining/survey", survey, atMs: now });
+      } catch {
+        // A refused or unreadable scan is not an answer about any rock, and it
+        // is not a reason to stop a bot either. It costs a throttle slot, and
+        // two in a row retire the scanner for this run — a hull with no mining
+        // scanner upgrade must not be asked once every two seconds for ever.
+        surveyMemory = rememberSurveyFailure(surveyMemory, now);
+      }
+    }
+    return surveyedSnapshot(snapshot, surveyMemory);
+  }
+
   /** Ask the refinery what these stacks would yield — and what the tax is. */
   async function loadReprocessingQuote(itemIDs: readonly number[]): Promise<void> {
     if (itemIDs.length === 0) {
@@ -5111,7 +5163,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       },
       getSpaceSnapshot: async () => {
         const result = await api.getSpaceSnapshot(callOptions);
-        const snapshot = decodeSpaceSnapshot(result.space);
+        // Run the surveyor when this grid has rocks nobody has measured yet —
+        // the mining ladder chooses rocks, and a rock with no `remainingQuantity`
+        // gives it nothing to choose ON. `surveyForBot` decides whether a scan is
+        // actually due; on most ticks it is not, and this costs one map lookup.
+        const snapshot = await surveyForBot(decodeSpaceSnapshot(result.space));
         // Push it to the space slice too, so the Overview stays live while the
         // bot works even if the panel's own poll is not running.
         store.apply({
@@ -5908,6 +5964,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
   const BAY_MACROS = new Set(["unload-cargo"]);
+  // Blocks that WORK A ROCK, and so are worth running the mining surveyor for.
+  // `travel-to-belt` and `compress-ore` are deliberately not here: neither one
+  // reads a rock, and a scan they cannot use is a round trip nobody asked for.
+  const SURVEY_MACROS = new Set(["mine-at-belt"]);
   const FLEET_MANAGEMENT_MACROS = new Set([
     "create-fleet",
     "invite-to-fleet",
@@ -6338,7 +6398,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         ]);
         const status = decodeFlightStatus(flightStep.flight);
         void observeFlightStatus(status);
-        const snapshot = decodeSpaceSnapshot(spaceResult.space);
+        // The surveyor, for the blocks that work a rock (see SURVEY_MACROS and
+        // nav/surveyScan.ts). Gated on the active block for the same reason every
+        // other read here is: a hauler on a mission run has no use for a rock's
+        // remaining ore, and should not spend a round trip finding it out.
+        const snapshot =
+          hint.activeMacro !== null && SURVEY_MACROS.has(hint.activeMacro)
+            ? await surveyForBot(decodeSpaceSnapshot(spaceResult.space))
+            : decodeSpaceSnapshot(spaceResult.space);
         store.apply({
       type: "space/snapshot",
       snapshot,

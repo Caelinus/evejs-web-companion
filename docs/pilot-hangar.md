@@ -40,10 +40,32 @@ between them is the character bar, not this screen.
 ## Where the data comes from
 
 Per pilot the screen shows: name, ship, location, wallet, skill points, what it is training, and
-whether it is already in the client. All of it except the last comes from
+whether it is already in the client. Name, ship, location, wallet and skill points come from
 `charUnboundMgr.GetCharacterSelectionData` — the same call the character-select screen has always
-used, which already carries `stationID` / `solarSystemID` / `skillTypeID` / `toLevel` /
-`trainingEndTime`. "In client" is live from App's session list, never from storage.
+used, which already carries `stationID` / `solarSystemID`. "In client" is live from App's session
+list, never from storage.
+
+**Training does NOT come from that call, and the reason is worth writing down.** The tuple carries
+`skillTypeID` / `toLevel` / `trainingEndTime` per character and the hangar used to believe them.
+Measured against a live server on 2026-09-09: **all three are null for every pilot on every
+account**, including pilots whose stored queue was active with fifty-odd skills on it —
+`charService.Handle_GetCharacterSelectionData` fills them from `buildTrainingSelectionInfo`, which
+answers off a runtime snapshot the selection path does not have warm. The hangar rendered that null
+as IDLE, so the training column was not *stale*, it was structurally always wrong.
+
+The authority that does answer is the gateway's own `GET /skills`
+(`skillQueueRuntime.getQueueSnapshot`), which needs no bridge session for the same reason the skill
+panel's read does not: reading what a character is training is not an act of piloting. `GET
+/api/roster/training?characterIDs=…` is the BFF route over it — the skill's **name** and the
+completion instant arrive already resolved, so the roster needs no `/api/names` lookup for the skill.
+Ownership is the gateway's: every id is passed with the *caller's* accountID and
+`validateOwnedCharacter` refuses the rest.
+
+⚠ **A missing row is not an idle row.** A pilot the read could not answer for is left OUT of the
+response and keeps whatever the roster already had; only a row that comes back with `skillTypeID:
+null` — the positive finding "this queue is empty" — turns a pilot IDLE. The same rule runs one layer
+down in `rememberCharacters`, where an ordinary character-select sign-in (which cannot ask about the
+queue at all) leaves the training columns exactly as it found them.
 
 That call needs a signed-in session and this is the screen you see *before* you sign in. So
 `rosterRefresh.ts` does what Onboarding's stop-a-bot button already did: signs in on a **throwaway
@@ -57,6 +79,13 @@ sign-ins and the next click of any kind queues behind them.
 
 The results land in `knownCharacters.ts`, which grew four optional columns (`locationName`,
 `trainingSkillName`, `trainingToLevel`, `trainingEndsAtMs`) plus the two IDs those names came from.
+
+Accounts are shown **in name order**, not in roster order. Roster order is `lastSeen` descending, and
+the refresh above rewrites `lastSeen` account by account as each sign-in lands — so the account that
+happened to refresh last led the screen, the next open refreshed them in that new order, and the
+sections reshuffled every single time the hangar was opened. Sorting is case-insensitive and
+`numeric`, so `alt10` follows `alt9`; pilots inside an account keep the pinned-then-SP rule with the
+pilot name as the tiebreak, so equal-SP pilots cannot swap places between two paints either.
 
 > **The carry-over rule, and why it exists.** Only a caller holding a token can resolve a place or a
 > skill name, and an ordinary sign-in through the character-select screen has one but does not do the
@@ -166,12 +195,19 @@ path for it to take.
 
 ## Verification
 
-- `web/src/app/hangar.test.ts` — 18 tests: the stale-training rule, scope × search composition, the
-  pinned-then-SP sort, slot padding, and every formatted string.
+- `web/src/app/hangar.test.ts` — the stale-training rule (including a nameless queue that has not
+  ended yet, which is training and not IDLE), scope × search composition, the pinned-then-SP sort,
+  the name-order grouping and its stability whatever order the roster arrives in, slot padding, and
+  every formatted string.
+- `test/rosterTraining.test.js` — `GET /api/roster/training`: the queue head named and dated, an
+  empty queue answered *as* empty, a pilot the read could not answer for omitted rather than reported
+  idle, id cleanup, the per-request cap, and the auth gate.
 - `web/src/app/hangarPrefs.test.ts` — 12 tests: round-trip, junk and half-written storage, the two
   cascade deletes (a squad takes its membership and pin; a forgotten pilot leaves every squad), and
   `addSquadMembers` as a union that ignores an unknown squad.
-- `web/src/app/knownCharacters.test.ts` — the carry-over rule and the FILETIME conversion.
+- `web/src/app/knownCharacters.test.ts` — the carry-over rule, the FILETIME conversion, and the
+  three-tier training precedence (live queue, then the selection tuple, then what the row already
+  had).
 - `web/src/ui/pilotHangar.test.ts` — SSR renders: first run, a populated hangar, a roster row written
   before the hangar existed, empty slots, squads (pinned and not), a collapsed account, manage mode,
   the squad picker (open, closed and empty — every row offering the editor), and "Save as squad" with

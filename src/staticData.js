@@ -1042,6 +1042,90 @@ function listOreFamilies() {
   return families;
 }
 
+// --- What a rock is WORTH, per cubic metre ---------------------------------
+//
+// The number behind the Mining Surveyor's "Ore Value" gradient. It is not a
+// server read: the retail client computes it itself, in
+// `mining_util.get_volume_est_price`, and this is that same arithmetic against
+// the same inputs —
+//
+//   reprocessed value of one unit = Σ (material quantity × material price)
+//                                   × 0.66 (the client's own efficiency)
+//                                   ÷ the ore's portion size
+//   value per m³                  = that ÷ the ore's unit volume
+//
+// A hold is a VOLUME, so ISK per m³ — not ISK per unit — is the number that
+// ranks two rocks for a miner: it is what one trip is worth.
+//
+// ⚠ WHICH PRICE. The client's `GetAveragePrice` reads the server's average-price
+// table, and on this server that table IS the static `basePrice` of each type
+// (the config service builds it from exactly that field). So basePrice here is
+// not a stand-in for the market — it is the same number the in-game client would
+// have used, which is why the two agree.
+//
+// ⚠ UNKNOWN IS NULL, NEVER ZERO. A missing volume, a missing portion size or a
+// material with no price makes the whole answer null: a zero would rank a rock
+// as worthless, which is a claim nobody computed. The client does the same — it
+// returns None and the overlay falls back to a neutral colour.
+const REPROCESSING_EFFICIENCY = 0.66;
+
+function getTypeMaterials(typeID) {
+  const entry = buildJsonlIndex("typeMaterials.jsonl").get(Number(typeID) || 0);
+  const materials = entry && Array.isArray(entry.materials) ? entry.materials : [];
+  return materials
+    .map((material) => ({
+      materialTypeID: Number(material && material.materialTypeID) || 0,
+      quantity: Number(material && material.quantity) || 0,
+    }))
+    .filter((material) => material.materialTypeID > 0 && material.quantity > 0);
+}
+
+/** A type's average price, as this server publishes it: its static basePrice. */
+function getTypeAveragePrice(typeID) {
+  const entry = getType(typeID);
+  const price = Number(entry && entry.basePrice);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+/** What one unit of this type is worth, reprocessed where it can be. */
+function getTypeUnitEstimatedPrice(typeID) {
+  const materials = getTypeMaterials(typeID);
+  if (materials.length === 0) {
+    return getTypeAveragePrice(typeID);
+  }
+  const entry = getType(typeID);
+  const portionSize = Number(entry && entry.portionSize);
+  if (!Number.isFinite(portionSize) || portionSize <= 0) {
+    return null;
+  }
+  let total = 0;
+  for (const material of materials) {
+    const price = getTypeAveragePrice(material.materialTypeID);
+    if (price === null) {
+      // One unpriced mineral makes the sum a guess, so there is no answer.
+      return null;
+    }
+    total += material.quantity * price;
+  }
+  return (total * REPROCESSING_EFFICIENCY) / portionSize;
+}
+
+/** ISK per m³ for one ore type, or null when any input is missing. */
+function getOreValuePerM3(typeID) {
+  const numericTypeID = Number(typeID) || 0;
+  const cacheKey = `oreValuePerM3:${numericTypeID}`;
+  if (caches.has(cacheKey)) {
+    return caches.get(cacheKey);
+  }
+  const entry = getType(numericTypeID);
+  const volume = Number(entry && entry.volume);
+  const unitPrice = getTypeUnitEstimatedPrice(numericTypeID);
+  const value =
+    unitPrice === null || !Number.isFinite(volume) || volume <= 0 ? null : unitPrice / volume;
+  caches.set(cacheKey, value);
+  return value;
+}
+
 // --- Browsing the market by group (goal R83) -------------------------------
 //
 // The market panel could only be reached by TYPING a name. That is fine when you
@@ -1332,6 +1416,8 @@ module.exports = {
   getPropulsionEffectName,
   getModuleChargeFitment,
   getChargeSize,
+  getOreValuePerM3,
+  getTypeMaterials,
   findMarketTypes,
   listOreFamilies,
   getMarketGroupChildren,

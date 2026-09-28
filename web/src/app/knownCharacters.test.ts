@@ -178,6 +178,115 @@ test("a name whose id changed is DROPPED rather than carried over as a lie", () 
   assert.equal(row?.trainingSkillName, null);
 });
 
+// --- the LIVE queue overrides the selection tuple ---------------------------
+//
+// charUnboundMgr.GetCharacterSelectionData carries skillTypeID / toLevel /
+// trainingEndTime per character and this module used to believe them. On the
+// emulator those three are null for every pilot, including one training a
+// fifty-skill queue, so the hangar called everybody idle. app/rosterRefresh.ts
+// now reads the real queue and passes it here.
+
+test("the live queue beats the selection tuple's own training fields", () => {
+  rememberCharacters(
+    "farmer",
+    // The tuple says nothing is training. It is wrong, and it always is.
+    [hangarChar(7001, { stationID: 60000004, skillTypeID: null, toLevel: null })],
+    new Map([
+      [
+        7001,
+        {
+          locationName: "Jita IV - Moon 4",
+          trainingSkillName: null,
+          training: {
+            skillTypeID: 3300,
+            skillName: "Mining Barge",
+            toLevel: 5,
+            endsAtMs: 1_800_000_000_000,
+          },
+        },
+      ],
+    ]),
+  );
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.trainingSkillName, "Mining Barge");
+  assert.equal(row?.trainingToLevel, 5);
+  assert.equal(row?.trainingEndsAtMs, 1_800_000_000_000);
+  assert.equal(row?.trainingSkillTypeID, 3300);
+});
+
+test("a live queue that is EMPTY clears the skill it used to name", () => {
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, {})],
+    new Map([
+      [
+        7001,
+        {
+          locationName: null,
+          trainingSkillName: null,
+          training: {
+            skillTypeID: 3300,
+            skillName: "Mining Barge",
+            toLevel: 5,
+            endsAtMs: 1_800_000_000_000,
+          },
+        },
+      ],
+    ]),
+  );
+  // Second refresh: the pilot finished the queue. "Present and empty" is a
+  // finding, not a gap, so nothing of the old skill may survive it.
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, {})],
+    new Map([
+      [
+        7001,
+        {
+          locationName: null,
+          trainingSkillName: null,
+          training: { skillTypeID: null, skillName: null, toLevel: null, endsAtMs: null },
+        },
+      ],
+    ]),
+  );
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.trainingSkillName, null);
+  assert.equal(row?.trainingToLevel, null);
+  assert.equal(row?.trainingEndsAtMs, null);
+});
+
+test("a refresh that could NOT read the queue leaves the row it had alone", () => {
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, {})],
+    new Map([
+      [
+        7001,
+        {
+          locationName: null,
+          trainingSkillName: null,
+          training: {
+            skillTypeID: 3300,
+            skillName: "Mining Barge",
+            toLevel: 5,
+            endsAtMs: 1_800_000_000_000,
+          },
+        },
+      ],
+    ]),
+  );
+  // No `training` key at all: the read failed, or this caller has no way to ask.
+  // The tuple's nulls must NOT be promoted into "the queue is empty".
+  rememberCharacters(
+    "farmer",
+    [hangarChar(7001, {})],
+    new Map([[7001, { locationName: null, trainingSkillName: null }]]),
+  );
+  const row = loadKnownCharacters()[0];
+  assert.equal(row?.trainingSkillName, "Mining Barge");
+});
+
 test("an undocked pilot is placed by its solar system", () => {
   rememberCharacters("farmer", [hangarChar(7001, { solarSystemID: 30000142 })]);
   assert.equal(loadKnownCharacters()[0]?.locationRefID, 30000142);

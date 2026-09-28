@@ -2213,13 +2213,26 @@ select).
   A `SESSION_NOT_FOUND` drops the held bridge session (the page returns to
   character select).
 
-  One exception: the BFF stamps `oreGrade` onto each ROCK row (a row carrying
-  `beltID`/`miningYieldTypeID`, or `kind: "asteroid"`) before relaying — the
-  gateway's own row does not carry it. `oreGrade` is the rock's ore type's
-  dogma attribute 2699 (asteroid meta level): 0-Grade=0, plain=1, II-Grade=2,
-  III=3, IV=4. It is `null` on non-rock rows and when the attribute cannot be
-  read; a `null` is never a `0` — see `SpaceEntity.oreGrade` in
-  `web/src/store/types.ts`.
+  One exception: the BFF stamps two STATIC-DATA fields onto each ROCK row (a row
+  carrying `beltID`/`miningYieldTypeID`, or `kind: "asteroid"`) before relaying —
+  the gateway's own row carries neither. Both are `null` on non-rock rows and
+  whenever the static data cannot answer, and a `null` is never a `0`.
+
+  - `oreGrade` — the rock's ore type's dogma attribute 2699 (asteroid meta
+    level): 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4.
+  - `oreValuePerM3` — ISK per m³ for that ore: its reprocessed material value
+    (`typeMaterials` × each material's average price × 0.66, ÷ the ore's portion
+    size) ÷ the ore's unit volume. This is the number behind the retail client's
+    Mining Surveyor "Ore Value" gradient, and the client computes it the same way
+    in its own UI (`mining_util.get_volume_est_price`) rather than reading it from
+    the server — so this is one arithmetic done once here, not a new fact about
+    the world. The prices are the server's own average prices: its config service
+    builds that table from each type's static `basePrice`. Per m³ and not per
+    unit because a hold is a volume. A missing volume, portion size or material
+    price makes the whole value `null` — a partial sum would rank an ore below
+    ore it might well beat.
+
+  See `SpaceEntity` in `web/src/store/types.ts` for both.
 
 **Polling cadence:** the Overview panel polls this every **1 s** while the ship
 is in space and the panel is open. It stops when the panel closes, and the very

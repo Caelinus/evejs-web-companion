@@ -34,6 +34,7 @@
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
+    ROCK_PICKS,
     TARGET_CLASS_ARGS,
     type TargetClassArg,
     type SquadRoleArg,
@@ -58,6 +59,7 @@
     WATCH_CONDITION_KINDS,
   } from "../bots/editorOptions.ts";
   import { MACRO_CATALOG_LIST, macroEntry } from "../bots/macroCatalogView.ts";
+  import { MAX_WORLD_NAME_LEN } from "../bots/scriptCodec.ts";
   import { interruptSentence, targetClassWord } from "../bots/scriptText.ts";
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -75,7 +77,6 @@
     target,
     flow,
     currentStation = null,
-    belts = [],
     equipment = [],
     items = [],
     pilots = [],
@@ -96,7 +97,6 @@
     target: InspectorTarget;
     flow: AppFlow;
     currentStation?: { id: number; name: string } | null;
-    belts?: readonly { itemID: number; name: string; systemName?: string | null }[];
     equipment?: readonly { groupID: number; label: string }[];
     items?: readonly { typeID: number; groupID?: number | null; name: string }[];
     pilots?: readonly { characterID: number; characterName: string }[];
@@ -155,17 +155,25 @@
       ? { entity: "system", id: null, name: null, systemName: null }
       : { entity: "station", id: null, name: null, systemName: null };
   }
-  function beltChosenID(step: MacroStep, key: string): number | null {
+  // ── Which belt ──────────────────────────────────────────────────────────────
+  // A belt is TYPED, not picked from a list, and the reason is where bots get
+  // written: a player configuring a mining bot is almost never sitting in the
+  // system whose belts it will work, so any list the editor could offer — the
+  // live grid, or the belts of wherever the pilot happens to be docked — is a
+  // list of the wrong belts.
+  //
+  // Typing costs nothing extra in correctness, because the NAME was already the
+  // handle. Belt entity ids are grid-local, so the runtime never matches on one:
+  // it re-matches the name against whatever belts are on the grid it arrives at
+  // (`beltTarget` in nav/scriptMacros.ts). The name a player types is exactly
+  // what a picked belt would have stored.
+  function beltMode(step: MacroStep, key: string): "nearest" | "named" {
     const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? arg.belt.ref.id : null;
+    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? "named" : "nearest";
   }
-  function beltChosenName(step: MacroStep, key: string): string | null {
+  function beltName(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? arg.belt.ref.name : null;
-  }
-  function beltSelectValue(step: MacroStep, key: string): string {
-    const id = beltChosenID(step, key);
-    return id === null ? "nearest" : String(id);
+    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? (arg.belt.ref.name ?? "") : "";
   }
   function characterValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -276,24 +284,51 @@
     }
     onArg(arg.key, { kind: arg.kind, value: Math.min(bounds.max, Math.max(bounds.min, parsed)) } as Arg);
   }
-  function setBelt(key: string, raw: string): void {
-    if (raw === "nearest") {
+  /**
+   * The belt name a player last typed, per step and per slot.
+   *
+   * ⚠ IT CANNOT LIVE IN THE DOCUMENT. "The nearest belt" is a belt argument
+   * with NO ref on it at all, so the instant a player flips away from a name
+   * there is nowhere in the script left to keep one — and writing the name into
+   * the saved bot anyway would be recording a belt the bot is not going to use.
+   * So it is throwaway editor state, like `oreQuery` and `keepQuery` above:
+   * flipping to the nearest belt and back within a sitting keeps the name,
+   * reloading the builder does not, and losing it costs a retype.
+   *
+   * Keyed by step AND slot, so a bot with two belt steps in it cannot have one
+   * of them hand its name to the other.
+   */
+  let typedBeltNames = $state<Record<string, string>>({});
+  function beltSlotKey(step: MacroStep, key: string): string {
+    return `${step.id}::${key}`;
+  }
+  /** Switch between "the nearest belt" and one the player names, keeping any
+   * name already typed so flipping back and forth does not lose it. */
+  function setBeltMode(step: MacroStep, key: string, mode: string): void {
+    if (mode !== "named") {
+      // Catch the name on the way out — this is the last moment it exists.
+      typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
       onArg(key, { kind: "belt", belt: { mode: "nearest" } });
       return;
     }
-    const match = belts.find((b) => b.itemID === Number(raw));
-    if (match === undefined) return;
-    // ⚠ THE SYSTEM NAME IS PART OF THE SAVED DOCUMENT, so it has to be carried
-    // here rather than resolved later: belt ids are grid-local, and the library
-    // is platform-wide, so a pinned belt in someone else's copy of this bot is
-    // only identifiable by the system it was in. The caller resolves it (it is
-    // the one with the name store) and hands it over with the belt.
+    setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
+  }
+  /**
+   * The typed belt name.
+   *
+   * ⚠ NO ID AND NO SYSTEM NAME ARE STORED. A belt's id is grid-local, so one
+   * read here would be meaningless on the grid the bot actually arrives at —
+   * and the name a player types is already fully qualified ("<system> <planet>
+   * - Asteroid Belt <n>"), so it names its own system. The validator asks for a
+   * name that is not blank; nothing else here is in a position to know whether
+   * a belt by that name exists, and pretending to check would be a worse lie
+   * than the bot saying so when it gets there.
+   */
+  function setBeltName(key: string, value: string): void {
+    const name = value.slice(0, MAX_WORLD_NAME_LEN);
     onArg(key, {
       kind: "belt",
-      belt: {
-        mode: "chosen",
-        ref: { entity: "belt", id: match.itemID, name: match.name, systemName: match.systemName ?? null },
-      },
+      belt: { mode: "chosen", ref: { entity: "belt", id: null, name, systemName: null } },
     });
   }
   function setItemType(key: string, raw: string): void {
@@ -356,9 +391,12 @@
     onArg(key, trimmed.length === 0 ? undefined : { kind: "corp", id: null, name: trimmed });
   }
   function setRockPick(key: string, raw: string): void {
-    // Back to the default: drop the argument rather than storing "nearest",
-    // so an untouched step exports exactly as it was imported.
-    onArg(key, raw === "biggest" ? { kind: "rockPick", pick: "biggest" } : undefined);
+    // Back to the default: drop the argument rather than storing "nearest", so
+    // an untouched step exports exactly as it was imported. Anything that is not
+    // one of the picks the codec accepts is treated as that default too, rather
+    // than stored and refused on the next import.
+    const pick = ROCK_PICKS.find((candidate) => candidate === raw && candidate !== "nearest");
+    onArg(key, pick === undefined ? undefined : { kind: "rockPick", pick });
   }
   // ── A fight-back WATCH fights like a block, so it edits like one ───────────
   function addWatchTarget(chosen: readonly TargetClassArg[], cls: TargetClassArg): void {
@@ -721,6 +759,8 @@
       {/if}
       <span class="inspector-suffix">
         First is mined first. Every grade of an ore counts; richer grades are mined before poorer ones.
+        Leave this empty and the bot mines whatever is worth most per cubic metre on the belt — name an
+        ore here only when you want that ore in particular.
       </span>
     </div>
   {:else if arg.widget === "target-list-picker"}
@@ -781,21 +821,29 @@
         {arg.label}{#if !arg.required}<span class="inspector-optional"> — optional</span>{/if}
       </span>
       {#if arg.widget === "belt-picker"}
-        <select id={fieldId} value={beltSelectValue(step, arg.key)} onchange={(e) => setBelt(arg.key, e.currentTarget.value)}>
+        <select
+          id={fieldId}
+          value={beltMode(step, arg.key)}
+          onchange={(e) => setBeltMode(step, arg.key, e.currentTarget.value)}
+        >
           <option value="nearest">the nearest belt</option>
-          {#if beltChosenID(step, arg.key) !== null && !belts.some((b) => b.itemID === beltChosenID(step, arg.key))}
-            <!-- The pinned belt is not on this grid right now — keep it
-                 selectable rather than silently blanking the picker. Kept
-                 short: a native select popup sizes itself to its widest option
-                 and cannot be constrained from page CSS. -->
-            <option value={String(beltChosenID(step, arg.key))}>
-              {beltChosenName(step, arg.key) ?? "Pinned belt"} (off grid)
-            </option>
-          {/if}
-          {#each belts as belt (belt.itemID)}
-            <option value={String(belt.itemID)}>{belt.name}</option>
-          {/each}
+          <option value="named">a belt I name</option>
         </select>
+        {#if beltMode(step, arg.key) === "named"}
+          <input
+            id={`${fieldId}-name`}
+            type="text"
+            maxlength={MAX_WORLD_NAME_LEN}
+            placeholder="Otanuomi VI - Asteroid Belt 1"
+            aria-label="Belt name"
+            value={beltName(step, arg.key)}
+            oninput={(e) => setBeltName(arg.key, e.currentTarget.value)}
+          />
+          <span class="inspector-suffix">
+            Type it exactly as the overview shows it — the bot looks for a belt of
+            that name when it gets to the system, and stops if there is none.
+          </span>
+        {/if}
       {:else if arg.widget === "equipment-picker"}
         <select id={fieldId} value={equipmentValue(step, arg.key)} onchange={(e) => setEquipment(arg.key, e.currentTarget.value)}>
           <option value="">use everything fitted</option>
@@ -852,6 +900,7 @@
         <select id={fieldId} value={rockPickValue(step, arg.key)} onchange={(e) => setRockPick(arg.key, e.currentTarget.value)}>
           <option value="nearest">the nearest rock first</option>
           <option value="biggest">the biggest rock first</option>
+          <option value="valuable">the most valuable ore first</option>
         </select>
       {:else if arg.widget === "squad-role-select"}
         <select id={fieldId} value={squadRoleValue(step, arg.key)} onchange={(e) => setSquadRole(arg.key, e.currentTarget.value)}>

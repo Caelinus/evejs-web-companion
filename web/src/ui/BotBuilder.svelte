@@ -109,8 +109,6 @@
   // svelte-ignore state_referenced_locally
   const names = store.names;
   // svelte-ignore state_referenced_locally
-  const space = store.space;
-  // svelte-ignore state_referenced_locally
   const fitting = store.fitting;
   // svelte-ignore state_referenced_locally
   const finder = store.finder;
@@ -613,19 +611,6 @@
     void refreshSaved();
   });
 
-  // Belt ids are grid-local, not global (unlike a station), so a galaxy-wide
-  // search makes no sense: offer whatever belts are on the CURRENT grid, matched
-  // by the same name test the runtime uses to resolve "nearest".
-  // The system name rides along because it is written into the SAVED document
-  // (see `setBelt` in BotInspector.svelte): a belt id means nothing outside the
-  // grid it was read on, and this library is shared across accounts.
-  const beltsOnGrid = $derived.by<readonly { itemID: number; name: string; systemName: string | null }[]>(() => {
-    const systemID = $space.snapshot?.solarSystemID ?? null;
-    const systemName = systemID !== null ? ($names.resolved[nameKey("system", systemID)] ?? null) : null;
-    return ($space.snapshot?.entities ?? [])
-      .filter((e) => /belt/i.test(e.name ?? ""))
-      .map((e) => ({ itemID: e.itemID, name: e.name ?? "Unnamed belt", systemName }));
-  });
   // Which fitted modules are the miners — from the ACTIVE ship's slots,
   // deduplicated by GROUP, because the format's equipment argument is a group
   // and not a single module. Left unset, the step runs every mining module
@@ -877,7 +862,6 @@
     {target}
     {flow}
     {currentStation}
-    belts={beltsOnGrid}
     equipment={fittedEquipment}
     items={knownItems}
     pilots={knownPilots}

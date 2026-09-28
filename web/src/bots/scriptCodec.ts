@@ -110,7 +110,7 @@ const WORLD_ENTITIES = new Set<WorldEntity>(["station", "belt", "agent", "system
 const DOC_KEYS = new Set(["format", "version", "name", "notes", "home", "interrupts", "program"]);
 
 const MAX_ID_LEN = 40;
-const MAX_WORLD_NAME_LEN = 100;
+export const MAX_WORLD_NAME_LEN = 100;
 const MAX_ECHO_LEN = 24;
 
 // ─── Player sentences ────────────────────────────────────────────────────────

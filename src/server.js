@@ -16916,12 +16916,20 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
   }
 });
 
-// The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level) of the
-// rock's ore type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. Stamped onto
-// each ROCK row of a space snapshot from static data before it reaches the
-// browser, because the gateway's own row carries the ore's typeID but not its
-// grade. Non-rock rows pass through untouched; a non-numeric attribute (or a
-// rock whose ore has none) reads as null, never 0 — see SpaceEntity.oreGrade.
+// Two things about a rock that live in STATIC DATA rather than in the scene, and
+// so are stamped onto each ROCK row of a space snapshot before it reaches the
+// browser. Non-rock rows pass through untouched, and both fields read null —
+// never 0 — when the data cannot answer, because a zero here is a claim.
+//
+//   • ORE GRADE — dogma attribute 2699 (asteroid meta level) of the rock's ore
+//     type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. The gateway's own row
+//     carries the ore's typeID but not its grade. See SpaceEntity.oreGrade.
+//   • ORE VALUE — ISK per m³, the number behind the retail client's Mining
+//     Surveyor "Ore Value" gradient. The client computes it in its own UI from
+//     the same static inputs (see staticData.getOreValuePerM3), so this is not a
+//     new fact about the world, it is the same arithmetic done once here instead
+//     of per rock per tick in the browser. Per m³ and not per unit, because a
+//     hold is a volume: it ranks two rocks by what one trip is worth.
 const ASTEROID_META_LEVEL_ATTRIBUTE = 2699;
 
 function isRockSpaceEntityRow(row) {
@@ -16932,7 +16940,7 @@ function isRockSpaceEntityRow(row) {
   );
 }
 
-function withOreGrades(space) {
+function withOreStaticFields(space) {
   if (!space || typeof space !== "object" || !Array.isArray(space.entities)) {
     return space;
   }
@@ -16943,9 +16951,24 @@ function withOreGrades(space) {
         return row;
       }
       const grade = staticData.getTypeDogmaAttribute(row.typeID, ASTEROID_META_LEVEL_ATTRIBUTE, null);
+      // The ore the LASER yields where the row names it, falling back to the
+      // rock's own type: an asteroid row already resolves name/typeID to the ore
+      // it holds, and the two agree for every ordinary rock.
+      //
+      // ⚠ GUARDED, ON PURPOSE — the same rule readStaticTable learned the hard
+      // way: a static-data gap must not be fatal to the one read every ship in
+      // space depends on. An injected staticData that predates this field (a
+      // test double, an older deployment) leaves the value UNKNOWN instead of
+      // throwing the whole snapshot route into a 500.
+      const oreTypeID = Number(row.miningYieldTypeID) || Number(row.typeID) || 0;
+      const value =
+        oreTypeID > 0 && typeof staticData.getOreValuePerM3 === "function"
+          ? staticData.getOreValuePerM3(oreTypeID)
+          : null;
       return {
         ...row,
         oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+        oreValuePerM3: typeof value === "number" && Number.isFinite(value) ? value : null,
       };
     }),
   };
@@ -16970,7 +16993,7 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
     });
     res.json({
       ok: true,
-      space: withOreGrades(outcome.space),
+      space: withOreStaticFields(outcome.space),
       notifications: outcome.notifications,
     });
   } catch (error) {
@@ -17422,6 +17445,104 @@ async function answerWithSkillSheet(res, account, characterID, extra = {}) {
   }
   res.json({ ok: true, ...extra, skills });
 }
+
+/**
+ * The Pilot Hangar's training column, for pilots who are NOT signed in (R107).
+ *
+ * ⚠ WHY THIS ROUTE EXISTS AT ALL. The hangar used to take training straight out
+ * of charUnboundMgr.GetCharacterSelectionData, which carries `skillTypeID`,
+ * `toLevel` and `trainingEndTime` per character and is the one call the screen
+ * already makes. On this emulator those three fields are ALWAYS null — measured
+ * against a live server on 2026-09-09, every pilot on every account, including
+ * pilots whose stored queue was active with fifty-odd entries. charService fills
+ * them from `buildTrainingSelectionInfo`, which answers off a runtime snapshot
+ * the selection path does not have warm, so the tuple is honest about nothing.
+ * The hangar rendered that null as IDLE / "not training" and was wrong for every
+ * pilot that was in fact training.
+ *
+ * The gateway's own GET /skills is the authority that does answer:
+ * `skillQueueRuntime.getQueueSnapshot`, resolved to plain JSON with the skill
+ * NAME and the queue's instants already in epoch milliseconds — and, like the
+ * skill panel's read above, it needs no bridge session, because reading what a
+ * character is training is not an act of piloting. So this route asks it once
+ * per pilot and answers the three values the hangar row prints.
+ *
+ * OWNERSHIP IS THE GATEWAY'S. `characterIDs` comes from the browser, and every
+ * one of them is passed to getSkills with the CALLER's accountID; the gateway's
+ * validateOwnedCharacter refuses any character that account does not own. A
+ * refused (or failed) id is simply left OUT of the answer rather than reported —
+ * see below for why that is the useful shape.
+ *
+ * A MISSING ROW IS NOT AN IDLE ROW. The client keeps whatever it already had for
+ * any id this route does not answer for, so one pilot's failed read can never
+ * blank a column that was right a moment ago. Present-with-`skillTypeID: null`
+ * is the positive statement "this queue is empty", and only that turns a row
+ * IDLE.
+ */
+const ROSTER_TRAINING_MAX_IDS = 12;
+
+app.get("/api/roster/training", requireAuth, async (req, res, next) => {
+  const characterIDs = [];
+  for (const part of String(req.query.characterIDs || "").split(",")) {
+    const characterID = Number(part.trim()) || 0;
+    if (characterID > 0 && !characterIDs.includes(characterID)) {
+      characterIDs.push(characterID);
+    }
+  }
+  if (characterIDs.length === 0) {
+    res.json({ ok: true, training: [] });
+    return;
+  }
+  if (characterIDs.length > ROSTER_TRAINING_MAX_IDS) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_CHARACTERS",
+      message: `Ask about at most ${ROSTER_TRAINING_MAX_IDS} pilots at a time.`,
+    });
+    return;
+  }
+  try {
+    // An account holds three pilots, so these go together rather than one after
+    // the other — the hangar already walks its accounts sequentially, and three
+    // reads inside one account do not need the same restraint.
+    const rows = await Promise.all(
+      characterIDs.map(async (characterID) => {
+        let skills = null;
+        try {
+          skills = await gateway.getSkills(req.account.accountID, characterID);
+        } catch (error) {
+          // Not ours, not there, or the gateway stumbled. Say nothing about this
+          // pilot; the client keeps the row it had.
+          void error;
+          return null;
+        }
+        if (!skills) {
+          return null;
+        }
+        const queue = skills.queue && typeof skills.queue === "object" ? skills.queue : null;
+        const entries = queue && Array.isArray(queue.entries) ? queue.entries : [];
+        const head = queue && queue.active === true ? entries[0] || null : null;
+        if (!head) {
+          return { characterID, skillTypeID: null, skillName: null, toLevel: null, endsAtMs: null };
+        }
+        const skillTypeID = Number(head.typeID) || null;
+        const named = Array.isArray(skills.skills)
+          ? skills.skills.find((row) => Number(row.typeID) === skillTypeID)
+          : null;
+        return {
+          characterID,
+          skillTypeID,
+          skillName: named && typeof named.name === "string" ? named.name : null,
+          toLevel: Number(head.toLevel) || null,
+          endsAtMs: Number.isFinite(head.endTimeMs) ? head.endTimeMs : null,
+        };
+      }),
+    );
+    res.json({ ok: true, training: rows.filter((row) => row !== null) });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get("/api/bridge/skills", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);

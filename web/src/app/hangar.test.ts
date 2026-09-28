@@ -84,6 +84,14 @@ test("trainingLabel keeps the skill when there is no end time to count down", ()
   assert.equal(trainingLabel("Drones", 4, null, NOW), "Drones IV");
 });
 
+test("trainingLabel keeps a nameless queue that has not ended yet", () => {
+  // The end time is the roster saying "this pilot IS training"; the skill's name
+  // is a separate lookup that can come back empty on its own. Losing the name
+  // must cost the row its words, never its badge.
+  assert.equal(trainingLabel(null, null, NOW + 3_600_000, NOW), "Training · 1h 0m");
+  assert.equal(trainingLabel("", 4, NOW + 3_600_000, NOW), "Training · 1h 0m");
+});
+
 test("trainingLabel is null for an empty queue", () => {
   assert.equal(trainingLabel(null, null, null, NOW), null);
   assert.equal(trainingLabel("", 3, null, NOW), null);
@@ -172,7 +180,7 @@ test("the squad chip shows only that squad's pilots, across accounts", () => {
 
 // --- grouping and ordering --------------------------------------------------
 
-test("accounts keep roster order and pilots sort pinned first, then by SP", () => {
+test("accounts sort by name and pilots sort pinned first, then by SP", () => {
   const rows = [
     pilot({ characterID: 1, name: "Low", accountName: "First", skillPoints: 1_000 }),
     pilot({ characterID: 2, name: "High", accountName: "First", skillPoints: 9_000_000 }),
@@ -182,6 +190,42 @@ test("accounts keep roster order and pilots sort pinned first, then by SP", () =
   const grouped = groupByAccount(rows, { padSlots: false });
   assert.deepEqual(grouped.map((g) => g.name), ["First", "Second"]);
   assert.deepEqual(grouped[0]?.pilots.map((p) => p.name), ["Pinned", "High", "Low"]);
+});
+
+test("account order is the SAME whatever order the roster arrives in", () => {
+  // The bug this pins: roster order is `lastSeen` descending, and the hangar's
+  // own refresh rewrites `lastSeen` account by account — so the sections used to
+  // shuffle on every open of the screen.
+  const rows = [
+    pilot({ characterID: 1, accountName: "zulu" }),
+    pilot({ characterID: 2, accountName: "Alpha" }),
+    pilot({ characterID: 3, accountName: "mike" }),
+  ];
+  const names = (list: readonly HangarPilot[]): string[] =>
+    groupByAccount(list, { padSlots: false }).map((g) => g.name);
+  assert.deepEqual(names(rows), ["Alpha", "mike", "zulu"]);
+  assert.deepEqual(names([...rows].reverse()), ["Alpha", "mike", "zulu"]);
+});
+
+test("account names ending in digits sort numerically, not as text", () => {
+  const rows = [10, 9, 1].map((n) =>
+    pilot({ characterID: n, accountName: `alt${n}` }),
+  );
+  assert.deepEqual(
+    groupByAccount(rows, { padSlots: false }).map((g) => g.name),
+    ["alt1", "alt9", "alt10"],
+  );
+});
+
+test("pilots with identical SP keep a fixed order rather than the roster's", () => {
+  const rows = [
+    pilot({ characterID: 1, name: "Yara", accountName: "One", skillPoints: 5 }),
+    pilot({ characterID: 2, name: "Bex", accountName: "One", skillPoints: 5 }),
+  ];
+  const order = (list: readonly HangarPilot[]): string[] =>
+    groupByAccount(list, { padSlots: false })[0]?.pilots.map((p) => p.name) ?? [];
+  assert.deepEqual(order(rows), ["Bex", "Yara"]);
+  assert.deepEqual(order([...rows].reverse()), ["Bex", "Yara"]);
 });
 
 test("empty slots pad an account out to its three, but only on the unfiltered view", () => {

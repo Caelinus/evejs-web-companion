@@ -3129,6 +3129,69 @@ export async function resolveNames(
   return { names, unresolved };
 }
 
+// --- R107 The hangar's training column, for pilots who are NOT signed in ----
+// GET /api/roster/training?characterIDs=a,b,c answers what each of those pilots
+// is training, read from the gateway's live queue snapshot.
+//
+// ⚠ IT REPLACES A FIELD THAT LIES. charUnboundMgr.GetCharacterSelectionData
+// carries skillTypeID / toLevel / trainingEndTime per character and the hangar
+// used to believe them; on this emulator they are always null, even for a pilot
+// with an active fifty-skill queue, so every training row read as IDLE. See the
+// route in src/server.js for the measurement.
+
+export interface RosterTrainingRow {
+  readonly characterID: number;
+  /** The skill being trained; null is the positive finding "the queue is empty". */
+  readonly skillTypeID: number | null;
+  /** Already resolved by the server — the roster needs no name lookup for it. */
+  readonly skillName: string | null;
+  readonly toLevel: number | null;
+  /** When the level completes, epoch ms, or null when nothing is training. */
+  readonly endsAtMs: number | null;
+}
+
+/**
+ * What each of these pilots is training. Only pilots the server could actually
+ * answer for come back: an id that is missing from the result was NOT answered
+ * (not this account's, or the read failed), and the caller must keep whatever it
+ * already had for it rather than reading the gap as an empty queue.
+ */
+export async function loadRosterTraining(
+  characterIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<readonly RosterTrainingRow[]> {
+  const ids = characterIDs.filter((id) => Number.isFinite(id) && id > 0);
+  if (ids.length === 0) {
+    return [];
+  }
+  const data = await getJson(
+    `/api/roster/training?characterIDs=${encodeURIComponent(ids.join(","))}`,
+    options,
+  );
+  if (!Array.isArray(data.training)) {
+    return [];
+  }
+  const rows: RosterTrainingRow[] = [];
+  for (const entry of data.training as JsonValue[]) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const row = entry as Record<string, JsonValue>;
+    const characterID = asNumberOrNull(row.characterID);
+    if (characterID === null) {
+      continue;
+    }
+    rows.push({
+      characterID,
+      skillTypeID: asNumberOrNull(row.skillTypeID),
+      skillName: typeof row.skillName === "string" ? row.skillName : null,
+      toLevel: asNumberOrNull(row.toLevel),
+      endsAtMs: asNumberOrNull(row.endsAtMs),
+    });
+  }
+  return rows;
+}
+
 // --- R24 slice C: module cycle times (static reference data) ----------------
 // POST /api/types/cycle-times takes { typeIDs } and returns { baseCycleMs }.
 // Read-only static data over attribute 73 (`duration`) — like /api/names, NOT a

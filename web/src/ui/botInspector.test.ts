@@ -22,6 +22,7 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const BotInspector = (await import("./BotInspector.svelte")).default;
 const { MACRO_ARG_DESCRIPTORS } = await import("../bots/editorOptions.ts");
+const { ROCK_PICKS } = await import("../bots/botScript.ts");
 
 function fakeFlow(): unknown {
   return new Proxy({}, { get: () => async () => {} });
@@ -39,7 +40,6 @@ function visibleText(body: string): string {
  * needs to name a real character, item or station. */
 const OPTIONS = {
   currentStation: { id: 60000001, name: "Test Station" },
-  belts: [{ itemID: 40000001, name: "Asteroid Belt I" }],
   equipment: [{ groupID: 54, label: "Test Mining Laser" }],
   items: [{ typeID: 34, name: "Test Mineral" }],
   pilots: [{ characterID: 90000001, characterName: "Test Pilot One" }],
@@ -167,6 +167,20 @@ test("an optional argument the player has ALREADY set stays visible", () => {
   assert.ok(html.indexOf("arg-step-under-test-pick") < summaryAt, "a set optional argument was hidden away");
 });
 
+test("the rock-order select offers every order the codec accepts", () => {
+  // ⚠ THE POINT OF THIS TEST is the gap it closes: a pick the codec accepts but
+  // the editor never offers is a feature nobody can reach, and one the editor
+  // offers but the codec refuses is a script that will not import.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", { args: { pick: { kind: "rockPick", pick: "valuable" } } }),
+  });
+  for (const pick of ROCK_PICKS) {
+    assert.ok(html.includes(`value="${pick}"`), `the ${pick} order is not offered`);
+  }
+  assert.match(html, /most valuable ore first/);
+});
+
 // ── The ore priority list ────────────────────────────────────────────────────
 
 test("chosen ore families render in priority order", () => {
@@ -205,6 +219,90 @@ test("no ore group id reaches the screen (R7d)", () => {
   });
   const text = visibleText(html);
   assert.doesNotMatch(text, /450001/, "an ore group id was rendered as text");
+});
+
+// ── Which belt ──────────────────────────────────────────────────────────────
+//
+// A belt is TYPED, not picked from a list: a player configuring a mining bot is
+// almost never in the system whose belts it will work, so a list of the belts
+// the editor can see is a list of the wrong belts. The name is what the runtime
+// matches on anyway — belt ids are grid-local — so nothing is lost by typing it.
+
+test("a belt step offers the nearest belt, and naming one, and nothing else", () => {
+  const html = renderInspector({ kind: "step", step: step("mine-at-belt") });
+  const text = visibleText(html);
+  assert.match(text, /the nearest belt/);
+  assert.match(text, /a belt I name/);
+  // Taking the nearest belt needs nothing typed, so no field is in the way.
+  assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
+});
+
+test("naming a belt opens a field carrying the name, and says the name must be exact", () => {
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: {
+          kind: "belt",
+          belt: {
+            mode: "chosen",
+            ref: { entity: "belt", id: null, name: "Test System VI - Asteroid Belt 1", systemName: null },
+          },
+        },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/, "no field to type the belt name in");
+  assert.ok(html.includes('value="Test System VI - Asteroid Belt 1"'), "the typed name did not come back");
+  const text = visibleText(html);
+  assert.match(text, /exactly as the overview shows it/, "nothing warned that the name has to match");
+});
+
+test("a belt saved by the OLD editor shows its name, dead id and all", () => {
+  // A bot from before the picker became a text field: the ref carries a
+  // grid-local entity id and the system it was read in. The inspector reads the
+  // NAME and nothing else, so the field has to fill in exactly as it would for
+  // one typed today — an old bot that opened blank would look like it had lost
+  // its belt, and a player would retype what was already there.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: {
+          kind: "belt",
+          belt: {
+            mode: "chosen",
+            ref: {
+              entity: "belt",
+              id: 40000001,
+              name: "Test System VI - Asteroid Belt 1",
+              systemName: "Test System",
+            },
+          },
+        },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/, "no field to type the belt name in");
+  assert.ok(
+    html.includes('value="Test System VI - Asteroid Belt 1"'),
+    "an old bot's belt name did not reach the field",
+  );
+});
+
+test("a belt named but left blank still opens its field, rather than snapping back", () => {
+  // The moment after switching to "a belt I name": the argument is set, the
+  // name is not. The validator is what asks for it; the field has to be there
+  // to answer in.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", {
+      args: {
+        belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: "", systemName: null } } },
+      },
+    }),
+  });
+  assert.match(html, /id="arg-step-under-test-belt-name"/);
 });
 
 // ── The "stop when" control ─────────────────────────────────────────────────
