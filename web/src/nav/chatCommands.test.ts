@@ -433,6 +433,48 @@ test("the four link verbs still return null with no link, unaffected by the area
   assert.equal(parseChatCommand(chatMessage("jump through")), null);
 });
 
+// --- `props on` / `props off` ------------------------------------------------
+//
+// The only toggle in the vocabulary, and the only verb whose value is a word
+// rather than an id or a distance. Both halves matter: without `off` there is no
+// way to countermand a burn short of restarting the companion.
+
+test("props on and props off both parse, and carry which one was said", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("props on")), { kind: "props", on: true });
+  assert.deepEqual(parseChatCommand(chatMessage("props off")), { kind: "props", on: false });
+});
+
+test("the singular `prop` is the same verb — a commander typing fast writes either", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("prop on")), { kind: "props", on: true });
+  assert.deepEqual(parseChatCommand(chatMessage("prop off")), { kind: "props", on: false });
+});
+
+test("props is case-insensitive and tolerates the surrounding whitespace every verb does", () => {
+  assert.deepEqual(parseChatCommand(chatMessage("  PROPS   ON  ")), { kind: "props", on: true });
+  assert.deepEqual(parseChatCommand(chatMessage("Props Off")), { kind: "props", on: false });
+});
+
+// ⚠ THE VALUE IS MANDATORY, UNLIKE `follow`'s RANGE. A bare "props" is an
+// INCOMPLETE order — there is no obvious half of a toggle — whereas a bare
+// "follow" is a complete one with an obvious range. Defaulting it would let the
+// single most common thing a human types about their prop mod (mentioning it)
+// light one.
+test("a bare `props` is not an order, and neither is one with a word that is not on/off", () => {
+  assert.equal(parseChatCommand(chatMessage("props")), null);
+  assert.equal(parseChatCommand(chatMessage("prop")), null);
+  assert.equal(parseChatCommand(chatMessage("props please")), null);
+  assert.equal(parseChatCommand(chatMessage("props on off")), null);
+  assert.equal(parseChatCommand(chatMessage("props onn")), null);
+});
+
+// The same anchored, word-bounded discipline every other verb gets: a line that
+// merely MENTIONS the word is not a command.
+test("`props` is anchored and word-bounded, so propulsion/proposal/mid-sentence never fire", () => {
+  assert.equal(parseChatCommand(chatMessage("propulsion on")), null);
+  assert.equal(parseChatCommand(chatMessage("proposal off")), null);
+  assert.equal(parseChatCommand(chatMessage("did you get props on that kill")), null);
+});
+
 // --- CHAT_COMMAND_VERBS ------------------------------------------------------
 
 test("CHAT_COMMAND_VERBS lists exactly the recognised verbs, target/primary included as aliases", () => {
@@ -445,6 +487,7 @@ test("CHAT_COMMAND_VERBS lists exactly the recognised verbs, target/primary incl
       "jump",
       "loot",
       "primary",
+      "props",
       "salvage",
       "stop",
       "target",

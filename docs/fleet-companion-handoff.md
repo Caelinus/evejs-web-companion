@@ -34,7 +34,7 @@ behind by a phase at least once, including this document's own.
 | Engage + chat | **COMPLETE** — a called target is SHOT, and local-chat commands feed the same rung |
 | Phase 3 | **COMPLETE** — tank up: hardeners, per-layer self-rep, the cap inversion, both off-halves |
 | Phase 4 | **COMPLETE** — the commander gate, canTag made real, two wrappers, three blocks |
-| Phase 7 | **COMPLETE** — tackle → tag: the jam pushes decoded, and a tackled pilot letters what holds it |
+| Phase 7 | **COMPLETE**, and **CORRECTED 2026-09-13** — tackle → call out: a tackled pilot letters what holds it if it may, and BROADCASTS it if it may not (which is every ordinary run). See the correction section |
 | Phase 5 | **COMPLETE** — drones: launch, recall a hurt one, redeploy; and getting safe stops abandoning them |
 | Phase 6 | **COMPLETE** — flee and return; the flee sits ABOVE the fleet rung, by the operator's decision |
 | Phase 8 | **DONE** — chat commands, on LOCAL chat. The fleet-channel gateway patch is CANCELLED, not pending |
@@ -118,8 +118,8 @@ and no guns, and reports no error, because every list is legitimately empty.
 
 - `web/src/nav/fleetCompanionLoop.ts` — the loop. Types, the typed request, the
   controller, and the ladder. The rungs as they now stand: 1 warp
-  yield, 2 supervision / abandonment, 3 tank up, 4 tackle → tag, 5 flee,
-  6 drones, 7 obeying the fleet. ⚠ The flee went ABOVE the fleet rung, not
+  yield, 2 supervision / abandonment, 3 tank up, 3b prop mod, 4 tackle → tag,
+  5 flee, 6 drones, 7 obeying the fleet. ⚠ The flee went ABOVE the fleet rung, not
   beneath it as every earlier draft of this bullet predicted — the operator
   decided that in phase 6. `decideCompanionAction`'s own header now carries the
   full list with the reasoning, so prefer it to this bullet.
@@ -1328,6 +1328,244 @@ bounded 30-minute wait / invite-gated rejoin protocol. Two things there will
 surprise you: a human leaving a two-member fleet leaves the companion in a fleet
 of one and **promotes it to boss**, and **the sun cannot be warped to** — there is
 no celestial in the scene or in any read, so the safe spot is a bookmark.
+
+## Phase 7's tag rung never actually fired — fixed 2026-09-13
+
+**The bug the operator reported was a status line, and the status line was
+telling the truth about a feature that did nothing.** A running companion's
+roster row read
+
+    Running — cannot tag, not a fleet commander
+
+and that is what every companion says, forever. A companion alt joins somebody
+else's fleet as a plain member; nobody promotes it; `canTag` is therefore `false`
+for essentially every real run. Phase 7's whole headline — "a tackled pilot
+letters what holds it" — was gated on a verdict that is permanently no.
+
+So the rung was not just mis-reported. It was **dead in the field**, and the
+readout dutifully said so once every two seconds as though it were a fault the
+player might go and fix.
+
+### What the server actually allows — read, not assumed
+
+The asymmetry is in two functions in the same file:
+
+| | gate | who may |
+| --- | --- | --- |
+| `setFleetTargetTag` (`fleetRuntime.js:1309-1326`) | member record must carry `FLEET_JOB_CREATOR` or a role in `FLEET_CMDR_ROLES` | fleet boss, wing cmdr, squad cmdr, creator |
+| `sendBroadcast` (`fleetRuntime.js:2521-2551`) | `ensureFleetMembership` and nothing else | **anyone in the fleet** |
+
+That is EVE's own division of labour, not a quirk of this server: **lettering a
+target is a commander's job and calling one out is everybody's.** The operator's
+"all pilots should be able to tag an NPC that tackles them" is right about the
+capability and lands on the second row, not the first.
+
+The retail client agrees, call for call (`fleetSvc.py:1050`):
+
+    def SendBroadcast_Target(self, itemID):
+        self.SendBubbleBroadcast(evefleet.BROADCAST_TARGET, itemID)
+
+— `BroadcastToBubble`, bubble range, scope left at the session default
+`BROADCAST_ALL` (`fleetbroadcastexports.py:332`), `typeID` left at `None`. We
+send exactly that and nothing of our own design.
+
+### Rung 4 is now a fork, not a gate
+
+    canTag === true   ->  letter it       (fleet STATE: re-readable, confirmable)
+    canTag === false  ->  broadcast it    (an EVENT: arrives once, leaves nothing)
+    canTag === null   ->  say nothing     (unreadable roster is not an answer)
+
+⚠ **`canBroadcast` is a separate observation field and had to be.**
+`canTagInFleet` returns `false` both for "in a fleet, not a commander" and for
+"in no fleet at all", and only the first has anybody to broadcast to. The second
+cannot be derived from the first; it is a second `.find` on the same roster read,
+so the two verdicts can never disagree about which fleet they describe.
+
+### Three things the two arms deliberately do differently
+
+- **Budget.** The letter arm retries three times and then gives up per ship,
+  because a tag can be re-read and a re-send is how you find out whether the
+  first landed. The broadcast arm calls **once per ship, ever**
+  (`tackleCalledOut`): a broadcast leaves nothing behind, so a second send could
+  learn nothing the first did not.
+- **The tag dict.** A null `fleetTargetTags` stops a letter dead (a tag is
+  unique fleet-wide; guessing "A" would steal the FC's own mark) and does not
+  stop a broadcast, which claims no letter. When the dict IS readable, both arms
+  skip a ship that already carries a letter — for the broadcast that is not
+  politeness, it is necessary: every companion obeys the NEWEST target call, so
+  re-calling a lettered ship would shove the commander's standing primary aside.
+- **The ack.** This is the one fleet write in the loop whose refusal is
+  **knowable**. `Handle_BroadcastToBubble` RETURNS `sendBroadcast`'s boolean
+  where `Handle_CmdFleetTagTarget` discards it (`beyonceService.js:3320`, the
+  discard that `bridge/fleetCommand.ts` exists because of). A `false` is the
+  2-second rate limit (`MIN_BROADCAST_TIME_SEC`, exactly
+  `FLEET_COMPANION_CADENCE_MS`); it is logged and not retried.
+
+### What the readout says now
+
+`canTagWords` reports a **method**, not a deficiency: "tags targets" /
+"broadcasts targets" / "not known". The roster's per-row note for `false` is
+**gone** — a permanent, unfixable, entirely normal condition is not a status
+line. The `null` note survives and was sharpened to "fleet roster unreadable,
+not calling targets", which is the one of the three states actually worth
+interrupting a player for.
+
+### What this did NOT do
+
+- **No `NeedBackup`.** A `Target` broadcast is the call that names the ship;
+  `NeedBackup` names the sender's nearest ball and is a different sentence.
+  One call, the one the retail client makes for this act.
+- **No broadcasting for a commander.** A pilot that can letter, letters. Doing
+  both would put two calls on one ship for no gain.
+- **No retry on a rate-limited call.** See the ack note above.
+- **No player-facing toggle.** Same reasoning phase 7 used to delete
+  `attemptsTagging`: the trigger is already exactly what was asked for — call out
+  what is holding you down, and only that.
+
+## Companions never used a prop mod at all — fixed 2026-09-13
+
+Reported as "fleet companions are not using propulsion modules like MWD or
+afterburner". It was not a bug in prop-mod handling; there was no prop-mod
+handling. Three separate layers had to gain one.
+
+### Why nothing ever ran one
+
+`resolveDefenseModuleIDs` (`web/src/app/flow.ts`) is the only thing that reads a
+companion's fit and sorts it into lists. Its branch chain covered shield
+boosters, armour and hull repairers, hardeners, tackle, webs and weapons. SDE
+group 46 "Propulsion Module" matched none of them, so an afterburner or MWD fell
+off the end of the chain and was silently dropped. `FleetCompanionRequest` had no
+list to put one in either, and no rung asked.
+
+The off-switch was already known-broken for them, and said so: the `deactivate`
+action's header read **"NOT FOR PROP MODS AS IT STANDS"**. The dispatcher called
+`api.deactivateModule(moduleID, {})` with no `typeID`, and the server routes to
+`deactivatePropulsionModule` only when Deactivate NAMES the propulsion effect —
+it infers the default effect on activate and not on deactivate. Without the
+typeID the call returns 200 with `stopped:false` and the burner keeps cycling.
+The `ModuleRack` UI had been threading the typeID through for a while; the
+companion path never did.
+
+### What the group name cannot tell you, and where the answer came from
+
+Group 46 holds **both** afterburners and microwarpdrives, so no test on the group
+name can separate them — the same shape of problem as group 60 "Damage Control"
+holding both the passive and the cycling one, which the dogma duration check
+settled. Here the answer is the SDE's own `dogmaEffects`: **6731
+`moduleBonusAfterburner`**, **6730 `moduleBonusMicrowarpdrive`**.
+
+`staticData.getPropulsionEffectName` already resolved exactly that — it had been
+written for the deactivate route. It is now also reachable from the browser as a
+**`propulsionEffect` kind on the batch `/api/names` resolver**, rather than
+through a route of its own: it is the same question in the same shape (one
+typeID against the static tables, batched and cached per key) and the classifier
+already warms `typeGroup` for every fitted module on the same pass. It is the one
+kind there that does not answer a display name, and it says so.
+
+**The split is load-bearing, not decoration.** A warp scrambler
+(`warpScramblerMWD` — the server's names for the two tackle types are the wrong
+way round, and this is the one carrying `blocksMicrowarpdrive`) turns an MWD off
+and does **nothing at all** to an afterburner. A rung that knew only "prop mod"
+would have to pick one wrong behaviour for every scrammed companion: keep
+re-activating an MWD the server already killed, or stand down an afterburner that
+is working. The second is worse — a scrammed ship is the one that needs its
+speed.
+
+### Rung 3b, directly under tank up
+
+Same kind of move as tank-up: one call, self-targeted, instant, and it falls
+through the moment the rack matches what is wanted, so it costs the rungs below
+it a tick or two after a trip starts or ends and nothing the rest of the time.
+Above the fleet rung so a standing target call cannot swallow a `props on`.
+
+- **"Travelling" is the ship's own movement MODE, plus the autopilot.** See the
+  correction below — the first cut read it as the autopilot alone and never
+  fired.
+- ⚠ **A flee gets one now, by accident rather than design.** The get-safe ladder
+  approaches a station before docking and an approach is `GOTO`, so the burner
+  lights for that leg. The warp leg gets nothing: the ladder never reaches this
+  rung mid-warp because rung 1 yields first, and a prop mod is no use in warp.
+- **The capacitor floor gates the lighting only, never the stopping.** An MWD
+  runs at roughly ninety per cent of a frigate's capacitor per cycle. But gating
+  the off-half on the same floor would strand a burner ON at exactly the
+  capacitor level that made it dangerous.
+- **Every unreadable input fails open**, as everywhere else in this file:
+  `activeModuleIDs` null issues nothing rather than re-lighting a running module;
+  `scrammed` is three-state and only an explicit `true` gates; an unclassifiable
+  prop mod is assumed scram-vulnerable, which costs at most a stationary
+  afterburner on a pilot that is already tackled.
+
+### `props on` / `props off`
+
+The first verb in `chatCommands.ts` that is a **toggle** rather than an order,
+which is why it carries a boolean instead of an id or a range, and why both
+halves are required: without `off` there is no way to countermand a burn short of
+restarting the companion — the same gap `follow` closes by doubling as its own
+resume. `prop` and `props` are the same verb.
+
+- **The value is mandatory and has no default.** A bare `props` is an *incomplete*
+  order — there is no obvious half of a toggle — unlike a bare `follow`, which is
+  a complete one with an obvious range. Defaulting it would let the single most
+  common thing a human types about their prop mod (mentioning it) light one.
+- **It latches**, through `withStandingChatOrders` alongside the follow, the trip
+  and `stop`, replayed oldest-first so "the last thing said wins" is answered once
+  rather than per verb. Re-reading it off the chat backlog would switch the burner
+  off the moment the line aged out of the freshness window.
+- ⚠ **A `stop` does not clear it.** `stop` cancels standing ORDERS; propulsion is
+  not one. A commander halting a pilot has said nothing about whether it may keep
+  its speed, and a ship told to stop is often the one that most needs to move
+  again in a hurry.
+- **`propsHeld` is three-state and `null` is not "off"** — it means nobody has
+  overridden, so the travel test decides. `false` there would ship every companion
+  with a permanent order never to use its prop mod. It resets to `null` on a
+  restart, for the same reason the follow range does: the line that set it is long
+  out of the chat window and cannot be re-heard.
+
+### Correction, same day: the trigger was right and never fired
+
+Reported back from a live fleet: still no afterburner. The mechanism was fine —
+static data resolves `typeGroup:12058` to "Propulsion Module" and
+`propulsionEffect:12058` to `moduleBonusAfterburner` against the real tables —
+but **`obs.travel.status === "running"` is almost never true for a companion.**
+
+Both of the loop's own travel rungs fly through `startRoute`, which is what made
+the autopilot look like the authority. It isn't, because in ordinary fleet play a
+companion does not travel that way at all: it yields to the commander's fleet
+warp (rung 1), holds station on them (rung 9) and jumps the gate it is sitting on
+(rung 7). The autopilot stays idle for an entire trip across a dozen systems.
+
+The trigger is now `isUnderWay`: the ship's **own movement mode**, falling back to
+the autopilot. Checked against the server (`space/destiny/commands/`), the only
+values it ever assigns to `entity.mode` are **FIELD, FOLLOW, GOTO, ORBIT, STOP,
+WARP**. `gotoPointEntity` — what an approach runs — sets `GOTO`; `followShipEntity`,
+which is `keepAtRange` and so the follow rung, sets `FOLLOW`. Those two are the
+burn; `ORBIT` is excluded because a ship holding station has arrived and would
+otherwise circle on full power for ever.
+
+⚠ **`isClosing` (same file) tests `/follow|approach|warp/i` and so misses every
+approach**, because the word "approach" is not in the server's vocabulary — an
+approach is `GOTO`. That helper gates the salvage and loot rungs' "is the ship
+still under way" wait. Not touched here; flagged because reusing it for anything
+that spends a call would inherit the same silent miss.
+
+Four regression tests cover the reported case directly, and reverting `isUnderWay`
+to the autopilot-only reading fails exactly those four.
+
+### What was checked
+
+27 rung tests and 5 parser tests, mutation-checked: removing the scram gate fails
+3, dropping the `typeID` from the deactivate fails 1 (the exact latent bug), and
+reading the three-state override as a plain boolean fails 1. Six BFF tests cover
+the new resolver kind. `tsc -p tsconfig.json` and `docker build --target
+web-build` both clean; the full suite's 17 failures are the host's pre-existing
+locale-formatting ones and none are in companion, chat, jam or fitting code.
+
+⚠ **Not verified against a live pilot.** Everything above is SSR-level. The
+observable claims a running client would settle are: that a fitted prop mod
+actually appears in `propulsionModules` (the classifier runs inside `flow.ts`'s
+closure and has no direct test), and that the typeID-carrying Deactivate really
+stops one — which was measured live once, on a 1MN Civilian Afterburner, but
+never from this rung.
 
 ## The method that kept paying
 

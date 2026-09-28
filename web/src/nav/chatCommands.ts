@@ -239,7 +239,26 @@ export type ChatCommand =
   | { readonly kind: "loot" }
   | { readonly kind: "stop" }
   | { readonly kind: "follow"; readonly rangeM: number }
-  | { readonly kind: "destination"; readonly systemID: number };
+  | { readonly kind: "destination"; readonly systemID: number }
+  /**
+   * `props on` / `props off` — run the fitted afterburner/MWD, or stand it down.
+   *
+   * ⚠ THE ONLY VERB HERE THAT IS A TOGGLE RATHER THAN AN ORDER, which is why it
+   * carries a boolean instead of an id or a range. Every other command names a
+   * thing to do once (`target`, `jump`) or a behaviour with a value attached
+   * (`follow 10km`); this one flips a standing preference that the pilot would
+   * otherwise decide for itself from whether it is travelling. Both halves are
+   * therefore REQUIRED: an FC who can only say "on" has no way back to the
+   * automatic behaviour except by restarting the companion, which is the same
+   * gap `follow` closed by doubling as its own resume.
+   *
+   * ⚠ AND "OFF" IS NOT "STOP". `stop` cancels standing ORDERS (it suspends the
+   * follow, clears the trip); `props off` says nothing about any of them. They
+   * are kept apart deliberately — folding propulsion into `stop` would mean a
+   * commander could not halt a trip without also stripping the speed off a ship
+   * that may need it to get out.
+   */
+  | { readonly kind: "props"; readonly on: boolean };
 
 /**
  * Verb -> command kind, each with its own anchored, case-insensitive
@@ -466,6 +485,28 @@ const VALUE_COMMAND_VERBS: ReadonlyArray<{
     read: (remainder) => {
       const systemID = destinationSystemFrom(remainder);
       return systemID === null ? null : { kind: "destination", systemID };
+    },
+  },
+  {
+    // ⚠ `props` AND `prop` BOTH, because a commander typing at combat speed
+    // writes either and the two cannot mean different things. `\b` after the
+    // optional `s` keeps the anchor honest: "proposal" and "propulsion" are not
+    // this verb.
+    verb: "props",
+    pattern: /^props?\b/i,
+    // ⚠ THE VALUE IS MANDATORY AND HAS NO DEFAULT. A bare "props" is not an
+    // order, and reading it as "on" would let the single most common thing a
+    // human types about their prop mod — mentioning it — light one. Same rule
+    // `destination` follows for a remainder that is not a system: no value, no
+    // command, `null` rather than a guess.
+    //
+    // ⚠ `follow`'s DEFAULTING IS NOT THE PRECEDENT IT LOOKS LIKE. A bare
+    // "follow" is a complete order with an obvious range; a bare "props" is an
+    // incomplete one, because there is no obvious half of a toggle.
+    read: (remainder) => {
+      const said = /^\s*(on|off)\s*$/i.exec(remainder);
+      const word = said?.[1];
+      return word === undefined ? null : { kind: "props", on: word.toLowerCase() === "on" };
     },
   },
 ];

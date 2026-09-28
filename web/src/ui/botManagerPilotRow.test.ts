@@ -267,7 +267,12 @@ test("a companion's row NAMES the run and sends the player elsewhere for it", ()
   assert.match(text, /Fleet companions window/, "and the door to it is named");
   assert.doesNotMatch(text, /In fleet:/);
   assert.doesNotMatch(text, /can tag:/);
-  assert.doesNotMatch(text, /Last order heard/);
+  // ⚠ "Last order", not "Last order heard" — the companion readout shortened
+  // its column heads. What this guards is unchanged: this row must not grow a
+  // copy of that readout. Pinned to the words that actually exist, because an
+  // absence test against a phrase nothing can print any more passes forever
+  // while guarding nothing.
+  assert.doesNotMatch(text, /Last order/);
   assert.doesNotMatch(text, /whatever the host called it/, "not the run's own name");
 });
 
@@ -284,5 +289,10 @@ test("a plain script row grows no companion badge", () => {
   const text = visibleText(renderRow({ serverBot: fakeServerBot() }));
   assert.doesNotMatch(text, /In fleet:/);
   assert.doesNotMatch(text, /can tag:/);
-  assert.doesNotMatch(text, /Last order heard/);
+  // ⚠ "Last order", not "Last order heard" — the companion readout shortened
+  // its column heads. What this guards is unchanged: this row must not grow a
+  // copy of that readout. Pinned to the words that actually exist, because an
+  // absence test against a phrase nothing can print any more passes forever
+  // while guarding nothing.
+  assert.doesNotMatch(text, /Last order/);
 });

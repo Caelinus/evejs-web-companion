@@ -74,11 +74,17 @@ export function tallyCompanions(statuses: readonly (string | null)[]): Companion
  * read before they can dismiss it; the sentence that means the same thing is
  * shorter and lands faster. Paused is named separately from idle for the reason
  * `holdsTheShip` exists: a paused companion has not let go of the hull.
+ *
+ * ⚠ THE EMPTY SENTENCE IS ABOUT THE OP, NOT THE BROWSER. It used to read "No
+ * pilots are signed in here", which was true when the window listed every
+ * session automatically. The roster is now a list the player builds, so an
+ * empty one means they have not added anybody — and telling somebody with four
+ * pilots online that nobody is signed in is simply wrong.
  */
 export function companionSummaryWords(tally: CompanionTally): string {
   const total = tally.running + tally.paused + tally.idle;
   if (total === 0) {
-    return "No pilots are signed in here.";
+    return "No pilots in this op yet.";
   }
   if (tally.running === 0 && tally.paused === 0) {
     return "No pilot is flying as a companion.";

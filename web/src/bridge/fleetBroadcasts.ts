@@ -54,6 +54,29 @@ export const FLEET_BROADCAST_NAMES = [
 
 export type FleetBroadcastName = (typeof FLEET_BROADCAST_NAMES)[number];
 
+/**
+ * `BROADCAST_ALL` (fleetConstants.js:10) — the `scope` a broadcast we SEND
+ * carries, and the only one this client ever sends.
+ *
+ * ⚠ THIS IS A SCOPE, NOT A RANGE, AND THE TWO ARE INDEPENDENT ARGUMENTS. Range
+ * (bubble/system/universe) is chosen by WHICH server method is called and
+ * decides whose sessions are collected; scope is a separate argument tested per
+ * recipient by `shouldReceiveBroadcast` (fleetRuntime.js:2430) and decides which
+ * of those collected may hear it. `ALL` short-circuits that test to true; `UP`
+ * and `DOWN` walk the wing/squad hierarchy, so a plain member sending `UP`
+ * reaches only its squad commander and above — nobody on grid.
+ *
+ * The retail client's own setting (`fleetBroadcastScopeSetting`,
+ * fleetbroadcastexports.py:332) offers all three and defaults to `ALL`. We do
+ * not expose the choice: a companion's only reason to broadcast is to be heard
+ * by whoever can shoot the thing.
+ *
+ * ⚠ NOT RE-EXPORTED FROM THE DECODER SIDE OF THIS MODULE BY ACCIDENT. Received
+ * broadcasts carry a scope too, and this client ignores it on the way in —
+ * the server has already decided we were entitled to hear it.
+ */
+export const FLEET_BROADCAST_SCOPE_ALL = 3;
+
 function isFleetBroadcastName(value: unknown): value is FleetBroadcastName {
   return (
     typeof value === "string" &&

@@ -42,8 +42,12 @@ function facts(over: Partial<CompanionFitFacts> = {}): CompanionFitFacts {
     remoteShieldModuleIDs: [],
     remoteArmorModuleIDs: [],
     remoteCapacitorModuleIDs: [],
+    propulsionModules: [],
     weaponModuleIDs: [GUN_A],
     salvagerModuleIDs: [],
+    // A fit that said nothing about where its tank is — which is what a hull
+    // with one hardener and a gun genuinely does say.
+    tankLayer: null,
     modules: [module({ itemID: HARDENER, takesCharge: false }), module({ itemID: GUN_A })],
     droneBay: null,
     droneBayRoles: NO_DRONE_ROLES,

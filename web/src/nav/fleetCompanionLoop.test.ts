@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import {
   DEFAULT_FLEET_COMPANION_REQUEST,
   FLEET_COMPANION_ABANDONMENT_WAIT_MS,
+  FLEET_COMPANION_BURST_MS,
+  FLEET_COMPANION_CADENCE_MS,
   TANK_LAYER_HURT_THRESHOLD,
   createFleetCompanion,
   decideCompanionAction,
@@ -17,6 +19,7 @@ import {
   type CompanionLadderMemory,
   type FleetCompanionDeps,
   type FleetCompanionObservation,
+  type CompanionPropulsionModule,
   type FleetCompanionRequest,
 } from "./fleetCompanionLoop.ts";
 import type { ChatMessage, SpaceSnapshot } from "../store/types.ts";
@@ -2886,6 +2889,168 @@ test("an unsupervised pilot tags nothing", () => {
   assert.notEqual(decision.action.kind, "setFleetTargetTag");
 });
 
+// --- rung 4's other arm: tackle -> BROADCAST ---------------------------------
+//
+// THE ARM THAT ACTUALLY RUNS. A companion alt joins somebody else's fleet as a
+// plain member and is never promoted, so `canTag` is `false` for essentially
+// every real run -- and the rung used to stop dead there, which meant the whole
+// "letter what has you tackled" feature described something that never fired.
+//
+// It fires now, the way EVE lets a member fire it: `Target`, broadcast. The
+// server has NO commander gate on broadcasting (`sendBroadcast`,
+// fleetRuntime.js:2521, checks membership and nothing else) where it has a hard
+// one on tagging (fleetRuntime.js:1317). Lettering is a commander's job and
+// calling a target out is everybody's, which is the division these two arms
+// mirror rather than invent.
+
+/** A PLAIN MEMBER that is tackled: in a fleet, no command, nothing lettered. */
+function memberObs(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithEntities([TACKLE]),
+    canTag: false,
+    canBroadcast: true,
+    fleetTargetTags: new Map(),
+    tackledBy: [TACKLE],
+    ...overrides,
+  });
+}
+
+test("a plain member broadcasts the ship that has it scrambled", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs());
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: TACKLE });
+  assert.equal(decision.phase, "Tagging");
+});
+
+// ⚠ THE READOUT MUST NAME THE CALL IT MADE. "Marking it for the fleet" over a
+// broadcast would hide the one thing a player needs to know about this pilot:
+// that its calls arrive in the broadcast window and not on the overview.
+test("the reason says it BROADCAST, never that it marked or lettered", () => {
+  const why = decideCompanionAction(TAGGING, memberObs()).why ?? "";
+  assert.match(why, /broadcast/i);
+  assert.doesNotMatch(why, /marking|letter|tag/i);
+});
+
+// ⚠ `canTag === false` ANSWERS TWO QUESTIONS AND ONLY ONE OF THEM HAS A
+// FALLBACK. `canTagInFleet` returns false both for "in a fleet, not a commander"
+// and for "in no fleet at all", and a pilot in no fleet has nobody to broadcast
+// to. Deriving the second from the first is impossible, which is why
+// `canBroadcast` is asked separately -- and why a host that does not populate it
+// gets silence rather than a guess.
+test("a pilot in no fleet broadcasts nothing", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canBroadcast: false }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+test("an unpopulated canBroadcast is unknown, and unknown stays quiet", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canBroadcast: undefined }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// ⚠ `null` IS NOT THE BROADCAST ARM'S DOOR. An unreadable roster is not
+// evidence this pilot lacks command; sending it down the fallback would make a
+// transient read failure change how the pilot talks to its fleet.
+test("an unreadable roster makes neither call", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ canTag: null }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+  assert.notEqual(decision.action.kind, "setFleetTargetTag");
+});
+
+// ⚠ THE ONE PLACE THE TWO ARMS DISAGREE ABOUT THE TAG DICT, and it is not an
+// oversight. The letter arm cannot write without knowing which letters are free
+// (a tag is unique fleet-wide). A broadcast claims no letter, so an unreadable
+// dict is no reason to stay quiet about being tackled.
+test("an unreadable tag dict stops a letter but NOT a broadcast", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ fleetTargetTags: null }));
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: TACKLE });
+});
+
+// ⚠ A LETTERED SHIP IS ALREADY CALLED. Broadcasting it as well would put a
+// second call on a target the fleet is already pointed at -- and because every
+// companion obeys the NEWEST target call, it would shove the commander's own
+// standing primary aside for nothing.
+test("a tackler the commander has already lettered is not broadcast", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ fleetTargetTags: new Map([[TACKLE, "B"]]) }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// ⚠ ONCE PER SHIP, AND THIS IS WHAT STOPS TWO COMPANIONS SHOUTING AT EACH
+// OTHER. A broadcast leaves nothing behind to re-read, so a second send could
+// learn nothing a first did not -- it would just be the same shout every two
+// seconds for as long as the ship held this pilot. And since a `Target`
+// broadcast is an ORDER to every companion that hears it, two pilots tackled by
+// one ship would re-call it in turn without a per-ship memory.
+test("one broadcast per ship, however long it keeps this pilot tackled", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const calls: number[] = [];
+  for (let tick = 0; tick < 5; tick += 1) {
+    const decision = decideCompanionAction(TAGGING, memberObs(), memory);
+    memory = decision.memory;
+    if (decision.action.kind === "broadcastFleetTarget") {
+      calls.push(decision.action.targetID);
+    }
+  }
+  assert.deepEqual(calls, [TACKLE], "called once, then silent about that ship");
+});
+
+// ⚠ PER SHIP, NOT A SINGLE "ALREADY CALLED" FLAG -- the same reasoning that
+// makes the letter arm's give-up list per-ship. A flag would pass the test above
+// and fail the moment a second ship joined in.
+test("having called one tackler does not silence the next", () => {
+  let memory: CompanionLadderMemory = freshLadderMemory();
+  const grid = gridWithEntities([TACKLE, OTHER]);
+  memory = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: grid, tackledBy: [TACKLE] }),
+    memory,
+  ).memory;
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: grid, tackledBy: [TACKLE, OTHER] }),
+    memory,
+  );
+  assert.deepEqual(decision.action, { kind: "broadcastFleetTarget", targetID: OTHER });
+});
+
+// The trigger is the same narrow one the letter arm has: ships holding THIS
+// pilot down, never a ranking of the grid.
+test("a plain member that is not tackled broadcasts nothing, however hostile the grid", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ tackledBy: [] }));
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+test("a tackler that is not on this grid is not broadcast", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    memberObs({ snapshot: gridWithEntities([OTHER]), tackledBy: [TACKLE] }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
+// Rungs 1 and 2 outrank this arm exactly as they outrank the letter arm.
+test("nothing is broadcast mid-warp", () => {
+  const decision = decideCompanionAction(TAGGING, memberObs({ inWarp: true }));
+  assert.deepEqual(decision.action, { kind: "wait" });
+});
+
+test("an unsupervised pilot broadcasts nothing", () => {
+  const decision = decideCompanionAction(
+    TAGGING,
+    alone({
+      snapshot: gridWithEntities([TACKLE]),
+      canTag: false,
+      canBroadcast: true,
+      fleetTargetTags: new Map(),
+      tackledBy: [TACKLE],
+    }),
+  );
+  assert.notEqual(decision.action.kind, "broadcastFleetTarget");
+});
+
 // --- the parking fix: a standing order no longer ends the tick ---------------
 //
 // `lockThenEngage`'s last branch used to return an ordinary wait once the called
@@ -3015,6 +3180,179 @@ test("the floor that decides is the request's own", () => {
   const jumpy: FleetCompanionRequest = { ...REQUEST, fleeHealthFloor: 0.8 };
   assert.equal(decideCompanionAction(jumpy, fleeObs({ health: 0.5 })).phase, "Getting clear");
   assert.notEqual(decideCompanionAction(REQUEST, fleeObs({ health: 0.5 })).phase, "Getting clear");
+});
+
+// --- which layers a flee is judged on -----------------------------------------
+//
+// ⚠ DAMAGE EATS SHIELD, THEN ARMOUR, THEN HULL, WHATEVER THE FIT. So an armour
+// tank's shield is not its tank: it is the thing that empties in the first
+// seconds of every fight. Folding all three layers made such a ship run for the
+// door before its repairer had cycled once -- reported live, 2026-09-13, "they
+// run away when shield is down instead of turning on armor repair and waiting
+// for armor going below threshold". What the ship can REPAIR is what it is
+// tanked in, and that is read off the hull at start.
+
+/** A hull with an armour repairer and no booster: shield is buffer, not tank. */
+const ARMOUR_TANKED: FleetCompanionRequest = {
+  ...REQUEST,
+  armorRepairerModuleIDs: [ARMOR_REPAIRER],
+};
+
+/** A hull that repairs its own shield: the shield IS the tank. */
+const SHIELD_TANKED: FleetCompanionRequest = {
+  ...REQUEST,
+  shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+};
+
+test("an armour-tanked ship does not run away over an empty shield", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.equal(decision.memory.flee, null);
+});
+
+// ⚠ THE REPAIRER COMES FIRST, AND THAT IS THE ASKED-FOR ORDER. Rung 3 sits
+// above the flee, so the first tick of a hurt layer switches its own repairer
+// on ("turning on armor repair") and the door is only reached once that is
+// already cycling and the layer is still going.
+test("the hurt layer's own repairer is reached for before the door is", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 0.2, hullRatio: 1 }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_REPAIRER, targetID: 0 });
+  assert.equal(decision.phase, "Tanking up");
+});
+
+/** The same grid, with one of this ship's own modules already cycling. */
+function fleeObsCycling(
+  moduleID: number,
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  const grid = gridWithStation(200_000);
+  return fleeObs({
+    snapshot: { ...grid, ship: { ...grid.ship, activeModuleIDs: [moduleID] } },
+    ...overrides,
+  } as Partial<FleetCompanionObservation>);
+}
+
+test("and it leaves when the layer it actually tanks with drops", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_TANKED,
+    fleeObsCycling(ARMOR_REPAIRER, {
+      health: 0.05,
+      shieldRatio: 0.05,
+      armorRatio: 0.2,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The other half: a shield tank's shield is its health, and ignoring it would
+// be the same mistake in the opposite direction.
+test("a shield-tanked ship still leaves on its shield", () => {
+  const decision = decideCompanionAction(
+    SHIELD_TANKED,
+    fleeObsCycling(SHIELD_BOOSTER, {
+      health: 0.1,
+      shieldRatio: 0.1,
+      armorRatio: 1,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// A fit that voted for NEITHER layer says nothing about where its hitpoints
+// are, so the worst layer stays the honest answer.
+test("a hull that said nothing about its tank keeps the worst-layer fold", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// --- the buffer fit, which cycles nothing and had nothing to say -------------
+//
+// A brick's plates and extenders are PASSIVE, so they never reach a list this
+// loop can activate. `tankLayer` is voted off the hull's group names at start
+// (bots/tankLayer.ts) and is the only thing such a fit has to say.
+
+/** A plated brick: no repairer to cycle, and a fit that says so. */
+const ARMOUR_BRICK: FleetCompanionRequest = { ...REQUEST, tankLayer: "armor" };
+
+/** An extender brick. */
+const SHIELD_BRICK: FleetCompanionRequest = { ...REQUEST, tankLayer: "shield" };
+
+test("a plated brick does not run away over an empty shield either", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.notEqual(decision.phase, "Getting clear");
+  assert.equal(decision.memory.flee, null);
+});
+
+test("and it leaves when its armour goes", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({ health: 0.05, shieldRatio: 0.05, armorRatio: 0.2, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+test("an extender brick still leaves on its shield", () => {
+  const decision = decideCompanionAction(
+    SHIELD_BRICK,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// ⚠ A FITTED REPAIRER OUTRANKS THE VOTE, and a hull that carries both is where
+// that matters: a shield-boosted ship with a plate in the lows is shield-tanked,
+// because the thing it can switch on is the plainer statement by far.
+test("what the ship can cycle beats what it is built of", () => {
+  const boostedAndPlated: FleetCompanionRequest = {
+    ...REQUEST,
+    shieldBoosterModuleIDs: [SHIELD_BOOSTER],
+    tankLayer: "armor",
+  };
+  const decision = decideCompanionAction(
+    boostedAndPlated,
+    fleeObsCycling(SHIELD_BOOSTER, {
+      health: 0.1,
+      shieldRatio: 0.1,
+      armorRatio: 1,
+      hullRatio: 1,
+    }),
+  );
+  assert.equal(decision.phase, "Getting clear");
+});
+
+// The way back is judged on the same layers, or a brick would wait at a safe
+// spot for a shield that is empty by design.
+test("a plated brick comes back once its ARMOUR is whole, whatever its shield says", () => {
+  const decision = decideCompanionAction(
+    ARMOUR_BRICK,
+    fleeObs({
+      health: 0.05,
+      shieldRatio: 0.05,
+      armorRatio: 1,
+      hullRatio: 1,
+      docked: false,
+      // Somewhere else, so the return has a leg to fly and this asserts a move
+      // rather than the absence of one.
+      flightStatus: { solarSystemID: 30000144 } as FleetCompanionObservation["flightStatus"],
+    }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "travelTo", systemID: HOME_SYSTEM });
+  assert.equal(decision.phase, "Going back");
 });
 
 // Null is not "healthy" and it is not "dying" -- the same three-state discipline
@@ -3187,7 +3525,7 @@ test("latching a flee drops any drone redeploy cycle in flight", () => {
   const request: FleetCompanionRequest = REQUEST;
   const mid: CompanionLadderMemory = {
     ...freshLadderMemory(),
-    droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], waited: 1 },
+    droneCycle: { stage: "holding-off", recalledIDs: [DRONE_A], stageSinceMs: 0 },
   };
   const decision = decideCompanionAction(request, fleeObs(), mid);
   assert.equal(decision.memory.droneCycle, null, "a live redeploy must not survive a flee latching");
@@ -3242,6 +3580,12 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
       triggeredAtHealth: 0.12,
       fromSolarSystemID: HOME_SYSTEM,
       repairAttempts: 0,
+      // The cautious stamp by default: this flee cannot vouch for the armour,
+      // so a station has to be asked about it. The tests that want the common
+      // case -- a shield-tanked pilot whose other two layers never dropped --
+      // say so explicitly.
+      onlyTheShieldWasHurt: false,
+      arrivedSafe: false,
       safeSpotWarpIssued: false,
       safeSpotWarpSeen: false,
       droneRecallWaited: null,
@@ -3253,7 +3597,9 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
 test("a docked pilot holds, and says what it left at", () => {
   const decision = decideCompanionAction(
     REQUEST,
-    fleeObs({ docked: true, inSpace: false }),
+    // With damage the shop has named: a pilot holding in a station for a reason
+    // is the one whose readout has to carry that reason.
+    fleeObs({ docked: true, inSpace: false, damagedItemIDs: [900001] }),
     fleeing(),
   );
   assert.equal(decision.phase, "Safe");
@@ -3282,56 +3628,123 @@ const RIG_ITEM = 900002;
 // `damage` and `armorDamage` alone, so a shield flee is whole on arrival and an
 // armour flee is not. Everything below is shaped around that one server fact.
 
-/** Docked at the station a flee ended at, with a health the test picks. */
+/**
+ * Docked at the station a flee ended at.
+ *
+ * ⚠ `health: null`, ALWAYS, AND THAT IS THE POINT OF THIS WHOLE SECTION. There
+ * is no health read in a station: `obs.health` is folded from the SPACE
+ * snapshot, and a docked ship has none. These fixtures used to hand the ladder
+ * a docked health anyway -- `dockedAfterFleeing(1)` for "whole",
+ * `dockedAfterFleeing(0.4)` for "hurt in the armour" -- which is a reading the
+ * live loop can never get, and it is exactly why the stranded-pilot bug of
+ * 2026-09-13 passed every test in here. A station answers two questions
+ * instead: the flee's own stamp, and the shop's quote.
+ */
 function dockedAfterFleeing(
-  health: number | null,
   overrides: Partial<FleetCompanionObservation> = {},
 ): FleetCompanionObservation {
-  return fleeObs({ docked: true, inSpace: false, health, ...overrides });
+  return fleeObs({ docked: true, inSpace: false, health: null, ...overrides });
 }
 
-test("a pilot whole again undocks to rejoin", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+/** The flee a shield-tanked pilot latches: armour and hull never dropped. */
+const SHIELD_ONLY = { onlyTheShieldWasHurt: true } as const;
+
+// THE REGRESSION, IN ONE TEST. Docking gives the shield back in full, so a
+// shield-only flee is whole the moment it arrives -- with no health read, no
+// quote, and no wallet.
+test("a station reports no health at all, and a shield-only flee still goes home", () => {
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), fleeing(SHIELD_ONLY));
   assert.deepEqual(decision.action, { kind: "undock" });
   assert.equal(decision.phase, "Going back");
 });
 
 // ⚠ THE MARGIN, NOT THE FLOOR. Coming back at exactly the number that sends it
 // running means the next tick reads the same number and leaves again: one fight
-// would eat the whole budget without a shot fired.
+// would eat the whole budget without a shot fired. Asked at a SAFE SPOT, which
+// is where a live health read is the authority.
 test("a pilot only just above its floor stays put rather than commuting", () => {
   const decision = decideCompanionAction(
     REQUEST,
-    dockedAfterFleeing(REQUEST.fleeHealthFloor + 0.01),
-    fleeing(),
+    fleeObs({ health: REQUEST.fleeHealthFloor + 0.01, docked: false }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
   );
   assert.notEqual(decision.action.kind, "undock");
   assert.equal(decision.phase, "Safe");
+  assert.match(decision.why, /waiting out here/i);
 });
 
-test("an UNREADABLE health never undocks", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(null), fleeing());
-  assert.notEqual(decision.action.kind, "undock");
+test("an UNREADABLE health out at a safe spot never goes back", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: null, docked: false }),
+    fleeing({ safeSpotWarpIssued: true, safeSpotWarpSeen: true }),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.equal(decision.phase, "Safe");
 });
 
 // --- the armour case, which is the whole reason the opt-in exists -------------
 
 test("without the opt-in, a pilot hurt in the armour says why it is staying", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(0.4), fleeing());
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
+    fleeing(),
+  );
   assert.deepEqual(decision.action, { kind: "wait" });
   assert.match(decision.why, /not set to pay for repairs/i);
   assert.notEqual(decision.action.kind, "undock");
+});
+
+// ⚠ AND IT SAYS IT ONLY OVER DAMAGE THE SHOP HAS NAMED. The wallet used to be
+// consulted before the quote was, so a whole ship in a station was told it was
+// staying put because nobody would pay to fix it.
+test("a pilot that does not pay for repairs still waits for the quote before blaming it", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: null }),
+    fleeing(),
+  );
+  assert.match(decision.why, /quote/i);
+});
+
+// THE HAND-REPAIRED CASE, REPORTED LIVE THE SAME DAY: the operator fixed the
+// armour themselves, so no companion ever spent a coin — and the pilot has to
+// notice. It notices the only way a docked ship can: the shop has nothing left
+// to quote for.
+test("a pilot repaired BY HAND goes home, with no opt-in and nothing paid", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [] }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Going back");
 });
 
 test("with the opt-in, it pays the shop for exactly what the quote named", () => {
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM, RIG_ITEM] }),
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM, RIG_ITEM] }),
     fleeing(),
   );
   assert.deepEqual(decision.action, { kind: "repairItems", itemIDs: [SHIP_ITEM, RIG_ITEM] });
   assert.equal(decision.phase, "Repairing");
+});
+
+// THE OTHER HALF OF THE SAME BUG. The repair lands, the quote empties -- and the
+// return was still gated on a health read the station cannot produce, so a pilot
+// that had just been paid for stayed docked as surely as one that had not.
+test("a paid-for pilot undocks once the shop's quote comes back empty", () => {
+  const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
+  const decision = decideCompanionAction(
+    paying,
+    dockedAfterFleeing({ damagedItemIDs: [] }),
+    fleeing({ repairAttempts: 1 }),
+  );
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Going back");
 });
 
 // Null is "could not say", never "nothing is damaged" -- the same contract the
@@ -3341,7 +3754,7 @@ test("an unquoted shop is waited on, not read as nothing-to-fix", () => {
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: null }),
+    dockedAfterFleeing({ damagedItemIDs: null }),
     fleeing(),
   );
   assert.deepEqual(decision.action, { kind: "wait" });
@@ -3352,7 +3765,7 @@ test("a shop that keeps not fixing things is given up on, not asked for ever", (
   const paying: FleetCompanionRequest = { ...REQUEST, repairsAtStation: true };
   const decision = decideCompanionAction(
     paying,
-    dockedAfterFleeing(0.4, { damagedItemIDs: [SHIP_ITEM] }),
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
     fleeing({ repairAttempts: 3 }),
   );
   assert.deepEqual(decision.action, { kind: "wait" });
@@ -3362,8 +3775,11 @@ test("a shop that keeps not fixing things is given up on, not asked for ever", (
 // --- the budget ---------------------------------------------------------------
 
 test("a pilot that used its last trip stays docked even once it is whole", () => {
-  const spent: CompanionLadderMemory = { ...fleeing(), fleeTripsSpent: REQUEST.maxFleeAttempts };
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), spent);
+  const spent: CompanionLadderMemory = {
+    ...fleeing(SHIELD_ONLY),
+    fleeTripsSpent: REQUEST.maxFleeAttempts,
+  };
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), spent);
   assert.notEqual(decision.action.kind, "undock");
   assert.match(decision.why, /staying home/i);
 });
@@ -3371,28 +3787,54 @@ test("a pilot that used its last trip stays docked even once it is whole", () =>
 // "A return that holds resets the budget", made checkable: a pilot that comes
 // back and stays well for long enough gets its trips back.
 test("a return that HOLDS puts the budget back", () => {
+  // Driven on a clock rather than by counting calls: the hold is a span now
+  // (`FLEE_RECOVERY_HOLD_MS`), so how many ticks fit inside it is neither fixed
+  // nor the thing being asserted.
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
   const well = fleeObs({ health: 1 });
-  for (let tick = 0; tick < 15; tick += 1) {
-    memory = decideCompanionAction(REQUEST, well, memory).memory;
+  for (let tick = 0; tick < 16; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 2_000;
   }
   assert.equal(memory.fleeTripsSpent, 0);
+});
+
+// ⚠ AND THE SPAN IS WALL CLOCK, NOT A CALL COUNT. This is what stops a pilot
+// whose ticks happen to be running fast -- a burst of orders to obey, see
+// `FLEET_COMPANION_BURST_MS` -- from earning its flee budget back sooner than
+// one sitting still.
+test("a return that holds for too SHORT a time does not put the budget back", () => {
+  let nowMs = 1_000_000;
+  let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 40; tick += 1) {
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 350;
+  }
+  assert.equal(
+    memory.fleeTripsSpent,
+    2,
+    "forty fast ticks are still only fourteen seconds, and must not count as a hold",
+  );
 });
 
 // ⚠ AND ONE THAT DOES NOT HOLD MUST NOT. This is the half that makes the bound
 // mean anything: a pilot being sent home over and over never reaches the reset,
 // so its trips accumulate and it eventually stays put.
 test("dropping through the floor again restarts the recovery count", () => {
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = { ...freshLadderMemory(), fleeTripsSpent: 2 };
   const well = fleeObs({ health: 1 });
   for (let tick = 0; tick < 14; tick += 1) {
-    memory = decideCompanionAction(REQUEST, well, memory).memory;
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+    nowMs += 2_000;
   }
-  assert.notEqual(memory.fleeRecoveryTicks, 0, "the count should be part-way up");
+  assert.notEqual(memory.fleeRecoverySinceMs, null, "the span should be part-way through");
 
-  // One bad tick, and the count starts again rather than carrying on.
-  memory = decideCompanionAction(REQUEST, fleeObs({ health: 0.1 }), memory).memory;
-  assert.equal(memory.fleeRecoveryTicks, 0);
+  // One bad tick, and the span starts again rather than carrying on.
+  memory = decideCompanionAction(REQUEST, fleeObs({ health: 0.1 }), memory, nowMs).memory;
+  assert.equal(memory.fleeRecoverySinceMs, null);
   assert.equal(memory.fleeTripsSpent, 3, "and it costs another trip");
 });
 
@@ -3410,8 +3852,88 @@ test("limping just above the floor does not count as recovering", () => {
 // --- the latch ends with the undock -------------------------------------------
 
 test("undocking ends the flee, so the rung stops driving a pilot already back out", () => {
-  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(1), fleeing());
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), fleeing(SHIELD_ONLY));
   assert.equal(decision.memory.flee, null);
+});
+
+// --- the operator's own undock ------------------------------------------------
+//
+// ⚠ REPORTED LIVE, 2026-09-13: "I can not force them to undock, as soon as they
+// are undocked they dock back." A parked flee read a ship that was suddenly in
+// space as one still on its way out, and sent it straight back to the station --
+// every two seconds, for ever. Nothing else can undock a parked pilot: this rung
+// drops its own latch before every undock it issues, and no rung below it runs
+// while it is parked.
+
+/** A flee that has already delivered the ship to a station. */
+function parkedInStation(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory {
+  return fleeing({ arrivedSafe: true, ...overrides });
+}
+
+test("a pilot the operator undocks is not docked again", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, docked: false }),
+    parkedInStation(),
+  );
+  assert.notEqual(decision.action.kind, "dock");
+  assert.equal(decision.memory.flee, null, "the flee is over — a human is flying this ship");
+});
+
+test("and it stops sending itself home, rather than re-latching on the next tick", () => {
+  let memory = parkedInStation();
+  const pulledOut = fleeObs({ health: 0.1, docked: false });
+  for (let tick = 0; tick < 5; tick += 1) {
+    const decision = decideCompanionAction(REQUEST, pulledOut, memory);
+    memory = decision.memory;
+    assert.notEqual(decision.action.kind, "dock", "no tick may put it back in the station");
+  }
+  assert.equal(memory.fleeTripsSpent, REQUEST.maxFleeAttempts);
+});
+
+// The override is not permanent: a ship that actually recovers earns its budget
+// back the ordinary way, and may look after itself again later in the same run.
+test("an overridden pilot that recovers gets its flee budget back", () => {
+  let nowMs = 1_000_000;
+  let memory: CompanionLadderMemory = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, docked: false }),
+    parkedInStation(),
+    nowMs,
+  ).memory;
+  assert.equal(memory.fleeTripsSpent, REQUEST.maxFleeAttempts);
+  const well = fleeObs({ health: 1 });
+  for (let tick = 0; tick < 16; tick += 1) {
+    nowMs += 2_000;
+    memory = decideCompanionAction(REQUEST, well, memory, nowMs).memory;
+  }
+  assert.equal(memory.fleeTripsSpent, 0);
+});
+
+// --- what the trigger stamps --------------------------------------------------
+
+test("a flee that leaves with the armour whole says so, and one that does not, does not", () => {
+  const shieldOnly = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 1, hullRatio: 1 }),
+  );
+  assert.equal(shieldOnly.memory.flee?.onlyTheShieldWasHurt, true);
+
+  const armourToo = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: 0.1, hullRatio: 1 }),
+  );
+  assert.equal(armourToo.memory.flee?.onlyTheShieldWasHurt, false);
+});
+
+// A layer that did not read is a layer nobody can vouch for, and vouching for it
+// is what would send a hurt ship back out of a station on no information.
+test("a layer that could not be read at the trigger never counts as clear", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    fleeObs({ health: 0.1, shieldRatio: 0.1, armorRatio: null, hullRatio: 1 }),
+  );
+  assert.equal(decision.memory.flee?.onlyTheShieldWasHurt, false);
 });
 
 // The safe-spot half of a return: no station to undock from, so a pilot out at
@@ -3429,6 +3951,64 @@ test("a recovered pilot at a safe spot routes back to the system it left", () =>
   );
   assert.deepEqual(decision.action, { kind: "travelTo", systemID: HOME_SYSTEM });
   assert.equal(decision.phase, "Going back");
+});
+
+// --- rung 5b: out of the station ----------------------------------------------
+//
+// ⚠ THE LADDER HAD NO WAY TO UNDOCK A PILOT THAT WAS NOT MID-FLEE, and the
+// settings panel promised the opposite in writing the whole time ("It will
+// undock when the fleet gives it something to do"). A companion started in a
+// station, restarted while parked, or docked by its operator simply stayed
+// there: every rung beneath read an empty grid and decided nothing.
+
+/** Docked, with nothing wrong and no flee standing. */
+function dockedWithNothingWrong(
+  overrides: Partial<FleetCompanionObservation> = {},
+): FleetCompanionObservation {
+  return obs({ docked: true, inSpace: false, health: null, ...overrides });
+}
+
+test("a docked companion with nothing keeping it docked leaves", () => {
+  const decision = decideCompanionAction(REQUEST, dockedWithNothingWrong());
+  assert.deepEqual(decision.action, { kind: "undock" });
+  assert.equal(decision.phase, "Undocking");
+});
+
+test("an undock already in flight is waited on, not sent again every tick", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedWithNothingWrong({
+      flightStatus: {
+        docked: true,
+        transition: { kind: "undock", phase: "session-changing" },
+      } as FleetCompanionObservation["flightStatus"],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.equal(decision.phase, "Undocking");
+});
+
+// Every deliberate reason to STAY in a station is above this rung, and has to
+// keep winning: this is the one that would otherwise drag a pilot back out of
+// the repairs it is waiting on.
+test("a pilot holding in a station for a reason is not dragged out of it", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    dockedAfterFleeing({ damagedItemIDs: [SHIP_ITEM] }),
+    fleeing(),
+  );
+  assert.deepEqual(decision.action, { kind: "wait" });
+  assert.match(decision.why, /not set to pay for repairs/i);
+});
+
+test("and neither is one that has spent its round trips", () => {
+  const spent: CompanionLadderMemory = {
+    ...fleeing(SHIELD_ONLY),
+    fleeTripsSpent: REQUEST.maxFleeAttempts,
+  };
+  const decision = decideCompanionAction(REQUEST, dockedAfterFleeing(), spent);
+  assert.notEqual(decision.action.kind, "undock");
+  assert.match(decision.why, /staying home/i);
 });
 
 // --- rung 6: drones ----------------------------------------------------------
@@ -3654,12 +4234,14 @@ test("an unreadable drone health recalls nothing", () => {
 // space, so the trigger reads null - and a rung that re-derived its state from
 // the observation would forget it was ever in a cycle.
 test("the cycle survives its own trigger disappearing, and relaunches after the hold-off", () => {
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = freshLadderMemory();
 
   const recall = decideCompanionAction(
     WITH_DRONES,
     droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 }),
     memory,
+    nowMs,
   );
   assert.equal(recall.action.kind, "recallDrones");
   memory = recall.memory;
@@ -3668,7 +4250,8 @@ test("the cycle survives its own trigger disappearing, and relaunches after the 
   const gone = droneObs({ myDroneIDs: [], lowestDroneHealth: null });
   const ticks: string[] = [];
   for (let tick = 0; tick < 12; tick += 1) {
-    const decision = decideCompanionAction(WITH_DRONES, gone, memory);
+    nowMs += 2_000;
+    const decision = decideCompanionAction(WITH_DRONES, gone, memory, nowMs);
     memory = decision.memory;
     ticks.push(decision.action.kind);
     if (decision.action.kind === "launchDrones") {
@@ -3741,29 +4324,42 @@ test("the recall is not finished while one of the recalled drones is still out",
 // no error anywhere. Without a bound the rung would wait on it until the run
 // ended.
 test("a recall that never completes is given up on rather than waited on for ever", () => {
+  // ⚠ THE CLOCK IS DRIVEN EXPLICITLY, because the bound is a DURATION and not a
+  // tick count any more (see `DRONE_RECALL_GIVE_UP_MS`). A loop that called the
+  // ladder twenty-five times inside one millisecond used to exhaust the bound;
+  // now it would prove nothing at all, so the test advances a clock by a
+  // plausible tick and asserts on the elapsed time it took to let go.
+  const TICK_MS = 2_000;
+  let nowMs = 1_000_000;
   let memory: CompanionLadderMemory = freshLadderMemory();
   const recall = decideCompanionAction(
     WITH_DRONES,
     droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 }),
     memory,
+    nowMs,
   );
   memory = recall.memory;
+  const startedAtMs = nowMs;
 
   // The drone never leaves the grid, because the bay it is trying to enter is
   // full and nothing will ever say so.
   const stuck = droneObs({ myDroneIDs: [DRONE_A], lowestDroneHealth: 0.2 });
   let letGo = false;
-  let longestWait = 0;
-  for (let tick = 0; tick < 25; tick += 1) {
-    memory = decideCompanionAction(WITH_DRONES, stuck, memory).memory;
+  let waitedMs = 0;
+  for (let tick = 0; tick < 40; tick += 1) {
+    nowMs += TICK_MS;
+    memory = decideCompanionAction(WITH_DRONES, stuck, memory, nowMs).memory;
     if (memory.droneCycle === null) {
       letGo = true;
+      waitedMs = nowMs - startedAtMs;
       break;
     }
-    longestWait = Math.max(longestWait, memory.droneCycle.waited);
   }
   assert.ok(letGo, "the stuck cycle must be let go of rather than waited on for ever");
-  assert.ok(longestWait <= 15, `the wait must be bounded, saw ${longestWait} ticks`);
+  assert.ok(
+    waitedMs <= 30_000 + TICK_MS,
+    `the wait must be bounded near half a minute, saw ${waitedMs} ms`,
+  );
 });
 
 // ⚠ THE SECOND CYCLE IS WORTH LESS THAN THE FIRST AND THE FOURTH IS WORTH
@@ -4359,12 +4955,17 @@ const SALVAGER_2 = 11400002;
 const WRECK_NEAR = 300010;
 
 /** A grid with one wreck at `distanceM`, plus this ship. */
-function salvageGrid(distanceM: number, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
+function salvageGrid(
+  distanceM: number,
+  activeModuleIDs: readonly number[] = [],
+  /** The ship's own server mode, so a test can say what move is being flown. */
+  shipMode: string | null = null,
+): SpaceSnapshot {
   return {
     inSpace: true,
-    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null, activeModuleIDs },
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode: shipMode, activeModuleIDs },
     entities: [
-      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: null },
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode: shipMode },
       {
         itemID: WRECK_NEAR,
         kind: "wreck",
@@ -5010,6 +5611,35 @@ test("a can is finished by the OUTCOME, not by having been reached for", () => {
     asking.memory,
   );
   assert.notEqual(done.action.kind, "lootContainer");
+});
+
+test("a wreck ANOTHER pilot already emptied is never flown to", () => {
+  // ⚠ THE FLEET'S WASTE, NOT THIS PILOT'S. Nothing in a snapshot says a wreck is
+  // empty -- the server refuses to list one past 2,500 m, and the slim item's
+  // `isEmpty` never reaches a web session -- so the question costs whoever asks
+  // it the flight there. Each companion keeps its OWN record of what it emptied,
+  // which is why a fleet of four used to send four ships to the same wreck, the
+  // last three arriving at a hold the first one had already cleared.
+  //
+  // `lootFinishedItemIDs` is now fed from the BFF's shared loot memory as well
+  // as from this pilot's own calls (flow.ts `companionSharedEmpty`), so what one
+  // trip found out answers for everybody. This pilot has never touched this
+  // wreck: the id arrives from somebody else, and the rung must treat it exactly
+  // as it treats its own emptied can.
+  const told = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ wreckOwner: COMPANION, wreckDistance: 30_000 }),
+      chatMessages: [areaOrder("loot")],
+      lootFinishedItemIDs: [WRECK],
+    }),
+  );
+  assert.notEqual(told.action.kind, "approach", "no trip is made for a wreck known to be empty");
+  assert.notEqual(told.action.kind, "lootWreck");
+  assert.equal(told.memory.lootTargetID, null, "and nothing is latched onto");
+  // With the one wreck accounted for there is no work left here, so the job
+  // stands down rather than holding a pilot on a picked-clean grid.
+  assert.equal(told.memory.areaJob, null);
 });
 
 test("a target that leaves the grid is dropped rather than waited on", () => {
@@ -6025,4 +6655,650 @@ test("a standing destination trip starves the reload rung, and that is the trip'
     moduleIDs: [AUTOCANNON],
     chargeItemID: SLUGS,
   });
+});
+
+// --- Rung 3b: the prop mod --------------------------------------------------
+//
+// Before this rung, group 46 "Propulsion Module" fell off the end of
+// `resolveDefenseModuleIDs`'s branch chain and no companion ever touched an
+// afterburner or an MWD. Three separate things had to be true for one to run:
+// the classifier had to keep it, the request had to carry it (with its typeID,
+// because Deactivate cannot stop a prop mod without naming its effect), and a
+// rung had to decide when. These tests cover the third.
+
+/** Two obviously-synthetic prop mods, one of each kind. */
+const AFTERBURNER: CompanionPropulsionModule = {
+  itemID: 11300001,
+  typeID: 90000910,
+  kind: "afterburner",
+};
+const MWD: CompanionPropulsionModule = {
+  itemID: 11300002,
+  typeID: 90000911,
+  kind: "microwarpdrive",
+};
+
+/** An autopilot reading — `running` is the whole of what "travelling" means here. */
+function travelling(status: "idle" | "running" | "arrived" = "running") {
+  return {
+    status,
+    destinationStationID: null,
+    destinationSystemID: 30000001,
+    remainingJumps: 3,
+    failureReason: null,
+  } as FleetCompanionObservation["travel"];
+}
+
+function withProps(
+  modules: readonly CompanionPropulsionModule[] = [MWD],
+): FleetCompanionRequest {
+  return { ...REQUEST, propulsionModules: [...modules] };
+}
+
+test("TRAVELLING lights the prop mod — the case that did not exist before this rung", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling() }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("NOT travelling leaves a prop mod that is already off alone — no call, and the ladder goes on", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("idle") }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ THE OFF-HALF IS THE WHOLE REASON THE ACTION GREW A typeID. A bare
+// Deactivate returns 200 with the burner still cycling: the server infers a
+// prop mod's default effect on ACTIVATE and not on deactivate, and the BFF
+// resolves the effect name from the typeID. A test that only checked the
+// moduleID would pass against the broken call.
+test("travel ENDING stands the prop mod down, and the deactivate NAMES the typeID", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], [MWD.itemID]), travel: travelling("arrived") }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "deactivate",
+    moduleID: MWD.itemID,
+    typeID: MWD.typeID,
+  });
+});
+
+test("a prop mod already lit while travelling is not re-activated — one call, then fall through", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], [MWD.itemID]), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("the deactivate is issued ONCE — the latch holds until the snapshot proves it stopped", () => {
+  const lit = obs({
+    snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+    travel: travelling("arrived"),
+  });
+  const first = decideCompanionAction(withProps(), lit);
+  assert.equal(first.action.kind, "deactivate");
+  // Same observation, one tick later: activeModuleIDs has not caught up yet.
+  const second = decideCompanionAction(withProps(), lit, first.memory);
+  assert.notEqual(second.phase, "Propulsion");
+});
+
+test("the stopping latch clears once the module is seen stopped, so a REFUSED deactivate retries", () => {
+  const lit = obs({
+    snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+    travel: travelling("arrived"),
+  });
+  const first = decideCompanionAction(withProps(), lit);
+  const stopped = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("arrived") }),
+    first.memory,
+  );
+  assert.equal(stopped.memory.propsStoppingID, null);
+  // And it is willing to try again if the burner turns out to still be running.
+  const again = decideCompanionAction(withProps(), lit, stopped.memory);
+  assert.equal(again.action.kind, "deactivate");
+});
+
+// --- the chat override ------------------------------------------------------
+
+test("`props on` lights the prop mod even though this pilot is not travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", HUMAN)],
+    }),
+  );
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+  assert.equal(decision.followingOrderFrom, "chat");
+});
+
+test("`props off` stands it down even though this pilot IS travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+      travel: travelling(),
+      chatMessages: [chatLine("props off", HUMAN)],
+    }),
+  );
+  assert.equal(decision.action.kind, "deactivate");
+  assert.equal(decision.followingOrderFrom, "chat");
+});
+
+// ⚠ THE LATCH IS WHY `props on` IS WORTH TYPING ONCE. Re-reading it off the chat
+// backlog every tick would switch the burner off the moment the line aged out of
+// the freshness window — the exact failure `withStandingChatOrders` exists to
+// prevent, and the reason propulsion rides that fold rather than the
+// order-lapses path a target call takes.
+test("the override LATCHES: silence after `props on` does not put it back on automatic", () => {
+  const heard = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", HUMAN)],
+    }),
+  );
+  assert.equal(heard.memory.propsHeld, true);
+  // Chat has gone quiet and the pilot is still not travelling. It stays lit.
+  const later = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling("idle") }),
+    heard.memory,
+  );
+  assert.deepEqual(later.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+test("NEWEST WINS between the two halves, replayed in timestamp order like every other latch", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [
+        { ...chatLine("props off", HUMAN), createdAtMs: 2_000 },
+        { ...chatLine("props on", HUMAN), createdAtMs: 1_000 },
+      ],
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ `stop` CANCELS ORDERS AND PROPULSION IS NOT ONE. A commander halting a pilot
+// has said nothing about whether it may keep its speed, and a ship told to stop
+// is often the one that most needs to move again in a hurry.
+test("a `stop` does not clear the propulsion override the way it clears the trip", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [
+        { ...chatLine("props on", HUMAN), createdAtMs: 1_000 },
+        { ...chatLine("stop", HUMAN), createdAtMs: 2_000 },
+      ],
+    }),
+  );
+  assert.equal(decision.memory.propsHeld, true);
+});
+
+test("a stranger in local cannot touch the prop mod — same commander gate as every chat order", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling("idle"),
+      chatMessages: [chatLine("props on", 90000099)],
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// --- the scram gate ---------------------------------------------------------
+//
+// ⚠ THE ONE PLACE THE AB/MWD SPLIT EARNS ITS KEEP. SDE group 46 holds both, so
+// the classifier has to reach into the SDE's own dogmaEffects to tell them
+// apart. A warp SCRAMBLER (`warpScramblerMWD`, the jam carrying
+// `blocksMicrowarpdrive`) turns an MWD off server-side and does nothing at all
+// to an afterburner.
+
+test("a scram stops the rung re-lighting an MWD the server has already killed", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("a scram does NOT stand an AFTERBURNER down — no jam in this vocabulary touches one", () => {
+  const decision = decideCompanionAction(
+    withProps([AFTERBURNER]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "activate",
+    moduleID: AFTERBURNER.itemID,
+    targetID: 0,
+  });
+});
+
+test("a ship carrying BOTH keeps its afterburner under a scram — the MWD is skipped, not the rung", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD, AFTERBURNER]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "activate",
+    moduleID: AFTERBURNER.itemID,
+    targetID: 0,
+  });
+});
+
+// ⚠ FAIL OPEN, EVERY TIME. A dropped SSE frame must never be what takes the
+// speed off a ship, so only an explicit `true` gates.
+test("an UNREADABLE scram reading does not gate — three-state, and null is not `scrammed`", () => {
+  const decision = decideCompanionAction(
+    withProps([MWD]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: null }),
+  );
+  assert.equal(decision.action.kind, "activate");
+});
+
+// The cheap half of the wrong answer: an unclassifiable prop mod is assumed
+// scram-vulnerable, costing at most a stationary afterburner on an already
+// tackled pilot, rather than a call spent every tick to be refused.
+test("a prop mod whose kind could not be read is treated as an MWD under a scram", () => {
+  const unknown: CompanionPropulsionModule = { itemID: 11300003, typeID: 90000912, kind: null };
+  const decision = decideCompanionAction(
+    withProps([unknown]),
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), scrammed: true }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// --- the capacitor floor ----------------------------------------------------
+
+test("below the operator's capacitor floor the rung does not LIGHT one", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({
+      snapshot: gridWithShipsAndActive([], []),
+      travel: travelling(),
+      capacitorRatio: 0.2,
+    }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ AND THE FLOOR MUST NOT GATE THE OFF-HALF, or a burner is stranded ON at
+// exactly the capacitor level that made it dangerous.
+test("below the floor it still STOPS one — a running module must always be stoppable", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({
+      snapshot: gridWithShipsAndActive([], [MWD.itemID]),
+      travel: travelling("arrived"),
+      capacitorRatio: 0.2,
+    }),
+  );
+  assert.equal(decision.action.kind, "deactivate");
+});
+
+test("unreadable capacitor does not gate — the same fail-open rule the rest of the file follows", () => {
+  const decision = decideCompanionAction(
+    { ...withProps(), capacitorFloor: 0.5 },
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling(), capacitorRatio: null }),
+  );
+  assert.equal(decision.action.kind, "activate");
+});
+
+// --- the reads this rung refuses to guess at ---------------------------------
+
+test("an UNREADABLE activeModuleIDs issues nothing — `cannot say` is not `nothing is running`", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], null), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("a hull with no prop mod fitted never reaches this rung at all", () => {
+  const decision = decideCompanionAction(
+    REQUEST,
+    obs({ snapshot: gridWithShipsAndActive([], []), travel: travelling() }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// A companion that has not been given a travel reading at all — an older host,
+// or one that never wired it up — reads as "not travelling", never as
+// "travelling". It must not burn capacitor on a guess.
+test("an absent travel reading is NOT travelling", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridWithShipsAndActive([], []) }),
+  );
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+// ⚠ THE OVERRIDE DOES NOT SURVIVE A RESTART, and that is deliberate: the
+// `props on` that set it is long out of the chat window and cannot be re-heard,
+// so carrying it would be a standing order nobody can see or countermand.
+test("a fresh ladder memory has no propulsion override — `null`, not `false`", () => {
+  assert.equal(freshLadderMemory().propsHeld, null);
+});
+
+// --- the trigger that actually fires: the ship's own movement mode ----------
+//
+// ⚠ THESE ARE THE REGRESSION TESTS FOR THE BUG THIS RUNG SHIPPED WITH. Reading
+// "travelling" as `obs.travel.status === "running"` — the shared autopilot — is
+// true and nearly useless: a companion in ordinary fleet play never runs its own
+// autopilot. It yields to the commander's fleet warp, holds station on them, and
+// jumps the gate it is sitting on, so the autopilot stayed idle for an entire
+// trip and no prop mod ever lit. Reported from a live fleet, 2026-09-13.
+//
+// The mode vocabulary is the SERVER's own and is six uppercase words
+// (`space/destiny/commands/`): FIELD, FOLLOW, GOTO, ORBIT, STOP, WARP. ⚠ The
+// word "approach" never appears in it, and an APPROACH IS FOLLOW — there is no
+// CmdApproach at all, so `/flight/approach` sends `CmdFollowBall(target, range)`
+// and `followShipEntity` sets FOLLOW. GOTO is the OTHER burn: an align, an
+// undock, a landing out of warp, a throttle opened from STOP.
+//
+// This rung wants both, because both are a hull burning sub-warp. `isClosing`
+// wants FOLLOW and WARP, because it asks a different question — "is the move I
+// sent the move being flown" — and GOTO is the answer "no". Two lists, on
+// purpose; see `NO_REAPPROACH_SHIP_MODES`.
+
+/** A grid whose own ship carries a server movement mode. */
+function gridInMode(mode: string | null, activeModuleIDs: readonly number[] = []): SpaceSnapshot {
+  return {
+    inSpace: true,
+    ship: { position: { x: 0, y: 0, z: 0 }, radius: 0, mode, activeModuleIDs },
+    entities: [
+      { itemID: 1, kind: "ship", isSelf: true, position: { x: 0, y: 0, z: 0 }, radius: 0, mode },
+    ],
+  } as unknown as SpaceSnapshot;
+}
+
+test("GOTO lights the prop mod — an approach, which is how a pilot closes on a gate", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("GOTO") }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+test("FOLLOW lights it too — keeping up with a commander who is pulling away", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("FOLLOW") }));
+  assert.deepEqual(decision.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+// ⚠ THE WHOLE POINT OF THE REGRESSION. No autopilot anywhere in this
+// observation — exactly the shape of a companion following its FC through a
+// dozen systems — and it must still burn.
+test("a companion with NO autopilot trip still burns while closing — the reported bug", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("GOTO"), travel: travelling("idle") }),
+  );
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("ORBIT does not light it — a ship holding station has arrived, it is not closing", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("ORBIT") }));
+  assert.notEqual(decision.phase, "Propulsion");
+});
+
+test("STOP stands a lit prop mod down — nothing is being closed on any more", () => {
+  const decision = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("STOP", [MWD.itemID]) }),
+  );
+  assert.deepEqual(decision.action, {
+    kind: "deactivate",
+    moduleID: MWD.itemID,
+    typeID: MWD.typeID,
+  });
+});
+
+// The server sends uppercase; being liberal about case costs nothing and a
+// future drop that changed it must not silently stop every companion burning.
+test("the mode test is case-insensitive", () => {
+  const decision = decideCompanionAction(withProps(), obs({ snapshot: gridInMode("goto") }));
+  assert.equal(decision.phase, "Propulsion");
+});
+
+test("an unreadable mode falls back to the autopilot test rather than burning on a guess", () => {
+  const idle = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode(null), travel: travelling("idle") }),
+  );
+  assert.notEqual(idle.phase, "Propulsion");
+  const onTrip = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode(null), travel: travelling() }),
+  );
+  assert.equal(onTrip.phase, "Propulsion");
+});
+
+// ⚠ THE OVERRIDE STILL OUTRANKS THE MODE, in both directions.
+test("`props off` beats a GOTO, and `props on` beats an ORBIT", () => {
+  const off = decideCompanionAction(
+    withProps(),
+    obs({
+      snapshot: gridInMode("GOTO", [MWD.itemID]),
+      chatMessages: [chatLine("props off", HUMAN)],
+    }),
+  );
+  assert.equal(off.action.kind, "deactivate");
+  const on = decideCompanionAction(
+    withProps(),
+    obs({ snapshot: gridInMode("ORBIT"), chatMessages: [chatLine("props on", HUMAN)] }),
+  );
+  assert.deepEqual(on.action, { kind: "activate", moduleID: MWD.itemID, targetID: 0 });
+});
+
+// --- the approach latch: which modes mean "the move I sent is being flown" ---
+//
+// The loot and the salvage rungs both issue ONE approach and then wait on it, and
+// what they wait on is `isClosing` — the ship's own mode, never their memory of
+// having asked. Which modes that accepts is therefore a call-budget decision on
+// every tick of a run, and it was being made by `/follow|approach|warp/i` over
+// free text.
+//
+// ⚠ AN APPROACH IS **FOLLOW**. There is no CmdApproach on this server: retail's
+// Approach is `CmdFollowBall(targetID, 0)`, `/api/bridge/flight/approach` sends
+// exactly that after opening the throttle, and `followShipEntity` sets FOLLOW at
+// any range — so the looter's range-less approach and the salvager's 3 km one
+// both land there. The regex's "approach" alternative could never match anything
+// the server is able to say; these tests pin the real vocabulary in its place.
+
+/** A wreck 30 km off — out of salvager reach — with the hull in `mode`. */
+function salvagingInMode(mode: string | null): FleetCompanionObservation {
+  return salvageObs(salvageGrid(30_000, [], mode));
+}
+
+/** The memory left behind by the first tick, which issued the approach. */
+function approachIssued(): CompanionLadderMemory {
+  const first = decideCompanionAction(WITH_SALVAGER, salvagingInMode(null));
+  assert.deepEqual(first.action, { kind: "approach", targetID: WRECK_NEAR, range: 3000 });
+  assert.equal(first.memory.salvageApproachIssued, true);
+  return first.memory;
+}
+
+test("FOLLOW is believed — the mode an approach actually sets, so the rung waits", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvagingInMode("FOLLOW"),
+    approachIssued(),
+  );
+  assert.notEqual(decision.action.kind, "approach");
+  assert.equal(decision.phase, "Salvaging");
+});
+
+// ⚠ THE ONE THAT MUST NOT BE SHARED WITH `CLOSING_SHIP_MODES`. GOTO is what the
+// hull is left in when the follow was REFUSED — `followBall` bounces a pilot
+// whose warp landing is still pending — and the throttle was opened BEFORE it,
+// so the ship is under way at full speed somewhere that is not the wreck.
+// Believing that mode would park the rung on one wreck for the rest of the run.
+test("GOTO is NOT believed — a refused approach leaves the hull flying elsewhere", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("GOTO"), approachIssued());
+  assert.deepEqual(decision.action, { kind: "approach", targetID: WRECK_NEAR, range: 3000 });
+});
+
+test("an align by another rung does not hold the salvage latch either", () => {
+  // CmdAlignTo also sets GOTO, and an align is a heading, not an approach: the
+  // ship is burning away from the wreck on somebody else's order.
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("GOTO"), approachIssued());
+  assert.equal(decision.action.kind, "approach");
+});
+
+test("STOP and ORBIT get a fresh approach — neither is a move toward the wreck", () => {
+  for (const mode of ["STOP", "ORBIT", "FIELD"]) {
+    const decision = decideCompanionAction(
+      WITH_SALVAGER,
+      salvagingInMode(mode),
+      approachIssued(),
+    );
+    assert.equal(decision.action.kind, "approach", `${mode} must not hold the latch`);
+  }
+});
+
+// ⚠ WARP IS HELD, AND NOT BECAUSE A WARP IS AN APPROACH. `followShipEntity`
+// refuses outright while the mode is WARP, so an approach sent there is a call
+// spent to be told no. The rung's own `inWarp` guard usually catches this first,
+// but that flag and the snapshot's mode are different reads and can disagree.
+test("WARP holds the latch — an approach sent mid-warp is a call spent to be refused", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvageObs(salvageGrid(30_000, [], "WARP"), { inWarp: false }),
+    approachIssued(),
+  );
+  assert.notEqual(decision.action.kind, "approach");
+});
+
+test("an unreadable mode re-issues rather than waiting on a move it cannot see", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode(null), approachIssued());
+  assert.equal(decision.action.kind, "approach");
+});
+
+// The server sends uppercase; being liberal about case costs nothing, and a drop
+// that changed it must not silently have every rung re-ordering a move that is
+// already under way.
+test("the latch is case-insensitive", () => {
+  const decision = decideCompanionAction(WITH_SALVAGER, salvagingInMode("follow"), approachIssued());
+  assert.notEqual(decision.action.kind, "approach");
+});
+
+// The looter runs the same latch on its own memory, and its approach carries no
+// range — which changes nothing about the mode, because CmdFollowBall sets
+// FOLLOW at any range at all.
+test("the loot rung reads the same vocabulary — FOLLOW waits, GOTO re-approaches", () => {
+  const out = obs({
+    snapshot: lootGrid({ containerDistance: 40_000 }),
+    chatMessages: [areaOrder("loot")],
+  });
+  const first = decideCompanionAction(WITH_DRONES, out);
+  assert.deepEqual(first.action, { kind: "approach", targetID: CAN });
+
+  const following = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 40_000, shipMode: "FOLLOW" }),
+      chatMessages: [areaOrder("loot")],
+    }),
+    first.memory,
+  );
+  assert.notEqual(following.action.kind, "approach");
+
+  const goingSomewhereElse = decideCompanionAction(
+    WITH_DRONES,
+    obs({
+      snapshot: lootGrid({ containerDistance: 40_000, shipMode: "GOTO" }),
+      chatMessages: [areaOrder("loot")],
+    }),
+    first.memory,
+  );
+  assert.deepEqual(goingSomewhereElse.action, { kind: "approach", targetID: CAN });
+});
+
+// ⚠ THE REGRESSION THE OLD REGEX WOULD PASS AND THE NEW LIST MUST NOT. A mode
+// that merely CONTAINS one of the old alternatives is not that mode. Nothing in
+// the server's six words does, which is exactly why a substring test over free
+// text was the wrong shape for a closed vocabulary.
+test("a mode is matched whole, not as a substring", () => {
+  const decision = decideCompanionAction(
+    WITH_SALVAGER,
+    salvagingInMode("NOTFOLLOWING"),
+    approachIssued(),
+  );
+  assert.equal(decision.action.kind, "approach");
+});
+
+// --- the two beats ------------------------------------------------------------
+//
+// ⚠ WHAT THIS PINS IS A REACTION TIME, NOT AN IMPLEMENTATION DETAIL. Obeying a
+// single `Target` call takes several ticks -- lock it, wait for the lock, put
+// the drones on it, then bring the guns up one module at a time -- and at a flat
+// cadence every one of those steps cost the full beat even though none of them
+// was waiting on the world. The rule is: a tick that ISSUED something comes back
+// at the burst, a tick that waited keeps the cadence.
+
+test("a tick that issued a call comes back at the burst, not the cadence", async () => {
+  const slept: number[] = [];
+  let ticks = 0;
+  const controller = createFleetCompanion({
+    // Hostiles on grid with drones aboard: rung 6 has something to launch, so
+    // the first tick issues a real call.
+    observe: async () => droneObs(),
+    issue: async () => {},
+    sleep: async (ms) => {
+      slept.push(ms);
+      ticks += 1;
+      if (ticks >= 1) {
+        controller.stop();
+      }
+    },
+  });
+  controller.start(WITH_DRONES);
+  await controller.run();
+  assert.deepEqual(slept, [FLEET_COMPANION_BURST_MS]);
+});
+
+// ⚠ AND THE OTHER HALF, WHICH IS WHAT KEEPS EVERY WAIT IN THIS FILE HONEST. A
+// rung that is merely waiting returns no action, so the tick is a `wait` and
+// still sleeps the full cadence -- which is why a burst cannot quietly shorten
+// a drone hold-off or a recall bound.
+test("a tick that decided nothing keeps the full cadence", async () => {
+  const slept: number[] = [];
+  let ticks = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs(),
+    issue: async () => {},
+    sleep: async (ms) => {
+      slept.push(ms);
+      ticks += 1;
+      if (ticks >= 1) {
+        controller.stop();
+      }
+    },
+  });
+  controller.start(DEFAULT_FLEET_COMPANION_REQUEST);
+  await controller.run();
+  assert.deepEqual(slept, [FLEET_COMPANION_CADENCE_MS]);
+});
+
+// The burst is a real saving only if it is well under the cadence; pinning the
+// relationship rather than the number keeps a later tuning honest.
+test("the burst is shorter than the cadence", () => {
+  assert.ok(
+    FLEET_COMPANION_BURST_MS > 0 && FLEET_COMPANION_BURST_MS < FLEET_COMPANION_CADENCE_MS,
+    "a burst that is not shorter than the cadence is not a burst",
+  );
 });

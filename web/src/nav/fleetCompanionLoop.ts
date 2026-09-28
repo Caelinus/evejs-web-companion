@@ -90,6 +90,22 @@ export type FleetCompanionRunState = "idle" | "running" | "paused" | "stopped" |
 export type CompanionOrderAuthority = "broadcast" | "tag" | "chat" | "own-ladder";
 
 /**
+ * One fitted afterburner or microwarpdrive: what to cycle, what to name when
+ * stopping it, and which of the two it is.
+ *
+ * `kind` is `null` when the SDE effect read did not arrive. That is a third
+ * state and not a default — "the group said propulsion module and the effect
+ * did not answer" — and the rung that reads it fails OPEN, running the module
+ * and assuming the scram-vulnerable half. See `propulsionModules` on the
+ * request.
+ */
+export interface CompanionPropulsionModule {
+  readonly itemID: number;
+  readonly typeID: number;
+  readonly kind: "afterburner" | "microwarpdrive" | null;
+}
+
+/**
  * What one companion run actually FLIES WITH: the operator's few settings, plus
  * the eight module lists read off the hull it is sitting in.
  *
@@ -114,6 +130,16 @@ export type CompanionOrderAuthority = "broadcast" | "tag" | "chat" | "own-ladder
  * routinely span accounts. A setup that were a REFERENCE into an account-scoped
  * library could not be shared by a mixed squad; a value can.
  */
+/**
+ * Which of a hull's two real tank layers it is built around.
+ *
+ * "hull" is deliberately not one of them: nothing is tanked in its hull, and a
+ * layer nothing is built around has no vote to cast. The hull layer is still
+ * COUNTED by `tankHealth` — it is beneath both of these, so it is in every
+ * slice — it just never names the tank.
+ */
+export type CompanionTankLayer = "shield" | "armor";
+
 export interface FleetCompanionRequest {
   /**
    * Fitted modules that DEFEND this ship -- hardeners and the like -- by item
@@ -214,6 +240,55 @@ export interface FleetCompanionRequest {
    * one costs a drone command and the other moves the ship.
    */
   readonly salvagerModuleIDs: readonly number[];
+  /**
+   * Fitted PROPULSION modules — afterburners and microwarpdrives — classified
+   * off SDE group 46 "Propulsion Module".
+   *
+   * ⚠ THE ONLY MODULE LIST HERE THAT IS NOT A BARE LIST OF IDS, and both extra
+   * fields are forced by the game rather than chosen:
+   *
+   *   • `typeID`, because turning one OFF needs it. Deactivate stops a prop mod
+   *     only when it names the propulsion effect — the server infers the default
+   *     effect on activate and NOT on deactivate — so a bare Deactivate returns
+   *     success with the burner still cycling. The BFF resolves the effect name
+   *     from the typeID, so the id has to travel with the module. Every other
+   *     list here names modules that stop when told to.
+   *
+   *   • `kind`, because group 46 holds BOTH and only one of them cares about a
+   *     scram. `warpScramblerMWD` (the jam that carries `blocksMicrowarpdrive`)
+   *     kills a microwarpdrive and does nothing at all to an afterburner. It
+   *     comes from the SDE's own dogmaEffects (6730/6731), not from the type
+   *     name, and `null` means the effect read did not arrive — see
+   *     `decidePropulsion` for what that costs.
+   *
+   * Empty is a real answer and a common one: plenty of hulls fly without one.
+   */
+  readonly propulsionModules: readonly CompanionPropulsionModule[];
+  /**
+   * Which layer this hull is BUILT to be hit in, when nothing it can cycle says
+   * so — read off the fit at start, `null` when the fit could not answer.
+   *
+   * ⚠ IT EXISTS FOR BUFFER FITS ALONE, AND IS CONSULTED LAST. `tankHealth`
+   * asks the self-repair lists first, because a module the ship can switch on
+   * is the strongest possible statement about where its tank is. A brick with
+   * no active repairer makes no such statement: plates and extenders are
+   * PASSIVE, so they never reach any list this loop cycles, and before this
+   * field such a hull fell back to the worst-layer fold — which on a plated ship
+   * means fleeing over a shield that was never its tank. The operator asked for
+   * exactly this split after the armour-repairer case was fixed.
+   *
+   * ⚠ IT IS A VOTE OVER GROUP NAMES, NOT A SINGLE MODULE'S SAY-SO, and a tie is
+   * `null` rather than a guess. Plates, coatings, membranes, extenders,
+   * rechargers, power relays, the hardeners of either layer AND the armour and
+   * shield RIGS all vote; a Damage Control does not, because it defends all
+   * three layers equally and so says nothing about which one matters. A hull
+   * carrying both kinds (a shield extender in the mids and a plate in the lows
+   * is a real, if unhappy, fit) says nothing either, and gets the old fold.
+   *
+   * ⚠ NEVER OVERRIDES A FITTED REPAIRER. A shield-boosted hull that also
+   * carries an armour plate is shield-tanked: the thing it can cycle wins.
+   */
+  readonly tankLayer: CompanionTankLayer | null;
   // ─── From here down: the stored setup. See `COMPANION_SETUP_KEYS`. ─────────
   //
   // ⚠ THE FIELDS BELOW ARE THE ONLY ONES AN OPERATOR EVER SETS, and the only
@@ -420,6 +495,9 @@ export const DEFAULT_FLEET_COMPANION_REQUEST: FleetCompanionRequest = Object.fre
   remoteCapacitorModuleIDs: Object.freeze([]),
   weaponModuleIDs: Object.freeze([]),
   salvagerModuleIDs: Object.freeze([]),
+  propulsionModules: Object.freeze([]),
+  // Nothing fitted is nothing to vote with, which is exactly what `null` says.
+  tankLayer: null,
 } satisfies FleetCompanionRequest);
 
 /**
@@ -472,6 +550,45 @@ export interface CompanionFlee {
    * cannot pay, and asking it for ever is not a plan.
    */
   readonly repairAttempts: number;
+  /**
+   * Whether, at the moment the floor was breached, the ARMOUR and the HULL were
+   * both already clear of the return mark — so the shield was the only layer
+   * that had dropped far enough to matter.
+   *
+   * ⚠ THIS FIELD EXISTS BECAUSE A STATION CANNOT ANSWER `obs.health` AT ALL, and
+   * that silence used to strand pilots for ever. `health` is folded from the
+   * SPACE snapshot (`lowestHealth`, miningBotLoop.ts), and a docked ship has no
+   * space snapshot — so every docked tick reads `null`, `wellEnoughToReturn`
+   * read `null` as "not well", and no docked pilot ever undocked itself again.
+   * A shield-only flee (the common one) was the worst case of all: the ship was
+   * whole the moment it arrived, and it sat in the station telling its operator
+   * that its armour needed paying for. Observed live, 2026-09-13, on two pilots
+   * that could not be forced out — every manual undock was answered by the
+   * re-dock below.
+   *
+   * ⚠ IT IS STAMPED AT THE TRIGGER BECAUSE THAT IS THE LAST TICK THAT CAN READ
+   * IT. Once the ship is in the station the layers are unreadable, and neither
+   * armour nor hull can change in there without the shop being paid — so what
+   * was true on the way out is still true on arrival. `false` whenever either
+   * layer could not be read, which keeps the safe direction: an unknown layer
+   * sends the pilot down the quote-and-repair path rather than back into a
+   * fight.
+   *
+   * The server fact this rests on is the one this rung is already built around:
+   * `topOffShipShieldAndCapacitorForDockingTransition` (`space/transitions.js`)
+   * writes `shieldCharge: 1.0` and leaves `damage` and `armorDamage` alone.
+   */
+  readonly onlyTheShieldWasHurt: boolean;
+  /**
+   * Whether this flee has already delivered the ship to safety — docked, or
+   * landed at the safe spot it warped to.
+   *
+   * ⚠ WHAT IT GUARDS IS THE OPERATOR'S OWN UNDOCK. Without it, a parked flee
+   * read `docked === false` as "still on the way out" and docked the ship
+   * again, so a human pulling a pilot out of a station was overruled within two
+   * seconds, for ever. See `flyTheFlee`.
+   */
+  readonly arrivedSafe: boolean;
 
   // ── the `SafetyRun` contract ────────────────────────────────────────
   readonly safeSpotWarpIssued: boolean;
@@ -499,6 +616,19 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * both forbid a write, but only `false` is settled. Never guess "no".
    */
   readonly canTag: boolean | null;
+  /**
+   * Whether THIS pilot may BROADCAST in its fleet — i.e. whether it is in one
+   * at all. Three states on the same terms as `canTag`: `null` is an unreadable
+   * roster, `false` is a read one saying this pilot is in no fleet.
+   *
+   * ⚠ IT IS A SEPARATE FIELD BECAUSE `canTag === false` ANSWERS TWO QUESTIONS
+   * AT ONCE AND THE FALLBACK ONLY WORKS FOR ONE OF THEM. `canTagInFleet`
+   * returns `false` both for "in a fleet, not a commander" (where a broadcast
+   * is exactly the right substitute) and for "in no fleet" (where there is
+   * nobody to broadcast to). Deriving the second from the first is impossible;
+   * asking the roster the second question directly is a `.find` away.
+   */
+  readonly canBroadcast?: boolean | null;
   /**
    * Character IDs the fleet roster names as COMMANDERS — fleet boss, wing
    * commander, squad commander, or the fleet's creator. The chat-order rung
@@ -590,6 +720,28 @@ export interface FleetCompanionObservation extends ScriptObservation {
    * that wrongly believes it can warp.
    */
   readonly tackledBy?: readonly number[];
+  /**
+   * Whether a live WARP SCRAMBLER is on this ship — the one jam that turns a
+   * microwarpdrive off.
+   *
+   * ⚠ NARROWER THAN `tackledBy` ABOVE, AND DELIBERATELY A SEPARATE FIELD. That
+   * list counts BOTH tackle types, and the server's names for them are the wrong
+   * way round from how a player says them: `warpScramblerMWD` is the scrambler
+   * (it carries `blocksMicrowarpdrive`) and `warpScrambler` is the disruptor,
+   * which stops a warp and leaves the prop mod running at full effect. Deriving
+   * this from `tackledBy` would read a disruptor as an MWD kill.
+   *
+   * ⚠ THREE-STATE, AND `null` MUST NOT DISARM ANYTHING. Absent or null is "the
+   * jam slice could not be read", not "clear" and not "scrammed". The rung that
+   * uses it treats only an explicit `true` as a reason to stand a microwarpdrive
+   * down — the same fail-open rule `itemHasActivationCycle` follows, and for the
+   * same reason: a dropped SSE frame must never be what takes the speed off a
+   * ship.
+   *
+   * ⚠ AND IT SAYS NOTHING ABOUT AN AFTERBURNER. No jam in this vocabulary stops
+   * one, so a scrammed pilot with an afterburner keeps burning.
+   */
+  readonly scrammed?: boolean | null;
   /**
    * This ship's own drones out in space, by entity id — the ones this hull can
    * actually ORDER, which is a narrower set than the ones it owns.
@@ -755,13 +907,20 @@ export type FleetCompanionAction =
    * Switch a module OFF. The companion's first: until the tank-up rung there
    * was nothing it started that it ever had to stop.
    *
-   * ⚠ NOT FOR PROP MODS AS IT STANDS. `api.deactivateModule`'s own comment
-   * warns that an afterburner or MWD only actually STOPS when Deactivate names
-   * its propulsion effect -- the server infers a default effect on activate but
-   * not on deactivate. Hardeners and repairers are unaffected. Read that
-   * comment before widening this to anything that moves the ship.
+   * ⚠ `typeID` IS WHAT MAKES THIS SAFE FOR PROP MODS, and it used to be absent.
+   * This action's own comment read "NOT FOR PROP MODS AS IT STANDS": an
+   * afterburner or MWD only actually STOPS when Deactivate names its propulsion
+   * effect — the server infers a default effect on activate but NOT on
+   * deactivate — so the call returned 200 with the burner still cycling. The BFF
+   * resolves that effect name from the typeID, so passing it is the whole of the
+   * fix, and `decidePropulsion` is the rung that needed it.
+   *
+   * ⚠ OPTIONAL BECAUSE EVERY OTHER CALLER IS RIGHT WITHOUT IT. Hardeners and
+   * repairers stop on a bare Deactivate, and the BFF treats an absent typeID
+   * exactly as it always did. Callers that have it should pass it; the tank-up
+   * rung has no reason to.
    */
-  | { readonly kind: "deactivate"; readonly moduleID: number }
+  | { readonly kind: "deactivate"; readonly moduleID: number; readonly typeID?: number }
   /**
    * Obeying the fleet (rung 7): a `TravelTo` broadcast — a solar system, not
    * an on-grid object, so this hands off to the SHARED autopilot
@@ -792,6 +951,29 @@ export type FleetCompanionAction =
    * letter arrive in a later `fleetTargetTags` — never the write's own 200.
    */
   | { readonly kind: "setFleetTargetTag"; readonly targetID: number; readonly tag: string }
+  /**
+   * Rung 4's OTHER half: call the ship out by fleet broadcast instead of
+   * lettering it — `Target`, bubble range, which is the retail client's own
+   * `SendBroadcast_Target` down to the argument (see `api.broadcastFleetTarget`).
+   *
+   * ⚠ THIS EXISTS BECAUSE THE TAG PATH IS SHUT TO ALMOST EVERY COMPANION, AND
+   * PERMANENTLY. A companion alt joins somebody else's fleet as a plain member
+   * and stays one; `setFleetTargetTag` refuses plain members
+   * (fleetRuntime.js:1317). So the rung above it — "letter the ship that has
+   * this one tackled so the fleet can call it" — described something that in
+   * practice never fired. Broadcasting has NO commander gate on the server
+   * (`sendBroadcast`, fleetRuntime.js:2521, gates on membership alone), which is
+   * both EVE's own division of labour and the reason this action closes the gap
+   * rather than papering over it.
+   *
+   * ⚠ AND ITS ACK MEANS SOMETHING, unlike the tag's. `false` back from the
+   * server is a real refusal (the 2-second rate limit) rather than the tag
+   * path's indistinguishable `null`. The dispatcher still does not RETRY on it
+   * — see `decideTackleTag` for why one call per ship is the right budget —
+   * but a dropped call is at least knowable, which is a thing this loop has
+   * never been able to say about a tag.
+   */
+  | { readonly kind: "broadcastFleetTarget"; readonly targetID: number }
   /**
    * Rung 6: put drones out. `droneItemIDs` are BAY STACK ids, not drone entity
    * ids - a stack and a drone in space live in different id spaces, and the
@@ -962,6 +1144,35 @@ export interface FleetCompanionController {
 export const FLEET_COMPANION_CADENCE_MS = 2000;
 
 /**
+ * The gap after a tick that ISSUED A CALL, rather than after one that waited.
+ *
+ * ⚠ THIS EXISTS BECAUSE THIS LADDER ANSWERS ONE ORDER OVER SEVERAL TICKS, AND
+ * A FLAT CADENCE CHARGED FULL PRICE FOR EVERY ONE OF THEM. Obeying a single
+ * `Target` call is: lock it, wait for the lock to land, put the drones on it,
+ * then bring the guns up ONE MODULE PER TICK (`decideOpenFire`). At a flat two
+ * seconds -- really nearer four, once the tick's own reads are counted -- a
+ * five-gun pilot was half a minute from "the FC called it" to "everything this
+ * hull owns is shooting it". None of those steps is waiting on the WORLD; each
+ * is waiting only for this loop to come round again.
+ *
+ * ⚠ IT IS KEYED ON "DID THIS TICK ISSUE SOMETHING", NOT ON "IS THERE A FIGHT",
+ * AND THAT IS WHAT KEEPS EVERY TICK-COUNTED BUDGET IN THIS FILE HONEST. A rung
+ * that is WAITING -- counting out a drone hold-off, watching for a recall to
+ * complete, sitting out a flee recovery -- returns no action, so the tick that
+ * carries it is a `wait` and still sleeps the full cadence. Only a tick that
+ * did something comes back early, and a loop that is doing something every
+ * ~350 ms is a loop with a queue of orders to work through, which is exactly
+ * the case this is for. The moment the queue empties the ladder returns `wait`
+ * and the beat goes back to two seconds.
+ *
+ * ⚠ AND IT IS NOT A LOWER BOUND ON THE READ TRAFFIC IT COSTS. The tick's own
+ * six round trips happen before this sleep, so a burst tick is ~350 ms PLUS the
+ * reads, not 350 ms total. The measured tick is ~4 s at a 2 s cadence, so a
+ * burst tick lands nearer 2 s -- twice as fast, not six times.
+ */
+export const FLEET_COMPANION_BURST_MS = 350;
+
+/**
  * How long an abandoned companion waits before giving up and releasing the
  * hull. Decision 5's number.
  *
@@ -1112,6 +1323,28 @@ export interface CompanionLadderMemory {
    * long fight cannot grow it without bound.
    */
   readonly taggingGaveUpOn: readonly number[];
+  /**
+   * Ships this pilot has already called out by BROADCAST (rung 4's fallback for
+   * a non-commander). One entry per ship, one broadcast per entry, for the run.
+   *
+   * ⚠ A BROADCAST HAS NO STATE TO RE-READ, WHICH IS WHY THIS LIST AND NOT AN
+   * ATTEMPT COUNTER. A tag can be watched for in a later `fleetTargetTags`, so
+   * the tag arm knows when to try again and when to give up; a broadcast is a
+   * one-shot notification that leaves nothing behind to observe. With no
+   * confirmation to wait for there is nothing a second call could learn — it
+   * would just be the same shout again, every two seconds, for as long as the
+   * ship held this one tackled.
+   *
+   * ⚠ AND IT IS WHAT STOPS TWO COMPANIONS SHOUTING AT EACH OTHER. A `Target`
+   * broadcast is an ORDER to the other rungs of every companion that hears it
+   * (`asNamedOrderName`, and newest-wins), so without a per-ship memory two
+   * pilots tackled by the same ship would re-call it in turn indefinitely. With
+   * one, the exchange is bounded at one call per pilot per ship and then stops.
+   *
+   * Capped like `taggingGaveUpOn`, for the same reason: a long fight must not
+   * grow it without bound.
+   */
+  readonly tackleCalledOut: readonly number[];
   /**
    * The target this pilot's last lock refusals were against, and how many it has
    * had in a row.
@@ -1281,15 +1514,24 @@ export interface CompanionLadderMemory {
    */
   readonly fleeTripsSpent: number;
   /**
-   * Consecutive ticks since a flee ended with nothing wrong, against
-   * `FLEE_RECOVERY_HOLD_TICKS`. Reaching it puts the budget back to full.
+   * When this pilot last became well enough to count as recovered, against
+   * `FLEE_RECOVERY_HOLD_MS`. Null whenever it is not currently recovering --
+   * because it never fled, or because it has dropped back through its floor.
+   * Holding out the whole span puts the budget back to full.
    *
    * ⚠ THIS IS WHAT MAKES "A RETURN THAT HOLDS" CHECKABLE. A pilot that comes
-   * back and drops through its floor again before the count runs out never
+   * back and drops through its floor again before the span runs out never
    * reaches the reset, so its trips keep accumulating and it eventually stays
    * home -- which is the entire purpose of bounding them.
+   *
+   * ⚠ A TIMESTAMP AND NOT A TICK COUNT, for the reason `DroneCycle.stageSinceMs`
+   * carries one. The count advanced on EVERY tick, including the ticks that
+   * issue an action and now come back at `FLEET_COMPANION_BURST_MS` -- so "back
+   * on station with nothing wrong for a while" would have meant a different
+   * length of time for a pilot that happened to be shooting than for one
+   * sitting still.
    */
-  readonly fleeRecoveryTicks: number;
+  readonly fleeRecoverySinceMs: number | null;
   /**
    * The stand-off the newest `follow` order named, in metres.
    *
@@ -1368,6 +1610,44 @@ export interface CompanionLadderMemory {
   readonly stopHeardAtMs: number | null;
   readonly stopShipIssued: boolean;
   /**
+   * What the last `props on` / `props off` said, or `null` when nobody has said
+   * either.
+   *
+   * ⚠ THREE STATES, AND `null` IS THE INTERESTING ONE. It does NOT mean "off";
+   * it means nobody has overridden, and the pilot decides for itself — prop mod
+   * on while it is travelling, off otherwise. `true` and `false` are a
+   * commander's standing override in each direction, which is why `props off`
+   * had to exist alongside `props on`: without it there is no way to countermand
+   * a burn short of restarting the companion, the same gap `follow` closes by
+   * doubling as its own resume.
+   *
+   * ⚠ IT LATCHES, LIKE THE TRIP AND THE FOLLOW ABOVE IT, AND UNLIKE A TARGET
+   * CALL. A commander says "props on" once and means it until they say
+   * otherwise; re-reading it off the chat backlog every tick would switch the
+   * burner off the moment the line aged out of the freshness window. See
+   * `withStandingChatOrders`, which folds all four latches in timestamp order so
+   * "the last thing said wins" is answered once rather than per verb.
+   *
+   * ⚠ AND A `stop` DOES NOT CLEAR IT. `stop` cancels standing ORDERS — it
+   * suspends the follow and drops the trip — and propulsion is not one: a
+   * commander halting a pilot has said nothing about whether it may keep its
+   * speed, and a ship told to stop is often the one that most needs to move
+   * again in a hurry.
+   */
+  readonly propsHeld: boolean | null;
+  /**
+   * The prop mod this rung has a `deactivate` in flight for, so the off-half is
+   * issued ONCE rather than every tick until the snapshot catches up.
+   *
+   * ⚠ THE SAME SHAPE AS `stopShipIssued`, AND FOR THE SAME REASON. Switching a
+   * module off is not idempotent in cost: `activeModuleIDs` refreshes on the
+   * space snapshot's own cadence, so between the call and the proof there are
+   * ticks where the module still reads as cycling. Without this latch each of
+   * them spends another Deactivate. Cleared the moment the module is seen
+   * stopped, which is what makes a REFUSED deactivate retry rather than stick.
+   */
+  readonly propsStoppingID: number | null;
+  /**
    * How many `loadAmmo` calls the reload rung has spent on each gun, keyed by
    * the module's own item id.
    *
@@ -1407,8 +1687,20 @@ export interface DroneCycle {
    * unrelated drone came home.
    */
   readonly recalledIDs: readonly number[];
-  /** Ticks spent in the current stage. Bounded in both of them. */
-  readonly waited: number;
+  /**
+   * When the CURRENT stage began, on the ladder's injected clock. Both stages
+   * are bounded against it.
+   *
+   * ⚠ A TIMESTAMP, NOT A TICK COUNT, AND THE CHANGE WAS FORCED BY TWO THINGS.
+   * Both of this record's stages fall THROUGH to the rungs below rather than
+   * parking the tick, so the ticks they are counting are exactly the ones that
+   * may now come back at `FLEET_COMPANION_BURST_MS` instead of the cadence --
+   * a count would measure a different amount of time depending on whether the
+   * pilot happened to be shooting at the same moment. And the hold-off stage
+   * was never a count in the first place: it is the operator's own
+   * `droneRedeployHoldOffSeconds`, which is a duration.
+   */
+  readonly stageSinceMs: number;
 }
 
 export function freshLadderMemory(): CompanionLadderMemory {
@@ -1426,6 +1718,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastTagIssuedFor: null,
     lastTagAttempts: 0,
     taggingGaveUpOn: [],
+    tackleCalledOut: [],
     lockRefusedFor: null,
     lockRefusals: 0,
     lockGaveUpOn: [],
@@ -1445,7 +1738,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastWarpedToID: null,
     flee: null,
     fleeTripsSpent: 0,
-    fleeRecoveryTicks: 0,
+    fleeRecoverySinceMs: null,
     // ⚠ THE DEFAULT RANGE, NOT NULL. Following is the standing behaviour, so a
     // companion nobody has typed `follow` at still has a distance to hold -- see
     // `followRangeM`. `followHeld` false for the same reason: it starts
@@ -1458,6 +1751,11 @@ export function freshLadderMemory(): CompanionLadderMemory {
     destinationRoutedFor: null,
     stopHeardAtMs: null,
     stopShipIssued: false,
+    // ⚠ `null`, NOT `false`. Nobody has said anything about propulsion yet, so
+    // the pilot decides for itself; `false` here would ship every companion with
+    // a standing order never to use its prop mod.
+    propsHeld: null,
+    propsStoppingID: null,
     reloadAttempts: {},
   };
 }
@@ -1609,6 +1907,7 @@ function nearestOf(
  *     1  yield to warp              server fleet warp wins, unconditionally
  *     2  supervision / abandonment  decision 5; getting safe lives here
  *     3  tank up                    hardeners, then each layer's repairer
+ *     3b prop mod                   burn while travelling; `props on`/`off`
  *     4  tackle -> tag              letter what is holding this ship
  *     5  flee                       leave, get whole, come back
  *     6  drones                     launch, recall a hurt one, redeploy
@@ -1762,6 +2061,7 @@ export function decideCompanionAction(
     lastTagIssuedFor: memory.lastTagIssuedFor,
     lastTagAttempts: memory.lastTagAttempts,
     taggingGaveUpOn: memory.taggingGaveUpOn,
+    tackleCalledOut: memory.tackleCalledOut,
     lockRefusedFor: memory.lockRefusedFor,
     lockRefusals: memory.lockRefusals,
     lockGaveUpOn: memory.lockGaveUpOn,
@@ -1787,7 +2087,7 @@ export function decideCompanionAction(
     // hurt pilot sitting on the grid it was leaving.
     flee: memory.flee,
     fleeTripsSpent: memory.fleeTripsSpent,
-    fleeRecoveryTicks: memory.fleeRecoveryTicks,
+    fleeRecoverySinceMs: memory.fleeRecoverySinceMs,
     // Carried, every one of them. A human turning up says nothing about where
     // this pilot was told to fly or how close to hold: an order given while the
     // fleet was unsupervised was still given, and a `stop` typed a moment before
@@ -1800,6 +2100,8 @@ export function decideCompanionAction(
     destinationRoutedFor: memory.destinationRoutedFor,
     stopHeardAtMs: memory.stopHeardAtMs,
     stopShipIssued: memory.stopShipIssued,
+    propsHeld: memory.propsHeld,
+    propsStoppingID: memory.propsStoppingID,
     // Carried for the same reason as the orders above: a supervisor logging
     // back in says nothing about which of this ship's guns are empty or how
     // many loads have already been spent on them.
@@ -1815,12 +2117,35 @@ export function decideCompanionAction(
     return tankedUp.decision;
   }
 
+  // Rung 3b: the prop mod. Directly under tank-up because it is the same KIND of
+  // move -- one call, self-targeted, instant, and a rung that falls through the
+  // moment the rack matches what is wanted -- so it costs the rungs below it a
+  // tick or two after a trip starts or ends and nothing the rest of the time.
+  //
+  // ⚠ ABOVE THE FLEET RUNG SO A STANDING TARGET CALL CANNOT SWALLOW `props on`.
+  // A commander who types it while the fleet is holding a primary means it now;
+  // below rung 7 it would land whenever the call happened to lapse.
+  //
+  // ⚠ BELOW THE FLEE, WHICH IS WHY THE FLEE TURNS IT OFF. Rung 5 does not fly
+  // through the shared autopilot, so `obs.travel` reads as "not travelling" for
+  // the whole flee and this rung stands the burner down. That is the asked-for
+  // behaviour ("when they travel") and `decidePropulsion`'s header records the
+  // cost and the escape hatch.
+  //
+  // Threaded like rung 3: the tick that merely CLEARS a spent stopping latch
+  // issues no action, and a call site taking only the decision would drop it and
+  // re-issue the same deactivate for ever.
+  const burning = decidePropulsion(request, obs, tankedUp.memory);
+  if (burning.decision !== null) {
+    return burning.decision;
+  }
+
   // Rung 4: tackle → tag. ABOVE obeying the fleet, and that placement is the
   // whole reason this rung works — see `decideTackleTag`'s own header. Threaded
   // the way rung 3 is, and for the same reason: the tick that GIVES UP on a
   // ship issues no action, so a call site that only took the decision would
   // throw the give-up away and re-pick the same ship for ever.
-  const tagging = decideTackleTag(request, obs, tankedUp.memory);
+  const tagging = decideTackleTag(request, obs, burning.memory);
   if (tagging.decision !== null) {
     return tagging.decision;
   }
@@ -1839,12 +2164,36 @@ export function decideCompanionAction(
     return fleeing.decision;
   }
 
+  // Rung 5b: get out of the station.
+  //
+  // ⚠ THE LADDER COULD NOT UNDOCK A PILOT AT ALL UNLESS IT WAS MID-FLEE, AND
+  // NOBODY NOTICED BECAUSE THE FLEE ALWAYS WAS. The one `undock` this loop has
+  // ever issued lives in `recoverAndReturn`, which only runs while a flee latch
+  // is standing — so a companion that was docked for any other reason (started
+  // in a station, stopped and restarted while parked, docked by its operator)
+  // sat there for the rest of the run with every rung beneath it reading an
+  // empty grid and deciding nothing. The settings panel has been promising the
+  // opposite in writing the whole time: "It will undock when the fleet gives it
+  // something to do" (`fleetCompanionRequirements.ts`, which is why a docked
+  // start is advisory rather than blocking). This rung is that sentence.
+  //
+  // ⚠ IT SITS BELOW THE FLEE ON PURPOSE, so every deliberate reason to STAY in
+  // a station still wins: a pilot waiting on repairs, one whose operator will
+  // not pay for them, one that has spent its round trips, and the abandonment
+  // protocol above all of them, each hold the tick before it reaches here. What
+  // is left when it does reach here is a docked ship with nothing keeping it
+  // docked and a fleet somewhere else.
+  const leaving = decideLeaveTheStation(obs, fleeing.memory);
+  if (leaving !== null) {
+    return leaving;
+  }
+
   // Rung 6: drones. Above the fleet rung, like tank-up and tackle-tag and for
   // the same reason: it moves nothing, costs one call, and a pilot does not
   // stop obeying its commander to keep its drones alive. Threaded like rung 3
   // because most of what it does - waiting out a recall, counting down a
   // hold-off - happens on ticks that issue NO action at all.
-  const drones = decideDrones(request, obs, fleeing.memory);
+  const drones = decideDrones(request, obs, fleeing.memory, nowMs);
   if (drones.decision !== null) {
     return drones.decision;
   }
@@ -3061,6 +3410,11 @@ interface NamedOrder {
  *   • `follow` — answers no broadcast either, and is not even an event: it is
  *     this companion's STANDING behaviour with a distance attached. Nothing the
  *     fleet can broadcast means "stay near me at 10 km".
+ *   • `props` — switches this ship's own afterburner/MWD on or off. It names no
+ *     object, answers no broadcast, and is not even an order in the sense the
+ *     others are: it is a standing OVERRIDE of a decision the pilot otherwise
+ *     makes for itself from whether it is travelling. Nothing in the fleet's
+ *     broadcast vocabulary means "use your prop mod".
  *   • `destination` — carries an id and so LOOKS like `travel`, which does map
  *     onto `TravelTo`. It is excluded anyway because the two differ in kind:
  *     `travel` is obeyed for as long as the call stands and lapses with it,
@@ -3071,7 +3425,7 @@ interface NamedOrder {
  */
 type NamedChatCommandKind = Exclude<
   ChatCommand["kind"],
-  "salvage" | "loot" | "stop" | "follow" | "destination"
+  "salvage" | "loot" | "stop" | "follow" | "destination" | "props"
 >;
 
 const CHAT_ORDER_NAMES: Readonly<Record<NamedChatCommandKind, NamedOrderName>> = Object.freeze({
@@ -3274,20 +3628,24 @@ function withAreaJobCleared(
 }
 
 /**
- * The follow range, the trip and the `stop` gate after this tick's chat.
+ * The follow range, the trip, the propulsion override and the `stop` gate after
+ * this tick's chat.
  *
  * ⚠ THE SAME "A HEARD ORDER LATCHES; SILENCE CHANGES NOTHING" RULE AS
- * `withAreaJob`, applied to the two orders that outlive a chat window by even
- * more than an area job does. A `destination` is a trip of several jumps and a
- * `follow` is a standing behaviour with no end at all; neither could survive
- * being read off the backlog the way a target call is.
+ * `withAreaJob`, applied to the three orders that outlive a chat window by even
+ * more than an area job does. A `destination` is a trip of several jumps, a
+ * `follow` is a standing behaviour with no end at all, and a `props` override
+ * stands until it is countermanded; none could survive being read off the
+ * backlog the way a target call is.
  *
  * ⚠ THE BACKLOG IS REPLAYED IN TIMESTAMP ORDER RATHER THAN SCANNED PER VERB,
  * which is the only construction that gets `stop` right. `stop` is the one word
- * that touches all three latches, so "which is newer, the stop or the follow"
- * has to be answered for each latch separately -- and answering it with three
- * independent newest-of-this-kind scans means three different tie rules and one
- * ordering bug waiting to happen. Folding every order onto the memory oldest
+ * that touches two of these latches, so "which is newer, the stop or the follow"
+ * has to be answered for each latch separately -- and answering it with
+ * independent newest-of-this-kind scans means a different tie rule per verb and
+ * one ordering bug waiting to happen. (`props` is the latch `stop` does NOT
+ * touch; it rides this fold anyway, because "the last thing said wins" is the
+ * same rule and there is no reason for it to have a second implementation.) Folding every order onto the memory oldest
  * first gives the plain answer instead: the last thing said wins, per latch,
  * exactly as a reader of the chat would expect.
  *
@@ -3309,7 +3667,12 @@ function withStandingChatOrders(
     if (command === null) {
       continue;
     }
-    if (command.kind === "follow" || command.kind === "destination" || command.kind === "stop") {
+    if (
+      command.kind === "follow" ||
+      command.kind === "destination" ||
+      command.kind === "stop" ||
+      command.kind === "props"
+    ) {
       heard.push({ command, at: message.createdAtMs });
     }
   }
@@ -3330,6 +3693,14 @@ function withStandingChatOrders(
     }
     if (command.kind === "destination") {
       next = { ...next, destinationSystemID: command.systemID };
+      continue;
+    }
+    if (command.kind === "props") {
+      // ⚠ THE STOPPING LATCH IS CLEARED WITH IT, so a commander who says "props
+      // off" and then "props on" before the deactivate has been proven does not
+      // find the rung still holding a stale "I am switching this off". The
+      // override is the newer statement and wins outright.
+      next = { ...next, propsHeld: command.on, propsStoppingID: null };
       continue;
     }
     // ⚠ A `stop` IS RE-READ ON EVERY TICK OF ITS FRESHNESS WINDOW, AND MUST BE
@@ -3613,9 +3984,36 @@ function rememberGiveUp(gaveUpOn: readonly number[], itemID: number): readonly n
 }
 
 /**
- * Rung 4: letter the ship that is holding this one down, so the whole fleet can
- * call it. Hands back a decision only on a tick it actually writes — which is
- * few of them — so everything below it keeps its turn.
+ * Rung 4: CALL OUT the ship that is holding this one down, so the whole fleet
+ * can shoot it. Hands back a decision only on a tick it actually writes — which
+ * is few of them — so everything below it keeps its turn.
+ *
+ * ⚠ TWO WAYS TO CALL A SHIP, AND WHICH ONE THIS PILOT HAS IS NOT ITS CHOICE.
+ * Lettering a target (`setFleetTargetTag`) is a COMMANDER's job — the fleet
+ * boss, a wing or squad commander, or the fleet's creator, and nobody else
+ * (fleetRuntime.js:1317). Broadcasting `Target` is EVERY member's
+ * (fleetRuntime.js:2521 gates on membership and nothing more). A companion alt
+ * joins somebody else's fleet as a plain member and will never be promoted, so
+ * for the overwhelming majority of runs the first way is shut for good.
+ *
+ * This rung therefore does not HAVE a commander check in the sense of a thing
+ * it might fail. It has a fork:
+ *
+ *   canTag === true   ->  letter it (stable, survives the tick, re-readable)
+ *   canTag === false  ->  broadcast it, if this pilot is in a fleet at all
+ *   canTag === null   ->  the roster is unreadable; say nothing this tick
+ *
+ * A previous version of this rung stopped dead on the middle line, and the
+ * readout it fed said "cannot tag, not a fleet commander" — true about the
+ * letter, and quite wrong about the pilot, which had a perfectly good way to
+ * name its tackler and was not using it.
+ *
+ * ⚠ THE TWO ARMS ARE NOT THE SAME PROMISE AND MUST NOT BE DESCRIBED AS ONE. A
+ * tag is fleet STATE: it sits on the ship, anyone reading the fleet sees it,
+ * and it can be confirmed by reading it back. A broadcast is an EVENT: it
+ * arrives once, in the broadcast window, and leaves nothing behind. That is
+ * why the arms have different budgets (attempts-and-give-up versus called-once)
+ * and different memories (`lastTagIssuedFor` versus `tackleCalledOut`).
  *
  * ⚠ IT SITS **ABOVE** OBEYING THE FLEET, AND THAT IS THE WHOLE REASON IT WORKS.
  * `decideFleetOrders` PARKS THE TICK once a target call stands and is locked
@@ -3661,45 +4059,57 @@ function decideTackleTag(
   memory: CompanionLadderMemory,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
-  // ⚠ NO OPERATOR GATE. Every companion tags, and the three things below
-  // are what make that safe rather than a letter-fight:
+  // ⚠ NO OPERATOR GATE. Every companion calls out what has it tackled, and the
+  // three things below are what make that safe rather than a shouting match:
   //
-  //   1. THE SERVER IS THE REAL GATE. Only a fleet creator, leader, wing
-  //      commander or squad commander may tag at all, and `obs.canTag` mirrors
-  //      that test off the roster. In an ordinary fleet the companions are
-  //      plain members and this rung writes nothing, whatever anybody ticked.
-  //   2. A LETTERED SHIP IS SKIPPED, below, so a second tagger seeing the same
-  //      tackler leaves the letter it already has alone.
+  //   1. THE SERVER IS THE REAL GATE ON THE LETTER. Only a fleet creator,
+  //      leader, wing or squad commander may tag, and `obs.canTag` mirrors that
+  //      test off the roster. In an ordinary fleet the companions are plain
+  //      members and this rung never writes a letter, whatever anybody ticked —
+  //      it broadcasts instead, which is the call plain members do have.
+  //   2. A SHIP ALREADY CALLED IS SKIPPED, in BOTH arms: lettered ships are
+  //      filtered out below (so a second tagger leaves an existing letter
+  //      alone) and `tackleCalledOut` bounds the broadcast arm to one call per
+  //      ship per pilot (so two pilots cannot re-call each other's tackler
+  //      back and forth).
   //   3. THE TRIGGER IS NARROW: only ships tackling THIS pilot are candidates.
   //      Two companions collide only if one ship has tackled both of them in
-  //      the same tick, before either letter is visible.
+  //      the same tick, before either call is visible.
   //
   // The `attemptsTagging` checkbox that used to stand here gated behaviour that
-  // was already exactly what was asked for -- tag what is holding you down, and
-  // only that. See docs/fleet-companion-simplification.md, "Tagging".
+  // was already exactly what was asked for -- call out what is holding you
+  // down, and only that. See docs/fleet-companion-simplification.md, "Tagging".
   const snapshot = obs.snapshot ?? null;
   if (obs.inSpace !== true || snapshot === null) {
     return nothing;
   }
-  // ⚠ THREE STATES, AND ONLY ONE OF THEM WRITES. `null` is "could not read the
-  // roster" and `false` is "read it, and this pilot is not a commander". Both
-  // forbid the write; neither is remembered here, because a `null` cached as
-  // "no" would freeze a transient roster outage into a pilot that never tags
-  // again for the rest of the run.
-  if (obs.canTag !== true) {
+  // ⚠ THREE STATES, AND THE THIRD IS SILENCE. `null` is "could not read the
+  // roster" — it is not evidence this pilot lacks command, so it must not send
+  // this rung down the broadcast arm any more than it may send it down the tag
+  // arm. Nothing is remembered either way: a `null` cached as an answer would
+  // freeze a transient roster outage into a settled verdict for the whole run.
+  const canTag = obs.canTag ?? null;
+  if (canTag === null) {
     return nothing;
   }
   const tacklers = obs.tackledBy ?? [];
   if (tacklers.length === 0) {
     return nothing;
   }
-  // ⚠ NO TAG DICT, NO WRITE. `null` means this client has never received an
-  // `OnFleetStateChange` (or could not parse one), so it cannot tell which
-  // letters are free — and a tag is unique fleet-wide, so guessing "A" would
-  // silently steal the letter off whatever the FC had already marked. This is
-  // the caller `fleetBroadcasts.ts`'s null-versus-empty contract was written
-  // for: an EMPTY map is a real answer, and it does write.
+  // ⚠ NULL HERE IS FATAL TO THE LETTER AND HARMLESS TO THE BROADCAST, which is
+  // why it is read once and checked in the arm that cares. `null` means this
+  // client has never received an `OnFleetStateChange` (or could not parse one),
+  // so it cannot tell which letters are free — and a tag is unique fleet-wide,
+  // so guessing "A" would silently steal the letter off whatever the FC had
+  // already marked. A broadcast claims no letter and so needs no such reading;
+  // it only USES the dict, when there is one, to avoid re-calling a ship the
+  // commander has already marked. This is the caller `fleetBroadcasts.ts`'s
+  // null-versus-empty contract was written for: an EMPTY map is a real answer.
   const tags = obs.fleetTargetTags ?? null;
+
+  if (canTag === false) {
+    return decideTackleBroadcast(obs, memory, snapshot, tacklers, tags);
+  }
   if (tags === null) {
     return nothing;
   }
@@ -3768,6 +4178,102 @@ function decideTackleTag(
   };
 }
 
+/**
+ * Rung 4's other arm: this pilot is in a fleet and is NOT a commander, so the
+ * ship holding it down gets called out by `Target` broadcast instead of
+ * lettered. Reached only from `decideTackleTag` with `canTag === false`.
+ *
+ * ⚠ THIS IS THE ARM THAT ACTUALLY RUNS, in nearly every real fleet. A companion
+ * alt is a plain member; the tag arm above it is for the unusual run where the
+ * companion IS the boss (it formed the fleet itself, say, or the player made it
+ * a squad commander). Treat this one as the main path when reasoning about the
+ * rung's cost, not as a fallback that rarely fires.
+ *
+ * ⚠ `canBroadcast` IS CHECKED SEPARATELY AND IS NOT IMPLIED BY `canTag ===
+ * false`. That verdict covers both "in a fleet, not a commander" and "in no
+ * fleet at all" (see `canTagInFleet`), and only the first of those has anybody
+ * to broadcast to. `undefined` — a host that does not populate the field — is
+ * treated as unknown and stays silent, deliberately: a broadcast is an outward
+ * act, and an outward act on an unread gate is exactly the guess this loop's
+ * three-state discipline exists to forbid.
+ *
+ * ⚠ ONE CALL PER SHIP, AND NO RETRY BUDGET AT ALL — the opposite of the tag
+ * arm's three-attempts-then-give-up, for a reason that is about the two calls
+ * and not about caution. A tag can be re-read, so re-sending one is a way of
+ * finding out whether the first landed. A broadcast leaves nothing to re-read,
+ * so a second send could learn nothing the first did not; it would only be the
+ * same shout again. `tackleCalledOut` is what makes it once.
+ *
+ * ⚠ AND THE SERVER WOULD DROP MOST OF THE RE-SENDS ANYWAY.
+ * `isBroadcastRateLimited` (fleetRuntime.js:2473) refuses a repeat of the same
+ * broadcast name inside `MIN_BROADCAST_TIME_SEC` — 2 seconds, which is exactly
+ * `FLEET_COMPANION_CADENCE_MS`. Two new tacklers arriving on consecutive ticks
+ * sit right on that boundary and one of the two calls may be dropped. It is
+ * left to be dropped: the call is bounded, the refusal is visible in the ack
+ * (unlike a tag's), and spacing sends out over ticks would mean holding a
+ * queue of ships to shout about, which is a worse thing to own than a missed
+ * shout about a ship this pilot is already shooting.
+ */
+function decideTackleBroadcast(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+  snapshot: SpaceSnapshot,
+  tacklers: readonly number[],
+  tags: ReadonlyMap<number, string> | null,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const nothing = { decision: null, memory } as const;
+  if (obs.canBroadcast !== true) {
+    return nothing;
+  }
+
+  const candidates = tacklers
+    .map((itemID) => entityOnGrid(itemID, snapshot.entities))
+    .filter((entity): entity is SpaceEntity => entity !== null)
+    // ⚠ ALREADY LETTERED IS ALREADY CALLED. A commander has marked this ship;
+    // broadcasting it as well would put a second, louder call on a target the
+    // fleet is already pointed at — and because a `Target` broadcast is the
+    // NEWEST call every companion hearing it obeys, it would also shove aside
+    // whatever primary the commander had standing. Nothing to gain, a real
+    // fleet-wide cost. When `tags` is null this filter cannot run and does not:
+    // an unreadable dict is not a reason to stay quiet about being tackled.
+    .filter((entity) => tags === null || !tags.has(entity.itemID))
+    .filter((entity) => !memory.tackleCalledOut.includes(entity.itemID));
+  if (candidates.length === 0) {
+    return nothing;
+  }
+
+  // Same ranking as the tag arm, and for the same reason: one ordering for
+  // combat across this whole client, never a second one invented per rung.
+  const measurement = measureSpace(snapshot);
+  const groups = obs.targetGroupNames ?? null;
+  const target =
+    pickPrimary(
+      candidates,
+      (entity) => entity.typeID,
+      (entity) => measurement?.distances.get(entity.itemID) ?? null,
+      (typeID) => (groups === null ? null : (groups[typeID] ?? null)),
+    ) ?? candidates[0]!;
+
+  return {
+    decision: {
+      action: { kind: "broadcastFleetTarget", targetID: target.itemID },
+      phase: "Tagging",
+      // ⚠ SAYS WHICH CALL IT MADE, not just that it called. The readout is the
+      // only place a player can learn that this pilot broadcasts rather than
+      // letters, and "marking it for the fleet" would hide exactly that.
+      why: "Something has this ship scrambled. Broadcasting it to the fleet as the target.",
+      memory: {
+        ...memory,
+        // Capped the same way, and by the same helper, as the tag arm's
+        // give-up list: both exist to stop one rung re-picking one ship for
+        // ever, and a fight long enough to overflow one has overflowed both.
+        tackleCalledOut: rememberGiveUp(memory.tackleCalledOut, target.itemID),
+      },
+    },
+    memory,
+  };
+}
+
 // ─── Rung 5: flee ────────────────────────────────────────────────────────────
 //
 // ⚠ ABOVE THE FLEET RUNG, AND THAT IS A DECISION THE OPERATOR MADE RATHER THAN
@@ -3807,6 +4313,7 @@ function countTowardsRecovery(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
+  nowMs: number,
 ): CompanionLadderMemory {
   if (memory.fleeTripsSpent === 0) {
     return memory;
@@ -3815,14 +4322,19 @@ function countTowardsRecovery(
   // number that would send it running has not recovered from anything, and
   // letting that count would hand the budget back to the pilot least able to
   // spend it well.
-  if (!wellEnoughToReturn(request, obs)) {
-    return memory.fleeRecoveryTicks === 0 ? memory : { ...memory, fleeRecoveryTicks: 0 };
+  if (!healthClearOfTheMark(request, obs)) {
+    return memory.fleeRecoverySinceMs === null
+      ? memory
+      : { ...memory, fleeRecoverySinceMs: null };
   }
-  const held = memory.fleeRecoveryTicks + 1;
-  if (held < FLEE_RECOVERY_HOLD_TICKS) {
-    return { ...memory, fleeRecoveryTicks: held };
+  // The first well tick STARTS the span; every later one only reads it.
+  if (memory.fleeRecoverySinceMs === null) {
+    return { ...memory, fleeRecoverySinceMs: nowMs };
   }
-  return { ...memory, fleeRecoveryTicks: 0, fleeTripsSpent: 0 };
+  if (nowMs - memory.fleeRecoverySinceMs < FLEE_RECOVERY_HOLD_MS) {
+    return memory;
+  }
+  return { ...memory, fleeRecoverySinceMs: null, fleeTripsSpent: 0 };
 }
 
 /** What rung 5 hands back: a decision when it has one, and always its memory. */
@@ -3857,13 +4369,13 @@ function decideFlee(
   // ship is whole, and it is not evidence the ship is dying either. Fleeing
   // blind would abandon a fleet on a dropped poll; the honest answer is to
   // decide nothing this tick and look again in two seconds.
-  const health = obs.health ?? null;
+  const health = tankHealth(request, obs);
   if (health === null || health >= request.fleeHealthFloor) {
-    return { decision: null, memory: countTowardsRecovery(request, obs, memory) };
+    return { decision: null, memory: countTowardsRecovery(request, obs, memory, nowMs) };
   }
 
   // Dropped through the floor, so whatever recovery was being counted is over.
-  const hurt: CompanionLadderMemory = { ...memory, fleeRecoveryTicks: 0 };
+  const hurt: CompanionLadderMemory = { ...memory, fleeRecoverySinceMs: null };
 
   // ⚠ THE BUDGET IS CHECKED BEFORE THE LATCH, NOT INSIDE THE LEG. A pilot that
   // has spent its round trips is a pilot the operator told to stay home
@@ -3879,6 +4391,8 @@ function decideFlee(
     triggeredAtHealth: health,
     fromSolarSystemID: obs.flightStatus?.solarSystemID ?? null,
     repairAttempts: 0,
+    onlyTheShieldWasHurt: armorAndHullClearOfTheMark(request, obs),
+    arrivedSafe: false,
     safeSpotWarpIssued: false,
     safeSpotWarpSeen: false,
     droneRecallWaited: null,
@@ -3917,17 +4431,21 @@ function decideFlee(
 const FLEE_RETURN_MARGIN = 0.2;
 
 /**
- * How many ticks back on station with nothing wrong before a round trip counts
- * as having WORKED and the budget goes back to full.
+ * How long back on station with nothing wrong before a round trip counts as
+ * having WORKED and the budget goes back to full.
  *
  * The spec's rule, in its words: "an attempt is spent when the same condition
  * re-fires shortly after a return; a return that holds resets the budget."
- * Counting ticks is how "holds" is made checkable -- a pilot that comes back
- * and immediately drops through its floor again never reaches this, so its
- * trips keep accumulating and it eventually stays home, which is the whole
- * point of the bound.
+ * A span is how "holds" is made checkable -- a pilot that comes back and
+ * immediately drops through its floor again never reaches this, so its trips
+ * keep accumulating and it eventually stays home, which is the whole point of
+ * the bound.
+ *
+ * Thirty seconds, which is the duration the fifteen ticks this replaces were
+ * written to mean. See `fleeRecoverySinceMs` for why a count could not keep
+ * meaning it.
  */
-const FLEE_RECOVERY_HOLD_TICKS = 15;
+const FLEE_RECOVERY_HOLD_MS = 30_000;
 
 /**
  * How many times the shop is asked before a hurt pilot gives up on repairing.
@@ -3940,19 +4458,164 @@ const FLEE_RECOVERY_HOLD_TICKS = 15;
 const MAX_FLEE_REPAIR_ATTEMPTS = 3;
 
 /**
+ * The health that decides whether this ship is in trouble: the worst of the
+ * layers its TANK is actually made of, and nothing above them.
+ *
+ * ⚠ THE WORST OF ALL THREE LAYERS IS THE WRONG NUMBER, AND ON AN ARMOUR-TANKED
+ * HULL IT IS CATASTROPHICALLY WRONG. Damage on this server eats shield, then
+ * armour, then hull, whatever the fit — so an armour tank's shield is not its
+ * tank at all, it is the thing that empties in the first seconds of every fight
+ * on the way to the layer that matters. `lowestHealth` folds all three, so a
+ * cruiser with an armour repairer and a 30% floor ran for the door the moment
+ * its shield dipped, before its repairer had cycled once. Reported live,
+ * 2026-09-13: "they run away when shield is down instead of turning on armor
+ * repair and waiting for armor going below threshold".
+ *
+ * ⚠ WHAT COUNTS IS READ OFF THE HULL, NEVER GUESSED AT. The self-repair lists
+ * are derived from the fit at start (`requestForFit`), and the shallowest layer
+ * this ship can repair is the layer it is tanked in: everything above that is
+ * buffer, and everything at or below it is the tank. A shield booster means the
+ * shield counts (and so, beneath it, do armour and hull); an armour repairer
+ * with no booster means the shield is ignored and the armour is the trigger,
+ * which is the behaviour asked for above. This is the same authority rung 3
+ * already cycles the repairers from, so a ship flees on the layer it defends.
+ *
+ * ⚠ A HULL WITH NO SELF-REPAIRER FALLS BACK TO WHAT IT IS BUILT OF. A buffer fit
+ * cycles nothing, so it makes no statement this loop can read off an activation
+ * list — plates and extenders are PASSIVE and never reach one. `request.tankLayer`
+ * is that hull's answer, voted at start over the game's own group names (see the
+ * field), and it is consulted ONLY here, only when nothing repairable said so
+ * first. A fit that voted for neither keeps the old worst-layer fold, which is
+ * the honest answer for a hull that genuinely does not say.
+ *
+ * `null` when no counted layer could be read, which is never "well" and never
+ * "dying" — the callers keep that three-state discipline themselves.
+ */
+function tankHealth(request: FleetCompanionRequest, obs: FleetCompanionObservation): number | null {
+  const layers = [
+    {
+      name: "shield",
+      ratio: obs.shieldRatio,
+      repaired: request.shieldBoosterModuleIDs.length > 0,
+    },
+    {
+      name: "armor",
+      ratio: obs.armorRatio,
+      repaired: request.armorRepairerModuleIDs.length > 0,
+    },
+    { name: "hull", ratio: obs.hullRatio, repaired: request.hullRepairerModuleIDs.length > 0 },
+  ] as const;
+  const repaired = layers.findIndex((layer) => layer.repaired);
+  // The repairable layer outranks the vote: a hull that can switch something on
+  // has said where its tank is far more plainly than its plates can.
+  const tank =
+    repaired !== -1
+      ? repaired
+      : request.tankLayer === null
+        ? -1
+        : layers.findIndex((layer) => layer.name === request.tankLayer);
+  const counted = tank === -1 ? layers : layers.slice(tank);
+  const readable = counted
+    .map((layer) => layer.ratio)
+    .filter((ratio): ratio is number => ratio !== null && Number.isFinite(ratio));
+  // ⚠ THE SNAPSHOT'S OWN FOLD IS THE FALLBACK, not a zero and not a refusal. A
+  // tick whose layer ratios did not arrive but whose `health` did is a tick that
+  // still knows something, and on a hull with nothing to narrow by the two
+  // numbers are the same number anyway.
+  return readable.length === 0 ? (obs.health ?? null) : Math.min(...readable);
+}
+
+/**
+ * The health a returning pilot has to be at: its floor plus the margin, capped
+ * at a whole ship. One definition, because three different questions ask it —
+ * the return itself, and the two layer reads the trigger stamps.
+ */
+function returnMark(request: FleetCompanionRequest): number {
+  return Math.min(1, request.fleeHealthFloor + FLEE_RETURN_MARGIN);
+}
+
+/**
+ * Whether the armour AND the hull are both readable and both already clear of
+ * the return mark — i.e. whatever is wrong with this ship is wrong with its
+ * SHIELD, which a dock puts back in full.
+ *
+ * ⚠ NULL IS NEVER "CLEAR". A layer that did not read is a layer this pilot
+ * cannot claim is whole, and claiming it would send a hurt ship back into a
+ * fight on no information. False is the safe direction and costs only a quote.
+ */
+function armorAndHullClearOfTheMark(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+): boolean {
+  const mark = returnMark(request);
+  const armor = obs.armorRatio ?? null;
+  const hull = obs.hullRatio ?? null;
+  return armor !== null && hull !== null && armor >= mark && hull >= mark;
+}
+
+/**
  * Whether a ship is well enough to go back to the fight it left.
  *
  * ⚠ A DIFFERENT QUESTION FROM THE ONE THAT STARTED THE FLEE, and deliberately a
  * harder one to answer yes to. See `FLEE_RETURN_MARGIN`.
+ *
+ * ⚠ IT IS ALSO A DIFFERENT QUESTION IN A STATION THAN IT IS IN SPACE, and
+ * asking the space question in a station is the bug this branch exists to end.
+ * `obs.health` is folded from the SPACE snapshot, and a docked ship has none —
+ * so every docked tick reads `null`, and "unreadable is not well" (true and
+ * right in space) meant no pilot that fled to a station ever came back out.
+ * Two things answer it in there instead, in this order:
+ *
+ *   1. The flee's own stamp. A flee that started with the armour and the hull
+ *      already clear of the mark is whole on arrival, because docking gives the
+ *      shield back in full and nothing in a station can hurt the other two.
+ *      This is the common case — a shield-tanked pilot in a fight — and it
+ *      needs no call at all.
+ *   2. The shop's own quote, which is the authority on what a station can see:
+ *      an EMPTY quote is "nothing on this hull is damaged", and that includes
+ *      the armour the stamp could not vouch for. `null` is "we could not say"
+ *      and stays "not well", exactly as it does everywhere else this loop reads
+ *      that field — note that a pilot which does not pay for repairs never
+ *      raises a quote at all, so it falls through to the message that says so.
  */
-function wellEnoughToReturn(request: FleetCompanionRequest, obs: FleetCompanionObservation): boolean {
-  const health = obs.health ?? null;
+function wellEnoughToReturn(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  running: CompanionFlee,
+): boolean {
+  if (obs.docked === true) {
+    if (running.onlyTheShieldWasHurt) {
+      return true;
+    }
+    const damaged = obs.damagedItemIDs ?? null;
+    return damaged !== null && damaged.length === 0;
+  }
+  return healthClearOfTheMark(request, obs);
+}
+
+/**
+ * The live health read, against the return mark — the question as SPACE answers
+ * it, with no station authority behind it.
+ *
+ * Kept separate from `wellEnoughToReturn` because the recovery budget asks it on
+ * ticks where no flee is running at all, so there is no stamp and no quote to
+ * consult: out here, an unreadable health is simply not a recovered ship.
+ */
+function healthClearOfTheMark(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+): boolean {
+  // ⚠ THE SAME LAYERS THAT STARTED THE FLEE, NEVER THE WHOLE FOLD. Judging the
+  // way back by a layer that did not send the pilot away is how an armour-tanked
+  // ship gets stranded at a safe spot: its shield is empty by design, so the
+  // worst-layer fold would never clear the mark however well the armour healed.
+  const health = tankHealth(request, obs);
   if (health === null) {
     // Unreadable is not "well". A pilot that undocked on a dropped poll would
     // be flying back into a fight on no information at all.
     return false;
   }
-  return health >= Math.min(1, request.fleeHealthFloor + FLEE_RETURN_MARGIN);
+  return health >= returnMark(request);
 }
 
 /**
@@ -3974,7 +4637,7 @@ function recoverAndReturn(
 ): FleeStep {
   const hurtAt = Math.round(running.triggeredAtHealth * 100);
 
-  if (!wellEnoughToReturn(request, obs)) {
+  if (!wellEnoughToReturn(request, obs, running)) {
     // Not docked: the safe-spot case. There is no shop out here, so the only
     // thing to do is hold and let the layers come back on their own.
     if (obs.docked !== true) {
@@ -3983,11 +4646,28 @@ function recoverAndReturn(
         memory: mem,
       };
     }
+    // ⚠ THE SHOP'S OWN QUOTE DECIDES WHAT IS DAMAGED, never a guess at the ship
+    // item id -- the same authority the DSL's `repair-ship` uses. Null is "we
+    // could not say", which is a tick spent waiting for the quote and never a
+    // conclusion that nothing is wrong.
+    //
+    // ⚠ IT IS ASKED BEFORE THE WALLET IS CONSULTED, AND THE OTHER ORDER WAS A
+    // LIE. A pilot that does not pay for repairs used to answer every docked
+    // tick with "not set to pay for repairs", whether or not anything was
+    // actually damaged -- so the sentence an operator read while a perfectly
+    // whole ship sat in a station blamed a setting for a health read that had
+    // never happened. The quote now comes first, for every companion (see
+    // flow.ts, where it stopped being gated on `repairsAtStation`), so that
+    // sentence is only ever printed over damage the shop has actually named.
+    const damaged = obs.damagedItemIDs ?? null;
+    if (damaged === null) {
+      return { decision: waiting("Safe", "Asking the repair shop for a quote.", mem), memory: mem };
+    }
     if (!request.repairsAtStation) {
       return {
         decision: waiting(
           "Safe",
-          `Left the fight at ${hurtAt}%. Docking gave the shield back but not the armour, and this pilot is not set to pay for repairs, so it is staying put.`,
+          `Left the fight at ${hurtAt}%. Docking gave the shield back, the shop says the armour is still damaged, and this pilot is not set to pay for repairs, so it is staying put.`,
           mem,
         ),
         memory: mem,
@@ -4003,22 +4683,13 @@ function recoverAndReturn(
         memory: mem,
       };
     }
-    // ⚠ THE SHOP'S OWN QUOTE DECIDES WHAT IS DAMAGED, never a guess at the ship
-    // item id -- the same authority the DSL's `repair-ship` uses. Null is "we
-    // could not say", which is a tick spent waiting for the quote and never a
-    // conclusion that nothing is wrong.
-    const damaged = obs.damagedItemIDs ?? null;
-    if (damaged === null) {
-      return { decision: waiting("Safe", "Asking the repair shop for a quote.", mem), memory: mem };
-    }
-    if (damaged.length === 0) {
-      // Nothing the shop will fix, and still below the return mark. Holding is
-      // the honest answer: there is damage no station can take out.
-      return {
-        decision: waiting("Safe", `Left the fight at ${hurtAt}% and the shop has nothing left to fix.`, mem),
-        memory: mem,
-      };
-    }
+    // ⚠ AN EMPTY QUOTE NEVER REACHES HERE ANY MORE, AND THAT IS THE FIX RATHER
+    // THAN AN OVERSIGHT. It used to land on "the shop has nothing left to fix"
+    // and hold — which, for a docked pilot, was every repaired ship for ever:
+    // the repair worked, the quote emptied, and the return was still gated on a
+    // health read no station can produce. `wellEnoughToReturn` now reads that
+    // same empty quote as the station's own "this hull is whole", so a pilot
+    // whose armour has just been paid for undocks on the next tick.
     const asked: CompanionLadderMemory = {
       ...mem,
       flee: { ...running, repairAttempts: running.repairAttempts + 1 },
@@ -4052,7 +4723,7 @@ function recoverAndReturn(
   // ends the flee; holding the latch across it would leave this rung driving a
   // pilot that is already back out, and a ship that undocks hurt would then be
   // steered by a flee that thinks it is still going the other way.
-  const done: CompanionLadderMemory = { ...mem, flee: null, fleeRecoveryTicks: 0 };
+  const done: CompanionLadderMemory = { ...mem, flee: null, fleeRecoverySinceMs: null };
 
   if (obs.docked === true) {
     return {
@@ -4107,7 +4778,39 @@ function flyTheFlee(
   running: CompanionFlee,
 ): FleeStep {
   if (reachedSafety(obs, running)) {
+    // Stamped on the first tick that sees it, and only for what the next branch
+    // needs it for: telling "still on the way out" apart from "somebody took
+    // this ship back out".
+    if (!running.arrivedSafe) {
+      const arrived: CompanionFlee = { ...running, arrivedSafe: true };
+      return recoverAndReturn(request, obs, { ...mem, flee: arrived }, arrived);
+    }
     return recoverAndReturn(request, obs, mem, running);
+  }
+
+  // ⚠ THE OPERATOR'S OWN UNDOCK WINS, AND BEFORE THIS IT COULD NOT. A flee that
+  // has already delivered the ship somewhere safe and now finds it out in space
+  // did not move it: this rung drops its latch before every undock it issues
+  // (see `recoverAndReturn`), and nothing below this rung ever runs while it is
+  // parked. So the only thing that can have undocked this ship is a human — and
+  // the answer to a human was to dock it again, two seconds later, for ever.
+  // Reported live on 2026-09-13: "I can not force them to undock, as soon as
+  // they are undocked they dock back."
+  //
+  // ⚠ THE BUDGET IS SPENT, NOT JUST THE LATCH DROPPED. Dropping the latch alone
+  // would let the very next tick read the same hurt ship, re-latch, and dock it
+  // again — the same loop with one extra step in it. Spending the round trips is
+  // how this ladder already says "stop sending yourself home" (`maxFleeAttempts`
+  // is the operator's own "stay home after N trips"), so the override needs no
+  // new state and reads the same way in the budget it already has. It is not
+  // permanent either: `countTowardsRecovery` hands the budget back after this
+  // pilot has held above its return mark for `FLEE_RECOVERY_HOLD_MS`, so a ship
+  // that actually recovers may flee again later in the same run.
+  if (running.arrivedSafe) {
+    return {
+      decision: null,
+      memory: { ...mem, flee: null, fleeTripsSpent: request.maxFleeAttempts },
+    };
   }
 
   const safe = runToSafety(obs, mem, {
@@ -4134,12 +4837,54 @@ function flyTheFlee(
   return { decision: null, memory: { ...mem, flee: null, fleeTripsSpent: mem.fleeTripsSpent - 1 } };
 }
 
+// ─── Rung 5b: out of the station ─────────────────────────────────────────────
+
+/**
+ * A docked companion with nothing keeping it docked leaves.
+ *
+ * ⚠ `null` FOR A SHIP ALREADY IN SPACE, which is every ordinary tick — this
+ * rung costs a boolean and falls straight through.
+ *
+ * ⚠ AN UNDOCK ALREADY UNDER WAY IS NOT RE-ISSUED. The flight status carries the
+ * server's own transition record, so "I have asked and it has not landed yet"
+ * is a fact this loop can read rather than one it has to remember: a `kind:
+ * "undock"` transition that has not reached `ready` (or `failed`) is this rung's
+ * own call still in flight, and re-sending it every two seconds would spend a
+ * call per tick on a session change that is already happening. An older BFF
+ * that does not send the field at all falls back to issuing, which is the
+ * behaviour this rung would have had without it.
+ */
+function decideLeaveTheStation(
+  obs: FleetCompanionObservation,
+  mem: CompanionLadderMemory,
+): CompanionDecision | null {
+  if (obs.docked !== true) {
+    return null;
+  }
+  const transition = obs.flightStatus?.transition;
+  if (
+    transition !== undefined &&
+    transition.kind === "undock" &&
+    transition.phase !== "ready" &&
+    transition.phase !== "failed"
+  ) {
+    return waiting("Undocking", "Undocking, and the station has not let go yet.", mem);
+  }
+  return {
+    action: { kind: "undock" },
+    phase: "Undocking",
+    why: "A companion belongs out with its fleet, not in a station.",
+    memory: mem,
+  };
+}
+
 // ─── Rung 6: drones ──────────────────────────────────────────────────────────
 
 /**
  * How long a recall is believed to be in progress before the rung stops waiting
- * on it, in ticks. The same number, for the same reason, as the DSL's own
- * `RECALL_MAX_WAIT_TICKS` (`scriptMacros.ts:60`).
+ * on it. The same duration, for the same reason, as the DSL's own
+ * `RECALL_MAX_WAIT_TICKS` (`scriptMacros.ts:60`) -- which is fifteen of that
+ * loop's two-second ticks, i.e. the thirty seconds written here.
  *
  * ⚠ THE STUCK CASE IS REAL AND IT IS SILENT, so this bound is not defensive
  * padding. A drone that arrives at scoop range to find a FULL BAY is refused by
@@ -4148,8 +4893,17 @@ function flyTheFlee(
  * circles at 2500 m for ever, still on grid, still in `myDroneIDs`, with no
  * error anywhere. Without this bound the rung would wait on it until the run
  * ended.
+ *
+ * ⚠ MILLISECONDS, NOT TICKS, AND THAT CHANGED FOR A REASON. It used to be a
+ * count of ticks, which was only ever a proxy for elapsed time and was a bad
+ * one twice over. The measured tick was never the 2 s the cadence names -- it
+ * is ~4 s once the tick's own six reads are counted -- so fifteen of them was a
+ * minute, not the half-minute intended; and now that a tick which ISSUED
+ * something comes back at `FLEET_COMPANION_BURST_MS`, the tick is not even a
+ * fixed unit any more. This branch falls THROUGH to the rungs below it, so its
+ * ticks are exactly the ones that can be bursts. A clock says what it means.
  */
-const MAX_DRONE_RECALL_WAIT_TICKS = 15;
+const DRONE_RECALL_GIVE_UP_MS = 30_000;
 
 /**
  * How many recall-and-relaunch cycles one run will spend.
@@ -4164,15 +4918,23 @@ const MAX_DRONE_RECALL_WAIT_TICKS = 15;
  */
 const MAX_DRONE_REDEPLOY_CYCLES = 3;
 
-/** The hold-off, in ticks. See `droneCycleHoldTicks` for why ticks. */
-function droneCycleHoldTicks(request: FleetCompanionRequest): number {
-  // ⚠ TICKS, NOT A WALL CLOCK, and deliberately. The loop sleeps AT LEAST
-  // `FLEET_COMPANION_CADENCE_MS` between ticks, so N ticks is always a lower
-  // bound on elapsed time - and undershooting a hold-off is the only failure
-  // that matters here. The ladder carries no injected clock and threading one
-  // through for this would be a cross-cutting change for precision nobody
-  // needs. The operator sets SECONDS and this converts once.
-  return Math.max(1, Math.ceil((request.droneRedeployHoldOffSeconds * 1000) / FLEET_COMPANION_CADENCE_MS));
+/**
+ * The hold-off the operator asked for, in milliseconds.
+ *
+ * ⚠ THIS USED TO BE A TICK COUNT AND THE CONVERSION WAS WRONG IN PRACTICE. It
+ * divided the operator's seconds by `FLEET_COMPANION_CADENCE_MS`, on the stated
+ * grounds that a tick is AT LEAST that long so N ticks is a safe lower bound.
+ * The first half is true and the second half is the problem: the measured tick
+ * is ~4 s, not 2 s, so a ten-second hold-off was waiting twenty. "At least what
+ * you asked for" quietly meant "about double", every time.
+ *
+ * The ladder has had an injected clock all along -- `decideCompanionAction`
+ * takes `nowMs` and hands it to the abandonment protocol -- so the "threading
+ * one through would be cross-cutting" that justified the tick count is no
+ * longer true either. The operator sets seconds and gets seconds.
+ */
+function droneCycleHoldMs(request: FleetCompanionRequest): number {
+  return Math.max(0, request.droneRedeployHoldOffSeconds * 1000);
 }
 
 // ─── The `loot` order ────────────────────────────────────────────────────────
@@ -4264,6 +5026,47 @@ const MAX_SALVAGE_LOCK_WAIT_TICKS = 10;
 
 
 /**
+ * The ship modes in which sending ANOTHER approach is not worth the call --
+ * either the move already sent is the one the server is flying, or a new one
+ * would be refused outright.
+ *
+ * ⚠ THE VOCABULARY IS THE SERVER'S OWN, AND IT IS SIX UPPERCASE WORDS: FIELD,
+ * FOLLOW, GOTO, ORBIT, STOP, WARP are the only values anything under
+ * `space/destiny/` assigns to `entity.mode`, and the snapshot carries that
+ * string through untouched. ⚠ "APPROACH" IS NOT ONE OF THEM. This test used to
+ * be `/follow|approach|warp/i` over the free text, one third of which could
+ * never match anything the server is able to say -- the same trap
+ * `CLOSING_SHIP_MODES` was written to document.
+ *
+ * ⚠ AN APPROACH IS **FOLLOW**, NOT GOTO, WHICH IS THE FACT THIS WHOLE CONSTANT
+ * TURNS ON. There is no CmdApproach on this server: retail's Approach is
+ * `CmdFollowBall(targetID, 0)`, the BFF's `/flight/approach` issues exactly that
+ * (`CmdSetSpeedFraction(1.0)`, then `CmdFollowBall`), and it lands in
+ * `followShipEntity`, which sets FOLLOW at any range -- so the looter's
+ * range-less approach and the salvager's 3 km one both produce it. `keepAtRange`
+ * is the same server method with a non-zero range, which is also why no mode can
+ * tell "closing on my wreck" from "holding station on the commander". That
+ * ambiguity is bounded by the caller's own `…Approaching` latch, not here.
+ *
+ * ⚠ GOTO IS DELIBERATELY ABSENT, THOUGH `CLOSING_SHIP_MODES` HOLDS IT. GOTO is
+ * what the hull is left in when an approach was REFUSED or when the move being
+ * flown is somebody else's: `followBall` bounces a pilot whose warp landing is
+ * still pending, and a ship that has just landed, undocked, been aligned by the
+ * fleet rung, or merely had its throttle opened from STOP is in GOTO while
+ * travelling somewhere that is not the target. Every one of those is a moment
+ * this rung MUST let go and re-issue, so counting GOTO would turn a one-tick
+ * recovery into a wait that never ends -- precisely the failure the callers'
+ * comments warn about. The two constants answer different questions ("is the
+ * hull burning sub-warp" against "is the move I sent the move being flown") and
+ * their overlap is a coincidence, so they stay separate lists.
+ *
+ * ⚠ WARP IS IN IT, AND NOT BECAUSE A WARP IS AN APPROACH. `followShipEntity`
+ * refuses outright while `entity.mode === "WARP"`, so an approach sent mid-warp
+ * is a call spent to be told no.
+ */
+const NO_REAPPROACH_SHIP_MODES: readonly string[] = ["FOLLOW", "WARP"];
+
+/**
  * Whether this ship is still under way toward something.
  *
  * ⚠ READ OFF THE SHIP, NOT OFF OUR OWN MEMORY OF HAVING ASKED. "I sent an
@@ -4272,7 +5075,9 @@ const MAX_SALVAGE_LOCK_WAIT_TICKS = 10;
  */
 function isClosing(obs: FleetCompanionObservation): boolean {
   const mode = obs.snapshot?.ship?.mode ?? null;
-  return mode !== null && /follow|approach|warp/i.test(mode);
+  // Liberal about case on purpose: the server sends uppercase today, and a drop
+  // that changed that must not silently stop every rung believing its own move.
+  return mode !== null && NO_REAPPROACH_SHIP_MODES.includes(mode.toUpperCase());
 }
 
 /**
@@ -4502,6 +5307,221 @@ function decideLooting(
     // three and fly off. The latch is kept for the same reason: this can is
     // still the target until somebody says it is done.
     memory: { ...mem, lootApproaching: null },
+  };
+}
+
+/**
+ * The ship's movement modes that mean "closing on something", read off the
+ * SERVER's own vocabulary rather than guessed at.
+ *
+ * ⚠ THE VOCABULARY IS SIX UPPERCASE WORDS AND THESE ARE THE TWO THAT MATTER.
+ * Checked against the server 2026-09-13 (`space/destiny/commands/`): the only
+ * values it ever assigns to `entity.mode` are `FIELD`, `FOLLOW`, `GOTO`,
+ * `ORBIT`, `STOP` and `WARP`. **GOTO** is a hull flying a heading of its own --
+ * an align, an undock, a landing out of warp, a throttle opened from STOP.
+ * **FOLLOW** is a hull flying at another object: `followShipEntity`, which is
+ * `keepAtRange`, the follow rung, and -- the one that is easy to get wrong --
+ * an APPROACH, which is `CmdFollowBall(targetID, 0)` and not a goto at all.
+ * Both are the burn this rung exists to help, which is why both are here.
+ *
+ * ⚠ THE WORD "APPROACH" NEVER APPEARS IN IT, which is the trap this constant
+ * exists to avoid: `isClosing` above used to test `/follow|approach|warp/i`,
+ * one third of which could never match anything the server can say. It now
+ * tests `NO_REAPPROACH_SHIP_MODES` -- a DIFFERENT list, deliberately, because it
+ * answers a different question. See that constant before reusing either for
+ * anything that spends a call.
+ *
+ * ⚠ ORBIT IS DELIBERATELY NOT HERE. A ship holding an orbit has arrived; it is
+ * circling, not closing, and a prop mod lit for the whole of a standing orbit
+ * burns capacitor for nothing. STOP and FIELD are not movement at all, and WARP
+ * is movement a prop mod cannot help with -- the server stops one on entering
+ * warp, and the ladder never reaches this rung mid-warp anyway because rung 1
+ * yields first.
+ */
+const CLOSING_SHIP_MODES: readonly string[] = ["GOTO", "FOLLOW"];
+
+/**
+ * Whether this pilot is TRAVELLING in the sense the prop-mod rung means: moving
+ * sub-warp toward something, or running a multi-jump route of its own.
+ *
+ * ⚠ THE MODE TEST IS THE ONE THAT ACTUALLY FIRES, AND THE AUTOPILOT TEST ALONE
+ * WAS THE BUG. The first cut of this rung read "travelling" as
+ * `obs.travel?.status === "running"` -- the shared autopilot -- because both of
+ * this loop's own travel rungs (the `destination` trip and a `TravelTo` order)
+ * fly through `startRoute`. That is true and it is nearly useless: in ORDINARY
+ * fleet play a companion never runs its own autopilot at all. It yields to the
+ * commander's fleet warp (rung 1), holds station on them (rung 9) and jumps the
+ * gate it is sitting on (rung 7) -- so the autopilot stays idle for an entire
+ * trip across a dozen systems and no prop mod ever lit. Observed on a live
+ * fleet, 2026-09-13.
+ *
+ * ⚠ BOTH TESTS ARE KEPT, NOT JUST THE NEW ONE. The mode test covers the burn
+ * that matters -- landing off a gate and closing the last few km, keeping up
+ * with a commander who is pulling away -- and the autopilot test keeps the rung
+ * honest about the pilot's OWN trips, including the moments between legs when
+ * the hull is briefly in no interesting mode at all.
+ */
+function isUnderWay(obs: FleetCompanionObservation): boolean {
+  const mode = obs.snapshot?.ship?.mode ?? null;
+  if (mode !== null && CLOSING_SHIP_MODES.includes(mode.toUpperCase())) {
+    return true;
+  }
+  return obs.travel?.status === "running";
+}
+
+/**
+ * Rung 3b: the prop mod. On while this pilot is TRAVELLING, off when it is not,
+ * and a commander's `props on` / `props off` beats both.
+ *
+ * ⚠ "TRAVELLING" IS `isUnderWay`, AND READING IT AS THE AUTOPILOT ALONE WAS THE
+ * BUG THIS RUNG SHIPPED WITH. See that function's header: a companion in
+ * ordinary fleet play never runs its own autopilot, so the first cut of this
+ * rung was correct and never fired. What fires is the ship's own movement MODE
+ * -- GOTO (flying a heading of its own) or FOLLOW (approaching something, or
+ * keeping up with the commander) -- which is the burn a player actually makes:
+ * landing off a gate and covering the last few km, or chasing an FC who is
+ * pulling away.
+ *
+ * ⚠ A FLEE STILL GETS ONE, NOW, AND BY ACCIDENT RATHER THAN BY DESIGN. The
+ * get-safe ladder approaches a station before docking, and an approach is
+ * FOLLOW, so the burner lights for that leg. The WARP leg of a flee gets nothing,
+ * because the ladder never reaches this rung mid-warp (rung 1 yields first) and
+ * a prop mod is no use in warp anyway. `props on` remains the way to say "keep
+ * it lit regardless".
+ *
+ * ⚠ AN ORBIT IS NOT CLOSING. A ship holding station in ORBIT has arrived, so the
+ * burner goes out rather than circling on full power for ever -- see
+ * `CLOSING_SHIP_MODES`.
+ *
+ * ⚠ THE OVERRIDE IS THREE-STATE AND `null` IS NOT "OFF". `propsHeld` null means
+ * nobody has said anything, so the travel test decides; `true`/`false` are a
+ * standing instruction in either direction. Reading null as off would ship every
+ * companion with a permanent order never to use its prop mod.
+ *
+ * ⚠ A SCRAM STANDS DOWN A MICROWARPDRIVE AND ONLY A MICROWARPDRIVE. The server
+ * turns an MWD off under a warp scrambler, so re-activating one every tick is a
+ * call spent to be refused; an AFTERBURNER is untouched by any jam in that
+ * vocabulary and is exactly what a tackled ship needs. This is the whole reason
+ * `propulsionModules` carries a `kind` at all -- SDE group 46 holds both and no
+ * group name can separate them. `obs.scrammed` is three-state and only an
+ * explicit `true` gates, so a jam slice that could not be read never takes the
+ * speed off a ship.
+ *
+ * ⚠ AN UNKNOWN `kind` IS TREATED AS A MICROWARPDRIVE, which is the cheap half of
+ * the wrong answer. The alternative -- assume afterburner -- keeps re-activating
+ * a dead MWD under a scram; this one costs at most a stationary afterburner on a
+ * pilot that is already tackled and that a commander can re-light by typing.
+ *
+ * ⚠ THE CAPACITOR FLOOR GATES ONLY THE LIGHTING, NEVER THE STOPPING. An MWD
+ * runs at roughly ninety per cent of a frigate's capacitor per cycle, so
+ * lighting one below the operator's own floor is how a companion caps itself out
+ * and then cannot warp. But a module already running must always be stoppable:
+ * gating the off-half on the same floor would strand a burner ON at exactly the
+ * capacitor level that made it dangerous. Null capacitor is unreadable and does
+ * not gate, the same fail-open rule the rest of this file follows.
+ *
+ * ⚠ IT ISSUES ONE CALL AND THEN FALLS THROUGH. Like tank-up, this rung has
+ * something to do only while the rack disagrees with what is wanted, so the cost
+ * to every rung below it is a tick or two after the state changes and nothing at
+ * all the rest of the time.
+ */
+function decidePropulsion(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
+  const fitted = request.propulsionModules;
+  if (fitted.length === 0 || obs.inSpace !== true) {
+    return { decision: null, memory };
+  }
+  // ⚠ `activeModuleIDs` IS THE AUTHORITY AND `null` MEANS "CANNOT SAY". An
+  // unreadable snapshot must not be read as "nothing is running" -- that would
+  // have this rung re-activate a burner that is already lit, every tick, for as
+  // long as the read stayed down.
+  const active = obs.snapshot?.ship?.activeModuleIDs ?? null;
+  if (active === null) {
+    return { decision: null, memory };
+  }
+  const running = new Set(active);
+
+  const wanted = memory.propsHeld ?? isUnderWay(obs);
+  const scrammed = obs.scrammed === true;
+
+  if (!wanted) {
+    // The off-half. Only what is actually cycling, one module per tick, and once
+    // per module until the snapshot proves it stopped.
+    const lit = fitted.find((module) => running.has(module.itemID));
+    if (lit === undefined) {
+      // Nothing is running, so nothing is being stopped -- clearing the latch
+      // here is what lets a REFUSED deactivate be retried rather than stick.
+      return {
+        decision: null,
+        memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
+      };
+    }
+    if (memory.propsStoppingID === lit.itemID) {
+      return { decision: null, memory };
+    }
+    return {
+      decision: {
+        // ⚠ THE typeID IS WHAT MAKES THIS WORK AT ALL. Deactivate stops a prop
+        // mod only when it names the propulsion effect, and the BFF resolves
+        // that name from the typeID -- without it the call returns success and
+        // the burner keeps cycling. See the action's own header.
+        action: { kind: "deactivate", moduleID: lit.itemID, typeID: lit.typeID },
+        phase: "Propulsion",
+        why:
+          memory.propsHeld === false
+            ? "A commander said props off in chat. Standing the prop mod down."
+            : "Not travelling any more. Standing the prop mod down.",
+        memory: { ...memory, propsStoppingID: lit.itemID },
+        ...(memory.propsHeld === false
+          ? {
+              followingOrderFrom: "chat" as const,
+              lastOrderHeard: "a chat order to stop the prop mod",
+            }
+          : {}),
+      },
+      memory,
+    };
+  }
+
+  // The on-half. A scrammed MWD is skipped rather than the whole rung, so a ship
+  // carrying both keeps its afterburner.
+  const idle = fitted.find(
+    (module) => !running.has(module.itemID) && !(scrammed && module.kind !== "afterburner"),
+  );
+  if (idle === undefined) {
+    return {
+      decision: null,
+      memory: memory.propsStoppingID === null ? memory : { ...memory, propsStoppingID: null },
+    };
+  }
+  // ⚠ THE FLOOR IS THE OPERATOR'S OWN, the same one the flee rung reads, and it
+  // gates lighting ONLY. Unreadable capacitor does not gate.
+  const capacitor = obs.capacitorRatio ?? null;
+  if (capacitor !== null && capacitor < request.capacitorFloor) {
+    return { decision: null, memory };
+  }
+  return {
+    decision: {
+      // ⚠ SELF-TARGETED, so no `targetID` -- `0` is this codebase's sentinel for
+      // "run it on the caster", the same form the hardeners use.
+      action: { kind: "activate", moduleID: idle.itemID, targetID: 0 },
+      phase: "Propulsion",
+      why:
+        memory.propsHeld === true
+          ? "A commander said props on in chat. Lighting the prop mod."
+          : "Travelling. Lighting the prop mod.",
+      memory: { ...memory, propsStoppingID: null },
+      ...(memory.propsHeld === true
+        ? {
+            followingOrderFrom: "chat" as const,
+            lastOrderHeard: "a chat order to run the prop mod",
+          }
+        : {}),
+    },
+    memory,
   };
 }
 
@@ -5054,9 +6074,12 @@ function decideSalvaging(
   const distance = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
   if (distance > COMPANION_SALVAGE_RANGE_M) {
     // ⚠ ONLY BELIEVE AN APPROACH THAT IS STILL RUNNING. A move that was
-    // refused, or that the server finished early, leaves the ship stopped and
-    // out of reach -- and a rung that trusted its own "already issued" flag
-    // would wait on it for the rest of the run.
+    // refused, or that the server finished early, leaves the ship out of reach
+    // -- and not necessarily stopped: `/flight/approach` opens the throttle
+    // BEFORE it sends the follow, so a refused one leaves the hull under way in
+    // GOTO, flying somewhere that is not the wreck. A rung that trusted its own
+    // "already issued" flag would wait on that for the rest of the run, which is
+    // why GOTO is not in `NO_REAPPROACH_SHIP_MODES`.
     if (mem.salvageApproachIssued && isClosing(obs)) {
       return waiting("Salvaging", "Flying to the wreck.", mem);
     }
@@ -5216,6 +6239,7 @@ function decideDrones(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
+  nowMs: number,
 ): { readonly decision: CompanionDecision | null; readonly memory: CompanionLadderMemory } {
   const nothing = { decision: null, memory } as const;
   // ⚠ NO `useDrones` FLAG. A pilot uses the drones it is carrying. What it does
@@ -5245,28 +6269,28 @@ function decideDrones(
         // the fact the hold-off is about.
         return {
           decision: null,
-          memory: { ...memory, droneCycle: { ...cycle, stage: "holding-off", waited: 0 } },
+          memory: {
+            ...memory,
+            droneCycle: { ...cycle, stage: "holding-off", stageSinceMs: nowMs },
+          },
         };
       }
-      if (cycle.waited >= MAX_DRONE_RECALL_WAIT_TICKS) {
-        // Given up on, not retried. See MAX_DRONE_RECALL_WAIT_TICKS: the
-        // commonest reason a recall never completes is a full bay, which the
-        // server refuses SILENTLY, and re-issuing the same call cannot fix a
-        // bay that has no room in it.
+      if (nowMs - cycle.stageSinceMs >= DRONE_RECALL_GIVE_UP_MS) {
+        // Given up on, not retried. See DRONE_RECALL_GIVE_UP_MS: the commonest
+        // reason a recall never completes is a full bay, which the server
+        // refuses SILENTLY, and re-issuing the same call cannot fix a bay that
+        // has no room in it.
         return { decision: null, memory: { ...memory, droneCycle: null } };
       }
-      return {
-        decision: null,
-        memory: { ...memory, droneCycle: { ...cycle, waited: cycle.waited + 1 } },
-      };
+      // ⚠ THE MEMORY IS RETURNED UNTOUCHED, which a tick count could not do:
+      // the stamp is set once when the stage begins and read on every tick
+      // after it, so waiting costs no write at all.
+      return nothing;
     }
 
     // holding-off
-    if (cycle.waited + 1 < droneCycleHoldTicks(request)) {
-      return {
-        decision: null,
-        memory: { ...memory, droneCycle: { ...cycle, waited: cycle.waited + 1 } },
-      };
+    if (nowMs - cycle.stageSinceMs < droneCycleHoldMs(request)) {
+      return nothing;
     }
     // The hold-off is over. Whether anything goes back out is the launch
     // branch's decision, taken below on the NEXT tick against a fresh bay
@@ -5340,7 +6364,7 @@ function decideDrones(
         memory: {
           ...memory,
           droneCyclesSpent: memory.droneCyclesSpent + 1,
-          droneCycle: { stage: "recalling", recalledIDs: [...out], waited: 0 },
+          droneCycle: { stage: "recalling", recalledIDs: [...out], stageSinceMs: nowMs },
         },
       },
       memory,
@@ -6160,6 +7184,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastTagIssuedFor: null,
           lastTagAttempts: 0,
           taggingGaveUpOn: [],
+          tackleCalledOut: [],
           lockRefusedFor: null,
           lockRefusals: 0,
           lockGaveUpOn: [],
@@ -6176,7 +7201,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       // if it still needs to.
       flee: null,
       fleeTripsSpent: 0,
-      fleeRecoveryTicks: 0,
+      fleeRecoverySinceMs: null,
           // ⚠ A RESUMED RUN IS NOT FOLLOWING ANYBODY AND IS NOT ON A TRIP, and
           // that is the honest answer rather than a lossy one. Nothing about a
           // `keepAtRange` survives the process that sent it: the server may well
@@ -6196,6 +7221,14 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           destinationRoutedFor: null,
           stopHeardAtMs: null,
           stopShipIssued: false,
+          // ⚠ THE PROPULSION OVERRIDE RESETS TO `null`, NOT TO WHAT WAS HELD, for
+          // the same reason the follow range just above it does: the `props on`
+          // that set it is long out of the chat window and cannot be re-heard, so
+          // carrying it would be a standing order nobody can see or countermand.
+          // `null` hands the decision back to the travel test, which the first
+          // live tick answers from the autopilot itself.
+          propsHeld: null,
+          propsStoppingID: null,
           // A resumed run has loaded nothing either. Starting the budget empty
           // is the generous answer and the right one: the dead process's loads
           // may well have landed, and if they did, the first live tick sees
@@ -6246,11 +7279,20 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       const token = runToken;
       try {
         while (mem.status === "running" && token === runToken) {
-          await tick();
+          const action = await tick();
           if (mem.status !== "running" || token !== runToken) {
             break;
           }
-          await deps.sleep(FLEET_COMPANION_CADENCE_MS);
+          // ⚠ THE ONLY PLACE THE TWO BEATS ARE CHOSEN BETWEEN, and the test is
+          // the tick's own answer rather than any state this loop keeps: a tick
+          // that ISSUED something is mid-order and comes back at the burst, a
+          // tick that waited keeps the full cadence. See
+          // `FLEET_COMPANION_BURST_MS` for why that rule, and not "is there a
+          // fight", is what leaves every tick-counted wait in this file
+          // measuring what it always measured.
+          await deps.sleep(
+            action.kind === "wait" ? FLEET_COMPANION_CADENCE_MS : FLEET_COMPANION_BURST_MS,
+          );
         }
       } catch (error) {
         if (token !== runToken) {

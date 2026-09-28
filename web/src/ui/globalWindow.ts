@@ -69,8 +69,31 @@ export function isGlobalTab(id: TabID): boolean {
  * multi-column table of pilots.
  */
 export const DEFAULT_GLOBAL_POS = { x: 64, y: 48 };
-const DEFAULT_GLOBAL_W = 720;
-const DEFAULT_GLOBAL_H = 520;
+export const DEFAULT_GLOBAL_W = 720;
+export const DEFAULT_GLOBAL_H = 520;
+
+/**
+ * Where a workspace window OPENED BY a global window should first appear.
+ *
+ * ⚠ THE LAYERS DO NOT SHARE A CORNER, AND ONE OF THEM ALWAYS WINS. This layer
+ * paints over every workspace desktop, so a desktop window at the desktop's own
+ * first cascade spot (16,16) opens UNDERNEATH a global window sitting at 64,48
+ * — completely hidden by it, at the default sizes. That is not a general
+ * nuisance; it is specifically the Bot Builder, which has no launcher entry and
+ * is reached ONLY from the Bot Manager's Edit and New bot buttons, so the one
+ * window it can be buried by is the very window the player pressed the button
+ * in. It looked exactly like the button doing nothing.
+ *
+ * Clear of the default global rectangle, not merely nudged: past its right edge
+ * with a gap, and level with its top so the two sit side by side. A desktop too
+ * narrow to hold that is not a problem to solve here — the desktop clamps a
+ * window into its own area (Desktop.svelte), which lands this one flush against
+ * the right edge, still clear of a global window anchored on the left.
+ */
+export const CLEAR_OF_GLOBAL_POS = {
+  x: DEFAULT_GLOBAL_POS.x + DEFAULT_GLOBAL_W + 16,
+  y: DEFAULT_GLOBAL_POS.y,
+};
 /** The second window lands clear of the first rather than exactly on it. */
 const GLOBAL_CASCADE_STEP = 32;
 

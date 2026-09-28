@@ -1,4 +1,7 @@
-// Client-side gate: "may THIS pilot set a fleet target tag?"
+// Client-side gates: "may THIS pilot set a fleet target tag?" and, when the
+// answer is no, "may it call the ship out the other way?" (`canBroadcastInFleet`
+// at the foot of this file — every member may, and that asymmetry is the reason
+// a companion is never actually mute about what has it tackled).
 //
 // WHY THIS HAS TO LIVE HERE: the server's own gate
 // (fleetRuntime.js:setFleetTargetTag, read at fleetRuntime.js:1310-1326) DOES
@@ -138,4 +141,66 @@ export function canTagInFleet(
  */
 function charIDMatches(charID: number | string | null, characterID: number): boolean {
   return charID !== null && String(charID) === String(characterID);
+}
+
+// --- the OTHER way to call a ship, the one every member has ----------------
+
+/**
+ * Whether THIS character may BROADCAST in its fleet right now — the same three
+ * states as `canTagInFleet`, asked of the call a plain member actually has.
+ *
+ * ⚠ THERE IS NO COMMANDER TEST HERE BECAUSE THE SERVER HAS NONE. Read
+ * `fleetRuntime.js:sendBroadcast` (fleetRuntime.js:2521-2551) beside
+ * `setFleetTargetTag` (fleetRuntime.js:1309-1326) and the asymmetry is the
+ * whole point of this function existing: the tag path fetches the member
+ * record and refuses anyone outside `FLEET_CMDR_ROLES`, and the broadcast path
+ * fetches the member record only to decide who RECEIVES the thing. Membership
+ * (`ensureFleetMembership`) is the entire gate on sending. A wing of plain
+ * members can all broadcast; not one of them can write a letter.
+ *
+ * That is not a quirk of this server, it is EVE: lettering targets is a
+ * commander's job and calling one out is everybody's. It is why a companion
+ * that will never be made a commander is not mute — see `decideTackleTag` in
+ * `nav/fleetCompanionLoop.ts`, which lands on this function every time
+ * `canTagInFleet` says `false`.
+ *
+ * ⚠ TWO THINGS THIS DELIBERATELY DOES NOT ANSWER, because a roster cannot:
+ *
+ *   - THE RATE LIMIT. `isBroadcastRateLimited` (fleetRuntime.js:2473) drops a
+ *     repeat of the SAME broadcast name inside `MIN_BROADCAST_TIME_SEC` (2s,
+ *     fleetConstants.js:36), and a different name inside a third of that. It is
+ *     per character and per fleet, held in server memory, and nothing a client
+ *     reads reflects it. A caller must bound its own sending.
+ *   - BEING IN SPACE. The retail client checks `CheckIsInFleet(inSpace=True)`
+ *     before every send (fleetSvc.py:984); the server does not. Docked, the
+ *     broadcast goes out and names an itemID nobody can act on. Callers already
+ *     gate on `inSpace`, so this is a note, not a second check.
+ *
+ * ⚠ AND UNLIKE THE TAG, THE ANSWER COMES BACK. `sendBroadcast` returns a
+ * boolean and BOTH its callers return it rather than discarding it
+ * (`fleetObjectHandlerService.js:365` Handle_SendBroadcast,
+ * `fleetMgrService.js:38` Handle_BroadcastToBubble) — the exact opposite of
+ * `Handle_CmdFleetTagTarget`, whose discard is why this module exists at all.
+ * A refused broadcast is VISIBLE to the sender. That does not make this
+ * pre-flight gate redundant (a call not worth sending is still not worth
+ * sending), but it does mean a caller never has to infer a broadcast's fate
+ * from later state the way a tag's has to be inferred from `fleetTargetTags`.
+ */
+export function canBroadcastInFleet(
+  snapshot: FleetCenterSnapshot | null | undefined,
+  characterID: number,
+): boolean | null {
+  if (!snapshot || snapshot.availability === "unavailable") {
+    return null;
+  }
+  if (snapshot.availability === "not-in-fleet") {
+    return false;
+  }
+  // Same inconsistent-read reasoning as `canTagInFleet`: a member that cannot
+  // find its own row has not learned it is not a member, it has learned the
+  // read is untrustworthy. `null`, never `false`.
+  const member = snapshot.fleet.initState.value.members.find((row) =>
+    charIDMatches(row.charID, characterID),
+  );
+  return member ? true : null;
 }

@@ -88,6 +88,42 @@ export interface FleetApplication {
   readonly outcome: "needs-approval" | "invited" | "unknown";
 }
 
+/**
+ * The advert to apply to for a fleet the player named, or null when no listed
+ * advert carries that name. `wanted` is already lowercased.
+ *
+ * ⚠ THE TIE-BREAK IS PART OF THE ANSWER, NOT AN IMPLEMENTATION DETAIL. Fleet
+ * names are not unique, so two adverts can both match: the BIGGER fleet wins,
+ * because the op with people already in it is the one the player meant, and the
+ * lower id breaks a tie between equals so two pilots reading the same listing
+ * never split across two fleets of the same size and name.
+ *
+ * ⚠ IT LIVES IN THIS LEAF MODULE, NOT IN scriptMacros.ts WHERE IT WAS WRITTEN,
+ * because there are now two callers: the `join-advertised-fleet` block and the
+ * Fleet companions window's own join watch (nav/fleetJoinWatch.ts). A second
+ * copy of a tie-break is a second copy that drifts, and the window must not
+ * import the whole macro catalogue to ask one question.
+ */
+export function pickAdvertisedFleet(
+  ads: readonly FleetAdRow[],
+  wanted: string,
+): FleetAdRow | null {
+  let best: FleetAdRow | null = null;
+  for (const ad of ads) {
+    if (ad.fleetID <= 0 || ad.fleetName.trim().toLowerCase() !== wanted) {
+      continue;
+    }
+    if (
+      best === null ||
+      ad.numMembers > best.numMembers ||
+      (ad.numMembers === best.numMembers && ad.fleetID < best.fleetID)
+    ) {
+      best = ad;
+    }
+  }
+  return best;
+}
+
 export interface ScriptObservation {
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;

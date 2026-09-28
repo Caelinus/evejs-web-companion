@@ -94,6 +94,7 @@ import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { JamEvent } from "../bridge/jamNotifications.ts";
+import type { TargetEvent } from "../bridge/targetNotifications.ts";
 import type { FleetAvailability, FleetPendingInvite } from "../bridge/fleetCenter.ts";
 import type { ShipStats } from "../bridge/shipStats.ts";
 import type { MiningRungID, MiningStepID } from "../nav/miningLadder.ts";
@@ -630,6 +631,16 @@ export type FeedEvent =
   | { readonly type: "targeting/silent-decline"; readonly message: string | null }
   // Drop the targeting state (docked / character offline / logged out).
   | { readonly type: "targeting/cleared" }
+  // One `OnTarget` push — this ship's own lock landing, dropping, or being
+  // wiped. Carries the event rather than the folded list, the same shape and
+  // the same reason as `space/jam` above: the fold belongs beside the decoder
+  // that knows the wire, not in each producer.
+  //
+  // ⚠ IT DOES NOT DISPLACE `targeting/targets`. That one is the server's answer
+  // to `GetTargets` and stays the authority; this only lets a lock become
+  // visible in the moment it completes instead of on the next poll. See
+  // `applyTargetEvent`.
+  | { readonly type: "targeting/lock-event"; readonly event: TargetEvent }
   // R24 slice C — the BASE cycle length for a module type (attribute 73, off
   // static reference data). Applied to every fitted module of that type that
   // has no better figure; a server-sourced duration is never overwritten by it.
