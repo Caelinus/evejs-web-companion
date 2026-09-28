@@ -597,6 +597,7 @@ const INITIAL_CUSTOM_BOT: CustomBotState = Object.freeze({
   interruptID: null,
   pauseReason: null,
   note: null,
+  refusals: [],
   startError: null,
   lastAlert: null,
 });
@@ -2113,6 +2114,7 @@ export function createClientStore(): ClientStore {
           interruptID: event.interruptID,
           pauseReason: event.pauseReason,
           note: event.note ?? null,
+          refusals: event.refusals ?? [],
         });
         break;
       case "custom-bot/alert":

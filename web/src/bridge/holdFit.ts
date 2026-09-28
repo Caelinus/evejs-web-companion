@@ -48,3 +48,77 @@ export function unitsThatFit(
   const fits = Math.floor(freeM3 / unitVolume);
   return Math.max(0, Math.min(quantity, fits));
 }
+
+/**
+ * What of `rows` a hold with `freeM3` of room can actually take.
+ *
+ * ⚠ WHY THIS EXISTS. A transfer is all-or-nothing PER STACK, so asking for a
+ * stack bigger than the free space is refused outright — the whole thing, not
+ * the part that would have fitted. A bot looting a can holding more than it can
+ * carry therefore took NOTHING, was refused, and asked again on the next tick,
+ * for ever. Taking a load at a time and coming back is what drains the can.
+ *
+ * The four buckets are deliberately distinct, because they need different calls
+ * and have different failure modes:
+ *
+ *   • `whole`    — stacks that fit entire. One MultiAdd.
+ *   • `split`    — the ONE stack that straddles the boundary, with how many
+ *                  units of it fit. A separate Add, because the bridge refuses a
+ *                  quantity when more than one stack is named (INVALID_SPLIT).
+ *                  At most one: past it the hold is full by construction.
+ *   • `unknown`  — volume not in the static tables. Kept SEPARATE so that a
+ *                  refusal on these cannot take the computed stacks down with
+ *                  it; the server judges them, which is holdFit's standing rule.
+ *   • `deferred` — does not fit at all. Left where it is, for the next trip.
+ *
+ * `freeM3 === null` means the hold's capacity could not be read, so nothing can
+ * be computed: every row becomes `unknown` and the server decides, exactly as it
+ * did before this function existed.
+ */
+export interface FitSelection<Row> {
+  readonly whole: readonly Row[];
+  readonly split: { readonly row: Row; readonly quantity: number } | null;
+  readonly unknown: readonly Row[];
+  readonly deferred: readonly Row[];
+}
+
+export function fitWithin<Row extends { readonly quantity: number; readonly volume?: number | null }>(
+  rows: readonly Row[],
+  freeM3: number | null,
+): FitSelection<Row> {
+  if (freeM3 === null || !Number.isFinite(freeM3)) {
+    return { whole: [], split: null, unknown: [...rows], deferred: [] };
+  }
+  const whole: Row[] = [];
+  const unknown: Row[] = [];
+  const deferred: Row[] = [];
+  let split: { row: Row; quantity: number } | null = null;
+  let remaining = Math.max(0, freeM3);
+
+  for (const row of rows) {
+    const unit = row.volume;
+    if (unit === null || unit === undefined || !(unit > 0)) {
+      unknown.push(row);
+      continue;
+    }
+    const stack = unit * row.quantity;
+    if (stack <= remaining) {
+      whole.push(row);
+      remaining -= stack;
+      continue;
+    }
+    // Too big for what is left. One stack may still be split into it; after
+    // that there is nothing worth measuring, so the rest waits for a trip with
+    // an empty hold.
+    if (split === null) {
+      const fits = unitsThatFit(row.quantity, unit, remaining);
+      if (fits > 0) {
+        split = { row, quantity: fits };
+        remaining -= fits * unit;
+        continue;
+      }
+    }
+    deferred.push(row);
+  }
+  return { whole, split, unknown, deferred };
+}

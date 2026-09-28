@@ -45,6 +45,9 @@ import {
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
   ROCK_PICKS,
+  type ItemMatchArg,
+  MAX_BAY_LIST,
+  MAX_ITEM_LIST,
   MAX_ORE_LIST,
   SCRIPT_FORMAT,
   SCRIPT_VERSION,
@@ -147,6 +150,19 @@ const SAY = {
   badResponse: "This script answers a warning in a way this app does not know.",
 } as const;
 
+/**
+ * The bay keys a document may name. The BFF's own vocabulary (R40's SHIP_BAYS),
+ * spelled out here because the codec must be able to refuse a key the runner
+ * would silently ignore — a "leave my ammo alone" that protects nothing is worse
+ * than a rejected import.
+ */
+const KNOWN_BAY_KEYS: ReadonlySet<string> = new Set([
+  "cargo", "drone", "shipMaintenance", "fuel", "ore", "gas", "mineral", "salvage",
+  "ship", "smallShip", "mediumShip", "largeShip", "industrialShip", "ammo",
+  "commandCenter", "planetary", "quafe", "fleet", "fighter", "corpse", "booster",
+  "subsystem", "ice", "asteroid", "mobileDepot", "colony", "expedition",
+]);
+
 const WARN = {
   strippedControl: "Removed some characters from a name that cannot be shown.",
   clampFraction: (label: string, toFraction: number): string =>
@@ -157,6 +173,7 @@ const WARN = {
   forgotWorldId: "A saved location did not look valid and was forgotten — pick it again.",
   reassignedIds: "Renamed some step handles that were missing or repeated.",
   droppedDuplicateOres: "Removed repeated entries from an ore priority list.",
+  droppedUnknownBays: "Removed bays this app does not know from a step's leave-alone list.",
   truncatedOreList: (max: number): string => `An ore priority list was cut down to ${max} entries.`,
 } as const;
 
@@ -577,6 +594,61 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       ctx.warn(WARN.truncatedOreList(MAX_ORE_LIST));
     }
     return { kind: "oreList", ores: ores.slice(0, MAX_ORE_LIST) };
+  }
+  if (expected === "bayList") {
+    // A CLOSED VOCABULARY, checked here rather than trusted. Bay keys are the
+    // BFF's own names ("ore", "ammo"), so an unknown one is a document from
+    // somewhere else and is dropped rather than carried into the runner, which
+    // would silently protect nothing.
+    const arr = asArray(obj["bays"], SAY.badArg(label));
+    const seen = new Set<string>();
+    const bays: string[] = [];
+    let droppedUnknown = false;
+    for (const item of arr) {
+      const key = readText(item, { min: 1, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+      if (!KNOWN_BAY_KEYS.has(key)) {
+        droppedUnknown = true;
+        continue;
+      }
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      bays.push(key);
+    }
+    if (droppedUnknown) {
+      ctx.warn(WARN.droppedUnknownBays);
+    }
+    return { kind: "bayList", bays: bays.slice(0, MAX_BAY_LIST) };
+  }
+  if (expected === "itemList") {
+    const arr = asArray(obj["items"], SAY.badArg(label));
+    const seen = new Set<string>();
+    const items: ItemMatchArg[] = [];
+    for (const entry of arr) {
+      const itemObj = asObject(entry, SAY.badArg(label));
+      const match = itemObj["match"];
+      const name = readText(itemObj["name"], { min: 0, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+      if (match !== "type" && match !== "group") {
+        refuse(SAY.badArg(label));
+      }
+      const idField = match === "type" ? "typeID" : "groupID";
+      const id = itemObj[idField];
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        refuse(SAY.badArg(label));
+      }
+      const key = `${match}:${id}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      items.push(
+        match === "type"
+          ? { match: "type", typeID: id as number, name }
+          : { match: "group", groupID: id as number, name },
+      );
+    }
+    return { kind: "itemList", items: items.slice(0, MAX_ITEM_LIST) };
   }
   if (expected === "bookmark") {
     const id = obj["bookmarkID"];
@@ -1110,6 +1182,17 @@ function orderArg(arg: Arg): unknown {
       return {
         kind: "oreList",
         ores: arg.ores.map((ore) => ({ groupID: ore.groupID, name: ore.name })),
+      };
+    case "bayList":
+      return { kind: "bayList", bays: [...arg.bays] };
+    case "itemList":
+      return {
+        kind: "itemList",
+        items: arg.items.map((item) =>
+          item.match === "type"
+            ? { match: "type", typeID: item.typeID, name: item.name }
+            : { match: "group", groupID: item.groupID, name: item.name },
+        ),
       };
     default: {
       // ⚠ EXHAUSTIVE ON PURPOSE. Every Arg kind MUST serialise here, or an export

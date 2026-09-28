@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { FlightStatus, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
+import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import type { MacroMemory } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { MacroStep } from "../bots/botScript.ts";
@@ -418,12 +418,42 @@ test("mine: the ore-priority list running out entirely -> blocked, never a silen
 });
 
 test("deliver: docked with ore -> unload; docked empty -> done", () => {
-  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, quantity: 100 }], capacity: null, present: true, error: null }];
+  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null }];
   const unload = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre }), NM, {});
   assert.ok(unload.action.kind === "unloadOre" && unload.action.itemIDs.includes(8));
 
   const done = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: [] }), NM, {});
   assert.equal(done.outcome.kind, "done");
+});
+
+test("deliver: the ore hold goes ashore, the CARGO hold stays aboard", () => {
+  // A barge carrying spare mining crystals in cargo. Before this, the delivery
+  // took them too — the mining-holds route reports cargo as a fallback entry on
+  // every hull and the block emptied every hold it was handed.
+  const holds: MiningHold[] = [
+    { key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, groupID: 483, categoryID: 8, quantity: 4 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.ok(t.action.kind === "unloadOre");
+  assert.deepEqual(t.action.kind === "unloadOre" ? [...t.action.itemIDs] : [], [8], "the crystals stayed in cargo");
+});
+
+test("deliver: a hull with no ore hold still delivers what it mined into cargo", () => {
+  const holds: MiningHold[] = [
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 42, typeID: 1230, groupID: 462, categoryID: 25, quantity: 50 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.ok(t.action.kind === "unloadOre" && t.action.itemIDs.includes(42));
+});
+
+test("deliver: an empty ore hold is DONE even with cargo aboard", () => {
+  const holds: MiningHold[] = [
+    { key: "ore", label: "Ore Hold", items: [], capacity: null, present: true, error: null },
+    { key: "cargo", label: "Cargo Hold", items: [{ itemID: 99, typeID: 3389, groupID: 483, categoryID: 8, quantity: 4 }], capacity: null, present: true, error: null },
+  ];
+  const t = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds }), NM, {});
+  assert.equal(t.outcome.kind, "done", "the trip delivered its ore; the cargo hold is not its business");
 });
 
 test("deliver: in space, away from the station -> ride the autopilot there (multi-system)", () => {
@@ -750,6 +780,24 @@ test("loot-containers: far from a container -> approach first", () => {
   assert.ok(go.action.kind === "approach" && go.action.targetID === 80001);
 });
 
+/** One entry as the run's refusal ledger would report it. */
+function refusal(
+  stepID: string,
+  actionKind: string,
+  targetID: number,
+  count: number,
+  kind: "refused" | "unreachable" | "gone" = "refused",
+) {
+  return {
+    key: `${stepID}:${actionKind}:${targetID}`,
+    count,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There isn't enough room in that hold.",
+    kind,
+  };
+}
+
 test("loot-containers: still on grid after a loot attempt -> tried again, never silently believed emptied", () => {
   // A jetcan the server has not despawned is a jetcan that is NOT actually
   // empty yet (jettisonRuntime.js's maybeExpireEmptySpaceContainer despawns it
@@ -760,25 +808,188 @@ test("loot-containers: still on grid after a loot attempt -> tried again, never 
   const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
   const can = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
 
-  const retry = loot(s, obs({ snapshot: snapshot([can]) }), { tries: { "80001": 1 } }, {});
+  const retry = loot(s, obs({ snapshot: snapshot([can]), refusals: [refusal("lc", "lootContainer", 80001, 1)] }), {}, {});
   assert.ok(retry.action.kind === "lootContainer" && retry.action.containerID === 80001);
-  assert.equal((retry.nextMem["tries"] as Record<string, number>)["80001"], 2);
 });
 
-test("loot-containers: a can that keeps refusing for MAX_BLOCK_ATTEMPTS is set aside, not looped forever", () => {
+test("loot-containers: a can that keeps refusing is set aside — and the bound SURVIVES the lap", () => {
+  // The bound now lives on the RUN's ledger, not in step memory. That is the
+  // whole change: `scriptDecide` drops step memory every time the block is left,
+  // so the old `tries` counter handed each stubborn can a fresh five attempts on
+  // every lap of a `forever` loop — which is exactly why the original log shows
+  // repeating bursts of five instead of one burst and then silence.
   const loot = SCRIPT_MACROS["loot-containers"]!;
   const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
   const stuck = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
   const other = entity({ itemID: 80002, kind: "container", position: { x: 2000, y: 0, z: 0 } });
+  const ledger = [refusal("lc", "lootContainer", 80001, 5)];
 
-  // MAX_BLOCK_ATTEMPTS is 5 (scriptMacros.ts, not exported) — this is the 6th try.
-  const gaveUp = loot(s, obs({ snapshot: snapshot([stuck]) }), { tries: { "80001": 5 } }, {});
-  assert.equal(gaveUp.action.kind, "wait");
-  assert.deepEqual(gaveUp.nextMem["skipped"], [80001]);
-
-  // Next tick: the stuck can is skipped, so a different one on grid is picked instead.
-  const next = loot(s, obs({ snapshot: snapshot([stuck, other]) }), gaveUp.nextMem, {});
+  // Set aside, so a different can on the grid is picked instead.
+  const next = loot(s, obs({ snapshot: snapshot([stuck, other]), refusals: ledger }), {}, {});
   assert.ok(next.action.kind === "lootContainer" && next.action.containerID === 80002);
+
+  // ⚠ WITH FRESH MEMORY — a new lap. The old counter lived here and was wiped;
+  // the ledger is not, so the can stays set aside.
+  const nextLap = loot(s, obs({ snapshot: snapshot([stuck, other]), refusals: ledger }), {}, {});
+  assert.ok(nextLap.action.kind === "lootContainer" && nextLap.action.containerID === 80002);
+
+  // And with only the stuck can on grid, the block finishes rather than looping.
+  const alone = loot(s, obs({ snapshot: snapshot([stuck]), refusals: ledger }), { emptyChecks: 99 }, {});
+  assert.equal(alone.outcome.kind, "done");
+});
+
+/** Holds with a given amount of free room, as the mining-holds read reports it. */
+function holdsWithFree(freeM3: number) {
+  return [
+    { key: "ore", label: "Ore hold", items: [], capacity: { capacity: 16000, used: 16000 - freeM3 }, present: true, error: null },
+    { key: "cargo", label: "Cargo hold", items: [], capacity: { capacity: 0, used: 0 }, present: false, error: null },
+  ];
+}
+
+test("loot-containers: a FULL ship finishes the block instead of reaching into the can", () => {
+  // With nowhere to put anything there is nothing to attempt. Asking anyway is
+  // the refusal loop; stopping the whole bot over it is not much better.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: holdsWithFree(0) as never }), {}, {});
+  assert.equal(t.outcome.kind, "done");
+  assert.match(t.why, /full/i);
+});
+
+test("loot-containers: room left -> it still loots", () => {
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: holdsWithFree(500) as never }), {}, {});
+  assert.ok(t.action.kind === "lootContainer");
+});
+
+test("loot-containers: holds that could not be READ are never taken for full", () => {
+  // "We could not look" is not "there is no room" — the block carries on and
+  // lets the transfer decide, exactly as it did before.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(s, obs({ snapshot: snapshot([can]), holds: null }), {}, {});
+  assert.ok(t.action.kind === "lootContainer");
+});
+
+test("loot-wrecks: a FULL ship finishes the block too", () => {
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([wreck]), myCharacterID: 90000001, holds: holdsWithFree(0) as never }),
+    {},
+    {},
+  );
+  assert.equal(t.outcome.kind, "done");
+});
+
+test("loot-containers: the FIRST no-room ends the block — it is not proved once per can", () => {
+  // The failure this closes: the ore hold is full after mining, the cans hold
+  // ore, and ore does not fall through to cargo. Every can then answers "no
+  // room", and the block spent five attempts with a growing backoff on EACH
+  // before setting it aside. With a belt full of cans that is minutes of a bot
+  // doing nothing, which is indistinguishable from a hang.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const a = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const b = entity({ itemID: 80002, kind: "container", position: { x: 20, y: 0, z: 0 } });
+  const noRoom = {
+    key: "lc:lootContainer:80001",
+    count: 1,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There is no room aboard for what is in that container.",
+    kind: "no-room" as const,
+  };
+  // The ship is NOT full by the block's own measure — the cargo hold has room,
+  // it is the ore hold that does not — so only the no-room record can end this.
+  const t = loot(s, obs({ snapshot: snapshot([a, b]), refusals: [noRoom] }), {}, {});
+  assert.equal(t.outcome.kind, "done", "one refusal answers for the whole belt");
+  assert.match(t.why, /unload/i);
+});
+
+test("loot-wrecks: the same, so a full ship stops looting wrecks too", () => {
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const noRoom = {
+    key: "lw:lootWreck:70001",
+    count: 1,
+    firstAt: 0,
+    lastAt: 0,
+    words: "There is no room aboard for what is in that container.",
+    kind: "no-room" as const,
+  };
+  const t = loot(s, obs({ snapshot: snapshot([wreck]), myCharacterID: 90000001, refusals: [noRoom] }), {}, {});
+  assert.equal(t.outcome.kind, "done");
+});
+
+test("loot-containers: a can that CANNOT BE REACHED is closed in on, never set aside", () => {
+  // eve.js answers the same FakeItemNotFound for a despawned can and for one
+  // merely out of range. Retiring on that would abandon every can the ship
+  // drifted away from — most of them, on a hauling loop.
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 10, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([can]), refusals: [refusal("lc", "lootContainer", 80001, 9, "unreachable")] }),
+    {},
+    {},
+  );
+  // In range by our own arithmetic, and it still closes in: the gateway's range
+  // check beats the snapshot's.
+  assert.ok(t.action.kind === "approach" && t.action.targetID === 80001);
+});
+
+test("loot-containers: a can that is GONE is set aside at once, without spending the budget", () => {
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const s = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const ghost = entity({ itemID: 80001, kind: "container", position: { x: 1000, y: 0, z: 0 } });
+  const real = entity({ itemID: 80002, kind: "container", position: { x: 2000, y: 0, z: 0 } });
+  const t = loot(
+    s,
+    obs({ snapshot: snapshot([ghost, real]), refusals: [refusal("lc", "lootContainer", 80001, 1, "gone")] }),
+    {},
+    {},
+  );
+  assert.ok(t.action.kind === "lootContainer" && t.action.containerID === 80002);
+});
+
+test("loot-wrecks: a wreck is marked emptied only once the attempt was NOT refused", () => {
+  // It used to be marked the instant the action went out, which believed a
+  // refused transfer exactly as readily as a real one — the behaviour
+  // loot-containers' own comment calls out and this block never fixed.
+  const loot = SCRIPT_MACROS["loot-wrecks"]!;
+  const s = { id: "lw", kind: "macro", macro: "loot-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", ownerID: 90000001, position: { x: 10, y: 0, z: 0 } });
+  const world = { snapshot: snapshot([wreck]), myCharacterID: 90000001 };
+
+  const issued = loot(s, obs(world), {}, {});
+  assert.ok(issued.action.kind === "lootWreck" && issued.action.wreckID === 70001);
+  assert.equal(issued.nextMem["attempted"], 70001, "remembered as ATTEMPTED, not as emptied");
+  assert.deepEqual(issued.nextMem["looted"], [], "nothing is claimed emptied yet");
+
+  // Next tick with NO refusal recorded: the attempt stood, so the wreck is
+  // ticked off — and with nothing else of ours on the grid, the block finishes.
+  const confirmed = loot(s, obs(world), issued.nextMem, {});
+  assert.equal(confirmed.outcome.kind, "done");
+
+  // The other branch: the attempt WAS refused, so the wreck is NOT ticked off
+  // and the block tries it again instead of declaring the grid clear.
+  const refused = loot(
+    s,
+    obs({ ...world, refusals: [refusal("lw", "lootWreck", 70001, 1)] }),
+    issued.nextMem,
+    {},
+  );
+  assert.notEqual(refused.outcome.kind, "done", "a refused wreck is not ticked off");
+  assert.ok(refused.action.kind === "lootWreck", "it tries again");
 });
 
 test("hardeners-on: switches idle hardeners on one per tick; all running -> done; none fitted -> blocked", () => {
@@ -1481,6 +1692,29 @@ test("remote-cap: a mate out of reach is closed on, and the transfer is bounded"
 
 const jettisonStep: MacroStep = { id: "jc", kind: "macro", macro: "jettison-cargo", args: {} };
 
+test("jettison-cargo: keepItems is honoured, and an UNREADABLE row is never thrown out", () => {
+  // ⚠ The one block where getting this wrong cannot be undone: a jettisoned
+  // stack goes into a can that despawns. So unlike the unload block, a row this
+  // client cannot classify stays aboard.
+  const keepCrystals: MacroStep = {
+    id: "jc3", kind: "macro", macro: "jettison-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const rows = [
+    { itemID: 11, typeID: 1230, groupID: 462, categoryID: 25, quantity: 50, singleton: false },
+    { itemID: 12, typeID: 3389, groupID: 483, categoryID: 8, quantity: 2, singleton: false },
+    { itemID: 13, typeID: 999, groupID: null, categoryID: null, quantity: 1, singleton: false },
+  ];
+  const cargo = { rows, capacity: null } as unknown as ScriptObservation["cargo"];
+  const t = jettison(keepCrystals, obs({ cargo }), {}, {});
+  assert.ok(t.action.kind === "jettison");
+  assert.deepEqual(
+    t.action.kind === "jettison" ? [...t.action.itemIDs] : [],
+    [11],
+    "the ore went out; the crystals and the unidentifiable stack stayed",
+  );
+});
+
 test("jettison-cargo: dumps the whole hold, or only the picked item; empty is done", () => {
   const rows = [
     { itemID: 11, typeID: 34, quantity: 100, singleton: false },
@@ -1600,8 +1834,11 @@ const compress = SCRIPT_MACROS["compress-ore"]!;
 const compressStep: MacroStep = { id: "co", kind: "macro", macro: "compress-ore", args: {} };
 
 /** A hold with these stacks in it. */
-function oreHold(items: { itemID: number; typeID: number; quantity: number }[]): MiningHold[] {
-  return [{ key: "ore", label: "Ore Hold", items, capacity: null, present: true, error: null }];
+function oreHold(items: readonly { itemID: number; typeID: number; quantity: number }[]): MiningHold[] {
+  // Everything in an ore hold is ore, so the helper classifies it as such —
+  // callers say what is there, not what kind of thing it is.
+  const rows: HoldItem[] = items.map((item) => ({ ...item, groupID: 462, categoryID: 25 }));
+  return [{ key: "ore", label: "Ore Hold", items: rows, capacity: null, present: true, error: null }];
 }
 
 /** A support ship that IS running its compression gear. */

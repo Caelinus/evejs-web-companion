@@ -593,17 +593,22 @@
     return [...seen.entries()].map(([groupID, label]) => ({ groupID, label }));
   });
   // Items offered = what is visible in the hangar/cargo right now, by NAME.
-  const knownItems = $derived.by<readonly { typeID: number; name: string }[]>(() => {
-    const seen = new Map<number, string>();
+  // groupID rides along so a "keep everything like this" rule can be built: every
+  // grade of a mining crystal shares a group, where a type list would need a
+  // dozen entries and would silently miss the thirteenth.
+  const knownItems = $derived.by<readonly { typeID: number; groupID: number | null; name: string }[]>(() => {
+    const seen = new Map<number, { groupID: number | null; name: string }>();
     for (const row of [...$inventory.hangar.rows, ...$inventory.cargo.rows]) {
       if (row.typeID > 0 && !seen.has(row.typeID)) {
         const label = $names.resolved[nameKey("type", row.typeID)] ?? null;
         if (label !== null && label.length > 0) {
-          seen.set(row.typeID, label);
+          seen.set(row.typeID, { groupID: row.groupID, name: label });
         }
       }
     }
-    return [...seen.entries()].map(([typeID, name]) => ({ typeID, name })).sort((a, b) => a.name.localeCompare(b.name));
+    return [...seen.entries()]
+      .map(([typeID, entry]) => ({ typeID, groupID: entry.groupID, name: entry.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   });
 
   // ── Import / export ─────────────────────────────────────────────────────────

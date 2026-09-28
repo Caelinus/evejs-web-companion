@@ -332,16 +332,176 @@ test("wait: defaults to 10 seconds when no number is set", () => {
   assert.equal(done, 5, "10s at the 2s cadence is 5 ticks");
 });
 
-test("unload-cargo: docked with cargo -> move it all; empty hold -> done; undocked -> blocked", () => {
-  const unload = SCRIPT_MACROS["unload-cargo"]!;
-  const move = unload(step("unload-cargo"), obs({ cargo: { rows: [row({ itemID: 51 }), row({ itemID: 52, typeID: 34 })], capacity: null } }), {}, NB);
-  assert.ok(move.action.kind === "unloadMissionCargo" && move.action.itemIDs.length === 2);
+// A hull whose bays were all READ and are all absent — the shape a ship with
+// nothing but a cargo hold reports. Distinct from `null` (we could not look).
+const NO_SPECIAL_BAYS = [
+  { key: "cargo", label: "Cargo hold", present: true, capacity: null, items: [], error: null },
+  { key: "ore", label: "Ore hold", present: false, capacity: null, items: null, error: null },
+];
 
-  const done = unload(step("unload-cargo"), obs({ cargo: { rows: [], capacity: null } }), {}, NB);
+test("unload-cargo: docked with cargo -> move it all; empty ship -> done; undocked -> blocked", () => {
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const move = unload(
+    step("unload-cargo"),
+    obs({
+      cargo: { rows: [row({ itemID: 51 }), row({ itemID: 52, typeID: 34 })], capacity: null },
+      shipBays: NO_SPECIAL_BAYS,
+    }),
+    {},
+    NB,
+  );
+  assert.ok(move.action.kind === "unloadHolds", "it empties holds, not just the mission package");
+  assert.deepEqual(
+    move.action.kind === "unloadHolds" ? move.action.groups.map((g) => ({ bay: g.bay, n: g.itemIDs.length })) : [],
+    [{ bay: null, n: 2 }],
+    "one group, from the cargo hold",
+  );
+
+  const done = unload(step("unload-cargo"), obs({ cargo: { rows: [], capacity: null }, shipBays: NO_SPECIAL_BAYS }), {}, NB);
   assert.equal(done.outcome.kind, "done");
 
   const undocked = unload(step("unload-cargo"), obs({ flightStatus: flight({ docked: false, inSpace: true, stationID: null }) }), {}, NB);
   assert.equal(undocked.outcome.kind, "blocked");
+});
+
+test("unload-cargo: FREIGHT in a specialised bay is unloaded too — the hauler bug", () => {
+  // The ore hold fills from looted ore; before this the block read the cargo
+  // hold alone, so a hauler could never put its freight ashore and every later
+  // scoop was refused for want of room.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const tick = unload(
+    step("unload-cargo"),
+    obs({
+      cargo: { rows: [row({ itemID: 51 })], capacity: null },
+      shipBays: [
+        { key: "cargo", label: "Cargo hold", present: true, capacity: null, items: [], error: null },
+        { key: "ore", label: "Ore hold", present: true, capacity: null, items: [row({ itemID: 71, typeID: 1230 })], error: null },
+        // The drone bay is kit and must NOT be emptied at the drop-off.
+        { key: "drone", label: "Drone bay", present: true, capacity: null, items: [row({ itemID: 81, typeID: 2486 })], error: null },
+        // The ammo hold IS emptied now: the operator asked for it to be
+        // supported, and a bay a bot may fill has to be one it can empty. A
+        // ship that must keep its charges names it in `exceptBays`.
+        { key: "ammo", label: "Ammo hold", present: true, capacity: null, items: [row({ itemID: 82, typeID: 220 })], error: null },
+      ],
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds");
+  const groups = tick.action.kind === "unloadHolds" ? tick.action.groups : [];
+  assert.deepEqual(
+    groups.map((g) => ({ bay: g.bay, itemIDs: [...g.itemIDs] })),
+    [
+      { bay: null, itemIDs: [51] },
+      { bay: "ore", itemIDs: [71] },
+      { bay: "ammo", itemIDs: [82] },
+    ],
+    "cargo, the ore hold and the ammo hold: never the drone bay",
+  );
+});
+
+test("unload-cargo: a bay named in exceptBays is left alone", () => {
+  // The ship keeps its own charges. Without this the ammo hold is freight like
+  // any other and would be emptied at the drop-off, which on a combat hull means
+  // undocking with no ammunition.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withExcept = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { exceptBays: { kind: "bayList", bays: ["ammo"] } },
+  } as never;
+  const tick = unload(
+    withExcept,
+    obs({
+      cargo: { rows: [], capacity: null },
+      shipBays: [
+        { key: "cargo", label: "Cargo hold", present: true, capacity: null, items: [], error: null },
+        { key: "ore", label: "Ore hold", present: true, capacity: null, items: [row({ itemID: 71, typeID: 1230 })], error: null },
+        { key: "ammo", label: "Ammo hold", present: true, capacity: null, items: [row({ itemID: 82, typeID: 220 })], error: null },
+      ],
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds");
+  const groups = tick.action.kind === "unloadHolds" ? tick.action.groups : [];
+  assert.deepEqual(
+    groups.map((g) => g.bay),
+    ["ore"],
+    "the ore hold went ashore; the ammo hold stayed aboard",
+  );
+});
+
+test("unload-cargo: items named in keepItems stay aboard, wherever they are", () => {
+  // The case no bay rule can answer: spare mining crystals sit in the CARGO
+  // hold, beside the ore and salvage the trip was for.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withKeep = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const tick = unload(
+    withKeep,
+    obs({
+      cargo: {
+        rows: [
+          { itemID: 51, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 5, singleton: false },
+          { itemID: 52, typeID: 3389, groupID: 483, categoryID: 8, flagID: null, quantity: 2, singleton: false },
+        ],
+        capacity: null,
+      },
+      shipBays: NO_SPECIAL_BAYS,
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds");
+  const groups = tick.action.kind === "unloadHolds" ? tick.action.groups : [];
+  assert.deepEqual(
+    groups,
+    [{ bay: null, itemIDs: [51] }],
+    "the minerals went ashore; the crystals stayed",
+  );
+});
+
+test("unload-cargo: an unclassifiable row is MOVED, since the hangar is recoverable", () => {
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  const withKeep = {
+    id: "u",
+    kind: "macro",
+    macro: "unload-cargo",
+    args: { keepItems: { kind: "itemList", items: [{ match: "group", groupID: 483, name: "crystal" }] } },
+  } as never;
+  const tick = unload(
+    withKeep,
+    obs({
+      cargo: {
+        rows: [{ itemID: 60, typeID: 999, groupID: null, categoryID: null, flagID: null, quantity: 1, singleton: false }],
+        capacity: null,
+      },
+      shipBays: NO_SPECIAL_BAYS,
+    }),
+    {},
+    NB,
+  );
+  assert.ok(tick.action.kind === "unloadHolds", "it still unloads what it cannot classify");
+});
+
+test("unload-cargo: a ship whose holds could not be READ never passes for empty", () => {
+  // `shipBays: null` is "we could not look". Reporting done here is exactly the
+  // conflation that let a full ore hold sail through this block.
+  const unload = SCRIPT_MACROS["unload-cargo"]!;
+  let mem: Record<string, unknown> = {};
+  for (let i = 0; i < 5; i += 1) {
+    const t = unload(step("unload-cargo"), obs({ cargo: { rows: [], capacity: null }, shipBays: null }), mem, NB);
+    assert.equal(t.outcome.kind, "acting", `tick ${i} keeps looking rather than declaring done`);
+    mem = t.nextMem as Record<string, unknown>;
+  }
+  const gaveUp = unload(step("unload-cargo"), obs({ cargo: { rows: [], capacity: null }, shipBays: null }), mem, NB);
+  assert.equal(gaveUp.outcome.kind, "blocked", "and eventually says so rather than looping forever");
 });
 
 test("refine-ore: refines only what is CERTAINLY ore; unknown category is left alone", () => {

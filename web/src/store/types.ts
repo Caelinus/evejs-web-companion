@@ -1825,6 +1825,13 @@ export interface HoldCapacity {
 export interface HoldItem {
   readonly itemID: number;
   readonly typeID: number;
+  /**
+   * What KIND of thing this is, as the game classifies it. `null` is "the read
+   * did not say" and is never a verdict — a delivery that cannot tell ore from
+   * a mining crystal leaves the stack alone rather than guessing.
+   */
+  readonly groupID: number | null;
+  readonly categoryID: number | null;
   readonly quantity: number;
 }
 
@@ -2089,6 +2096,16 @@ export type MiningBotRunState = "idle" | "running" | "paused" | "stopped" | "err
  * it survives dock/undock and the shell switch — the bug the first cut hit when
  * this lived in the docked-only editor component).
  */
+/** One thing the run keeps being refused, in words a player reads. */
+export interface BotRefusal {
+  readonly key: string;
+  readonly count: number;
+  readonly firstAt: number;
+  readonly lastAt: number;
+  readonly words: string;
+  readonly kind: "refused" | "unreachable" | "gone" | "no-room";
+}
+
 export interface CustomBotState {
   readonly status: "idle" | "running" | "paused" | "stopped" | "error";
   readonly name: string | null;
@@ -2099,6 +2116,12 @@ export interface CustomBotState {
   readonly pauseReason: string | null;
   /** The run board as one line ("Working with <agent>"), or null. */
   readonly note: string | null;
+  /**
+   * What the server is currently turning down, worst first — empty on a healthy
+   * run. Held on the slice rather than shown once, for the same reason
+   * `lastAlert` is: the player this matters to is the one who was not watching.
+   */
+  readonly refusals: readonly BotRefusal[];
   readonly startError: string | null;
   /**
    * The last thing an "alert me" watch said, and when. HELD rather than fired and

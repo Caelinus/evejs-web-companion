@@ -81,6 +81,17 @@ export type ScriptAction =
   | { readonly kind: "startRoute"; readonly stationID: number }
   | { readonly kind: "loadMissionCargo"; readonly typeID: number; readonly quantity: number }
   | { readonly kind: "unloadMissionCargo"; readonly itemIDs: readonly number[] }
+  /**
+   * Empty the ship's FREIGHT into the station hangar — the cargo hold and every
+   * specialised bay carrying cargo — one group per source place, because a move
+   * must name the place the items are actually in. `bay: null` is the cargo
+   * hold. Distinct from `unloadMissionCargo`, which only ever means "the one
+   * package the mission put in cargo".
+   */
+  | {
+      readonly kind: "unloadHolds";
+      readonly groups: readonly { readonly bay: string | null; readonly itemIDs: readonly number[] }[];
+    }
   /** Order salvage drones onto a wreck; targetID 0 = the runtime auto-picks. */
   | { readonly kind: "salvageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   /** Take everything out of ONE wreck (an owned wreck — the decider guarantees it). */
@@ -173,7 +184,22 @@ const WAIT: ScriptAction = { kind: "wait" };
 
 // ─── The macro contract (concrete macros land in A4c) ────────────────────────
 
-/** Per-step scratch that persists across ticks while the step is active. */
+/**
+ * Per-step scratch that persists across ticks while the step is active.
+ *
+ * ⚠ THIS IS SCRATCH, AND IT IS WIPED EVERY TIME THE STEP IS LEFT (see the two
+ * `omit(macroMem, step.id)` calls below). That is correct for what belongs here
+ * — an approach target, a lock wait, an "issued" flag — because a fresh visit
+ * should genuinely re-approach and re-read.
+ *
+ * IT IS THE WRONG PLACE FOR A BOUND. A counter kept here is per-VISIT, not
+ * per-run, so on a `forever` loop every failing target is handed a fresh budget
+ * on every lap. That is not hypothetical: it is why a bot produced 227
+ * consecutive refusals in repeating bursts of five instead of stopping after
+ * the first five. Anything of the shape "this object has been refusing me"
+ * belongs in the RUN's refusal ledger (`refusalLedger.ts`), which the runner
+ * owns and which no step exit can wipe.
+ */
 export type MacroMemory = Readonly<Record<string, unknown>>;
 
 /**

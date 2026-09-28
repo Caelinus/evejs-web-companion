@@ -1067,6 +1067,15 @@ async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
         if (held.boundHandles.get(bindSpec.key) === bindPromise) {
           held.boundHandles.delete(bindSpec.key);
         }
+        // Name the target on the way past. A bind refusal says only WHAT the
+        // gateway thought (`FakeItemNotFound`), never WHICH bind asked — and
+        // one panel load fires four of them, so the log cannot otherwise tell
+        // a despawned can from a stale active ship. `errorLogger` prints an
+        // Error's own properties, so this rides out beside code/statusCode.
+        // Set once: the first (innermost) bind to fail owns the name.
+        if (error && typeof error === "object" && error.bindKey === undefined) {
+          error.bindKey = bindSpec.key;
+        }
         throw error;
       });
     held.boundHandles.set(bindSpec.key, bindPromise);
@@ -2408,6 +2417,16 @@ app.get("/api/bridge/inventory/container/:itemID", requireAuth, async (req, res,
       // A container that reports no capacity is still browsable; the panel
       // simply omits the gauge.
       capacity: capacity.status === "fulfilled" ? capacity.value.result : null,
+      // Per-type VOLUME, from static reference data — the same lookup the
+      // inventory and asset routes already use, so no bridge call and no new
+      // allowlist pair. Volume is a property of the TYPE, never of the stack.
+      //
+      // ⚠ THIS IS WHAT LETS A BOT TAKE WHAT FITS. Without it the browser cannot
+      // work out how much of a stack a hold has room for, so the loot path had
+      // to hand the WHOLE stack over and let the server judge — and a can
+      // holding more than the free space was refused outright, over and over,
+      // rather than being drained a load at a time.
+      volumes: readTypeVolumes(list.value.result),
     });
   } catch (error) {
     next(error);
@@ -10726,6 +10745,14 @@ function readModuleChargeFits(result) {
 function readTypeVolumes(result) {
   const rows = result && Array.isArray(result.items) ? result.items : [];
   const volumes = {};
+  // A REFERENCE LOOKUP MUST NOT BE ABLE TO BREAK A ROUTE. Volume is an
+  // enrichment: without it a panel shows "—" and a bot hands the server the
+  // whole stack to judge, both of which are defined behaviours. A static table
+  // that cannot answer therefore yields an empty map, never a 500 on a read the
+  // player asked for.
+  if (typeof staticData.getType !== "function") {
+    return volumes;
+  }
   for (const row of rows) {
     const fields = row && row.type === "packedrow" && row.fields ? row.fields : null;
     const typeID = Number(fields && fields.typeID) || 0;
@@ -16090,6 +16117,15 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
           ? decodeInventoryRows(listed.value.result).map((row) => ({
               itemID: row.itemID,
               typeID: row.typeID,
+              // WHAT KIND OF THING IT IS — the same two fields /bays publishes,
+              // and for the same reason: a stack's category is part of what a
+              // player reads about it, not wire detail like flagID. Without
+              // them a bot delivering out of the CARGO fallback (a hull with no
+              // specialised hold mines straight into cargo) cannot tell the ore
+              // it just mined from the mining crystals stowed beside it, and so
+              // shipped the crystals ashore with the ore every lap.
+              groupID: row.groupID,
+              categoryID: row.categoryID,
               quantity: row.quantity,
             }))
           : null;
@@ -16282,6 +16318,25 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
     res.status(400).json({ ok: false, error: "INVALID_SHIP", message: "A ship is required." });
     return;
   }
+  // ?keys=ore,mineral — read only these bays.
+  //
+  // ⚠ THIS IS A COST CONTROL, NOT A FILTER FOR TIDINESS. The full read costs one
+  // GetCapacity per candidate flag — twenty-seven of them — which is fine once
+  // for a panel and far too much for a bot that wants to know how much room the
+  // ore hold has before it reaches into a can. Naming the two bays it cares
+  // about turns that into two calls. An unknown or empty key list means the
+  // whole enumeration, exactly as before.
+  const requestedKeys = String(req.query.keys || "")
+    .split(",")
+    .map((key) => key.trim())
+    .filter(Boolean);
+  const wanted = requestedKeys.length > 0
+    ? SHIP_BAYS.filter((bay) => requestedKeys.includes(bay.key))
+    : SHIP_BAYS;
+  if (requestedKeys.length > 0 && wanted.length === 0) {
+    res.status(400).json({ ok: false, error: "INVALID_BAY", message: "No such ship bay." });
+    return;
+  }
   // The bind is the SAME call a container binds with — a ship's bays are just
   // its own inventory, so there is no ship-specific bind method.
   const spec = containerBindSpec(shipID);
@@ -16289,7 +16344,7 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
     // One capacity read per candidate flag, all independent: a hull that
     // refuses one bay must not blank the other twenty-six.
     const settled = await Promise.allSettled(
-      SHIP_BAYS.map((bay) =>
+      wanted.map((bay) =>
         boundCall(held, req.webSessionID, spec, "GetCapacity", [bay.flag], null),
       ),
     );
@@ -16299,7 +16354,7 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
         return;
       }
     }
-    const readings = SHIP_BAYS.map((bay, index) => {
+    const readings = wanted.map((bay, index) => {
       const outcome = settled[index];
       if (outcome.status !== "fulfilled") {
         // Could not look. NOT "the hull lacks this bay".

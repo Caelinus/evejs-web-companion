@@ -347,12 +347,119 @@ export function holdShouldHaul(hold: MiningHold | null): boolean | null {
   return capacity.used >= capacity.capacity * HAUL_AT_FRACTION;
 }
 
-/** Every stack sitting in any readable hold — what an unload would move. */
+/**
+ * Every stack sitting in any readable hold — INCLUDING the cargo hold.
+ *
+ * ⚠ Read the note on `freightHoldItemIDs` before reaching for this to decide
+ * what to unload. The mining-holds route reports the cargo hold as a fallback
+ * entry on every hull, so "every stack in any hold" is a superset of "the ore
+ * this trip was for" and sweeps the ship's kit along with it.
+ */
 export function holdItemIDs(holds: readonly MiningHold[] | null): readonly number[] {
   if (!holds) {
     return [];
   }
   return holds.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
+}
+
+/**
+ * Retail's Asteroid category — every ore, ice and harvestable gas type lives in
+ * it, so it is exactly "what a mining ship could have mined". The same constant
+ * `refine-ore` and the loot router reach for.
+ */
+const CATEGORY_ASTEROID = 25;
+
+/**
+ * Is this one of the hull's OWN specialised mining holds, rather than the cargo
+ * hold the route appends as a fallback?
+ *
+ * ⚠ `present` ALONE IS NOT ENOUGH HERE. Unlike `/bays`, which is strictly
+ * three-valued, the mining-holds route computes `present` as
+ * `reading !== null && capacity > 0` (src/server.js) — so a hold whose CAPACITY
+ * read failed is reported exactly like a hold the hull does not have. Contents
+ * are the second witness: a hold that listed a stack demonstrably exists,
+ * whatever its capacity read did. Without that, one failed capacity read would
+ * demote a Retriever to "no ore hold" and send its cargo ashore instead.
+ */
+function isSpecialisedHold(hold: MiningHold): boolean {
+  if (hold.key === "cargo") {
+    return false;
+  }
+  return hold.present || (hold.items ?? []).length > 0;
+}
+
+/**
+ * The stacks a DELIVERY should actually put ashore.
+ *
+ * ⚠ WHY THIS IS NOT `holdItemIDs`. `MINING_HOLDS` on the BFF ends with the
+ * cargo hold, and its own comment says what that entry is for: "a hull with no
+ * specialised hold mines straight into cargo, so a miner flying a frigate must
+ * still be able to see and unload the ore." It is a FALLBACK. But `holdItemIDs`
+ * flattens every hold unconditionally, so on a hull that *does* have an ore
+ * hold the fallback fired anyway and the delivery emptied the cargo hold too —
+ * spare mining crystals, ammunition, scripts and all, into the station hangar,
+ * every single lap. Nobody chose that; the filter was simply missing.
+ *
+ * So: deliver from the specialised holds when the hull has any, and fall back
+ * to cargo only when it has none — which is the case the fallback was written
+ * for and the only case in which cargo holds the ore.
+ *
+ * A hull with NO specialised hold carries its kit in the same cargo hold as its
+ * ore, so that fallback is filtered by category: only what the ship could have
+ * mined is delivered, and the crystals stowed beside it stay put. A row whose
+ * category cannot be read is LEFT ABOARD — unknown is never a verdict, the same
+ * rule `refine-ore` applies when it refuses to refine a row it cannot classify.
+ * Nothing is filtered out of a specialised hold: an ore hold holds ore, and the
+ * player put anything else in there on purpose.
+ */
+export function freightHoldItemIDs(holds: readonly MiningHold[] | null): readonly number[] {
+  if (!holds) {
+    return [];
+  }
+  const specialised = holds.filter(isSpecialisedHold);
+  if (specialised.length > 0) {
+    return specialised.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
+  }
+  const fallback = holds.filter((hold) => hold.key === "cargo").flatMap((hold) => hold.items ?? []);
+  // ⚠ NO CLASSIFIER, NO FILTER. If not one row in the hold carries a category,
+  // we are not looking at a cargo hold full of unclassifiable things — we are
+  // talking to a bridge that does not publish the field at all. Filtering on it
+  // then would deliver NOTHING, and a miner would sit at the station mining
+  // into a hold that never empties. Falling back to the pre-Part-1b behaviour
+  // is the safe reading; a single classified row is enough to trust the filter.
+  // `typeof … === "number"`, not `!== null`: a row from a source that omits the
+  // field entirely reads as `undefined`, and treating that as "classified"
+  // would filter every stack out and deliver nothing.
+  const canClassify = fallback.some((item) => typeof item.categoryID === "number");
+  if (!canClassify) {
+    return fallback.map((item) => item.itemID);
+  }
+  return fallback.filter((item) => item.categoryID === CATEGORY_ASTEROID).map((item) => item.itemID);
+}
+
+/**
+ * Total free m³ across every hold that can be READ, or null when none could be.
+ *
+ * What a loot block asks before reaching into a can: with nowhere to put
+ * anything, the answer is not to try and be refused — it is that this ship is
+ * full and the trip is over. Absent/unreadable holds contribute nothing rather
+ * than a zero, so "we could not look" never masquerades as "there is no room".
+ */
+export function holdsFreeM3(holds: readonly MiningHold[] | null): number | null {
+  if (!holds) {
+    return null;
+  }
+  let total = 0;
+  let sawOne = false;
+  for (const hold of holds) {
+    const capacity = hold.capacity;
+    if (!hold.present || capacity === null || capacity.capacity === null || capacity.used === null) {
+      continue;
+    }
+    sawOne = true;
+    total += Math.max(0, capacity.capacity - capacity.used);
+  }
+  return sawOne ? total : null;
 }
 
 /** Total units across the holds, or null when nothing could be read. */
@@ -483,7 +590,7 @@ export function decideMiningAction(
         step: null,
       };
     }
-    const items = holdItemIDs(holds);
+    const items = freightHoldItemIDs(holds);
     if (items.length > 0) {
       return {
         action: { kind: "unload", itemIDs: items },
@@ -1671,7 +1778,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
       memory.haulPending &&
       observation.status.docked &&
       observation.holds !== null &&
-      holdItemIDs(observation.holds).length === 0
+      freightHoldItemIDs(observation.holds).length === 0
     ) {
       completeHaul();
     }
@@ -1763,7 +1870,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     if (decision.action.kind === "unload") {
       memory.haulPending = true;
       const after = await safely(() => deps.getHolds()).catch(() => null);
-      if (after !== null && holdItemIDs(after).length === 0) {
+      if (after !== null && freightHoldItemIDs(after).length === 0) {
         completeHaul();
       }
     }

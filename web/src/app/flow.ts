@@ -12,6 +12,9 @@ import {
 } from "../bridge/stationPanel.ts";
 import { decodeCapacity, decodeContainer, decodeInventoryRows } from "../bridge/inventoryShip.ts";
 import { decodeShipBays } from "../bridge/shipBays.ts";
+import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
+import { holdFreeM3 } from "../bridge/holdFit.ts";
+import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
 import { buildSlots, decodeChargeFits, decodeResources, decodeShipAttributes } from "../bridge/fitting.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import {
@@ -117,6 +120,8 @@ import type {
   FlightStatus,
   InventoryItemRow,
   InventoryPlace,
+  MiningHold,
+  ShipBay,
   SlotFamily,
   StationStatic,
 } from "../store/types.ts";
@@ -5749,6 +5754,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   ]);
   const CONVO_MACROS = new Set(["request-mission", "accept-mission", "turn-in-mission"]);
   const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo"]);
+  // Blocks that need the ACTIVE HULL'S BAY LIST, contents included. Kept apart
+  // from CARGO_MACROS because the two reads have very different prices: the
+  // inventory panel is one call, `/bays` is one capacity call per candidate
+  // flag plus a listing. Only a block that actually empties the ship earns it.
+  const BAY_MACROS = new Set(["unload-cargo"]);
   const FLEET_MANAGEMENT_MACROS = new Set(["create-fleet", "invite-to-fleet", "join-fleet"]);
   const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
   const SCANNER_MACROS = new Set([
@@ -5898,46 +5908,72 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     throw new Error(`The custom-bot action dispatcher is missing an action: ${String(action)}`);
   }
 
-  // Retail's Asteroid category — every ore type lives in it. Same constant
-  // scriptMacros.ts's refine-ore reaches for, kept local here since it is not
-  // exported and this is a different module.
-  const CATEGORY_ORE = 25;
-
   /**
-   * Move a wreck/can's rows out, ore-category ones to the ore hold and
-   * everything else to cargo — split into two transfers rather than one call
-   * to a single destination. Loot-container and loot-wreck both dumped
-   * EVERYTHING into cargo before this: harmless for a combat ship, but on a
-   * mining/hauling hull the cargo hold is typically tiny next to the ore
-   * hold, so ore-bearing loot trickled in a few units at a time instead of
-   * landing where it actually fits. A ship with no ore hold at all just
-   * declines that half (TransferResult.declinedSilently) — nothing here
-   * throws over it, and the ore stays put in the wreck/can rather than being
-   * lost or wrongly forced into cargo.
+   * Move a wreck/can's rows out, each stack to the bay that WANTS it on this
+   * hull, and everything with nowhere better to go into the cargo hold.
+   *
+   * ⚠ EVERY GROUP IS ISSUED INDEPENDENTLY, AND THAT IS THE POINT. The previous
+   * shape awaited an ore-hold transfer and then a cargo one, unguarded, so a
+   * refusal on the first cancelled the second and the whole wreck was left
+   * untouched — including the modules and salvage that would have fitted in
+   * cargo perfectly well. Worse, the ore hold was addressed unconditionally:
+   * `resolvePlace` (src/server.js) resolves `{shipBay:"ore"}` out of a static
+   * table WITHOUT checking the hull has that bay, so a hull with no ore hold
+   * got a 0-capacity destination and a NotEnoughCargoSpace every single time.
+   * Measured against a live bot: 227 consecutive refusals over twelve hours.
+   *
+   * So: `planLootTransfers` walks each row's chain of SPECIALISED bays against
+   * the hull's own list and their measured room, splitting where only part of a
+   * stack fits — and only a haul where something was attempted AND refused is
+   * reported as a failure. What fits nowhere stays in the can.
    */
   async function transferLootedRows(
     rows: readonly InventoryItemRow[],
     from: { readonly kind: "container"; readonly itemID: number },
+    bays: readonly ShipBay[],
+    freeFor: (bay: string | null) => number | null,
   ): Promise<void> {
-    const ore = rows.filter((row) => row.categoryID === CATEGORY_ORE);
-    const rest = rows.filter((row) => row.categoryID !== CATEGORY_ORE);
-    if (ore.length > 0) {
-      await api.transferItems(
-        ore.map((row) => row.itemID),
-        from,
-        { kind: "shipBay", bay: "ore" },
-        null,
-        callOptions,
-      );
+    let moved = 0;
+    let planned = 0;
+    let lastError: unknown = null;
+    for (const transfer of planLootTransfers(rows, bays, freeFor)) {
+      planned += 1;
+      try {
+        await api.transferItems(
+          transfer.itemIDs,
+          from,
+          transfer.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: transfer.bay },
+          transfer.qty,
+          callOptions,
+        );
+        moved += 1;
+      } catch (error) {
+        if (isSessionLost(error)) {
+          throw error;
+        }
+        // No spill-to-cargo backstop here any more, and none is needed: the
+        // planner already walked this row's whole chain and ENDED at the cargo
+        // hold, so a refusal means the destination it measured has less room
+        // than it was told — not that a fallback was never tried.
+        lastError = error;
+      }
     }
-    if (rest.length > 0) {
-      await api.transferItems(
-        rest.map((row) => row.itemID),
-        from,
-        { kind: "cargo" },
-        null,
-        callOptions,
-      );
+    if (moved === 0 && lastError !== null) {
+      throw lastError;
+    }
+    // ⚠ NOTHING PLANNED IS NOT NOTHING TO SAY. If the can had rows and not one
+    // of them could go anywhere, the ship has no room for THIS can — which is a
+    // different thing from the ship being full, and the deciders cannot tell it
+    // apart on their own: their "am I full?" check sums every hold, so a barge
+    // with a full ore hold and a half-empty cargo bay reads as having room while
+    // a can of pure ore still fits nowhere.
+    //
+    // Left silent, that is a spin: no call, no refusal, no progress, and the
+    // block re-targets the same can for ever. Saying so puts it in the refusal
+    // ledger, which backs off and sets that can aside after a few tries, so the
+    // block finishes and the script goes on to unload.
+    if (moved === 0 && planned === 0) {
+      throw new Error(`${NO_ROOM_CODE}: There is no room aboard for what is in that container.`);
     }
   }
 
@@ -5967,6 +6003,74 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         return { value, scope: capabilityScope(value.shipID) };
       },
     );
+    // Which bays THIS hull has — the fact `transferLootedRows` routes on, and
+    // the one `resolvePlace` never checks for itself.
+    //
+    // Cached per hull because the read is expensive: `/bays` costs one
+    // GetCapacity per candidate flag (27 of them) plus a ListByFlags, which is
+    // far too much to pay on a ~2s tick. What it answers, though, is a property
+    // of the HULL, not of the moment — a Retriever has an ore hold whether or
+    // not it is full — so one read per hull is all the routing needs. Fill
+    // level is deliberately NOT cached or consulted: the server rules on room,
+    // and a refused bay spills into cargo.
+    let bayCache: { readonly shipID: number; readonly bays: readonly ShipBay[] } | null = null;
+    async function activeShipBays(): Promise<readonly ShipBay[]> {
+      const shipID = capabilityCache.peek().shipID;
+      if (shipID === null) {
+        return [];
+      }
+      if (bayCache !== null && bayCache.shipID === shipID) {
+        return bayCache.bays;
+      }
+      try {
+        const bays = decodeShipBays((await api.getShipBays(shipID, callOptions)).bays);
+        bayCache = { shipID, bays };
+        return bays;
+      } catch {
+        // Unreadable is not "no bays" — but for ROUTING it has to behave like
+        // it, because the only safe destination when the hull is unknown is the
+        // cargo hold every hull has. The wrong call here is speculating a bay.
+        return [];
+      }
+    }
+
+    /**
+     * Open a container and move out what this hull can actually take.
+     *
+     * The rows are decoded WITH the route's per-type volumes, and the
+     * mining-holds read supplies live free space — between them the
+     * transfer can be sized to the room available instead of being
+     * offered whole and refused.
+     */
+    const lootFrom = async (containerID: number): Promise<void> => {
+      const bays = await activeShipBays();
+      // Room is asked for BY NAME, and only for the freight bays this hull has
+      // — a handful of capacity calls rather than the twenty-seven a full bay
+      // read costs. Without it every bay outside the mining-holds route
+      // (mineral, salvage, planetary, command-centre) had no measurable room and
+      // fell back to offering whole stacks, so the bays the operator asked to be
+      // supported were routed to but never actually fitted.
+      const keys = bays
+        .filter((entry) => entry.present === true && FREIGHT_BAYS.has(entry.key))
+        .map((entry) => entry.key);
+      const shipID = capabilityCache.peek().shipID ?? store.inventory.get().activeShipID;
+      const [contents, roomRead] = await Promise.all([
+        api.openContainer(containerID, callOptions),
+        shipID === null
+          ? Promise.resolve(null)
+          : api.getShipBays(shipID, callOptions, [...keys, "cargo"]).catch(() => null),
+      ]);
+      const rows = decodeInventoryRows(contents.list, contents.volumes);
+      if (rows.length === 0) {
+        return;
+      }
+      const room = roomRead === null ? [] : decodeShipBays(roomRead.bays);
+      // null is "we could not read that bay's room", which the planner treats as
+      // "hand it over and let the server judge" — never as "no room".
+      const freeFor = (bay: string | null): number | null =>
+        holdFreeM3(room.find((entry) => entry.key === (bay ?? "cargo"))?.capacity ?? null);
+      await transferLootedRows(rows, { kind: "container", itemID: containerID }, bays, freeFor);
+    };
     return {
       observe: async (hint) => {
         const [flightStep, spaceResult, targetsResult, holdsResult, dronesResult] = await Promise.all([
@@ -6019,6 +6123,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let journal: ScriptObservation["journal"] = null;
         let cargo: ScriptObservation["cargo"] = null;
         let stationHangar: ScriptObservation["stationHangar"] = null;
+        let shipBays: ScriptObservation["shipBays"] = null;
         let foundAgent: ScriptObservation["foundAgent"] = null;
         let jumpsToDropoff: ScriptObservation["jumpsToDropoff"] = null;
         let anomalies: ScriptObservation["anomalies"] = null;
@@ -6257,6 +6362,30 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               stationHangar = null;
             }
           }
+          // The ship's specialised bays, for the one block that empties them.
+          // Gated hard on that block: the BFF answers `/bays` with a capacity
+          // call per candidate flag, which is worth paying once at a drop-off
+          // and never worth paying on a mining tick.
+          if (BAY_MACROS.has(macro)) {
+            try {
+              // The hull the fit was resolved against, falling back to the
+              // inventory panel's active ship: this block runs DOCKED, where the
+              // panel is authoritative and a capability read may not have landed
+              // yet. Without the fallback an unread shipID leaves `shipBays`
+              // null, and the block would block on a ship that is perfectly fine.
+              const observedShip = capabilityCache.peek().shipID ?? store.inventory.get().activeShipID;
+              if (observedShip !== null) {
+                const bays = decodeShipBays((await api.getShipBays(observedShip, callOptions)).bays);
+                shipBays = bays;
+                // A fresh read is a better cache entry than the one routing is
+                // holding, so let the loot side have it too.
+                bayCache = { shipID: observedShip, bays };
+              }
+            } catch {
+              // Unreadable stays null — "we could not look", never "no bays".
+              shipBays = null;
+            }
+          }
           if (macro === "accept-mission" && briefing?.destinationSystemID != null) {
             try {
               const origin = status.solarSystemID;
@@ -6334,6 +6463,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           briefing,
           journal,
           cargo,
+          shipBays,
           stationHangar,
           travel,
           foundAgent,
@@ -6456,7 +6586,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "unloadOre":
             if (action.itemIDs.length > 0) {
-              await api.unloadMiningHolds(action.itemIDs, callOptions);
+              // ⚠ THE RESULT IS READ, NOT DISCARDED. A 200 from this route is
+              // not proof anything moved — invbroker declines silently in
+              // several branches, which is the whole reason the route re-reads
+              // and reports `moved`. The UI path judges that through
+              // runMiningAction; the bot path threw the answer away, so a
+              // delivery that moved nothing looked exactly like one that
+              // worked. Raising here is what puts it in front of the refusal
+              // ledger instead of nowhere.
+              const result = await api.unloadMiningHolds(action.itemIDs, callOptions);
+              const moved = result.moved ?? null;
+              if (moved !== null && moved.length === 0) {
+                throw new Error("Nothing moved to your hangar, and the server gave no reason.");
+              }
             }
             return;
           case "rememberBeltDry":
@@ -6501,6 +6643,38 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             }
             return;
           }
+          case "unloadHolds": {
+            // One transfer per SOURCE place — a move names where the items
+            // actually are, and a bay's contents are not in the cargo hold.
+            // Each group is guarded on its own: a bay the station refuses must
+            // not stop the others being landed, exactly as on the loot side.
+            let lastError: unknown = null;
+            let movedGroups = 0;
+            for (const group of action.groups) {
+              if (group.itemIDs.length === 0) {
+                continue;
+              }
+              try {
+                await api.transferItems(
+                  [...group.itemIDs],
+                  group.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: group.bay },
+                  { kind: "hangar" },
+                  null,
+                  callOptions,
+                );
+                movedGroups += 1;
+              } catch (error) {
+                if (isSessionLost(error)) {
+                  throw error;
+                }
+                lastError = error;
+              }
+            }
+            if (movedGroups === 0 && lastError !== null) {
+              throw lastError;
+            }
+            return;
+          }
           case "unloadMissionCargo":
             if (action.itemIDs.length > 0) {
               await api.transferItems(
@@ -6534,6 +6708,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "boardShip":
             await api.boardShip(action.shipID, callOptions);
             capabilityCache.invalidate();
+            bayCache = null;
             return;
           case "moveItems": {
             const asPlace = (place: string): InventoryPlace =>
@@ -6569,6 +6744,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               }
               await api.applySavedFitting(shipID, stationID, modulesByFlag, callOptions);
               capabilityCache.invalidate();
+              bayCache = null;
               await loadInventory().catch(() => {});
             }
             return;
@@ -6582,25 +6758,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             }
             return;
           case "lootWreck": {
-            // Read the wreck's contents, then move the lot out — ore to the ore
-            // hold, everything else to cargo (transferLootedRows). The wreck is
-            // addressed as a plain container; the transfer route re-reads and
-            // even absorbs the loot-raises-after-move server quirk.
-            const contents = await api.openContainer(action.wreckID, callOptions);
-            const rows = decodeInventoryRows(contents.list);
-            if (rows.length > 0) {
-              await transferLootedRows(rows, { kind: "container", itemID: action.wreckID });
-            }
+            // Read the wreck's contents, then move the lot out — each stack to
+            // whichever bay this hull wants it in, the rest to cargo
+            // (transferLootedRows). The wreck is addressed as a plain
+            // container; the transfer route re-reads and even absorbs the
+            // loot-raises-after-move server quirk.
+            await lootFrom(action.wreckID);
             return;
           }
           case "lootContainer": {
             // Same shape as lootWreck — the server applies no ownership check to
             // a container, so nothing here needs to either.
-            const contents = await api.openContainer(action.containerID, callOptions);
-            const rows = decodeInventoryRows(contents.list);
-            if (rows.length > 0) {
-              await transferLootedRows(rows, { kind: "container", itemID: action.containerID });
-            }
+            await lootFrom(action.containerID);
             return;
           }
           case "placeBuyOrder":
@@ -6692,6 +6861,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           interruptID: snapshot.interruptID,
           pauseReason: snapshot.pauseReason,
           note: snapshot.note,
+          refusals: snapshot.refusals,
         });
         if (snapshot.status === "error") {
           stopLiveStream();
@@ -6699,6 +6869,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
       },
       isSessionLost,
+      // The RAW wire text, code prefix and all — the ledger words it through
+      // describeRefusal itself and classifies on the code, so it must not be
+      // pre-translated here.
+      refusalReason: readRefusalReason,
       registry: SCRIPT_MACROS,
       travelHome: scriptTravelHome,
     };

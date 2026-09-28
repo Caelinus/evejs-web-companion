@@ -28,7 +28,7 @@
 //      overload / probe-launch / bookmark / fleet-bridge helpers and
 //      Handle_Scoop are all real UserError sites that this client CANNOT
 //      provoke, and none of them is in the table below.
-//   3. That leaves the 24 bare codes and 2 localization labels in
+//   3. That leaves the 27 bare codes and 2 localization labels in
 //      SERVER_REFUSALS. The list is asserted in refusals.test.ts.
 //
 // ── HOW A REFUSAL ARRIVES ──────────────────────────────────────────────────
@@ -161,6 +161,14 @@ const SERVER_REFUSALS: Readonly<Record<string, string>> = Object.freeze({
   // dogma `_throwModuleActivationUserError` — MAX_GROUP_ACTIVE.
   EffectCrowdedOut:
     "Your ship already has as many modules of that kind running as it is allowed.",
+  // invbroker Handle_GetInventoryFromId — the itemID bound no inventory target.
+  // It covers TWO server conditions that arrive as one code: the item does not
+  // exist, and the item exists but failed the handler's own scene/range check.
+  // The sentence must therefore name neither, because the wire cannot tell them
+  // apart (`refusalLedger.ts` separates them for the bot with the grid snapshot,
+  // which a bare panel read does not hold).
+  FakeItemNotFound:
+    "That ship or container is no longer there, or is too far away to reach.",
   // dogma `_throwModuleActivationUserError` — MODULE_REACTIVATING.
   ModuleReactivationDelayed2:
     "That module is still cooling down from its last cycle. Give it a moment.",

@@ -176,6 +176,8 @@ function oreHold(used: number, capacity = 5_000, items: readonly number[] = []):
     items: items.map((quantity, index) => ({
       itemID: 90_000 + index,
       typeID: 1230,
+      groupID: 462,
+      categoryID: 25,
       quantity,
     })),
     capacity: { capacity, used },

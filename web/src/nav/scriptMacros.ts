@@ -20,7 +20,7 @@ import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import { BELT_ARRIVAL_RADIUS_M, holdItemIDs, isMineableRock } from "./miningBotLoop.ts";
+import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import {
   agentActionID,
@@ -36,6 +36,9 @@ import { decideCloseIn, measureSpace, type SpaceMeasurement } from "./autopilotL
 import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
+import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
+import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
+import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
 
 const WAIT = { kind: "wait" } as const;
 const ACTING = { kind: "acting" } as const;
@@ -707,7 +710,10 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
     });
   }
   if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
-    const items = holdItemIDs(obs.holds ?? null);
+    // The FREIGHT holds, not every hold. On a hull with an ore hold the cargo
+    // hold is not where the ore is, and emptying it here put the ship's spare
+    // crystals and ammunition ashore every lap — see freightHoldItemIDs.
+    const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
       return tick({ kind: "unloadOre", itemIDs: items }, "Unloading the ore into the hangar.", "Unloading", ACTING);
     }
@@ -814,6 +820,19 @@ const defendWithDrones: MacroDecider = (_step, obs, mem) => {
 // helpers verbatim (agentActionID / missionAccepted / findPackageStack /
 // packageAboard / gateOffer). Cross-block facts (the agent, the mission) ride
 // the run BOARD; each block confirms by re-read, one action per tick.
+
+/** The "leave this aboard" rules on a step, or none. */
+function keepRules(step: MacroStep): readonly KeepRule[] {
+  const arg = step.args["keepItems"];
+  if (arg === undefined || arg.kind !== "itemList") {
+    return [];
+  }
+  return arg.items.map((item) =>
+    item.match === "type"
+      ? ({ match: "type", typeID: item.typeID } as const)
+      : ({ match: "group", groupID: item.groupID } as const),
+  );
+}
 
 const MAX_BLOCK_ATTEMPTS = 5; // presses/moves per block before it says so and stops
 
@@ -1269,9 +1288,27 @@ const waitBlock: MacroDecider = (step, _obs, mem) => {
 };
 
 // ── unload-cargo ─────────────────────────────────────────────────────────────
-// Docked: move EVERYTHING in the cargo hold into the station hangar. Done only
-// when a fresh cargo read shows the hold empty — a 200 is not an empty hold.
-const unloadCargo: MacroDecider = (_step, obs, mem) => {
+// Docked: move everything the ship is CARRYING into the station hangar — the
+// cargo hold and every specialised freight bay, each from its own place.
+//
+// ⚠ IT IS NOT ONLY THE CARGO HOLD, AND THAT IS THE WHOLE FIX. This block used
+// to read `obs.cargo` alone, which was fine while loot went nowhere else. Once
+// `transferLootedRows` started routing ore into the ore hold, a hauler's freight
+// stopped being reachable by the one block meant to unload it: the ore hold
+// filled, `cargo-full` (which measures the CARGO hold) never tripped, the loop
+// never ended, and every further scoop was refused for want of room. Whatever
+// `FREIGHT_BAYS` lets a bot fill, this block has to be able to empty, or the
+// same trap just moves one bay over.
+//
+// ⚠ WHAT IT WILL NOT TOUCH: the ship's KIT. Drones, fuel, ammo, fighters,
+// subsystems and the hulls in a maintenance bay are not freight, and a block
+// that stripped them would turn a drop-off into a stranding. `FREIGHT_BAYS`
+// draws that line; this block never widens it.
+//
+// Done only when a fresh read shows nothing left — and a hold that could not be
+// READ never counts as an empty one, so an unreadable ship reports blocked
+// rather than quietly passing for unloaded.
+const unloadCargo: MacroDecider = (step, obs, mem) => {
   if (obs.flightStatus?.docked !== true) {
     return tick(WAIT, "Not docked, so there is no hangar to unload into.", "Emptying the hold", {
       kind: "blocked",
@@ -1279,27 +1316,67 @@ const unloadCargo: MacroDecider = (_step, obs, mem) => {
     });
   }
   const cargo = obs.cargo ?? null;
-  if (cargo === null) {
-    return tick(WAIT, "Reading the cargo hold.", "Emptying the hold", ACTING, false, mem);
+  const bays = obs.shipBays ?? null;
+  // Bays this step must leave alone. The ammo hold on a combat hull and the fuel
+  // bay on a jump-capable one are freight to a hauler and the ship's own kit to
+  // everything else, and nothing about the bay itself says which.
+  const exceptArg = step.args["exceptBays"];
+  const except = new Set<string>(
+    exceptArg !== undefined && exceptArg.kind === "bayList" ? exceptArg.bays : [],
+  );
+  // Items to leave aboard, whichever bay they are in. "move" on an unreadable
+  // row: it lands in the station hangar, which is one drag from undone, and
+  // holding back what cannot be classified would stall the empty check for ever.
+  const keep = keepRules(step);
+  const groups: { readonly bay: string | null; readonly itemIDs: readonly number[] }[] = [];
+  const cargoRows = cargo === null ? [] : movableRows(cargo.rows, keep, "move");
+  if (cargoRows.length > 0) {
+    groups.push({ bay: null, itemIDs: cargoRows.map((row) => row.itemID) });
   }
-  if (cargo.rows.length === 0) {
-    return tick(WAIT, "The cargo hold is empty.", "Emptying the hold", { kind: "done" });
+  for (const bay of bays ?? []) {
+    if (bay.present !== true || !FREIGHT_BAYS.has(bay.key) || except.has(bay.key)) {
+      continue;
+    }
+    const items = movableRows(bay.items ?? [], keep, "move");
+    if (items.length > 0) {
+      groups.push({ bay: bay.key, itemIDs: items.map((row) => row.itemID) });
+    }
   }
-  const attempts = (num(mem, "attempts") ?? 0) + 1;
-  if (attempts > MAX_BLOCK_ATTEMPTS) {
-    return tick(WAIT, "The cargo would not move.", "Emptying the hold", {
-      kind: "blocked",
-      reason: "The station kept refusing the cargo, so the bot stopped.",
+  if (groups.length > 0) {
+    const attempts = (num(mem, "attempts") ?? 0) + 1;
+    if (attempts > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The cargo would not move.", "Emptying the hold", {
+        kind: "blocked",
+        reason: "The station kept refusing the cargo, so the bot stopped.",
+      });
+    }
+    return tick(
+      { kind: "unloadHolds", groups },
+      "Moving what the ship is carrying into the hangar.",
+      "Emptying the hold",
+      ACTING,
+      false,
+      { ...mem, attempts },
+    );
+  }
+  // Nothing to move that we can SEE. Only a ship we actually managed to read
+  // end to end is an empty one — a failed cargo or bay read is "cannot tell",
+  // and passing that off as "done" is the exact conflation that let a full ore
+  // hold sail through this block in the first place.
+  if (cargo === null || bays === null) {
+    const blindChecks = (num(mem, "blindChecks") ?? 0) + 1;
+    if (blindChecks > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The ship's holds could not be read.", "Emptying the hold", {
+        kind: "blocked",
+        reason: "The ship's holds could not be read, so the bot cannot tell whether it is empty.",
+      });
+    }
+    return tick(WAIT, "Checking the ship's holds.", "Emptying the hold", ACTING, false, {
+      ...mem,
+      blindChecks,
     });
   }
-  return tick(
-    { kind: "unloadMissionCargo", itemIDs: cargo.rows.map((row) => row.itemID) },
-    "Moving the cargo into the hangar.",
-    "Emptying the hold",
-    ACTING,
-    false,
-    { attempts },
-  );
+  return tick(WAIT, "The ship is empty.", "Emptying the hold", { kind: "done" });
 };
 
 // ── return-to-agent ──────────────────────────────────────────────────────────
@@ -1469,7 +1546,7 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
 // Loot YOUR OWN wrecks, nearest first: fly inside loot range, empty it, mark it,
 // next. A wreck whose owner cannot be read is NEVER opened — that is the whole
 // "no can flipping" rule, structural rather than polite.
-const lootWrecks: MacroDecider = (_step, obs, mem) => {
+const lootWrecks: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Looting", ACTING, false, mem);
@@ -1477,40 +1554,83 @@ const lootWrecks: MacroDecider = (_step, obs, mem) => {
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
   }
+  // ⚠ A FULL SHIP IS A FINISHED TRIP, NOT A FAILURE. With no room anywhere there
+  // is nothing to attempt: reaching into a can regardless is the refusal loop
+  // this block used to run, and stopping the whole bot over it (which the
+  // refusal ledger rightly did) is not much better. `null` is "we could not
+  // read the holds", which is never a verdict — the block carries on and lets
+  // the transfer decide, as it always did.
+  const freeM3 = holdsFreeM3(obs.holds ?? null);
+  if (freeM3 !== null && freeM3 <= 0) {
+    return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
+  }
+  // ⚠ ONCE IS ENOUGH. "Nothing aboard will take this" is a fact about the SHIP,
+  // not about the wreck in front of it: the hold with no room for this one has
+  // no room for the next either. Proving it again on every target costs five
+  // attempts and a growing backoff EACH, which is minutes of a bot doing
+  // nothing and looking hung. The trip is over; go and unload.
+  if (shipHasNoRoom(obs.refusals, step.id, "lootWreck")) {
+    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" });
+  }
   const lootedRaw = mem["looted"];
-  const looted = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
-  const mine = wrecksOnGrid(snapshot).filter((w) => isOwnWreck(w, obs) && !looted.has(w.itemID));
+  const lootedBefore = new Set<number>(Array.isArray(lootedRaw) ? (lootedRaw as number[]) : []);
+
+  // ⚠ MARK IT ON THE ANSWER, NOT ON THE ASKING. This block used to add a wreck
+  // to `looted` the instant it issued the action, which believed a refused
+  // transfer exactly as readily as a real one and moved on leaving the loot
+  // sitting there. `lootContainers` was deliberately built to avoid that and
+  // said so in its own comment; this block was never brought along.
+  //
+  // A wreck cannot use the container trick of reading "still on grid" as "still
+  // has something in it" — an emptied wreck stays put — so the block does need
+  // its own record. What it can do is write that record one tick LATER, once the
+  // ledger has had a chance to say whether the attempt was refused.
+  const attempted = num(mem, "attempted");
+  const attemptWasRefused =
+    attempted !== null && refusalFor(obs.refusals, step.id, "lootWreck", attempted) !== null;
+  const looted =
+    attempted !== null && !attemptWasRefused ? new Set([...lootedBefore, attempted]) : lootedBefore;
+  const memBase: MacroMemory = { ...mem, looted: [...looted], attempted: null };
+
+  const mine = wrecksOnGrid(snapshot).filter(
+    (w) =>
+      isOwnWreck(w, obs) &&
+      !looted.has(w.itemID) &&
+      !shouldSetAside(obs.refusals, step.id, "lootWreck", w.itemID, MAX_BLOCK_ATTEMPTS),
+  );
   if (mine.length === 0) {
     return tick(WAIT, "Every wreck of yours here is emptied.", "Looting", { kind: "done" });
   }
   const measurement = measureSpace(snapshot);
   const target = nearest(mine, measurement);
   if (target === null) {
-    return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, mem);
+    return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memBase);
   }
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
-  if (dist > LOOT_RANGE_M) {
-    if (num(mem, "approaching") === target.itemID) {
-      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, mem);
+  // The gateway's own range check beats our arithmetic — see lootContainers.
+  const unreachable = isUnreachable(obs.refusals, step.id, "lootWreck", target.itemID);
+  if (dist > LOOT_RANGE_M || unreachable) {
+    if (!unreachable && num(memBase, "approaching") === target.itemID) {
+      return tick(WAIT, "Flying to your wreck.", "Looting", ACTING, true, memBase);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      "Heading for your wreck.",
+      unreachable ? "Too far to reach it, closing in." : "Heading for your wreck.",
       "Looting",
       ACTING,
       true,
-      { ...mem, approaching: target.itemID },
+      { ...memBase, approaching: target.itemID },
     );
   }
-  // In range: empty it and mark it done (the flow's transfer verifies the move;
-  // an empty wreck is a no-op either way).
+  // In range: empty it, and remember only that it was ATTEMPTED. Whether it is
+  // actually emptied is settled on the next tick, above.
   return tick(
     { kind: "lootWreck", wreckID: target.itemID },
     "Taking what's inside.",
     "Looting",
     ACTING,
     true,
-    { ...mem, approaching: null, looted: [...looted, target.itemID] },
+    { ...memBase, approaching: null, attempted: target.itemID },
   );
 };
 
@@ -1541,7 +1661,7 @@ const CONTAINER_SETTLE_TICKS = 30; // ~2s/tick elsewhere in this file -> roughly
 // exactly the retry a decline needs. Only a can that keeps refusing for
 // MAX_BLOCK_ATTEMPTS running gets set aside, so a genuinely stuck one does not
 // loop the block forever.
-const lootContainers: MacroDecider = (_step, obs, mem) => {
+const lootContainers: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Looting", ACTING, false, mem);
@@ -1549,9 +1669,28 @@ const lootContainers: MacroDecider = (_step, obs, mem) => {
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
   }
-  const skippedRaw = mem["skipped"];
-  const skipped = new Set<number>(Array.isArray(skippedRaw) ? (skippedRaw as number[]) : []);
-  const cans = containersOnGrid(snapshot).filter((c) => !skipped.has(c.itemID));
+  // ⚠ A FULL SHIP IS A FINISHED TRIP, NOT A FAILURE. With no room anywhere there
+  // is nothing to attempt: reaching into a can regardless is the refusal loop
+  // this block used to run, and stopping the whole bot over it (which the
+  // refusal ledger rightly did) is not much better. `null` is "we could not
+  // read the holds", which is never a verdict — the block carries on and lets
+  // the transfer decide, as it always did.
+  const freeM3 = holdsFreeM3(obs.holds ?? null);
+  if (freeM3 !== null && freeM3 <= 0) {
+    return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
+  }
+  // Once is enough: see the note in loot-wrecks. Nothing about the next can will
+  // be different while the hold that turned this one down is still full.
+  if (shipHasNoRoom(obs.refusals, step.id, "lootContainer")) {
+    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" });
+  }
+  // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
+  // list in step memory. The list was dropped every time the block was left, so
+  // on a `forever` loop each stubborn can was reconsidered from scratch on every
+  // lap — five fresh attempts, for ever. See `shouldSetAside`.
+  const cans = containersOnGrid(snapshot).filter(
+    (c) => !shouldSetAside(obs.refusals, step.id, "lootContainer", c.itemID, MAX_BLOCK_ATTEMPTS),
+  );
   if (cans.length === 0) {
     // A can that has not shown up in THIS tick's snapshot is not proof the
     // grid never had one — landing on a belt and checking for containers on
@@ -1576,38 +1715,34 @@ const lootContainers: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memClean);
   }
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
-  if (dist > LOOT_RANGE_M) {
-    if (num(memClean, "approaching") === target.itemID) {
+  // ⚠ THE SERVER'S RANGE CHECK BEATS OUR MEASUREMENT. A bind that came back
+  // "cannot reach" means the gateway's own scene/range test said no, whatever
+  // the snapshot's arithmetic made of the distance — a stale position, or a
+  // scene boundary this client cannot see. Closing in is the answer; retrying
+  // the loot from here would just collect the same refusal.
+  const unreachable = isUnreachable(obs.refusals, step.id, "lootContainer", target.itemID);
+  if (dist > LOOT_RANGE_M || unreachable) {
+    if (!unreachable && num(memClean, "approaching") === target.itemID) {
       return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, memClean);
     }
     return tick(
       { kind: "approach", targetID: target.itemID },
-      "Heading for the container.",
+      unreachable ? "Too far to reach it, closing in." : "Heading for the container.",
       "Looting",
       ACTING,
       true,
       { ...memClean, approaching: target.itemID },
     );
   }
-  const triesRaw = memClean["tries"];
-  const tries: Record<string, number> =
-    triesRaw !== null && typeof triesRaw === "object" ? { ...(triesRaw as Record<string, number>) } : {};
-  const targetTries = (tries[target.itemID] ?? 0) + 1;
-  if (targetTries > MAX_BLOCK_ATTEMPTS) {
-    return tick(WAIT, "That container would not give up its contents.", "Looting", ACTING, true, {
-      ...memClean,
-      approaching: null,
-      skipped: [...skipped, target.itemID],
-    });
-  }
-  tries[target.itemID] = targetTries;
+  // No `tries` counter here any more: the ledger counts, across laps, and
+  // `shouldSetAside` above is what takes a hopeless can out of the list.
   return tick(
     { kind: "lootContainer", containerID: target.itemID },
     "Taking what's inside.",
     "Looting",
     ACTING,
     true,
-    { ...memClean, approaching: null, tries },
+    { ...memClean, approaching: null },
   );
 };
 
@@ -2877,7 +3012,14 @@ const jettisonCargo: MacroDecider = (step, obs, mem) => {
   const item = step.args["item"];
   const wanted =
     item !== undefined && item.kind === "itemType" && item.typeID !== null ? item.typeID : null;
-  const rows = cargo.rows.filter((row) => wanted === null || row.typeID === wanted);
+  // ⚠ "keep" ON AN UNREADABLE ROW, and this is the block where that matters.
+  // A jettisoned stack goes into a can that despawns: there is no undo, so
+  // "I could not tell what this is" must never be enough to throw it into space.
+  const rows = movableRows(
+    cargo.rows.filter((row) => wanted === null || row.typeID === wanted),
+    keepRules(step),
+    "keep",
+  );
   if (rows.length === 0) {
     return tick(WAIT, "Nothing left in the hold to jettison.", "Jettisoning", { kind: "done" });
   }

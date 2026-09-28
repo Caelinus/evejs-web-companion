@@ -918,7 +918,7 @@ const HOLD_STORE_EVENT = {
     {
       key: "ore",
       label: "Ore hold",
-      items: [{ itemID: 77000001, typeID: ORE_TYPE_ID, quantity: 350 }],
+      items: [{ itemID: 77000001, typeID: ORE_TYPE_ID, groupID: 462, categoryID: 25, quantity: 350 }],
       capacity: { capacity: 5000, used: 1250 },
       present: true,
       error: null,
@@ -984,7 +984,7 @@ test("R24 slice D: a hold the ship could not measure reads NOT KNOWN, not empty"
       {
         key: "ore",
         label: "Ore hold",
-        items: [{ itemID: 77000001, typeID: ORE_TYPE_ID, quantity: 350 }],
+        items: [{ itemID: 77000001, typeID: ORE_TYPE_ID, groupID: 462, categoryID: 25, quantity: 350 }],
         capacity: null,
         present: false,
         error: null,

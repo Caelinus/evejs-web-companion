@@ -16,6 +16,7 @@ import type { ChargeFitment } from "../bridge/fitting.ts";
 
 import type {
   ActivityCalendarEventRow,
+  BotRefusal,
   ActivityCalendarResponseRow,
   ActivityNotificationRow,
   ActivityRead,
@@ -838,6 +839,8 @@ export type FeedEvent =
       readonly pauseReason: string | null;
       /** The run board as one line ("Working with <agent>"), or null. */
       readonly note?: string | null;
+      /** What the server is turning down, worst first. Absent reads as none. */
+      readonly refusals?: readonly BotRefusal[];
     }
   | { readonly type: "custom-bot/start-error"; readonly message: string | null }
   /** An "alert me" watch fired: what it said, and when (epoch ms). */
