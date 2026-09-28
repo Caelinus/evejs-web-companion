@@ -119,6 +119,7 @@ function entity(overrides: Partial<SpaceEntity> & { itemID: number }): SpaceEnti
     remainingQuantity: null,
     miningYieldTypeID: null,
     beltID: null,
+    oreGrade: null,
     isNpc: false,
     npcEntityType: null,
     controllerID: null,

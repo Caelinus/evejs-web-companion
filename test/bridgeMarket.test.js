@@ -102,6 +102,12 @@ function fakeStaticData() {
         limit: 25,
       };
     },
+    listOreFamilies() {
+      return [
+        { groupID: 460, name: "Scordite" },
+        { groupID: 462, name: "Veldspar" },
+      ];
+    },
   };
 }
 
@@ -570,6 +576,22 @@ test("a query too short to be useful returns nothing rather than the whole table
   const { baseUrl } = await startTestServer({ gateway });
   const { payload } = await apiRequest(baseUrl, "/api/market/find?q=t");
   assert.deepEqual(payload.matches, []);
+});
+
+test("GET /api/ore/families lists ore families from static data, touching the gateway not at all", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  // Deliberately NO character selected: this is static reference data too.
+  const { response, payload } = await apiRequest(baseUrl, "/api/ore/families");
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.source, "static-data");
+  assert.equal(payload.count, 2);
+  assert.deepEqual(payload.families, [
+    { groupID: 460, name: "Scordite" },
+    { groupID: 462, name: "Veldspar" },
+  ]);
+  assert.equal(gateway.calls.topLevel.length, 0, "the ore family list is not a bridge call");
 });
 
 // --- session handling -------------------------------------------------------

@@ -39,6 +39,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
       { key: "equipment", kind: "equipment", required: false },
       // Optional: absent = "nearest", the shipped behaviour.
       { key: "pick", kind: "rockPick", required: false },
+      // Optional: an ordered ore priority list (families by type group). Absent
+      // or empty = any rock.
+      { key: "ores", kind: "oreList", required: false },
     ],
     untilRequired: true,
   },

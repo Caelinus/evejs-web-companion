@@ -16,11 +16,12 @@ import type {
   MacroTick,
   ScriptBoard,
 } from "./scriptDecide.ts";
-import type { ScriptObservation } from "./scriptConditions.ts";
+import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
-import type { MacroStep, WorldRef } from "../bots/botScript.ts";
+import type { MacroStep, OreFamilyArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, holdItemIDs, isMineableRock } from "./miningBotLoop.ts";
+import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import {
   agentActionID,
   cargoRoom,
@@ -332,6 +333,26 @@ function pickRock(
   return best ?? nearest(rocks, measurement);
 }
 
+/**
+ * Restrict to the richest grade present — an ore-priority tier reaches for the
+ * highest `oreGrade` before anything else, and `pickRock`'s nearest/biggest
+ * choice only breaks the tie among those. An unknown grade sorts AFTER every
+ * known one (same null-is-not-worst rule as `remainingQuantity`): if nothing
+ * in the set has a known grade, every rock stays a candidate.
+ */
+function highestGradeRocks(rocks: readonly SpaceEntity[]): readonly SpaceEntity[] {
+  let bestGrade = -1;
+  for (const rock of rocks) {
+    if (rock.oreGrade !== null && rock.oreGrade > bestGrade) {
+      bestGrade = rock.oreGrade;
+    }
+  }
+  if (bestGrade < 0) {
+    return rocks;
+  }
+  return rocks.filter((rock) => rock.oreGrade === bestGrade);
+}
+
 // ── undock ───────────────────────────────────────────────────────────────────
 const undock: MacroDecider = (_step, obs) => {
   const docked = obs.flightStatus?.docked ?? null;
@@ -378,7 +399,33 @@ const travelToBelt: MacroDecider = (step, obs) => {
 // is gone pick the next — warping to the step's belt (a pinned one, or else
 // the nearest) first if no rock is in range. The player's `until` (ore hold
 // full) is what ends the block.
-const mineAtBelt: MacroDecider = (step, obs, mem) => {
+//
+// Two things layer on top of that core loop:
+//   • NEAREST-mode rotation (decision 2, docs/bot-builder-brainstorm.md §op-2):
+//     a belt found dry after arrival is not a stop, it is a cue to rotate to
+//     the nearest belt not yet reported dry — pausing only once every belt has
+//     been visited and found empty. That "found dry" memory is SHARED across
+//     every pilot running a mining bot: it lives on the BFF, in-process, keyed
+//     by solar system NAME then belt NAME (never a grid-local id, which means
+//     nothing to a pilot in a different instance of the same system), and it
+//     expires on its own so a later tour finds rock that respawned. This block
+//     only reads it (`obs.dryBelts`) and reports into it (the `rememberBeltDry`
+//     action) — it holds none of that state itself. A CHOSEN (pinned) belt
+//     never rotates: it keeps the original "pause when dry" behaviour, pinned
+//     to the one belt.
+//   • ORE PRIORITY (the step's optional `ores` tier list): only rocks whose
+//     groupID matches the CURRENT tier's family are mineable. A belt with none
+//     of that ore counts as dry for the tier exactly like an all-out belt does
+//     for the plain case; once every belt is dry for the tier, the next tier
+//     starts a fresh tour. The current tier is per-pilot (kept on this pilot's
+//     own run board, `mineOreTier`) — two pilots working the same system can be
+//     on different tiers. Tiers run out → blocked. Deliberately NOT handled: a
+//     higher-priority family reappearing on a belt already dry for a lower
+//     tier (e.g. Veldspar respawning while working Kernite) is simply not
+//     noticed — the tour already moved on, and chasing respawns mid-tier is
+//     not worth the extra state for how rarely a rock resource turnover
+//     matters here.
+const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Flying to the belt", ACTING, false, mem);
@@ -388,32 +435,161 @@ const mineAtBelt: MacroDecider = (step, obs, mem) => {
   }
 
   const measurement = measureSpace(snapshot);
-  const rocks = snapshot.entities.filter(isMineableRock);
+  const allRocks = snapshot.entities.filter(isMineableRock);
+  const pinned = isChosenBelt(step);
 
-  if (rocks.length === 0) {
-    // No rocks in range. If we are already sitting on the right belt, it is
-    // mined out; otherwise fly there to find some.
-    const belts = snapshot.entities.filter((e) => /belt/i.test(e.name ?? ""));
+  const oresArg = step.args["ores"];
+  const ores = oresArg !== undefined && oresArg.kind === "oreList" ? oresArg.ores : [];
+
+  if (ores.length > 0) {
+    const tier = boardNum(board, MINE_ORE_TIER_KEY) ?? 0;
+    if (tier >= ores.length) {
+      return tick(WAIT, "None of the ores on your list are left in this system.", "Nothing left to mine", {
+        kind: "blocked",
+        reason: "None of the ores on your list are left in this system.",
+      });
+    }
+    const family = ores[tier]!;
+    const tierRocks = allRocks.filter((r) => r.groupID === family.groupID);
+    if (tierRocks.length === 0) {
+      return mineNoTargetRocks(step, obs, snapshot, measurement, board, pinned, family, ores, tier);
+    }
+    return mineWithRocks(step, obs, mem, snapshot, highestGradeRocks(tierRocks), measurement);
+  }
+
+  if (allRocks.length === 0) {
+    return mineNoTargetRocks(step, obs, snapshot, measurement, board, pinned, null, [], 0);
+  }
+  return mineWithRocks(step, obs, mem, snapshot, allRocks, measurement);
+};
+
+/**
+ * No mineable (or no tier-matching) rocks on grid. If we are already sitting
+ * on the right belt it is dry — a pinned belt pauses (today's behaviour);
+ * nearest mode marks it emptied and rotates to the next unworked belt, only
+ * pausing once every belt in the system has come up dry. `family` (when the
+ * step carries an ore-priority list) both restricts what counts as "dry" —
+ * plenty of rock can still be sitting there, just not the wanted ore — and
+ * names the ore in the reported reason instead of a bare id.
+ */
+function mineNoTargetRocks(
+  step: MacroStep,
+  obs: ScriptObservation,
+  snapshot: SpaceSnapshot,
+  measurement: SpaceMeasurement | null,
+  board: ScriptBoard,
+  pinned: boolean,
+  family: OreFamilyArg | null,
+  ores: readonly OreFamilyArg[],
+  tier: number,
+): MacroTick {
+  const belts = snapshot.entities.filter((e) => /belt/i.test(e.name ?? ""));
+
+  if (pinned) {
     const belt = beltTarget(step, belts, measurement);
     if (belt === null) {
-      const reason = isChosenBelt(step)
-        ? "The belt this step is pinned to is not on this grid."
-        : "There is no asteroid belt here to mine at.";
       return tick(WAIT, "No asteroid belt in view to mine at.", "Nothing to mine", {
         kind: "blocked",
-        reason,
+        reason: "The belt this step is pinned to is not on this grid.",
       });
     }
     const beltDist = measurement?.distances.get(belt.itemID) ?? Number.POSITIVE_INFINITY;
     if (beltDist <= BELT_ARRIVAL_RADIUS_M) {
-      return tick(WAIT, "At the belt, but there are no rocks left.", "Belt empty", {
-        kind: "blocked",
-        reason: "This belt has no rocks left to mine.",
-      });
+      const reason = family !== null ? `No ${family.name} left here.` : "This belt has no rocks left to mine.";
+      return tick(WAIT, "At the belt, but there is nothing to mine.", "Belt empty", { kind: "blocked", reason });
     }
     return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${rockLabel(belt)}.`, "Flying to the belt", ACTING, false, {});
   }
 
+  // Nearest mode — rotate. Belts not on this grid at all can't be flown to
+  // either, so that is the same "nothing to mine here" block as before.
+  if (belts.length === 0) {
+    return tick(WAIT, "No asteroid belt in view to mine at.", "Nothing to mine", {
+      kind: "blocked",
+      reason: "There is no asteroid belt here to mine at.",
+    });
+  }
+
+  const dryNames = dryBeltNames(obs.dryBelts ?? null, family);
+  const options: readonly BeltOption[] = belts.map((b) => ({
+    id: b.itemID,
+    name: b.name,
+    distance: measurement?.distances.get(b.itemID) ?? null,
+  }));
+  const emptied = belts.filter((b) => b.name !== null && dryNames.has(b.name)).map((b) => b.itemID);
+  const target = nearestUnworkedBelt(options, new Set(emptied));
+
+  if (target === null) {
+    // Every belt on this grid is reported dry by the shared memory. There is
+    // no "emptied this tour" set of our own to clear here — the BFF's memory
+    // ages entries out on its own, and THAT is what lets a later tour (of this
+    // tier, or any pilot's) find rock that has respawned since.
+    if (family !== null && tier + 1 < ores.length) {
+      return withBoardPatch(
+        tick(WAIT, `No ${family.name} left in this system, moving to the next ore.`, "Switching ore", ACTING, false, {}),
+        { [MINE_ORE_TIER_KEY]: tier + 1 },
+      );
+    }
+    const reason = family !== null
+      ? "None of the ores on your list are left in this system."
+      : "Every asteroid belt in this system is mined out.";
+    return tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason });
+  }
+
+  const targetDist = target.distance ?? Number.POSITIVE_INFINITY;
+  if (targetDist <= BELT_ARRIVAL_RADIUS_M) {
+    // On grid with it, and it has none of what we want — tell the BFF's
+    // shared memory (name-keyed) instead of writing a board patch of our own,
+    // so every pilot's rotation, not just this one, steers away from it.
+    const systemName = obs.systemName ?? null;
+    const beltName = target.name ?? null;
+    if (systemName === null || beltName === null) {
+      const reason = "The bot cannot tell which solar system this is.";
+      return tick(WAIT, reason, "Belt empty", { kind: "blocked", reason });
+    }
+    const why = family !== null
+      ? `No ${family.name} left here, moving to the next belt.`
+      : "This belt is mined out, moving to the next belt.";
+    return tick(
+      { kind: "rememberBeltDry", systemName, beltName, groupID: family?.groupID ?? null },
+      why,
+      "Belt empty",
+      ACTING,
+    );
+  }
+  return tick(
+    { kind: "warp", targetID: target.id },
+    `Warping to ${target.name ?? "the belt"}.`,
+    "Flying to the belt",
+    ACTING,
+    false,
+    {},
+  );
+}
+
+/** Belt names the shared memory reports dry — for `family`'s tier, or entirely. */
+function dryBeltNames(dryBelts: readonly DryBelt[] | null, family: OreFamilyArg | null): ReadonlySet<string> {
+  const names = new Set<string>();
+  if (dryBelts === null) {
+    return names;
+  }
+  for (const dry of dryBelts) {
+    if (dry.all || (family !== null && dry.families.includes(family.groupID))) {
+      names.add(dry.beltName);
+    }
+  }
+  return names;
+}
+
+/** We have rocks (of the current tier, when there is one) — the core lock-and-mine loop. */
+function mineWithRocks(
+  step: MacroStep,
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  snapshot: SpaceSnapshot,
+  rocks: readonly SpaceEntity[],
+  measurement: SpaceMeasurement | null,
+): MacroTick {
   // We have rocks. Track the one we are working.
   let rockID = num(mem, "rockID");
   const present = rockID !== null && rocks.some((r) => r.itemID === rockID);
@@ -516,7 +692,7 @@ const mineAtBelt: MacroDecider = (step, obs, mem) => {
     );
   }
   return tick(WAIT, "Mining the rock.", "Mining", ACTING, true, { rockID, lockIssued: true, waited: 0, approachedRockID: rockID });
-};
+}
 
 // ── deliver-ore ──────────────────────────────────────────────────────────────
 // Fly to the station — same system or across the map, on the SHARED autopilot —
@@ -645,6 +821,20 @@ function boardNum(board: ScriptBoard, key: string): number | null {
   const value = board[key];
   return typeof value === "number" ? value : null;
 }
+
+/** Attach a board patch to an already-built tick (`tick()` itself has no slot for one). */
+function withBoardPatch(t: MacroTick, patch: ScriptBoard): MacroTick {
+  return { ...t, boardPatch: patch };
+}
+
+// ── belt rotation bookkeeping (mine-at-belt, nearest mode) ─────────────────
+// Which belts have been found dry lives OFF this board entirely now — it is
+// the BFF's shared, name-keyed memory (see the `mineAtBelt` header comment
+// and `dryBeltNames` above), so every pilot's rotation sees the same picture
+// and a later tour finds rock that respawned once the BFF's entry ages out.
+// The current ORE TIER stays per-pilot on this run board: two pilots working
+// the same system can legitimately be working different tiers.
+const MINE_ORE_TIER_KEY = "mineOreTier";
 
 /** The agent this mission step works with: its own pick, or the board's. */
 function stepAgentID(step: MacroStep, board: ScriptBoard): number | null {

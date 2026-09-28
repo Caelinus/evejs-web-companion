@@ -583,6 +583,7 @@ test("the target bracket names a locked target and shows its condition", () => {
     remainingQuantity: null,
     miningYieldTypeID: null,
     beltID: null,
+    oreGrade: null,
     isNpc: true,
     npcEntityType: "npc",
     controllerID: null,

@@ -32,6 +32,7 @@ function entity(over: Partial<SpaceEntity> & { itemID: number }): SpaceEntity {
     remainingQuantity: null,
     miningYieldTypeID: null,
     beltID: null,
+    oreGrade: null,
     isNpc: false,
     npcEntityType: null,
     ...over,

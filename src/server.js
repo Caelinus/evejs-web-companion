@@ -16,6 +16,7 @@ const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
+const { createBeltMemory } = require("./beltMemory");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -99,6 +100,12 @@ app.locals.bridgeSessions = bridgeSessions;
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
 app.locals.botScripts = botScripts;
+// Shared, in-process (never persisted — see src/beltMemory.js) memory of belts
+// mining bots have found dry, keyed by solar-system NAME then belt NAME. Every
+// account's bots share the one instance; a restart forgets it, which is fine —
+// belts repopulate and entries expire on their own.
+const beltMemory = options.beltMemory || createBeltMemory();
+app.locals.beltMemory = beltMemory;
 fs.mkdirSync(config.iconCacheDir, { recursive: true });
 
 app.disable("x-powered-by");
@@ -16686,6 +16693,41 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
   }
 });
 
+// The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level) of the
+// rock's ore type: 0-Grade=0, plain=1, II-Grade=2, III=3, IV=4. Stamped onto
+// each ROCK row of a space snapshot from static data before it reaches the
+// browser, because the gateway's own row carries the ore's typeID but not its
+// grade. Non-rock rows pass through untouched; a non-numeric attribute (or a
+// rock whose ore has none) reads as null, never 0 — see SpaceEntity.oreGrade.
+const ASTEROID_META_LEVEL_ATTRIBUTE = 2699;
+
+function isRockSpaceEntityRow(row) {
+  return Boolean(
+    row &&
+      typeof row === "object" &&
+      (row.beltID || row.miningYieldTypeID || row.kind === "asteroid"),
+  );
+}
+
+function withOreGrades(space) {
+  if (!space || typeof space !== "object" || !Array.isArray(space.entities)) {
+    return space;
+  }
+  return {
+    ...space,
+    entities: space.entities.map((row) => {
+      if (!isRockSpaceEntityRow(row)) {
+        return row;
+      }
+      const grade = staticData.getTypeDogmaAttribute(row.typeID, ASTEROID_META_LEVEL_ATTRIBUTE, null);
+      return {
+        ...row,
+        oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+      };
+    }),
+  };
+}
+
 // R11 space overview + ship HUD. A read-only snapshot of what the ship can see
 // right now — the visible entities around it and the active ship's shield /
 // armor / hull / capacitor. The browser polls this ~1s while in space with the
@@ -16703,7 +16745,11 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
     const outcome = await gateway.readSpaceSnapshot(held.bridgeSessionID, {
       userid: held.accountID,
     });
-    res.json({ ok: true, space: outcome.space, notifications: outcome.notifications });
+    res.json({
+      ok: true,
+      space: withOreGrades(outcome.space),
+      notifications: outcome.notifications,
+    });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
       forgetBridgeSession(req.webSessionID);
@@ -17870,6 +17916,23 @@ app.get("/api/market/find", requireAuth, async (req, res, next) => {
   }
 });
 
+// The ore families for the bot editor's ore picker: the distinct type GROUPS
+// of published Asteroid-category types (goal: mine-ore-priority). Static
+// reference data, like /api/market/find — no gateway call.
+app.get("/api/ore/families", requireAuth, async (req, res, next) => {
+  try {
+    const families = staticData.listOreFamilies();
+    res.json({
+      ok: true,
+      source: "static-data",
+      count: families.length,
+      families,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /**
  * R83 — BROWSING THE MARKET BY GROUP.
  *
@@ -18409,6 +18472,56 @@ const BOT_START_STATUS = {
 app.get("/api/bots", requireAuth, (req, res, next) => {
   try {
     res.json({ ok: true, bots: botHost.list(req.account.accountID) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Shared belt memory (goal: mine-ore-priority) ────────────────────────────
+// In-process only, keyed by solar-system NAME then belt NAME (see
+// src/beltMemory.js for why belt entity ids are not usable). No gateway call
+// either way — this is BFF-local bookkeeping every account's bots share.
+app.get("/api/bots/belt-memory", requireAuth, (req, res, next) => {
+  try {
+    const system = typeof req.query.system === "string" ? req.query.system.trim() : "";
+    if (!system) {
+      res.status(400).json({ ok: false, error: "INVALID_SYSTEM", message: "A system name is required." });
+      return;
+    }
+    res.json({ ok: true, system, belts: beltMemory.dryBelts(system) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bots/belt-memory", requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const system = typeof body.system === "string" ? body.system.trim() : "";
+    const beltName = typeof body.beltName === "string" ? body.beltName.trim() : "";
+    if (!system || !beltName) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_BELT",
+        message: "A system name and a belt name are required.",
+      });
+      return;
+    }
+    let groupID = null;
+    if (body.groupID !== null && body.groupID !== undefined) {
+      const numeric = Number(body.groupID);
+      if (!Number.isSafeInteger(numeric) || numeric <= 0) {
+        res.status(400).json({
+          ok: false,
+          error: "INVALID_GROUP",
+          message: "groupID must be null or a positive integer.",
+        });
+        return;
+      }
+      groupID = numeric;
+    }
+    beltMemory.markDry(system, beltName, groupID);
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }

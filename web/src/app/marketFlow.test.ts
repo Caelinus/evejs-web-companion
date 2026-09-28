@@ -431,6 +431,35 @@ test("a query too short to be useful never reaches the BFF", async () => {
   );
 });
 
+// --- Ore families (bot editor ore picker) -----------------------------------
+
+test("listOreFamilies loads the ore families from static data", async () => {
+  const { flow, requests } = makeFlow(
+    respondOk((path) =>
+      path.startsWith("/api/ore/families")
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              source: "static-data",
+              count: 2,
+              families: [
+                { groupID: 460, name: "Scordite" },
+                { groupID: 462, name: "Veldspar" },
+              ],
+            },
+          }
+        : null,
+    ),
+  );
+  const families = await flow.listOreFamilies();
+  assert.deepEqual(families, [
+    { groupID: 460, name: "Scordite" },
+    { groupID: 462, name: "Veldspar" },
+  ]);
+  assert.ok(requests.some((entry) => entry.path.startsWith("/api/ore/families")));
+});
+
 // =============================================================================
 // Slice B: the WRITES
 // =============================================================================

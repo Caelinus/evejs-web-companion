@@ -116,6 +116,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   message: "Message",
   destination: "Destination",
   pick: "Which rock first",
+  ores: "Ore priority",
 };
 
 function paramView(arg: MacroArgSpec): MacroParamView {
@@ -158,7 +159,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "mine-at-belt": entry(
     "mine-at-belt",
     "mining",
-    "Warps to a belt, locks rocks, and runs your mining equipment — moving on when a belt runs dry.",
+    "Warps to a belt, locks rocks, and runs your mining equipment — moving belt to belt as each one runs dry, and following an ore priority list when you set one.",
     "A belt and mining equipment fitted",
   ),
   "deliver-ore": entry(

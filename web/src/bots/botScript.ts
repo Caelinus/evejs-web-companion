@@ -237,7 +237,26 @@ export type Arg =
    */
   | { readonly kind: "destination"; readonly ref: WorldRef }
   /** Which rock a mining step reaches for first. */
-  | { readonly kind: "rockPick"; readonly pick: RockPick };
+  | { readonly kind: "rockPick"; readonly pick: RockPick }
+  /** An ORDERED ore priority list for the mine block (first = most wanted).
+   * Empty or absent = any rock, the shipped behaviour. */
+  | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] };
+
+/**
+ * One ORE FAMILY the mine block prefers — Veldspar, Kernite, … — identified by
+ * its type GROUP, never a name pattern (R47, the same rule as EquipmentArg):
+ * every grade of an ore (0-Grade, plain, II-, III-, IV-Grade) shares one group,
+ * and a rock in the space snapshot carries its groupID. `name` is the display
+ * hint. Which GRADE to reach for first inside a family is the runtime's job
+ * (`SpaceEntity.oreGrade`, highest first), not something the player lists.
+ */
+export interface OreFamilyArg {
+  readonly groupID: number;
+  readonly name: string;
+}
+
+/** How long an ore priority list may be. Past ten a player is not prioritising. */
+export const MAX_ORE_LIST = 10;
 
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";

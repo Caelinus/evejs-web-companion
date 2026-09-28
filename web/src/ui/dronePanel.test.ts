@@ -126,6 +126,7 @@ function spaceRow(over: Record<string, unknown> & { itemID: number }): unknown {
     remainingQuantity: null,
     miningYieldTypeID: null,
     beltID: null,
+    oreGrade: null,
     isNpc: false,
     npcEntityType: null,
     controllerID: null,

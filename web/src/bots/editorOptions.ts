@@ -61,7 +61,8 @@ export type WidgetKind =
   | "qty-input"
   | "character-picker"
   | "destination-picker"
-  | "rock-pick-select";
+  | "rock-pick-select"
+  | "ore-list-picker";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
@@ -80,6 +81,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   character: "character-picker",
   destination: "destination-picker",
   rockPick: "rock-pick-select",
+  oreList: "ore-list-picker",
 };
 
 /** A plain-language name for an argument KIND — used when no per-macro label fits. */
@@ -99,6 +101,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   character: "Pilot",
   destination: "Destination",
   rockPick: "Which rock first",
+  oreList: "Ore priority",
 };
 
 /**

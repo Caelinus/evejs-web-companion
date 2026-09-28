@@ -288,7 +288,10 @@ function macroPhrase(step: MacroStep): string {
       const where = belt !== undefined && belt.kind === "belt" ? beltPhrase(belt.belt) : "a belt you pick";
       const pick = step.args["pick"];
       const order = pick !== undefined && pick.kind === "rockPick" && pick.pick === "biggest" ? ", biggest rocks first" : "";
-      return `Mine at ${where}${order}`;
+      const ores = step.args["ores"];
+      const oreNames = ores !== undefined && ores.kind === "oreList" ? ores.ores.map((ore) => ore.name).filter((name) => name.length > 0) : [];
+      const oreWord = oreNames.length > 0 ? `, ${oreNames.join(" then ")} first` : "";
+      return `Mine at ${where}${order}${oreWord}`;
     }
     case "travel-to-station": {
       const station = step.args["station"];
