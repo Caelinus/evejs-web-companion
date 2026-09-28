@@ -38,5 +38,5 @@
 {:else if tab === "companion"}
   <FleetCompanions {sessions} {onGoToPilot} />
 {:else if tab === "piManager"}
-  <PiManager />
+  <PiManager {sessions} />
 {/if}

@@ -34,6 +34,7 @@ import {
   type ColonyFindingUrgency,
 } from "./colonyAttention.ts";
 import { colonyPlaceWords, formatDuration, serverNow, summarizeColony } from "./planets.ts";
+import { extractorReroute } from "./colonyRoutes.ts";
 
 /**
  * What the latest attempt to read a pilot did.
@@ -93,6 +94,8 @@ export interface PiPilotRow {
   readonly pilotName: string;
   /** The sentence about this pilot when there is one to say; null otherwise. */
   readonly noteWords: string | null;
+  /** Read, and found with no colony: the one note a roster can fold away. */
+  readonly notBuilt: boolean;
   readonly colonyCount: number;
   /** How old this pilot's reading is, or null when there is none. */
   readonly readAgeWords: string | null;
@@ -248,18 +251,29 @@ function dispatchFor(
   if (reading !== null) {
     const nowMs = serverNow(reading.report.clockOffsetMs, input.browserNowMs);
     const { extractors, colonies } = restartableExtractors(reading, nowMs);
-    if (extractors > 0) {
-      const ended = extractors === 1 ? "1 extractor has" : `${extractors} extractors have`;
+    // Routes still sized for an earlier program: the same run re-sizes them
+    // (the retail client does it in the install edit; see colonyRoutes.ts).
+    const reroutes = reading.report.colonies.reduce((total, colony) => total + colony.pins
+      .filter((pin) => pin.kind === "extractor-control" && extractorReroute(colony, pin.pinID) !== null)
+      .length, 0);
+    if (extractors > 0 || reroutes > 0) {
       const where = colonies === 1 ? "1 colony" : `${colonies} colonies`;
+      const ended = extractors === 0
+        ? null
+        : `${extractors === 1 ? "1 extractor has" : `${extractors} extractors have`} ended on ${where}.`;
+      const short = reroutes === 0
+        ? null
+        : `${reroutes === 1 ? "1 extractor yields" : `${reroutes} extractors yield`} more than ${reroutes === 1 ? "its" : "their"} routes carry.`;
       restart = {
         // Not while a bot flies the pilot, while it is being read, or while a
         // start from here is in flight or has just gone out.
         enabled: !flying && attempt !== "reading" && state?.kind !== "starting" && state?.kind !== "started",
-        label: "Restart extractors",
+        label: extractors > 0 ? "Restart extractors" : "Fix extractor routes",
         // "an hour": PI_RESTART_RUNTIME_MINUTES in app/piDispatch.ts.
         words:
-          `${ended} ended on ${where}. This starts a server run for ${pilotName} that restarts every ` +
-          "ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+          `${[ended, short].filter((part) => part !== null).join(" ")} This starts a server run for ${pilotName} that restarts every ` +
+          "ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, " +
+          "then stops. It changes nothing else and runs for an hour at most.",
       };
     }
   }
@@ -415,6 +429,9 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
       characterID,
       pilotName,
       noteWords: pilotNote(pilotName, knownName !== undefined, attempt, reading),
+      notBuilt: knownName !== undefined
+        && attempt !== "no-account" && attempt !== "failed" && attempt !== "unanswered"
+        && reading !== null && reading.report.coloniesReadable && reading.report.colonies.length === 0,
       colonyCount: reading?.report.colonies.length ?? 0,
       readAgeWords: reading === null ? null : ageWords(reading, input.browserNowMs),
       busy: attempt === "reading",
@@ -553,4 +570,44 @@ function emptyWords(input: PiBoardInput): string | null {
       && reading.report.colonies.length === 0;
   });
   return everyoneEmpty ? "None of your pilots has built on a planet yet." : null;
+}
+
+/**
+ * One account's pilots on the roster. A pilot with colonies, or with anything
+ * else to say, gets a row; one read and found with no colony is only a name.
+ */
+export interface PiAccountGroup {
+  /** Null for pilots no longer in the hangar, whose account is not known. */
+  readonly accountName: string | null;
+  readonly rows: readonly PiPilotRow[];
+  readonly notBuilt: readonly PiPilotRow[];
+  readonly colonyCount: number;
+  /** Said once for the account when every pilot in it reads the same; else null. */
+  readonly readAgeWords: string | null;
+}
+
+/** The roster by account, accounts by name and pilots in roster order. */
+export function pilotsByAccount(
+  pilots: readonly PiPilotRow[],
+  accountOf: ReadonlyMap<number, string>,
+): PiAccountGroup[] {
+  const byAccount = new Map<string | null, PiPilotRow[]>();
+  for (const pilot of pilots) {
+    const accountName = accountOf.get(pilot.characterID) ?? null;
+    byAccount.set(accountName, [...(byAccount.get(accountName) ?? []), pilot]);
+  }
+  return [...byAccount.entries()]
+    .sort(([left], [right]) =>
+      left === null ? 1 : right === null ? -1 : left.localeCompare(right))
+    .map(([accountName, members]) => {
+      const ages = new Set(members.map((pilot) => pilot.readAgeWords));
+      const [onlyAge] = ages;
+      return {
+        accountName,
+        rows: members.filter((pilot) => !pilot.notBuilt),
+        notBuilt: members.filter((pilot) => pilot.notBuilt),
+        colonyCount: members.reduce((total, pilot) => total + pilot.colonyCount, 0),
+        readAgeWords: ages.size === 1 && onlyAge !== undefined ? onlyAge : null,
+      };
+    });
 }

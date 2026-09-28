@@ -33,6 +33,7 @@ import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import type { RefusalRecord } from "./refusalLedger.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
+import type { ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import type { PropulsionModule } from "./propulsion.ts";
 
@@ -446,6 +447,12 @@ export interface ScriptObservation {
       /** The drill area to reinstall with (it sets the run length); null = unknown. */
       readonly headRadius?: number | null;
     }[];
+    /**
+     * Extractors whose storage routes reserve less than the installed
+     * program's maximum cycle, each with the retail re-size that settles it
+     * (bridge/colonyRoutes.ts). Absent = nobody looked.
+     */
+    readonly reroutes?: readonly ExtractorReroute[];
     /**
      * Every structure on the planet, for the blocks that act on a hold rather
      * than on a program.

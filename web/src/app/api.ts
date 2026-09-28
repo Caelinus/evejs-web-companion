@@ -3215,6 +3215,41 @@ export async function deleteBotScript(scriptID: string, options: ApiOptions = {}
   await postJson(`/api/botscripts/${encodeURIComponent(scriptID)}/delete`, {}, options);
 }
 
+// ─── Saved PI plans (src/piPlanStore.js) ─────────────────────────────────────
+// Rows from the companion's own database. The answers are handed back RAW:
+// app/piPlans.ts decodes them, so a stored row and a fresh one go through the
+// same door.
+
+/** The fields a plan may carry on create or update. */
+export interface PiPlanFields {
+  readonly typeID?: number;
+  readonly quantity?: number;
+  readonly note?: string;
+  readonly status?: "active" | "done";
+}
+
+export async function listPiPlans(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/pi/plans", options)).plans ?? null;
+}
+
+export async function createPiPlan(fields: PiPlanFields, options: ApiOptions = {}): Promise<JsonValue> {
+  return (await postJson("/api/pi/plans", fields, options)).plan ?? null;
+}
+
+export async function updatePiPlan(
+  planID: string,
+  fields: PiPlanFields,
+  baseRev: number,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/pi/plans/${encodeURIComponent(planID)}`, { ...fields, baseRev }, options);
+  return data.plan ?? null;
+}
+
+export async function deletePiPlan(planID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/pi/plans/${encodeURIComponent(planID)}/delete`, {}, options);
+}
+
 // ─── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies on a session of its own, so it keeps running when
 // this tab goes away. These calls are the remote control: start a saved
@@ -3592,6 +3627,23 @@ export async function loadRosterPlanets(
     `/api/roster/planets?characterIDs=${encodeURIComponent(ids.join(","))}`,
     options,
   );
+}
+
+// --- R108 slice 5: a corporation's hangars, read through a held session -----
+// GET /api/bridge/corp-assets (the R61 corpmgr reads). Without a locationID it
+// answers where the corp has offices (`inventory`); with one it also answers
+// what is in that office (`locationInventory`). The body goes back RAW, for
+// bridge/corpAssets.ts to unwrap. It rides the HELD session of `options`: corp
+// goods are in no pilot's snapshot, so a pilot of that corp must be online.
+
+export async function loadCorpAssets(
+  locationID: number | null,
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const query = locationID !== null && Number.isSafeInteger(locationID) && locationID > 0
+    ? `?which=offices&locationID=${locationID}`
+    : "?which=offices";
+  return getJson(`/api/bridge/corp-assets${query}`, options);
 }
 
 // --- R107 The hangar's training column, for pilots who are NOT signed in ----
@@ -4124,6 +4176,34 @@ export async function restartExtractorProgram(
   await postJson(
     "/api/bridge/planet/network/update",
     { planetID, changes: [[13, [pinID, resourceTypeID, headRadius]]], confirm: true },
+    options,
+  );
+}
+
+/**
+ * Re-size an extractor's routes: remove the old ones and create the new ones
+ * in ONE network edit, so the colony is never left with the extractor
+ * unrouted between two submits.
+ *
+ * Command 7 = REMOVEROUTE(routeID); command 6 = CREATEROUTE(routeID, path,
+ * typeID, quantity). A new route carries a temporary id the way the retail
+ * client mints one (clientColony.GetTemporaryRouteID: the tuple (2, n)); the
+ * server allocates the real id.
+ */
+export async function rerouteExtractorRoutes(
+  planetID: number,
+  removeRouteIDs: readonly number[],
+  create: readonly { readonly path: readonly number[]; readonly typeID: number; readonly quantity: number }[],
+  options: ApiOptions = {},
+): Promise<void> {
+  const changes: JsonValue[] = [
+    ...removeRouteIDs.map((routeID): JsonValue => [7, [routeID]]),
+    ...create.map((route, index): JsonValue =>
+      [6, [[2, index + 1], [...route.path], route.typeID, route.quantity]]),
+  ];
+  await postJson(
+    "/api/bridge/planet/network/update",
+    { planetID, changes, confirm: true },
     options,
   );
 }

@@ -2739,6 +2739,12 @@ export interface ColonyExtractionProgram {
   readonly expiresAtMs: number | null;
   readonly headCount: number;
   /**
+   * The most one cycle can yield, which is what this extractor's routes must
+   * reserve between them before the game calls it settled (retail
+   * EcuPin.GetMaxOutput). Null or absent when the BFF could not say.
+   */
+  readonly maxOutputPerCycle?: number | null;
+  /**
    * The drill area the program was installed with — which is also what sets
    * how long it runs. A restart sends it back unchanged. Null or absent when
    * the server gave none (an older BFF), and then nothing may guess one.
@@ -2780,6 +2786,12 @@ export interface ColonyPin {
    */
   readonly hasReceivedInputs: boolean | null;
   readonly receivedInputsLastCycle: boolean | null;
+  /**
+   * Whether the pin is running right now (retail BasePin.IsActive). A factory
+   * set to a recipe but waiting for inputs is false. Null or absent when the
+   * server gave no state, which is NOT "idle".
+   */
+  readonly active?: boolean | null;
   /** When this pin last ran, and (launchpads, command centres) last launched. */
   readonly lastRunAtMs: number | null;
   readonly lastLaunchAtMs: number | null;
@@ -2821,6 +2833,19 @@ export interface Colony {
   readonly linkCount: number;
   readonly links: readonly ColonyLink[];
   readonly routes: readonly ColonyRoute[];
+  /**
+   * What the planet carries and how rich each resource is, as the server
+   * states it (R108 slice 5). Null or absent when the read carried no record
+   * for the planet: unknown, never "carries nothing".
+   */
+  readonly resources?: readonly PlanetResource[] | null;
+}
+
+/** One resource a planet carries. `quality` is the server's number, unscaled. */
+export interface PlanetResource {
+  readonly typeID: number;
+  readonly typeName: string | null;
+  readonly quality: number | null;
 }
 
 /** The decoded GET /api/bridge/planets payload. */

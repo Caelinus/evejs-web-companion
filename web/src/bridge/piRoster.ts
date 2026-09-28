@@ -33,6 +33,63 @@ export interface PilotColonyReading {
   /** When this pilot's colonies were read, on the server's clock. Null if unstated. */
   readonly readAtMs: number | null;
   readonly report: ColonyReport;
+  /**
+   * The pilot's planetary goods outside its colonies (R108 slice 5), read in the
+   * same snapshot. Absent or null when the entry carried no stock at all — a reading
+   * stored before the route sent it — which is "not read", never "holds none".
+   */
+  readonly stock?: readonly PilotStockStack[] | null;
+  /** The pilot's corporation, whose hangars it could read online. Absent or null: unknown. */
+  readonly corporationID?: number | null;
+}
+
+/** What holds a stack inside the station: nothing (the hangar), a ship, a container. */
+export type StockHolder = "hangar" | "ship" | "container";
+
+/** So much of one planetary good, in one place, owned by the pilot. */
+export interface PilotStockStack {
+  readonly typeID: number;
+  readonly typeName: string | null;
+  readonly quantity: number;
+  /** The station it is docked at; null when the read could not place it. */
+  readonly locationID: number | null;
+  /** Null when the static map does not name the place — never the id (R7d). */
+  readonly locationName: string | null;
+  readonly holder: StockHolder;
+  /** The ship's or container's name; null in the hangar. */
+  readonly holderName: string | null;
+}
+
+const HOLDERS: readonly StockHolder[] = ["hangar", "ship", "container"];
+
+function decodeStockStack(value: JsonValue): PilotStockStack | null {
+  const record = asRecord(value);
+  const typeID = Number(record.typeID);
+  const quantity = Number(record.quantity);
+  if (!Number.isSafeInteger(typeID) || typeID <= 0 || !Number.isFinite(quantity) || quantity <= 0) {
+    return null;
+  }
+  const locationID = Number(record.locationID);
+  const holder = HOLDERS.find((entry) => entry === record.holder) ?? "hangar";
+  const name = (field: JsonValue | undefined): string | null =>
+    typeof field === "string" && field.length > 0 ? field : null;
+  return {
+    typeID,
+    typeName: name(record.typeName),
+    quantity,
+    locationID: Number.isSafeInteger(locationID) && locationID > 0 ? locationID : null,
+    locationName: name(record.locationName),
+    holder,
+    holderName: holder === "hangar" ? null : name(record.holderName),
+  };
+}
+
+/** Null when the entry carried no stock list at all; see PilotColonyReading. */
+function decodeStock(value: JsonValue | undefined): readonly PilotStockStack[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.map(decodeStockStack).filter((stack): stack is PilotStockStack => stack !== null);
 }
 
 function asRecord(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -75,6 +132,10 @@ export function decodeRosterColonies(
       characterID,
       readAtMs: asInstant(pilot.readAtMs),
       report: decodeColonyReport({ ...pilot, serverNowMs }, browserNowMs),
+      stock: decodeStock(pilot.stock),
+      corporationID: Number.isSafeInteger(Number(pilot.corporationID)) && Number(pilot.corporationID) > 0
+        ? Number(pilot.corporationID)
+        : null,
     });
   }
   return readings;

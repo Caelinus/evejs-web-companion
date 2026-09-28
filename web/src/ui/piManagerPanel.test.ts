@@ -132,11 +132,22 @@ function renderSeeded(): string {
           colonyWire(40000002, "Alpha I", now + 30 * 60 * MINUTE),
           colonyWire(40000004, "Alpha II", now - 30 * MINUTE),
         ],
+        stock: [
+          {
+            typeID: 2268,
+            typeName: "Aqueous Liquids",
+            quantity: 5000,
+            locationID: 60000004,
+            locationName: "Alpha I - Moon 1 - Station",
+            holder: "ship",
+            holderName: "Hauler One",
+          },
+        ],
       },
       { characterID: NEWBIE, readAtMs: readAt, coloniesReadable: true, colonies: [] },
     ],
   };
-  savePiRoster(recordPiAnswer(addPiMembers(EMPTY_PI_ROSTER, [FARMER, NEWBIE, STRANGER]), answer, readAt));
+  savePiRoster(recordPiAnswer(addPiMembers(EMPTY_PI_ROSTER, [FARMER, NEWBIE, STRANGER]), answer as never, readAt));
   try {
     return render(PiManager as never, { props: {} } as never).body;
   } finally {
@@ -186,7 +197,9 @@ test("⚠ the window draws one frame, not a box per section", () => {
 
 test("⚠ each pilot's outcome is said about that pilot", () => {
   const text = visibleText(renderSeeded());
-  assert.match(text, /Cy Newbie Cy Newbie has not built on a planet yet\./);
+  // Read and found with no colony: folded to a name, not a sentence per alt.
+  assert.match(text, /Not on a planet yet Cy Newbie/);
+  assert.doesNotMatch(text, /has not built on a planet yet/);
   assert.match(
     text,
     /A pilot no longer in the hangar This pilot is no longer in the hangar, so there is no account to read with\./,
@@ -196,9 +209,11 @@ test("⚠ each pilot's outcome is said about that pilot", () => {
 test("taking a pilot off the list is called Remove, never 'Take off'", () => {
   // In a game about ships "Take off" reads as launching the ship. This button
   // only edits the list: nothing is signed in, selected or undocked.
-  const text = visibleText(renderSeeded());
-  assert.match(text, /\bRemove\b/);
-  assert.doesNotMatch(text, /take off/i);
+  const body = renderSeeded();
+  // A quiet glyph, named for the pilot it removes, on rows and on names alike.
+  assert.match(body, /aria-label="Remove Ada Farmer"/);
+  assert.match(body, /aria-label="Remove Cy Newbie"/);
+  assert.doesNotMatch(body, /take off/i);
 });
 
 test("the add list offers pilots not yet on it, and a squad with someone new", () => {
@@ -220,10 +235,26 @@ test("a pilot with an ended extractor is offered a restart, said before the butt
   const text = visibleText(renderSeeded());
   assert.match(
     text,
-    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
+    /1 extractor has ended on 1 colony\. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, then stops\. It changes nothing else and runs for an hour at most\. Restart extractors/,
   );
   // Only one pilot has anything to restart.
   assert.equal(text.match(/Restart extractors/g)?.length, 1);
+});
+
+test("the restart is offered on the pilot's colonies, not on the roster", () => {
+  const body = renderSeeded();
+  const colonies = body.slice(body.indexOf('id="pi-view-colonies"'), body.indexOf('id="pi-view-pilots"'));
+  const pilots = body.slice(body.indexOf('id="pi-view-pilots"'), body.indexOf('id="pi-view-stock"'));
+  assert.match(visibleText(colonies), /Ada Farmer - 2 colonies, Alpha Read 2 hours ago 1 extractor has ended/);
+  assert.doesNotMatch(pilots, /Restart extractors/);
+});
+
+test("the roster is grouped by account, and a shared age is said once", () => {
+  const body = renderSeeded();
+  const text = visibleText(body.slice(body.indexOf('id="pi-view-pilots"'), body.indexOf('id="pi-view-stock"')));
+  assert.match(text, /alpha 2 pilots, 2 colonies - Read 2 hours ago Ada Farmer 2 colonies, Alpha/);
+  // A pilot whose account is not known any more is still listed.
+  assert.match(text, /No longer in the hangar 1 pilot A pilot no longer in the hangar/);
 });
 
 test("⚠ a restart goes through the server bot host, never a select in this tab", () => {
@@ -251,7 +282,7 @@ test("⚠ the window never selects a character, and never reads on a timer", () 
 
 test("the window has its own menu, and shows one view at a time", () => {
   const body = renderSeeded();
-  for (const id of ["colonies", "pilots", "planner"]) {
+  for (const id of ["colonies", "stock", "planner", "pilots"]) {
     assert.match(body, new RegExp(`<button[^>]*role="tab"[^>]*id="pi-tab-${id}"`));
   }
   // A roster with pilots opens on Colonies; the other views are hidden, not
@@ -260,12 +291,14 @@ test("the window has its own menu, and shows one view at a time", () => {
   assert.doesNotMatch(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
   assert.match(body, /<section[^>]*id="pi-view-pilots"[^>]*hidden/);
   assert.match(body, /<section[^>]*id="pi-view-planner"[^>]*hidden/);
+  assert.match(body, /<section[^>]*id="pi-view-stock"[^>]*hidden/);
 });
 
 test("the menu badges say what waits in each view", () => {
   const text = visibleText(renderSeeded());
-  // One colony needs you; one pilot has a restart to offer.
-  assert.match(text, /Colonies 1 Pilots 1 Planner/);
+  // One colony needs you. The restart waits on the colonies too, so Pilots
+  // has no badge of its own.
+  assert.match(text, /Colonies 1 Stock Planner Pilots (?!\d)/);
 });
 
 test("an empty roster opens on Pilots, where a pilot is added", () => {
@@ -276,6 +309,27 @@ test("an empty roster opens on Pilots, where a pilot is added", () => {
   assert.match(body, /<section[^>]*id="pi-view-colonies"[^>]*hidden/);
 });
 
-test("the planner says it is not built, rather than pretending to plan", () => {
-  assert.match(visibleText(renderSeeded()), /The planner is not built yet\./);
+test("the planner says plainly when it has no recipe table to plan with", () => {
+  // Rendering never reads, so the table was never read: say so, offer no form.
+  const body = renderSeeded();
+  assert.match(visibleText(body), /The recipe table has not been read yet\. Refresh reads it\./);
+  assert.doesNotMatch(body, /id="pi-plan-quantity"/);
+});
+
+test("stock says where every unit sits, and what each part of the total rests on", () => {
+  const body = renderSeeded();
+  const text = visibleText(body);
+  // The line, in the hangar column, with the colony column empty.
+  assert.match(text, /Aqueous Liquids - 5,000 - 5,000/);
+  // What each part of the total rests on, said beside the numbers.
+  assert.match(text, /Colonies and personal hangars - 1 pilot, oldest read 2 hours ago/);
+  assert.match(text, /Personal hangars of Cy Newbie not read yet\. Refresh reads them\./);
+  assert.match(text, /A pilot no longer in the hangar not read, so nothing they hold is counted\./);
+});
+
+test("the corp hangar read rides a session already online, and never signs anyone in itself", () => {
+  // It is reached only through the tab's sessions, on each pilot's own options.
+  assert.match(SOURCE, /session\.flow\.requestOptions\(\)/);
+  const corpRead = readFileSync(path.join(UI_DIR, "../app/piCorpRead.ts"), "utf8");
+  assert.doesNotMatch(corpRead, /login|signIn|selectCharacter|\/api\/bridge\/select/);
 });

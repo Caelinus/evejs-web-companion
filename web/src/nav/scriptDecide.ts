@@ -187,6 +187,22 @@ export type ScriptAction =
       readonly headRadius: number;
     }
   /**
+   * Re-size ONE extractor's storage routes to its installed program: remove
+   * them and create them again at the retail split (bridge/colonyRoutes.ts),
+   * as one network edit.
+   */
+  | {
+      readonly kind: "rerouteExtractor";
+      readonly planetID: number;
+      readonly pinID: number;
+      readonly removeRouteIDs: readonly number[];
+      readonly create: readonly {
+        readonly path: readonly number[];
+        readonly typeID: number;
+        readonly quantity: number;
+      }[];
+    }
+  /**
    * Launch what ONE colony's command centre is holding into orbit.
    *
    * ⚠ A COMMAND CENTRE, NEVER A LAUNCHPAD. The emulator refuses every other
@@ -498,6 +514,10 @@ const SETTLE_TICKS_BY_KIND: Partial<Record<ScriptAction["kind"], number>> = {
   // stack, but compressing CONSUMES it).
   placeBuyOrder: 1,
   restartExtractor: 1,
+  // A reroute is confirmed the same way (the colony re-read shows the routes
+  // re-sized), and a duplicate inside one stale read would try to remove
+  // routes the first edit already removed.
+  rerouteExtractor: 1,
   compressOre: 1,
 
   // A launch is the same shape of cost as the restart above it, twice over: the

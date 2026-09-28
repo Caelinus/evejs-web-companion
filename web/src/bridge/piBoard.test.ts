@@ -20,7 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPiBoard, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
+import { buildPiBoard, pilotsByAccount, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
 import type { PilotColonyReading } from "./piRoster.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 
@@ -108,7 +108,7 @@ const QUIET = colony(40000002, "Alpha I", [extractor(2, NOW + 30 * HOUR)]);
 const STOPPED = colony(40000004, "Alpha II", [extractor(2, NOW - HOUR)]);
 const STARVED = colony(40000006, "Alpha III", [
   extractor(2, NOW + 30 * HOUR),
-  pin({ pinID: 4, kind: "factory", schematicName: "Water", receivedInputsLastCycle: false }),
+  pin({ pinID: 4, kind: "factory", schematicID: 121, schematicName: "Water", receivedInputsLastCycle: false }),
 ]);
 const COMING_UP = colony(40000008, "Alpha IV", [extractor(2, NOW + 2 * HOUR)]);
 
@@ -316,18 +316,30 @@ test("the board judges a starved factory by its recipe when it has the table", a
       output: { typeID: 3645, quantity: 20, typeName: "Water" },
     }],
   } as never);
-  // Unfed last cycle, no route in, but holding a full batch: the recipe says it
-  // has what it needs. Without the table there is nothing to say that with.
-  const stocked = colony(40000012, "Alpha V", [
-    pin({
-      pinID: 4,
-      kind: "factory",
-      schematicID: 121,
-      schematicName: "Water",
-      receivedInputsLastCycle: false,
-      contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 3000 }],
-    }),
-  ]);
+  // Unfed last cycle and holding a full batch: the recipe says it has what it
+  // needs. Without the table its inputs are what its routes bring, and one of
+  // them (contrived: a commodity Water does not take) comes from an empty
+  // storage - dead supply. Wired in and out for Water itself, so the game's
+  // own routing rules have nothing to say either way.
+  const stocked = {
+    ...colony(40000012, "Alpha V", [
+      pin({ pinID: 3, kind: "storage" }),
+      pin({ pinID: 5, kind: "launchpad" }),
+      pin({
+        pinID: 4,
+        kind: "factory",
+        schematicID: 121,
+        schematicName: "Water",
+        receivedInputsLastCycle: false,
+        contents: [{ typeID: 2268, typeName: "Aqueous Liquids", quantity: 3000 }],
+      }),
+    ]),
+    routes: [
+      { routeID: 1, path: [3, 4], commodityTypeID: 2268, commodityTypeName: null, commodityQuantity: 3000 },
+      { routeID: 2, path: [4, 5], commodityTypeID: 3645, commodityTypeName: null, commodityQuantity: 20 },
+      { routeID: 3, path: [3, 4], commodityTypeID: 2393, commodityTypeName: null, commodityQuantity: 3000 },
+    ],
+  };
   const readings = new Map([[FARMER, reading(FARMER, [stocked], NOW - MINUTE)]]);
   assert.equal(buildPiBoard(input({ members: [FARMER], readings })).needsYou.length, 1);
   assert.deepEqual(buildPiBoard(input({ members: [FARMER], readings, recipes })).needsYou, []);
@@ -347,7 +359,7 @@ test("a pilot with ended extractors is offered a restart, with what it does said
   assert.deepEqual(farmer!.restart, {
     enabled: true,
     label: "Restart extractors",
-    words: "3 extractors have ended on 2 colonies. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, then stops. It changes nothing else and runs for an hour at most.",
+    words: "3 extractors have ended on 2 colonies. This starts a server run for Ada Farmer that restarts every ended extractor on all of its colonies, re-sizes the storage routes of any extractor that yields more than they carry, then stops. It changes nothing else and runs for an hour at most.",
   });
   // A pilot with nothing ended is offered nothing.
   assert.equal(hauler!.restart, null);
@@ -467,4 +479,41 @@ test("the strip counts colonies, those extracting, those that need you, and the 
     readings: new Map([[FARMER, reading(FARMER, [QUIET, STOPPED, COMING_UP], NOW - MINUTE)]]),
   }));
   assert.deepEqual(board.summary, { colonies: 3, extracting: 2, needYouNow: 1, nextEndsWords: "2 hours" });
+});
+
+test("the roster groups by account, and folds only a pilot read with no colony", () => {
+  const board = buildPiBoard(input({
+    members: [FARMER, HAULER, NEWBIE, LOST],
+    attempts: new Map([[HAULER, "failed"]]),
+    readings: new Map([
+      [FARMER, reading(FARMER, [QUIET], NOW - MINUTE)],
+      [NEWBIE, reading(NEWBIE, [], NOW - MINUTE)],
+      [LOST, reading(LOST, [], NOW - MINUTE, false)],
+    ]),
+    names: new Map([[FARMER, "Ada Farmer"], [HAULER, "Bo Hauler"], [NEWBIE, "Cy Newbie"], [LOST, "Di Lost"]]),
+  }));
+  // Only a readable, empty colony table folds. "Could not be read" and "the
+  // server did not say" are not "has none", so they keep their rows.
+  assert.deepEqual(board.pilots.map((pilot) => pilot.notBuilt), [false, false, true, false]);
+
+  const groups = pilotsByAccount(board.pilots, new Map([
+    [FARMER, "beta"],
+    [NEWBIE, "beta"],
+    [LOST, "alpha"],
+  ]));
+  assert.deepEqual(
+    groups.map((group) => ({
+      accountName: group.accountName,
+      rows: group.rows.map((pilot) => pilot.pilotName),
+      notBuilt: group.notBuilt.map((pilot) => pilot.pilotName),
+      colonyCount: group.colonyCount,
+      readAgeWords: group.readAgeWords,
+    })),
+    [
+      { accountName: "alpha", rows: ["Di Lost"], notBuilt: [], colonyCount: 0, readAgeWords: "Read 1 minute ago" },
+      { accountName: "beta", rows: ["Ada Farmer"], notBuilt: ["Cy Newbie"], colonyCount: 1, readAgeWords: "Read 1 minute ago" },
+      // An account nobody knows any more goes last, and has no one age.
+      { accountName: null, rows: ["Bo Hauler"], notBuilt: [], colonyCount: 0, readAgeWords: null },
+    ],
+  );
 });

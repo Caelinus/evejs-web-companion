@@ -14,6 +14,8 @@ const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
+const { lazyCompanionDb } = require("./companionDb");
+const { createPiPlanStore } = require("./piPlanStore");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
@@ -42,6 +44,22 @@ const BOTSCRIPT_STATUS = {
   SCRIPT_REV_CONFLICT: 409,
   BOTSCRIPT_NOT_FOUND: 404,
 };
+// The same for a saved PI plan (src/piPlanStore.js).
+const PI_PLAN_STATUS = {
+  PI_PLAN_INVALID: 400,
+  PI_PLAN_LIMIT_REACHED: 409,
+  PI_PLAN_REV_CONFLICT: 409,
+  PI_PLAN_NOT_FOUND: 404,
+};
+function sendPiPlanError(res, error, next) {
+  const status = error && PI_PLAN_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
+
 function sendBotScriptError(res, error, next) {
   const status = error && BOTSCRIPT_STATUS[error.code];
   if (status) {
@@ -62,6 +80,10 @@ const staticData = options.staticData || staticDataModule;
 // is our own JSON file.
 const botScripts =
   options.botScriptStore || botScriptStoreModule.createBotScriptStore({ dataDir: config.dataDir });
+// Saved PI plans, in the companion's own data/companion.sqlite (src/companionDb.js),
+// opened on the first request that needs it -- never eve.js's gamestore.
+const piPlans =
+  options.piPlanStore || createPiPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
 // Persistent-session handles (goal R2): webSessionID -> the opaque
 // bridgeSessionID the gateway minted, held server-side only. The browser
 // never sees the handle; it just gets its character/station state back.
@@ -18461,6 +18483,37 @@ function pinUsedM3(staticDataSource, contents) {
  * run out is not decided here either — the browser compares `expiresAtMs` to
  * `serverNowMs`, so a page left open goes stale visibly instead of lying.
  */
+const ECU_NOISE_FACTOR_ATTRIBUTE_ID = 1687;
+
+/**
+ * The most one cycle of this program can yield — which is also how much its
+ * routes may reserve, and how much they MUST reserve for the game to call the
+ * extractor settled. Null when the program or the noise factor is unknown.
+ *
+ * This is the retail client's EcuPin.GetMaxOutput and the emulator's
+ * getPinProducts for an ECU, the same arithmetic on the same numbers:
+ * trunc((1 + ecuNoiseFactor) * qtyPerCycle) * cycleSeconds / 900, floored.
+ * No extractor type carries ecuNoiseFactor; each uses the attribute's SDE
+ * default (0.8), so the default fallback is load-bearing here.
+ */
+function ecuMaxOutputPerCycle(staticDataSource, pin) {
+  const qtyPerCycle = Number(pin && pin.qtyPerCycle) || 0;
+  const cycleTicks = Number(pin && pin.cycleTime) || 0;
+  if (!(Number(pin && pin.programType) > 0) || qtyPerCycle <= 0 || cycleTicks <= 0) {
+    return null;
+  }
+  const read = staticDataSource && staticDataSource.getTypeDogmaAttributeOrDefault;
+  const noise = typeof read === "function"
+    ? Number(read(Number(pin && pin.typeID) || 0, ECU_NOISE_FACTOR_ATTRIBUTE_ID, null))
+    : NaN;
+  if (!Number.isFinite(noise)) {
+    return null;
+  }
+  const output = Math.trunc((1 + Math.max(0, noise)) * qtyPerCycle)
+    * (cycleTicks / FILETIME_TICKS_PER_SECOND) / 900;
+  return output > 0 ? Math.floor(output) : null;
+}
+
 function projectExtractionProgram(staticDataSource, pin) {
   const resourceTypeID = Number(pin && pin.programType) || 0;
   const expiresAtMs = fileTimeToEpochMs(pin && pin.expiryTime);
@@ -18475,6 +18528,7 @@ function projectExtractionProgram(staticDataSource, pin) {
     quantityPerCycle: Number(pin && pin.qtyPerCycle) || 0,
     installedAtMs,
     expiresAtMs,
+    maxOutputPerCycle: ecuMaxOutputPerCycle(staticDataSource, pin),
     headCount: Array.isArray(pin && pin.heads) ? pin.heads.length : 0,
     // The drill area the program was installed with. It is what sets how long a
     // program runs (the emulator's getProgramLengthFromHeadRadius), and a
@@ -18520,6 +18574,12 @@ function projectColony(staticDataSource, colony) {
       // been dry since carries hasReceivedInputs true and this false.
       hasReceivedInputs: flag(pin && pin.hasReceivedInputs),
       receivedInputsLastCycle: flag(pin && pin.receivedInputsLastCycle),
+      // Whether the pin is running right now: the retail BasePin.IsActive,
+      // activityState > STATE_IDLE (0). A factory set to a recipe with nothing
+      // in its buffer sits at 0. Null when the server gave no state.
+      active: Number.isFinite(Number(pin && pin.state)) && pin.state !== null && pin.state !== ""
+        ? Number(pin.state) > 0
+        : null,
       // Instants, epoch ms against the same serverNowMs as everything else.
       // "0" — a pad that has never launched — comes back null, not 1601.
       lastRunAtMs: fileTimeToEpochMs(pin && pin.lastRunTime),
@@ -18582,9 +18642,19 @@ function coloniesFromSnapshot(snapshot) {
     && runtime.coloniesByKey && typeof runtime.coloniesByKey === "object"
     && !Array.isArray(runtime.coloniesByKey),
   );
+  const resourcesByPlanetID = runtime && runtime.resourcesByPlanetID
+    && typeof runtime.resourcesByPlanetID === "object"
+    ? runtime.resourcesByPlanetID
+    : {};
   const colonies = coloniesReadable
     ? Object.values(runtime.coloniesByKey)
-      .map((colony) => projectColony(staticData, colony))
+      .map((colony) => {
+        const projected = projectColony(staticData, colony);
+        return {
+          ...projected,
+          resources: projectPlanetResources(staticData, resourcesByPlanetID[String(projected.planetID)]),
+        };
+      })
       .filter((colony) => colony.planetID > 0)
       .sort((left, right) => (
         String(left.planetName || "").localeCompare(String(right.planetName || ""))
@@ -18592,6 +18662,115 @@ function coloniesFromSnapshot(snapshot) {
       ))
     : [];
   return { coloniesReadable, colonies };
+}
+
+/**
+ * What a colonised planet carries, and how rich each resource is (R108 slice 5).
+ *
+ * The snapshot carries the planet's own resource record beside the colony: the
+ * same `qualitiesByTypeID` GetPlanetResourceInfo answers from, with no session
+ * needed. `quality` is the server's number as stated — not a percentage, and
+ * not rescaled here. Null when the snapshot carried no record for the planet:
+ * "unknown" is not "carries nothing".
+ */
+function projectPlanetResources(staticDataSource, record) {
+  if (!record || typeof record !== "object" || !Array.isArray(record.resourceTypeIDs)) {
+    return null;
+  }
+  const qualities = record.qualitiesByTypeID && typeof record.qualitiesByTypeID === "object"
+    ? record.qualitiesByTypeID
+    : {};
+  return record.resourceTypeIDs
+    .map((id) => Number(id) || 0)
+    .filter((typeID) => typeID > 0)
+    .map((typeID) => {
+      const quality = Number(qualities[String(typeID)]);
+      return {
+        typeID,
+        typeName: staticDataSource.getTypeName(typeID),
+        quality: Number.isFinite(quality) ? quality : null,
+      };
+    });
+}
+
+// The server's own classification of planetary goods: category 42 is Planetary
+// Resources (what an extractor pulls up), 43 Planetary Commodities (everything
+// a factory makes). By category, never by a list of item ids.
+const PLANETARY_CATEGORY_IDS = new Set([42, 43]);
+const SHIP_CATEGORY_ID = 6;
+
+/**
+ * Every planetary good this pilot owns outside its colonies, and where it sits
+ * (R108 slice 5).
+ *
+ * ⚠ NO SESSION, LIKE THE COLONIES. The gateway snapshot carries every item the
+ * character owns, plus the parents of those items, owner-filtered on the server
+ * (listItemsForCharacter). Reading stock this way brings nobody online.
+ *
+ * Each stack is walked up through what holds it (a ship's cargo, a container)
+ * to the place it is docked, so a unit is always said with its place. Stacks of
+ * one type in one holder are summed: the planner needs "how much, where", not
+ * item ids. Corporation-owned goods are not here; the snapshot is filtered to
+ * the character as owner.
+ */
+function stockFromSnapshot(staticDataSource, snapshot) {
+  const rawItems = snapshot && snapshot.items;
+  const items = Array.isArray(rawItems)
+    ? rawItems
+    : rawItems && typeof rawItems === "object" ? Object.values(rawItems) : [];
+  const byItemID = new Map();
+  for (const item of items) {
+    const itemID = Number(item && item.itemID) || 0;
+    if (itemID > 0) {
+      byItemID.set(itemID, item);
+    }
+  }
+  const stacks = new Map();
+  for (const item of items) {
+    if (!item || !PLANETARY_CATEGORY_IDS.has(Number(item.categoryID))) {
+      continue;
+    }
+    const typeID = Number(item.typeID) || 0;
+    const quantity = Number(item.stacksize) > 0 ? Number(item.stacksize) : Number(item.quantity) || 0;
+    if (typeID <= 0 || quantity <= 0) {
+      continue;
+    }
+    let holder = "hangar";
+    let holderName = null;
+    let locationID = Number(item.locationID) || 0;
+    // Bounded: a corrupt parent chain must not spin.
+    for (let depth = 0; depth < 8 && byItemID.has(locationID); depth += 1) {
+      const parent = byItemID.get(locationID);
+      if (holder === "hangar") {
+        holder = Number(parent.categoryID) === SHIP_CATEGORY_ID ? "ship" : "container";
+        holderName = typeof parent.itemName === "string" && parent.itemName.length > 0
+          ? parent.itemName
+          : staticDataSource.getTypeName(Number(parent.typeID) || 0);
+      }
+      locationID = Number(parent.locationID) || 0;
+    }
+    const station = locationID > 0 && typeof staticDataSource.getStation === "function"
+      ? staticDataSource.getStation(locationID)
+      : null;
+    const key = `${typeID}:${locationID}:${holder}:${holderName || ""}`;
+    const known = stacks.get(key);
+    if (known) {
+      known.quantity += quantity;
+      continue;
+    }
+    stacks.set(key, {
+      typeID,
+      typeName: staticDataSource.getTypeName(typeID),
+      quantity,
+      locationID: locationID > 0 ? locationID : null,
+      // Null when the place is not a station the static map knows (a
+      // structure, or somewhere in space): the browser words that, never an id.
+      locationName: station && station.stationName ? String(station.stationName) : null,
+      holder,
+      holderName,
+    });
+  }
+  return [...stacks.values()].sort((left, right) => left.typeID - right.typeID);
 }
 
 /**
@@ -18659,6 +18838,11 @@ app.get("/api/bridge/planets", requireAuth, async (req, res, next) => {
  * leaves, which is what the browser corrects its own clock against. Folding
  * the two together would skew that correction by however long the slowest
  * read took.
+ *
+ * THE SAME SNAPSHOT CARRIES THE PILOT'S STOCK (R108 slice 5). `stock` is every
+ * planetary good the pilot owns outside its colonies, with where it sits, and
+ * each colony carries its planet's resource qualities — so the planner needs
+ * no second read and no session. See stockFromSnapshot.
  */
 const ROSTER_PLANETS_MAX_IDS = 12;
 
@@ -18692,7 +18876,18 @@ app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
         if (!snapshot) {
           return null;
         }
-        return { characterID, readAtMs, ...coloniesFromSnapshot(snapshot) };
+        const character = snapshot.characters && typeof snapshot.characters === "object"
+          ? snapshot.characters[String(characterID)]
+          : null;
+        const corporationID = Number(character && character.corporationID) || 0;
+        return {
+          characterID,
+          readAtMs,
+          // Which corporation's hangars this pilot could read, if it were online.
+          corporationID: corporationID > 0 ? corporationID : null,
+          ...coloniesFromSnapshot(snapshot),
+          stock: stockFromSnapshot(staticData, snapshot),
+        };
       }),
     );
     res.json({
@@ -19822,6 +20017,40 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
     res.json({ ok: true, removed });
   } catch (error) {
     next(error);
+  }
+});
+
+// ── Saved Planetary Industry plans (R108) ──────────────────────────────────
+// CRUD over pi_plans in data/companion.sqlite. A plan is intent -- commodity,
+// quantity, note, active or done -- and the browser re-plans it from live
+// stock. Global like the bot library; requireAuth only proves a sign-in.
+app.get("/api/pi/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plans: piPlans.list() });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plan: piPlans.create(req.body || {}) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans/:planID", requireAuth, (req, res, next) => {
+  try {
+    const { baseRev, ...fields } = req.body || {};
+    res.json({ ok: true, plan: piPlans.update(req.params.planID, fields, baseRev) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
+  }
+});
+app.post("/api/pi/plans/:planID/delete", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, removed: piPlans.remove(req.params.planID) });
+  } catch (error) {
+    sendPiPlanError(res, error, next);
   }
 });
 
