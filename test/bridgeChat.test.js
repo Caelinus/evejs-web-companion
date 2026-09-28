@@ -426,6 +426,23 @@ async function selectOnServer(baseUrl) {
  * resolution production uses rather than an injected socket factory that
  * proves nothing about it.
  */
+/**
+ * Read a chat channel until it holds at least `count` messages, or give up.
+ *
+ * A line the stub says travels over a real socket before the BFF's XMPP client
+ * sees it, so a read issued on the very next line can land first and find the
+ * backlog empty. Bounded like the join wait below: a message that never comes
+ * still fails the test, a message that is merely in flight does not.
+ */
+async function readChatUntil(baseUrl, path, count) {
+  let last = await apiRequest(baseUrl, path);
+  for (let attempt = 0; attempt < 100 && (last.payload?.chat?.messages?.length ?? 0) < count; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    last = await apiRequest(baseUrl, path);
+  }
+  return last;
+}
+
 async function startChatWorld(stubOptions = {}, serverOptions = {}) {
   const stub = startFakeStub(stubOptions);
   pointAtStub(await stub.listen());
@@ -514,7 +531,7 @@ test("a line said in Local is attributed to the SENDER'S character id, from the 
   await apiRequest(baseUrl, "/api/bridge/chat/local");
 
   stub.say(`local_${HOME_SYSTEM_ID}`, 8, "follow 1000 m");
-  const { payload } = await apiRequest(baseUrl, "/api/bridge/chat/local");
+  const { payload } = await readChatUntil(baseUrl, "/api/bridge/chat/local", 1);
 
   const said = payload.chat.messages.at(-1);
   assert.equal(said.message, "follow 1000 m");
@@ -537,7 +554,7 @@ test("the room's own voice (admin speak) arrives as a message, other admin comma
   });
   stub.admin(`local_${HOME_SYSTEM_ID}`, { cmd: "roster", charid: 1 });
 
-  const { payload } = await apiRequest(baseUrl, "/api/bridge/chat/local");
+  const { payload } = await readChatUntil(baseUrl, "/api/bridge/chat/local", 1);
   assert.equal(payload.chat.messages.length, 1);
   assert.equal(payload.chat.messages[0].message, "Welcome to Local.");
   assert.equal(payload.chat.messages[0].characterID, 1);
