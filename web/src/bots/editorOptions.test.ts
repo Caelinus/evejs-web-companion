@@ -10,13 +10,10 @@ import {
   COUNT_ARG_BOUNDS,
   ISK_ARG_BOUNDS,
   MACRO_ARG_DESCRIPTORS,
-  MAX_CONDITION_PILOT_COUNT,
   argBounds,
-  clampConditionCount,
   clampConditionFraction,
   clampConditionIsk,
   conditionFractionCap,
-  conditionUsesCount,
   conditionUsesFraction,
   conditionUsesIsk,
   conditionPercent,
@@ -107,10 +104,8 @@ test("every Arg kind has a widget and a generic label", () => {
     "isk",
     "qty",
     "character",
-    "chatChannel",
     "destination",
     "rockPick",
-    "text",
   ];
   for (const k of kinds) {
     assert.ok(ARG_KIND_WIDGET[k], k);
@@ -208,7 +203,6 @@ test("count/isk/qty bounds resolve through numericArgBounds", () => {
   assert.deepEqual(numericArgBounds("count"), COUNT_ARG_BOUNDS);
   assert.deepEqual(numericArgBounds("isk"), ISK_ARG_BOUNDS);
   assert.deepEqual(numericArgBounds("qty"), QTY_ARG_BOUNDS);
-  assert.equal(numericArgBounds("text"), null);
   assert.equal(numericArgBounds("belt"), null);
 });
 
@@ -250,14 +244,6 @@ test("argBounds narrows a count argument to what that argument actually means", 
   const seconds = MACRO_ARG_DESCRIPTORS["wait"].all.find((a) => a.key === "seconds");
   assert.ok(seconds);
   assert.deepEqual(argBounds("wait", seconds), { min: 1, max: 500 });
-});
-
-test("a per-macro override wins: hunt-player's leash is shorter than a courier's trip", () => {
-  const hunt = MACRO_ARG_DESCRIPTORS["hunt-player"].all.find((a) => a.key === "maxJumps");
-  const find = MACRO_ARG_DESCRIPTORS["find-distribution-agent"].all.find((a) => a.key === "maxJumps");
-  assert.ok(hunt && find, "maxJumps is missing from one of the two macros");
-  assert.deepEqual(argBounds("hunt-player", hunt), { min: 1, max: 30 });
-  assert.deepEqual(argBounds("find-distribution-agent", find), { min: 1, max: 50 });
 });
 
 test("argBounds falls back to the format's own bounds, and is null for a non-number", () => {
@@ -318,8 +304,6 @@ test("freshCondition starts a hold at 'nearly full' and a defence at a low line"
 test("freshCondition does not carry a number across shapes", () => {
   const wallet = freshCondition("wallet-below", { kind: "shield-below", fraction: 0.3 });
   assert.deepEqual(wallet, { kind: "wallet-below", isk: 10_000_000 });
-  const pilots = freshCondition("players-in-system-above", { kind: "wallet-below", isk: 5 });
-  assert.deepEqual(pilots, { kind: "players-in-system-above", count: 0 }, "zero means anyone else at all");
   assert.deepEqual(freshCondition("hostile-on-grid"), { kind: "hostile-on-grid" });
 });
 
@@ -329,7 +313,6 @@ test("every condition kind produces a condition the shape helpers agree with", (
     assert.equal(condition.kind, kind);
     assert.equal("fraction" in condition, conditionUsesFraction(kind), `${kind}: fraction disagreement`);
     assert.equal("isk" in condition, conditionUsesIsk(kind), `${kind}: isk disagreement`);
-    assert.equal("count" in condition, conditionUsesCount(kind), `${kind}: count disagreement`);
   }
 });
 
@@ -347,13 +330,6 @@ test("the ore hold's ceiling is lower than every other fraction's", () => {
 test("conditionPercent is what a player types, both ways round", () => {
   assert.equal(conditionPercent(0.3), 30);
   assert.equal(conditionPercent(0.9), 90);
-});
-
-test("a pilot count clamps to its range, and zero survives", () => {
-  assert.equal(clampConditionCount(0), 0, "zero means anyone else at all and must not be raised");
-  assert.equal(clampConditionCount(-4), 0);
-  assert.equal(clampConditionCount(9999), MAX_CONDITION_PILOT_COUNT);
-  assert.equal(clampConditionCount(Number.NaN), 0);
 });
 
 test("an ISK threshold clamps to what the codec accepts", () => {

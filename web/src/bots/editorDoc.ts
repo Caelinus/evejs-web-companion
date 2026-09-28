@@ -24,8 +24,6 @@ import {
   type Repeat,
   type SubBotNode,
   type WorldRef,
-  DEFAULT_HUNT_MAX_JUMPS,
-  DEFAULT_HUNT_RANGE_AU,
   MAX_NOTES_LEN,
   startingStation,
 } from "./botScript.ts";
@@ -217,8 +215,8 @@ function buildRepeat(state: EditorState): Repeat {
 // them document logic and not presentation — the reason they live here rather
 // than in the picker that calls them. `editorDoc.test.ts` pins the emitted
 // arguments for ALL of `MACRO_IDS`, so a default cannot be dropped in a rewrite
-// the way `hunt-player`'s leash once was: the step's sentence went on claiming
-// a range it no longer carried, and nothing was comparing the two.
+// unnoticed: a step whose sentence claims a default it no longer carries is
+// the worst shape this bug can take, and nothing else compares the two.
 //
 // The rule these follow: seed an argument only where a sensible default EXISTS
 // and leaving it out would make the step's own sentence a lie or make the step
@@ -278,27 +276,6 @@ export function newStepFor(macro: MacroID, makeId: IdGen): MacroStep {
   }
   if (macro === "invite-to-fleet") {
     return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
-  }
-  if (macro === "hunt-player") {
-    // `only` stays ABSENT (any player); the leash and the scanner reach start
-    // on their shared defaults so the sentence reads honestly from the start.
-    return {
-      id,
-      kind: "macro",
-      macro,
-      args: {
-        maxJumps: { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS },
-        range: { kind: "count", value: DEFAULT_HUNT_RANGE_AU },
-      },
-    };
-  }
-  if (macro === "send-chat") {
-    return {
-      id,
-      kind: "macro",
-      macro,
-      args: { channel: { kind: "chatChannel", channel: "local" }, message: { kind: "text", text: "" } },
-    };
   }
   if (macro === "set-destination") {
     // Unbound on purpose: there is no sensible default place to fly to, and the

@@ -30,15 +30,11 @@
     type SubBotNode,
     type WorldRef,
     MAX_ISK_ARG,
-    MAX_TEXT_ARG_LEN,
     MIN_ISK_ARG,
   } from "../bots/botScript.ts";
   import {
     MACRO_ARG_DESCRIPTORS,
-    CONDITION_PILOT_COUNT_HINT,
-    MAX_CONDITION_PILOT_COUNT,
     argBounds,
-    clampConditionCount,
     clampConditionFraction,
     clampConditionIsk,
     conditionFractionCap,
@@ -120,10 +116,6 @@
     if (arg === undefined) return "";
     return arg.kind === "count" || arg.kind === "isk" || arg.kind === "qty" ? arg.value : "";
   }
-  function textValue(step: MacroStep, key: string): string {
-    const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "text" ? arg.text : "";
-  }
   function itemTypeValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "itemType" && arg.typeID !== null ? String(arg.typeID) : "";
@@ -174,10 +166,6 @@
   function corpValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "corp" ? (arg.name ?? "") : "";
-  }
-  function channelValue(step: MacroStep, key: string): string {
-    const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "chatChannel" ? arg.channel : "local";
   }
   function rockPickValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -323,11 +311,6 @@
     if (current === undefined || !("isk" in current)) return;
     onCondition({ ...current, isk: clampConditionIsk(raw) });
   }
-  function changeCount(raw: number): void {
-    const current = conditionOf();
-    if (current === undefined || !("count" in current)) return;
-    onCondition({ ...current, count: clampConditionCount(raw) });
-  }
 
   const heading = $derived(
     target.kind === "step"
@@ -389,22 +372,6 @@
           oninput={(e) => changeIsk(Number(e.currentTarget.value))}
         />
         <span class="inspector-suffix">ISK</span>
-      </span>
-    </label>
-  {:else if condition !== undefined && "count" in condition}
-    <label class="inspector-field" for={`${id}-count`}>
-      <span class="inspector-label">How many other pilots</span>
-      <span class="inspector-unit">
-        <input
-          id={`${id}-count`}
-          class="num-in"
-          type="number"
-          min="0"
-          max={MAX_CONDITION_PILOT_COUNT}
-          value={condition.count}
-          oninput={(e) => changeCount(Number(e.currentTarget.value))}
-        />
-        <span class="inspector-suffix">{CONDITION_PILOT_COUNT_HINT}</span>
       </span>
     </label>
   {/if}
@@ -503,15 +470,6 @@
         {#if pilots.length === 0}
           <span class="inspector-suffix">No known pilots yet — add one from the login screen.</span>
         {/if}
-      {:else if arg.widget === "chat-channel-select"}
-        <select
-          id={fieldId}
-          value={channelValue(step, arg.key)}
-          onchange={(e) => onArg(arg.key, { kind: "chatChannel", channel: e.currentTarget.value === "corp" ? "corp" : "local" })}
-        >
-          <option value="local">local chat</option>
-          <option value="corp">corp chat</option>
-        </select>
       {:else if arg.widget === "rock-pick-select"}
         <select id={fieldId} value={rockPickValue(step, arg.key)} onchange={(e) => setRockPick(arg.key, e.currentTarget.value)}>
           <option value="nearest">the nearest rock first</option>
@@ -524,15 +482,6 @@
           placeholder="any corporation"
           value={corpValue(step, arg.key)}
           oninput={(e) => setCorp(arg.key, e.currentTarget.value)}
-        />
-      {:else if arg.widget === "text-input"}
-        <input
-          id={fieldId}
-          type="text"
-          maxlength={MAX_TEXT_ARG_LEN}
-          placeholder="write the message…"
-          value={textValue(step, arg.key)}
-          oninput={(e) => onArg(arg.key, { kind: "text", text: e.currentTarget.value.slice(0, MAX_TEXT_ARG_LEN) })}
         />
       {:else}
         <!-- count / isk / qty. The range is SHOWN, not merely enforced: a bound

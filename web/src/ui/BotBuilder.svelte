@@ -381,13 +381,13 @@
   function addWatch(kind: ConditionKind): void {
     if (hasWatch(kind) || watches.length >= MAX_INTERRUPTS) return;
     // Sensible first responses: money, a full hold and an empty one are not
-    // dangers, so they just stop; a pirate launches drones; being targeted or
-    // joined by players is news rather than damage, so it tells you; anything
-    // about health heads home.
+    // dangers, so they just stop; a pirate launches drones; being targeted is
+    // news rather than damage, so it tells you; anything about health heads
+    // home.
     const respond: InterruptResponse =
       kind === "hostile-on-grid"
         ? "launch-drones"
-        : kind === "targeted-by-player" || kind === "players-in-system-above"
+        : kind === "targeted-by-player"
           ? "alert"
           : kind === "wallet-below" ||
               kind === "wallet-above" ||

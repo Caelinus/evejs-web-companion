@@ -89,8 +89,6 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   { macro: "move-items", key: "from", expect: /station hangar/, why: "place-select" },
   { macro: "buy-item", key: "item", expect: /Test Mineral/, why: "item-type-picker" },
   { macro: "invite-to-fleet", key: "who", expect: /Test Pilot One/, why: "character-picker" },
-  { macro: "send-chat", key: "message", expect: /placeholder="write the message/, why: "text-input" },
-  { macro: "send-chat", key: "channel", expect: /local chat/, why: "chat-channel-select" },
   // The two world-ref widgets delegate to StationPicker, and the ONLY visible
   // difference between them is whether it will also match a solar system —
   // which is exactly the bug a shared widget could hide, so it is what these

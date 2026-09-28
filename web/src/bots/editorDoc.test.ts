@@ -29,7 +29,7 @@ import {
   toScript,
   DEFAULT_LOOP_ID,
 } from "./editorDoc.ts";
-import { DEFAULT_HUNT_MAX_JUMPS, DEFAULT_HUNT_RANGE_AU, MACRO_IDS } from "./botScript.ts";
+import { MACRO_IDS } from "./botScript.ts";
 import { decodeScriptValue, encodeScriptDoc } from "./scriptCodec.ts";
 import { validateScript } from "./validateScript.ts";
 import { EXAMPLE_BOTS } from "./exampleBots.ts";
@@ -200,10 +200,10 @@ test("notes are carried, not discarded, and are bounded", () => {
 // ─── What a newly added node is born as ──────────────────────────────────────
 //
 // This is the durable form of a comparison that had only ever been run by hand:
-// the JSON a fresh step carries, for every macro the format has. It exists
-// because `hunt-player` silently lost its leash and scanner reach in a rewrite
-// and nothing noticed — the step's own SENTENCE went on claiming a range the
-// step no longer carried, which is the worst shape this bug can take.
+// the JSON a fresh step carries, for every macro the format has. A default
+// dropped in a rewrite goes unnoticed otherwise — the step's own SENTENCE goes
+// on claiming a value the step no longer carries, which is the worst shape
+// this bug can take.
 
 test("every macro can make a fresh step, and it is the macro it was asked for", () => {
   let n = 0;
@@ -237,19 +237,8 @@ test("a fresh step's seeded arguments are exactly these, for every macro", () =>
     "buy-item": { args: ["item", "price", "quantity"], until: null },
     "sell-item": { args: ["item", "price"], until: null },
     "invite-to-fleet": { args: ["who"], until: null },
-    "hunt-player": { args: ["maxJumps", "range"], until: null },
-    "send-chat": { args: ["channel", "message"], until: null },
     "set-destination": { args: ["destination"], until: null },
   });
-});
-
-test("hunt-player is born with the leash and scanner reach its sentence claims", () => {
-  // The regression this whole section exists for. The values come from the
-  // format's own constants, so the step and the runtime cannot disagree.
-  const step = newStepFor("hunt-player", () => "ID");
-  assert.deepEqual(step.args["maxJumps"], { kind: "count", value: DEFAULT_HUNT_MAX_JUMPS });
-  assert.deepEqual(step.args["range"], { kind: "count", value: DEFAULT_HUNT_RANGE_AU });
-  assert.equal(step.args["only"], undefined, "a hunt should start on 'any player', not on someone");
 });
 
 // ⚠ THE INVARIANT THAT KEEPS A FRESH STEP SAFE. Save is disabled while any

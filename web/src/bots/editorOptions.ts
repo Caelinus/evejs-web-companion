@@ -60,10 +60,8 @@ export type WidgetKind =
   | "isk-input"
   | "qty-input"
   | "character-picker"
-  | "chat-channel-select"
   | "destination-picker"
-  | "rock-pick-select"
-  | "text-input";
+  | "rock-pick-select";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
@@ -80,10 +78,8 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   isk: "isk-input",
   qty: "qty-input",
   character: "character-picker",
-  chatChannel: "chat-channel-select",
   destination: "destination-picker",
   rockPick: "rock-pick-select",
-  text: "text-input",
 };
 
 /** A plain-language name for an argument KIND — used when no per-macro label fits. */
@@ -101,10 +97,8 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   isk: "ISK amount",
   qty: "Quantity",
   character: "Pilot",
-  chatChannel: "Channel",
   destination: "Destination",
   rockPick: "Which rock first",
-  text: "Text",
 };
 
 /**
@@ -131,10 +125,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   quantity: "How many",
   price: "Price each (ISK)",
   who: "Pilot",
-  only: "Only this pilot",
   range: "Scanner reach (AU)",
-  channel: "Channel",
-  message: "Message",
   destination: "Destination",
   pick: "Which rock first",
 };
@@ -267,12 +258,10 @@ const ARG_KEY_BOUNDS: Readonly<Record<string, NumericBounds>> = {
 
 /**
  * Per-macro overrides of the above, for a key whose sensible range genuinely
- * differs by macro. `hunt-player`'s `maxJumps` is a LEASH on a bot that chases
- * a player — it is deliberately shorter than the distance a courier bot may
- * travel to reach an agent, even though both are "maxJumps".
+ * differs by macro. None does today; an entry here wins over the shared
+ * bounds above for that one macro's key.
  */
 const MACRO_ARG_BOUNDS: Readonly<Partial<Record<MacroID, Readonly<Record<string, NumericBounds>>>>> = {
-  "hunt-player": { maxJumps: { min: 1, max: 30 } },
 };
 
 /**
@@ -346,7 +335,6 @@ export const CONDITION_NOUN_LABEL: Readonly<Record<ConditionKind, string>> = {
   "wallet-above": "Wallet rises above",
   "hostile-on-grid": "A pirate shows up",
   "cargo-full": "Cargo hold",
-  "players-in-system-above": "Other pilots in system",
   "targeted-by-player": "Being targeted",
   "drone-health-below": "A drone's health",
 };
@@ -370,7 +358,6 @@ export const CONDITION_UNTIL_LABEL: Readonly<Record<ConditionKind, string>> = {
   "wallet-above": "the wallet rises above…",
   "hostile-on-grid": "a pirate shows up",
   "cargo-full": "the cargo hold is nearly full",
-  "players-in-system-above": "another pilot comes into this system",
   "targeted-by-player": "another player locks onto your ship",
   "drone-health-below": "one of your drones drops below…",
 };
@@ -419,24 +406,7 @@ export function freshCondition(kind: ConditionKind, previous?: Condition): Condi
     const keep = previous !== undefined && "isk" in previous ? previous.isk : 10_000_000;
     return { kind, isk: keep } as Condition;
   }
-  if (conditionUsesCount(kind)) {
-    // Zero = "anyone else at all", the setting a solo miner wants.
-    const keep = previous !== undefined && "count" in previous ? previous.count : 0;
-    return { kind, count: keep } as Condition;
-  }
   return { kind } as Condition;
-}
-
-/** The ceiling on a pilot-count condition — a whole system's worth is plenty. */
-export const MAX_CONDITION_PILOT_COUNT = 50;
-
-/** What a pilot-count field's zero means, said in the field rather than left
- * to be discovered — an empty-looking "0" otherwise reads as "off". */
-export const CONDITION_PILOT_COUNT_HINT = "0 means anyone else at all";
-
-/** A pilot count, clamped. ZERO is legal and means "anyone else at all". */
-export function clampConditionCount(raw: number): number {
-  return Math.min(MAX_CONDITION_PILOT_COUNT, Math.max(0, Math.trunc(raw) || 0));
 }
 
 /** An ISK threshold, clamped to what the format will accept. */
@@ -451,19 +421,13 @@ export function conditionUsesFraction(kind: ConditionKind): boolean {
     kind !== "hostile-on-grid" &&
     kind !== "wallet-below" &&
     kind !== "wallet-above" &&
-    kind !== "targeted-by-player" &&
-    kind !== "players-in-system-above"
+    kind !== "targeted-by-player"
   );
 }
 
 /** True when a condition kind's threshold is an ISK amount, not a fraction. */
 export function conditionUsesIsk(kind: ConditionKind): boolean {
   return kind === "wallet-below" || kind === "wallet-above";
-}
-
-/** True when a condition kind takes a plain count (not a fraction or ISK). */
-export function conditionUsesCount(kind: ConditionKind): boolean {
-  return kind === "players-in-system-above";
 }
 
 // ─── Interrupt responses ─────────────────────────────────────────────────────
