@@ -381,12 +381,14 @@
   function addWatch(kind: ConditionKind): void {
     if (hasWatch(kind) || watches.length >= MAX_INTERRUPTS) return;
     // Sensible first responses: money, a full hold and an empty one are not
-    // dangers, so they just stop; a pirate launches drones; being targeted is
-    // news rather than damage, so it tells you; anything about health heads
-    // home.
+    // dangers, so they just stop; a pirate gets fought (drones out AND pointed
+    // at it — "send out drones" leaves them to defend themselves, which reads to
+    // players as the bot ignoring the pirate, so it is no longer the default);
+    // being targeted is news rather than damage, so it tells you; anything
+    // about health heads home.
     const respond: InterruptResponse =
       kind === "hostile-on-grid"
-        ? "launch-drones"
+        ? "fight-back"
         : kind === "targeted-by-player"
           ? "alert"
           : kind === "wallet-below" ||

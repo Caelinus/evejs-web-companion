@@ -179,14 +179,51 @@ test("until-met with the laser off but the rock still locked releases the lock b
   assert.equal(results[1]?.stepPath, "h", "the rock is unlocked, so it can advance now");
 });
 
-test("a loop whose body can never do anything pauses on the livelock guard", () => {
+// ─── The "skipped" outcome ───────────────────────────────────────────────────
+
+/** A step that cannot do its job on this ship — the salvage-without-a-salvager case. */
+const skipper: MacroDecider = () => tick({ kind: "wait" }, { kind: "skipped", reason: "no way to do this" });
+const skipRegistry = { ...registry, "salvage-wrecks": skipper };
+
+test("a skipped step warns ONCE through the alert path and the program moves on", () => {
+  const s = script([macroStep("sv", "salvage-wrecks"), macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const first = decideScriptAction(s, obs(), initialMemory(s), skipRegistry, home);
+  assert.equal(first.status, "running", "not paused");
+  assert.equal(first.action.kind, "alert");
+  assert.match(first.action.kind === "alert" ? first.action.message : "", /Skipped "Salvage the wrecks on this grid": no way to do this/);
+  assert.equal(first.stepPath, "sv");
+  // Next tick: the step after it is working, and nothing was said again.
+  const next = decideScriptAction(s, obs(), first.memory, skipRegistry, home);
+  assert.equal(next.stepPath, "m");
+  assert.equal(next.action.kind, "activate");
+});
+
+test("a skipped step inside a loop is silent the second time round, and a loop of nothing but skips trips the livelock guard", () => {
+  const loop: ProgramNode = { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [macroStep("sv", "salvage-wrecks"), macroStep("u", "undock")] };
+  const s = script([loop]);
+  const first = decideScriptAction(s, obs({ inSpace: true }), initialMemory(s), skipRegistry, home);
+  assert.equal(first.action.kind, "alert", "said once");
+  // Round two: the skip is silent and the scan runs on to the livelock guard,
+  // because undock-in-space and skip-salvage between them do nothing.
+  const second = decideScriptAction(s, obs({ inSpace: true }), first.memory, skipRegistry, home);
+  assert.equal(second.status, "running", "in space it heads home rather than parking there");
+  assert.equal(second.action.kind, "warp");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, docked: true }), second.memory, skipRegistry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
+});
+
+test("a loop whose body can never do anything trips the livelock guard, and heads home to stop", () => {
   // Body is a single undock, but the ship is already in space, so every pass
   // completes instantly issuing no world call.
   const loop: ProgramNode = { id: "L", kind: "loop", repeat: { kind: "forever" }, body: [macroStep("u", "undock")] };
   const s = script([loop]);
   const r = decideScriptAction(s, obs({ inSpace: true }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /nothing it can do/i);
+  assert.equal(r.status, "running");
+  assert.equal(r.action.kind, "warp", "a livelock in space is flown home, not parked");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
 });
 
 // ─── Branches ────────────────────────────────────────────────────────────────
@@ -303,8 +340,10 @@ test("a loop whose branch sides do nothing still trips the livelock guard", () =
   };
   const s = script([loop], []);
   const r = decideScriptAction(s, obs({ inSpace: true, holdEmpty: true }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /nothing it can do/i);
+  assert.equal(r.action.kind, "warp", "heads home first");
+  const stopped = decideScriptAction(s, obs({ inSpace: true, holdEmpty: true, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /nothing it can do/i);
 });
 
 test("a loop-level until still ends the loop when the body starts with a branch", () => {
@@ -336,13 +375,27 @@ test("an until does not advance the step while the macro is unarmed", () => {
 
 // ─── Interrupts ──────────────────────────────────────────────────────────────
 
-test("a plain-pause interrupt stops with the condition as its reason", () => {
+test("a plain-pause interrupt gets the ship to a station first, then stops with the condition as its reason", () => {
   const shields: InterruptRow = { id: "s", when: { kind: "shield-below", fraction: 0.3 }, respond: "pause" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, shields]);
   const r = decideScriptAction(s, obs({ shieldRatio: 0.2 }), initialMemory(s), registry, home);
-  assert.equal(r.status, "paused");
+  assert.equal(r.status, "running", "a watch the player set to STOP still does not stop in space");
+  assert.equal(r.action.kind, "warp");
   assert.equal(r.interruptID, "s");
-  assert.match(r.pauseReason ?? "", /shields/i);
+  const stopped = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: true }), r.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.equal(stopped.interruptID, "s", "the row that stopped it is still named");
+  assert.match(stopped.pauseReason ?? "", /shields/i);
+});
+
+test("a plain-pause interrupt fired while ALREADY docked stops on the spot", () => {
+  // The flight home costs nothing when there is no flying to do: the travel
+  // decider reports done on its first consultation and the pause lands the same tick.
+  const wallet: InterruptRow = { id: "w", when: { kind: "wallet-below", isk: 100 }, respond: "pause" };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [wallet]);
+  const r = decideScriptAction(s, obs({ docked: true, inSpace: false, walletBalance: 10 }), initialMemory(s), registry, home);
+  assert.equal(r.status, "paused");
+  assert.equal(r.interruptID, "w");
 });
 
 test("a dock-and-pause interrupt flies home and then stops", () => {
@@ -361,27 +414,238 @@ test("a dock-and-pause interrupt flies home and then stops", () => {
 test("a launch-drones interrupt launches once, then yields to the step when drones are out", () => {
   const drones: InterruptRow = { id: "d", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, drones]);
-  const launching = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false }), initialMemory(s), registry, home);
+  const launching = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false, combatDroneBayItemIDs: [1, 2], salvageDroneBayItemIDs: [3] }), initialMemory(s), registry, home);
   assert.equal(launching.action.kind, "launchDrones");
+  assert.deepEqual(launching.action.kind === "launchDrones" ? launching.action.droneItemIDs : [], [1, 2], "the COMBAT drones only — the salvage drone stays in the bay");
   assert.equal(launching.interruptID, "d");
   // Drones now out: the interrupt is satisfied and the step keeps working.
-  const working = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true }), launching.memory, registry, home);
+  const working = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true, combatDroneIDs: [1, 2] }), launching.memory, registry, home);
   assert.equal(working.action.kind, "activate");
   assert.equal(working.stepPath, "m");
 });
 
+// ─── fight-back ──────────────────────────────────────────────────────────────
+//
+// The response borrows the Fight-the-rats decider out of the registry, so these
+// stand in a fake one and check the three properties that matter: the ladder's
+// actions reach the world, its memory survives tick to tick (so the primary is
+// not re-picked every time), and it RELEASES the ship the moment it stops acting.
+
+/** A fake ratting ladder: lock, then shoot, then report the grid clear. */
+const ratLadder: MacroDecider = (_s, o, mem) => {
+  if (o.hostileOnGrid !== true) {
+    return tick({ kind: "wait" }, { kind: "done" });
+  }
+  if (mem["locked"] !== true) {
+    return tick({ kind: "lock", targetID: 77 }, { kind: "acting" }, true, { locked: true });
+  }
+  return tick({ kind: "activate", moduleID: 5, targetID: 77 }, { kind: "acting" }, true, mem);
+};
+const fightRegistry = { ...registry, "fight-the-rats": ratLadder };
+
+const fightBack: InterruptRow = { id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" };
+
+test("a fight-back interrupt runs the ratting ladder and keeps its memory across ticks", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const locking = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), fightRegistry, home);
+  assert.equal(locking.action.kind, "lock");
+  assert.equal(locking.interruptID, "fb");
+
+  // The ladder remembered the lock, so the next tick SHOOTS rather than
+  // re-locking — which is the whole point of keying its memory by the row id.
+  const shooting = decideScriptAction(s, obs({ hostileOnGrid: true }), locking.memory, fightRegistry, home);
+  assert.equal(shooting.action.kind, "activate");
+  assert.equal(shooting.interruptID, "fb");
+});
+
+test("fight-back hands the ship back to the step once there is nothing left to fight", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const fighting = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), fightRegistry, home);
+  assert.equal(fighting.interruptID, "fb");
+
+  // Grid clear: the watch no longer fires at all and mining resumes.
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false }), fighting.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+  assert.equal(mining.action.kind, "activate");
+});
+
+test("fight-back releases the step even while the pirate is STILL there, when the ladder stops acting", () => {
+  // The hostile is on grid (so the watch keeps firing) but the ladder reports
+  // itself done — out of targeting range, or no way to fight. The step must not
+  // be starved: an always-armed response that never released would own the ship.
+  const stalled: MacroDecider = () => tick({ kind: "wait" }, { kind: "done" });
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), { ...registry, "fight-the-rats": stalled }, home);
+  assert.equal(r.stepPath, "m");
+  assert.equal(r.action.kind, "activate");
+});
+
+// ─── fight-back: hardeners up, then the stand-down ───────────────────────────
+//
+// The watch owns two module decisions the ladder knows nothing about: the tank
+// goes up BEFORE the shooting, and it comes back down — with the drones — once
+// the pirate is gone. The second half cannot run inside `fireInterrupt` (a watch
+// stops being consulted the moment its condition clears), so these drive it
+// through whole ticks rather than the response alone.
+
+/** A snapshot whose only interesting part is which modules are running. */
+function running(...moduleIDs: number[]): ScriptObservation["snapshot"] {
+  return {
+    inSpace: true,
+    solarSystemID: 30000142,
+    shipID: 9001,
+    sampledAtMs: 1,
+    entities: [],
+    ship: { itemID: 9001, activeModuleIDs: moduleIDs },
+  } as unknown as ScriptObservation["snapshot"];
+}
+
+test("fight-back runs the hardeners up before it points anything at the pirate", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running() };
+
+  const first = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(first.action.kind, "activate", "the tank goes up first");
+  assert.equal(first.action.kind === "activate" ? first.action.moduleID : 0, 40);
+  assert.equal(first.action.kind === "activate" ? first.action.targetID : -1, 0, "self-targeted");
+  assert.equal(first.interruptID, "fb");
+
+  const second = decideScriptAction(s, obs({ ...pirate, snapshot: running(40) }), first.memory, fightRegistry, home);
+  assert.equal(second.action.kind === "activate" ? second.action.moduleID : 0, 41, "the second hardener");
+
+  // Everything hardened: NOW the ladder gets the ship.
+  const fighting = decideScriptAction(s, obs({ ...pirate, snapshot: running(40, 41) }), second.memory, fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+});
+
+test("fight-back leaves the player's own already-running hardener alone", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  // 40 is already on — a Hardeners-on block earlier in the program lit it.
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running(40) }),
+    initialMemory(s),
+    fightRegistry,
+    home,
+  );
+  assert.equal(r.action.kind === "activate" ? r.action.moduleID : 0, 41, "only the idle one");
+});
+
+test("a hardener that will not come on is tried once, not every tick", () => {
+  // Otherwise the watch would re-issue the same activate forever and starve the
+  // step underneath it — the same way an unreleased fight would.
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const stuck = { hostileOnGrid: true, hardenerModuleIDs: [40], snapshot: running() };
+  const tried = decideScriptAction(s, obs(stuck), initialMemory(s), fightRegistry, home);
+  assert.equal(tried.action.kind, "activate");
+  // Still not running next tick: the watch gives up on it and fights anyway.
+  const fighting = decideScriptAction(s, obs(stuck), tried.memory, fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+});
+
+test("once the pirate is gone the watch calls the drones in and switches its own hardeners off", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40], snapshot: running() };
+  const hardening = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(hardening.action.kind, "activate");
+
+  // Grid clear, drones still out, the watch's hardener still running.
+  const clear = { hostileOnGrid: false, hardenerModuleIDs: [40], snapshot: running(40), combatDroneIDs: [1, 2], dronesOut: true };
+  const recalling = decideScriptAction(s, obs(clear), hardening.memory, fightRegistry, home);
+  assert.equal(recalling.action.kind, "recallDrones", "the drones come home first, tank still up");
+  assert.deepEqual(recalling.action.kind === "recallDrones" ? recalling.action.droneIDs : [], [1, 2]);
+  assert.equal(recalling.interruptID, "fb");
+
+  // Then the hardener it lit goes back off.
+  const cooling = decideScriptAction(s, obs(clear), recalling.memory, fightRegistry, home);
+  assert.equal(cooling.action.kind, "deactivate");
+  assert.equal(cooling.action.kind === "deactivate" ? cooling.action.moduleID : 0, 40);
+
+  // Stood down: the step has the ship back, and it stays that way.
+  const stoodDown = { hostileOnGrid: false, hardenerModuleIDs: [40], snapshot: running(), dronesOut: false };
+  const mining = decideScriptAction(s, obs(stoodDown), cooling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+  assert.equal(mining.action.kind, "activate");
+  const stillMining = decideScriptAction(s, obs(stoodDown), mining.memory, fightRegistry, home);
+  assert.equal(stillMining.stepPath, "m", "the stand-down is over, not repeating");
+});
+
+test("the stand-down never switches off a hardener the watch did not switch on", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  // 40 was already running when the pirate arrived, so the watch only claims 41.
+  const pirate = { hostileOnGrid: true, hardenerModuleIDs: [40, 41], snapshot: running(40) };
+  const hardening = decideScriptAction(s, obs(pirate), initialMemory(s), fightRegistry, home);
+  assert.equal(hardening.action.kind === "activate" ? hardening.action.moduleID : 0, 41);
+
+  const clear = { hostileOnGrid: false, hardenerModuleIDs: [40, 41], snapshot: running(40, 41) };
+  const cooling = decideScriptAction(s, obs(clear), hardening.memory, fightRegistry, home);
+  assert.equal(cooling.action.kind === "deactivate" ? cooling.action.moduleID : 0, 41, "its own, not the player's");
+  // Nothing of the watch's left running: 40 stays on and mining resumes.
+  const mining = decideScriptAction(s, obs(clear), cooling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+});
+
+test("a hull with no hardeners fitted still gets its drones back when the grid clears", () => {
+  // The stand-down record is written by the FIGHT as well as by the hardeners,
+  // so a droneboat with nothing to harden is not left with its drones in space.
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const fighting = decideScriptAction(s, obs({ hostileOnGrid: true, hardenerModuleIDs: [] }), initialMemory(s), fightRegistry, home);
+  assert.equal(fighting.action.kind, "lock");
+  const recalling = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [7], dronesOut: true }), fighting.memory, fightRegistry, home);
+  assert.equal(recalling.action.kind, "recallDrones");
+  assert.deepEqual(recalling.action.kind === "recallDrones" ? recalling.action.droneIDs : [], [7]);
+  // Nothing else to undo, so the step has the ship straight back.
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [] }), recalling.memory, fightRegistry, home);
+  assert.equal(mining.stepPath, "m");
+});
+
+test("a fight-back watch that never got to act leaves the drones where it found them", () => {
+  // The ladder reported itself done on the first tick (out of range, or no way to
+  // fight), so the watch committed nothing — and must not call in drones some
+  // other block of the program deliberately put out.
+  const stalled: MacroDecider = () => tick({ kind: "wait" }, { kind: "done" });
+  const idleRegistry = { ...registry, "fight-the-rats": stalled };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const released = decideScriptAction(s, obs({ hostileOnGrid: true, hardenerModuleIDs: [] }), initialMemory(s), idleRegistry, home);
+  assert.equal(released.stepPath, "m");
+  const mining = decideScriptAction(s, obs({ hostileOnGrid: false, combatDroneIDs: [7], dronesOut: true }), released.memory, idleRegistry, home);
+  assert.equal(mining.stepPath, "m", "no record, so no recall");
+  assert.equal(mining.action.kind, "activate");
+});
+
+test("a fight-back watch with no ratting macro in the registry leaves the program running", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const r = decideScriptAction(s, obs({ hostileOnGrid: true }), initialMemory(s), registry, home);
+  assert.equal(r.stepPath, "m");
+  assert.equal(r.status, "running");
+});
+
+test("a launch-drones interrupt with no combat drones to launch yields to the step rather than spinning", () => {
+  const drones: InterruptRow = { id: "d", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, drones]);
+  // A bay of salvage drones defends nothing.
+  const salvageOnly = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: false, combatDroneBayItemIDs: [], salvageDroneBayItemIDs: [3] }), initialMemory(s), registry, home);
+  assert.equal(salvageOnly.action.kind, "activate");
+  assert.equal(salvageOnly.stepPath, "m");
+  // Other drones hold the slots: a launch would be refused every tick, so the step keeps working.
+  const slotsTaken = decideScriptAction(s, obs({ hostileOnGrid: true, dronesOut: true, combatDroneBayItemIDs: [1], combatDroneIDs: [] }), initialMemory(s), registry, home);
+  assert.equal(slotsTaken.action.kind, "activate");
+});
+
 // ─── Bounds: cannot-tell streak and the step-tick cap ────────────────────────
 
-test("an unreadable until pauses after the cannot-tell streak runs out", () => {
+test("an unreadable until heads home after the cannot-tell streak runs out", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
   let last = decideScriptAction(s, obs({ oreHoldFraction: null }), mem, registry, home);
-  for (let i = 0; i < MAX_CANNOT_TELL_STREAK + 2 && last.status === "running"; i += 1) {
+  for (let i = 0; i < MAX_CANNOT_TELL_STREAK + 2 && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
     last = decideScriptAction(s, obs({ oreHoldFraction: null }), mem, registry, home);
   }
-  assert.equal(last.status, "paused");
-  assert.match(last.pauseReason ?? "", /could not read/i);
+  assert.equal(last.action.kind, "warp", "it gives up by flying home, not by parking in space");
+  const stopped = decideScriptAction(s, obs({ oreHoldFraction: null, docked: true }), last.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /could not read/i);
 });
 
 test("a step that never finishes trips the step-tick cap", () => {
@@ -389,22 +653,52 @@ test("a step that never finishes trips the step-tick cap", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
   let last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
-  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.status === "running"; i += 1) {
+  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
     last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
   }
-  assert.equal(last.status, "paused");
-  assert.match(last.pauseReason ?? "", /very long time/i);
+  assert.equal(last.action.kind, "warp", "the cap sends it home rather than leaving it there");
+  const stopped = decideScriptAction(s, obs({ oreHoldFraction: 0, docked: true }), last.memory, registry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /very long time/i);
 });
 
 // ─── A blocked macro ─────────────────────────────────────────────────────────
 
-test("a blocked macro pauses with the macro's own reason", () => {
-  const stuck: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "There are no rocks left here." });
+const stuck: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "There are no rocks left here." });
+const stuckRegistry = { ...registry, "mine-at-belt": stuck };
+
+test("a blocked macro heads home, then pauses with the macro's own reason", () => {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
-  const r = decideScriptAction(s, obs(), initialMemory(s), { ...registry, "mine-at-belt": stuck }, home);
+  const r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, home);
+  assert.equal(r.status, "running", "a blocked belt is not a place to sit");
+  assert.equal(r.action.kind, "warp");
+  const stopped = decideScriptAction(s, obs({ docked: true }), r.memory, stuckRegistry, home);
+  assert.equal(stopped.status, "paused");
+  assert.match(stopped.pauseReason ?? "", /no rocks left/i);
+});
+
+test("a fault stops in space after all when there is no home to fly to", () => {
+  // The one honest exception, and the bound that stops the latch being forever:
+  // if the way home is BLOCKED (no home station known), the runner stops where
+  // it is and says why, rather than flying at a guess or latching in a loop.
+  const noHome: HomeTravelDecider = () =>
+    tick({ kind: "wait" }, { kind: "blocked", reason: "This bot does not know which station is home." });
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, noHome);
   assert.equal(r.status, "paused");
-  assert.match(r.pauseReason ?? "", /no rocks left/i);
+  assert.match(r.pauseReason ?? "", /does not know which station is home/i);
+});
+
+test("a fault keeps flying home across ticks instead of re-deciding the fault every tick", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  let r = decideScriptAction(s, obs(), initialMemory(s), stuckRegistry, home);
+  for (let i = 0; i < 4; i += 1) {
+    assert.equal(r.action.kind, "warp");
+    assert.equal(r.status, "running");
+    r = decideScriptAction(s, obs(), r.memory, stuckRegistry, home);
+  }
+  assert.equal(decideScriptAction(s, obs({ docked: true }), r.memory, stuckRegistry, home).status, "paused");
 });
 
 // ─── The "alert me" response ─────────────────────────────────────────────────

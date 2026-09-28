@@ -341,12 +341,47 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
 /**
  * What a fired interrupt does.
  *
- *   • "pause"          — stop where you are and say why.
+ * ⚠ NOTHING HERE EVER COMES TO REST IN SPACE. A stopped bot is an unattended
+ * ship with its guns off, and a mining bot that stopped in a belt is food, so
+ * every stop happens FROM A STATION: the runner flies home first and pauses on
+ * arrival, carrying the reason with it (nav/scriptDecide `stopSafely`). The same
+ * rule covers the runner's own faults — a blocked block, the livelock guard, the
+ * step-tick cap — which are not responses at all and so are not listed here.
+ *
+ *   • "pause"          — stop and say why, from a station. In space that means
+ *                        flying home first, which reads the same as
+ *                        "dock-and-pause"; docked, it stops on the spot.
  *   • "dock-and-pause" — break off, dock at home, pause (the safety-floor
  *                        response, and the hostile "run for the station" pick).
  *   • "launch-drones"  — put drones out and KEEP WORKING (the hostile "use
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
+ *   • "fight-back"     — TANK UP AND ACTUALLY FIGHT the pirate, then keep
+ *                        working. Every fitted hardener and damage control goes
+ *                        on first — one tick each, the instant self-targeted
+ *                        move a player makes before they touch the guns — and
+ *                        then the fight: drones out, lock the nearest hostile
+ *                        inside targeting range, drones onto it, every idle gun
+ *                        onto it — the same ladder the Fight-the-rats block
+ *                        runs, borrowed rather than copied. It is what
+ *                        "launch-drones" is usually mistaken for: launching
+ *                        drones tells them to defend, it does not point them at
+ *                        anything.
+ *
+ *                        When the pirate is gone the watch STANDS THE SHIP DOWN
+ *                        — the drones it committed come home, then the hardeners
+ *                        it switched on go back off, so the next lap starts cold
+ *                        instead of burning capacitor on an empty grid. It undoes
+ *                        only its OWN work: a hardener the player's Hardeners-on
+ *                        block lit is never claimed and never switched off.
+ *
+ *                        ⚠ IT MUST NEVER OWN THE SHIP FOREVER. An interrupt
+ *                        that keeps returning an action starves the step under
+ *                        it, so the ladder hands control back the moment there
+ *                        is nothing left to fight — grid clear, nothing inside
+ *                        targeting range, or no way to fight at all — and the
+ *                        program carries on from where it was. The stand-down is
+ *                        bounded the same way: one action per rung, never a wait.
  */
 /**
  *   • "repair"         — switch the matching repairers ON while the condition
@@ -369,13 +404,20 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *     Once spent, the scan skips the row and carries on down the ladder — so
  *     "tell me, AND dock" is two rows that both work.
  */
-export type InterruptResponse = "pause" | "dock-and-pause" | "launch-drones" | "repair" | "alert";
+export type InterruptResponse =
+  | "pause"
+  | "dock-and-pause"
+  | "launch-drones"
+  | "fight-back"
+  | "repair"
+  | "alert";
 
 /** Every interrupt response — for exhaustive iteration in menus and tests. */
 export const INTERRUPT_RESPONSES: readonly InterruptResponse[] = Object.freeze<InterruptResponse[]>([
   "pause",
   "dock-and-pause",
   "launch-drones",
+  "fight-back",
   "repair",
   "alert",
 ]);

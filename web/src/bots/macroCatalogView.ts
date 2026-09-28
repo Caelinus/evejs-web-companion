@@ -233,7 +233,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "salvage-wrecks": entry(
     "salvage-wrecks",
     "hauling",
-    "Works through the wrecks around you: salvage drones sweep on their own, and fitted salvagers are run on each wreck in turn. Finishes when nothing salvageable is left, drones home.",
+    "Works through the wrecks around you: salvage drones sweep on their own, and fitted salvagers are run on each wreck in turn. Finishes when nothing salvageable is left, drones home. A ship with no way to salvage skips this step with a warning rather than stopping.",
     "Salvage drones in the bay, or salvagers fitted",
   ),
   "loot-wrecks": entry(

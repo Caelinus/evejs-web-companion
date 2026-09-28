@@ -10,6 +10,15 @@
 //      keep flying it, then pause once docked.
 //   2. Otherwise, interrupts first (A4a): a met one fires; a pirate with an
 //      unreadable ship pauses.
+//   2.7 A STOP NEVER HAPPENS IN SPACE. Every fault the runner cannot work
+//      through — a blocked macro, the livelock guard, the step-tick cap, the
+//      cannot-tell streak, an unknown macro, the sealed acute pause — and the
+//      player's own "just stop" watch LATCH and fly the ship home first, then
+//      pause docked with the reason that sent it there. A bot parked in a belt
+//      is food: the rats keep coming and nobody is flying. `stopSafely` is the
+//      only way any of them stops, and the only bare pauses left in this file
+//      are the two at the END of that flight home (arrived, or it cannot be
+//      flown), which must be terminal or the ship would latch forever.
 //   3. Otherwise, the FORWARD SCAN runs the program: consult the active step's
 //      macro, and if the step is finished (its `until` met while the macro is
 //      armed, or the macro reports itself done) advance to the next node and
@@ -35,7 +44,7 @@ import type {
   MacroID,
   MacroStep,
 } from "../bots/botScript.ts";
-import { alertSentence, conditionSentence } from "../bots/scriptText.ts";
+import { alertSentence, conditionSentence, stepSentence } from "../bots/scriptText.ts";
 import {
   SENTENCE as COND_SENTENCE,
   bumpCannotTellStreak,
@@ -167,6 +176,9 @@ export type MacroMemory = Readonly<Record<string, unknown>>;
  *   • outcome "done"    — it has finished its own job (docked, hold empty); the
  *                         orchestrator advances to the next step this tick.
  *   • outcome "blocked" — it cannot proceed; the bot pauses with the reason.
+ *   • outcome "skipped" — it cannot do its job on this ship and that is not
+ *                         worth stopping for (no salvager on a ratting hull):
+ *                         the orchestrator says so once and advances.
  *
  * `armed` says whether the player's `until` is meaningful yet — mine-at-belt is
  * unarmed until it has arrived, which is what keeps "ore hold full" from reading
@@ -175,7 +187,8 @@ export type MacroMemory = Readonly<Record<string, unknown>>;
 export type MacroOutcome =
   | { readonly kind: "acting" }
   | { readonly kind: "done" }
-  | { readonly kind: "blocked"; readonly reason: string };
+  | { readonly kind: "blocked"; readonly reason: string }
+  | { readonly kind: "skipped"; readonly reason: string };
 
 /**
  * The run-scoped BOARD: facts one block publishes for the blocks after it (the
@@ -240,7 +253,12 @@ type Position =
   | { readonly kind: "done" };
 
 interface Latched {
-  readonly interruptID: string;
+  /**
+   * The watch row that sent the ship home, or NULL when a fault did — the
+   * livelock guard and the step-tick cap are the runner's own verdicts and have
+   * no row to point the readout at.
+   */
+  readonly interruptID: string | null;
   readonly reason: string;
 }
 
@@ -259,6 +277,13 @@ export interface ScriptMemory {
    * "nothing spent yet", which is the safe default: it alerts.
    */
   readonly spentAlerts?: readonly string[];
+  /**
+   * Step ids that have already been SKIPPED (outcome "skipped") this run, so the
+   * warning is said once: a skipped step inside a loop comes round again every
+   * pass, and a program that can do nothing but skip must trip the livelock
+   * guard, not alert forever. Optional like `spentAlerts`, same default.
+   */
+  readonly skippedSteps?: readonly string[];
 }
 
 /** The memory a fresh run starts from — positioned at the first node. */
@@ -272,6 +297,7 @@ export function initialMemory(script: BotScript): ScriptMemory {
     macroMem: {},
     board: {},
     spentAlerts: [],
+    skippedSteps: [],
   };
 }
 
@@ -364,8 +390,9 @@ export function decideScriptAction(
   const res = resolveInterrupt(script.interrupts, obs, spentAlerts);
   if (res.kind === "safety-override") {
     // No interrupt row caused this — it is the sealed acute rule firing on its
-    // own, so there is honestly no interrupt id to report.
-    return paused(res.reason, scanMem, null);
+    // own, so there is honestly no interrupt id to report. A pirate is here and
+    // the ship is unreadable, which is the LAST state to sit still in: home first.
+    return stopSafely(res.reason, scanMem, null, obs, travelHome);
   }
   if (res.kind === "fire") {
     return fireInterrupt(script, res.row.id, obs, scanMem, travelHome, registry, false);
@@ -389,8 +416,26 @@ export function decideScriptAction(
     };
   }
 
-  // 3. The program, with the forward scan.
-  return runProgram(script, obs, scanMem, registry);
+  // 2.6 The fight-back watch's OTHER half: the pirate is gone, so the drones it
+  // committed come home and the hardeners IT switched on go back off.
+  const stand = standDownAfterFight(script, obs, scanMem);
+  if (stand.action !== null) {
+    return {
+      action: stand.action,
+      why: stand.why,
+      phase: "Standing down",
+      stepPath: stand.rowID,
+      interruptID: stand.rowID,
+      status: "running",
+      pauseReason: null,
+      memory: stand.memory,
+    };
+  }
+
+  // 3. The program, with the forward scan. `stand.memory` and not `scanMem`: the
+  // pass above forgets a finished stand-down record without spending a tick on
+  // it, and that forgetting has to reach the memory this returns.
+  return runProgram(script, obs, stand.memory, registry, travelHome);
 }
 
 /**
@@ -455,6 +500,135 @@ function repairShutdown(
   return null;
 }
 
+/**
+ * Where a fight-back watch records what it will have to UNDO — the hardeners it
+ * switched on, and whether it has already called the drones in.
+ *
+ * It cannot share the borrowed ladder's memory entry (keyed by the row id
+ * itself): that ladder rewrites its memory wholesale on some rungs — picking a
+ * fresh primary starts from `{}` — which would lose the record mid-fight and
+ * leave the hardeners running for the rest of the run. Row ids and step ids
+ * share one namespace; the suffix keeps this key out of it.
+ */
+function standDownKey(rowID: string): string {
+  return `${rowID}:stand-down`;
+}
+
+// A type alias and not an interface on purpose: only an alias carries the
+// implicit index signature that lets a record be stored back into `macroMem`,
+// which is a `Record<string, unknown>` map.
+type StandDownRecord = {
+  /** Hardeners THIS watch switched on — so it is also the list it may switch off. */
+  readonly hardened: readonly number[];
+  readonly recalled: boolean;
+};
+
+function standDownRecord(mem: ScriptMemory, rowID: string): StandDownRecord {
+  const raw = mem.macroMem[standDownKey(rowID)] ?? {};
+  const hardened = raw["hardened"];
+  return {
+    hardened: Array.isArray(hardened) ? hardened.filter((id): id is number => typeof id === "number") : [],
+    recalled: raw["recalled"] === true,
+  };
+}
+
+/**
+ * The next fitted hardener a fight-back watch should light, or null when there
+ * is nothing to do.
+ *
+ * ⚠ ONE ATTEMPT PER HARDENER PER EPISODE, and that is the whole bound. The list
+ * of what the watch switched on doubles as the list of what it has already
+ * tried, so a hardener that will not come on is not retried every tick — which
+ * would starve the step under the watch exactly the way an unreleased fight
+ * would. The same list is why a hardener the player's own Hardeners-on block
+ * already lit is never claimed here, and so is never switched off by the
+ * stand-down: the watch only ever undoes its own work.
+ */
+function hardenerToLight(obs: ScriptObservation, mem: ScriptMemory, rowID: string): number | null {
+  if (obs.inSpace !== true) {
+    return null; // modules only run out in space
+  }
+  const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+  const tried = new Set(standDownRecord(mem, rowID).hardened);
+  return (obs.hardenerModuleIDs ?? []).find((id) => !active.has(id) && !tried.has(id)) ?? null;
+}
+
+interface StandDown {
+  readonly action: ScriptAction | null;
+  readonly why: string;
+  readonly rowID: string | null;
+  readonly memory: ScriptMemory;
+}
+
+/**
+ * The fight-back watch's OFF half: once the pirate is gone, put the ship back
+ * the way the watch found it — the drones it committed come home, then the
+ * hardeners it switched on go off.
+ *
+ * ⚠ THIS CANNOT LIVE IN `fireInterrupt`. A watch is only consulted while its
+ * condition is MET, so the moment the grid clears the fight-back row is never
+ * reached again and the borrowed ladder's own "grid clear — call the drones
+ * home" rung becomes unreachable: without this pass the drones stay in space and
+ * the hardeners burn capacitor for the rest of the run. Same shape as the repair
+ * thermostat above, and read the same way — only a NOT-MET condition stands the
+ * ship down, because standing down blind is the worst possible moment to drop
+ * the tank.
+ *
+ * IT NEVER WAITS. Every rung is a real action and shrinks the record, so the
+ * whole stand-down is one tick per hardener plus one for the recall, and then
+ * the program has the ship back. It does NOT hold the ship until the drones are
+ * actually in the bay: they fly home on their own, and starving the step to
+ * watch them do it is the one thing an always-armed response must not do.
+ */
+function standDownAfterFight(script: BotScript, obs: ScriptObservation, mem: ScriptMemory): StandDown {
+  let memory = mem;
+  for (const row of script.interrupts) {
+    const key = standDownKey(row.id);
+    if (row.respond !== "fight-back" || !(key in memory.macroMem)) {
+      continue;
+    }
+    if (evaluateCondition(row.when, obs) !== "not-met") {
+      continue;
+    }
+    const record = standDownRecord(memory, row.id);
+    if (obs.inSpace !== true) {
+      // Docked: the modules are off and the drones are in whatever the record
+      // says, so there is nothing to undo — just forget it.
+      memory = { ...memory, macroMem: omit(memory.macroMem, key) };
+      continue;
+    }
+    // The drones first, while the tank is still up.
+    const out = obs.combatDroneIDs ?? [];
+    if (!record.recalled && out.length > 0) {
+      return {
+        action: { kind: "recallDrones", droneIDs: out },
+        why: "The pirate is gone, so the drones come home.",
+        rowID: row.id,
+        memory: { ...memory, macroMem: { ...memory.macroMem, [key]: { ...record, recalled: true } } },
+      };
+    }
+    // Then the hardeners — only the ones still running, and only ours.
+    const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+    const next = record.hardened.find((id) => active.has(id));
+    if (next !== undefined) {
+      return {
+        action: { kind: "deactivate", moduleID: next },
+        why: "The pirate is gone, so the hardener goes back off.",
+        rowID: row.id,
+        memory: {
+          ...memory,
+          macroMem: {
+            ...memory.macroMem,
+            [key]: { hardened: record.hardened.filter((id) => id !== next), recalled: true },
+          },
+        },
+      };
+    }
+    memory = { ...memory, macroMem: omit(memory.macroMem, key) };
+  }
+  return { action: null, why: "", rowID: null, memory };
+}
+
 // ─── Interrupts ──────────────────────────────────────────────────────────────
 
 function fireInterrupt(
@@ -468,29 +642,123 @@ function fireInterrupt(
 ): ScriptTickResult {
   const row = script.interrupts.find((r) => r.id === rowID);
   if (row === undefined) {
-    return runProgram(script, obs, mem, registry);
+    return runProgram(script, obs, mem, registry, travelHome);
   }
   switch (row.respond) {
     case "pause":
-      return paused(stoppedBecause(conditionSentence(row.when)), mem, row.id);
+      // "Just stop and wait" still stops — from a STATION. The watch fired for a
+      // reason the player wanted to be told about, and leaving the ship parked in
+      // space to be told about it is how a mining bot ends up dead in a belt with
+      // a full hold. In space this now reads the same as "dock at home and stop";
+      // docked, it stops exactly where it stands.
+      return stopSafely(stoppedBecause(conditionSentence(row.when)), mem, row.id, obs, travelHome);
     case "dock-and-pause": {
       const latched: Latched = { interruptID: row.id, reason: stoppedBecause(conditionSentence(row.when)) };
       return continueHeadingHome(obs, { ...mem, latched }, travelHome);
     }
     case "launch-drones": {
-      if (obs.dronesOut === true) {
-        // Already defended — keep working the program.
-        return runProgram(script, obs, mem, registry);
+      // The COMBAT drones, by role (nav/droneRoles.ts) — never the whole bay.
+      // Satisfied once they are out. Nothing to do either when the bay holds no
+      // combat drones (a bay of salvage drones defends nothing) or when OTHER
+      // drones hold the slots: a launch into full slots is refused every tick
+      // and would starve the step under it, so the program keeps working.
+      const combatOut = obs.combatDroneIDs ?? [];
+      const combatBay = obs.combatDroneBayItemIDs ?? [];
+      if (combatOut.length > 0 || combatBay.length === 0 || obs.dronesOut === true) {
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       return {
-        action: { kind: "launchDrones", droneItemIDs: obs.droneBayItemIDs ?? [] },
-        why: "A pirate showed up, so the drones go out to defend the ship.",
+        action: { kind: "launchDrones", droneItemIDs: combatBay },
+        why: "A pirate showed up, so the combat drones go out to defend the ship.",
         phase: "Defending",
         stepPath: row.id,
         interruptID: row.id,
         status: "running",
         pauseReason: null,
         memory: mem,
+      };
+    }
+    case "fight-back": {
+      // ⚠ BORROWED, NOT COPIED. The combat ladder (drones out → lock the nearest
+      // hostile in targeting range → drones onto it → every idle gun onto it)
+      // already exists as the Fight-the-rats block, and it is reached the only
+      // way this file is allowed to reach a macro: through the injected registry.
+      // That keeps the orchestrator's one dependency rule intact (it knows macro
+      // IDs, never macro code) and means the watch and the block can never drift
+      // apart — a fix to one is a fix to both.
+      const fight = registry["fight-the-rats"];
+      if (fight === undefined) {
+        return runProgram(script, obs, mem, registry, travelHome);
+      }
+      // THE TANK GOES UP FIRST. A hardener is instant and self-targeted, so it
+      // costs one tick and buys the whole fight — the same thing a player reaches
+      // for before they reach for the guns. Bounded to one attempt each per
+      // episode by `hardenerToLight`, and what it lights is written down so the
+      // stand-down can put it back (`standDownAfterFight`).
+      const hardener = hardenerToLight(obs, mem, row.id);
+      if (hardener !== null) {
+        const record = standDownRecord(mem, row.id);
+        return {
+          action: { kind: "activate", moduleID: hardener, targetID: 0 },
+          why: "A pirate showed up, so the hardeners go on before the fight.",
+          phase: "Hardening",
+          stepPath: row.id,
+          interruptID: row.id,
+          status: "running",
+          pauseReason: null,
+          memory: {
+            ...mem,
+            macroMem: {
+              ...mem.macroMem,
+              [standDownKey(row.id)]: { ...record, hardened: [...record.hardened, hardener] },
+            },
+          },
+        };
+      }
+      // The ladder's memory (which target is primary, whether the lock was
+      // issued, which target the drones are already on) is keyed by the WATCH
+      // ROW's id in the same per-step memory map the program's steps use. Row ids
+      // and step ids share one namespace, so this needs no new memory slot — and
+      // it keeps the watch's fight separate from any Fight-the-rats STEP the same
+      // script might also run.
+      const step: MacroStep = { id: row.id, kind: "macro", macro: "fight-the-rats", args: {} };
+      const tick = fight(step, obs, mem.macroMem[row.id] ?? {}, mem.board);
+      if (tick.outcome.kind !== "acting") {
+        // Nothing left to fight — the grid is clear, nothing is inside targeting
+        // range, or this hull cannot fight at all. THIS IS THE RELEASE: the watch
+        // drops the ship and the step under it carries on from where it was. An
+        // always-armed response that never released would starve the program.
+        //
+        // Only the LADDER's memory goes. The stand-down record under
+        // `standDownKey` deliberately survives the release — it is the only note
+        // of which hardeners this watch switched on, and it is read after the
+        // condition clears, which is long after this row stops being consulted.
+        const { [row.id]: _spent, ...rest } = mem.macroMem;
+        return runProgram(script, obs, { ...mem, macroMem: rest }, registry, travelHome);
+      }
+      // The ladder is ACTING, so this watch has now committed the ship to a
+      // fight — write the stand-down record even when there was no hardener to
+      // light. Without this a hull with no hardeners fitted would fight, clear
+      // the grid, and leave its drones in space forever: the record is the only
+      // thing the stand-down looks for. Rewriting it each tick is idempotent —
+      // `standDownRecord` reads the existing one back, so a recall already
+      // issued stays issued.
+      return {
+        action: tick.action,
+        why: tick.why,
+        phase: tick.phase,
+        stepPath: row.id,
+        interruptID: row.id,
+        status: "running",
+        pauseReason: null,
+        memory: {
+          ...mem,
+          macroMem: {
+            ...mem.macroMem,
+            [row.id]: tick.nextMem,
+            [standDownKey(row.id)]: standDownRecord(mem, row.id),
+          },
+        },
       };
     }
     case "repair": {
@@ -515,12 +783,12 @@ function fireInterrupt(
             memory: mem,
           };
         }
-        return runProgram(script, obs, mem, registry);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       const idle = reps.find((id) => !active.has(id));
       if (idle === undefined) {
         // Nothing to switch on (all running, or none fitted) — keep working.
-        return runProgram(script, obs, mem, registry);
+        return runProgram(script, obs, mem, registry, travelHome);
       }
       return {
         action: { kind: "activate", moduleID: idle, targetID: 0 },
@@ -618,6 +886,7 @@ function runProgram(
   obs: ScriptObservation,
   mem: ScriptMemory,
   registry: MacroRegistry,
+  travelHome: HomeTravelDecider,
 ): ScriptTickResult {
   let position = mem.position;
   let loopPass = mem.loopPass;
@@ -666,11 +935,11 @@ function runProgram(
         const samePlace = positionKey(position) === positionKey(mem.position);
         const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
         if (stepTicks > MAX_STEP_TICKS) {
-          return paused(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id);
+          return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         const streak = bumpCannotTellStreak(mem.cannotTellStreak, true);
         if (cannotTellStreakExhausted(streak)) {
-          return paused(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, branch.id);
+          return stopSafely(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         return {
           action: WAIT,
@@ -698,7 +967,7 @@ function runProgram(
           if (next.wrapped) {
             wraps += 1;
             if (wraps >= 2) {
-              return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+              return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
             }
           }
         } else {
@@ -717,7 +986,7 @@ function runProgram(
     const step = activeStep(script, position);
     const decider = registry[step.macro];
     if (decider === undefined) {
-      return paused(SAY.unknownMacro, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(SAY.unknownMacro, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
 
     const stepMem = macroMem[step.id] ?? {};
@@ -728,7 +997,50 @@ function runProgram(
     }
 
     if (tick.outcome.kind === "blocked") {
-      return paused(tick.outcome.reason, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(tick.outcome.reason, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
+    }
+
+    if (tick.outcome.kind === "skipped") {
+      // The step cannot do its job on this ship, and that is not worth stopping
+      // the whole program for. Say so ONCE — through the alert path, which is
+      // held on the readout and on a server bot's record so a player who was
+      // away still sees it — and move on exactly as a finished step does. The
+      // SECOND time the same step is skipped (a loop brought it round again)
+      // it advances silently, so a program with nothing else to do falls
+      // through to the livelock guard below instead of alerting every tick.
+      macroMem = omit(macroMem, step.id);
+      const next = advance(script, position, loopPass);
+      const skipped = mem.skippedSteps ?? [];
+      if (skipped.includes(step.id)) {
+        position = next.position;
+        loopPass = next.loopPass;
+        if (next.wrapped) {
+          wraps += 1;
+          if (wraps >= 2) {
+            return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
+          }
+        }
+        continue;
+      }
+      const message = `Skipped "${stepSentence(step)}": ${tick.outcome.reason}`;
+      return {
+        action: { kind: "alert", message },
+        why: message,
+        phase: "Skipping a step",
+        stepPath: step.id,
+        interruptID: null,
+        status: "running",
+        pauseReason: null,
+        memory: {
+          ...mem,
+          position: next.position,
+          loopPass: next.loopPass,
+          stepTicks: 0,
+          macroMem,
+          board,
+          skippedSteps: [...skipped, step.id],
+        },
+      };
     }
 
     if (tick.outcome.kind === "done") {
@@ -739,7 +1051,7 @@ function runProgram(
       if (next.wrapped) {
         wraps += 1;
         if (wraps >= 2) {
-          return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+          return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
         }
       }
       continue;
@@ -797,7 +1109,7 @@ function runProgram(
         if (next.wrapped) {
           wraps += 1;
           if (wraps >= 2) {
-            return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+            return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
           }
         }
         continue;
@@ -811,11 +1123,11 @@ function runProgram(
     const samePlace = positionKey(position) === positionKey(mem.position);
     const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
     if (stepTicks > MAX_STEP_TICKS) {
-      return paused(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
     const streak = bumpCannotTellStreak(mem.cannotTellStreak, blindThisTick);
     if (cannotTellStreakExhausted(streak)) {
-      return paused(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, step.id);
+      return stopSafely(COND_SENTENCE.cannotTellStreak, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
 
     return {
@@ -844,7 +1156,7 @@ function runProgram(
 
   // The scan is bounded by construction; reaching here means it could not make
   // progress, which is the livelock case under another name.
-  return paused(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null);
+  return stopSafely(SAY.livelock, { ...mem, position, loopPass, macroMem, board }, null, obs, travelHome);
 }
 
 // ─── Position arithmetic ─────────────────────────────────────────────────────
@@ -1014,6 +1326,36 @@ function done(mem: ScriptMemory): ScriptTickResult {
     pauseReason: null,
     memory: { ...mem, position: { kind: "done" }, latched: null },
   };
+}
+
+/**
+ * STOP — BUT NEVER IN SPACE. Every stop the player did not personally press goes
+ * through here: it latches the reason and flies the ship home, and the pause
+ * itself happens on arrival (`continueHeadingHome`), carrying that same reason
+ * to the readout so the player still learns why.
+ *
+ * The reason this exists is a bot found paused in a belt with rats on top of it.
+ * A stop in space is not a safe state — it is an unattended ship with its guns
+ * off, and the longer nobody looks, the worse it gets. Docked is the only place
+ * a bot may come to rest.
+ *
+ * It costs nothing when the ship is already safe: `scriptTravelHome` reports
+ * "docked anywhere is done" on its first consultation, so the flight collapses
+ * to the plain pause it would have been, on the same tick.
+ *
+ * ⚠ THE TWO PAUSES INSIDE `continueHeadingHome` MUST STAY BARE — arriving home,
+ * and a home that cannot be flown to (no home station known). Routing those
+ * through here would re-latch the ship into a flight it has just finished or
+ * cannot make, and it would never stop at all.
+ */
+function stopSafely(
+  reason: string,
+  mem: ScriptMemory,
+  litID: string | null,
+  obs: ScriptObservation,
+  travelHome: HomeTravelDecider,
+): ScriptTickResult {
+  return continueHeadingHome(obs, { ...mem, latched: { interruptID: litID, reason } }, travelHome);
 }
 
 function paused(reason: string, mem: ScriptMemory, litID: string | null): ScriptTickResult {
