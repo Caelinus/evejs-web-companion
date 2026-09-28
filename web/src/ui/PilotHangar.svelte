@@ -80,6 +80,10 @@
     type LaunchTarget,
   } from "../app/hangarLaunch.ts";
   import { refreshRoster } from "../app/rosterRefresh.ts";
+  import { listActiveServerBots, type ActiveServerBot } from "../app/api.ts";
+  import { stopServerBotFor } from "../app/stopBotFor.ts";
+  import { skipWhileBusy } from "../app/skipWhileBusy.ts";
+  import { panelErrorWords } from "../bridge/refusals.ts";
 
   let {
     onlineIDs = new Set<number>(),
@@ -214,6 +218,69 @@
       known = loadKnownCharacters();
     });
   });
+
+  // --- server bots ------------------------------------------------------------
+  //
+  // ⚠ THIS IS THE SCREEN A PLAYER COMES BACK TO. A server bot keeps flying with
+  // the tab shut (src/botHost.js), so the hangar is the first thing they see
+  // afterwards — and it used to say nothing about bots at all. Worse than
+  // silent: the BFF refuses to select a bot-flown character
+  // (CHARACTER_IN_USE_BY_BOT), so the row was a refusal with no remedy printed
+  // on it, and a browser whose pilots were ALL bot-flown had no reachable Stop
+  // anywhere on it. The one Stop that existed was on the "Add character"
+  // overlay, which you have to already know to go looking for.
+  //
+  // The read is /api/bots/active — unauthenticated by design, because this
+  // screen exists before any sign-in; it carries each bot's phase and the
+  // host's ~15s ship-vitals sample. Stopping DOES need auth and is
+  // app/stopBotFor.ts's job.
+  let botStatuses = $state<Map<number, ActiveServerBot>>(new Map());
+  let botPollAlive = true;
+
+  async function refreshBotFlown(): Promise<void> {
+    try {
+      const rows = await listActiveServerBots({ priority: "poll" });
+      if (botPollAlive) botStatuses = new Map(rows.map((row) => [row.characterID, row]));
+    } catch {
+      // Keep the last known rows and let the next poll retry: a landing screen
+      // that blinks its markers off because one read failed is worse than one
+      // showing a marker a few seconds stale.
+    }
+  }
+
+  $effect(() => {
+    // Guarded, like every periodic read in the client — see app/skipWhileBusy.ts.
+    const beat = skipWhileBusy(refreshBotFlown);
+    void beat();
+    const handle = setInterval(() => void beat(), 5000);
+    return () => {
+      botPollAlive = false;
+      clearInterval(handle);
+    };
+  });
+
+  const botFlownCount = $derived(pilots.filter((p) => botStatuses.has(p.characterID)).length);
+
+  /** The pilot whose bot a stop is in flight for — one stop at a time. */
+  let stoppingID = $state<number | null>(null);
+  let botError = $state("");
+
+  async function stopBot(pilot: HangarPilot): Promise<void> {
+    if (stoppingID !== null) return;
+    stoppingID = pilot.characterID;
+    botError = "";
+    try {
+      await stopServerBotFor(pilot.accountName, pilot.characterID);
+    } catch (cause) {
+      botError = `Could not stop the bot flying ${pilot.name} — ${panelErrorWords(cause)}`;
+    } finally {
+      stoppingID = null;
+    }
+    // Repaint from the server either way: a stop that threw on the way back may
+    // still have landed, and a run that had already ended on its own has to
+    // stop being marked.
+    await refreshBotFlown();
+  }
 
   // --- selection -------------------------------------------------------------
 
@@ -572,12 +639,22 @@
     <span>{scopeLabel(scope, prefs.squads)}</span>
     <span class="hangar-summary-bar" aria-hidden="true">|</span>
     <span>{totalsLabel(visible, pilots)}</span>
+    {#if botFlownCount > 0}
+      <span class="hangar-summary-bar" aria-hidden="true">|</span>
+      <span class="hangar-summary-bots">
+        {botFlownCount === 1 ? "1 pilot" : `${botFlownCount} pilots`} flown by a server bot — Stop is on the row
+      </span>
+    {/if}
     {#if manage}
       <span class="hangar-summary-manage">
         manage mode — remove pilots, remove accounts, assign squads
       </span>
     {/if}
   </div>
+
+  {#if botError}
+    <p class="hangar-boterror" role="alert">{botError}</p>
+  {/if}
 
   <main class="hangar-grid" class:has-selection={selectedPilots.length > 0}>
     {#each accounts as account (account.name)}
@@ -627,6 +704,10 @@
                 {manage}
                 {tapSelects}
                 selected={selected.has(pilot.characterID)}
+                bot={botStatuses.get(pilot.characterID) ?? null}
+                stopping={stoppingID === pilot.characterID}
+                stopBusy={stoppingID !== null}
+                onStopBot={() => void stopBot(pilot)}
                 squads={prefs.squads}
                 squadMenuOpen={squadMenuFor === pilot.characterID}
                 onActivate={() => activatePilot(pilot)}

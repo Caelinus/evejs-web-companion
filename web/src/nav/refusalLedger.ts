@@ -53,6 +53,21 @@ export type RefusalKind = "refused" | "unreachable" | "gone" | "no-room";
  */
 export const NO_ROOM_CODE = "NO_ROOM_ABOARD";
 
+/**
+ * Is this that failure, asked of the thrown error rather than of a wire string?
+ *
+ * ⚠ THE MARKER IS IN THE MESSAGE, WHICH IS RIGHT FOR A LEDGER AND WRONG FOR A
+ * PERSON. `classifyRefusal` reads raw text, so the sentinel has to travel in it
+ * — but `panelErrorWords` has no code table for an error this client minted
+ * itself and falls through to `error.message`, which would put NO_ROOM_ABOARD on
+ * screen verbatim in the one place R9a matters most. A surface that reports to a
+ * player asks here and writes its own sentence instead.
+ */
+export function isNoRoomAboard(cause: unknown): boolean {
+  const text = cause instanceof Error ? cause.message : String(cause ?? "");
+  return text.includes(NO_ROOM_CODE);
+}
+
 export interface RefusalRecord {
   /** stepPath + action kind + target, so one failing can does not mask another. */
   readonly key: string;

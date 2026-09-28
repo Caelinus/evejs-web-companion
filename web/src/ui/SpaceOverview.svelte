@@ -63,6 +63,7 @@
   } from "./spaceRanges.ts";
   import { resolvedName, nameKey, type NameRef } from "../store/names.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
+  import { isNoRoomAboard } from "../nav/refusalLedger.ts";
   import { isSessionLost } from "../app/flow.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -393,6 +394,58 @@
     });
   }
 
+  /**
+   * What "Take everything" did, in one line.
+   *
+   * ⚠ A SUCCESS HAS TO SAY SOMETHING HERE. A refusal already lands in
+   * `concernErrors`, but the two quiet outcomes do not: an EMPTY wreck and a
+   * partial move both end with the player looking at a screen that has not
+   * visibly changed, and a verb that answers nothing at all reads as broken. So
+   * the outcome is reported whether or not it went well.
+   */
+  let lootNotice = $state<{ words: string; ok: boolean } | null>(null);
+
+  /**
+   * Empty the selected wreck or can into the ship.
+   *
+   * ⚠ THE "NO ROOM" CASE IS CAUGHT HERE, NOT LEFT TO `runFor`. That failure is
+   * minted by the client itself and carries the ledger's `NO_ROOM_ABOARD`
+   * sentinel in its message; `panelErrorWords` has no code table for it and
+   * would print the sentinel to the player (R9a). Every OTHER error is rethrown
+   * untouched, so a real server refusal still arrives in the server's own words.
+   */
+  async function lootThis(containerID: number): Promise<void> {
+    await runFor("hold", async () => {
+      const outcome = await flow.lootContainer(containerID).catch((cause: unknown) => {
+        if (!isNoRoomAboard(cause)) {
+          throw cause;
+        }
+        return null;
+      });
+      if (outcome === null) {
+        lootNotice = {
+          words: "There is no room aboard for what is in that. Unload before you try again.",
+          ok: false,
+        };
+        return;
+      }
+      if (outcome.stacks === 0) {
+        lootNotice = { words: "There was nothing in it.", ok: true };
+      } else if (outcome.moved >= outcome.planned) {
+        lootNotice = { words: "Took what your holds would take.", ok: true };
+      } else {
+        lootNotice = {
+          words: "Part of it is aboard. The rest would not fit, or was turned down.",
+          ok: false,
+        };
+      }
+      // Read the holds again, so the ore gauge shows what the ship HAS rather
+      // than what the transfer said it would have. Best-effort: a failed read
+      // must never turn a successful haul into an error.
+      await flow.loadMiningHolds().catch(() => {});
+    });
+  }
+
   /** Everything on this grid you could dock at, nearest first. By NAME (R7d). */
   const stationsOnGrid = $derived(
     rows.filter((row) => isDockableKind(row.kind)).map((row) => ({
@@ -441,16 +494,20 @@
     }
     rangeMenu = null;
     mineReports = [];
-    // ⚠ THE TWO MULTI-STEP VERBS ARE RUN HERE, NOT DELEGATED. They used to be
+    lootNotice = null;
+    // ⚠ THE MULTI-STEP VERBS ARE RUN HERE, NOT DELEGATED. They used to be
     // answered with "…is in the Around Your Ship window for now", which was a
     // pointer to a window that no longer exists. `rowActionRunner.ts` still
-    // refuses them, correctly: it is the SINGLE-CALL dispatcher, and these two
-    // need reporting it has no way to produce.
+    // refuses them, correctly: it is the SINGLE-CALL dispatcher, and each of
+    // these needs reporting it has no way to produce — per laser for mine, per
+    // step for haul, and "how much of it actually landed" for loot.
     if (!isSingleCallAction(action.id)) {
       if (action.id === "mine") {
         void mineThis(row.itemID);
       } else if (action.id === "haul") {
         void haulNow();
+      } else if (action.id === "loot") {
+        void lootThis(row.itemID);
       }
       return;
     }
@@ -729,6 +786,14 @@
       {#each Object.entries(concernErrors) as [concern, words] (concern)}
         {#if words}<p class="spc-note bad">{words}</p>{/if}
       {/each}
+      <!--
+        ⚠ "Take everything" ANSWERS EVEN WHEN IT WENT WELL. An empty wreck and a
+        partial move both leave the screen looking unchanged, and a verb that
+        says nothing at all reads as a broken button.
+      -->
+      {#if lootNotice}
+        <p class="spc-note" class:bad={!lootNotice.ok}>{lootNotice.words}</p>
+      {/if}
       <!--
         ⚠ ONE LINE PER LASER, NEVER ONE SHARED VERDICT. Every activate lands its
         outcome in the same store slot, so a fan-out that reported once would

@@ -5,7 +5,9 @@
   // and re-picking. A pilot already live in this window is shown disabled; the
   // × forgets a stale one from the local roster.
   import type { KnownCharacter } from "../app/knownCharacters.ts";
-  import type { ActiveServerBot, ActiveBotVitals } from "../app/api.ts";
+  import type { ActiveServerBot } from "../app/api.ts";
+  // The bot phrases are shared with the Pilot Hangar's row — see bots/pilotRoster.ts.
+  import { activeBotCommandWords, activeBotVitalsWords } from "../bots/pilotRoster.ts";
 
   let {
     known,
@@ -33,31 +35,6 @@
     onStopBot?: (character: KnownCharacter) => void;
   } = $props();
 
-  /** "Shield 92% · Armor 100% · Hull 100%" — or "Docked" where bars don't apply. */
-  function healthWords(vitals: ActiveBotVitals): string {
-    if (vitals.docked === true) {
-      return "Docked";
-    }
-    const parts: string[] = [];
-    if (vitals.shield !== null) parts.push(`Shield ${Math.round(vitals.shield * 100)}%`);
-    if (vitals.armor !== null) parts.push(`Armor ${Math.round(vitals.armor * 100)}%`);
-    if (vitals.hull !== null) parts.push(`Hull ${Math.round(vitals.hull * 100)}%`);
-    return parts.join(" · ");
-  }
-
-  /** "Cargo hold 12% · Ore hold 75%" — percentages, only for holds that answered. */
-  function holdWords(vitals: ActiveBotVitals): string {
-    return vitals.holds
-      .filter((hold) => hold.used !== null && hold.capacity !== null && hold.capacity > 0)
-      .map((hold) => `${hold.label} ${Math.round((hold.used! / hold.capacity!) * 100)}%`)
-      .join(" · ");
-  }
-
-  /** What the bot is doing right now, in its own words. */
-  function commandWords(bot: ActiveServerBot): string {
-    const phase = bot.phase ?? (bot.status === "paused" ? "Paused" : "Running");
-    return bot.why ? `${phase} — ${bot.why}` : phase;
-  }
 </script>
 
 {#if known.length > 0}
@@ -96,15 +73,10 @@
               {#if botRow}
                 <!-- The at-a-glance ship readout: what the bot is doing, then
                      health and hold fill from the host's ~15s vitals sample. -->
-                <span class="detail known-state">{commandWords(botRow)}</span>
-                {#if botRow.vitals}
-                  {@const health = healthWords(botRow.vitals)}
-                  {@const holds = holdWords(botRow.vitals)}
-                  {#if health || holds}
-                    <span class="detail bot-vitals">
-                      {health}{#if health && holds} · {/if}{holds}
-                    </span>
-                  {/if}
+                <span class="detail known-state">{activeBotCommandWords(botRow)}</span>
+                {@const vitals = activeBotVitalsWords(botRow.vitals)}
+                {#if vitals}
+                  <span class="detail bot-vitals">{vitals}</span>
                 {/if}
               {:else}
                 <span class="detail known-state">A server bot is flying this pilot — stop it to fly it yourself.</span>

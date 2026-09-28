@@ -261,6 +261,39 @@ export interface InsertSavedBotResult {
 }
 
 /** Every id already in use across a program, including nested loop/branch ids. */
+export function programIDs(nodes: readonly ProgramNode[]): Set<string> {
+  const ids = new Set<string>();
+  collectProgramIDs(nodes, ids);
+  return ids;
+}
+
+/**
+ * The editor's id source: counts up (`n1`, `n2`, ...) but SKIPS anything the
+ * document is already using, asked afresh on every call.
+ *
+ * A plain counter is not enough, because the editor also OPENS documents it did
+ * not write. Loading a bot saved in an earlier session brings its `n...` ids back
+ * with it, and a counter restarting from zero hands the next added step an id a
+ * loaded step already owns - two rows under one key, which Svelte refuses to
+ * render (`each_key_duplicate`) and which every id lookup here would resolve to
+ * the wrong node. Bumping the counter by a fixed jump on load only moves that
+ * collision to the second time the same bot is opened, so the generator asks the
+ * document rather than guessing how far it has to jump.
+ */
+export function countingIdGen(inUse: () => ReadonlySet<string>): IdGen {
+  let seed = 0;
+  return () => {
+    for (let attempt = 0; attempt < 10_000; attempt += 1) {
+      const candidate = `n${(seed += 1)}`;
+      if (!inUse().has(candidate)) {
+        return candidate;
+      }
+    }
+    throw new Error("Could not make a fresh step id.");
+  };
+}
+
+/** Every id in `nodes`, added to `into`. */
 function collectProgramIDs(nodes: readonly ProgramNode[], into: Set<string>): void {
   for (const node of nodes) {
     into.add(node.id);

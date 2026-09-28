@@ -308,6 +308,28 @@ export type RouteStartOutcome =
   | { readonly started: true }
   | { readonly started: false; readonly reason: string; readonly cause?: unknown };
 
+/**
+ * What one "take everything" actually did, for a surface that has to say so.
+ *
+ * ⚠ COUNTS, NOT A BOOLEAN. Three outcomes a player must be able to tell apart:
+ * the thing was EMPTY (`stacks: 0`, nothing attempted and nothing wrong), it all
+ * went aboard (`moved === planned`), and SOME of it went aboard while the rest
+ * stayed in the can because no bay had room for it (`moved < planned`). A
+ * boolean collapses the last two into a lie in one direction or the other.
+ *
+ * `planned` counts TRANSFERS, not stacks — the router merges every stack bound
+ * for the same bay into one call — so it is only ever compared with `moved`,
+ * never reported to a player as a number of things.
+ */
+export interface LootOutcome {
+  /** Stacks in the container when it was opened. Zero means it was empty. */
+  readonly stacks: number;
+  /** Transfers the router planned across this hull's bays. */
+  readonly planned: number;
+  /** How many of those the server accepted. */
+  readonly moved: number;
+}
+
 export interface AppFlow {
   /** Boot health ping — sets the health slice online/offline (gates the login). */
   checkHealth(): Promise<void>;
@@ -748,6 +770,16 @@ export interface AppFlow {
    * decline when nothing actually moved — never a phantom success.
    */
   jettisonItems(itemIDs: readonly number[]): Promise<void>;
+  /**
+   * ⚠ THE INVERSE OF JETTISON — empty a wreck or a can ON THE GRID into this
+   * hull, each stack going to the bay that wants it (ore to the ore hold, gas to
+   * the gas hold, the rest to cargo) exactly as the loot BOTS route it.
+   *
+   * Reports what it did rather than throwing on a partial move: what fits
+   * nowhere stays in the container, which is not a failure. It throws when the
+   * server refused everything, and when the hull has room for none of it.
+   */
+  lootContainer(containerID: number): Promise<LootOutcome>;
   /**
    * ⚠ COMPRESS ONE ORE STACK against a mining support ship on the grid — your
    * own hull or a fleet-mate's, running an Industrial Core plus a compression
@@ -6042,13 +6074,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * the hull's own list and their measured room, splitting where only part of a
    * stack fits — and only a haul where something was attempted AND refused is
    * reported as a failure. What fits nowhere stays in the can.
+   *
+   * Returns how many of the transfers it planned actually landed, which is what a
+   * surface reporting to a PERSON needs: fewer than planned is "some of it is
+   * aboard", and that is a different sentence from either success or refusal.
    */
   async function transferLootedRows(
     rows: readonly InventoryItemRow[],
     from: { readonly kind: "container"; readonly itemID: number },
     bays: readonly ShipBay[],
     freeFor: (bay: string | null) => number | null,
-  ): Promise<void> {
+  ): Promise<{ readonly planned: number; readonly moved: number }> {
     let moved = 0;
     let planned = 0;
     let lastError: unknown = null;
@@ -6091,6 +6127,62 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (moved === 0 && planned === 0) {
       throw new Error(`${NO_ROOM_CODE}: There is no room aboard for what is in that container.`);
     }
+    return { planned, moved };
+  }
+
+  /**
+   * Empty ONE wreck or can into this hull: open it, work out what fits where,
+   * and move it.
+   *
+   * ⚠ THIS IS THE BOT'S OWN LOOT PATH, LIFTED SO A PERSON CAN PRESS IT. It used
+   * to sit inside the script runner's closure, which is precisely why the
+   * overview had no looting verb to offer: the only way to a wreck's contents
+   * was writing a custom bot with a loot-wrecks block. A second copy for the
+   * hand-flown case would have been the worst kind of duplication — it would not
+   * diverge loudly, it would diverge in the BAY ROUTING, so a hand-flown
+   * Retriever would put ore in its cargo hold while the bot put it in the ore
+   * hold, and `deliver-ore` would never unload the former.
+   *
+   * The rows are decoded WITH the route's per-type volumes, and the bay read
+   * supplies live free space — between them the transfer can be sized to the
+   * room available instead of being offered whole and refused.
+   */
+  async function lootIntoShip(
+    containerID: number,
+    bays: readonly ShipBay[],
+    shipID: number | null,
+  ): Promise<LootOutcome> {
+    // Room is asked for BY NAME, and only for the freight bays this hull has —
+    // a handful of capacity calls rather than the twenty-seven a full bay read
+    // costs. Without it every bay outside the mining-holds route (mineral,
+    // salvage, planetary, command-centre) had no measurable room and fell back
+    // to offering whole stacks, so the bays the operator asked to be supported
+    // were routed to but never actually fitted.
+    const keys = bays
+      .filter((entry) => entry.present === true && FREIGHT_BAYS.has(entry.key))
+      .map((entry) => entry.key);
+    const [contents, roomRead] = await Promise.all([
+      api.openContainer(containerID, callOptions),
+      shipID === null
+        ? Promise.resolve(null)
+        : api.getShipBays(shipID, callOptions, [...keys, "cargo"]).catch(() => null),
+    ]);
+    const rows = decodeInventoryRows(contents.list, contents.volumes);
+    if (rows.length === 0) {
+      return { stacks: 0, planned: 0, moved: 0 };
+    }
+    const room = roomRead === null ? [] : decodeShipBays(roomRead.bays);
+    // null is "we could not read that bay's room", which the planner treats as
+    // "hand it over and let the server judge" — never as "no room".
+    const freeFor = (bay: string | null): number | null =>
+      holdFreeM3(room.find((entry) => entry.key === (bay ?? "cargo"))?.capacity ?? null);
+    const outcome = await transferLootedRows(
+      rows,
+      { kind: "container", itemID: containerID },
+      bays,
+      freeFor,
+    );
+    return { stacks: rows.length, planned: outcome.planned, moved: outcome.moved };
   }
 
   /**
@@ -6205,39 +6297,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     /**
      * Open a container and move out what this hull can actually take.
      *
-     * The rows are decoded WITH the route's per-type volumes, and the
-     * mining-holds read supplies live free space — between them the
-     * transfer can be sized to the room available instead of being
-     * offered whole and refused.
+     * ⚠ THE WORK IS `lootIntoShip`, SHARED WITH THE OVERVIEW'S OWN VERB. What is
+     * left here is the only part that is the RUNNER's: its per-hull bay cache
+     * and the ship the capability read already resolved. The routing, the room
+     * arithmetic and the per-bay transfers are one implementation, so a bot and
+     * a player pressing "Take everything" cannot fill different holds.
      */
     const lootFrom = async (containerID: number): Promise<void> => {
-      const bays = await activeShipBays();
-      // Room is asked for BY NAME, and only for the freight bays this hull has
-      // — a handful of capacity calls rather than the twenty-seven a full bay
-      // read costs. Without it every bay outside the mining-holds route
-      // (mineral, salvage, planetary, command-centre) had no measurable room and
-      // fell back to offering whole stacks, so the bays the operator asked to be
-      // supported were routed to but never actually fitted.
-      const keys = bays
-        .filter((entry) => entry.present === true && FREIGHT_BAYS.has(entry.key))
-        .map((entry) => entry.key);
-      const shipID = capabilityCache.peek().shipID ?? store.inventory.get().activeShipID;
-      const [contents, roomRead] = await Promise.all([
-        api.openContainer(containerID, callOptions),
-        shipID === null
-          ? Promise.resolve(null)
-          : api.getShipBays(shipID, callOptions, [...keys, "cargo"]).catch(() => null),
-      ]);
-      const rows = decodeInventoryRows(contents.list, contents.volumes);
-      if (rows.length === 0) {
-        return;
-      }
-      const room = roomRead === null ? [] : decodeShipBays(roomRead.bays);
-      // null is "we could not read that bay's room", which the planner treats as
-      // "hand it over and let the server judge" — never as "no room".
-      const freeFor = (bay: string | null): number | null =>
-        holdFreeM3(room.find((entry) => entry.key === (bay ?? "cargo"))?.capacity ?? null);
-      await transferLootedRows(rows, { kind: "container", itemID: containerID }, bays, freeFor);
+      await lootIntoShip(
+        containerID,
+        await activeShipBays(),
+        capabilityCache.peek().shipID ?? store.inventory.get().activeShipID,
+      );
     };
     return {
       observe: async (hint) => {
@@ -7684,6 +7755,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     openContainer,
     openShipBays,
+
+    async lootContainer(containerID) {
+      // ⚠ THE SHIP IS ASKED FOR, NOT ASSUMED. Routing needs to know which bays
+      // this hull HAS; a read that fails leaves the list empty, which is not
+      // "no bays" but behaves like it must — the only destination that is safe
+      // to address on an unknown hull is the cargo hold every hull has. The
+      // wrong move here is speculating a bay: `resolvePlace` hands out a
+      // 0-capacity ore hold for a hull that has none and every transfer to it
+      // is refused (see `transferLootedRows`).
+      const shipID = store.space.get().snapshot?.ship?.itemID ?? store.inventory.get().activeShipID;
+      let bays: readonly ShipBay[] = [];
+      if (shipID !== null) {
+        try {
+          bays = decodeShipBays((await api.getShipBays(shipID, callOptions)).bays);
+        } catch {
+          bays = [];
+        }
+      }
+      return lootIntoShip(containerID, bays, shipID);
+    },
 
     async transferItems(itemIDs, from, to, qty = null) {
       await runInventoryAction(async () => {

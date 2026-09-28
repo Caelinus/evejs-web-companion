@@ -6702,6 +6702,14 @@
   }
   .hangar-summary-bar { color: var(--hangar-text-ghost); }
   .hangar-summary-manage { color: var(--hangar-warn); }
+  .hangar-summary-bots { color: var(--hangar-accent); }
+  /* A stop that failed: said once, across the screen, above the grid. */
+  .hangar-boterror {
+    margin: 0;
+    padding: 6px 16px 0;
+    font-size: 12px;
+    color: var(--hangar-bad);
+  }
 
   /* --- account grid ---------------------------------------------------- */
 
@@ -6833,6 +6841,57 @@
   .hangar-badge.is-idle {
     color: var(--hangar-warn);
     border: 1px solid var(--hangar-warn-line);
+  }
+  .hangar-badge.is-bot {
+    color: var(--hangar-accent);
+    border: 1px solid var(--hangar-accent);
+  }
+
+  /* The server-bot line: what the bot is doing, and the Stop that ends it.
+   * It only exists on a bot-flown row, so a hangar with no bots running is
+   * exactly the screen it was before. */
+  .hangar-botline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid var(--hangar-line);
+  }
+  .hangar-botwords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 8px;
+    min-width: 0;
+    font-size: 11px;
+  }
+  .hangar-botphase { color: var(--hangar-accent); }
+  .hangar-botvitals {
+    font-family: var(--hangar-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--hangar-text-dim);
+  }
+  /* R8 — a comfortable target on a phone, and the only 40px control on the
+   * row, because stopping an unattended hull is the one thing here you cannot
+   * afford to mis-tap your way past. */
+  :is(.hangar, .hangar-chrome) .hangar-stopbot {
+    margin-left: auto;
+    flex: none;
+    min-height: 40px;
+    padding: 0 10px;
+    white-space: nowrap;
+    background: var(--hangar-bad-fill);
+    border: 1px solid var(--hangar-bad-line);
+    color: var(--hangar-bad);
+    cursor: pointer;
+  }
+  :is(.hangar, .hangar-chrome) .hangar-stopbot:hover:not(:disabled) {
+    background: var(--hangar-bad-hover);
+    border-color: var(--hangar-bad);
+  }
+  :is(.hangar, .hangar-chrome) .hangar-stopbot:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
   .hangar-meta {
     display: flex;

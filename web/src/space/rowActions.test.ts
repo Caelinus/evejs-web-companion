@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   actionsForRow,
   isDockableKind,
+  isLootableKind,
   isMiningGroup,
   MINING_GROUP_NAMES,
   SELECTION_GONE,
@@ -269,4 +270,53 @@ test("R49: neither remaining reason mentions ore being gone", () => {
     actionsForRow({ ...A_ROCK, ...ctx }).find((a) => a.id === "mine")?.unavailable ?? "";
   assert.doesNotMatch(reason({ minerCount: 0, locked: false }), /no ore|empty|mined out/i);
   assert.doesNotMatch(reason({ minerCount: 1, locked: false }), /no ore|empty|mined out/i);
+});
+
+// --- Taking what is inside ---------------------------------------------------
+//
+// The gap this closed: a wreck could be warped to, approached, locked and
+// salvaged from this bar, and there was no verb anywhere in space for taking
+// what was INSIDE it. The only route to a wreck's contents was a custom bot with
+// a loot-wrecks block; the Station panel's "open this crate" is docked-only.
+
+test("Take everything is offered on the two things that HOLD something, and on nothing else", () => {
+  for (const kind of ["wreck", "container"]) {
+    assert.ok(ids({ ...A_ROCK, kind }).includes("loot"), `a ${kind} can be emptied`);
+  }
+  // A rock, a station, a gate and another ship have no inventory to reach into.
+  for (const kind of ["asteroid", "station", "structure", "ship", "celestial", null]) {
+    assert.ok(
+      !ids({ ...A_ROCK, kind }).includes("loot"),
+      `a ${kind ?? "kind-less"} row must not offer it`,
+    );
+  }
+});
+
+test("what can be emptied is the SERVER'S runtime kind, never a guess at a name", () => {
+  // The same two strings the loot blocks filter on (nav/scriptMacros.ts), so the
+  // verb a player presses and the bot that does it unattended cannot disagree.
+  assert.equal(isLootableKind("wreck"), true);
+  assert.equal(isLootableKind("container"), true);
+  assert.equal(isLootableKind("asteroid"), false);
+  assert.equal(isLootableKind(null), false);
+});
+
+test("Take everything is never blocked by a distance this side worked out", () => {
+  // Retail will not open a can past 2,500 m — and that is the GATEWAY'S rule,
+  // which it states itself. A reason invented here would put a guessed rule on
+  // screen beside the real one, so the verb goes out at any range and the server
+  // answers. (The context carries no distance at all, which is the structural
+  // half of the same guarantee.)
+  const loot = actionsForRow({ ...A_ROCK, kind: "wreck" }).find((a) => a.id === "loot");
+  assert.ok(loot);
+  assert.equal(loot.unavailable, null);
+  assert.doesNotMatch(loot.label, /\d/, "R7d: no id, and no range number either");
+});
+
+test("Take everything belongs to the hold concern, so it cannot grey out a lock or Stop", () => {
+  // The same rule "Haul now" is held to: one busy channel per CONCERN, so a
+  // transfer in flight can never disable the lock button in the middle of a
+  // fight.
+  const loot = actionsForRow({ ...A_ROCK, kind: "wreck" }).find((a) => a.id === "loot");
+  assert.equal(loot?.concern, "hold");
 });

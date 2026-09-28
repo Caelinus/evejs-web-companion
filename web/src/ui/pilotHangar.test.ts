@@ -325,6 +325,81 @@ test("manage mode hides every way to launch or select a pilot by accident", () =
   assert.match(managing, /Squads \(0\)/, "and the squad checklist appears instead");
 });
 
+// --- the server-bot row -----------------------------------------------------
+//
+// ⚠ THE BUG THESE PIN. A server bot keeps flying after the tab that started it
+// is gone, so the screen the player comes back to is this one — and the BFF
+// refuses to select a character a bot is flying. Until the row carried a Stop,
+// a browser whose pilots were ALL bot-flown had no reachable way to stop any of
+// them: every row refused, and the app's only Stop was behind the "Add
+// character" overlay you had to already know about.
+
+/** One row of /api/bots/active, with only the fields the row reads. */
+function activeBot(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    characterID: 90000001,
+    status: "running",
+    phase: "Mining",
+    why: "belt is not dry yet",
+    note: null,
+    vitals: null,
+    ...over,
+  };
+}
+
+test("a bot-flown row says a bot has it, what it is doing, and offers Stop", () => {
+  const body = renderRow({ bot: activeBot(), onStopBot: () => {} });
+  assert.match(body, />BOT</, "the badge carries a word, not a colour (R9a)");
+  assert.match(body, /Mining — belt is not dry yet/, "what the bot is doing right now");
+  assert.match(body, /Stop bot/, "and the remedy is on the row itself");
+});
+
+test("a row with no bot on it is exactly the row it was before", () => {
+  const body = renderRow();
+  assert.doesNotMatch(body, />BOT</);
+  assert.doesNotMatch(body, /Stop bot/);
+});
+
+test("the ship readout appears only once the host has sampled it", () => {
+  const unsampled = renderRow({ bot: activeBot(), onStopBot: () => {} });
+  assert.doesNotMatch(unsampled, /Shield/, "no bars before the first ~15s sample");
+
+  const sampled = renderRow({
+    bot: activeBot({
+      vitals: {
+        sampledAt: "2026-09-02T13:00:00.000Z",
+        docked: false,
+        shield: 0.92,
+        armor: 1,
+        hull: 1,
+        holds: [{ label: "Ore hold", used: 3, capacity: 4 }],
+      },
+    }),
+    onStopBot: () => {},
+  });
+  assert.match(sampled, /Shield 92%/);
+  assert.match(sampled, /Ore hold 75%/);
+});
+
+test("Stop stays reachable in manage mode, unlike every other row control", () => {
+  // Manage mode makes the row inert on purpose — but it is where you remove
+  // pilots and shuffle squads, and a hull out mining unattended must not need
+  // you to leave a mode before you can stop it.
+  const body = renderRow({ manage: true, bot: activeBot(), onStopBot: () => {} });
+  assert.doesNotMatch(body, /role="button"/, "the row itself is still inert");
+  assert.match(body, /Stop bot/);
+});
+
+test("a stop in flight says so on its own row and locks every other one", () => {
+  const mine = renderRow({ bot: activeBot(), onStopBot: () => {}, stopping: true, stopBusy: true });
+  assert.match(mine, /Stopping…/);
+  assert.match(mine, /disabled/);
+
+  const other = renderRow({ bot: activeBot(), onStopBot: () => {}, stopBusy: true });
+  assert.match(other, /Stop bot/, "a different pilot's button keeps its own word");
+  assert.match(other, /disabled/, "but cannot be pressed while a stop is in flight");
+});
+
 // --- "Save as squad" --------------------------------------------------------
 
 function renderAssign(squads: unknown[]): string {

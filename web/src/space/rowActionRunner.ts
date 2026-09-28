@@ -51,12 +51,18 @@ export interface RowActionFlow {
  * The verbs that are NOT one server call.
  *
  * `mine` reaches for every powered-up mining laser and each answers separately;
- * `haul` runs a loop with its own per-step reporting. Both live in the overview
- * with the reporting they need, so this module names them rather than
- * pretending it can run them — a caller can then either delegate or leave them
- * out of its menu, but it cannot silently do nothing.
+ * `haul` runs a loop with its own per-step reporting; `loot` opens a container
+ * and then issues one transfer per bay this hull can take, so what it did is a
+ * COUNT (some of it aboard, the rest left in the can) rather than a status code.
+ * All three live in the overview with the reporting they need, so this module
+ * names them rather than pretending it can run them — a caller can then either
+ * delegate or leave them out of its menu, but it cannot silently do nothing.
  */
-export const MULTI_STEP_ACTIONS: ReadonlySet<RowActionID> = new Set<RowActionID>(["mine", "haul"]);
+export const MULTI_STEP_ACTIONS: ReadonlySet<RowActionID> = new Set<RowActionID>([
+  "mine",
+  "haul",
+  "loot",
+]);
 
 /** True when `dispatchRowAction` can run this verb. */
 export function isSingleCallAction(id: RowActionID): boolean {

@@ -51,6 +51,7 @@ export type RowActionID =
   | "lock"
   | "unlock"
   | "mine"
+  | "loot"
   | "haul";
 
 /** One verb offered for the selected thing. */
@@ -92,6 +93,28 @@ export function isDockableKind(kind: string | null): boolean {
 }
 
 /**
+ * Is this something you can reach into and take out of?
+ *
+ * ⚠ THE SERVER'S OWN RUNTIME KIND, exactly as `isDockableKind` reads it and
+ * for the same reason. A wreck and a jettisoned can are the two things the
+ * runtime models as an inventory sitting in space, and it says which is which
+ * itself. The loot BLOCKS already filter on precisely these two strings
+ * (`nav/scriptMacros.ts` — `wrecksOnGrid`, `containersOnGrid`), so the verb a
+ * player presses and the bot that does it unattended agree about what can be
+ * opened, without either of them guessing from a name or a group number.
+ *
+ * ⚠ AND RANGE IS NOT PART OF IT. Retail will not open a can past 2,500 m, but
+ * that rule is the gateway's and the gateway states its own refusal — which is
+ * exactly what the loot blocks learned ("the gateway's own range check beats our
+ * arithmetic", `scriptMacros.ts`). A distance test here would put a rule this
+ * side guessed at on screen beside the real one, so the verb is offered from any
+ * distance and the server answers for itself.
+ */
+export function isLootableKind(kind: string | null): boolean {
+  return kind === "wreck" || kind === "container";
+}
+
+/**
  * The verbs for the selected row, in the order they are drawn.
  *
  * Movement first (it is what a player reaches for most), then the verbs that
@@ -126,6 +149,20 @@ export function actionsForRow(ctx: RowActionContext): readonly RowAction[] {
       concern: "move",
       unavailable: jumpBlockedReason(ctx.gateLink),
     });
+  }
+
+  // TAKE EVERYTHING — the verb this bar simply did not have.
+  //
+  // A wreck could be warped to, approached, locked and salvaged from here, and
+  // the one thing a player could not do with it was take what was INSIDE. The
+  // only route to a wreck's or a can's contents was writing a custom bot with a
+  // loot-wrecks / loot-containers block, because `StationPanel.svelte`'s "open
+  // this crate" is docked-only and nothing in space offered it at all.
+  //
+  // Offered on the two kinds the runtime models as an inventory in space, and
+  // never carrying a reason this side invented — see `isLootableKind`.
+  if (isLootableKind(ctx.kind)) {
+    actions.push({ id: "loot", label: "Take everything", concern: "hold", unavailable: null });
   }
 
   // R30 slice E — "Mine this", the verb that made the Mining tab's own
