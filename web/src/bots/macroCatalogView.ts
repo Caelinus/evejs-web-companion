@@ -116,6 +116,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   message: "Message",
   destination: "Destination",
   pick: "Which rock first",
+  into: "Unload into",
   ores: "Ore priority",
   // The drone boat's two overrides. Both say their unit or their choice in the
   // label, because both are things a player only reaches for when the block's
@@ -170,13 +171,13 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "mine-at-belt": entry(
     "mine-at-belt",
     "mining",
-    "Warps to a belt, locks rocks, and runs your mining equipment — moving belt to belt as each one runs dry, and following an ore priority list when you set one.",
-    "A belt and mining equipment fitted",
+    "Warps to wherever you tell it — the nearest belt, a belt you name, or the scanner's ore sites — locks rocks, and runs your mining equipment. On a belt it moves belt to belt as each one runs dry; sent to the scanner's ore sites it tours those instead and never sits down on a belt at all. Follows an ore priority list when you set one.",
+    "Somewhere to mine, and mining equipment fitted",
   ),
   "deliver-ore": entry(
     "deliver-ore",
     "hauling",
-    "Flies to a station and unloads the ore into your hangar.",
+    "Flies to a station and unloads the ore into your hangar — or into one of your corporation's hangars there, when you pick one and the corporation rents an office.",
     "A station to unload at",
   ),
   "defend-with-drones": entry(
@@ -242,6 +243,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Moves everything in your ship's cargo hold into the station hangar, and checks the hold really is empty. Handy before accepting a delivery, so the cargo is sure to fit.",
     "Being docked",
   ),
+  "load-cargo": entry(
+    "load-cargo",
+    "hauling",
+    "Takes what you name out of the station hangar and puts each stack where it belongs — command centres into the command centre hold, planetary goods into the planetary hold, ore into the mining hold, everything else into cargo. It loads as much as will fit and leaves the rest for the next trip, so a loop of this, a flight and an unload moves a whole hangar a shipload at a time.",
+    "Being docked, with room somewhere aboard",
+  ),
   "salvage-wrecks": entry(
     "salvage-wrecks",
     "hauling",
@@ -296,7 +303,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "warp-to-ore-anomaly": entry(
     "warp-to-ore-anomaly",
     "mining",
-    "Reads your ship's scanner and warps to the next ore site it shows — asteroid clusters and ice belts, never a pirate den — skipping the ones this run has already visited. Pair it with Mine at a belt in a repeat loop.",
+    "Reads your ship's scanner and warps to the next ore site it shows — asteroid clusters and ice belts, never a pirate den — skipping the ones this run has already visited. Pair it with Mine at a belt or an ore site in a repeat loop.",
     "Being in space, with an ore site on the scanner",
   ),
   "refit-ship": entry(

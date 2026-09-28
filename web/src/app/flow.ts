@@ -101,7 +101,7 @@ import { decodeColonyReport } from "../bridge/planets.ts";
 import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
 import type { RequestPriority } from "./transport.ts";
-import type { FlightStepResult } from "./api.ts";
+import type { CorpOfficesResult, FlightStepResult } from "./api.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
 import { refusalWords as sayRefusalWords } from "../bridge/refusals.ts";
 import { readDictEntry, type JsonValue } from "../bridge/wire.ts";
@@ -513,6 +513,14 @@ export interface AppFlow {
   trashItems(itemIDs: readonly number[], place: InventoryPlace): Promise<void>;
   /** Read the corporation hangar at the docked station. */
   loadCorpHangar(): Promise<void>;
+  /**
+   * WHERE the corporation has offices, and what its divisions are called —
+   * answered for every station at once, from wherever the ship is. The Bot
+   * Builder asks this while a script is being WRITTEN, about a station the ship
+   * may never have docked at, so it returns its answer instead of applying it
+   * to the store: nothing on screen shows it, one picker uses it.
+   */
+  loadCorpOffices(): Promise<CorpOfficesResult>;
   /** Show a different corporation hangar division. */
   selectCorpDivision(division: number): void;
   /** Load the Fitting panel (the active ship's slots + resource readings). */
@@ -1633,6 +1641,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // Coalesced: mining grants ore stack by stack, so a busy cycle can push
       // several of these at once and one re-read answers all of them.
       scheduleHoldRefresh();
+      // The drone bay is an inventory like any other, and this frame is the
+      // only word we get when something OUTSIDE this client changes it — a
+      // drone destroyed in space, a bot loading the bay, the game's own client
+      // on the same character. Without it the Drones window's one read per
+      // session was the whole of its knowledge.
+      scheduleDroneRefresh();
       return;
     }
     if (method === "OnDamageMessage") {
@@ -1736,6 +1750,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }, HOLD_REFRESH_COALESCE_MS);
     if (typeof holdRefreshTimer === "object" && "unref" in holdRefreshTimer) {
       (holdRefreshTimer as { unref(): void }).unref();
+    }
+  }
+
+  /**
+   * The drone bay's half of the same frame, coalesced harder and paid for only
+   * where it is read.
+   *
+   * ⚠ IT IS GATED ON `loaded`, WHICH IS THE WHOLE COST CONTROL. One drones read
+   * is three calls on the BFF (the bay, the ship's attributes, the space
+   * snapshot), and `OnItemsChanged` also fires on every ore grant of every
+   * mining cycle. A session that never opened the Drones window must not pay
+   * that per cycle — and one that did opened it precisely to watch this.
+   *
+   * It coalesces at the space refresh's beat rather than the hold's: the bay
+   * needs to be RIGHT, not to redraw once per stack.
+   */
+  const DRONE_REFRESH_COALESCE_MS = 400;
+  let droneRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleDroneRefresh(): void {
+    if (droneRefreshTimer !== null || !store.get().drones.loaded) {
+      return;
+    }
+    droneRefreshTimer = setTimeout(() => {
+      droneRefreshTimer = null;
+      // Best-effort, like both refreshes around it: a failed read leaves the
+      // last good bay on screen rather than emptying it, which is the one thing
+      // this panel may never do by accident.
+      void loadDrones().catch(() => {});
+    }, DRONE_REFRESH_COALESCE_MS);
+    if (typeof droneRefreshTimer === "object" && "unref" in droneRefreshTimer) {
+      (droneRefreshTimer as { unref(): void }).unref();
     }
   }
 
@@ -1938,6 +1983,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (current.openShip) {
       await openShipBays(current.openShip.itemID);
     }
+    // The DRONE BAY is one of those bays, and it has its own window. Dragging
+    // drones into it from the hangar showed them in Inventory & Ship instantly
+    // and left the Drones window reading "Nothing in the drone bay" — the same
+    // stale-hold bug one panel over, and worse, because that window is where a
+    // pilot goes to LAUNCH what they just loaded.
+    //
+    // Gated on `loaded`: a session that never opened the window pays nothing,
+    // exactly as the container and corp-hangar re-reads above are gated.
+    if (store.get().drones.loaded) {
+      await loadDrones().catch(() => {});
+    }
   }
 
   /**
@@ -2134,6 +2190,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       bays: decodeShipBays(result.bays),
       error: null,
     });
+  }
+
+  async function loadCorpOffices(): Promise<CorpOfficesResult> {
+    try {
+      return await api.loadCorpOffices(callOptions);
+    } catch (error) {
+      if (isSessionLost(error)) {
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        throw error;
+      }
+      // A failed read is "we could not check", and the picker says so. It is
+      // NOT "there is no office": a corporation hangar quietly disappearing
+      // from the builder because one read timed out would look like the
+      // feature breaking.
+      return { stationIDs: [], divisions: [], error: errorWords(error) };
+    }
   }
 
   async function loadCorpHangar(): Promise<void> {
@@ -8374,12 +8447,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "fly-to-mission-site",
   ]);
   const CONVO_MACROS = new Set(["request-mission", "accept-mission", "turn-in-mission"]);
-  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo"]);
+  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo"]);
   // Blocks that need the ACTIVE HULL'S BAY LIST, contents included. Kept apart
   // from CARGO_MACROS because the two reads have very different prices: the
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
-  const BAY_MACROS = new Set(["unload-cargo"]);
+  const BAY_MACROS = new Set(["unload-cargo", "load-cargo"]);
   // Blocks that WORK A ROCK, and so are worth running the mining surveyor for.
   // `travel-to-belt` and `compress-ore` are deliberately not here: neither one
   // reads a rock, and a scan they cannot use is a round trip nobody asked for.
@@ -9150,6 +9223,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let cargo: ScriptObservation["cargo"] = null;
         let stationHangar: ScriptObservation["stationHangar"] = null;
         let shipBays: ScriptObservation["shipBays"] = null;
+        let typeNames: ScriptObservation["typeNames"] = null;
         let foundAgent: ScriptObservation["foundAgent"] = null;
         let jumpsToDropoff: ScriptObservation["jumpsToDropoff"] = null;
         let anomalies: ScriptObservation["anomalies"] = null;
@@ -9159,7 +9233,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let scannerOperations: ScriptObservation["scannerOperations"] = null;
         const systemName = store.flight.get().solarSystemName;
         let dryBelts: ScriptObservation["dryBelts"] = null;
-        if (macro === "mine-at-belt" && systemName !== null) {
+        // ⚠ AND NOT IN SITE MODE, WHICH NEVER LOOKS AT A BELT. `mineAtBelt`
+        // routes a site step away before the belt regex, the tier ladder and
+        // `dryBeltNames` — every line that reads this — and reports a barren
+        // grid into the board's own ore-site list rather than into the shared
+        // belt memory. The read is the SAME shape of waste as the scanner read
+        // the site mode was missing, in the other direction: a call per tick
+        // for a list the block cannot use. `needsOreSites` already names
+        // exactly that mode (see activeStepToursOreSites), so it gates both.
+        if (macro === "mine-at-belt" && hint.needsOreSites !== true && systemName !== null) {
           const cached = beltMemoryCache;
           if (cached !== null && cached.system === systemName && Date.now() - cached.at < BELT_MEMORY_CACHE_MS) {
             dryBelts = cached.rows;
@@ -9238,7 +9320,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             savedFittings = null;
           }
         }
-        if (macro !== null && ANOMALY_MACROS.has(macro)) {
+        // `needsOreSites` is the site-mode mining block asking for the same
+        // list. It is a hint rather than a third entry in ANOMALY_MACROS
+        // because `mine-at-belt` earns the read only when its belt argument
+        // says "site" — pointed at a belt, the same block must not pay for a
+        // scanner read it will never look at (see activeStepToursOreSites).
+        if (macro !== null && (ANOMALY_MACROS.has(macro) || hint.needsOreSites === true)) {
           try {
             const full = decodeFullState(await api.loadScanFullState(callOptions));
             // The whole row is classified here, not just labelled: `targetID` is
@@ -9251,6 +9338,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 : [{
                     label: site.targetID,
                     kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+                    // The row's own `position`, carried so a refused warp can be
+                    // told apart from standing in the site already. A row
+                    // without one stays null — never an origin, which would
+                    // read as "the ship is right here" for every site at once.
+                    position:
+                      site.position === null || site.position.length < 3
+                        ? null
+                        : { x: site.position[0]!, y: site.position[1]!, z: site.position[2]! },
                   }],
             );
           } catch {
@@ -9459,11 +9554,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           if (CARGO_MACROS.has(macro)) {
             try {
               const panel = await api.loadInventory(callOptions);
+              // ⚠ THE VOLUMES ARE NOT DECORATION. Per-unit m³ is what lets the
+              // load block work out that six of the twenty command centres in
+              // this hangar fit the hold and ask for exactly six; without it a
+              // transfer is all-or-nothing per stack, so the whole twenty are
+              // offered and the server refuses the lot, every tick, for ever.
               cargo = {
-                rows: decodeInventoryRows(panel.cargo.list),
+                rows: decodeInventoryRows(panel.cargo.list, panel.volumes),
                 capacity: decodeCapacity(panel.cargo.capacity),
               };
-              stationHangar = status.docked ? decodeInventoryRows(panel.hangar.list) : null;
+              stationHangar = status.docked
+                ? decodeInventoryRows(panel.hangar.list, panel.volumes)
+                : null;
               activeShipID = panel.activeShipID;
             } catch {
               cargo = null;
@@ -9492,6 +9594,44 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             } catch {
               // Unreadable stays null — "we could not look", never "no bays".
               shipBays = null;
+            }
+          }
+          // Type NAMES, for a block matching items by name pattern — and only
+          // for one. Every other block asks the game's own classification, which
+          // already rides in on the row; paying for a name lookup on their ticks
+          // would be a round trip to answer a question nobody asked.
+          //
+          // Names are cached in the store, so this is one bulk lookup for types
+          // nobody has resolved yet and free on every tick after that. An
+          // unresolved type is left out rather than guessed: a pattern that
+          // cannot be tested is undecidable, and the matcher leaves such a row
+          // in the hangar (bridge/keepAboard.ts).
+          if (hint.needsTypeNames === true) {
+            const typeIDs = new Set<number>();
+            for (const row of stationHangar ?? []) {
+              typeIDs.add(row.typeID);
+            }
+            for (const row of cargo?.rows ?? []) {
+              typeIDs.add(row.typeID);
+            }
+            for (const bay of shipBays ?? []) {
+              for (const row of bay.items ?? []) {
+                typeIDs.add(row.typeID);
+              }
+            }
+            if (typeIDs.size > 0) {
+              try {
+                await resolveNamesNow([...typeIDs].map((id) => ({ kind: "type" as const, id })));
+              } catch {
+                // A lookup that failed leaves the names unresolved; the block
+                // waits rather than loading something it could not identify.
+              }
+              const resolved = store.names.get().resolved;
+              const named: Record<number, string | null> = {};
+              for (const id of typeIDs) {
+                named[id] = resolved[nameKey("type", id)] ?? null;
+              }
+              typeNames = named;
             }
           }
           if (macro === "accept-mission" && briefing?.destinationSystemID != null) {
@@ -9587,6 +9727,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           cargo,
           shipBays,
           stationHangar,
+          typeNames,
           travel,
           foundAgent,
           jumpsToDropoff,
@@ -9797,10 +9938,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               // delivery that moved nothing looked exactly like one that
               // worked. Raising here is what puts it in front of the refusal
               // ledger instead of nowhere.
-              const result = await api.unloadMiningHolds(action.itemIDs, callOptions);
+              const result = await api.unloadMiningHolds(
+                action.itemIDs,
+                callOptions,
+                action.division ?? null,
+              );
               const moved = result.moved ?? null;
               if (moved !== null && moved.length === 0) {
                 throw new Error("Nothing moved to your hangar, and the server gave no reason.");
+              }
+              // A corporation delivery that landed in the pilot's own hangar
+              // instead is NOT a failure — the ore is ashore and the lap goes
+              // on — but it is not what the script asked for either, so it is
+              // said out loud rather than left for the player to find by
+              // opening an empty corporation hangar. A NOTE, not a throw: there
+              // is nothing here to retry and no streak to count.
+              if (action.division !== undefined && result.fellBack !== null) {
+                return `corp division ${action.division} refused (${result.fellBack}); the load went into your own hangar`;
               }
             }
             return;
@@ -9866,6 +10020,42 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                   group.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: group.bay },
                   { kind: "hangar" },
                   null,
+                  callOptions,
+                );
+                movedGroups += 1;
+              } catch (error) {
+                if (isSessionLost(error)) {
+                  throw error;
+                }
+                lastError = error;
+              }
+            }
+            if (movedGroups === 0 && lastError !== null) {
+              throw lastError;
+            }
+            return;
+          }
+          case "loadHolds": {
+            // The unload above, run the other way: one transfer per DESTINATION,
+            // all out of the station hangar. Each group is guarded on its own
+            // for the same reason — a bay that refuses (no room, a type it will
+            // not take) must not stop the ones that would have landed, because
+            // the block re-reads next tick and a half-loaded ship is a lap that
+            // still pays. `qty` rides along for the one stack a hold can only
+            // take part of; it is null for a whole-stack move, and the planner
+            // guarantees a group carrying one names exactly one stack.
+            let lastError: unknown = null;
+            let movedGroups = 0;
+            for (const group of action.groups) {
+              if (group.itemIDs.length === 0) {
+                continue;
+              }
+              try {
+                await api.transferItems(
+                  [...group.itemIDs],
+                  { kind: "hangar" },
+                  group.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: group.bay },
+                  group.qty,
                   callOptions,
                 );
                 movedGroups += 1;
@@ -10789,6 +10979,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     loadCorpHangar,
+    loadCorpOffices,
 
     selectCorpDivision(division) {
       store.apply({ type: "inventory/corp-division", division });

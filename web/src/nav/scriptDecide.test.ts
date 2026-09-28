@@ -11,10 +11,11 @@ import type { BotScript, BranchBlock, Condition, InterruptRow, MacroStep, Progra
 import type { ScriptObservation } from "./scriptConditions.ts";
 import {
   MAX_RECOVER_TRIPS,
-  MAX_STEP_TICKS,
+  MAX_SILENT_STEP_TICKS,
   decideScriptAction,
   initialMemory,
   activeMacroID,
+  activeStepToursOreSites,
   activeSquadRole,
   watchSquadRole,
   DEFAULT_SETTLE_TICKS,
@@ -654,19 +655,60 @@ test("an unreadable until heads home after the cannot-tell streak runs out", () 
   assert.match(stopped.pauseReason ?? "", /could not read/i);
 });
 
-test("a step that never finishes trips the step-tick cap", () => {
-  // mine always acts, its until never met: it should eventually pause on the cap.
+// A macro that WAITS for ever: acting, armed, and never a world call. This is
+// the only shape the silence cap is meant to catch.
+const silent: MacroDecider = () => tick({ kind: "wait" }, { kind: "acting" }, true);
+
+/** Drive one step until it leaves "running" or the budget is provably clear. */
+function driveStep(reg: Record<string, MacroDecider>, over: Partial<ScriptObservation>, ticks: number) {
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
   let mem = initialMemory(s);
-  let last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
-  for (let i = 0; i < MAX_STEP_TICKS + 5 && last.action.kind !== "warp"; i += 1) {
+  let last = decideScriptAction(s, obs(over), mem, reg, home);
+  for (let i = 0; i < ticks && last.action.kind !== "warp"; i += 1) {
     mem = last.memory;
-    last = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, registry, home);
+    last = decideScriptAction(s, obs(over), mem, reg, home);
   }
+  return { s, last };
+}
+
+test("a step that emits nothing at all trips the silence cap", () => {
+  const { s, last } = driveStep(
+    { ...registry, "mine-at-belt": silent },
+    { oreHoldFraction: 0 },
+    MAX_SILENT_STEP_TICKS + 5,
+  );
   assert.equal(last.action.kind, "warp", "the cap sends it home rather than leaving it there");
-  const stopped = decideScriptAction(s, obs({ oreHoldFraction: 0, docked: true }), last.memory, registry, home);
+  const stopped = decideScriptAction(
+    s, obs({ oreHoldFraction: 0, docked: true }), last.memory, { ...registry, "mine-at-belt": silent }, home,
+  );
   assert.equal(stopped.status, "paused");
-  assert.match(stopped.pauseReason ?? "", /very long time/i);
+  assert.match(stopped.pauseReason ?? "", /did nothing/i);
+});
+
+test("a step that keeps acting is never stopped for taking a long time", () => {
+  // THE REGRESSION. `mine` acts every tick and its `until` is never met — a
+  // miner filling a big hold from two ores, which is exactly what the elapsed-
+  // tick cap used to stop at 90 minutes. Far past the budget, it is still mining.
+  const { last } = driveStep(registry, { oreHoldFraction: 0 }, MAX_SILENT_STEP_TICKS * 3);
+  assert.equal(last.status, "running", "a slow job is not a stuck one");
+  assert.equal(last.action.kind, "activate", "and it is still working, not parked");
+  assert.equal(last.memory.stepTicks, 0, "a world call leaves no silence behind it");
+});
+
+test("a step that acts only now and then keeps its budget from running out", () => {
+  // The real shape of a working macro: long silences broken by a world call.
+  // Each call has to clear the count, or the silences add up and stop the bot.
+  const reg = { ...registry, "mine-at-belt": silent };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  const acting = { ...registry };
+  let mem = initialMemory(s);
+  for (let i = 0; i < MAX_SILENT_STEP_TICKS * 3; i += 1) {
+    // One world call every 100 ticks, silence in between.
+    const r = decideScriptAction(s, obs({ oreHoldFraction: 0 }), mem, i % 100 === 0 ? acting : reg, home);
+    assert.equal(r.status, "running", `stopped at tick ${i}: ${r.pauseReason ?? ""}`);
+    assert.notEqual(r.action.kind, "warp", `headed home at tick ${i}`);
+    mem = r.memory;
+  }
 });
 
 // ─── A blocked macro ─────────────────────────────────────────────────────────
@@ -1066,6 +1108,184 @@ test("a trip that DOES help puts the whole cap back", () => {
   assert.deepEqual(results.map((r) => r.status), Array(6).fill("running"));
 });
 
+// ─── dock-and-repair: a system mismatch rewinds the loop ────────────────────
+//
+// The incident: a nullsec mining bot's shields dipped mid mine-at-belt.
+// dock-and-repair flew it home, patched it up at the (highsec) home system,
+// and sent it back out — where the program resumed mine-at-belt exactly where
+// it left off, its "nearest belt" binding still pointing at the nullsec grid
+// it no longer stood on. It mined nothing, marked the home system's belts
+// dry, and the run died. These prove the fix: a trip that lands somewhere
+// DIFFERENT from where it fired restarts the loop the interrupted step sits
+// in, from its first element, instead of resuming that step directly.
+
+/** A loop of two steps — mine until the hold is 90% full, then deliver — so a
+ * rewind (back to "m") is visibly different from a resume (staying at "h"). */
+function loopTripScript(): BotScript {
+  const loop: ProgramNode = {
+    id: "L", kind: "loop", repeat: { kind: "forever" },
+    body: [
+      macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 }),
+      macroStep("h", "deliver-ore"),
+    ],
+  };
+  return script([loop], [shieldTrip]);
+}
+
+/** Like `deliver`, but tags its memory while acting — so a test can tell
+ * whether the abandoned step's memory survived a recovery or was cleared. */
+const stickyDeliver: MacroDecider = (_s, o) =>
+  o.holdEmpty
+    ? tick({ kind: "wait" }, { kind: "done" })
+    : tick({ kind: "unloadOre", itemIDs: [1] }, { kind: "acting" }, true, { pinnedBelt: "stale-binding" });
+
+const withShopAndMem = { ...withShop, "deliver-ore": stickyDeliver };
+
+test("recovery in the SAME system resumes the interrupted step", () => {
+  const s = loopTripScript();
+  const { results } = run(s, [
+    obs({ oreHoldFraction: 0.4, holdEmpty: false }),  // mine acts (m)
+    obs({ oreHoldFraction: 0.95, holdEmpty: false }), // mine done -> deliver acts (h)
+    // Shields gone in space, in "Alpha": the watch fires and the ship heads home.
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, holdEmpty: false, damagedItemIDs: [7], systemName: "Alpha" }),
+    // Docked, still "Alpha" (home happens to be in the same system): shop paid.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Alpha" }),
+    // Nothing left to fix, still "Alpha": back out — same system, no rewind.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Alpha" }),
+    // In space, still "Alpha": the DELIVER step runs again — not mine.
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, systemName: "Alpha" }),
+  ], withShopAndMem);
+  assert.equal(results[4]?.action.kind, "undock", "patched up, so back out");
+  assert.deepEqual(results[4]?.memory.macroMem["h"], { pinnedBelt: "stale-binding" },
+    "same system: the interrupted step's own memory is untouched");
+  assert.equal(results[5]?.stepPath, "h", "same system: resumes the step it was interrupted on");
+  assert.equal(results[5]?.action.kind, "unloadOre");
+});
+
+test("recovery in a DIFFERENT system restarts the loop body at its first step", () => {
+  const s = loopTripScript();
+  const { results } = run(s, [
+    obs({ oreHoldFraction: 0.4, holdEmpty: false }),  // mine acts (m)
+    obs({ oreHoldFraction: 0.95, holdEmpty: false }), // mine done -> deliver acts (h)
+    // Shields gone in space, working "Nullscape": the watch fires, heads home.
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, holdEmpty: false, damagedItemIDs: [7], systemName: "Nullscape" }),
+    // Docked home, in "Havenhome" — a different system: shop paid.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Havenhome" }),
+    // Nothing left to fix, still "Havenhome": back out — a mismatch, so the
+    // loop rewinds to its first element and "h"'s stale memory is dropped.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Havenhome" }),
+    // In space, in "Havenhome": MINE runs — the loop's first step, not deliver.
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, oreHoldFraction: 0.4, systemName: "Havenhome" }),
+  ], withShopAndMem);
+  assert.equal(results[4]?.action.kind, "undock", "patched up, so back out");
+  assert.equal(results[4]?.memory.macroMem["h"], undefined,
+    "a different system: the abandoned step's own memory is forgotten with it");
+  assert.equal(results[5]?.stepPath, "m", "different system: restarts the loop, not the interrupted step");
+  assert.equal(results[5]?.action.kind, "activate");
+});
+
+test("an UNREADABLE system never counts as a mismatch — it never rewinds", () => {
+  const s = loopTripScript();
+  const { results } = run(s, [
+    obs({ oreHoldFraction: 0.4, holdEmpty: false }),  // mine acts (m)
+    obs({ oreHoldFraction: 0.95, holdEmpty: false }), // mine done -> deliver acts (h)
+    // Fires with no system reading at all (an older BFF, or a blind tick).
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, holdEmpty: false, damagedItemIDs: [7] }),
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Havenhome" }),
+    // Even though THIS reading is fine, the fired-side one never was — no
+    // honest comparison was ever possible, so the rewind never fires.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Havenhome" }),
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, systemName: "Havenhome" }),
+  ], withShopAndMem);
+  assert.equal(results[5]?.stepPath, "h", "a null reading is never grounds to rewind a working program");
+});
+
+test("a TOP-LEVEL step (no enclosing loop) never rewinds", () => {
+  // Two plain program steps, no loop around either of them.
+  const s = script(
+    [macroStep("a", "undock"), macroStep("b", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })],
+    [shieldTrip],
+  );
+  const { results } = run(s, [
+    obs({ inSpace: false }),                      // undock acts (a)
+    obs({ inSpace: true, oreHoldFraction: 0.4 }),  // undock done -> mine acts (b)
+    // Shields gone at "b", in "Nullscape".
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, damagedItemIDs: [7], systemName: "Nullscape" }),
+    // Patched up at home, in "Havenhome" — a different system.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Havenhome" }),
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Havenhome" }),
+    // Back in space: "b" runs again — "b" has no loop to restart, so it keeps
+    // today's behaviour regardless of the system mismatch.
+    obs({ shieldRatio: 1, inSpace: true, docked: false, oreHoldFraction: 0.4, systemName: "Havenhome" }),
+  ], withShop);
+  assert.equal(results[5]?.stepPath, "b", "no enclosing loop: the interrupted step resumes, never rewound");
+  assert.equal(results[5]?.action.kind, "activate");
+});
+
+test("a rewind cannot be mistaken for the livelock guard's runaway loop", () => {
+  const s = loopTripScript();
+  const { results } = run(s, [
+    obs({ oreHoldFraction: 0.4, holdEmpty: false }),  // mine acts (m)
+    obs({ oreHoldFraction: 0.95, holdEmpty: false }), // mine done -> deliver acts (h)
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, holdEmpty: false, damagedItemIDs: [7], systemName: "Nullscape" }),
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Havenhome" }),
+    // Mismatch: rewinds to "m" and hands back "undock".
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Havenhome" }),
+    // The rewound loop runs a FULL extra lap from here — mine, deliver, and
+    // wraps back to mine again — normally, never reading as a hollow pass.
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, oreHoldFraction: 0.4, systemName: "Havenhome" }),
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, oreHoldFraction: 0.95, systemName: "Havenhome" }),
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: true, systemName: "Havenhome" }),
+  ], withShop);
+  assert.deepEqual(results.map((r) => r.status), Array(8).fill("running"),
+    "the rewind, and the ordinary wrap right after it, are both a single free lap each — never a livelock");
+  assert.equal(results[5]?.stepPath, "m", "resumes at the rewound loop start");
+  assert.equal(results[6]?.stepPath, "h");
+  assert.equal(results[7]?.stepPath, "m", "one ordinary wrap after the rewind");
+  assert.equal(results[7]?.memory.loopPass, 1,
+    "loopPass counts the wrap that happened AFTER the rewind, not the rewind itself");
+});
+
+// ⚠ A REWIND MUST NOT BUY THE LOOP ANOTHER RUN. `loopPass` counts the passes a
+// loop has COMPLETED, and the pass a rewind lands back at the start of is the
+// one that never finished — so the count is exactly what it was a tick ago.
+// Zeroing it here would be invisible in every `forever` script and ruinous in
+// every counted one: a hauling run told to make a fixed number of trips would
+// make almost twice as many because its shields once dipped in the wrong
+// system, which is the kind of bug that is only ever found by counting the
+// wallet afterwards.
+test("a rewind does not give a times-bounded loop extra passes", () => {
+  const loop: ProgramNode = {
+    id: "L", kind: "loop", repeat: { kind: "times", count: 2 },
+    body: [
+      macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 }),
+      macroStep("h", "deliver-ore"),
+    ],
+  };
+  const s = script([loop], [shieldTrip]);
+  const { results } = run(s, [
+    // ── pass one, in full ──
+    obs({ oreHoldFraction: 0.4, holdEmpty: false }),  // mine acts (m)
+    obs({ oreHoldFraction: 0.95, holdEmpty: false }), // mine done -> deliver acts (h)
+    obs({ holdEmpty: true }),                         // deliver done -> wraps, pass one counted
+    // ── pass two, interrupted and relocated ──
+    obs({ shieldRatio: 0.2, inSpace: true, docked: false, holdEmpty: false, damagedItemIDs: [7], systemName: "Nullscape" }),
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [7], systemName: "Havenhome" }),
+    // Mismatch: rewinds to "m" — and the pass already banked stays banked.
+    obs({ shieldRatio: 0.2, inSpace: false, docked: true, damagedItemIDs: [], systemName: "Havenhome" }),
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, oreHoldFraction: 0.4, systemName: "Havenhome" }),
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: false, oreHoldFraction: 0.95, systemName: "Havenhome" }),
+    // Pass two finishes here. Two of two: the program is over, not restarted.
+    obs({ shieldRatio: 1, inSpace: true, docked: false, holdEmpty: true, systemName: "Havenhome" }),
+  ], withShop);
+  assert.equal(results[2]?.memory.loopPass, 1, "pass one is banked before the trouble starts");
+  assert.equal(results[5]?.memory.loopPass, 1,
+    "the rewind re-enters the pass that never finished — it does not un-count the one that did");
+  assert.equal(results[6]?.stepPath, "m", "and it really did rewind to the loop's first step");
+  assert.equal(results[8]?.status, "done",
+    "two passes asked for, two passes run: the rewind did not buy a third");
+});
+
 // ─── In warp, nothing is decided ─────────────────────────────────────────────
 
 // The guard at the top of `decideScriptAction`. Until it existed the macros each
@@ -1222,4 +1442,48 @@ test("⚠ warp is NOT in the table — the one movement action that is not idemp
   // all emit it with no memory guard at all. If this assertion ever fails,
   // somebody has tidied warp in for symmetry and bought a double warp with it.
   assert.equal(settleTicksFor({ kind: "warp", targetID: 4002 }), DEFAULT_SETTLE_TICKS);
+});
+
+// ─── The scanner read a site-mode mining block needs ─────────────────────────
+
+test("a mining block set to SITE asks for the scanner read — nearest and chosen do not", () => {
+  // ⚠ THE LIVE FAILURE THIS LOCKS SHUT. `observe` fetches `anomalies` only for
+  // the blocks that fly to an anomaly by name, and `mine-at-belt` is not one of
+  // them — so site mode's barren-grid path, which names the next site ITSELF,
+  // read `null` (meaning "unread yet", which waits) on every tick. Five pilots
+  // mined their ore site out and then sat on "Reading the scanner for the next
+  // ore site." indefinitely with the scanner never asked once.
+  const site: BotScript = script([
+    { id: "m", kind: "macro", macro: "mine-at-belt", args: { belt: { kind: "belt", belt: { mode: "site" } } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+  ]);
+  assert.equal(activeStepToursOreSites(site, initialMemory(site)), true);
+
+  // Pointed at a belt, the SAME block must not pay for a read it never looks at.
+  const nearest = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })]);
+  assert.equal(activeStepToursOreSites(nearest, initialMemory(nearest)), false);
+
+  const chosen: BotScript = script([
+    { id: "m", kind: "macro", macro: "mine-at-belt",
+      args: { belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: null, name: "V - Belt 1", systemName: null } } } },
+      until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+  ]);
+  assert.equal(activeStepToursOreSites(chosen, initialMemory(chosen)), false);
+
+  // And no other block earns it by sitting next to one that does.
+  const hauling = script([macroStep("d", "deliver-ore")]);
+  assert.equal(activeStepToursOreSites(hauling, initialMemory(hauling)), false);
+});
+
+test("a latched repair trip does not order the scanner read on the site block's behalf", () => {
+  // The trip is running the borrowed Repair-ship block, not the mining one (see
+  // `activeMacroID` above), and the read is priced per block.
+  const s: BotScript = {
+    ...script([
+      { id: "m", kind: "macro", macro: "mine-at-belt", args: { belt: { kind: "belt", belt: { mode: "site" } } },
+        until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+    ], [shieldTrip]),
+  };
+  const flying = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: false }), initialMemory(s), withShop, home);
+  assert.equal(activeStepToursOreSites(s, flying.memory), false);
 });

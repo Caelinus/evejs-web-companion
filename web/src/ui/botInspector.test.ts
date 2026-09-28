@@ -115,6 +115,17 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
     expect: /search a station or system by name/,
     why: "destination-picker, which also accepts a system",
   },
+  // The corporation hangar picker has to ASK the bridge which stations have an
+  // office before it can offer anything, and SSR runs no effects — so what a
+  // server render proves is that it draws its waiting state rather than a blank
+  // where a control should be. The choosing itself is covered where it can be:
+  // the codec, the sentence, and the block's own decider.
+  {
+    macro: "deliver-ore",
+    key: "into",
+    expect: /Checking your corporation's offices/,
+    why: "corp-division-select, before its read has landed",
+  },
   { macro: "wait", key: "seconds", expect: /1 to 500/, why: "count-input shows its range" },
   { macro: "buy-item", key: "price", expect: /1 to 100000000000/, why: "isk-input shows its range" },
   { macro: "buy-item", key: "quantity", expect: /1 to 10000000/, why: "qty-input shows its range" },
@@ -228,12 +239,25 @@ test("no ore group id reaches the screen (R7d)", () => {
 // the editor can see is a list of the wrong belts. The name is what the runtime
 // matches on anyway — belt ids are grid-local — so nothing is lost by typing it.
 
-test("a belt step offers the nearest belt, and naming one, and nothing else", () => {
+test("a belt step offers the nearest belt, the scanner's ore sites, and naming one", () => {
   const html = renderInspector({ kind: "step", step: step("mine-at-belt") });
   const text = visibleText(html);
   assert.match(text, /the nearest belt/);
+  assert.match(text, /the scanner's ore sites/);
   assert.match(text, /a belt I name/);
   // Taking the nearest belt needs nothing typed, so no field is in the way.
+  assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
+});
+
+test("a belt step set to the scanner's ore sites offers no name field either", () => {
+  // "site" carries no ref, same as "nearest" — the scanner is read fresh
+  // wherever the block runs, so there is nothing here for a player to type.
+  const html = renderInspector({
+    kind: "step",
+    step: step("mine-at-belt", { args: { belt: { kind: "belt", belt: { mode: "site" } } } }),
+  });
+  const text = visibleText(html);
+  assert.match(text, /the scanner's ore sites/);
   assert.doesNotMatch(html, /id="arg-step-under-test-belt-name"/, "a name field appeared with nothing to name");
 });
 

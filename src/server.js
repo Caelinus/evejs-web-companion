@@ -2349,6 +2349,23 @@ function decodeDivisionNames(result) {
  * from the LISTED ROW's own locationID instead of assuming.
  */
 async function readCorpOffice(held, webSessionID) {
+  const offices = await readCorpOffices(held, webSessionID);
+  const here = offices.find((office) => office.stationID === held.stationID);
+  return here ? here.officeID : 0;
+}
+
+/**
+ * EVERY office the session's corporation rents, wherever it is.
+ *
+ * ⚠ THIS IS NOT A DOCKED-STATION READ, which is the whole reason it exists
+ * apart from readCorpOffice above. GetMyCorporationsOffices answers from the
+ * session's corporationID alone (evej's officeManagerService handler reads
+ * nothing else), so "does my corporation have an office at station X" is
+ * answerable from anywhere — in space, or docked on the far side of the map.
+ * That is what lets the bot builder offer a corporation hangar for a station
+ * the ship has never visited, instead of only for the one it is sitting in.
+ */
+async function readCorpOffices(held, webSessionID) {
   const outcome = await heldTopLevelCall(
     held,
     webSessionID,
@@ -2357,9 +2374,7 @@ async function readCorpOffice(held, webSessionID) {
     [],
     null,
   );
-  const offices = decodeOfficeRows(outcome.result);
-  const here = offices.find((office) => office.stationID === held.stationID);
-  return here ? here.officeID : 0;
+  return decodeOfficeRows(outcome.result).filter((office) => office.stationID > 0);
 }
 
 // Resolve a browser-supplied place descriptor to a bind spec, the destination
@@ -2914,6 +2929,70 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
               : null,
         };
       }),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * WHERE the corporation has offices, and what its seven divisions are CALLED.
+ * No contents, no office ids — this answers a question a PLANNER asks before
+ * flying anywhere: "if I haul a load to station X, can it go into a corporation
+ * hangar there?"
+ *
+ * Neither read is scoped to the docked station (offices come from the session's
+ * corporation, names from corpRegistry.GetCorporation), so this works in space
+ * and answers for every station at once. The station ids are the corporation's
+ * own offices — not a directory of who rents where.
+ *
+ * The divisions are listed WITHOUT a role check on purpose. The role that gates
+ * a division is only enforced where it is enforceable — at the office itself,
+ * by the server, at the moment of the deposit — and the unload route below
+ * falls back to the personal hangar when it refuses. Offering a division here
+ * that a pilot turns out not to have the role for costs them nothing; guessing
+ * a role mask wrong and HIDING a division they do have would cost them the
+ * feature.
+ */
+app.get("/api/bridge/corp-offices", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) {
+    return;
+  }
+  try {
+    const [officesSettled, corporationSettled] = await Promise.allSettled([
+      readCorpOffices(held, req.webSessionID),
+      heldTopLevelCall(held, req.webSessionID, "corpRegistry", "GetCorporation", [], null),
+    ]);
+    for (const settled of [officesSettled, corporationSettled]) {
+      if (settled.status === "rejected" && settled.reason && settled.reason.code === "SESSION_NOT_FOUND") {
+        next(settled.reason);
+        return;
+      }
+    }
+    const divisionNames =
+      corporationSettled.status === "fulfilled"
+        ? decodeDivisionNames(corporationSettled.value.result)
+        : {};
+    const stationIDs =
+      officesSettled.status === "fulfilled"
+        ? [...new Set(officesSettled.value.map((office) => office.stationID))]
+        : [];
+    const divisions = [];
+    for (let division = 1; division <= CORP_DIVISION_COUNT; division += 1) {
+      divisions.push({ division, name: divisionNames[division] || null });
+    }
+    res.json({
+      ok: true,
+      // An empty list is the ordinary answer for a corporation that rents no
+      // office anywhere — not an error, and told apart from a failed read by
+      // `error` being set.
+      stationIDs,
+      divisions,
+      error:
+        officesSettled.status === "rejected"
+          ? String((officesSettled.reason && officesSettled.reason.code) || "READ_FAILED")
+          : null,
     });
   } catch (error) {
     next(error);
@@ -9663,14 +9742,31 @@ app.post("/api/bridge/dogma/booster/use", requireAuth, async (req, res, next) =>
 // whose controllerID !== the session ship's itemID ("not currently under this
 // ship's control"). A foreign droneID cannot be commanded — no handoff-doc flag.
 
-/** Dispatch one confirm-gated BOUND entity write off the entity bind; uniform ack. */
-async function dispatchBoundEntityWrite(req, res, next, method, args) {
+/**
+ * Dispatch one confirm-gated BOUND entity write off the entity bind; uniform ack.
+ *
+ * `withDronesInSpace` adds the same snapshot re-read the four dedicated drone
+ * routes answer with. It is not decoration: a drone verb the PAGE drives is
+ * judged by what the snapshot says afterwards and never by the call's own
+ * return value, so a route the panel calls must carry `inSpace` or the page has
+ * nothing to judge with. The three plumbing-only writes keep the bare ack.
+ */
+async function dispatchBoundEntityWrite(req, res, next, method, args, { withDronesInSpace = false } = {}) {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
     return;
   }
   try {
     const outcome = await boundCall(held, req.webSessionID, entityBindSpec(), method, args, null);
+    if (withDronesInSpace) {
+      await answerWithDronesInSpace(
+        res,
+        held,
+        { applied: true, result: outcome.result ?? null },
+        outcome.notifications,
+      );
+      return;
+    }
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
@@ -9709,11 +9805,22 @@ app.post("/api/bridge/entity/drones/abandon", requireAuth, async (req, res, next
 
 // CmdReconnectToDrones([droneIDs]) — re-establish control over abandoned/orphaned
 // drones the session ship can still reach.
+//
+// ⚠ THE ONE OF THE FOUR THE DRONES PANEL ACTUALLY CALLS, which is why it alone
+// answers with the space re-read: success here is the drone becoming CONTROLLED,
+// and only the snapshot says whether it did.
 app.post("/api/bridge/entity/drones/reconnect", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This reconnects to those drones. Confirm to continue.")) {
     return;
   }
-  await dispatchBoundEntityWrite(req, res, next, "CmdReconnectToDrones", [bridgeIDList((req.body || {}).droneIDs)]);
+  await dispatchBoundEntityWrite(
+    req,
+    res,
+    next,
+    "CmdReconnectToDrones",
+    [bridgeIDList((req.body || {}).droneIDs)],
+    { withDronesInSpace: true },
+  );
 });
 
 // --- R102 WB-INV: the 7 Phase-4 BOUND inventory WRITES -----------------------
@@ -16783,6 +16890,27 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
 // is the source location — no new server method at all.
 //
 // Docked-only, because there is nowhere else for it to go.
+//
+// ── `division` (optional, 1-7): deliver into the CORPORATION hangar instead ──
+// Same call, a different bound object and a division flag — which is exactly
+// why it belongs here rather than in a route of its own: the proof that the ore
+// left the ship is the holds re-read below, and that read does not care where
+// the ore went.
+//
+// THE FALLBACK IS THE POINT. A corporation deposit can be refused for reasons
+// the browser cannot see and must not try to predict: no office at this station
+// any more, no role for that division, an impounded office. Every one of those
+// ends the same way — the load goes into the pilot's OWN hangar, at the station
+// they already flew to, and the answer says so. A hauler that stalls with a full
+// hold because a role changed is worse than one that lands the ore somewhere
+// recoverable, and "somewhere recoverable" is never the corporation's side:
+// ore put into a division belongs to the corporation and needs a take role to
+// get back, while ore in the pilot's hangar is still theirs.
+//
+// The fallback is judged by the RE-READ, never by the absence of a throw. A
+// division Add that raises may still have moved the item (the same reason the
+// transfer route remembers its dispatch error instead of rethrowing it), so
+// what is retried into the hangar is what the holds say is still aboard.
 app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
@@ -16792,6 +16920,20 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
   const requested = Array.isArray(body.itemIDs)
     ? body.itemIDs.map((value) => Number(value) || 0).filter((value) => value > 0)
     : [];
+  // Absent (or null) means the personal hangar, which is every existing caller.
+  // A division that is not one of the seven is a bug in the caller, not a
+  // silently-ignored preference: it is refused rather than turned into a
+  // personal-hangar unload the script never asked for.
+  const wantsDivision = body.division !== undefined && body.division !== null;
+  const division = wantsDivision ? Number(body.division) : 0;
+  if (wantsDivision && !isValidDivision(division)) {
+    res.status(400).json({
+      ok: false,
+      error: "INVALID_DIVISION",
+      message: "A corporation hangar division is required.",
+    });
+    return;
+  }
   if (requested.length === 0) {
     res.status(400).json({
       ok: false,
@@ -16817,39 +16959,107 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
     }
     const hangarSpec = hangarBindSpec(held);
     const notifications = [];
-    for (const itemID of requested) {
-      const outcome = await boundCall(
-        held,
-        req.webSessionID,
-        hangarSpec,
-        "Add",
-        [itemID, shipID],
-        { flag: ITEM_FLAG_HANGAR },
-      );
-      notifications.push(...outcome.notifications);
-    }
+
     // A 200 is not proof — invbroker can decline a move silently. The answer is
     // what the HOLDS say afterwards: anything still sitting in a mining hold
     // did not move, and is named as such rather than assumed moved.
     const spec = cargoBindSpec(held, shipID);
-    const stillHeld = new Set();
-    for (const hold of MINING_HOLDS) {
-      try {
-        const listed = await boundCall(held, req.webSessionID, spec, "List", [hold.flag], null);
-        for (const row of decodeInventoryRows(listed.result)) {
-          stillHeld.add(row.itemID);
+    const readStillHeld = async () => {
+      const stillHeld = new Set();
+      for (const hold of MINING_HOLDS) {
+        try {
+          const listed = await boundCall(held, req.webSessionID, spec, "List", [hold.flag], null);
+          for (const row of decodeInventoryRows(listed.result)) {
+            stillHeld.add(row.itemID);
+          }
+        } catch {
+          // A hold that cannot be re-read leaves its items unverified; they are
+          // reported as not-moved rather than silently counted as moved.
         }
-      } catch {
-        // A hold that cannot be re-read leaves its items unverified; they are
-        // reported as not-moved rather than silently counted as moved.
+      }
+      return stillHeld;
+    };
+    const addAll = async (itemIDs, destinationSpec, flag) => {
+      let refusal = null;
+      for (const itemID of itemIDs) {
+        try {
+          const outcome = await boundCall(
+            held,
+            req.webSessionID,
+            destinationSpec,
+            "Add",
+            [itemID, shipID],
+            { flag },
+          );
+          notifications.push(...outcome.notifications);
+        } catch (error) {
+          // Remembered, not rethrown: the re-read decides. Raising here would
+          // abandon the rest of the load — and on the corporation branch it
+          // would skip the fallback that is the whole point of this route.
+          refusal = refusal ?? error;
+        }
+      }
+      return refusal;
+    };
+
+    // Which hangar this load is FOR. A division with no office at this station
+    // never even attempts the corporation Add — there is nothing to bind.
+    let officeID = 0;
+    let fellBack = null;
+    if (wantsDivision) {
+      try {
+        officeID = await readCorpOffice(held, req.webSessionID);
+      } catch (error) {
+        officeID = 0;
+        fellBack = String((error && error.code) || "READ_FAILED");
+      }
+      if (!officeID && fellBack === null) {
+        fellBack = "NO_CORP_OFFICE";
       }
     }
+
+    let deliveredToCorp = [];
+    let stillHeld;
+    if (officeID) {
+      const refusal = await addAll(requested, corpOfficeBindSpec(officeID), corpDivisionFlag(division));
+      stillHeld = await readStillHeld();
+      deliveredToCorp = requested.filter((itemID) => !stillHeld.has(itemID));
+      const stranded = requested.filter((itemID) => stillHeld.has(itemID));
+      if (stranded.length > 0) {
+        // Whatever the corporation would not take goes into the pilot's own
+        // hangar. The reason is the refusal the server gave, when it gave one:
+        // a role the character lacks answers CrpAccessDenied, and that is worth
+        // repeating to the player verbatim rather than flattening to "refused".
+        // The MESSAGE, not the transport code. A refused bound call arrives as
+        // code "CALL_REFUSED" with the server's own word in the message
+        // ("CrpAccessDenied" for a role the character does not hold), and
+        // "CALL_REFUSED" on its own tells a player nothing. Untranslated on
+        // purpose, exactly as the other refusal passthroughs are: the browser
+        // owns the wording.
+        fellBack = (refusal && refusal.message) || (refusal && refusal.code) || "CORP_REFUSED";
+        await addAll(stranded, hangarSpec, ITEM_FLAG_HANGAR);
+        stillHeld = await readStillHeld();
+      }
+    } else {
+      await addAll(requested, hangarSpec, ITEM_FLAG_HANGAR);
+      stillHeld = await readStillHeld();
+    }
+
     const moved = requested.filter((itemID) => !stillHeld.has(itemID));
+    const movedToCorp = moved.filter((itemID) => deliveredToCorp.includes(itemID));
     res.json({
       ok: true,
       requested,
       moved,
       remaining: requested.filter((itemID) => stillHeld.has(itemID)),
+      // WHERE THE LOAD ACTUALLY WENT, which is not always where it was aimed.
+      // `corpDivision` is the division that took something (null when nothing
+      // did), and `fellBack` names why the rest did not — so a caller can say
+      // "it went in your own hangar because you lack the role" instead of
+      // reporting a clean delivery to a hangar nobody will check.
+      corpDivision: movedToCorp.length > 0 ? division : null,
+      movedToCorp,
+      fellBack,
       notifications,
     });
   } catch (error) {
@@ -17674,7 +17884,17 @@ app.post("/api/bridge/drones/scoop", requireAuth, async (req, res, next) => {
       [droneIDs],
       null,
     );
-    res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
+    // ⚠ THE SNAPSHOT, NOT THE ACK. ScoopDrone answers a per-drone dict that is
+    // empty on success, exactly like the entity orders, so the page judges a
+    // scoop by whether the drone LEFT space. Answering without `inSpace` left
+    // it judging `null`, which reads as "the scoop was accepted, but space
+    // could not be re-read" for every scoop, successful ones included.
+    await answerWithDronesInSpace(
+      res,
+      held,
+      { applied: true, droneIDs, result: outcome.result ?? null },
+      outcome.notifications,
+    );
   } catch (error) {
     next(error);
   }

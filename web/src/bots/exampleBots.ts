@@ -244,9 +244,20 @@ const ANOMALY_EXPEDITION: BotScript = {
 
 /**
  * Mine the system's ORE anomalies rather than its belts — the asteroid clusters
- * the scanner shows, which hold more and better rock than a belt does. The
- * mine-at-belt block does the mining wherever the ship is parked; the ore-site
- * block is only how it gets there, and it never picks a pirate den.
+ * the scanner shows, which hold more and better rock than a belt does.
+ *
+ * ⚠ THE MINING STEP IS SET TO "SITE" MODE, NOT "NEAREST", AND THAT IS THE FIX
+ * FOR A RUN THIS EXAMPLE USED TO LOSE. With `mode: "nearest"` the mine-at-belt
+ * block's OWN rotation — not the warp-to-ore-anomaly step ahead of it — took
+ * over the moment the anomaly it was parked in ran out of the wanted ore, and
+ * "nearest" tours the system's asteroid BELTS, never its ore sites. A bot
+ * whose blurb promised "the scanner's ore sites, not the belts" quietly became
+ * a belt bot the instant one site ran dry, and a repair trip that relocated it
+ * to its highsec home system — where the wanted ore cannot spawn on a belt
+ * either — ended the run outright. `mode: "site"` makes that same mid-lap
+ * rotation tour ore sites instead, so warp-to-ore-anomaly is still how the
+ * ship reaches the first site each lap, but mine-at-belt itself now finishes
+ * the lap without ever looking at a belt.
  */
 const ANOMALY_MINING: BotScript = {
   ...FORMAT,
@@ -270,7 +281,7 @@ const ANOMALY_MINING: BotScript = {
           id: "s3",
           kind: "macro",
           macro: "mine-at-belt",
-          args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
+          args: { belt: { kind: "belt", belt: { mode: "site" } } },
           until: { kind: "ore-hold-at-least", fraction: 0.9 },
         },
         { id: "s4", kind: "macro", macro: "deliver-ore", args: { station: { kind: "station", ref: startingStation() } } },

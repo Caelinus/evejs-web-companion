@@ -55,7 +55,14 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     untilRequired: true,
   },
   "deliver-ore": {
-    args: [{ key: "station", kind: "station", required: true }],
+    args: [
+      { key: "station", kind: "station", required: true },
+      // Optional: absent = the pilot's own hangar, the shipped behaviour. Set,
+      // the load is aimed at that corporation division — and still lands in the
+      // pilot's own hangar if the office or the role is not there when the ship
+      // docks, because a hauler that cannot unload cannot fly another lap.
+      { key: "into", kind: "corpDivision", required: false },
+    ],
     untilRequired: false,
   },
   "defend-with-drones": { args: [], untilRequired: false },
@@ -95,6 +102,29 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [
       { key: "exceptBays", kind: "bayList", required: false },
       { key: "keepItems", kind: "itemList", required: false },
+    ],
+    untilRequired: false,
+  },
+  // Docked: the mirror of unload-cargo. Take the named items OUT of the station
+  // hangar and put each stack in whichever bay this hull wants it in — the
+  // command centre hold, the planetary hold, the mining hold — falling back to
+  // the cargo hold only for a stack no bay on this hull claims. It takes what
+  // FITS and leaves the rest for the next lap, which is what makes a ten-trip
+  // haul a loop rather than ten hand-written blocks.
+  //
+  // ⚠ `items` IS REQUIRED, UNLIKE unload-cargo's `keepItems`. The two blocks
+  // default in opposite directions because their safe readings are opposite: an
+  // unload with nothing named empties the ship into a hangar (recoverable), but
+  // a load with nothing named would carry a station hangar's entire contents —
+  // ships, modules, everything — off to another system. One entry can still say
+  // "everything of this kind" (a group) or "everything called this" (a pattern),
+  // so requiring it costs a player one click, not a dozen.
+  "load-cargo": {
+    args: [
+      { key: "items", kind: "itemList", required: true },
+      // Same meaning as on unload-cargo, and it has to be here for the same
+      // reason: a bay a bot must not EMPTY is one it must not FILL either.
+      { key: "exceptBays", kind: "bayList", required: false },
     ],
     untilRequired: false,
   },

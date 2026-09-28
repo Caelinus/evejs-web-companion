@@ -56,9 +56,33 @@ function worldRefPhrase(ref: WorldRef | null, pickNoun: string): string {
   return `a ${pickNoun} you pick`;
 }
 
+/**
+ * A corporation hangar division as words: the corporation's own name for it
+ * when the script carries one, and "division N" when it does not.
+ *
+ * The ordinal IS a name here, not an id leaking into the sentence (R7d): it is
+ * what the division is called in an office nobody has renamed, and it is what
+ * the player picked it by. A script written on one account and read on another
+ * — where the office has never been opened, so no name was ever learned — has
+ * to read as something, and "division 3" is the honest something.
+ */
+function corpDivisionPhrase(division: number, name: string | null): string {
+  return name !== null && name.length > 0 ? name : `division ${division}`;
+}
+
 function beltPhrase(belt: BeltArg): string {
   if (belt.mode === "nearest") {
     return "the nearest belt";
+  }
+  // ⚠ THE WORD "BELT" NEVER APPEARS BELOW THIS LINE. "site" mode exists because
+  // "nearest" silently toured the system's asteroid BELTS the moment the ore
+  // anomaly a mining bot was parked in ran dry (see `BeltArg`'s own comment in
+  // botScript.ts) — a bot whose blurb read "the scanner's ore sites, not the
+  // belts" was a belt bot in practice, and a repair trip that relocated it to
+  // its highsec home system killed the run outright. A sentence that let
+  // "belt" slip back in here would hide the exact confusion that cost a run.
+  if (belt.mode === "site") {
+    return "the ore site the scanner shows";
   }
   return worldRefPhrase(belt.ref, "belt");
 }
@@ -75,7 +99,11 @@ export function macroName(macro: MacroID): string {
     case "travel-to-belt":
       return "Fly to a belt";
     case "mine-at-belt":
-      return "Mine at a belt";
+      // Three ways to pick where, now that BeltArg has grown a "site" mode
+      // beside "nearest" and a belt named by hand — the nearest asteroid belt,
+      // one the player typed, or the scanner's ore sites — so the palette
+      // name can no longer promise just a belt (see `beltPhrase` above).
+      return "Mine at a belt or an ore site";
     case "deliver-ore":
       return "Haul the ore home";
     case "defend-with-drones":
@@ -98,6 +126,8 @@ export function macroName(macro: MacroID): string {
       return "Wait a while";
     case "unload-cargo":
       return "Empty the ship";
+    case "load-cargo":
+      return "Load the ship";
     case "salvage-wrecks":
       return "Salvage the wrecks";
     case "loot-wrecks":
@@ -217,6 +247,16 @@ function keptItemsPhrase(step: MacroStep): string {
   }
   const names = arg.items.map((item) => item.name).filter((name) => name.length > 0);
   return names.length === 0 ? "" : `, keeping ${names.join(" and ")} aboard`;
+}
+
+/** What a load step was told to take: "Command Centers and Nanite Repair Paste". */
+function loadedItemsPhrase(step: MacroStep): string {
+  const arg = step.args["items"];
+  if (arg === undefined || arg.kind !== "itemList" || arg.items.length === 0) {
+    return "what you pick";
+  }
+  const names = arg.items.map((item) => item.name).filter((name) => name.length > 0);
+  return names.length === 0 ? "what you pick" : names.join(" and ");
 }
 
 export function placePhrase(place: string): string {
@@ -530,7 +570,12 @@ function macroPhrase(step: MacroStep): string {
         station !== undefined && station.kind === "station"
           ? worldRefPhrase(station.ref, "station")
           : "a station you pick";
-      return `Haul the ore to ${where}`;
+      const into = step.args["into"];
+      const hangar =
+        into !== undefined && into.kind === "corpDivision"
+          ? ` and put it in the corporation's ${corpDivisionPhrase(into.division, into.name)}`
+          : "";
+      return `Haul the ore to ${where}${hangar}`;
     }
     case "defend-with-drones":
       return "Fight off rats with your combat drones";
@@ -583,6 +628,20 @@ function macroPhrase(step: MacroStep): string {
       return names.length === 0
         ? `Empty the ship into the hangar${kept}`
         : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone${kept}`;
+    }
+    case "load-cargo": {
+      const except = step.args["exceptBays"];
+      const names =
+        except !== undefined && except.kind === "bayList"
+          ? except.bays.map((key) => BAY_LABELS[key] ?? key)
+          : [];
+      // "as much as fits" is the promise the block actually keeps, and saying it
+      // here is what stops a player reading a half-loaded ship as a failure: the
+      // rest is still in the hangar, waiting for the next lap of the loop.
+      const load = `Load as much ${loadedItemsPhrase(step)} as fits, each into the right hold`;
+      return names.length === 0
+        ? load
+        : `${load}, but leave the ${names.join(" and ")} alone`;
     }
     case "hardeners-on":
       // ⚠ "AND DAMAGE CONTROL" USED TO BE IN THIS LINE, AND IT PROMISED

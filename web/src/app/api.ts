@@ -739,6 +739,49 @@ export async function loadCorpHangar(options: ApiOptions = {}): Promise<RawCorpH
   };
 }
 
+/**
+ * WHERE the corporation has offices and what its divisions are CALLED — the
+ * planning read, answered from anywhere, for any station.
+ *
+ * `loadCorpHangar` above is the docked-station read: what is IN the office you
+ * are standing in. This one answers the question a bot script asks while it is
+ * being written, about a station on the far side of the map: is there an office
+ * there at all, and what would the divisions be called if I picked one?
+ */
+export interface CorpOfficeDivision {
+  readonly division: number;
+  readonly name: string | null;
+}
+
+export interface CorpOfficesResult {
+  /** Station ids where the corporation rents an office. Empty is an ordinary
+   * answer (a corporation with no offices), told apart from a failed read by
+   * `error`. */
+  readonly stationIDs: readonly number[];
+  /** All seven divisions with their corporation-given names, so a picker can
+   * label them without a second read. */
+  readonly divisions: readonly CorpOfficeDivision[];
+  readonly error: string | null;
+}
+
+export async function loadCorpOffices(options: ApiOptions = {}): Promise<CorpOfficesResult> {
+  const data = await getJson("/api/bridge/corp-offices", options);
+  const divisions = Array.isArray(data.divisions) ? data.divisions : [];
+  return {
+    stationIDs: Array.isArray(data.stationIDs)
+      ? data.stationIDs.map((entry) => Number(entry) || 0).filter((id) => id > 0)
+      : [],
+    divisions: divisions.map((entry) => {
+      const row = (entry ?? {}) as Record<string, JsonValue>;
+      return {
+        division: Number(row.division) || 0,
+        name: typeof row.name === "string" && row.name !== "" ? row.name : null,
+      };
+    }),
+    error: typeof data.error === "string" ? data.error : null,
+  };
+}
+
 // --- R12 Ship fitting ------------------------------------------------------
 // The BFF drives the same bound-object two-step as the inventory routes (a
 // slot flag instead of hangar/cargo) and returns the raw retail-shaped reads,
@@ -2828,6 +2871,28 @@ export interface MiningActionResult {
   readonly notifications: readonly JsonValue[];
 }
 
+/**
+ * An unload, which additionally reports WHERE the load went. Kept apart from
+ * the shared shape above because reprocessing has no destination to report and
+ * would have to carry three fields it can never fill.
+ */
+export interface UnloadResult extends MiningActionResult {
+  /**
+   * The corporation division that took something, when the unload was aimed at
+   * one and it worked. Null on every ordinary hangar unload — and also when the
+   * corporation refused, which is what `fellBack` then explains.
+   */
+  readonly corpDivision: number | null;
+  readonly movedToCorp: readonly number[];
+  /**
+   * Why a corporation delivery landed in the pilot's own hangar instead: the
+   * server's own refusal code ("CrpAccessDenied" for a missing role),
+   * "NO_CORP_OFFICE" when the corporation rents none here, or "CORP_REFUSED"
+   * when it declined without saying why. Null when nothing fell back.
+   */
+  readonly fellBack: string | null;
+}
+
 function readIDArray(value: JsonValue | undefined): readonly number[] | null {
   if (!Array.isArray(value)) {
     return null;
@@ -2844,21 +2909,34 @@ export async function getMiningHolds(options: ApiOptions = {}): Promise<MiningHo
   };
 }
 
-/** Move mined ore from the ship's holds into the station hangar (docked only). */
+/**
+ * Move mined ore from the ship's holds into the station hangar (docked only).
+ *
+ * `division` (1-7) aims the load at a CORPORATION hangar division instead. It
+ * is a request, not a guarantee: no office at this station, or no role for that
+ * division, and the BFF puts the load in the pilot's own hangar and says so in
+ * `fellBack`. That is deliberate — the ore ends up somewhere the pilot can still
+ * reach, at the station they flew to, rather than stuck aboard a ship that
+ * cannot finish its lap.
+ */
 export async function unloadMiningHolds(
   itemIDs: readonly number[],
   options: ApiOptions = {},
-): Promise<MiningActionResult> {
-  const data = await postJson(
-    "/api/bridge/ship/ore-hold/unload",
-    { itemIDs: [...itemIDs] },
-    options,
-  );
+  division: number | null = null,
+): Promise<UnloadResult> {
+  const body: Record<string, JsonValue> = { itemIDs: [...itemIDs] };
+  if (division !== null) {
+    body.division = division;
+  }
+  const data = await postJson("/api/bridge/ship/ore-hold/unload", body, options);
   return {
     requested: readIDArray(data.requested) ?? [],
     moved: readIDArray(data.moved),
     remaining: readIDArray(data.remaining),
     notifications: Array.isArray(data.notifications) ? data.notifications : [],
+    corpDivision: asNumberOrNull(data.corpDivision),
+    movedToCorp: readIDArray(data.movedToCorp) ?? [],
+    fellBack: typeof data.fellBack === "string" ? data.fellBack : null,
   };
 }
 

@@ -1,27 +1,42 @@
 // Bringing a whole squad's companions online, on the SERVER.
 //
-// ⚠ THE ONE PLACE IN THIS APP THAT STARTS A BOT FOR A PILOT NOBODY IS FLYING.
-// Every other start control reads its character out of a live tab's own station
-// slice, so it can only ever act on a pilot that is already signed in here. The
-// bot host does not need that at all -- it mints its own session token and
-// selects the character itself -- and a squad start depends on it: the point is
-// to bring six pilots online without opening six tabs.
+// ⚠ IT STARTS A BOT FOR A PILOT NOBODY IS FLYING, and that is what makes it
+// different from every start control in a pilot row. Those read their character
+// out of a live tab's own station slice, so they can only ever act on a pilot
+// already signed in here. The bot host does not need that at all -- it mints
+// its own session token and selects the character itself -- and a squad start
+// depends on it: the point is to bring six pilots online without opening six
+// tabs. (The Bot Manager's group launcher starts a SAVED bot the same way; see
+// startRun.ts.)
+//
+// ⚠ THE SEQUENCING AND THE ONE-REFUSAL RULE LIVE IN `groupStart.ts` NOW, not
+// here. Neither is about companions -- "start one at a time" is about the
+// browser's connection pool and "a refusal is a fact about that pilot" is about
+// pilots -- and a second caller needed both. What is left in this file is the
+// part that IS about companions: that each pilot flies its own `CompanionSetup`.
 //
 // PURE ORCHESTRATION. No fetch, no store, no component. The caller passes in
 // what to start and how to start one; this decides the order, what happens when
 // one refuses, and what the player is told.
 
+import {
+  groupStartFinished,
+  groupStartSummary,
+  startForGroup,
+  type GroupStartEntry,
+  type GroupStartState,
+} from "./groupStart.ts";
 import type { CompanionSetup } from "../nav/fleetCompanionLoop.ts";
 
-/** Where one pilot in the squad has got to. */
-export type SquadStartState = "queued" | "starting" | "started" | "refused";
-
-export interface SquadStartEntry {
-  readonly characterID: number;
-  readonly state: SquadStartState;
-  /** Why it refused, in the server's own words. Only set on `refused`. */
-  readonly sentence?: string;
-}
+/**
+ * Where one pilot in the squad has got to.
+ *
+ * ⚠ ALIASES, NOT COPIES. A squad start is one kind of group start, so its rows
+ * are group-start rows; giving them a parallel shape would let the two drift
+ * and would make the Hangar's progress list untypeable by the shared runner.
+ */
+export type SquadStartState = GroupStartState;
+export type SquadStartEntry = GroupStartEntry;
 
 export interface SquadStartDeps {
   /**
@@ -76,81 +91,55 @@ export function squadStartWarnings(targets: readonly SquadStartTarget[]): readon
 /**
  * Start every configured pilot in the squad, ONE AT A TIME.
  *
- * ⚠ SEQUENTIAL, AND NOT BECAUSE IT IS SIMPLER. `App.svelte`'s `bringOnline`
- * already argues this for signing pilots in and the argument carries: a browser
- * allows about six connections per origin, so six simultaneous starts fill that
- * pool with starts and the seventh request of any kind queues behind them. Each
- * pilot also LANDS separately this way, which is what makes a progress readout
- * honest -- a row flips because that pilot is actually flying, not because a
- * timer fired.
+ * The sequencing and the never-strand-the-rest rule are `startForGroup`'s --
+ * see its doc for why a browser's connection pool decides the first and a
+ * CHARACTER_IN_USE refusal decides the second. What this wrapper adds is the
+ * pairing of each pilot with ITS OWN setup.
  *
- * ⚠ ONE REFUSAL MUST NOT STRAND THE REST OF A SQUAD. A pilot already flown by a
- * bot, or by a tab, refuses with CHARACTER_IN_USE / BOT_ALREADY_RUNNING; that
- * is a fact about that pilot, not about the operation. It is recorded and the
- * next pilot is tried.
- *
- * ⚠ AND THE GRANT IS BUILT PER PILOT, BY THE CALLER, FROM THAT PILOT'S OWN
- * SETUP. Every companion now reads its own fit unconditionally, so `combat` is
- * an unconditional risk class for all of them -- the fit has not been read yet
- * at grant time and may hold anything. What still varies pilot to pilot is the
+ * ⚠ THE GRANT IS BUILT PER PILOT, BY THE CALLER, FROM THAT PILOT'S OWN SETUP,
+ * and that is why the targets carry a setup each rather than the squad carrying
+ * one. Every companion now reads its own fit unconditionally, so `combat` is an
+ * unconditional risk class for all of them -- the fit has not been read yet at
+ * grant time and may hold anything. What still varies pilot to pilot is the
  * rest of the setup: one that pays for repairs earns `financial` and one that
  * does not, does not. Reusing one grant across the squad would hand some pilot
  * a grant that does not describe it, and the host re-derives and compares.
+ * (A group start of a SAVED bot is the opposite case -- one script, so one
+ * grant for the whole group -- which is why that path does not come through
+ * here.)
  */
-export async function startCompanionSquad(
+export function startCompanionSquad(
   deps: SquadStartDeps,
   targets: readonly SquadStartTarget[],
   onProgress?: (entries: readonly SquadStartEntry[]) => void,
 ): Promise<readonly SquadStartEntry[]> {
-  const entries: SquadStartEntry[] = targets.map((target) => ({
-    characterID: target.characterID,
-    state: "queued" as const,
-  }));
-  const report = (): void => onProgress?.(entries.map((entry) => ({ ...entry })));
-  report();
-
-  for (let index = 0; index < targets.length; index++) {
-    const target = targets[index]!;
-    entries[index] = { characterID: target.characterID, state: "starting" };
-    report();
-    try {
-      await deps.startCompanion(target.characterID, target.setup);
-      entries[index] = { characterID: target.characterID, state: "started" };
-    } catch (cause) {
-      // The server's own sentence, unwrapped. There is no code-to-words layer
-      // on the client for these and there should not be a second one here:
-      // CHARACTER_IN_USE already says "A web session is flying this character."
-      entries[index] = {
-        characterID: target.characterID,
-        state: "refused",
-        sentence:
-          cause instanceof Error && cause.message
-            ? cause.message
-            : "That pilot could not be started.",
-      };
-    }
-    report();
-  }
-  return entries;
+  const setups = new Map(targets.map((target) => [target.characterID, target.setup]));
+  return startForGroup(
+    targets.map((target) => target.characterID),
+    async (characterID) => {
+      const setup = setups.get(characterID);
+      // Unreachable: the ids come from `targets` two lines up. Stated rather
+      // than asserted so a future caller that builds the map differently gets a
+      // refusal it can read instead of `undefined` on the wire.
+      if (setup === undefined) throw new Error("That pilot has no companion setup.");
+      await deps.startCompanion(characterID, setup);
+    },
+    onProgress,
+  );
 }
 
 /** Every pilot has reached a final state. */
 export function squadStartFinished(entries: readonly SquadStartEntry[]): boolean {
-  return entries.every((entry) => entry.state === "started" || entry.state === "refused");
+  return groupStartFinished(entries);
 }
 
-/** How the run went, in one line, once it is over. */
+/**
+ * How the run went, in one line, once it is over.
+ *
+ * The empty case is the one sentence a squad start owns: a squad with no
+ * configured pilot is not "nothing to do", it is "nobody here is set up yet",
+ * which names the thing the player has to go and do.
+ */
 export function squadStartSummary(entries: readonly SquadStartEntry[]): string {
-  const started = entries.filter((entry) => entry.state === "started").length;
-  const refused = entries.filter((entry) => entry.state === "refused").length;
-  if (entries.length === 0) {
-    return "No pilot in this squad is set up to fly a companion yet.";
-  }
-  if (refused === 0) {
-    return started === 1 ? "One pilot is flying." : `${started} pilots are flying.`;
-  }
-  if (started === 0) {
-    return refused === 1 ? "That pilot could not start." : `None of the ${refused} could start.`;
-  }
-  return `${started} flying, ${refused} could not start.`;
+  return groupStartSummary(entries, "No pilot in this squad is set up to fly a companion yet.");
 }

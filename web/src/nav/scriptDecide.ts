@@ -31,9 +31,9 @@
 // already tried means the program made a full loop emitting nothing — the exact
 // "a tick can legally emit no world call" primitive the phases model died of.
 // That is not silently tolerated: it pauses with a plain reason. A step that
-// runs too long (a macro-internal counter gap) trips MAX_STEP_TICKS. A read that
-// stays unreadable trips the cannot-tell streak. Every way of doing nothing has
-// a bound.
+// goes on emitting nothing (a macro-internal counter gap) trips
+// MAX_SILENT_STEP_TICKS. A read that stays unreadable trips the cannot-tell
+// streak. Every way of doing nothing has a bound.
 
 import { countSteps } from "../bots/botScript.ts";
 import type {
@@ -111,7 +111,17 @@ export type ScriptAction =
   | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[] }
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
-  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[] }
+  /**
+   * Put the freight ashore at the station the ship is docked at.
+   *
+   * `division` aims it at a CORPORATION hangar division instead of the pilot's
+   * own hangar. It is OPTIONAL because the personal hangar is what every
+   * emitter but one means, and because it is a REQUEST rather than a
+   * destination: the office may not be there, the pilot may not hold the role,
+   * and the bridge then lands the load in the pilot's own hangar and reports
+   * which happened. A block that named a division still finishes its lap.
+   */
+  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number }
   // ── Mission actions (the distribution blocks). Each is one proven mission-bot
   //    operation: a labeled button press in the agent conversation, a handoff to
   //    the shared autopilot, or a package move confirmed by re-read next tick.
@@ -129,6 +139,25 @@ export type ScriptAction =
   | {
       readonly kind: "unloadHolds";
       readonly groups: readonly { readonly bay: string | null; readonly itemIDs: readonly number[] }[];
+    }
+  /**
+   * Fill the ship FROM the station hangar — `unloadHolds` run backwards, one
+   * group per destination because a bay is a different place from the cargo
+   * hold. `bay: null` is the cargo hold.
+   *
+   * ⚠ `qty` IS WHY THE GROUPS CARRY ONE MORE FIELD THAN THE UNLOAD'S DO. A
+   * transfer is all-or-nothing per stack, so a hangar stack of twenty command
+   * centres bound for a hold with room for six has to be SPLIT — and the bridge
+   * refuses a quantity when more than one item is named, so a split group is
+   * always exactly one stack (`planLootTransfers` guarantees both).
+   */
+  | {
+      readonly kind: "loadHolds";
+      readonly groups: readonly {
+        readonly bay: string | null;
+        readonly itemIDs: readonly number[];
+        readonly qty: number | null;
+      }[];
     }
   /** Order salvage drones onto a wreck; targetID 0 = the runtime auto-picks. */
   | { readonly kind: "salvageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
@@ -232,6 +261,11 @@ export type ScriptAction =
  * delivered. It is not counted as world progress anywhere — the livelock proof
  * lives in the forward scan, and an alert is decided in the interrupt path above
  * it, so a program cannot satisfy the scan by alerting.
+ *
+ * The silence counter behind `MAX_SILENT_STEP_TICKS` asks this same question of
+ * a MACRO's action, and the sentence above still holds there: no macro emits an
+ * alert (both emitters are the orchestrator's own, and the skip path zeroes the
+ * counter as it leaves anyway), so nothing can stay alive by alerting either.
  */
 export function isWorldCall(action: ScriptAction): boolean {
   return action.kind !== "wait";
@@ -576,7 +610,44 @@ export type HomeTravelDecider = (obs: ScriptObservation, mem: MacroMemory) => Ma
 
 // ─── Memory ──────────────────────────────────────────────────────────────────
 
-export const MAX_STEP_TICKS = 1800; // ~1h at the 2s cadence — the R39 backstop
+/**
+ * How many ticks a step may stay SILENT — emitting no world call — before the
+ * run is called stuck. The R39 backstop.
+ *
+ * ⚠ SILENT TICKS, NOT ELAPSED TICKS, and the distinction is the whole point.
+ *
+ * This counted elapsed ticks until 2026-09-22 — reset only when the position
+ * changed — which made it a wall-clock cap on ONE VISIT to a step: 90 minutes,
+ * as four stopped miners measured it to within a minute of each other. All four
+ * were working perfectly. Their `mine-at-belt` visit (filtered to two ores,
+ * `until` an ore hold 90% full) had been locking rocks, cycling lasers and
+ * warping to a fresh anomaly as each one ran dry, and was stopped mid-cycle for
+ * taking too long about it. Five more pilots on the SAME script were untouched
+ * for the only reason that they mined a hold in about 25 minutes instead of 55
+ * and so never had a visit cross the line. A slow job is not a stuck one, and a
+ * guard that fires on the slower half of a working fleet is measuring the wrong
+ * thing.
+ *
+ * So a world call resets it. What the guard is for is the macro that emits
+ * NOTHING for ever (the "a tick can legally emit no world call" primitive in the
+ * header) — and that macro is silent by definition, so it still trips. This is
+ * the same shape as `STALL_TICKS` in siteProgress.ts, which counts APPLYING
+ * ticks and not elapsed ones for the same reason.
+ *
+ * A macro that keeps ACTING without getting anywhere is somebody else's job,
+ * deliberately: refusals belong to the run's refusal ledger (refusalLedger.ts),
+ * an approach that never closes to `closeInStall`, drones that never launch to
+ * `launchStalled`, a rat that will not die to `STALL_TICKS`. Each of those knows
+ * what progress means for its own case; this one does not and must not guess.
+ *
+ * 1800 is left where elapsed-tick tuning put it, and it is generous on purpose.
+ * The silent stretches a HEALTHY run has are real — an autopilot flying a long
+ * route, a `join-fleet` waiting on a squad (JOIN_MAX_WAIT_TICKS is 150) — and
+ * at the ~3s the fleet above actually ticked at, 1800 is an hour and a half of
+ * a bot doing literally nothing. A tighter number would have to argue against
+ * those, and the narrow stall detectors above are where tightness belongs.
+ */
+export const MAX_SILENT_STEP_TICKS = 1800;
 
 const HOME_MEM_KEY = "__home__";
 /** Where a repair trip's borrowed Repair-ship block keeps its own memory. */
@@ -605,6 +676,47 @@ type Position =
   | { readonly kind: "done" };
 
 /**
+ * A "which solar system" reading, taken once and compared against a later one.
+ * `id` is the live runner's own numeric read (`FlightStatus.solarSystemID`,
+ * backed up by the space snapshot's copy of the same field); `name` is
+ * `obs.systemName`, the read used elsewhere in the engine for the same
+ * question (it is the shared belt memory's key). Both null means the ship
+ * could not be placed in a system at all that tick — a docked session reports
+ * no ship (`docs/bridge-wire-contract.md`), and `systemName` goes dark with
+ * it — which is exactly the reading a station stop produces.
+ */
+interface SystemReading {
+  readonly id: number | null;
+  readonly name: string | null;
+}
+
+function readSystem(obs: ScriptObservation): SystemReading {
+  return {
+    id: obs.flightStatus?.solarSystemID ?? obs.snapshot?.solarSystemID ?? null,
+    name: obs.systemName ?? null,
+  };
+}
+
+/**
+ * Did the ship land somewhere DIFFERENT from where a reading was taken
+ * earlier? An id beats a name when both readings have one, matching
+ * `readSystem`'s own preference; two name-only readings compare by name; and
+ * anything the two readings cannot honestly compare — either side unreadable,
+ * or one side id-only against the other name-only — answers "no", never
+ * "yes". A mismatch this function cannot confirm is not grounds to rewind a
+ * working program; see `continueRecovering`'s step 3, the only caller.
+ */
+function systemsDiffer(fired: SystemReading, landed: SystemReading): boolean {
+  if (fired.id !== null && landed.id !== null) {
+    return fired.id !== landed.id;
+  }
+  if (fired.name !== null && landed.name !== null) {
+    return fired.name !== landed.name;
+  }
+  return false;
+}
+
+/**
  * A "dock at home and repair" trip in progress — the one latch that ENDS IN THE
  * PROGRAM rather than in a stop, so it has to remember how to get back.
  *
@@ -613,9 +725,13 @@ type Position =
  * watch that fired while already docked leaves the ship docked — undocking a bot
  * whose next step is a station step (unload, refine, sell) would break a program
  * that was working perfectly well.
+ *
+ * `firedSystem` is the system reading taken the same tick the latch was made —
+ * see `continueRecovering`'s step 3 for what it is compared against, and why.
  */
 interface Recovery {
   readonly undock: boolean;
+  readonly firedSystem: SystemReading;
 }
 
 interface Latched {
@@ -637,6 +753,12 @@ interface Latched {
 export interface ScriptMemory {
   readonly position: Position;
   readonly loopPass: number;
+  /**
+   * Consecutive ticks at this position that issued NO world call. Reset by a
+   * world call and by leaving the position — see `MAX_SILENT_STEP_TICKS` for why
+   * it counts silence rather than elapsed time. The name is historical; it is
+   * kept because it is the persisted memory's field name.
+   */
   readonly stepTicks: number;
   readonly cannotTellStreak: number;
   readonly latched: Latched | null;
@@ -758,6 +880,61 @@ export function activeMacroID(script: BotScript, mem: ScriptMemory): string | nu
   return step?.macro ?? null;
 }
 
+/**
+ * Is the active block a mining block set to tour ORE SITES? Asked because the
+ * scanner read is priced per block, and `mine-at-belt` is not a block that
+ * flies to an anomaly — except in `site` mode, where the barren-grid path is
+ * the tour: it names the next site itself rather than handing control back to
+ * a `warp-to-ore-anomaly` ahead of it (see `mineAtBeltSiteBarren` in
+ * scriptMacros.ts).
+ *
+ * ⚠ WITHOUT THIS THE SITE MODE CANNOT FINISH A LAP. `observe` only fetches
+ * `anomalies` for the two blocks that fly to an anomaly by name, so a mining
+ * block reading the scanner got a permanent `null` — and `null` there means
+ * "unread yet", which waits. A bot that mined its site out then sat on
+ * "Reading the scanner for the next ore site." forever, one tick after the
+ * other, with the scanner never asked.
+ *
+ * Asked of the STEP rather than of the macro for the same reason
+ * `activeStepNeedsTypeNames` below is: `site` is an ARGUMENT, and the same
+ * block pointed at the nearest belt must not pay for a read it cannot use.
+ */
+export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): boolean {
+  if (mem.position.kind === "done" || mem.latched !== null) {
+    return false;
+  }
+  const step = activeStep(script, mem.position);
+  if (step === undefined || step === null || step.macro !== "mine-at-belt") {
+    return false;
+  }
+  const belt = step.args["belt"];
+  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "site";
+}
+
+/**
+ * Does the active block match items by NAME? The one thing type ids and group
+ * ids cannot answer, and the only reason to pay for a name lookup on a tick.
+ *
+ * Asked of the STEP rather than of the macro, because it is an argument and not
+ * a property of the block: the same load block matching on a group needs no
+ * names at all (see `ScriptObservation.typeNames`).
+ */
+export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): boolean {
+  if (mem.position.kind === "done" || mem.latched !== null) {
+    return false;
+  }
+  const step = activeStep(script, mem.position);
+  if (step === undefined || step === null) {
+    return false;
+  }
+  return Object.values(step.args).some(
+    (arg) =>
+      arg !== undefined &&
+      arg.kind === "itemList" &&
+      arg.items.some((item) => item.match === "name" && item.pattern.trim().length > 0),
+  );
+}
+
 // ─── The decision returned each tick ─────────────────────────────────────────
 
 export type RunStatus = "running" | "paused" | "done";
@@ -778,7 +955,11 @@ export interface ScriptTickResult {
 const SAY = {
   programDone: "The program finished, so the bot stopped.",
   livelock: "This program has nothing it can do right now, so the bot stopped.",
-  stepTooLong: "A step ran for a very long time without finishing, so the bot stopped.",
+  // ⚠ "did nothing", not "took too long". A slow step is explicitly allowed (see
+  // MAX_SILENT_STEP_TICKS); what this sentence reports is a step that stopped
+  // doing anything at all, and it has to say so or the player goes looking for
+  // the wrong fault — a hold that fills slowly rather than a macro that hung.
+  stepDidNothing: "A step did nothing at all for a very long time, so the bot stopped.",
   unknownMacro: "This program uses an action the bot does not know, so it stopped.",
   headingHome: "A watched warning was hit, so the bot is heading home to stop.",
   inWarp: "The ship is in warp, so the bot is waiting until it lands.",
@@ -1251,7 +1432,7 @@ function fireInterrupt(
         // left docked: the program's next step then says what it needs (a space
         // step waits for space, a station step gets on with it), which is a
         // better answer than undocking a bot that was working in the hangar.
-        recover: { undock: obs.inSpace === true },
+        recover: { undock: obs.inSpace === true, firedSystem: readSystem(obs) },
       };
       return continueRecovering(
         script,
@@ -1592,14 +1773,75 @@ function continueRecovering(
     // watch fires again on the next lap and the trip cap ends the run properly.
   }
 
-  // 3. BACK OUT, and the program carries on from the step it was interrupted
-  // on. The latch is dropped on this same tick, which re-arms every watch: the
-  // ship is whole (or as whole as the shop could make it), so the row that fired
-  // should be free to fire again on the next real reading.
+  // 3. BACK OUT, and the program carries on — from the step it was interrupted
+  // on, UNLESS the trip put the ship down in a different solar system than the
+  // one the interrupt fired in, in which case it carries on from the START OF
+  // THE ENCLOSING LOOP instead. The latch is dropped on this same tick, which
+  // re-arms every watch: the ship is whole (or as whole as the shop could make
+  // it), so the row that fired should be free to fire again on the next real
+  // reading.
+  //
+  // THE INCIDENT THIS GUARDS: a five-pilot mining run working a nullsec system
+  // had its shields dip mid mine-at-belt. dock-and-repair flew the ship home,
+  // patched it up — at a station in a DIFFERENT, HIGHSEC system, the bot's
+  // designated home — and sent it back out, where the program resumed
+  // mine-at-belt exactly where it had left off. Every runtime binding that step
+  // had resolved (`belt: nearest`, chosen off the ship's grid at the moment it
+  // was interrupted) belonged to the nullsec work system, not the highsec
+  // system the ship now sat in. The wanted ore cannot spawn in a mission hub.
+  // Every pilot mined the only belts actually in reach, marked them all dry,
+  // and the run died — nobody had ever gone back to where the mining was
+  // supposed to happen.
+  //
+  // A SYSTEM MISMATCH, SPECIFICALLY, IS THE TRIGGER. A trip that lands back in
+  // the SAME system invalidates nothing — every binding the step resolved is
+  // still good, so resuming it is correct and restarting the loop would only
+  // repeat travel already done. Only a DIFFERENT system stales those bindings,
+  // and only the loop the interrupted step sits in knows how to re-derive them
+  // cleanly: its first element runs again exactly as any ordinary pass would
+  // (an undock that is already undocked, a travel-to-system already AT that
+  // system — both no-ops, both self-correcting), which is what walks the ship
+  // back to the work system with no travel logic of its own. A step that is
+  // NOT inside a loop has no body to restart, so it keeps today's behaviour —
+  // see `enclosingLoopRestart`.
+  const restart = systemsDiffer(latched.recover.firedSystem, readSystem(obs))
+    ? enclosingLoopRestart(script, mem.position)
+    : null;
+  const clearedMacroMem = omit(omit(macroMem, HOME_MEM_KEY), REPAIR_MEM_KEY);
+  // The abandoned step's own memory goes with it — a cached "nearest belt" (or
+  // any other binding a macro cached against the wrong grid) must not survive
+  // into the loop's fresh first pass, or the rewind would restart the SHAPE of
+  // the step while still running on the STALE binding that caused the trouble.
+  const abandonedStepID = restart !== null ? committedStepID(script, mem.position) : null;
+  const rewoundMacroMem = abandonedStepID !== null ? omit(clearedMacroMem, abandonedStepID) : clearedMacroMem;
   const settled: ScriptMemory = {
     ...mem,
     latched: null,
-    macroMem: omit(omit(macroMem, HOME_MEM_KEY), REPAIR_MEM_KEY),
+    position: restart ?? mem.position,
+    // ⚠ `loopPass` IS LEFT EXACTLY WHERE IT WAS, and that is the whole of the
+    // rule. It counts passes the loop has COMPLETED (`advanceLoopBody` reads it
+    // as `donePasses = loopPass + 1`), and the pass this rewind lands back at
+    // the start of is the one that never finished — so nothing has completed
+    // that had not completed a moment ago, and the counter has nothing to say
+    // about it. Resetting it to 0 here would be a quiet gift of a whole extra
+    // run to every `times`-bounded loop: a `repeat 23 times` interrupted on its
+    // twentieth pass would go back to zero and fly another twenty-three, and a
+    // hauling script told to make a fixed number of trips would make almost
+    // twice as many because its shields once dipped in the wrong system. The
+    // rewind changes WHERE the program is, never HOW MUCH of the loop it has
+    // already been paid for.
+    //
+    // ⚠ THE REWIND CANNOT TRIP THE LIVELOCK GUARD. `wraps` in `runProgram` is a
+    // per-call counter that only increments when the SCAN ITSELF walks off the
+    // end of a loop body and back to its start (`advanceLoopBody`'s own
+    // `wrapped` flag); it does not exist yet when this function returns, and a
+    // rewind reached by ASSIGNING `position` directly — never by advancing —
+    // never sets it. The very next `runProgram` call (this tick, or next tick
+    // after an undock) starts `wraps` at zero exactly as it would after any
+    // other kind of tick, so a rewound loop gets its usual two free wraps
+    // before the guard would even consider it a runaway.
+    loopPass: mem.loopPass,
+    macroMem: rewoundMacroMem,
   };
   if (latched.recover.undock && obs.docked === true) {
     return {
@@ -1669,10 +1911,14 @@ function runProgram(
           : (script.program[branchNode] as BranchBlock);
       const verdict = evaluateCondition(branch.when, obs);
       if (verdict === "cannot-tell") {
+        // No `isSilent` test here: a branch whose `when` cannot be read waits,
+        // full stop, so every tick counted at this position is already a silent
+        // one. (The cannot-tell streak is the tighter of the two and normally
+        // fires long first; this stays as the backstop it always was.)
         const samePlace = positionKey(position) === positionKey(mem.position);
         const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
-        if (stepTicks > MAX_STEP_TICKS) {
-          return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
+        if (stepTicks > MAX_SILENT_STEP_TICKS) {
+          return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
         const streak = bumpCannotTellStreak(mem.cannotTellStreak, true);
         if (cannotTellStreakExhausted(streak)) {
@@ -1857,10 +2103,15 @@ function runProgram(
     }
 
     // Issue the macro's action — the single action of this tick.
+    //
+    // The silence counter is bumped only when that action is a wait: a macro
+    // that issued a world call this tick is working, however long it has been at
+    // it, and starts again from zero. Leaving the position clears it too, which
+    // is what a `done` or a skip does on its way past.
     const samePlace = positionKey(position) === positionKey(mem.position);
-    const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
-    if (stepTicks > MAX_STEP_TICKS) {
-      return stopSafely(SAY.stepTooLong, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
+    const stepTicks = isWorldCall(tick.action) ? 0 : (samePlace ? mem.stepTicks : 0) + 1;
+    if (stepTicks > MAX_SILENT_STEP_TICKS) {
+      return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }
     const streak = bumpCannotTellStreak(mem.cannotTellStreak, blindThisTick);
     if (cannotTellStreakExhausted(streak)) {
@@ -2003,6 +2254,34 @@ function activeStep(script: BotScript, position: Position): MacroStep {
   }
   // position.kind === "step"
   return script.program[(position as { node: number }).node] as MacroStep;
+}
+
+/**
+ * Where a system-mismatch rewind sends the program: the first element of the
+ * loop body `position` sits inside, or null when `position` has no enclosing
+ * loop at all — a top-level step or a top-level branch, neither of which has a
+ * body to restart (`continueRecovering`'s step 3, the only caller, keeps
+ * `position` exactly as it was in that case). "Loop", "loop-branch" and
+ * "loop-branch-enter" all carry the loop's own node index no matter how far
+ * into the body they have gotten, so restarting is always the same move:
+ * re-enter that node at body slot 0, exactly as a fresh pass would.
+ */
+function enclosingLoopRestart(script: BotScript, position: Position): Position | null {
+  if (position.kind === "loop" || position.kind === "loop-branch" || position.kind === "loop-branch-enter") {
+    return startOfLoopBody(script, position.node, 0);
+  }
+  return null;
+}
+
+/**
+ * The step id whose per-step macro memory a rewind must forget — the step
+ * `position` had actually reached and run a macro against, or null when it had
+ * not reached one yet. A "loop-branch-enter" never ran a macro (its `when` is
+ * read fresh on the very next tick, which the rewind already forces), so it
+ * has nothing bound to a stale grid to clear.
+ */
+function committedStepID(script: BotScript, position: Position): string | null {
+  return position.kind === "loop" || position.kind === "loop-branch" ? activeStep(script, position).id : null;
 }
 
 function positionKey(position: Position): string {

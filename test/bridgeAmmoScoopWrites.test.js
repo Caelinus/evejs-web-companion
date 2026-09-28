@@ -88,8 +88,12 @@ function fakeStaticData() {
 }
 
 function fakeGateway(overrides = {}) {
-  const calls = { call: [], flight: [], bind: [], boundCall: [] };
+  const calls = { call: [], flight: [], bind: [], boundCall: [], space: [] };
   const state = {
+    // What is left in space when the snapshot is re-read after a scoop. The
+    // scoop is judged by this list and by nothing else, so the case says what
+    // the server did by saying which drones survive it.
+    droneIDsInSpace: overrides.droneIDsInSpace === undefined ? [] : overrides.droneIDsInSpace,
     selectedShipID: overrides.selectedShipID === undefined ? SHIP_ID : overrides.selectedShipID,
     flight: {
       docked: true,
@@ -129,6 +133,23 @@ function fakeGateway(overrides = {}) {
     async readFlightStatus(bridgeSessionID, sessionFields) {
       calls.flight.push({ bridgeSessionID, sessionFields });
       return { flight: { ...state.flight }, notifications: [] };
+    },
+    async readSpaceSnapshot(bridgeSessionID, sessionFields) {
+      calls.space.push({ bridgeSessionID, sessionFields });
+      return {
+        space: {
+          entities: state.droneIDsInSpace.map((itemID) => ({
+            kind: "drone",
+            itemID,
+            typeID: 2488,
+            name: "Warrior II",
+            ownerID: CHARACTER_ID,
+            controllerID: SHIP_ID,
+            droneActivity: "idle",
+          })),
+        },
+        notifications: [],
+      };
     },
     async callMethod(service, method, args, kwargs, sessionFields, bridgeSessionID) {
       calls.call.push({ service, method, args, kwargs, sessionFields, bridgeSessionID });
@@ -429,6 +450,51 @@ test("ScoopDrone is top-level, in-space, active-ship-pinned, and preserves per-d
   assert.equal(gateway.calls.call[0].method, "ScoopDrone");
   assert.deepEqual(gateway.calls.call[0].args, [[DRONE_ID, SECOND_DRONE_ID]]);
   assert.equal(gateway.calls.bind.length, 0);
+  // ⚠ THE REGRESSION THIS PINS. ScoopDrone's own dict is empty on success just
+  // like the entity orders, so the page judges a scoop by whether the drone
+  // LEFT space. While this route answered the bare ack, `inSpace` arrived
+  // undefined and every scoop — the ones that worked included — reported "The
+  // scoop was accepted, but space could not be re-read."
+  assert.equal(gateway.calls.space.length, 1, "space is re-read AFTER the scoop");
+  assert.ok(Array.isArray(payload.inSpace), "inSpace must be a list, not undefined");
+  assert.deepEqual(payload.inSpace, [], "both drones left space — the scoop landed");
+});
+
+test("a scoop that moved only one of them leaves the other in the answer's inSpace", async () => {
+  const gateway = fakeGateway({
+    flight: { inSpace: true, docked: false, stationID: null, structureID: null },
+    droneIDsInSpace: [SECOND_DRONE_ID],
+  });
+  const { baseUrl } = await startTestServer(gateway);
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/drones/scoop", {
+    method: "POST",
+    body: { droneIDs: [DRONE_ID, SECOND_DRONE_ID], confirm: true },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.inSpace.length, 1);
+  assert.equal(payload.inSpace[0].itemID, SECOND_DRONE_ID);
+});
+
+test("a scoop whose snapshot read fails answers inSpace:null — NOT an empty space", async () => {
+  const gateway = fakeGateway({
+    flight: { inSpace: true, docked: false, stationID: null, structureID: null },
+  });
+  gateway.readSpaceSnapshot = async () => {
+    throw new Error("snapshot unavailable");
+  };
+  const { baseUrl } = await startTestServer(gateway);
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/drones/scoop", {
+    method: "POST",
+    body: { droneIDs: [DRONE_ID], confirm: true },
+  });
+
+  assert.equal(response.status, 200, "the scoop itself still happened");
+  assert.equal(payload.inSpace, null, "null is 'we could not look', which the page reports as such");
 });
 
 test("location and active-ship preconditions fail without dispatch", async () => {

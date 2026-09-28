@@ -31,6 +31,7 @@ const SOLAR_SYSTEM_ID = 30000142;
 const CHARACTER_ID = 7;
 const CORPORATION_ID = 98000000;
 const SHIP_ID = 9001;
+const DRONE_ID = 9500001;
 
 const ORIGINAL_FETCH = global.fetch;
 const activeServers = new Set();
@@ -81,10 +82,32 @@ function fakeStaticData() {
   };
 }
 
-function fakeGateway() {
-  const calls = { bind: [], boundCall: [] };
+function fakeGateway(options = {}) {
+  const calls = { bind: [], boundCall: [], space: [] };
   return {
     calls,
+    // The snapshot the drone verbs are judged by. Reconnect asks for it; the
+    // three plumbing-only entity writes must not.
+    async readSpaceSnapshot(bridgeSessionID, sessionFields) {
+      calls.space.push({ bridgeSessionID, sessionFields });
+      return {
+        space: {
+          entities: [
+            {
+              kind: "drone",
+              itemID: DRONE_ID,
+              typeID: 2488,
+              name: "Warrior II",
+              ownerID: CHARACTER_ID,
+              // Controlled AFTER the reconnect, unless the case says otherwise.
+              controllerID: options.controllerID === undefined ? SHIP_ID : options.controllerID,
+              droneActivity: "idle",
+            },
+          ],
+        },
+        notifications: [],
+      };
+    },
     async selectCharacter() {
       return {
         bridgeSessionID: BRIDGE_SESSION_ID,
@@ -285,6 +308,65 @@ test("R102 CmdSalvage forwards [[droneIDs], targetID] as a bound entity call onc
   assert.ok(call, "CmdSalvage must reach the gateway once confirmed");
   assert.equal(call.service, "entity");
   assert.deepEqual(call.args, [[9000000001], 5000000009]);
+});
+
+// ⚠ THE REGRESSION THIS PINS. Reconnect is the one entity write the Drones
+// panel actually calls, and the page judges it by the snapshot — success is the
+// drone becoming CONTROLLED, which the call's own empty dict cannot say. While
+// this route answered the bare ack, `inSpace` arrived undefined and EVERY
+// reconnect, the ones that worked included, reported "The reconnect was
+// accepted, but space could not be re-read."
+test("⚠ CmdReconnectToDrones answers with the SPACE RE-READ, not the bare ack", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/entity/drones/reconnect", {
+    method: "POST",
+    body: { droneIDs: [DRONE_ID], confirm: true },
+  });
+  assert.equal(response.status, 200);
+  const call = gateway.calls.boundCall.find((c) => c.method === "CmdReconnectToDrones");
+  assert.ok(call, "CmdReconnectToDrones must reach the gateway once confirmed");
+  assert.deepEqual(call.args, [[DRONE_ID]]);
+  assert.equal(gateway.calls.space.length, 1, "space is re-read AFTER the command");
+  assert.ok(Array.isArray(payload.inSpace), "inSpace must be a list, not undefined");
+  assert.equal(payload.inSpace.length, 1);
+  assert.equal(payload.inSpace[0].itemID, DRONE_ID);
+  assert.equal(payload.inSpace[0].controlled, true, "control is what the page reads to say it worked");
+  // The per-drone refusal dict still rides along untouched (R34).
+  assert.equal(payload.result, null);
+});
+
+test("a reconnect the server ignored answers inSpace with the drone STILL uncontrolled", async () => {
+  // Same drone, still flown by nobody this hull owns.
+  const gateway = fakeGateway({ controllerID: 0 });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/entity/drones/reconnect", {
+    method: "POST",
+    body: { droneIDs: [DRONE_ID], confirm: true },
+  });
+  assert.equal(payload.inSpace[0].controlled, false);
+});
+
+test("the three plumbing-only entity writes keep the bare ack — no snapshot read", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  for (const [path, body] of [
+    ["/api/bridge/entity/drones/return-home", { droneIDs: [DRONE_ID] }],
+    ["/api/bridge/entity/drones/salvage", { droneIDs: [DRONE_ID], targetID: 5000000009 }],
+    ["/api/bridge/entity/drones/abandon", { droneIDs: [DRONE_ID] }],
+  ]) {
+    const { response, payload } = await apiRequest(baseUrl, path, {
+      method: "POST",
+      body: { ...body, confirm: true },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(payload.applied, true);
+    assert.equal(payload.inSpace, undefined, `${path} is not a panel route and must not re-read space`);
+  }
+  assert.equal(gateway.calls.space.length, 0, "no snapshot read for the plumbing-only writes");
 });
 
 test("R102 write routes refuse without a held bridge session", async () => {

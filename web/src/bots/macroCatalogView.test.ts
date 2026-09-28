@@ -70,6 +70,20 @@ test("undock needs nothing; mine-at-belt needs a belt, equipment, and an until",
   assert.equal(mine.untilRequired, true);
 });
 
+test("mine-at-belt's blurb covers all three ways to pick where, not just a belt", () => {
+  // The belt argument grew a "site" mode (tour the scanner's ore sites,
+  // never a belt) beside "nearest" and a belt named by hand, and the catalog
+  // card used to promise only belt-to-belt rotation — which undersold two of
+  // the block's three ways to run.
+  const mine = macroEntry("mine-at-belt");
+  assert.match(mine.does, /nearest belt/i);
+  assert.match(mine.does, /ore site/i);
+  // "locks rocks" is load-bearing for editorView.test.ts's search-by-does-text
+  // coverage (filterMacroPicker("locks rocks", ...)) — pinned here too so a
+  // future rewrite of this blurb notices it before that test does.
+  assert.match(mine.does, /locks rocks/);
+});
+
 test("every macro has a category with a label, and the filter offers no empty bucket", () => {
   for (const e of MACRO_CATALOG_LIST) {
     assert.ok(CATEGORY_LABEL[e.category], `${e.id} has category "${e.category}" with no label`);
@@ -92,8 +106,18 @@ test("every macro has a category with a label, and the filter offers no empty bu
 test("travel and deliver both take a station picker", () => {
   for (const id of ["travel-to-station", "deliver-ore"] as const) {
     const params = macroEntry(id).params;
-    assert.equal(params.length, 1);
     assert.equal(params[0]?.picker, "station");
     assert.equal(params[0]?.required, true);
   }
+});
+
+test("deliver's corporation hangar is an OPTIONAL second parameter", () => {
+  // Optional is the load-bearing half: a hauling block that could not run
+  // without naming a corporation division would have broken every script
+  // written before offices existed.
+  const params = macroEntry("deliver-ore").params;
+  assert.equal(params.length, 2);
+  assert.equal(params[1]?.picker, "corpDivision");
+  assert.equal(params[1]?.required, false);
+  assert.equal(macroEntry("travel-to-station").params.length, 1);
 });

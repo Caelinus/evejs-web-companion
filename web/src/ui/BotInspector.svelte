@@ -53,6 +53,7 @@
     CONDITION_NOUN_LABEL,
     CONDITION_UNTIL_LABEL,
     textPlaceholder,
+    itemListHint,
     PLACE_OPTIONS,
     RESPONSE_OPTIONS,
     UNTIL_CONDITION_KINDS,
@@ -64,6 +65,7 @@
   import type { ScriptProblem } from "../bots/validateScript.ts";
   import type { AppFlow } from "../app/flow.ts";
   import StationPicker from "./StationPicker.svelte";
+  import CorpHangarPicker from "./CorpHangarPicker.svelte";
 
   /** What the inspector is looking at. A branch and a sub-bot get their own
    * small forms; a loop header is never selectable, so there is no case for it. */
@@ -126,6 +128,14 @@
   function argOf(step: MacroStep, key: string): Arg | undefined {
     return step.args[key];
   }
+  /** The chosen corporation division, or null for the pilot's own hangar — which
+   * is what an ABSENT argument means, and the only thing it can mean. */
+  function corpDivisionValue(step: MacroStep, key: string): { division: number; name: string | null } | null {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "corpDivision"
+      ? { division: arg.division, name: arg.name }
+      : null;
+  }
   function numberValue(step: MacroStep, key: string): number | string {
     const arg = argOf(step, key);
     if (arg === undefined) return "";
@@ -172,9 +182,24 @@
   // it re-matches the name against whatever belts are on the grid it arrives at
   // (`beltTarget` in nav/scriptMacros.ts). The name a player types is exactly
   // what a picked belt would have stored.
-  function beltMode(step: MacroStep, key: string): "nearest" | "named" {
+  //
+  // "site" is the third choice, and it is not a belt at all: it points the
+  // block at the scanner's ore sites instead, and its whole reason to exist is
+  // that "nearest" quietly toured the wrong grid the moment a mining site ran
+  // dry (see `BeltArg` in botScript.ts). Nothing to type for it, same as
+  // "nearest" — the scanner is read fresh each time the block needs a target.
+  function beltMode(step: MacroStep, key: string): "nearest" | "named" | "site" {
     const arg = argOf(step, key);
-    return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "chosen" ? "named" : "nearest";
+    if (arg === undefined || arg.kind !== "belt") {
+      return "nearest";
+    }
+    if (arg.belt.mode === "chosen") {
+      return "named";
+    }
+    if (arg.belt.mode === "site") {
+      return "site";
+    }
+    return "nearest";
   }
   function beltName(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
@@ -263,7 +288,17 @@
   }
 
   function keepId(entry: ItemMatchArg): string {
-    return entry.match === "type" ? `type:${entry.typeID}` : `group:${entry.groupID}`;
+    switch (entry.match) {
+      case "type":
+        return `type:${entry.typeID}`;
+      case "group":
+        return `group:${entry.groupID}`;
+      case "name":
+        // Two patterns differing only in case are the same rule (the matcher is
+        // case-insensitive), so they must share an id or the list would take
+        // both and the block would test the same thing twice.
+        return `name:${entry.pattern.trim().toLowerCase()}`;
+    }
   }
 
   function addKeep(key: string, chosen: readonly ItemMatchArg[], entry: ItemMatchArg): void {
@@ -307,16 +342,18 @@
   function beltSlotKey(step: MacroStep, key: string): string {
     return `${step.id}::${key}`;
   }
-  /** Switch between "the nearest belt" and one the player names, keeping any
-   * name already typed so flipping back and forth does not lose it. */
+  /** Switch between "the nearest belt", one the player names, and the
+   * scanner's ore sites — keeping any name already typed so flipping back and
+   * forth does not lose it. */
   function setBeltMode(step: MacroStep, key: string, mode: string): void {
-    if (mode !== "named") {
-      // Catch the name on the way out — this is the last moment it exists.
-      typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
-      onArg(key, { kind: "belt", belt: { mode: "nearest" } });
+    if (mode === "named") {
+      setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
       return;
     }
-    setBeltName(key, typedBeltNames[beltSlotKey(step, key)] ?? "");
+    // Leaving "named" for "nearest" or "site" — catch the typed name on the
+    // way out, the last moment it exists (see the comment on typedBeltNames).
+    typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
+    onArg(key, { kind: "belt", belt: { mode: mode === "site" ? "site" : "nearest" } });
   }
   /**
    * The typed belt name.
@@ -626,7 +663,27 @@
 {#snippet argField(step: MacroStep, arg: ArgDescriptor)}
   {@const fieldId = `arg-${step.id}-${arg.key}`}
   {@const bounds = argBounds(step.macro, arg)}
-  {#if arg.widget === "station-picker" || arg.widget === "destination-picker" || arg.widget === "system-picker"}
+  {#if arg.widget === "corp-division-select"}
+    {@const chosenDivision = corpDivisionValue(step, arg.key)}
+    {@const stationArg = argOf(step, "station")}
+    <div class="inspector-field">
+      <span class="inspector-label">
+        {arg.label}{#if !arg.required}<span class="inspector-optional"> - optional</span>{/if}
+      </span>
+      <CorpHangarPicker
+        {flow}
+        value={chosenDivision}
+        station={stationArg !== undefined && stationArg.kind === "station" ? stationArg.ref : null}
+        onPick={(picked) =>
+          onArg(
+            arg.key,
+            picked === null
+              ? undefined
+              : { kind: "corpDivision", division: picked.division, name: picked.name },
+          )}
+      />
+    </div>
+  {:else if arg.widget === "station-picker" || arg.widget === "destination-picker" || arg.widget === "system-picker"}
     <div class="inspector-field">
       <span class="inspector-label">{arg.label}</span>
       <StationPicker
@@ -644,17 +701,34 @@
       <span class="inspector-label">
         {arg.label}{#if !arg.required}<span class="inspector-optional"> - optional</span>{/if}
       </span>
-      <span class="inspector-suffix">
-        Anything listed here stays on the ship. "All like this" keeps every
-        variant, which is usually what you want for crystals or ammunition.
-      </span>
+      <span class="inspector-suffix">{itemListHint(arg.key)}</span>
       <input
         id={fieldId}
         type="text"
-        placeholder="search what is aboard by name"
+        placeholder="search what is here by name"
         value={keepQuery}
         oninput={(e) => (keepQuery = e.currentTarget.value)}
       />
+      {#if keepQuery.trim().length > 0}
+        <!--
+          The WILDCARD entry, offered from what the player typed rather than
+          from a row they clicked — because the whole point of a pattern is to
+          catch the things that are NOT in this hangar right now (the next
+          twenty command centres, bought after the bot was written).
+        -->
+        <button
+          type="button"
+          class="pick-row"
+          onclick={() =>
+            addKeep(arg.key, chosenKeep, {
+              match: "name",
+              pattern: keepQuery.trim(),
+              name: `everything matching "${keepQuery.trim()}"`,
+            })}
+        >
+          <span class="pick-main"><span class="pick-name">Everything matching "{keepQuery.trim()}"</span></span>
+        </button>
+      {/if}
       {#if keepHits.length > 0}
         <ul class="market-picker">
           {#each keepHits as hit (hit.typeID)}
@@ -842,6 +916,7 @@
           onchange={(e) => setBeltMode(step, arg.key, e.currentTarget.value)}
         >
           <option value="nearest">the nearest belt</option>
+          <option value="site">the scanner's ore sites</option>
           <option value="named">a belt I name</option>
         </select>
         {#if beltMode(step, arg.key) === "named"}

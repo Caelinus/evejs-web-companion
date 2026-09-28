@@ -46,6 +46,8 @@ import {
   MIN_QTY_ARG,
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
+  MAX_CORP_DIVISION,
+  MIN_CORP_DIVISION,
   ROCK_PICKS,
   PROP_MODE_ARGS,
   TARGET_CLASS_ARGS,
@@ -53,6 +55,7 @@ import {
   type ItemMatchArg,
   MAX_BAY_LIST,
   MAX_ITEM_LIST,
+  MAX_ITEM_PATTERN_LEN,
   MAX_ORE_LIST,
   MAX_TARGET_LIST,
   MAX_TEXT_ARG_LEN,
@@ -649,6 +652,31 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     }
     return { kind: "place", place: place as ItemPlace };
   }
+  if (expected === "corpDivision") {
+    // REFUSED, NOT CLAMPED — and this is the one place in this file where a
+    // number out of range is not simply pulled back to the nearest bound. A
+    // clamp is honest when the bounds are a matter of degree (how far to hold
+    // off, how much to pay): the player asked for too much of the right thing.
+    // A division is an ADDRESS. "Division 9" clamped to 7 would deliver a hold
+    // of ore into a corporation hangar nobody chose, and the player would learn
+    // it from the wrong division being full. There is no nearest right answer to
+    // a wrong address.
+    const division = obj["division"];
+    if (
+      typeof division !== "number" ||
+      !Number.isSafeInteger(division) ||
+      division < MIN_CORP_DIVISION ||
+      division > MAX_CORP_DIVISION
+    ) {
+      refuse(SAY.badArg(label));
+    }
+    const nameRaw = obj["name"];
+    const name =
+      nameRaw === null || nameRaw === undefined
+        ? null
+        : readText(nameRaw, { min: 0, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+    return { kind: "corpDivision", division: division as number, name };
+  }
   if (expected === "destination") {
     // A station OR a system — and which one it is decides how the autopilot flies
     // it, so the entity is validated against exactly those two (never "belt").
@@ -770,8 +798,26 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       const itemObj = asObject(entry, SAY.badArg(label));
       const match = itemObj["match"];
       const name = readText(itemObj["name"], { min: 0, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
-      if (match !== "type" && match !== "group") {
+      if (match !== "type" && match !== "group" && match !== "name") {
         refuse(SAY.badArg(label));
+      }
+      if (match === "name") {
+        // A pattern is the player's own words, so it is READ like text (control
+        // characters stripped, length clamped) rather than refused. A blank one
+        // matches nothing at run time and the validator lists it as fixable.
+        const pattern = readText(
+          itemObj["pattern"],
+          { min: 0, max: MAX_ITEM_PATTERN_LEN, allowNewline: false },
+          ctx,
+          SAY.badArg(label),
+        );
+        const key = `name:${pattern.trim().toLowerCase()}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        items.push({ match: "name", pattern, name: name.length > 0 ? name : pattern });
+        continue;
       }
       const idField = match === "type" ? "typeID" : "groupID";
       const id = itemObj[idField];
@@ -830,6 +876,9 @@ function readBelt(raw: unknown, label: string, ctx: Ctx): BeltArg {
   const mode = obj["mode"];
   if (mode === "nearest") {
     return { mode: "nearest" };
+  }
+  if (mode === "site") {
+    return { mode: "site" };
   }
   if (mode === "chosen") {
     return { mode: "chosen", ref: readWorldRef(obj["ref"], "belt", ctx, SAY.badArg(label)) };
@@ -1305,9 +1354,9 @@ function orderInterrupt(row: InterruptRow): unknown {
 function orderArg(arg: Arg): unknown {
   switch (arg.kind) {
     case "belt":
-      return arg.belt.mode === "nearest"
-        ? { kind: "belt", belt: { mode: "nearest" } }
-        : { kind: "belt", belt: { mode: "chosen", ref: orderRef(arg.belt.ref) } };
+      return arg.belt.mode === "chosen"
+        ? { kind: "belt", belt: { mode: "chosen", ref: orderRef(arg.belt.ref) } }
+        : { kind: "belt", belt: { mode: arg.belt.mode } };
     case "station":
       return { kind: "station", ref: orderRef(arg.ref) };
     case "agent":
@@ -1324,6 +1373,8 @@ function orderArg(arg: Arg): unknown {
       return { kind: "itemType", typeID: arg.typeID, name: arg.name };
     case "place":
       return { kind: "place", place: arg.place };
+    case "corpDivision":
+      return { kind: "corpDivision", division: arg.division, name: arg.name };
     case "bookmark":
       return { kind: "bookmark", bookmarkID: arg.bookmarkID, name: arg.name };
     case "isk":
@@ -1358,11 +1409,23 @@ function orderArg(arg: Arg): unknown {
     case "itemList":
       return {
         kind: "itemList",
-        items: arg.items.map((item) =>
-          item.match === "type"
-            ? { match: "type", typeID: item.typeID, name: item.name }
-            : { match: "group", groupID: item.groupID, name: item.name },
-        ),
+        // ⚠ A SWITCH, NOT A TERNARY. This used to be "type ? … : group", which
+        // was total right up until a third match arrived — at which point a
+        // pattern would have been written out as a group and read back as one.
+        items: arg.items.map((item) => {
+          switch (item.match) {
+            case "type":
+              return { match: "type", typeID: item.typeID, name: item.name };
+            case "group":
+              return { match: "group", groupID: item.groupID, name: item.name };
+            case "name":
+              return { match: "name", pattern: item.pattern, name: item.name };
+            default: {
+              const _exhaustive: never = item;
+              return _exhaustive;
+            }
+          }
+        }),
       };
     default: {
       // ⚠ EXHAUSTIVE ON PURPOSE. Every Arg kind MUST serialise here, or an export

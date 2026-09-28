@@ -15,19 +15,48 @@
 // So a wrong or incomplete row in `BAY_PREFERENCES` costs one refused call and
 // a cargo-bound retry. It can never strand loot.
 //
-// ── WHY A PREFERENCE IS ALL IT CAN BE ────────────────────────────────────────
+// ── THE SERVER DOES ENFORCE ELIGIBILITY, AND THIS FILE USED TO SAY IT DID NOT ─
 //
-// The emulator does not enforce hold eligibility. `refusals.ts` pins the
-// EXHAUSTIVE list of UserError codes reachable through every call this client
-// is allowed to make — enumerated from eve.js's own throw sites, not guessed —
-// and the only hold-related code in it is `NotEnoughCargoSpace`, which means
-// "no room", not "wrong sort of thing". There is no CannotBeInHold, no
-// InvalidHold, no wrong-type code at all. So as far as anything in this repo
-// has ever observed, a bay refuses on CAPACITY and nothing else.
+// ⚠ CORRECTED 2026-09-15, BY A LIVE REFUSAL. A hauler loading command centres
+// was told, in the server's own words:
 //
-// That cuts both ways, and it is why the table is written as taste rather than
-// law: the server will not stop the client putting ore in the ammo hold, so
-// getting it right is entirely on this file — and getting it wrong is cheap.
+//     "Only planetary resources and commodities can be placed in the Planetary
+//      Commodities Hold."
+//
+// The old text here reasoned from `refusals.ts` — whose enumerated UserError
+// codes carry `NotEnoughCargoSpace` and no wrong-type code — that a bay refuses
+// on CAPACITY and nothing else, and that a wrong row therefore cost nothing.
+// Both halves were wrong. The check does not raise a UserError at all: the
+// inventory broker answers the move with `SHIP_BAY_ITEM_NOT_ALLOWED` and a
+// sentence naming the hold, which is why it was invisible to an audit of throw
+// sites.
+//
+// A wrong row is therefore NOT cheap. It is a refusal per attempt, and a block
+// that keeps asking spends its whole budget and stops the run.
+//
+// ⚠ SO A ROW IS CHECKED AGAINST THE SERVER'S OWN TABLE, NEVER GUESSED FROM A
+// NAME. The authority is the emulator's `specialShipHoldRegistry.js`
+// (`isSpecialShipHoldItemAllowed`), which is itself transcribed from the retail
+// client's `inventoryFlagsCommon.py` and cites it. What it says about the two
+// holds this file gets asked about most:
+//
+//   • the command centre hold (flag 148) takes GROUP 1027 and nothing else;
+//   • the planetary commodities hold (flag 149) takes CATEGORY 42 (Planetary
+//     Resources) and 43 (Planetary Commodities), plus Water and Oxygen.
+//
+// Command centres are group 1027 in CATEGORY 41 — Planetary Interaction, the
+// PI *structures* — so they are eligible for the first and refused by the
+// second. That one category is the whole of the bug: the table sent the
+// overflow of a full command centre hold into the planetary hold next door,
+// which looks obviously right and is obviously wrong.
+//
+// The mining holds (134 ore, 135 gas, 181 ice, 182 asteroid) are `managedBy`
+// the mining service rather than this generic check, which is why ice in a
+// mining hold has always worked.
+//
+// It remains a PREFERENCE and not a verdict — the server still judges, and an
+// unknown type still goes to cargo — but "the server will not stop us" is no
+// longer a reason to write a row on taste.
 //
 // ── WHY NOT JUST PUT EVERYTHING IN CARGO ─────────────────────────────────────
 //
@@ -120,7 +149,12 @@ const GROUP_HARVESTABLE_CLOUD = 711;
 const GROUP_MINERAL = 18;
 const GROUP_SALVAGED_MATERIAL = 754;
 const GROUP_COMMAND_CENTER = 1027;
-const CATEGORY_PLANETARY = 43;
+// ⚠ TWO CATEGORIES, AND A THIRD THAT LOOKS LIKE THEM AND IS NOT. 42 is raw
+// planetary RESOURCES and 43 the refined COMMODITIES; the planetary hold takes
+// both. Category 41 is Planetary Interaction — the command centres, extractors
+// and processors — and the hold refuses every one of them. See the header.
+const CATEGORY_PLANETARY_RESOURCES = 42;
+const CATEGORY_PLANETARY_COMMODITIES = 43;
 
 /**
  * Which bay each sort of cargo wants, most specific destination first.
@@ -159,10 +193,18 @@ export const BAY_PREFERENCES: readonly BayPreference[] = Object.freeze([
   // legacy — no current hull was found documented as exposing it — which costs
   // nothing: with no such bay present the rule simply never fires.
   { bays: ["salvage"], groupIDs: [GROUP_SALVAGED_MATERIAL] },
-  // Command centers → their own Epithal hold before the general PI one.
-  { bays: ["commandCenter", "planetary"], groupIDs: [GROUP_COMMAND_CENTER] },
-  // Planetary commodities → the Epithal's PI hold.
-  { bays: ["planetary"], categoryIDs: [CATEGORY_PLANETARY] },
+  // Command centres → the command centre hold, AND NOWHERE ELSE SPECIALISED.
+  // The planetary hold used to sit behind it here as the overflow; it refuses
+  // them outright (category 41, not 42/43 — see the header). With the chain one
+  // bay long, a FULL command centre hold leaves the rest where they are, for the
+  // trip after this one — the standing rule, and the right answer for a hauler
+  // whose cargo bay is a fraction of the hold. A hull with no command centre
+  // hold at all still carries them in cargo, which is what an empty chain means.
+  { bays: ["commandCenter"], groupIDs: [GROUP_COMMAND_CENTER] },
+  // Planetary resources and commodities → the Epithal's PI hold. Raw resources
+  // (42) belong there as much as refined commodities (43) do, which is what the
+  // server's own check says.
+  { bays: ["planetary"], categoryIDs: [CATEGORY_PLANETARY_RESOURCES, CATEGORY_PLANETARY_COMMODITIES] },
   // Everything else mineable → the mining hold, then the legacy asteroid hold.
   { bays: ["ore", "asteroid"], categoryIDs: [CATEGORY_ASTEROID] },
 ]);

@@ -46,12 +46,13 @@ import {
   STALL_UNSTICK_WHY,
 } from "./closeInStall.ts";
 import { DEFAULT_TARGET_PRIORITY, fleetTagRank, pickPrimary, type TargetClass } from "./targetPriority.ts";
-import { canMyShipOrderDrone, hostileRows, type OverviewRow } from "../space/overview.ts";
+import { canMyShipOrderDrone, distanceMeters, hostileRows, type OverviewRow } from "../space/overview.ts";
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
-import { FREIGHT_BAYS } from "../bridge/bayRouting.ts";
+import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
+import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
-import { movableRows, type KeepRule } from "../bridge/keepAboard.ts";
+import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
 import {
   LAUNCH_MAX_TRIES,
@@ -125,8 +126,11 @@ function warpLanded(obs: ScriptObservation, mem: MacroMemory): boolean {
 }
 
 /** The memory a step writes when it ISSUES a warp, so `warpLanded` can answer later. */
-function warpIssuedMem(obs: ScriptObservation): MacroMemory {
-  return { issued: true, waited: 0, warpsAtIssue: obs.completedWarps ?? null };
+function warpIssuedMem(obs: ScriptObservation, target: string | null = null): MacroMemory {
+  // `target` is the scan label the warp went out against, remembered because a
+  // refusal arrives with no clue which destination it is about, and telling
+  // "already standing in it" from "told no" needs that site's position.
+  return { issued: true, waited: 0, warpsAtIssue: obs.completedWarps ?? null, target };
 }
 
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
@@ -148,6 +152,16 @@ function num(mem: MacroMemory, key: string): number | null {
 }
 function flag(mem: MacroMemory, key: string): boolean {
   return mem[key] === true;
+}
+/** A remembered comma-joined list of labels; empty when there is none. */
+function listOf(mem: MacroMemory, key: string): string[] {
+  const value = mem[key];
+  return typeof value === "string" ? value.split(",").filter((item) => item.length > 0) : [];
+}
+/** A remembered label, or null — an empty string is "nothing", never a name. */
+function label(mem: MacroMemory, key: string): string | null {
+  const value = mem[key];
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 /**
@@ -488,6 +502,21 @@ function isChosenBelt(step: MacroStep): boolean {
 }
 
 /**
+ * True when a step is the ANOMALY MINER'S mode — tour the scanner's ore sites,
+ * never a belt. See the `BeltArg` header (botScript.ts) for the incident this
+ * mode exists to close: NEAREST-mode's belt rotation is the right fallback for
+ * a belt-mining bot and the wrong one for an anomaly-mining bot, because it
+ * hands the ship a destination ("the nearest belt") that a wanted anomaly ore
+ * can never spawn at. `mineAtBelt` checks this FIRST, before either the belt
+ * regex or the tier ladder, so a "site" step never reaches code written for
+ * the other two modes.
+ */
+function isSiteMode(step: MacroStep): boolean {
+  const arg = step.args["belt"];
+  return arg !== undefined && arg.kind === "belt" && arg.belt.mode === "site";
+}
+
+/**
  * The belt a mine-at-belt step should head for when no rocks are in range.
  * "chosen" pins one belt by NAME (never id — unlike a station, a belt's id is
  * grid-local, not globally stable, so it can only be re-resolved against what
@@ -664,6 +693,25 @@ const travelToBelt: MacroDecider = (step, obs) => {
 //     noticed — the tour already moved on, and chasing respawns mid-tier is
 //     not worth the extra state for how rarely a rock resource turnover
 //     matters here.
+//   • SITE mode (the `BeltArg` variant the anomaly miner uses) REPLACES all of
+//     the above rather than layering on it. It is a hard fork at the top of
+//     `mineAtBelt`, dispatched to `mineAtBeltSite` below, and it never falls
+//     through to the belt regex, `beltTarget`, `nearestUnworkedBelt` or
+//     `MINE_ORE_TIER_KEY` — see the `isSiteMode` and `BeltArg` (botScript.ts)
+//     comments for the incident a belt-rotation fallback silently caused. Two
+//     things differ from NEAREST/CHOSEN because a scanner site is a different
+//     kind of place than a belt:
+//       - "dry" is per-SITE, not per-belt, and is tracked on THIS pilot's own
+//         run board (`oreSitesBarren`) rather than the belts' shared,
+//         name-keyed BFF memory — a scanner site's label is already unique to
+//         this run (`warp-to-ore-anomaly` mints it), so there is no cross-
+//         pilot belt-name collision to solve here the way there is for belts.
+//       - ore priority is evaluated FRESH ON EVERY GRID rather than climbing a
+//         ladder that never comes back down. A belt system has one shared pool
+//         of rock that a tier ladder drains in order; an anomaly system hands
+//         out a NEW rock field every site, so a ladder would retire Arkonor
+//         forever the first time one site happened to lack it. See
+//         `mineAtBeltSite`.
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
@@ -675,10 +723,21 @@ const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
 
   const measurement = measureSpace(snapshot);
   const allRocks = snapshot.entities.filter(isMineableRock);
-  const pinned = isChosenBelt(step);
 
   const oresArg = step.args["ores"];
   const ores = oresArg !== undefined && oresArg.kind === "oreList" ? oresArg.ores : [];
+
+  // ⚠ THIS CHECK COMES BEFORE `pinned`, THE BELT REGEX AND THE TIER LADDER,
+  // AND MUST GO ON COMING FIRST. Every line below this branch was written for
+  // a grid that might have an asteroid belt on it; a site step's grid never
+  // does, and letting it reach `mineNoTargetRocks` (nearest/chosen's own
+  // barren handling) would re-introduce the exact belt-tour bug this mode
+  // exists to close.
+  if (isSiteMode(step)) {
+    return mineAtBeltSite(step, obs, mem, board, snapshot, allRocks, ores, measurement);
+  }
+
+  const pinned = isChosenBelt(step);
 
   if (ores.length > 0) {
     const tier = boardNum(board, MINE_ORE_TIER_KEY) ?? 0;
@@ -862,6 +921,210 @@ function dryBeltNames(dryBelts: readonly DryBelt[] | null, family: OreFamilyArg 
   return names;
 }
 
+// ── mine-at-belt, SITE mode ─────────────────────────────────────────────────
+// See the `mineAtBelt` header and `isSiteMode` for why this is a hard fork
+// rather than a third branch woven through the belt logic above: a scanner
+// site has no belt regex to match, no shared cross-pilot memory to consult
+// (its label is already unique to this run — `warp-to-ore-anomaly` mints it),
+// and — the whole reason this mode exists — no rotation destination that
+// could ever be wrong the way "the nearest belt" was.
+
+/** Where SITE mode keeps ITS OWN barren-site memory. Deliberately not the
+ *  belts' `obs.dryBelts` (BFF-shared, belt-name-keyed) and deliberately not
+ *  `MINE_ORE_TIER_KEY` (system-wide, one-way) — see the `mineAtBelt` header. */
+const ORE_SITES_BARREN_KEY = "oreSitesBarren";
+
+/**
+ * Which ore site the ship is standing on, read off `warp-to-ore-anomaly`'s own
+ * board key rather than kept by this block. That step already publishes every
+ * label it has warped to, as a CSV, oldest first (`ORE_FLAVOUR.boardKey`,
+ * encoded in `warpToAnomalyOfKind` below) — the LAST one is wherever the ship
+ * last warped to, which is this grid, because nothing else in an anomaly
+ * script issues a scan warp. Reusing that key instead of a label of our own
+ * is also what keeps the two blocks from ever disagreeing about which site
+ * this is.
+ *
+ * Null when the key is unset or empty — a site block run with no
+ * `warp-to-ore-anomaly` in front of it, which `mineAtBeltSiteBarren` turns
+ * into "ask for a tour block" rather than a guessed label.
+ */
+function currentOreSiteLabel(board: ScriptBoard): string | null {
+  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+    .split(",")
+    .filter((label) => label.length > 0);
+  return visited.length > 0 ? visited[visited.length - 1]! : null;
+}
+
+/** The labels THIS pilot's site tour has already found barren — same CSV encoding as every other board list in this file. */
+function barrenOreSiteLabels(board: ScriptBoard): ReadonlySet<string> {
+  return new Set(
+    String(board[ORE_SITES_BARREN_KEY] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0),
+  );
+}
+
+/** Append one label to `warp-to-ore-anomaly`'s own visited CSV — see requirement 3 on why this block writes into a key it does not own: without it, that step's next tick would warp the ship right back to the site this one just walked away from. */
+function appendOreVisited(board: ScriptBoard, label: string): string {
+  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+    .split(",")
+    .filter((existing) => existing.length > 0);
+  return [...visited, label].join(",");
+}
+
+/**
+ * SITE mode's rock pick: the highest-priority family from the step's `ores`
+ * list that is actually present ON THIS GRID, evaluated fresh every time —
+ * never a ladder that only advances. A belt system has one pool of rock a
+ * tier ladder drains in visiting order; an anomaly system hands the ship a
+ * BRAND NEW rock field at every site, so a ladder that only ever climbs would
+ * retire Arkonor for the rest of the run the first time one site's field
+ * happened not to have any, even though the very next site might be full of
+ * it. `ores.find` keeps the player's ordering (first = most wanted, same as
+ * every other ore-priority read in this file) and answers null when nothing
+ * on the list is here — which is this grid's barren, not the whole system's.
+ *
+ * An empty `ores` list (player wrote no priority) mines whatever is richest
+ * here, via `richestRocks` — identical to NEAREST/CHOSEN's own no-list
+ * behaviour, because "no preference" means the same thing in every mode.
+ */
+function mineAtBeltSite(
+  step: MacroStep,
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  board: ScriptBoard,
+  snapshot: SpaceSnapshot,
+  allRocks: readonly SpaceEntity[],
+  ores: readonly OreFamilyArg[],
+  measurement: SpaceMeasurement | null,
+): MacroTick {
+  if (ores.length === 0) {
+    if (allRocks.length === 0) {
+      return mineAtBeltSiteBarren(obs, mem, board, ores);
+    }
+    return mineWithRocks(step, obs, mem, snapshot, richestRocks(allRocks, num(mem, "rockID")), measurement);
+  }
+
+  const family = ores.find((candidate) => allRocks.some((rock) => rock.groupID === candidate.groupID)) ?? null;
+  if (family === null) {
+    return mineAtBeltSiteBarren(obs, mem, board, ores);
+  }
+  const familyRocks = allRocks.filter((rock) => rock.groupID === family.groupID);
+  return mineWithRocks(step, obs, mem, snapshot, highestGradeRocks(familyRocks), measurement);
+}
+
+/**
+ * This grid has none of the wanted ore. Mark the site barren, and either move
+ * on to the next one or, once every site the scanner knows about is barren,
+ * report `blocked` and let `stopSafely` fly the ship home — the same end
+ * state the belt modes reach when every belt is dry, reached over sites
+ * instead of belts.
+ *
+ * ⚠ AN EMPTY GRID RIGHT AFTER A WARP HAS NOT ARRIVED YET, and this block used
+ * to believe it on the very first read. `fightRatsLadder` above already tells
+ * the live incident this is the mining side of: a snapshot that has not
+ * caught up reads byte-identical to a grid with nothing on it, and a ship
+ * that lands on a full ore anomaly can see zero rocks for a tick or two
+ * before the entity list fills in. For the combat side that costs one wasted
+ * "grid clear" read; here it is far worse, because the very next thing this
+ * function does with "no rock here" is write a label into `oreSitesBarren`
+ * FOR THE REST OF THE RUN. Without the same confirmation `fightRatsLadder`
+ * already earns with `EMPTY_GRID_CONFIRM_TICKS`, a bot warping into a site
+ * full of ore strikes it off the list before the snapshot ever showed it the
+ * rock — and with several pilots landing on sites within the same few
+ * seconds of each other, a whole system can read "mined out" while every
+ * site in it is still full. So the SAME constant, reused rather than
+ * reinvented, gates every path below: no barren mark, no `warpScan`, and no
+ * "every site is barren" verdict until the grid has read empty on
+ * `EMPTY_GRID_CONFIRM_TICKS` CONSECUTIVE ticks. The count lives in this
+ * step's own macro memory (`oreGridEmptyReads`) and needs no explicit reset
+ * on the rock-found path: `mineWithRocks` REBUILDS its memory on every return
+ * rather than spreading it (see its own "COUNTERS ARE CARRIED BY HAND"
+ * comment), so the moment a rock is seen and mining resumes, this key is
+ * simply not among the ones it carries forward.
+ *
+ * `obs.anomalies` (the onboard scanner) is read again here rather than
+ * carried from an earlier block, because it is the only source that can name
+ * "the next ore site" at all — `warp-to-ore-anomaly` does not hand this block
+ * a list, only a label per warp. Unread yet (`null`) waits rather than
+ * guessing; `warpToAnomalyOfKind` above earns that same patience with its own
+ * `EMPTY_SCAN_CONFIRM_READS`, but this read only ever feeds a WARP THIS BLOCK
+ * IS ABOUT TO ISSUE, never a "give up" verdict, so one null tick is enough —
+ * there is no stale board state written before it that a slow scanner could
+ * strand.
+ */
+function mineAtBeltSiteBarren(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  board: ScriptBoard,
+  ores: readonly OreFamilyArg[],
+): MacroTick {
+  // Consecutive: any tick this function is even reached means the current
+  // read found no wanted rock, so there is no separate "saw a rock, reset
+  // the count" branch to write here — that reset already happened for free,
+  // on the mineWithRocks path, before this function was ever called.
+  const emptyReads = (num(mem, "oreGridEmptyReads") ?? 0) + 1;
+  if (emptyReads < EMPTY_GRID_CONFIRM_TICKS) {
+    // ⚠ THIS IS NOT THE TOUR'S "The scanner came back empty — reading it
+    // again." sentence, and must never borrow it. That one means the SCANNER
+    // found no anomalies at all; this one means the GRID (rocks in local
+    // space) has not shown the wanted ore yet. Telling the player the wrong
+    // one of those two would send them looking at the wrong panel — the same
+    // reason `noSiteReason` above keeps the scanner and the overview apart.
+    return tick(
+      WAIT,
+      "Nothing of the wanted ore on the grid yet — reading it again before calling this site barren.",
+      "Scanning",
+      ACTING,
+      false,
+      { ...mem, oreGridEmptyReads: emptyReads },
+    );
+  }
+
+  const anomalies = obs.anomalies ?? null;
+  if (anomalies === null) {
+    return tick(WAIT, "Reading the scanner for the next ore site.", "Scanning", ACTING, false, { ...mem, oreGridEmptyReads: emptyReads });
+  }
+
+  const currentLabel = currentOreSiteLabel(board);
+  if (currentLabel === null) {
+    // No `warp-to-ore-anomaly` ahead of this block ever wrote a label, so
+    // there is nothing to mark barren and nothing safe to guess. Reported as
+    // `blocked` rather than an endless wait: a grid that never gets more rock
+    // is exactly as stuck as a system with none left, and the player needs
+    // to know WHY, not just that nothing is moving.
+    const reason = "This block needs a Fly-to-an-ore-site block ahead of it, so it knows which site just went barren.";
+    return tick(WAIT, "This grid has no rock of the wanted ore, and no tour block named which site this is.", "Nothing to mine", {
+      kind: "blocked",
+      reason,
+    });
+  }
+
+  const oreNames = ores.length > 0 ? ores.map((family) => family.name).join(" and ") : null;
+  const barren = new Set(barrenOreSiteLabels(board));
+  barren.add(currentLabel);
+  const barrenPatch = { [ORE_SITES_BARREN_KEY]: [...barren].join(",") };
+
+  const next = anomalies.find((site) => site.kind === "ore" && !barren.has(site.label));
+  if (next === undefined) {
+    const reason = oreNames !== null
+      ? `Every ore site in this system is out of ${oreNames}.`
+      : "Every ore site in this system is mined out.";
+    return withBoardPatch(
+      tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason }),
+      barrenPatch,
+    );
+  }
+
+  const why = oreNames !== null
+    ? `No ${oreNames} left here, moving to the next ore site.`
+    : "This ore site is mined out, moving to the next one.";
+  return withBoardPatch(
+    tick({ kind: "warpScan", target: next.label }, why, "Flying to the ore site", ACTING, false, {}),
+    { ...barrenPatch, [ORE_FLAVOUR.boardKey]: appendOreVisited(board, next.label) },
+  );
+}
+
 /** We have rocks (of the current tier, when there is one) — the core lock-and-mine loop. */
 function mineWithRocks(
   step: MacroStep,
@@ -1002,6 +1265,19 @@ function mineWithRocks(
 // Fly to the station — same system or across the map, on the SHARED autopilot —
 // and unload; done once the hold is empty AT THE TARGET (an unload anywhere
 // else would scatter the ore across stations).
+//
+// The optional `into` argument aims the load at a CORPORATION hangar division.
+// It changes nothing about when this block is done: the block's contract is
+// that the freight holds end up empty at the target, and they do whether the
+// corporation took the load or the pilot's own hangar did. The bridge decides
+// which — an office that is not rented here any more, or a division this pilot
+// has no role for, lands the ore in their own hangar rather than stranding it
+// aboard — and says which in its answer, so the run's own log can tell the
+// player the corporation refused without the block having to stop the bot over
+// it. Asking HERE instead (read the offices, check a role, then unload) would
+// be two more round trips per lap to arrive at an answer the deposit itself
+// gives away for free, and it would still be a guess: the role is checked at
+// the office, at the moment of the move.
 const deliverOre: MacroDecider = (step, obs, mem, board) => {
   const target = stationTarget(step, obs, board);
   if (target === null) {
@@ -1016,7 +1292,21 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
     // crystals and ammunition ashore every lap — see freightHoldItemIDs.
     const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
-      return tick({ kind: "unloadOre", itemIDs: items }, "Unloading the ore into the hangar.", "Unloading", ACTING);
+      const into = step.args["into"];
+      const division = into !== undefined && into.kind === "corpDivision" ? into.division : null;
+      // The key is left OFF for an ordinary hangar unload rather than sent as
+      // null, so a block nobody aimed at a corporation issues byte-for-byte the
+      // action it always did.
+      return tick(
+        division === null
+          ? { kind: "unloadOre", itemIDs: items }
+          : { kind: "unloadOre", itemIDs: items, division },
+        division === null
+          ? "Unloading the ore into the hangar."
+          : "Unloading the ore into the corporation hangar.",
+        "Unloading",
+        ACTING,
+      );
     }
     return tick(WAIT, "The ore is unloaded.", "Done hauling", { kind: "done" });
   }
@@ -1168,17 +1458,46 @@ const defendWithDrones: MacroDecider = (_step, obs, mem) => {
 // packageAboard / gateOffer). Cross-block facts (the agent, the mission) ride
 // the run BOARD; each block confirms by re-read, one action per tick.
 
-/** The "leave this aboard" rules on a step, or none. */
-function keepRules(step: MacroStep): readonly KeepRule[] {
-  const arg = step.args["keepItems"];
+/**
+ * The item rules in one `itemList` argument — the saved form (which carries the
+ * player's display names) stripped down to what the matcher tests on.
+ */
+function itemRules(step: MacroStep, key: string): readonly KeepRule[] {
+  const arg = step.args[key];
   if (arg === undefined || arg.kind !== "itemList") {
     return [];
   }
-  return arg.items.map((item) =>
-    item.match === "type"
-      ? ({ match: "type", typeID: item.typeID } as const)
-      : ({ match: "group", groupID: item.groupID } as const),
-  );
+  const rules: KeepRule[] = [];
+  for (const item of arg.items) {
+    switch (item.match) {
+      case "type":
+        rules.push({ match: "type", typeID: item.typeID });
+        break;
+      case "group":
+        rules.push({ match: "group", groupID: item.groupID });
+        break;
+      case "name":
+        // A pattern that is only whitespace matches nothing rather than
+        // everything; the matcher enforces that too, but dropping it here keeps
+        // "has this step been given any rules at all" honest.
+        if (item.pattern.trim().length > 0) {
+          rules.push({ match: "name", pattern: item.pattern });
+        }
+        break;
+    }
+  }
+  return rules;
+}
+
+/** The "leave this aboard" rules on a step, or none. */
+function keepRules(step: MacroStep): readonly KeepRule[] {
+  return itemRules(step, "keepItems");
+}
+
+/** The bay keys one `bayList` argument names, or none. */
+function bayListArg(step: MacroStep, key: string): readonly string[] {
+  const arg = step.args[key];
+  return arg !== undefined && arg.kind === "bayList" ? arg.bays : [];
 }
 
 const MAX_BLOCK_ATTEMPTS = 5; // presses/moves per block before it says so and stops
@@ -1749,6 +2068,127 @@ const unloadCargo: MacroDecider = (step, obs, mem) => {
     });
   }
   return tick(WAIT, "The ship is empty.", "Emptying the hold", { kind: "done" });
+};
+
+// ── load-cargo ───────────────────────────────────────────────────────────────
+// Docked: unload-cargo run backwards. Take the named items out of the station
+// hangar and put each stack where THIS hull wants it — the command centre hold,
+// the planetary hold, the mining hold — with the cargo hold as the fallback for
+// a stack no bay claims.
+//
+// ⚠ IT LOADS WHAT FITS AND THEN IT IS DONE. That is the whole block, and it is
+// what makes a ten-trip haul a four-block loop instead of ten hand-written
+// programs: an Epithal whose command centre hold takes six of the twenty in the
+// hangar loads six, says so, and finishes. The fourteen left are not a failure
+// and must never read as one — the next lap comes back for them.
+//
+// ⚠ IT SHARES THE LOOT SIDE'S PLANNER ON PURPOSE (`planLootTransfers`). The
+// question "what of these rows can this hull take, and into which bay" is the
+// same question whether the rows are in a jetcan or in a station hangar, and it
+// is the question with all the sharp edges: the per-stack all-or-nothing rule
+// that needs a SPLIT, the operator's "a full specialised bay does not fall
+// through to cargo" rule, and the room-tracking that stops two stacks being
+// promised the same cubic metre. A second copy would get one of those wrong.
+//
+// ⚠ A BAY NAMED IN `exceptBays` IS NOT A DESTINATION, AND ITS CARGO STAYS HOME.
+// Treating it as merely absent would send the ammo a Hoarder was told to leave
+// alone into the cargo hold instead, which is the fall-through the operator's
+// rule forbids — so a row whose bays are ALL excluded is skipped entirely. A row
+// that never had a specialised bay still goes to cargo, as it always did.
+const loadCargo: MacroDecider = (step, obs, mem) => {
+  if (obs.flightStatus?.docked !== true) {
+    return tick(WAIT, "Not docked - there is no hangar to load from.", "Loading the ship", {
+      kind: "blocked",
+      reason: "Dock at a station first - this block loads your ship from its hangar.",
+    });
+  }
+  const rules = itemRules(step, "items");
+  if (rules.length === 0) {
+    return tick(WAIT, "This step has nothing to load.", "Loading the ship", {
+      kind: "blocked",
+      reason: "Pick what this step loads - an item, everything of its kind, or a name to match.",
+    });
+  }
+  const hangar = obs.stationHangar ?? null;
+  const bays = obs.shipBays ?? null;
+  const names = obs.typeNames ?? null;
+  // ⚠ A NAME RULE WITH NO NAMES READ IS "COULD NOT TELL", NOT "NOTHING MATCHED".
+  // Without this the lookup failing would hand the block an empty selection, and
+  // an empty selection is indistinguishable from a hangar that genuinely has
+  // none of what was asked for — so the ship would fly the lap empty and the
+  // player would be told the load was finished.
+  const needsNames = rules.some((rule) => rule.match === "name");
+  // "Could not read" is never "nothing to load". A hangar or a bay list that
+  // failed to read leaves the ship sailing empty and the player none the wiser,
+  // so it waits and then says so, exactly as the unload side does.
+  if (hangar === null || bays === null || (needsNames && names === null)) {
+    const blindChecks = (num(mem, "blindChecks") ?? 0) + 1;
+    if (blindChecks > MAX_BLOCK_ATTEMPTS) {
+      return tick(WAIT, "The hangar or the holds could not be read.", "Loading the ship", {
+        kind: "blocked",
+        reason:
+          needsNames && names === null
+            ? "The names of what is in the hangar could not be read, so the bot cannot tell what matches."
+            : "The hangar or the ship's holds could not be read, so the bot cannot tell what to load.",
+      });
+    }
+    return tick(WAIT, "Reading what is in the hangar.", "Loading the ship", ACTING, false, {
+      ...mem,
+      blindChecks,
+    });
+  }
+  const named = hangar.map((row) => ({ ...row, name: names?.[row.typeID] ?? null }));
+  // "skip": a row nobody could classify stays in the hangar, where it already
+  // safely is. The opposite of the unload side's "move", and for the same
+  // reason — which way a shrug is safe depends on where the stack ends up.
+  const wanted = pickedRows(named, rules, "skip");
+  const except = new Set<string>(bayListArg(step, "exceptBays"));
+  // An excluded bay is no longer a destination, so the planner must not see it
+  // as present; a row whose whole chain is excluded is dropped here rather than
+  // being allowed to fall through to cargo.
+  const usableBays = bays.map((bay) =>
+    except.has(bay.key) ? { ...bay, present: false as boolean | null } : bay,
+  );
+  const rows = wanted.filter((row) => {
+    const preferred = preferredBays(row);
+    return preferred.length === 0 || preferred.some((key) => !except.has(key));
+  });
+  const cargoFree = holdFreeM3(obs.cargo?.capacity ?? null);
+  const freeFor = (key: string | null): number | null => {
+    if (key === null) {
+      return cargoFree;
+    }
+    const bay = usableBays.find((entry) => entry.key === key) ?? null;
+    return bay === null ? null : holdFreeM3(bay.capacity);
+  };
+  const groups = planLootTransfers(rows, usableBays, freeFor);
+  if (groups.length === 0) {
+    // Three different worlds end here and the words have to tell them apart, or
+    // a player watching a bot fly off empty cannot tell a finished load from a
+    // selection that matched nothing.
+    const said =
+      wanted.length === 0
+        ? "None of that is in the hangar."
+        : rows.length === 0
+          ? "What is here only belongs in a hold this step was told to leave alone."
+          : "The ship is as full as it can get.";
+    return tick(WAIT, said, "Loading the ship", { kind: "done" });
+  }
+  const attempts = (num(mem, "attempts") ?? 0) + 1;
+  if (attempts > MAX_BLOCK_ATTEMPTS) {
+    return tick(WAIT, "The cargo would not load.", "Loading the ship", {
+      kind: "blocked",
+      reason: "The station kept refusing to load that cargo, so the bot stopped.",
+    });
+  }
+  return tick(
+    { kind: "loadHolds", groups },
+    "Loading the ship from the hangar.",
+    "Loading the ship",
+    ACTING,
+    false,
+    { ...mem, attempts },
+  );
 };
 
 // ── return-to-agent ──────────────────────────────────────────────────────────
@@ -2871,8 +3311,44 @@ interface AnomalyFlavour {
    *
    * It is consulted only after the server has refused the warp, to separate the
    * two refusals that arrive in identical words (see `warpRefusedHere`).
+   *
+   * `target` is the scan label the refused warp was issued against, or null
+   * when the block no longer holds it — a reading that needs the label and
+   * does not have it answers `null` rather than falling back to "some site of
+   * this kind is near", which is a different question.
    */
-  readonly alreadyHere: (obs: ScriptObservation) => boolean | null;
+  readonly alreadyHere: (obs: ScriptObservation, target: string | null) => boolean | null;
+}
+
+/**
+ * The server's own floor for a warp: `MIN_WARP_DISTANCE_METERS` in
+ * space/runtime.js, checked as `pendingWarp.totalDistance < 150_000` before
+ * `WARP_DISTANCE_TOO_CLOSE` goes back. Mirrored rather than invented, because
+ * the whole point of the reading below is to name the state the SERVER refused
+ * on, and a threshold of our own would answer a question nobody asked.
+ */
+const MIN_WARP_DISTANCE_M = 150_000;
+
+/**
+ * Was the refused warp a warp to where the ship already is?
+ *
+ * The one reading that separates the two identical-sounding refusals without
+ * guessing from what is on the grid: the scanner gives the SITE's position and
+ * the snapshot gives the SHIP's, and a gap under the server's own warp floor is
+ * the exact condition it refused on. Either position missing is `null` — cannot
+ * tell — never `false`, because "no reading" and "the ship is elsewhere" send
+ * the player to completely different places.
+ */
+function shipStandsInSite(obs: ScriptObservation, target: string | null): boolean | null {
+  if (target === null) {
+    return null;
+  }
+  const here = obs.snapshot?.ship?.position ?? null;
+  const site = (obs.anomalies ?? []).find((row) => row.label === target)?.position ?? null;
+  if (here === null || site === null || site === undefined) {
+    return null;
+  }
+  return distanceMeters(here, site) < MIN_WARP_DISTANCE_M;
 }
 
 const COMBAT_FLAVOUR: AnomalyFlavour = {
@@ -2896,11 +3372,18 @@ const ORE_FLAVOUR: AnomalyFlavour = {
   emptyScannerHint:
     "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
   givesUpOnSites: false,
-  // ⚠ CANNOT TELL, DELIBERATELY. Rock on the grid is not evidence of an ore
-  // SITE — a plain asteroid belt looks identical from here, and the whole point
-  // of `emptyScannerHint` is that the two get confused. There is no reading this
-  // block holds that separates them, so it makes none and reports the refusal.
-  alreadyHere: () => null,
+  // ⚠ NOT FROM THE ROCK ON THE GRID, WHICH IS THE READING THIS MUST NEVER
+  // MAKE: a plain asteroid belt looks identical from there, and the whole point
+  // of `emptyScannerHint` is that the two get confused. The positions do not
+  // have that problem — the scanner names where the SITE is and the snapshot
+  // names where the SHIP is, and a belt is somewhere else entirely.
+  //
+  // It went from "cannot tell" to a real answer because "cannot tell" stopped
+  // the bot every time: a pilot parked in the ore site from an earlier run had
+  // that same site picked first on the next one, the server refused the warp
+  // for standing in it, and the run ended on "The ship would not warp to the
+  // ore site" with the rock in front of the ship.
+  alreadyHere: shipStandsInSite,
 };
 
 // ── Why the dead end is THREE sentences and not one ──────────────────────────
@@ -2993,20 +3476,41 @@ function warpToAnomalyOfKind(
       // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
       // — already there — and all four stopped rather than fighting the rats in
       // front of them.
+      // ⚠ ONLY A REFUSAL NEWER THAN THE LAST ONE THIS STEP SAW. The ledger keys
+      // on step and action with no target, and a record lives until a SUCCESS
+      // clears it — so after moving on from a refused site, the warp to the
+      // next one would read the old refusal on its first tick and give up on a
+      // site it never actually asked for.
       const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
-      if (refusal !== null) {
+      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
         // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
         // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
         // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
         // right now." Standing in the site and the site having gone arrive in the
         // SAME WORDS, so the wording is no help and the grid has to answer.
-        if (flavour.alreadyHere(obs) === true) {
+        if (flavour.alreadyHere(obs, label(mem, "target")) === true) {
           return tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", {
             kind: "done",
           });
         }
-        // Cannot tell, or told no. Stop — but with what the SERVER said, not
-        // with a guess about the warp never starting.
+        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
+        // It happened for real: a pilot came back from unloading, read the
+        // scanner while the site the rest of the fleet had just emptied was
+        // still listed, and warped at it. The server had already torn it down
+        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
+        // scanned down"), and the pilot stopped while the others flew on to the
+        // next site. A refused site is set aside for this step and the pick runs
+        // again. The bot only stops when no site of this kind is left to try.
+        const target = label(mem, "target");
+        const refused = [...listOf(mem, "refused"), ...(target === null ? [] : [target])];
+        if (pickSite(obs.anomalies ?? [], board, refused) !== null) {
+          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
+            refused: refused.join(","),
+            refusalsSeen: refusal.count,
+          });
+        }
+        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
+        // the SERVER said, not with a guess about the warp never starting.
         return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
           kind: "blocked",
           reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
@@ -3039,9 +3543,6 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, 0, 0),
       });
     }
-    const visited = String(board[flavour.boardKey] ?? "")
-      .split(",")
-      .filter((label) => label.length > 0);
     const ofKind = anomalies.filter((site) => site.kind === wanted);
     // ── §13: the sites this run has given up on ────────────────────────────
     //
@@ -3055,26 +3556,20 @@ function warpToAnomalyOfKind(
     // exists to catch. This block has no such problem: it is the thing that
     // issued the warp, so an arrival is simply the tick it commits to a label —
     // the same tick it already writes that label into `anomsVisited`.
-    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
-    const workable =
-      ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
-    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
-    // situations and the old code answered both by stopping: there is no site of
-    // this kind here (a real dead end), or every one of them has been flown to
-    // once (not a dead end at all). A site is not finished because the ship has
-    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
-    // in a system holding a single ore site the visited list retired it after one
-    // trip and stopped a bot that had barely scratched it. So a completed lap
-    // wipes the list and starts the next one, and the run now ends where it
-    // should: at Mine-at-a-belt, which is the block that can actually see there
-    // is no rock left and says so.
-    const fresh = workable.find((site) => !visited.includes(site.label));
-    const next = fresh ?? workable[0];
-    if (next === undefined) {
+    const refused = listOf(mem, "refused");
+    const pick = pickSite(anomalies, board, refused);
+    if (pick === null) {
       // Two different dead ends now share this branch, and they must not share a
       // sentence: "there is no site of this kind here" (the scanner's fault, or
       // the system's) and "there are, and the run has given up on every one of
-      // them" (§13's stop).
+      // them" (§13's stop). A third joins them when the scanner changed after a
+      // refusal and only refused sites are left.
+      if (ofKind.length > 0 && ofKind.every((site) => refused.includes(site.label))) {
+        return tick(WAIT, `No ${flavour.noun} here would take the ship.`, "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to any ${flavour.noun} the scanner lists here, so the bot stopped.`,
+        });
+      }
       if (ofKind.length > 0) {
         return tick(WAIT, `Every ${flavour.noun} here is one I have given up on.`, "Scanning", {
           kind: "blocked",
@@ -3087,7 +3582,7 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
-    const lapRestart = fresh === undefined;
+    const { next, lapRestart, visited, ledger } = pick;
     return {
       ...tick(
         { kind: "warpScan", target: next.label },
@@ -3097,7 +3592,12 @@ function warpToAnomalyOfKind(
         flavour.flying,
         ACTING,
         false,
-        warpIssuedMem(obs),
+        {
+          ...warpIssuedMem(obs, next.label),
+          ...(refused.length > 0
+            ? { refused: refused.join(","), refusalsSeen: num(mem, "refusalsSeen") }
+            : {}),
+        },
       ),
       boardPatch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
@@ -3123,6 +3623,40 @@ function warpToAnomalyOfKind(
       },
     };
   };
+
+  /**
+   * The next site to fly to, or null when there is none — skipping any site this
+   * step has already been refused a warp to.
+   */
+  function pickSite(
+    anomalies: NonNullable<ScriptObservation["anomalies"]>,
+    board: ScriptBoard,
+    refused: readonly string[],
+  ) {
+    const visited = String(board[flavour.boardKey] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0);
+    const ofKind = anomalies.filter((site) => site.kind === wanted && !refused.includes(site.label));
+    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
+    const workable =
+      ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
+    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
+    // situations and the old code answered both by stopping: there is no site of
+    // this kind here (a real dead end), or every one of them has been flown to
+    // once (not a dead end at all). A site is not finished because the ship has
+    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
+    // in a system holding a single ore site the visited list retired it after one
+    // trip and stopped a bot that had barely scratched it. So a completed lap
+    // wipes the list and starts the next one, and the run now ends where it
+    // should: at Mine-at-a-belt, which is the block that can actually see there
+    // is no rock left and says so.
+    const fresh = workable.find((site) => !visited.includes(site.label));
+    const next = fresh ?? workable[0];
+    if (next === undefined) {
+      return null;
+    }
+    return { next, lapRestart: fresh === undefined, visited, ledger };
+  }
 }
 
 const warpToAnomaly: MacroDecider = warpToAnomalyOfKind("combat", COMBAT_FLAVOUR);
@@ -4855,6 +5389,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "return-to-agent": returnToAgent,
   wait: waitBlock,
   "unload-cargo": unloadCargo,
+  "load-cargo": loadCargo,
   "salvage-wrecks": salvageWrecks,
   "loot-wrecks": lootWrecks,
   "loot-containers": lootContainers,
