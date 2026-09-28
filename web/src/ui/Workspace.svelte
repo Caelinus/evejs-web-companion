@@ -20,6 +20,7 @@
   import MobileWorkspace from "./MobileWorkspace.svelte";
   import DockWipe from "./DockWipe.svelte";
   import Toasts from "./Toasts.svelte";
+  import NoticeBridge from "./NoticeBridge.svelte";
   import { showInfoTarget } from "./showInfo.ts";
   import TargetsPanel from "./TargetsPanel.svelte";
   import CustomBotReadout from "./CustomBotReadout.svelte";
@@ -234,12 +235,16 @@
   <!-- The same transition in both workspaces: the state change is identical, so
        it would be strange for only one of them to acknowledge it. -->
   <DockWipe {isDocked} />
+  <NoticeBridge {store} />
   <Toasts />
   <MobileWorkspace {store} {flow} {isDocked} {sessions} />
 {:else}
   <DockWipe {isDocked} />
-  <!-- Mounted once for the whole workspace: a notice raised inside a panel the
-       player has CLOSED still has somewhere to appear. -->
+  <!-- Mounted once for the whole workspace, and once each: the bridge is what
+       RAISES a notice (it watches every store slice that records a refusal) and
+       the flash is where one APPEARS. Both have to outlive the panel the event
+       came from — that is the entire point — so neither can live in a panel. -->
+  <NoticeBridge {store} />
   <Toasts />
   <div class="workspace" class:in-space={!isDocked}>
     <!-- Every piece of always-on chrome gets its own boundary. These are mounted

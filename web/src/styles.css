@@ -3350,6 +3350,66 @@
     padding: 0.6rem 0.7rem;
   }
 
+  /* THE WINDOW'S OWN SCROLLBAR — dark and thin, like the dock panel's.
+   *
+   * ⚠ A WINDOW USED TO GET THE PLATFORM'S. The Station panel and the Overview
+   * styled theirs (`.stn-content`, `.spc-content`) and nothing else did, so any
+   * window whose panel overflowed drew a bright native bar with its stepper
+   * buttons down the middle of a near-black frame — the one piece of chrome in
+   * the app that was not the app's. It showed up first on Fleet companions
+   * because a roster plus a setup form is the tallest thing the desktop holds.
+   *
+   * ⚠ AND IT IS `.win-body`, NOT ONE PANEL. Every window shares this frame, so
+   * the fix belongs to the frame; styling the panel that happened to reveal it
+   * would leave the next long panel to find it again. The inner scrollers are
+   * named too — a wide table inside a window scrolls in its own box, and that
+   * box is as much part of the window as its edge is.
+   *
+   * The station tokens cannot be reused here: they are declared on
+   * `.stn-panel, .spc-panel` and do not exist outside those subtrees. These are
+   * the global palette's equivalents. */
+  .win-body,
+  .win-body .table-wrap,
+  .win-body .overflow-x-auto,
+  .win-body .overflow-y-auto {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) var(--color-panel-3);
+  }
+  .win-body::-webkit-scrollbar,
+  .win-body .table-wrap::-webkit-scrollbar,
+  .win-body .overflow-x-auto::-webkit-scrollbar,
+  .win-body .overflow-y-auto::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .win-body::-webkit-scrollbar-track,
+  .win-body .table-wrap::-webkit-scrollbar-track,
+  .win-body .overflow-x-auto::-webkit-scrollbar-track,
+  .win-body .overflow-y-auto::-webkit-scrollbar-track {
+    background: var(--color-panel-3);
+  }
+  .win-body::-webkit-scrollbar-thumb,
+  .win-body .table-wrap::-webkit-scrollbar-thumb,
+  .win-body .overflow-x-auto::-webkit-scrollbar-thumb,
+  .win-body .overflow-y-auto::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border: 2px solid var(--color-panel-3);
+  }
+  .win-body::-webkit-scrollbar-thumb:hover,
+  .win-body .table-wrap::-webkit-scrollbar-thumb:hover,
+  .win-body .overflow-x-auto::-webkit-scrollbar-thumb:hover,
+  .win-body .overflow-y-auto::-webkit-scrollbar-thumb:hover {
+    background: var(--color-accent-dim);
+  }
+  /* The little square where a vertical and a horizontal bar meet: left alone it
+   * is the platform's own light grey, which is the exact thing being removed. */
+  .win-body::-webkit-scrollbar-corner,
+  .win-body .table-wrap::-webkit-scrollbar-corner,
+  .win-body .overflow-x-auto::-webkit-scrollbar-corner,
+  .win-body .overflow-y-auto::-webkit-scrollbar-corner {
+    background: var(--color-panel-3);
+  }
+
   /* Resize affordances — the right / bottom edges and the SE corner. */
   .win-resize { position: absolute; touch-action: none; }
   .win-resize-e { top: 0; right: -3px; width: 7px; height: 100%; cursor: ew-resize; }
@@ -3913,33 +3973,45 @@
      * out of room, so there is no breakpoint to keep in step with it. */
   }
 
-  /* ============================================== notices: toasts + log (R80) --
-   * The transient half and the permanent half of one list. A toast is a recent
+  /* ============================================== notices: flash + log (R80) --
+   * The transient half and the permanent half of one list. A flash is a recent
    * notice that has not been dismissed; the log keeps every one.
    *
+   * ⚠ IT IS CENTRED, AND IT IS NOT IN THE MIDDLE. Horizontally centred, parked
+   * in the upper band at 16vh — in the line of sight without being in the line
+   * of fire, because dead centre is where the ship is and where a pilot clicks.
+   * The column is centred by `margin-inline: auto` inside a full-width fixed
+   * strip rather than by `translateX(-50%)`, so a flash that grows a second line
+   * does not have to be re-centred and nothing is ever composited on a half
+   * pixel.
+   *
    * ⚠ THE STACK NEVER EATS A CLICK. `pointer-events: none` on the container and
-   * `auto` on the toasts themselves, so the gaps between them — and everything
+   * `auto` on the flashes themselves, so the gaps between them — and everything
    * underneath — stay live. A pilot is usually mid-action when one of these
    * fires, and a notification that swallowed the click they were making would be
-   * worse than no notification.
+   * worse than no notification. Over the middle of the screen that stops being
+   * politeness and starts being the difference between a warning and a misfire.
    *
-   * Severity is a WORD on every toast and every log row; the colour repeats it
+   * Severity is a WORD on every flash and every log row; the colour repeats it
    * and never carries it alone. */
   .toasts {
     position: fixed;
-    top: calc(var(--char-bar-h) + 0.6rem);
-    right: 0.7rem;
+    top: max(calc(var(--char-bar-h) + 0.6rem), 16vh);
+    left: 0;
+    right: 0;
     z-index: 450;
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 0.4rem;
-    width: min(22rem, calc(100vw - 1.4rem));
+    padding-inline: 0.7rem;
     pointer-events: none;
   }
   .toast {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
+    width: min(26rem, 100%);
     padding: 0.5rem 0.55rem;
     background: color-mix(in srgb, var(--color-panel) 94%, transparent);
     -webkit-backdrop-filter: blur(10px);
@@ -3959,6 +4031,11 @@
     gap: 0.1rem;
     min-width: 0;
     flex: 1;
+    /* ⚠ CENTRED TEXT, WHICH A LIST WOULD NEVER GET. These are one or two
+       lines read at a glance and gone; a ragged left edge under a centred
+       column reads as misalignment rather than as text. The LOG, where the
+       same notices pile up and are scanned down, stays left-aligned. */
+    text-align: center;
   }
   .toast-kind {
     font-family: var(--font-display);
@@ -5568,14 +5645,6 @@
     color: var(--color-danger);
     margin: 0.3rem 0 0;
   }
-  /* A module winding down is NOT a failure, so it must not wear the danger
-   * colour: the click worked and the cycle is finishing. */
-  .rack-note {
-    font-size: 0.78rem;
-    color: var(--color-muted);
-    margin: 0.3rem 0 0;
-  }
-
   /* Placeholder affordance — dashed panel + a pill, so a stub never reads as a
    * finished panel that happens to be empty. */
   .placeholder-hint { color: var(--color-muted); margin: 0.4rem 0 0; }

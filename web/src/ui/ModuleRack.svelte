@@ -33,6 +33,7 @@
     rackSlotTitle,
     OVERLOAD_HOLD_MS,
   } from "./moduleRack.ts";
+  import { notify } from "./notices.ts";
   import { abbreviate } from "./fittingIcons.ts";
   import { resolvedName } from "../store/names.ts";
   import type { RackModule } from "./moduleRack.ts";
@@ -99,7 +100,6 @@
       return;
     }
     error = "";
-    windingDown = "";
     try {
       await flow.setWeaponBanks(linked);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -117,13 +117,6 @@
   let pendingItemID = $state<number | null>(null);
   /** The server's refusal for the LAST rack click, read from the authority slots. */
   let error = $state("");
-  /**
-   * A module told to stop that is still cycling. NOT an error: retail stops a
-   * module at the end of its current cycle, so the tile stays lit for a few
-   * seconds and the player deserves to know why rather than wondering whether
-   * the click registered.
-   */
-  let windingDown = $state("");
   /**
    * Redraw tick for the cycle sweep. DISPLAY ONLY — every value it feeds comes
    * from the SERVER's own cycle stamp, and nothing here advances past what the
@@ -301,7 +294,6 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
     try {
       await flow.setModuleOverload(module.itemID, !module.overloaded);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -321,7 +313,6 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
     try {
       await flow.repairModule(module.itemID);
       const refusal = $targeting.actionError ?? $targeting.silentDecline;
@@ -342,7 +333,6 @@
     }
     pendingItemID = module.itemID;
     error = "";
-    windingDown = "";
     try {
       if (action === "deactivate") {
         // typeID rides along so the BFF can name a prop mod's effect — an
@@ -364,8 +354,25 @@
         ($space.snapshot?.ship?.activeModuleIDs ?? []).includes(module.itemID)
       ) {
         // Told to stop, still cycling — retail stops at the end of the current
-        // cycle. Say so, or the still-lit tile reads as a click that did nothing.
-        windingDown = `${moduleName(module.typeID)} stops when its current cycle ends.`;
+        // cycle. Say so once, or the still-lit tile reads as a click that did
+        // nothing.
+        //
+        // ⚠ IT IS A FLASH NOW, NOT A LINE UNDER THE RACK. It used to be a
+        // paragraph nailed to the bottom of the HUD, which is on screen for the
+        // WHOLE SESSION — so a sentence about the next few seconds sat there
+        // looking like a standing condition, and it was read as one. Deriving
+        // it from the snapshot fixed when it stopped being TRUE and did nothing
+        // about where it lived. A sentence with a shelf life belongs in the
+        // notice system, which retires it on its own and keeps it in the log.
+        //
+        // The key is per module, so switching the same one off twice inside the
+        // dedupe window says it once and a different module still says it.
+        notify({
+          kind: "info",
+          title: moduleName(module.typeID),
+          detail: "Stops when its current cycle ends.",
+          key: `module-winding-down:${module.itemID}`,
+        });
       }
     } catch (cause) {
       error = `${moduleName(module.typeID)}: ${String(cause)}`;
@@ -656,9 +663,10 @@
     </div>
   {/if}
   {#if error}
+    <!-- ⚠ A REFUSAL STAYS HERE, ON THE CONTROL (R30). Only the winding-down
+         note moved to the centre flash: that is an acknowledgement with a shelf
+         life of one cycle, where this is the reason a button did nothing, and a
+         player needs that while they are still looking at the button. -->
     <p class="rack-error" role="alert">{error}</p>
-  {:else if windingDown}
-    <!-- A NOTE, not an alert: the module is doing exactly as it was told. -->
-    <p class="rack-note" aria-live="polite">{windingDown}</p>
   {/if}
 </div>

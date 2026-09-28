@@ -1,22 +1,34 @@
 <script lang="ts">
-  // THE TOAST STACK (goal R80) — what just happened, top right, briefly.
+  // THE FLASH (goal R80) — what just happened, across the middle of the screen,
+  // briefly. EVE's own centre-screen notification, in the place a pilot's eyes
+  // already are.
   //
-  // Mounted once by the workspace and fed by `notify()` from anywhere, so an
-  // event that happens inside a panel the player has CLOSED still reaches them.
-  // Every toast also lands in the log window permanently; a toast is just a
-  // recent notice that has not been dismissed.
+  // Mounted once by the workspace and fed by `notify()` from anywhere — in
+  // practice by NoticeBridge, which watches every store slice that records a
+  // refusal — so an event raised inside a panel the player has CLOSED still
+  // reaches them. Every flash also lands in the log window permanently; a flash
+  // is just a recent notice that has not been dismissed.
   //
-  // ⚠ IT DOES NOT STEAL FOCUS OR BLOCK ANYTHING. A pilot is usually mid-action
-  // when one of these fires. The stack is `pointer-events: none` except for the
-  // dismiss buttons themselves, so a toast can never swallow a click meant for
-  // the thing underneath it.
+  // ---------------------------------------------------------------------------
+  // ⚠ IT SITS ABOVE THE MIDDLE, NOT IN IT.
+  //
+  // Dead centre is where the ship is and where a pilot clicks. The column is
+  // centred horizontally and parked in the upper band, so it is in the line of
+  // sight without being in the line of fire — which is where EVE puts it too,
+  // and for the same reason.
+  //
+  // ⚠ IT DOES NOT STEAL FOCUS OR BLOCK ANYTHING. `pointer-events: none` on the
+  // stack and `auto` on the dismiss buttons alone, so the gaps between flashes —
+  // and everything underneath — stay live. A pilot is usually mid-action when
+  // one of these fires, and a notification that swallowed the click they were
+  // making would be worse than no notification.
   import { noticeBoard, visibleToasts, TOAST_MS } from "./notices.ts";
 
   const notices = noticeBoard.notices;
   const dismissed = noticeBoard.dismissed;
 
   /**
-   * A clock, so a toast retires on time.
+   * A clock, so a flash retires on time.
    *
    * ⚠ IT ONLY TICKS WHILE THERE IS SOMETHING TO RETIRE. An unconditional
    * interval would re-render this component every 500 ms for the entire session

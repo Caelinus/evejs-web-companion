@@ -175,7 +175,10 @@
   let view = $state<View>("ship");
   let query = $state("");
   let sort = $state<SortOrder>({ key: "name", dir: 1 });
-  let moveQty = $state("");
+  // ⚠ NUMBER, NOT TEXT. The Qty box is `<input type="number">` and Svelte binds
+  // one back as a number (null while it is empty), so typing this as a string
+  // was wrong about its own state and crashed the move that read it.
+  let moveQty = $state<number | null>(null);
   let busy = $state(false);
   let error = $state("");
   /** Which bays the player has folded away, by bay key. */
@@ -530,6 +533,9 @@
   function finishAction(): void {
     flow.clearSelection();
     selectionPlace = null;
+    // The amount goes with the selection it was typed for: leaving it behind
+    // silently splits the NEXT stack somebody ticks.
+    moveQty = null;
     pending = null;
     targetMenuOpen = false;
     menu = null;

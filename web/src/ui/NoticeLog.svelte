@@ -27,7 +27,16 @@
   }
 </script>
 
-<section class="notice-log">
+<!--
+  ⚠ `panel` IS LOAD-BEARING, NOT DECORATION. `.panel-head`'s negative inline
+  margin exists to bleed to the edges of a PADDED panel, and a windowed panel
+  has no padding — so the stylesheet cancels the bleed with
+  `.win-body > .panel > .panel-head`. Without `panel` on this section that rule
+  does not match, the head hangs 16px outside on each side, and the window
+  scrolls sideways (R8). Measured live at 5px, the moment this panel became
+  reachable at all.
+-->
+<section class="panel notice-log">
   <div class="panel-head">
     <h2>Log</h2>
     <span class="controls">
