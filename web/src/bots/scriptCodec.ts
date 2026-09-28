@@ -52,6 +52,7 @@ import {
   MAX_ITEM_LIST,
   MAX_ORE_LIST,
   MAX_TARGET_LIST,
+  MAX_TEXT_ARG_LEN,
   SCRIPT_FORMAT,
   SCRIPT_VERSION,
   conditionAllowedAt,
@@ -615,6 +616,19 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     // it, so the entity is validated against exactly those two (never "belt").
     const ref = readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label), ["station", "system"]);
     return { kind: "destination", ref };
+  }
+  if (expected === "system") {
+    // Systems ONLY — no widened set, so a station in this slot is refused rather
+    // than kept as a station the block could not fly to (see the `system` arg
+    // in botScript.ts).
+    const ref = readWorldRef(obj["ref"], "system", ctx, SAY.badArg(label));
+    return { kind: "system", ref };
+  }
+  if (expected === "text") {
+    // A blank name is a fixable draft problem (the validator lists it), not a
+    // refusal — min 0 keeps an in-progress save loadable.
+    const text = readText(obj["text"], { min: 0, max: MAX_TEXT_ARG_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+    return { kind: "text", text };
   }
   if (expected === "rockPick") {
     const pick = obj["pick"];
@@ -1273,6 +1287,10 @@ function orderArg(arg: Arg): unknown {
       return { kind: "character", charID: arg.charID, name: arg.name };
     case "destination":
       return { kind: "destination", ref: orderRef(arg.ref) };
+    case "system":
+      return { kind: "system", ref: orderRef(arg.ref) };
+    case "text":
+      return { kind: "text", text: arg.text };
     case "rockPick":
       return { kind: "rockPick", pick: arg.pick };
     case "oreList":

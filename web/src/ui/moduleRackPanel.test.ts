@@ -260,6 +260,66 @@ test("the slot ring is a drawn CIRCLE, not a rounded corner (R53)", () => {
   assert.match(slotRule, /background: none;/, "the tile got its fill back");
 });
 
+test("⚠ AN ACTIVE MODULE LIGHTS THE RING, NOT THE WHOLE SQUARE", () => {
+  // FOUND BY EYE, on a rack with three guns up: every cycling module was a
+  // filled accent-blue SQUARE with its ring lost inside it.
+  //
+  // The tile is a real <button> and it carries `class:active`, which is also
+  // this app's GLOBAL nav-tab selected state — an accent gradient across the
+  // whole box. `button.active` (0,1,1) beats `.module-slot`'s own
+  // `background: none` (0,1,0), so the square the rack deliberately took off
+  // came back on the one state where the circle is the instrument.
+  //
+  // The cancellation has to name the button, or it loses the same way.
+  const at = CSS_SOURCE.indexOf("  button.module-slot.active {");
+  assert.ok(at > 0, "the active tile no longer cancels the global button chrome");
+  const rule = CSS_SOURCE.slice(at, CSS_SOURCE.indexOf("\n  }", at));
+  assert.match(rule, /background: none;/, "an active slot paints its box again");
+  assert.match(rule, /border: none;/, "an active slot got its border back");
+  // `button.active` sets colour and weight too, and the fallback abbreviation
+  // renders in them — cancelling only the fill leaves the ink wrong.
+  assert.match(rule, /color: var\(--color-muted\);/);
+  assert.match(rule, /font-weight: 700;/);
+  // And it must still come AFTER the global rule, or specificity is moot.
+  assert.ok(
+    at > CSS_SOURCE.indexOf("  button.active {"),
+    "the cancellation is above the rule it cancels",
+  );
+});
+
+test("⚠ THE CYCLE SWEEP CANNOT OUTLIVE THE CYCLE — it follows the snapshot", () => {
+  // FOUND LIVE: a module that had finished stayed marked as running.
+  //
+  // The sweep is drawn from `targeting.moduleCycles`, and that record only ends
+  // on an `OnGodmaShipEffect` frame with isStart=0. Miss one — a feed reconnect,
+  // a cycle the server ends without saying — and `startedAtMs` stays set; a
+  // non-repeating cycle then CLAMPS at 100% (moduleRack.test.ts pins that, and
+  // it is right: the question "where in the cycle" has no other answer). So the
+  // tile kept a full accent disc over its icon on an idle module.
+  //
+  // The fix is not to make the arithmetic lie — it is to ask the same authority
+  // the glow asks. `active` is the snapshot's own activeModuleIDs.
+  assert.match(
+    RACK_SOURCE,
+    /\{#if slot\.module\.active && cycleOf\(slot\.module\.itemID\) !== null\}/,
+    "the sweep is drawn from the cycle record alone again",
+  );
+});
+
+test("⚠ the 10Hz redraw is for modules that are RUNNING, not ones we have a duration for", () => {
+  // `moduleCycles` also holds BASE durations (attribute 73), learnt from the fit
+  // and never removed. Keyed off that, the rack re-rendered ten times a second
+  // for the rest of the session — docked, drifting, everything off — which is
+  // exactly the idle cost its own comment warns about.
+  assert.match(RACK_SOURCE, /const anyCycling = \$derived\(/);
+  assert.match(RACK_SOURCE, /slot\.module\?\.active === true/, "the tick lost the snapshot");
+  assert.doesNotMatch(
+    RACK_SOURCE,
+    /const anyCycling = \$derived\(Object\.keys/,
+    "the tick is keyed off the cycle record again",
+  );
+});
+
 // --- rack heat: a stub that admits it ----------------------------------------
 
 test("⚠ the heat bar says NOT KNOWN, and is never filled from damage", () => {

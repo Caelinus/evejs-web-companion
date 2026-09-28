@@ -30,6 +30,7 @@
     type SubBotNode,
     type WorldRef,
     MAX_ISK_ARG,
+    MAX_TEXT_ARG_LEN,
     MAX_ITEM_LIST,
     type ItemMatchArg,
     MAX_ORE_LIST,
@@ -50,6 +51,7 @@
     CONDITION_FRACTION_BOUNDS,
     CONDITION_NOUN_LABEL,
     CONDITION_UNTIL_LABEL,
+    textPlaceholder,
     PLACE_OPTIONS,
     RESPONSE_OPTIONS,
     UNTIL_CONDITION_KINDS,
@@ -129,6 +131,10 @@
     if (arg === undefined) return "";
     return arg.kind === "count" || arg.kind === "isk" || arg.kind === "qty" ? arg.value : "";
   }
+  function textValue(step: MacroStep, key: string): string {
+    const arg = argOf(step, key);
+    return arg !== undefined && arg.kind === "text" ? arg.text : "";
+  }
   function itemTypeValue(step: MacroStep, key: string): string {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "itemType" && arg.typeID !== null ? String(arg.typeID) : "";
@@ -137,12 +143,17 @@
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "place" ? arg.place : "";
   }
-  /** The world ref a station-shaped or destination-shaped argument points at. */
-  function worldRefValue(step: MacroStep, key: string): WorldRef {
+  /** The world ref a station-, destination- or system-shaped argument points at. */
+  function worldRefValue(step: MacroStep, key: string, kind: Arg["kind"]): WorldRef {
     const arg = argOf(step, key);
-    if (arg !== undefined && arg.kind === "station") return arg.ref;
-    if (arg !== undefined && arg.kind === "destination") return arg.ref;
-    return { entity: "station", id: null, name: null, systemName: null };
+    if (arg !== undefined && (arg.kind === "station" || arg.kind === "destination" || arg.kind === "system")) {
+      return arg.ref;
+    }
+    // The EMPTY ref has to carry the slot's own entity: a systems-only slot
+    // handed an "unbound station" is a shape its codec refuses to save.
+    return kind === "system"
+      ? { entity: "system", id: null, name: null, systemName: null }
+      : { entity: "station", id: null, name: null, systemName: null };
   }
   function beltChosenID(step: MacroStep, key: string): number | null {
     const arg = argOf(step, key);
@@ -370,7 +381,14 @@
     onArg(key, raw === "call" || raw === "follow" ? { kind: "squadRole", role: raw } : undefined);
   }
   function setWorldRef(arg: ArgDescriptor, ref: WorldRef): void {
-    onArg(arg.key, arg.kind === "destination" ? { kind: "destination", ref } : { kind: "station", ref });
+    onArg(
+      arg.key,
+      arg.kind === "destination"
+        ? { kind: "destination", ref }
+        : arg.kind === "system"
+          ? { kind: "system", ref }
+          : { kind: "station", ref },
+    );
   }
 
   // ── The ore priority list: search, add, reorder, remove ─────────────────────
@@ -551,18 +569,18 @@
      `ARG_KIND_WIDGET`, a `Record` over every `Arg["kind"]`, so a new argument
      kind is a compile error in `editorOptions.ts` before it can ever arrive
      here with no control to draw. That is the whole point of this switch: it
-     is the last hand-written thing, and it is written once for all 49 macros. -->
+     is the last hand-written thing, and it is written once for all 50 macros. -->
 {#snippet argField(step: MacroStep, arg: ArgDescriptor)}
   {@const fieldId = `arg-${step.id}-${arg.key}`}
   {@const bounds = argBounds(step.macro, arg)}
-  {#if arg.widget === "station-picker" || arg.widget === "destination-picker"}
+  {#if arg.widget === "station-picker" || arg.widget === "destination-picker" || arg.widget === "system-picker"}
     <div class="inspector-field">
       <span class="inspector-label">{arg.label}</span>
       <StationPicker
         {flow}
-        value={worldRefValue(step, arg.key)}
+        value={worldRefValue(step, arg.key, arg.kind)}
         current={currentStation}
-        allowSystems={arg.widget === "destination-picker"}
+        scope={arg.widget === "destination-picker" ? "any" : arg.widget === "system-picker" ? "system" : "station"}
         onPick={(ref) => setWorldRef(arg, ref)}
       />
     </div>
@@ -848,6 +866,15 @@
           placeholder="any corporation"
           value={corpValue(step, arg.key)}
           oninput={(e) => setCorp(arg.key, e.currentTarget.value)}
+        />
+      {:else if arg.widget === "text-input"}
+        <input
+          id={fieldId}
+          type="text"
+          maxlength={MAX_TEXT_ARG_LEN}
+          placeholder={textPlaceholder(arg.key)}
+          value={textValue(step, arg.key)}
+          oninput={(e) => onArg(arg.key, { kind: "text", text: e.currentTarget.value.slice(0, MAX_TEXT_ARG_LEN) })}
         />
       {:else}
         <!-- count / isk / qty. The range is SHOWN, not merely enforced: a bound

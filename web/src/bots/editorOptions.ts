@@ -61,12 +61,14 @@ export type WidgetKind =
   | "qty-input"
   | "character-picker"
   | "destination-picker"
+  | "system-picker"
   | "rock-pick-select"
   | "ore-list-picker"
   | "target-list-picker"
   | "squad-role-select"
   | "bay-list-picker"
-  | "item-list-picker";
+  | "item-list-picker"
+  | "text-input";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
@@ -84,12 +86,14 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   qty: "qty-input",
   character: "character-picker",
   destination: "destination-picker",
+  system: "system-picker",
   rockPick: "rock-pick-select",
   oreList: "ore-list-picker",
   targetList: "target-list-picker",
   squadRole: "squad-role-select",
   bayList: "bay-list-picker",
   itemList: "item-list-picker",
+  text: "text-input",
 };
 
 /** A plain-language name for an argument KIND — used when no per-macro label fits. */
@@ -108,12 +112,14 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   qty: "Quantity",
   character: "Pilot",
   destination: "Destination",
+  system: "Solar system",
   rockPick: "Which rock first",
   oreList: "Ore priority",
   targetList: "Target priority",
   squadRole: "Fleet fire",
   bayList: "Leave alone",
   itemList: "Keep aboard",
+  text: "Text",
 };
 
 /**
@@ -146,8 +152,24 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   who: "Pilot",
   range: "Scanner reach (AU)",
   destination: "Destination",
+  system: "Solar system",
+  fleetName: "Fleet name",
   pick: "Which rock first",
 };
+
+/**
+ * What an empty TEXT box invites the player to type, keyed by argument. The
+ * key, not the kind, decides - same reason `ARG_KEY_LABEL` exists above - so a
+ * second text argument gets its own invitation instead of borrowing this one.
+ */
+const TEXT_ARG_PLACEHOLDER: Readonly<Record<string, string>> = {
+  fleetName: "the fleet's name, as it appears in the fleet finder",
+};
+
+/** The invitation for one text box; a plain one for a key with no entry. */
+export function textPlaceholder(key: string): string {
+  return TEXT_ARG_PLACEHOLDER[key] ?? "type it here";
+}
 
 function argLabel(arg: MacroArgSpec): string {
   return ARG_KEY_LABEL[arg.key] ?? ARG_KIND_LABEL[arg.kind];
@@ -193,7 +215,7 @@ export interface MacroArgDescriptors {
    * The FORMAT allows an `until` on any step (`scriptCodec.ts` reads one
    * wherever a step is read), so this is a UI judgement, not a format fact:
    * offering "Leave the station until your wallet rises above 10m ISK" on all
-   * 49 macros would put a control nobody wants on almost every step. It is
+   * 51 macros would put a control nobody wants on almost every step. It is
    * offered where the macro cannot end on its own (`untilRequired`) and on
    * `wait`, whose own spec names "wait until shields are back above X" as the
    * intended combination. A step that ALREADY carries an `until` — from an
@@ -458,6 +480,10 @@ export function conditionUsesIsk(kind: ConditionKind): boolean {
  */
 export const RESPONSE_LABEL: Readonly<Record<InterruptResponse, string>> = {
   "dock-and-pause": "Dock at home and stop",
+  // The one response that goes home WITHOUT ending the run: the station stay is
+  // the repair (docking brings the shields and capacitor back, the shop fixes
+  // the armor and hull), and then the bot undocks and picks its program back up.
+  "dock-and-repair": "Dock at home, repair, then carry on",
   // A bot never comes to rest in space, so this stops FROM A STATION: in space
   // it flies home first and then stops, and docked it stops on the spot.
   pause: "Stop and wait, from a station",

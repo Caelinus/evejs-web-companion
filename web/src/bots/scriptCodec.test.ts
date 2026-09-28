@@ -171,7 +171,19 @@ function everyArgKind(): BotScript {
         args: { destination: { kind: "destination", ref: { entity: "system", id: 30000142, name: "Jita", systemName: null } } },
       },
       {
-        id: "a9",
+        id: "a12",
+        kind: "macro",
+        macro: "travel-to-system",
+        args: { system: { kind: "system", ref: { entity: "system", id: 30000144, name: "Far Away", systemName: null } } },
+      },
+      {
+        id: "a13",
+        kind: "macro",
+        macro: "join-advertised-fleet",
+        args: { fleetName: { kind: "text", text: "Mining Op" } },
+      },
+      {
+        id: "a11",
         kind: "macro",
         macro: "mine-at-belt",
         args: {
@@ -203,6 +215,58 @@ test("a SYSTEM destination keeps its own entity; a belt in that slot is refused"
   withBelt["program"] = program;
   const refused = decodeScriptValue(withBelt);
   assert.equal(refused.ok, false, "a belt is not somewhere the autopilot can be sent");
+});
+
+test("a travel-to-system slot takes SYSTEMS ONLY — a station in it is refused", () => {
+  // The narrower twin of the destination slot above. This block has no way to
+  // dock, so a station here would be a trip it could never make; the codec is
+  // where that is settled, because only the codec sees a hand-edited file.
+  const doc = everyArgKind();
+  const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+  const trip = round.program.find((n) => n.kind === "macro" && n.macro === "travel-to-system");
+  assert.ok(trip !== undefined && trip.kind === "macro");
+  const arg = trip.args["system"];
+  assert.ok(arg !== undefined && arg.kind === "system");
+  assert.equal(arg.ref.entity, "system");
+  assert.equal(arg.ref.id, 30000144);
+
+  for (const entity of ["station", "belt", "agent"] as const) {
+    const edited = JSON.parse(encodeScriptDoc(doc)) as Record<string, unknown>;
+    const program = structuredClone(edited["program"]) as Record<string, unknown>[];
+    const node = program.find((n) => n["macro"] === "travel-to-system") as Record<string, unknown>;
+    node["args"] = { system: { kind: "system", ref: { entity, id: 60000004, name: "Somewhere", systemName: null } } };
+    edited["program"] = program;
+    assert.equal(decodeScriptValue(edited).ok, false, `a ${entity} is not a solar system`);
+  }
+});
+
+test("a fleet name round-trips verbatim, and never carries a newline through", () => {
+  // The name is matched against a live advert at run time, so every character of
+  // it matters: a codec that quietly trimmed or case-folded here would make the
+  // saved script and the block disagree about what it is looking for.
+  const doc = everyArgKind();
+  const round = mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc;
+  const join = round.program.find((n) => n.kind === "macro" && n.macro === "join-advertised-fleet");
+  assert.ok(join !== undefined && join.kind === "macro");
+  const arg = join.args["fleetName"];
+  assert.ok(arg !== undefined && arg.kind === "text");
+  assert.equal(arg.text, "Mining Op");
+
+  // A hand-edited file cannot smuggle a line break into a fleet name.
+  const edited = JSON.parse(encodeScriptDoc(doc)) as Record<string, unknown>;
+  const program = structuredClone(edited["program"]) as Record<string, unknown>[];
+  const node = program.find((n) => n["macro"] === "join-advertised-fleet") as Record<string, unknown>;
+  const NEWLINE = String.fromCharCode(10);
+  node["args"] = { fleetName: { kind: "text", text: `Mining${NEWLINE}Op` } };
+  edited["program"] = program;
+  const decoded = decodeScriptValue(edited);
+  if (decoded.ok) {
+    const step = decoded.doc.program.find((n) => n.kind === "macro" && n.macro === "join-advertised-fleet");
+    assert.ok(step !== undefined && step.kind === "macro");
+    const cleaned = step.args["fleetName"];
+    assert.ok(cleaned !== undefined && cleaned.kind === "text");
+    assert.ok(!cleaned.text.includes(NEWLINE), "a newline must not survive into a fleet name");
+  }
 });
 
 test("the current watch kinds round-trip", () => {

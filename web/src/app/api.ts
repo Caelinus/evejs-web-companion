@@ -10,6 +10,7 @@ import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
+import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
 import {
   decodeCharCreationTables,
   type CharCreationTables,
@@ -1235,6 +1236,42 @@ export async function acceptFleetInvite(
     { fleetID, confirm: true },
     options,
   );
+}
+
+/**
+ * The fleet-finder reads: the listing of adverts open to THIS session, plus the
+ * session's own advert. Decode with bridge/fleetAds.
+ *
+ * The listing is filtered server-side (`isAdvertOpenToSession`), so it can only
+ * ever show fleets this character was eligible to join in the first place.
+ */
+export async function loadFleetAds(options: ApiOptions = {}): Promise<Record<string, JsonValue>> {
+  return getJson("/api/bridge/fleet-ads", options);
+}
+
+/**
+ * APPLY to an advertised fleet found in the finder. Confirm-gated.
+ *
+ * ⚠ AN APPLY DOES NOT JOIN YOU. On an open advert the server mints a fleet
+ * INVITE and notifies you; membership happens only when the client accepts it.
+ * That is the designed round trip, and the returned outcome says which half you
+ * are in — so callers MUST act on it rather than waiting for membership that
+ * will never arrive on its own.
+ *
+ * `autoAccept` is an instruction carried on the minted invite ("accept without
+ * prompting the player"), which a client is expected to honour; it is not a
+ * server-side auto-join, and passing it does not remove the accept step.
+ */
+export async function applyToJoinFleet(
+  fleetID: number,
+  options: ApiOptions = {},
+): Promise<FleetApplyOutcome> {
+  const ack = await postJson(
+    "/api/bridge/fleet/apply",
+    { fleetID, autoAccept: true, confirm: true },
+    options,
+  );
+  return decodeFleetApplyOutcome(ack);
 }
 
 /** LEAVE the session character's current fleet. Confirm-gated. */

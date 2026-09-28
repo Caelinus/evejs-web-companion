@@ -133,7 +133,14 @@
    * rack quietly re-rendering ten times a second forever to draw no change is
    * exactly the kind of idle cost that never shows up in a profile anyone runs.
    */
-  const anyCycling = $derived(Object.keys($targeting.moduleCycles).length > 0);
+  // ⚠ IT IS THE SNAPSHOT'S ACTIVE SET, NOT THE CYCLE RECORD. `moduleCycles`
+  // also holds BASE durations (attribute 73), which are learnt from the fit and
+  // never removed — so this read true from the first fit load onwards, docked
+  // ship included, and the rack redrew ten times a second forever to draw no
+  // change. That is precisely the idle cost the note above warns about.
+  const anyCycling = $derived(
+    rows.some((row) => row.slots.some((slot) => slot.module?.active === true)),
+  );
   let nowMs = $state(Date.now());
   $effect(() => {
     const period = anyCycling ? 100 : 1000;
@@ -580,7 +587,19 @@
                   {/if}
                 </svg>
                 <TypeIcon typeID={slot.module.typeID} name={nm} size="sm" fallbackText={abbreviate(nm)} />
-                {#if cycleOf(slot.module.itemID) !== null}
+                <!--
+                  ⚠ GATED ON `active`, WHICH IS THE SNAPSHOT'S ANSWER — the
+                  same authority the glow already answers to. The sweep used to
+                  be drawn from `moduleCycles` alone, and that record only ever
+                  ENDS on an `OnGodmaShipEffect` frame with isStart=0. A frame
+                  that never arrives (a feed reconnect, a cycle the server ends
+                  without saying) leaves `startedAtMs` set forever, and a
+                  non-repeating cycle clamps at 100% — so the tile kept a full
+                  accent disc over its icon on a module that had finished. That
+                  is the strongest 'still running' mark the rack draws, made
+                  from a claim nothing was standing behind any more.
+                -->
+                {#if slot.module.active && cycleOf(slot.module.itemID) !== null}
                   <!--
                     The cycle sweep — a radial wipe over the module's own icon,
                     the way the retail client draws it. Only drawn when the

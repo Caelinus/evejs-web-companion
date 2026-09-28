@@ -19,7 +19,7 @@
     value,
     current,
     onPick,
-    allowSystems = false,
+    scope = "station",
   }: {
     flow: AppFlow;
     value: WorldRef;
@@ -27,15 +27,20 @@
     current: { id: number; name: string } | null;
     onPick: (ref: WorldRef) => void;
     /**
-     * Widen the picker to SOLAR SYSTEMS as well as stations — for a destination
-     * slot, where the autopilot can be pointed at a system and arrive in space.
+     * WHAT THIS SLOT MAY HOLD, which is not the same question for every block:
+     *   • "station" — stations alone (the default, and what a dock slot means).
+     *   • "any"     — a station OR a solar system, for a destination slot where
+     *                 the autopilot can be pointed at either.
+     *   • "system"  — solar systems alone, for a block that has no way to dock.
      * The picked ref keeps the entity the match REALLY was, so a system id is
-     * never stored as a station. With systems allowed the station-only runtime
-     * bindings (the starting station, the mission board slots) are not offered:
-     * they name stations by definition.
+     * never stored as a station. Anything but "station" hides the station-only
+     * runtime bindings (the starting station, the mission board slots): they
+     * name stations by definition.
      */
-    allowSystems?: boolean;
+    scope?: "station" | "any" | "system";
   } = $props();
+
+  const stationsAllowed = $derived(scope !== "system");
 
   let query = $state("");
   let results = $state<DestinationMatch[]>([]);
@@ -51,9 +56,14 @@
     searching = true;
     error = null;
     try {
-      results = await flow.searchDestinations(q, allowSystems ? null : "station");
+      results = await flow.searchDestinations(q, scope === "any" ? null : scope);
       if (results.length === 0) {
-        error = allowSystems ? "No station or system matched that name." : "No stations matched that name.";
+        error =
+          scope === "any"
+            ? "No station or system matched that name."
+            : scope === "system"
+              ? "No systems matched that name."
+              : "No stations matched that name.";
       }
     } catch {
       error = "Could not search just now — try again.";
@@ -88,7 +98,13 @@
     onPick(boardSlotStation(slot));
   }
   function clearChoice(): void {
-    onPick({ entity: "station", id: null, name: null, systemName: null });
+    // Clear back to the entity this slot IS: a systems-only slot holding an
+    // empty "station" ref would be a shape its own codec refuses to save.
+    onPick(
+      scope === "system"
+        ? { entity: "system", id: null, name: null, systemName: null }
+        : { entity: "station", id: null, name: null, systemName: null },
+    );
   }
 </script>
 
@@ -101,29 +117,33 @@
     <button onclick={clearChoice}>Change</button>
   {:else if value.id !== null}
     <span class="picked">
-      {value.name ?? (value.entity === "system" ? "A system" : "A station")}{#if value.systemName} · {value.systemName}{/if}
-      {#if value.entity === "system"}<span class="kindtag">system</span>{/if}
+      {value.name ?? (value.entity === "system" ? "A system" : "A station")}{#if value.systemName && value.systemName !== value.name} · {value.systemName}{/if}
+      {#if value.entity === "system" && stationsAllowed}<span class="kindtag">system</span>{/if}
     </span>
     <button onclick={clearChoice}>Change</button>
   {:else}
-    {#if !allowSystems}
+    {#if scope === "station"}
       <button class="primary" onclick={chooseStarting}>Starting station</button>
     {/if}
     <input
       class="q"
-      placeholder={allowSystems ? "search a station or system by name" : "…or search a station by name"}
+      placeholder={scope === "any"
+        ? "search a station or system by name"
+        : scope === "system"
+          ? "search a solar system by name"
+          : "…or search a station by name"}
       bind:value={query}
       onkeydown={(e) => {
         if (e.key === "Enter") search();
       }}
     />
     <button onclick={search} disabled={searching}>{searching ? "Searching…" : "Search"}</button>
-    {#if current !== null}
+    {#if current !== null && stationsAllowed}
       <button onclick={chooseCurrent}>Use current station</button>
     {/if}
     <!-- Runtime bindings: follow whatever an earlier block found, instead of a
          station pinned now. Station-only, so not offered on a destination slot. -->
-    {#if !allowSystems}
+    {#if scope === "station"}
       {#each BOARD_SLOTS as slot (slot)}
         <button onclick={() => chooseSlot(slot)}>{boardSlotPhrase(slot)}</button>
       {/each}
@@ -135,7 +155,7 @@
           <li>
             <button class="result" onclick={() => choose(match)}>
               {match.name}{#if match.solarSystemName} · {match.solarSystemName}{/if}{#if match.jumps !== null}
-                ({match.jumps} jump{match.jumps === 1 ? "" : "s"}){/if}{#if allowSystems && match.kind === "system"}
+                ({match.jumps} jump{match.jumps === 1 ? "" : "s"}){/if}{#if scope === "any" && match.kind === "system"}
                 <span class="kindtag">system</span>{/if}
             </button>
           </li>

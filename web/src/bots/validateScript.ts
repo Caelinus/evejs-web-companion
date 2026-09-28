@@ -59,7 +59,9 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   who: "a pilot to invite",
   channel: "a channel to talk in",
   message: "a message to send",
+  fleetName: "a fleet name to look for",
   destination: "somewhere to go",
+  system: "a solar system to go to",
   fitting: "a fitting to switch to",
   bookmark: "a saved bookmark to warp to",
   from: "where to move items from",
@@ -73,7 +75,9 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   if (script.name.trim().length === 0) {
     problems.push(blocking("name", "Give your bot a name."));
   }
-  const someWatchDocks = script.interrupts.some((row) => row.respond === "dock-and-pause");
+  const someWatchDocks = script.interrupts.some(
+    (row) => row.respond === "dock-and-pause" || row.respond === "dock-and-repair",
+  );
   if (
     someWatchDocks &&
     script.home.id === null &&
@@ -198,8 +202,15 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
         ),
       );
     }
+    if (arg.kind === "text" && arg.text.trim().length === 0) {
+      // The fleet-finder step's fleet name is its whole argument.
+      problems.push(blocking(step.id, "Type the name of the fleet to look for in the fleet finder."));
+    }
     if (arg.kind === "destination" && arg.ref.id === null) {
       problems.push(blocking(step.id, "Pick where this step sets the destination to."));
+    }
+    if (arg.kind === "system" && arg.ref.id === null) {
+      problems.push(blocking(step.id, "Pick the solar system for this step."));
     }
   }
 

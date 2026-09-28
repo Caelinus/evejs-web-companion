@@ -199,6 +199,13 @@ export const MAX_ISK_ARG = 100_000_000_000;
 export const MIN_QTY_ARG = 1;
 export const MAX_QTY_ARG = 10_000_000;
 
+/**
+ * A short free-text argument a player writes (a fleet name). One line, capped
+ * well under the document byte ceiling; the codec strips control characters the
+ * same way it does for names.
+ */
+export const MAX_TEXT_ARG_LEN = 200;
+
 export type Arg =
   | { readonly kind: "belt"; readonly belt: BeltArg }
   | { readonly kind: "station"; readonly ref: WorldRef }
@@ -236,8 +243,20 @@ export type Arg =
    * must never be swapped by a hand-edited file.
    */
   | { readonly kind: "destination"; readonly ref: WorldRef }
+  /**
+   * A SOLAR SYSTEM and nothing else — where `travel-to-system` goes. Kept apart
+   * from `destination` (which is a station OR a system) because a block that
+   * only ever means a system must not be able to hold a station: the picker for
+   * this kind searches systems alone, and the codec refuses any other entity, so
+   * "fly to a system" cannot quietly become "fly to a station and dock" through
+   * a hand-edited file.
+   */
+  | { readonly kind: "system"; readonly ref: WorldRef }
   /** Which rock a mining step reaches for first. */
   | { readonly kind: "rockPick"; readonly pick: RockPick }
+  /** A short line of text the player writes (a fleet name). Never empty at run
+   * time — the validator flags a blank one before the bot can start. */
+  | { readonly kind: "text"; readonly text: string }
   /** An ORDERED ore priority list for the mine block (first = most wanted).
    * Empty or absent = any rock, the shipped behaviour. */
   | { readonly kind: "oreList"; readonly ores: readonly OreFamilyArg[] }
@@ -471,6 +490,26 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
  *                        "dock-and-pause"; docked, it stops on the spot.
  *   • "dock-and-pause" — break off, dock at home, pause (the safety-floor
  *                        response, and the hostile "run for the station" pick).
+ *   • "dock-and-repair"— break off, dock at home, PATCH THE SHIP UP, and then
+ *                        CARRY ON from where the program left off. The one
+ *                        response that flies the ship home without ending the
+ *                        run: it is "go and lick your wounds", not "stop".
+ *
+ *                        The stay is the repair. Docking restores the shields
+ *                        and the capacitor, and the station's repair shop fixes
+ *                        the two layers that do NOT come back on their own
+ *                        (armor and hull) — the same shop, through the same
+ *                        block, that a Repair-ship step uses. Then it undocks
+ *                        (only if the watch fired out in space; a watch that
+ *                        fired in station leaves it docked) and the program
+ *                        resumes at the very step it was interrupted on.
+ *
+ *                        ⚠ IT IS TRIP-CAPPED. A response that goes home and
+ *                        comes back is a loop, and a loop whose condition the
+ *                        trip never fixes is a bot flying laps: after a few
+ *                        round trips with the watched reading still bad, it
+ *                        stops from the station like any other watch instead of
+ *                        commuting forever (nav/scriptDecide `MAX_RECOVER_TRIPS`).
  *   • "launch-drones"  — put drones out and KEEP WORKING (the hostile "use
  *                        drones" pick). Bounded by the existing three-attempt
  *                        launch rule, which heads home if it cannot.
@@ -525,6 +564,7 @@ export function conditionAllowedAt(kind: ConditionKind, site: ConditionSite): bo
 export type InterruptResponse =
   | "pause"
   | "dock-and-pause"
+  | "dock-and-repair"
   | "launch-drones"
   | "fight-back"
   | "repair"
@@ -534,6 +574,7 @@ export type InterruptResponse =
 export const INTERRUPT_RESPONSES: readonly InterruptResponse[] = Object.freeze<InterruptResponse[]>([
   "pause",
   "dock-and-pause",
+  "dock-and-repair",
   "launch-drones",
   "fight-back",
   "repair",
@@ -578,6 +619,7 @@ export interface InterruptRow {
 export type MacroID =
   | "undock"
   | "travel-to-station"
+  | "travel-to-system"
   | "travel-to-belt"
   | "mine-at-belt"
   | "deliver-ore"
@@ -615,6 +657,7 @@ export type MacroID =
   | "create-fleet"
   | "invite-to-fleet"
   | "join-fleet"
+  | "join-advertised-fleet"
   // ── Movement extras. Point the autopilot somewhere; run for the nearest dock.
   | "set-destination"
   | "dock-at-nearest"
@@ -635,6 +678,7 @@ export type MacroID =
 export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "undock",
   "travel-to-station",
+  "travel-to-system",
   "travel-to-belt",
   "mine-at-belt",
   "deliver-ore",
@@ -669,6 +713,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "create-fleet",
   "invite-to-fleet",
   "join-fleet",
+  "join-advertised-fleet",
   "set-destination",
   "dock-at-nearest",
   "remote-cap",
@@ -776,7 +821,8 @@ export type ProgramNode = MacroStep | LoopBlock | BranchBlock | SubBotNode;
  * A whole player bot, as saved / imported / exported.
  *
  * `home` is required — every bot names the station it docks at when a
- * dock-and-pause response fires, so the safety floor always has somewhere to go.
+ * dock-and-pause (or dock-and-repair) response fires, so the safety floor always
+ * has somewhere to go.
  * `interrupts` is ordered and first-match-wins each tick, before any step. The
  * program runs once top to bottom; "go again" is an explicit outer loop block.
  */

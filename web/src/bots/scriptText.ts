@@ -68,6 +68,8 @@ export function macroName(macro: MacroID): string {
       return "Leave the station";
     case "travel-to-station":
       return "Fly to a station and dock";
+    case "travel-to-system":
+      return "Fly to a solar system";
     case "travel-to-belt":
       return "Fly to a belt";
     case "mine-at-belt":
@@ -136,6 +138,8 @@ export function macroName(macro: MacroID): string {
       return "Invite a pilot to your fleet";
     case "join-fleet":
       return "Join a fleet";
+    case "join-advertised-fleet":
+      return "Join a fleet from the fleet finder";
     case "set-destination":
       return "Set the destination and fly";
     case "dock-at-nearest":
@@ -281,6 +285,8 @@ export function responseSentence(response: InterruptResponse): string {
       return "get to a station and stop";
     case "dock-and-pause":
       return "dock at home and stop";
+    case "dock-and-repair":
+      return "dock at home, repair, and carry on";
     case "launch-drones":
       return "send out drones and keep going";
     case "fight-back":
@@ -397,6 +403,14 @@ function macroPhrase(step: MacroStep): string {
           ? worldRefPhrase(station.ref, "station")
           : "a station you pick";
       return `Fly to ${where} and dock`;
+    }
+    case "travel-to-system": {
+      const system = step.args["system"];
+      const where =
+        system !== undefined && system.kind === "system"
+          ? worldRefPhrase(system.ref, "system")
+          : "a system you pick";
+      return `Fly to ${where} and wait until you are there`;
     }
     case "travel-to-belt": {
       const belt = step.args["belt"];
@@ -556,6 +570,13 @@ function macroPhrase(step: MacroStep): string {
     }
     case "join-fleet":
       return "Accept a fleet invitation when one arrives";
+    case "join-advertised-fleet": {
+      const named = step.args["fleetName"];
+      const name = named !== undefined && named.kind === "text" ? named.text.trim() : "";
+      return name.length > 0
+        ? `Join the fleet "${name}" if it is in the fleet finder`
+        : "Join a fleet you name if it is in the fleet finder";
+    }
     case "set-destination": {
       const dest = step.args["destination"];
       const where =

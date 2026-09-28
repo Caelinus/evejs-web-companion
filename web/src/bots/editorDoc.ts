@@ -277,6 +277,21 @@ export function newStepFor(macro: MacroID, makeId: IdGen): MacroStep {
   if (macro === "invite-to-fleet") {
     return { id, kind: "macro", macro, args: { who: { kind: "character", charID: null, name: null } } };
   }
+  if (macro === "join-advertised-fleet") {
+    // Empty on purpose: only the player knows what the fleet will be called, and
+    // the validator asks for a name before the bot can start.
+    return { id, kind: "macro", macro, args: { fleetName: { kind: "text", text: "" } } };
+  }
+  if (macro === "travel-to-system") {
+    // Unbound for the same reason set-destination is: there is no sensible
+    // default system, and the validator asks for one before the bot can start.
+    return {
+      id,
+      kind: "macro",
+      macro,
+      args: { system: { kind: "system", ref: { entity: "system", id: null, name: null, systemName: null } } },
+    };
+  }
   if (macro === "set-destination") {
     // Unbound on purpose: there is no sensible default place to fly to, and the
     // validator asks for one before the bot can start.

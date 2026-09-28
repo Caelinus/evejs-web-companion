@@ -16,7 +16,7 @@ import type {
   MacroTick,
   ScriptBoard,
 } from "./scriptDecide.ts";
-import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
+import type { DryBelt, FleetAdRow, ScriptObservation } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
@@ -842,6 +842,52 @@ const travelToStation: MacroDecider = (step, obs, mem, board) => {
   return tick(WAIT, "Docked.", "Arrived", { kind: "done" });
 };
 
+// ── travel-to-system ─────────────────────────────────────────────────────────
+// Fly to a SOLAR SYSTEM and stop there — the arrival-waiting twin of
+// set-destination. Same shared autopilot, same route solver; the only
+// difference, and the whole reason the block exists, is WHEN it finishes.
+//
+// ⚠ set-destination is done the moment the trip is under way, on purpose, so a
+// player can put their own checks after it. That makes it the wrong block to
+// put in front of one that works on something in ANOTHER system: the next block
+// becomes the active step while the ship is still two gates out, reads the grid
+// it happens to be on, and stops the run for want of a belt/station/anomaly that
+// was never going to be there yet. Caught live, 2026-09-08: a mining bot pinned
+// to a belt in the next system over mined one lap (started in-system), then
+// stopped every lap after with "the belt this step is pinned to is not on this
+// grid" the moment it undocked at home.
+//
+// Arrival is measured on the SYSTEM ID and nothing else — docked or in space,
+// being there is being there. The autopilot's own system plan lands in space and
+// counts a dock in the destination system as arrived (`isAtDestination`), so a
+// stricter "in space too" rule would hang forever on a pilot who started the
+// block docked in the target system. A program that needs to be undocked says so
+// with an `undock` block, exactly as it does after travel-to-station.
+const travelToSystem: MacroDecider = (step, obs, mem) => {
+  const arg = step.args["system"];
+  if (arg === undefined || arg.kind !== "system" || arg.ref.id === null) {
+    return tick(WAIT, "No system picked.", "Travelling", {
+      kind: "blocked",
+      reason: "This step needs a solar system to go to.",
+    });
+  }
+  const target = arg.ref.id;
+  if (obs.flightStatus?.solarSystemID === target) {
+    return tick(WAIT, "Arrived.", "Arrived", { kind: "done" });
+  }
+  // Never warp off with drones still out. There is no grid target to align to
+  // — the destination is a whole system — so the recall just holds.
+  const recall = recallBeforeLeaving(obs, mem, "Travelling", null);
+  if (recall !== null) {
+    return recall;
+  }
+  const ride = rideAutopilotToSystem(obs, target, "Travelling");
+  if (ride !== null) {
+    return ride;
+  }
+  return tick(WAIT, "Arrived.", "Arrived", { kind: "done" });
+};
+
 // ── defend-with-drones ───────────────────────────────────────────────────────
 // Launch combat drones, set them on the nearest pirate, and finish once the
 // pirates are gone.
@@ -971,6 +1017,31 @@ function rideAutopilotTo(obs: ScriptObservation, stationID: number, phase: strin
     return tick(WAIT, "Flying there — the autopilot has the ship.", phase, ACTING, false);
   }
   return tick({ kind: "startRoute", stationID }, "Setting the destination and heading out.", phase, ACTING, false);
+}
+
+/**
+ * Riding the shared autopilot to a SYSTEM, multi-system. Null once the ship is
+ * in it. The station twin above keyed on `destinationStationID`; a system route
+ * carries no station, so this one keys on `destinationSystemID` — reading the
+ * wrong field would make every tick re-issue the route.
+ */
+function rideAutopilotToSystem(obs: ScriptObservation, systemID: number, phase: string): MacroTick | null {
+  if (obs.flightStatus?.solarSystemID === systemID) {
+    return null; // arrived
+  }
+  const travel = obs.travel ?? null;
+  // Only a failure on THIS destination blocks — a stale reason left over from an
+  // earlier route (or an abort the bot itself issued at start) must not.
+  if (travel !== null && travel.failureReason !== null && travel.destinationSystemID === systemID) {
+    return tick(WAIT, travel.failureReason, phase, {
+      kind: "blocked",
+      reason: `The trip could not be finished: ${travel.failureReason}`,
+    });
+  }
+  if (travel !== null && travel.status === "running" && travel.destinationSystemID === systemID) {
+    return tick(WAIT, "Flying there — the autopilot has the ship.", phase, ACTING, false);
+  }
+  return tick({ kind: "startSystemRoute", systemID }, "Setting the destination and heading out.", phase, ACTING, false);
 }
 
 // ── find-*-agent ─────────────────────────────────────────────────────────────
@@ -2905,7 +2976,170 @@ const joinFleet: MacroDecider = (_step, obs, mem) => {
       reason: "No fleet invitation arrived in time, so the bot stopped.",
     });
   }
-  return tick({ kind: "acceptFleetInvite" }, "Waiting for a fleet invite to accept.", "Joining a fleet", ACTING, false, { ...mem, waited });
+  return tick({ kind: "acceptFleetInvite", fleetID: null }, "Waiting for a fleet invite to accept.", "Joining a fleet", ACTING, false, { ...mem, waited });
+};
+
+
+// -- join-advertised-fleet ----------------------------------------------------
+// The fleet-finder twin of join-fleet. join-fleet waits to be INVITED and stops
+// the run if nobody ever invites it; this one goes looking, by name, in the
+// advert listing -- and is OPPORTUNISTIC where the other is a requirement:
+//
+//   * already in a fleet  -> done, immediately. "if not in fleet" is the block.
+//   * no fleet by that name advertised -> done, immediately, NOT blocked. This is
+//     the point of the block. It is meant to sit at the top of a loop an alt runs
+//     all day: the moment the boss advertises "Mining Op" the alt joins it, and
+//     every other lap it finds nothing, finishes, and carries on mining alone. A
+//     block that stopped the run here would make that loop unusable.
+//   * advertised -> apply, ACCEPT the invite that produces, then confirm.
+//
+// That last line is the whole round trip and all three steps are ours. An apply
+// does NOT join you: the server mints a fleet invite addressed to this pilot and
+// notifies it, and membership happens only when the client accepts. This block
+// is the client. The first version stopped after applying and waited for
+// membership to arrive on its own, and hung forever on a perfectly healthy
+// fleet -- fixed 2026-09-09.
+//
+// An approval-gated advert is the other half: it stores a request only the boss
+// can act on, so there is no invite to accept and no amount of waiting helps.
+// The block says so and stops, rather than timing out and blaming the fleet.
+//
+// The BOUNDED wait is not the same judgement as the absent-fleet one. A join
+// that was applied for AND accepted and still did not land is a real failure the
+// player wants told about, and silence there is the silently-refused-forever
+// trap this file keeps guarding against. So: absent fleet finishes quietly, a
+// join that will not complete stops with a reason.
+//
+// Matching is trimmed and case-insensitive but otherwise EXACT. Not a substring:
+// an unattended ship must not end up in a stranger's fleet because their name
+// happened to contain the player's word. Where two adverts share a name the
+// bigger fleet wins (ties broken by the lower id, so the choice is stable across
+// ticks rather than flapping between two equal fleets).
+const JOIN_ADVERTISED_MAX_WAIT_TICKS = 150; // a few minutes at the settle-paced cadence
+
+/** The fleet name the player typed, trimmed. "" when the step is unset. */
+function typedFleetName(step: MacroStep): string {
+  const arg = step.args["fleetName"];
+  return arg !== undefined && arg.kind === "text" ? arg.text.trim() : "";
+}
+
+/** The advertised fleet to join, or null when nobody is advertising that name. */
+function pickAdvertisedFleet(ads: readonly FleetAdRow[], wanted: string): FleetAdRow | null {
+  let best: FleetAdRow | null = null;
+  for (const ad of ads) {
+    if (ad.fleetID <= 0 || ad.fleetName.trim().toLowerCase() !== wanted) {
+      continue;
+    }
+    if (
+      best === null ||
+      ad.numMembers > best.numMembers ||
+      (ad.numMembers === best.numMembers && ad.fleetID < best.fleetID)
+    ) {
+      best = ad;
+    }
+  }
+  return best;
+}
+
+const joinAdvertisedFleet: MacroDecider = (step, obs, mem) => {
+  const typed = typedFleetName(step);
+  const wanted = typed.toLowerCase();
+  if (wanted.length === 0) {
+    return tick(WAIT, "This step is not fully set up.", "Joining a fleet", {
+      kind: "blocked",
+      reason: "Type the name of the fleet to look for in the fleet finder.",
+    });
+  }
+  const inFleet = obs.inFleet ?? null;
+  if (inFleet === true) {
+    // Covers both halves of "if not in fleet": the pilot who was already fleeted
+    // when the block started, and the one this block has just got in.
+    return tick(WAIT, "You are in a fleet.", "Joining a fleet", { kind: "done" });
+  }
+  const waited = (num(mem, "waited") ?? 0) + 1;
+  const overdue = waited > JOIN_ADVERTISED_MAX_WAIT_TICKS;
+  const appliedTo = num(mem, "appliedTo");
+  if (appliedTo !== null) {
+    // ⚠ APPLYING IS NOT JOINING. The apply minted an INVITE addressed to this
+    // pilot and told nobody else to do anything; accepting it is the client's
+    // half of the round trip, and this block is the client. Waiting here for
+    // membership to appear on its own is what the first version of this block
+    // did, and it hung forever.
+    //
+    // The application is read from the OBSERVATION rather than remembered as a
+    // flag, because only the runner sees what the server answered. It is trusted
+    // only when it names the fleet THIS activation applied to: the observation
+    // outlives a lap, step memory does not, so the fleet id is what keeps a
+    // stale answer from a previous lap out of this one.
+    const application = obs.fleetApplication ?? null;
+    const answered = application !== null && application.fleetID === appliedTo ? application : null;
+    if (answered !== null && answered.outcome === "needs-approval") {
+      // No invite exists and none is coming: only the boss can act now. Say so
+      // plainly rather than sitting out the bound and blaming a timeout.
+      return tick(WAIT, `"${typed}" has to approve the application.`, "Joining a fleet", {
+        kind: "blocked",
+        reason: `Applied to join "${typed}", but that fleet approves its own members, so the bot cannot join it by itself.`,
+      });
+    }
+    if (overdue) {
+      return tick(WAIT, "Never got into the fleet.", "Joining a fleet", {
+        kind: "blocked",
+        reason: `Applied to join "${typed}" and accepted the invitation, but never got into the fleet, so the bot stopped. It may be full.`,
+      });
+    }
+    if (answered === null) {
+      // The apply is still in flight, or it threw and the runner swallowed it.
+      return tick(WAIT, `Applying to "${typed}".`, "Joining a fleet", ACTING, false, { ...mem, waited });
+    }
+    // "invited", and "unknown" too: an unexpected answer is treated as an invite
+    // because that is the common half, and a wasted accept costs one swallowed
+    // call where a refused one would strand a bot with an invite waiting.
+    return tick(
+      { kind: "acceptFleetInvite", fleetID: appliedTo },
+      `Accepting the invitation to "${typed}".`,
+      "Joining a fleet",
+      ACTING,
+      false,
+      { ...mem, waited },
+    );
+  }
+  if (inFleet === null) {
+    // Unreadable is never an answer: neither "join" nor "carry on" is safe to
+    // guess, so wait for a clean read within the same bound.
+    if (overdue) {
+      return tick(WAIT, "Could not tell whether you are in a fleet.", "Joining a fleet", {
+        kind: "blocked",
+        reason: "Could not read your fleet status, so the bot stopped.",
+      });
+    }
+    return tick(WAIT, "Checking your fleet status.", "Joining a fleet", ACTING, false, { ...mem, waited });
+  }
+  const ads = obs.fleetAds ?? null;
+  if (ads === null) {
+    if (overdue) {
+      return tick(WAIT, "Could not read the fleet finder.", "Joining a fleet", {
+        kind: "blocked",
+        reason: "Could not read the fleet finder, so the bot stopped.",
+      });
+    }
+    return tick(WAIT, "Reading the fleet finder.", "Joining a fleet", ACTING, false, { ...mem, waited });
+  }
+  const match = pickAdvertisedFleet(ads, wanted);
+  if (match === null) {
+    // The whole opportunistic half of the block. An EMPTY listing is a real
+    // answer, not a failure, so this finishes on the first clean read.
+    return tick(WAIT, `No fleet called "${typed}" is in the fleet finder.`, "Joining a fleet", {
+      kind: "done",
+    });
+  }
+  return tick(
+    { kind: "applyToJoinFleet", fleetID: match.fleetID },
+    `Applying to join "${match.fleetName}".`,
+    "Joining a fleet",
+    ACTING,
+    false,
+    { ...mem, waited, appliedTo: match.fleetID },
+  );
 };
 
 // ═══ Movement extras ════════════════════════════════════════════════════════
@@ -3424,6 +3658,7 @@ const recoverScanProbes: MacroDecider = (_step, obs) => {
 export const SCRIPT_MACROS: CompleteMacroRegistry = {
   undock,
   "travel-to-belt": travelToBelt,
+  "travel-to-system": travelToSystem,
   "mine-at-belt": mineAtBelt,
   "deliver-ore": deliverOre,
   "travel-to-station": travelToStation,
@@ -3458,6 +3693,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "create-fleet": createFleet,
   "invite-to-fleet": inviteToFleet,
   "join-fleet": joinFleet,
+  "join-advertised-fleet": joinAdvertisedFleet,
   "set-destination": setDestination,
   "dock-at-nearest": dockAtNearest,
   "remote-cap": remoteCap,

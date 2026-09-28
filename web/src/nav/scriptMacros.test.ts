@@ -592,6 +592,97 @@ test("travel-to-station: rides the shared autopilot (multi-system) and is done o
   assert.ok(staleFailure.action.kind === "startRoute", "a failure on ANOTHER destination is ignored");
 });
 
+// ── travel-to-system ─────────────────────────────────────────────────────────
+//
+// The block exists because set-destination does NOT wait, and a bot whose next
+// step reads the grid stops the run when it starts two gates early. These tests
+// pin the one property that difference lives in: arrival, and only arrival,
+// finishes it.
+
+const HOME_SYSTEM = 30000142;
+const FAR_SYSTEM = 30000144;
+const flyToSystem = SCRIPT_MACROS["travel-to-system"]!;
+const systemStep: MacroStep = {
+  id: "ts",
+  kind: "macro",
+  macro: "travel-to-system",
+  args: { system: { kind: "system", ref: { entity: "system", id: FAR_SYSTEM, name: "Far", systemName: "Far" } } },
+};
+
+test("travel-to-system: rides the shared autopilot and is done ONLY once the ship is in the system", () => {
+  // Elsewhere -> hand the trip to the autopilot's system plan (no final dock).
+  const go = flyToSystem(systemStep, obs({ snapshot: snapshot([]) }), {}, {});
+  assert.ok(go.action.kind === "startSystemRoute" && go.action.systemID === FAR_SYSTEM);
+  assert.notEqual(go.outcome.kind, "done");
+
+  // Under way -> wait, never re-issue the route every tick.
+  const riding = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "running", destinationSystemID: FAR_SYSTEM, destinationStationID: null, remainingJumps: 2, failureReason: null } }),
+    {},
+    {},
+  );
+  assert.equal(riding.action.kind, "wait");
+  assert.notEqual(riding.outcome.kind, "done");
+
+  // ⚠ THE WHOLE POINT. Mid-route, one gate short, is NOT arrived — this is the
+  // tick where set-destination would already have handed the next block a grid
+  // in the wrong system.
+  const oneGateShort = flyToSystem(systemStep, obs({ flightStatus: flight({ solarSystemID: 30000148 }), snapshot: snapshot([]) }), {}, {});
+  assert.notEqual(oneGateShort.outcome.kind, "done");
+
+  // There -> done.
+  const arrived = flyToSystem(systemStep, obs({ flightStatus: flight({ solarSystemID: FAR_SYSTEM }), snapshot: snapshot([]) }), {}, {});
+  assert.equal(arrived.outcome.kind, "done");
+});
+
+test("travel-to-system: DOCKED in the destination system counts as arrived", () => {
+  // The autopilot's own system plan treats a dock in the destination system as
+  // arrival and will not undock for it, so a stricter rule here would hang
+  // forever. A program that needs to be in space says so with an undock block.
+  const dockedThere = flyToSystem(
+    systemStep,
+    obs({ flightStatus: flight({ docked: true, inSpace: false, solarSystemID: FAR_SYSTEM, stationID: 60000007 }), snapshot: null }),
+    {},
+    {},
+  );
+  assert.equal(dockedThere.outcome.kind, "done");
+});
+
+test("travel-to-system: a failure on THIS trip blocks; a stale one from another does not", () => {
+  const failed = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "idle", destinationSystemID: FAR_SYSTEM, destinationStationID: null, remainingJumps: 0, failureReason: "Off route" } }),
+    {},
+    {},
+  );
+  assert.equal(failed.outcome.kind, "blocked");
+
+  const stale = flyToSystem(
+    systemStep,
+    obs({ snapshot: snapshot([]), travel: { status: "idle", destinationSystemID: HOME_SYSTEM, destinationStationID: null, remainingJumps: 0, failureReason: "old news" } }),
+    {},
+    {},
+  );
+  assert.ok(stale.action.kind === "startSystemRoute", "a failure on ANOTHER destination is ignored");
+});
+
+test("travel-to-system: drones out come home before the ship warps off", () => {
+  const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const t = flyToSystem(systemStep, obs({ snapshot: snapshot([drone]), dronesOut: true }), {}, {});
+  assert.ok(t.action.kind === "recallDrones" && t.action.droneIDs.includes(111));
+});
+
+test("travel-to-system: an unpicked system blocks instead of flying somewhere arbitrary", () => {
+  const unbound: MacroStep = {
+    id: "ts",
+    kind: "macro",
+    macro: "travel-to-system",
+    args: { system: { kind: "system", ref: { entity: "system", id: null, name: null, systemName: null } } },
+  };
+  assert.equal(flyToSystem(unbound, obs({ snapshot: snapshot([]) }), {}, {}).outcome.kind, "blocked");
+});
+
 test("salvage: wrecks + drones out -> set them salvaging (auto-pick); grid clean -> recall, then done", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
@@ -1545,6 +1636,162 @@ test("invite-to-fleet: in a fleet -> invite once then done; not in a fleet -> bl
 test("join-fleet: not in a fleet -> keep accepting; in a fleet -> done", () => {
   assert.equal(joinF(joinStep, obs({ inFleet: false }), {}, {}).action.kind, "acceptFleetInvite");
   assert.equal(joinF(joinStep, obs({ inFleet: true }), {}, {}).outcome.kind, "done");
+});
+
+
+// ── join-advertised-fleet ────────────────────────────────────────────────────
+// The opportunistic twin of join-fleet. The tests that matter most are the ones
+// proving it does NOT stop the run when the fleet simply is not there, and that
+// it will not join a fleet whose name merely resembles the one asked for.
+
+const joinAdv = SCRIPT_MACROS["join-advertised-fleet"]!;
+const joinAdvStep: MacroStep = {
+  id: "jaf", kind: "macro", macro: "join-advertised-fleet",
+  args: { fleetName: { kind: "text", text: "Mining Op" } },
+};
+/** One fleet-finder row. */
+const ad = (fleetID: number, fleetName: string, numMembers = 1) => ({ fleetID, fleetName, numMembers });
+
+test("join-advertised-fleet: already in a fleet -> done without reading the finder", () => {
+  const done = joinAdv(joinAdvStep, obs({ inFleet: true }), {}, {});
+  assert.equal(done.outcome.kind, "done");
+  assert.equal(done.action.kind, "wait");
+});
+
+test("join-advertised-fleet: the named fleet is advertised -> apply to it", () => {
+  const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(42, "Other Op"), ad(77, "Mining Op")] }), {}, {});
+  assert.ok(t.action.kind === "applyToJoinFleet" && t.action.fleetID === 77);
+  assert.equal(t.outcome.kind, "acting");
+});
+
+test("join-advertised-fleet: the name matches past case and padding, but never as a substring", () => {
+  const loose = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(88, "  mining op ")] }), {}, {});
+  assert.ok(loose.action.kind === "applyToJoinFleet" && loose.action.fleetID === 88);
+  // "Sunday Mining Op" CONTAINS the typed name; an unattended ship must not join it.
+  const substring = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(99, "Sunday Mining Op")] }), {}, {});
+  assert.equal(substring.outcome.kind, "done");
+  assert.equal(substring.action.kind, "wait");
+});
+
+test("join-advertised-fleet: nobody advertising that name -> DONE, so the loop carries on", () => {
+  // The whole point of the block: an empty or non-matching finder is a real
+  // answer, not a failure, and must never stop a bot that mines on alone.
+  for (const ads of [[], [ad(42, "Other Op")]]) {
+    const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads }), {}, {});
+    assert.equal(t.outcome.kind, "done");
+    assert.equal(t.action.kind, "wait");
+  }
+});
+
+test("join-advertised-fleet: two fleets share the name -> the bigger one, stably", () => {
+  const t = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(5, "Mining Op", 2), ad(6, "Mining Op", 9)] }), {}, {});
+  assert.ok(t.action.kind === "applyToJoinFleet" && t.action.fleetID === 6);
+  // Equal sizes must not flap between ticks: the lower id wins, both orderings.
+  const tie = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: [ad(6, "Mining Op", 4), ad(5, "Mining Op", 4)] }), {}, {});
+  assert.ok(tie.action.kind === "applyToJoinFleet" && tie.action.fleetID === 5);
+});
+
+test("join-advertised-fleet: an unreadable finder or fleet status waits, never guesses", () => {
+  const noAds = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: null }), {}, {});
+  assert.equal(noAds.outcome.kind, "acting");
+  assert.equal(noAds.action.kind, "wait");
+  const noFleet = joinAdv(joinAdvStep, obs({ inFleet: null }), {}, {});
+  assert.equal(noFleet.outcome.kind, "acting");
+  assert.equal(noFleet.action.kind, "wait");
+});
+
+// ⚠ THE REGRESSION THIS SECTION EXISTS FOR. The first version of this block
+// applied and then waited for membership to appear, which it never does: an
+// apply mints an INVITE and the client has to accept it. Every test below the
+// apply is about the half that was missing, because the original tests all
+// stopped at "emits an applyToJoinFleet action" and passed while the block hung
+// on a live fleet.
+
+/** The state after this block has applied to fleet 77 this activation. */
+const APPLIED = { waited: 1, appliedTo: 77 };
+const ads77 = [ad(77, "Mining Op")];
+
+test("join-advertised-fleet: an apply is followed by ACCEPTING the invite it minted", () => {
+  const applied = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads77 }), {}, {});
+  assert.ok(applied.action.kind === "applyToJoinFleet" && applied.action.fleetID === 77);
+
+  // The server minted an invite. Accept it, naming the fleet applied to rather
+  // than depending on the notification having reached the store.
+  const accepting = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "invited" } }),
+    applied.nextMem,
+    {},
+  );
+  assert.ok(accepting.action.kind === "acceptFleetInvite" && accepting.action.fleetID === 77);
+  // And it does not apply a second time.
+  assert.notEqual(accepting.action.kind, "applyToJoinFleet");
+
+  // Membership ends the block.
+  assert.equal(joinAdv(joinAdvStep, obs({ inFleet: true }), accepting.nextMem, {}).outcome.kind, "done");
+});
+
+test("join-advertised-fleet: an approval-gated fleet stops at once, it does not sit out the bound", () => {
+  // No invite exists and none is coming -- only the boss can act. Saying so
+  // beats timing out and blaming the fleet several minutes later.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "needs-approval" } }),
+    APPLIED,
+    {},
+  );
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /approve/i);
+});
+
+test("join-advertised-fleet: an answer it does not recognise still tries the accept", () => {
+  // "unknown" is the honest third state. The invite half is the common one, and
+  // a wasted accept costs one swallowed call where refusing to accept would
+  // strand a bot that had an invite waiting.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "unknown" } }),
+    APPLIED,
+    {},
+  );
+  assert.ok(t.action.kind === "acceptFleetInvite" && t.action.fleetID === 77);
+});
+
+test("join-advertised-fleet: an answer about a DIFFERENT fleet is not this application", () => {
+  // The observation outlives a lap; step memory does not. A previous lap's
+  // answer must not decide this one -- the fleet id is what keeps them apart.
+  const t = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 42, outcome: "needs-approval" } }),
+    APPLIED,
+    {},
+  );
+  assert.equal(t.outcome.kind, "acting");
+  assert.equal(t.action.kind, "wait");
+});
+
+test("join-advertised-fleet: no answer yet waits; accepted but never landed gives up", () => {
+  // The apply is in flight, or it threw and the runner swallowed it.
+  const inFlight = joinAdv(joinAdvStep, obs({ inFleet: false, fleetAds: ads77 }), APPLIED, {});
+  assert.equal(inFlight.outcome.kind, "acting");
+  assert.equal(inFlight.action.kind, "wait");
+
+  // A join applied for AND accepted that still never lands is a real failure.
+  const overdue = joinAdv(
+    joinAdvStep,
+    obs({ inFleet: false, fleetAds: ads77, fleetApplication: { fleetID: 77, outcome: "invited" } }),
+    { waited: 10_000, appliedTo: 77 },
+    {},
+  );
+  assert.equal(overdue.outcome.kind, "blocked");
+});
+
+test("join-advertised-fleet: no name typed -> blocked before anything is read", () => {
+  const blank: MacroStep = {
+    id: "jaf0", kind: "macro", macro: "join-advertised-fleet",
+    args: { fleetName: { kind: "text", text: "   " } },
+  };
+  assert.equal(joinAdv(blank, obs({ inFleet: false, fleetAds: [ad(77, "Mining Op")] }), {}, {}).outcome.kind, "blocked");
 });
 
 // ── Movement extras, cargo extras, cap chain ─────────────────────────────────

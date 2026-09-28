@@ -199,6 +199,7 @@ import {
   decodeFleetCenter,
   decodeFleetInviteNotification,
 } from "../bridge/fleetCenter.ts";
+import { decodeAvailableFleetAds } from "../bridge/fleetAds.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -5907,7 +5908,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
   const BAY_MACROS = new Set(["unload-cargo"]);
-  const FLEET_MANAGEMENT_MACROS = new Set(["create-fleet", "invite-to-fleet", "join-fleet"]);
+  const FLEET_MANAGEMENT_MACROS = new Set([
+    "create-fleet",
+    "invite-to-fleet",
+    "join-fleet",
+    "join-advertised-fleet",
+  ]);
+  // Only the join-by-name block reads the finder, and only it pays for that read.
+  const FLEET_FINDER_MACROS = new Set(["join-advertised-fleet"]);
+  /**
+   * What the last fleet-finder apply answered. Run-scoped because only the
+   * runner sees a write's result -- a decider is handed observations, never
+   * return values -- and the join-by-name block cannot choose its next move
+   * without it: an open advert mints an invite to accept, an approval-gated one
+   * does not. Carries the fleet id so a block can tell its own application from
+   * one an earlier lap made (step memory resets per lap; this does not).
+   */
+  let fleetApplication: ScriptObservation["fleetApplication"] = null;
   const FLEET_SUPPORT_MACROS = new Set(["remote-rep", "orbit-and-boost", "remote-cap"]);
   const SCANNER_MACROS = new Set([
     "launch-scan-probes",
@@ -6576,6 +6593,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             fleetMemberCharacterIDs = null;
           }
         }
+        // The fleet finder, for the one block that joins by name. Read only when
+        // that block is the active step, and only while this pilot is NOT already
+        // fleeted — a fleeted pilot's block is already done, so the listing would
+        // be paid for and thrown away. A failed read stays null (the block waits
+        // for a clean one); an EMPTY listing is a real "nobody is advertising".
+        let fleetAds: ScriptObservation["fleetAds"] = null;
+        if (macro !== null && FLEET_FINDER_MACROS.has(macro) && inFleet === false) {
+          try {
+            fleetAds = decodeAvailableFleetAds(
+              (await api.loadFleetAds(callOptions)).availableFleetAds ?? null,
+            )
+              .filter((ad) => ad.fleetID !== null && ad.fleetID > 0)
+              .map((ad) => ({
+                fleetID: ad.fleetID as number,
+                fleetName: ad.fleetName,
+                numMembers: ad.numMembers,
+              }));
+          } catch {
+            fleetAds = null;
+          }
+        }
         if (macro !== null && (MISSION_MACROS.has(macro) || CARGO_MACROS.has(macro))) {
           if (MISSION_MACROS.has(macro)) {
             try {
@@ -6767,6 +6805,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           remoteHullRepairerIDs: capabilities.remoteReps.hull,
           remoteCapModuleIDs: capabilities.remoteReps.cap,
           inFleet,
+          fleetAds,
+          fleetApplication,
           fleetMemberCharacterIDs,
           targetGroupNames,
           squadPrimaryTargetID,
@@ -7064,13 +7104,30 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // fleetID carried by the live OnFleetInvite notification; the Fleet
             // Center slice retains it even when that panel is closed.
             {
-              const fleetID = store.fleet.get().pendingInvite?.fleetID;
+              // A block that MINTED the invite by applying names the fleet, and
+              // is believed: the notification may not have reached the Fleet
+              // Center slice yet on the very next tick, and the server checks
+              // the invite really is this character's anyway. Only the
+              // invite-waiting block has to ask the store, because only it has
+              // no other way to know which fleet invited it.
+              const fleetID = action.fleetID ?? store.fleet.get().pendingInvite?.fleetID;
               if (fleetID === undefined) {
                 throw new Error("No pending fleet invitation is available.");
               }
               await api.acceptFleetInvite(fleetID, callOptions);
             }
             return;
+          case "applyToJoinFleet": {
+            // ⚠ THIS DOES NOT JOIN THE FLEET. On an open advert the server mints
+            // an invite and notifies this pilot; the block accepts it on a later
+            // tick. The answer says which half of the round trip we are in, and
+            // it is the only place that answer exists -- so it is kept rather
+            // than discarded, and a throw leaves the previous value alone so a
+            // failed apply reads as "no answer yet" and not as somebody else's.
+            const outcome = await api.applyToJoinFleet(action.fleetID, callOptions);
+            fleetApplication = { fleetID: action.fleetID, outcome };
+            return;
+          }
           case "startSystemRoute":
             // The SHARED autopilot again — resolveDestination answers a system id
             // with kind "system", so the plan carries no final dock and the ride
@@ -7181,6 +7238,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // for the per-tick reads a bot really needs (the wallet, the local roster, the
     // cargo hold). See scriptWatchedConditionKinds.
     const watchedKinds = scriptWatchedConditionKinds(doc);
+    // Forgotten per RUN: an application belongs to the run that made it, and a
+    // fresh run must apply for itself rather than believe an old answer.
+    fleetApplication = null;
     scriptRunner = createScriptRunner(
       makeScriptRunnerDeps(initialCapabilities, startingStationID, doc.home, watchedKinds),
     );
