@@ -105,6 +105,8 @@ function makeMock(
       stationID: state.docked ? state.stationID : null,
       structureID: null,
       shipID: SHIP_ID,
+      shipTypeID: null,
+      shipIsCapsule: null,
       shipMode: state.docked ? null : state.shipMode,
       shipSpeedFraction: state.shipMode === "WARP" ? 1 : 0,
     };
@@ -417,6 +419,8 @@ function status(overrides: Partial<FlightStatus>): FlightStatus {
     stationID: null,
     structureID: null,
     shipID: SHIP_ID,
+    shipTypeID: null,
+    shipIsCapsule: null,
     shipMode: null,
     shipSpeedFraction: null,
     ...overrides,

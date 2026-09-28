@@ -85,6 +85,8 @@ function status(overrides: Partial<FlightStatus> = {}): FlightStatus {
     stationID: null,
     structureID: null,
     shipID: SHIP_ID,
+    shipTypeID: null,
+    shipIsCapsule: null,
     shipMode: "STOP",
     shipSpeedFraction: 0,
     ...overrides,

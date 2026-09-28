@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import type { BotScript, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
+import type { FlightStatus } from "../store/types.ts";
 import { MAX_CONSECUTIVE_REFUSALS } from "./refusalLedger.ts";
 import type {
   HomeTravelDecider,
@@ -529,4 +530,108 @@ test("a run ends exactly once, however many times it is told to stop", async () 
   h.runner.stop();
   h.runner.stop();
   assert.equal(lines.filter((l) => l.kind === "end").length, 1, "a log nobody can count runs in is worth less");
+});
+
+// ── Coming back in a pod, and arriving on a gate ─────────────────────────────
+//
+// THE TESTS THAT WOULD HAVE CAUGHT THE 2026-09-09/10 LOSSES. Three ships were
+// destroyed and every one of them kept flying its script afterwards: the
+// session survives a hull, the reads keep working, and nothing in the loop ever
+// asked whether the thing it was flying was still a ship. The second pair cover
+// the other half of the same night — a jump's ten-second cooldown turning the
+// hardeners back, booked as a refusal and never asked for again.
+
+/** A flight status carrying only what these tests judge on. */
+function flight(over: Partial<FlightStatus> = {}): FlightStatus {
+  return {
+    inSpace: true, docked: false, solarSystemID: 30000001, stationID: null,
+    structureID: null, shipID: 9001, shipTypeID: null, shipIsCapsule: null,
+    shipMode: null, shipSpeedFraction: null, ...over,
+  };
+}
+
+/** The BFF's 409 while a previous session change is still settling. */
+function settling(): Error & { code: string } {
+  return Object.assign(new Error("SESSION_CHANGE_IN_PROGRESS: still settling"), {
+    code: "SESSION_CHANGE_IN_PROGRESS",
+  });
+}
+
+test("a pod is not a ship: the script stops rather than mining in a capsule", async () => {
+  const h = harness();
+  h.setObs(calm({ holdEmpty: false, flightStatus: flight({ shipIsCapsule: true }) }));
+  h.runner.start(script([macroStep("d", "deliver-ore")]));
+
+  await h.runner.tick();
+
+  assert.equal(h.issued.length, 0, "nothing from the script goes out in a pod");
+  const latest = h.progress[h.progress.length - 1]!;
+  assert.match(latest.why ?? "", /capsule/i, "and it says why, in player language");
+  assert.equal(h.runner.getStatus(), "running", "still ticking — a pod parked in a belt is still a target");
+  assert.equal(latest.phase, "Heading home", "it heads for a station instead of stopping where it floats");
+});
+
+test("a pod heads home ONCE — the guard does not re-fire and pause it mid-flight", async () => {
+  const h = harness();
+  h.setObs(calm({ holdEmpty: false, flightStatus: flight({ shipIsCapsule: true }) }));
+  h.runner.start(script([macroStep("d", "deliver-ore")]));
+
+  await h.runner.tick();
+  for (let i = 0; i < 6; i += 1) {
+    await h.runner.tick();
+  }
+
+  assert.notEqual(h.runner.getStatus(), "paused", "pausing here strands the pod where it died");
+  assert.ok(h.issued.some((a) => a.kind === "warp"), "the way home is actually flown");
+});
+
+test("`shipIsCapsule: null` is not a verdict — an older BFF must not stop a healthy run", async () => {
+  const h = harness();
+  h.setObs(calm({ holdEmpty: false, flightStatus: flight({ shipIsCapsule: null }) }));
+  h.runner.start(script([macroStep("d", "deliver-ore")]));
+
+  await h.runner.tick();
+
+  assert.deepEqual(h.issued, [{ kind: "unloadOre", itemIDs: [1] }], "the script flies on");
+  const latest = h.progress[h.progress.length - 1]!;
+  assert.equal(/capsule/i.test(latest.why ?? ""), false, "we were not told, so nothing is claimed");
+});
+
+test("a settling session change is NOT a refusal: the same press is made again", async () => {
+  let thrown = 0;
+  const h = harness({
+    issueThrows: () => (thrown++ < 2 ? settling() : null),
+  });
+  h.setObs(calm({ inSpace: false }));
+  h.runner.start(script([macroStep("u", "undock")]));
+
+  await issueTicks(h, 3);
+
+  assert.deepEqual(
+    h.issued,
+    [{ kind: "undock" }, { kind: "undock" }, { kind: "undock" }],
+    "the press the cooldown ate is asked for again — this is the hardener that never went up",
+  );
+  const latest = h.progress[h.progress.length - 1]!;
+  assert.equal(latest.refusals.length, 0, "a cooldown is not the ship refusing, and must not fill the ledger");
+  assert.equal(h.runner.getStatus(), "running");
+});
+
+test("a session change that never settles still ends the run, by heading home", async () => {
+  const h = harness({ issueThrows: () => settling() });
+  h.setObs(calm({ inSpace: false }));
+  h.runner.start(script([macroStep("u", "undock")]));
+
+  let guard = 0;
+  while (h.runner.getStatus() === "running" && guard < 400) {
+    guard += 1;
+    await h.runner.tick();
+    const latest = h.progress[h.progress.length - 1];
+    if (latest?.phase === "Heading home") {
+      break;
+    }
+  }
+
+  const latest = h.progress[h.progress.length - 1]!;
+  assert.match(latest.why ?? "", /turned back while a session change/i, "waiting forever is its own way to lose a ship");
 });

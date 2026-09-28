@@ -774,3 +774,158 @@ test("flight routes require a live session (409 NO_LIVE_SESSION with no characte
   assert.equal(response.status, 409);
   assert.equal(payload.error, "NO_LIVE_SESSION");
 });
+
+// ── Re-parking beyonce on arrival ────────────────────────────────────────────
+//
+// THE TESTS THAT WOULD HAVE CAUGHT THE 2026-09-09/10 LOSSES. EveJS clears the
+// session's beyonce bind on stargate arrival and will not send the ship destiny
+// state until the CLIENT re-binds — roughly twelve seconds, after which it
+// force-runs the bootstrap itself. Until then the hull is inert while every
+// other call still answers ok, so nothing downstream can notice. The real
+// client re-parks on the arrival edge for exactly this reason (michelle.py
+// `UpdateBallpark` -> `AddBallpark` -> `Park`, driven by the session change),
+// and so does the BFF.
+
+/** Park binds are keyed by system: parkBindSpec puts [[systemID, 5]] in args. */
+function parkBindsFor(gateway, systemID) {
+  return gateway.calls.bind.filter(
+    (c) =>
+      c.service === "beyonce" &&
+      c.method === "MachoBindObject" &&
+      Array.isArray(c.args) &&
+      Array.isArray(c.args[0]) &&
+      Number(c.args[0][0]) === systemID,
+  );
+}
+
+test("a jump re-parks beyonce for the system it ARRIVED in, not the one it left", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  // One shared list, so the assertion is about real interleaving rather than
+  // the order two separate call logs happen to be concatenated in.
+  const order = [];
+  const bindObject = gateway.bindObject.bind(gateway);
+  const callBoundMethod = gateway.callBoundMethod.bind(gateway);
+  gateway.bindObject = async (service, method, args, ...rest) => {
+    order.push(`bind:${Number(args?.[0]?.[0])}`);
+    return bindObject(service, method, args, ...rest);
+  };
+  gateway.callBoundMethod = async (service, method, ...rest) => {
+    order.push(`call:${method}`);
+    return callBoundMethod(service, method, ...rest);
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { response } = await apiRequest(baseUrl, "/api/bridge/flight/jump", {
+    method: "POST",
+    body: { fromGateID: GATE_ID, toGateID: DEST_GATE_ID },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    parkBindsFor(gateway, DEST_SYSTEM_ID).length,
+    1,
+    "the destination park is minted eagerly — waiting for the next flight command is what left ships inert",
+  );
+  const jumpAt = order.indexOf("call:CmdStargateJump");
+  const destBindAt = order.indexOf(`bind:${DEST_SYSTEM_ID}`);
+  assert.ok(jumpAt >= 0, "the jump was dispatched");
+  assert.ok(
+    destBindAt > jumpAt,
+    `the destination park is minted AFTER the jump, not before it: ${order.join(" -> ")}`,
+  );
+});
+
+test("a re-park that is refused is retried rather than abandoned", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  const bindObject = gateway.bindObject.bind(gateway);
+  let refusals = 0;
+  gateway.bindObject = async (service, method, args, ...rest) => {
+    if (method === "MachoBindObject" && Number(args?.[0]?.[0]) === DEST_SYSTEM_ID && refusals < 2) {
+      refusals += 1;
+      gateway.calls.bind.push({ service, method, args });
+      throw Object.assign(new Error("FakeItemNotFound"), { code: "CALL_REFUSED" });
+    }
+    return bindObject(service, method, args, ...rest);
+  };
+  const { baseUrl } = await startTestServer({ gateway, transitionSleep: async () => {} });
+  await selectOnServer(baseUrl);
+
+  const { response } = await apiRequest(baseUrl, "/api/bridge/flight/jump", {
+    method: "POST",
+    body: { fromGateID: GATE_ID, toGateID: DEST_GATE_ID },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(refusals, 2, "both refusals were taken");
+  assert.equal(
+    parkBindsFor(gateway, DEST_SYSTEM_ID).length,
+    3,
+    "and it kept asking until one landed — one attempt silently reverts to the fatal lazy bind",
+  );
+});
+
+test("a re-park that never lands still lets the jump succeed — an arrival has arrived", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  const bindObject = gateway.bindObject.bind(gateway);
+  gateway.bindObject = async (service, method, args, ...rest) => {
+    if (method === "MachoBindObject" && Number(args?.[0]?.[0]) === DEST_SYSTEM_ID) {
+      gateway.calls.bind.push({ service, method, args });
+      throw Object.assign(new Error("FakeItemNotFound"), { code: "CALL_REFUSED" });
+    }
+    return bindObject(service, method, args, ...rest);
+  };
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (...a) => { warnings.push(a.join(" ")); };
+  try {
+    const { baseUrl } = await startTestServer({ gateway, transitionSleep: async () => {} });
+    await selectOnServer(baseUrl);
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/flight/jump", {
+      method: "POST",
+      body: { fromGateID: GATE_ID, toGateID: DEST_GATE_ID },
+    });
+    assert.equal(response.status, 200, "the re-park is never load-bearing");
+    assert.equal(payload.flight.solarSystemID, DEST_SYSTEM_ID);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(parkBindsFor(gateway, DEST_SYSTEM_ID).length, 4, "bounded — it does not retry forever");
+  assert.ok(
+    warnings.some((w) => /gave up re-parking/i.test(w)),
+    "and it says so: a silent give-up is the fatal behaviour returning unannounced",
+  );
+});
+
+test("a re-park is not retried into a session that no longer exists", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  const bindObject = gateway.bindObject.bind(gateway);
+  gateway.bindObject = async (service, method, args, ...rest) => {
+    if (method === "MachoBindObject" && Number(args?.[0]?.[0]) === DEST_SYSTEM_ID) {
+      gateway.calls.bind.push({ service, method, args });
+      throw Object.assign(new Error("no live session"), { code: "SESSION_NOT_FOUND" });
+    }
+    return bindObject(service, method, args, ...rest);
+  };
+  const { baseUrl } = await startTestServer({ gateway, transitionSleep: async () => {} });
+  await selectOnServer(baseUrl);
+
+  await apiRequest(baseUrl, "/api/bridge/flight/jump", {
+    method: "POST",
+    body: { fromGateID: GATE_ID, toGateID: DEST_GATE_ID },
+  });
+
+  assert.equal(
+    parkBindsFor(gateway, DEST_SYSTEM_ID).length,
+    1,
+    "there is nothing to re-park into, so it stops at the first answer",
+  );
+});

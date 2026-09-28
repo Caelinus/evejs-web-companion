@@ -29,7 +29,7 @@ planets · fleet · flow`).
 | Category | Blocks |
 |---|---|
 | movement | undock · travel-to-station · travel-to-belt · warp-to-bookmark · **set-destination** · **dock-at-nearest** · **travel-to-system** |
-| mining | mine-at-belt (+ nearest / biggest / **most valuable** rock order) · **compress-ore** |
+| mining | mine-at-belt (+ nearest / biggest / **most valuable** rock order) · **compress-ore** · **warp-to-ore-anomaly** |
 | combat | defend-with-drones · hardeners-on · fight-the-rats · warp-to-anomaly |
 | hauling | deliver-ore · unload-cargo · salvage-wrecks · loot-wrecks · move-items · **jettison-cargo** · **tidy-hangar** |
 | industry | refine-ore |

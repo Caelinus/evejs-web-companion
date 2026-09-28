@@ -242,6 +242,44 @@ const ANOMALY_EXPEDITION: BotScript = {
   ],
 };
 
+/**
+ * Mine the system's ORE anomalies rather than its belts — the asteroid clusters
+ * the scanner shows, which hold more and better rock than a belt does. The
+ * mine-at-belt block does the mining wherever the ship is parked; the ore-site
+ * block is only how it gets there, and it never picks a pirate den.
+ */
+const ANOMALY_MINING: BotScript = {
+  ...FORMAT,
+  name: "Anomaly mining",
+  notes: "Flies the scanner's ore sites, mines each one out, hauls home and refines.",
+  home: startingStation(),
+  interrupts: [
+    { id: "w-shield", when: { kind: "shield-below", fraction: 0.5 }, respond: "repair" },
+    { id: "w-rats", when: { kind: "hostile-on-grid" }, respond: "fight-back" },
+    { id: "w-hull", when: { kind: "hull-below", fraction: 0.5 }, respond: "dock-and-pause" },
+  ],
+  program: [
+    {
+      id: "loop",
+      kind: "loop",
+      repeat: { kind: "forever" },
+      body: [
+        { id: "s1", kind: "macro", macro: "undock", args: {} },
+        { id: "s2", kind: "macro", macro: "warp-to-ore-anomaly", args: {} },
+        {
+          id: "s3",
+          kind: "macro",
+          macro: "mine-at-belt",
+          args: { belt: { kind: "belt", belt: { mode: "nearest" } } },
+          until: { kind: "ore-hold-at-least", fraction: 0.9 },
+        },
+        { id: "s4", kind: "macro", macro: "deliver-ore", args: { station: { kind: "station", ref: startingStation() } } },
+        { id: "s5", kind: "macro", macro: "refine-ore", args: {} },
+      ],
+    },
+  ],
+};
+
 /** A one-shot housekeeping run for the end of a session. */
 const OPERATIONS_CLOSEOUT: BotScript = {
   ...FORMAT,
@@ -267,5 +305,6 @@ export const EXAMPLE_BOTS: readonly ExampleBot[] = Object.freeze([
   { key: "fleet-medic", label: "Fleet medic", blurb: "Cycle remote repairs and capacitor support.", doc: FLEET_MEDIC },
   { key: "fleet-anchor", label: "Fleet anchor", blurb: "Stay close and keep fleet-mates repaired.", doc: FLEET_ANCHOR },
   { key: "anomaly-expedition", label: "Anomaly expedition", blurb: "Explore, clear, loot, salvage, turn around.", doc: ANOMALY_EXPEDITION },
+  { key: "anomaly-mining", label: "Anomaly mining", blurb: "Mine the scanner's ore sites, not the belts.", doc: ANOMALY_MINING },
   { key: "operations-closeout", label: "Operations closeout", blurb: "Dock, unload, repair, tidy, check colonies.", doc: OPERATIONS_CLOSEOUT },
 ]);

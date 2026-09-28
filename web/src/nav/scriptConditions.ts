@@ -28,6 +28,7 @@ import type {
 import type { CargoReading, TravelReading } from "./missionBotLoop.ts";
 import type { SavedFitting } from "../bridge/fittings.ts";
 import type { ScannerOperationsSnapshot } from "../scanner/scannerCenter.ts";
+import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import type { RefusalRecord } from "./refusalLedger.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
@@ -39,6 +40,17 @@ import type { RefusalRecord } from "./refusalLedger.ts";
  * because `health-below` watches the weakest layer while `shield-below` watches
  * one specific layer.
  */
+/**
+ * One cosmic anomaly on the scanner: the scan label a warp is issued against,
+ * and WHAT KIND of site it is so a block can skip the ones it does not want.
+ * `kind` is "unknown" when the row carried nothing that classifies it — never a
+ * guess (see scanner/siteKind.ts).
+ */
+export interface ScannedAnomaly {
+  readonly label: string;
+  readonly kind: ExplorationSiteKind;
+}
+
 /** One belt the shared memory says is dry: entirely (`all`) or of these ore families (type groups). */
 export interface DryBelt {
   readonly beltName: string;
@@ -267,10 +279,10 @@ export interface ScriptObservation {
   /** Jumps from HERE to the offered mission's drop-off (the accept gate). */
   readonly jumpsToDropoff?: number | null;
   /**
-   * The onboard scanner's combat anomalies for THIS system (their scan labels),
-   * read only when a warp-to-anomaly step is active. null = unreadable.
+   * The onboard scanner's cosmic anomalies for THIS system, read only when an
+   * anomaly-flying step is active. null = unreadable.
    */
-  readonly anomalies?: readonly string[] | null;
+  readonly anomalies?: readonly ScannedAnomaly[] | null;
   /** Held-session probe authority, read only for exploration macros. */
   readonly scannerOperations?: ScannerOperationsSnapshot | null;
   /** The character's saved-fitting library (read when a refit step is active). */

@@ -203,6 +203,7 @@ import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import { decodeBoundSmallServices, decodeFullState } from "../bridge/boundSmallServices.ts";
 import { decodeFormations } from "../bridge/formations.ts";
 import { scannerStateFromBoundRead } from "../scanner/scannerCenter.ts";
+import { siteKind } from "../scanner/siteKind.ts";
 import { decodeFittings } from "../bridge/fittings.ts";
 import { decodeActiveBookmarks } from "../bridge/bookmarks.ts";
 import {
@@ -5968,6 +5969,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // `travel-to-belt` and `compress-ore` are deliberately not here: neither one
   // reads a rock, and a scan they cannot use is a round trip nobody asked for.
   const SURVEY_MACROS = new Set(["mine-at-belt"]);
+  // Blocks that fly to a cosmic anomaly, and so pay for the scanner read. Both
+  // kinds are here: each one filters the SAME list down to the sites it wants.
+  const ANOMALY_MACROS = new Set(["warp-to-anomaly", "warp-to-ore-anomaly"]);
   const FLEET_MANAGEMENT_MACROS = new Set([
     "create-fleet",
     "invite-to-fleet",
@@ -6552,12 +6556,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             savedFittings = null;
           }
         }
-        if (macro === "warp-to-anomaly") {
+        if (macro !== null && ANOMALY_MACROS.has(macro)) {
           try {
             const full = decodeFullState(await api.loadScanFullState(callOptions));
-            anomalies = full.anomalies
-              .map((site) => site.targetID)
-              .filter((label): label is string => label !== null);
+            // The whole row is classified here, not just labelled: `targetID` is
+            // the handle a warp is issued against, and `scanStrengthAttribute`
+            // (with `archetypeID` as its backstop) is what separates a rock
+            // field from a pirate den — see scanner/siteKind.ts.
+            anomalies = full.anomalies.flatMap((site) =>
+              site.targetID === null
+                ? []
+                : [{
+                    label: site.targetID,
+                    kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+                  }],
+            );
           } catch {
             anomalies = null;
           }

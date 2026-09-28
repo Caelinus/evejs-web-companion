@@ -44,6 +44,7 @@ import {
   type RefusalLedger,
   type RefusalRecord,
 } from "./refusalLedger.ts";
+import { isSessionChangeSettling, refusalWords } from "../bridge/refusals.ts";
 
 /**
  * What the next decide will look at — so `observe` reads ONLY what that macro
@@ -187,6 +188,16 @@ const READ_GAVE_UP_SENT_HOME =
   "Could not read your ship for several tries, so the bot sent it to a station and stopped.";
 const SESSION_LOST = "Lost the connection to your ship, so the bot stopped.";
 const DECIDE_FAILED = "The bot hit an unexpected problem working out its next move, so it stopped.";
+const IN_A_CAPSULE = "Your ship is gone and you are in a capsule, so the bot stopped flying the script.";
+// Commands turned back with 409 SESSION_CHANGE_IN_PROGRESS while a previous
+// transition settles. The same bound and the same reasoning as the autopilot's
+// MAX_SESSION_CHANGE_WAITS: the barrier deadline plus the ten-second
+// next-mutation cooldown is close to a minute, so this is far more generous
+// than any refusal budget. Kept local rather than imported so the script
+// runner does not depend on the autopilot's module.
+const MAX_SESSION_CHANGE_WAITS = 12;
+// A breath before the re-issue, matching the autopilot's SETTLE_TRANSPORT.
+const SETTLE_AFTER_SESSION_CHANGE = 2;
 
 export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerController {
   let status: ScriptRunnerStatus = "idle";
@@ -195,6 +206,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   let memory: ScriptMemory | null = null;
   let settle = 0;
   let readFailures = 0;
+  // Consecutive 409s while a session change settles. Reset the moment ANY call
+  // gets through, so a jump's ten-second cooldown never leaves a budget spent
+  // for the rest of the run.
+  let sessionChangeWaits = 0;
   // ⚠ PER RUN, AND THAT IS THE POINT. A macro's own attempt counter lives in
   // step memory, which scriptDecide drops every time the step is left, so a
   // forever-loop hands the same failing target a fresh budget on every lap. This
@@ -325,6 +340,31 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     readFailures = 0;
     lastObs = obs;
 
+    // ⚠ THE HULL IS GONE. A destroyed ship does not end the run on its own: the
+    // session survives, the reads keep working, and the decider happily goes on
+    // mining — in a pod, which has no miner, no hold and no tank. Three ships
+    // were lost on 2026-09-09/10 and every one of them kept "flying the script"
+    // for another 10-12 minutes afterwards, one of them warping the capsule back
+    // to the belt it had just died on. It only ever stopped by tripping some
+    // unrelated guard (ten refusals of a module that no longer exists), which is
+    // the bot noticing by accident.
+    //
+    // TRI-STATE, AND ONLY `true` DECIDES. `null` is "the gateway did not say"
+    // (an older BFF omits the field) and must never stop a healthy run — the
+    // same null-is-not-a-verdict rule the conditions follow.
+    //
+    // HEADING HOME, NOT PAUSING. A pod parked in a belt is still a target, and
+    // stopping where it floats is what the four-ships rule in `stopOrHeadHome`
+    // exists to prevent. The capsule can dock; let it.
+    // ⚠ ONCE. `stopOrHeadHome` latches the first time and PAUSES the second, so
+    // firing this every tick would pause the pod where it floats — the exact
+    // outcome the latch exists to avoid. Once latched, fall through and let the
+    // decider fly the thing home.
+    if (obs.flightStatus?.shipIsCapsule === true && memory !== null && memory.latched === null) {
+      stopOrHeadHome(IN_A_CAPSULE);
+      return;
+    }
+
     // Deciding is pure and total BY DESIGN, but a macro adapter reaching into a
     // live snapshot could still throw on a shape the tests never saw. If it does,
     // an unwrapped throw would reject run() and kill the loop SILENTLY — the ship
@@ -377,6 +417,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       try {
         await deps.issue(result.action);
         issuedSuccessfully = true;
+        sessionChangeWaits = 0;
         record({ t: now(), kind: "result", run: runID, ok: true, says: describeAction(result.action) });
         // It worked: the streak is over. Without this a key that failed twice
         // and then recovered would carry those two forever and stop the run
@@ -390,6 +431,42 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           setError(SESSION_LOST);
           return;
         }
+        // ⚠ A SETTLING SESSION CHANGE IS NOT A REFUSAL, AND COUNTING IT AS ONE
+        // COST THREE SHIPS. For ten seconds after a jump the BFF turns every
+        // mutation back with 409 — including the FIRST thing a ship does on
+        // arrival, which is put its hardeners up. Booked as an ordinary refusal
+        // that press is spent: the ledger takes it, the macro's own attempt
+        // budget takes it, and the block moves on to shooting. On 2026-09-09/10
+        // all three lost ships fought a gate spawn with their resists down, and
+        // in every one of the three logs the hardener was asked for exactly once
+        // and never again.
+        //
+        // So it is not booked at all. The ledger never sees it, no attempt is
+        // consumed, and the next tick asks for the same thing — which is what
+        // the two loops that already handle this do (nav/autopilotLoop
+        // `handleActionError`, nav/missionBotLoop) and what bridge/refusals
+        // `isSessionChangeSettling` says in as many words: "a loop must wait
+        // this out generously, never pause on the first one".
+        //
+        // BOUNDED ANYWAY. Waiting forever on a barrier that never clears is its
+        // own way to lose a ship, so a streak still ends the run — and ends it
+        // by heading home, not by parking where it floats.
+        if (isSessionChangeSettling(error)) {
+          sessionChangeWaits += 1;
+          record({
+            t: now(), kind: "result", run: runID, ok: false,
+            refusal: deps.refusalReason(error),
+            says: describeAction(result.action), stepPath: result.stepPath,
+          });
+          if (sessionChangeWaits > MAX_SESSION_CHANGE_WAITS) {
+            stopOrHeadHome(
+              `The ship kept being turned back while a session change finished: ${refusalWords(deps.refusalReason(error))}`,
+              result,
+            );
+            return;
+          }
+          backoffTicks = SETTLE_AFTER_SESSION_CHANGE;
+        } else {
         // A refusal is not a crash — but it is not nothing either, which is what
         // it used to be. It gets counted, worded, slowed down, and eventually
         // acted on rather than retried at full speed until somebody notices.
@@ -416,6 +493,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           return;
         }
         backoffTicks = settleTicksForRefusals(record_.count);
+        }
       }
       if (token !== runToken || status !== "running") {
         return;

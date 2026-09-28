@@ -276,8 +276,14 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "warp-to-anomaly": entry(
     "warp-to-anomaly",
     "combat",
-    "Reads your ship's scanner and warps to the next pirate den it shows, skipping the ones this run has already visited. Pair it with Fight the rats in a repeat loop.",
+    "Reads your ship's scanner and warps to the next pirate den it shows, skipping ore sites and the dens this run has already visited. Pair it with Fight the rats in a repeat loop.",
     "Being in space, with a den on the scanner",
+  ),
+  "warp-to-ore-anomaly": entry(
+    "warp-to-ore-anomaly",
+    "mining",
+    "Reads your ship's scanner and warps to the next ore site it shows — asteroid clusters and ice belts, never a pirate den — skipping the ones this run has already visited. Pair it with Mine at a belt in a repeat loop.",
+    "Being in space, with an ore site on the scanner",
   ),
   "refit-ship": entry(
     "refit-ship",

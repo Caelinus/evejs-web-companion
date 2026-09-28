@@ -61,6 +61,30 @@ services:
       # hardened for a LAN than the emulator behind it.
       - "127.0.0.1:${EVEJS_WEB_POC_PORT:-26500}:26500"
     restart: unless-stopped
+    # Keep enough history to investigate a bot that misbehaved overnight. The
+    # default json-file driver is UNCAPPED, so a chatty run grows until the disk
+    # complains; three 20 MB files is roughly a long weekend of this service and
+    # bounded either way.
+    #
+    # ⚠ THIS BOUNDS GROWTH. IT DOES NOT SURVIVE A RECREATE. A container's log
+    # belongs to the CONTAINER, not the service: `docker compose down`, a
+    # `--force-recreate`, or any edit to this file that changes the container
+    # spec throws the old container away and its whole log with it. That is not
+    # a rotation setting anyone can tune — it is what a container log IS.
+    #
+    # What does survive is what sits on a named volume (the bot flight recorders
+    # under /app/data/bot-logs) or has already been copied out.
+    #
+    # So if you are about to reproduce something you will want to read later,
+    # copy the log out FIRST — `docker compose logs --no-color --timestamps bff
+    # > some/path.log` — or put the thing you actually need on the data volume
+    # rather than on stdout. Anything still only in `docker logs` is one
+    # `up --build` away from being gone.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 # No shared network here on purpose. This file reaches EveJS through
 # host.docker.internal, so it needs nothing but its own project network — and

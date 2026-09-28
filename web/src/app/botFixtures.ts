@@ -32,6 +32,8 @@
 
 /** Farmer's live Procurer. */
 export const SHIP_ID = 9988400023309;
+/** Procurer. A hull, not a capsule — what `shipIsCapsule: false` means here. */
+export const SHIP_TYPE_ID = 17480;
 export const STATION_ID = 60000358;
 export const SOLAR_SYSTEM_ID = 30000144;
 
@@ -200,6 +202,8 @@ export function flightBody(docked: boolean): unknown {
       stationID: docked ? STATION_ID : null,
       structureID: null,
       shipID: SHIP_ID,
+      shipTypeID: SHIP_TYPE_ID,
+      shipIsCapsule: false,
       shipMode: docked ? null : "STOP",
       shipSpeedFraction: docked ? null : 0,
     },

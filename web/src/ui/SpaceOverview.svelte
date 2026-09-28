@@ -235,6 +235,10 @@
       locked: lockedIDs.has(row.itemID),
       acquiring: acquiringIDs.has(row.itemID),
       gateLink: row.gateLink,
+      // What decides whether "Mine this" is offered at all. A stargate used to
+      // get it, greyed out and blaming your equipment for a thing no equipment
+      // could ever fix — space/rowActions.ts, isMineableCategory.
+      categoryID: row.categoryID,
       // ⚠ FOUND LIVE: THIS WAS NEVER PASSED, so "Mine this" was permanently
       // disabled reading "No mining equipment is switched on" — on a hull with
       // three powered-up Miner Is. `minerCount ?? 0` defaults to zero, which is

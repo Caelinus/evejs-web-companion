@@ -1435,6 +1435,19 @@ export interface FlightStatus {
   readonly stationID: number | null;
   readonly structureID: number | null;
   readonly shipID: number | null;
+  readonly shipTypeID: number | null;
+  /**
+   * Whether the hull being flown is a capsule — i.e. the ship was lost and the
+   * pilot is in a pod. TRI-STATE: `null` is "the gateway did not say", which is
+   * never a verdict either way (an older BFF omits it entirely).
+   *
+   * ⚠ THIS IS THE ONLY HONEST SOURCE. `snapshot.ship.typeID` looks like it would
+   * do, but the space snapshot is exactly the read that comes back empty while a
+   * session change settles — see bridge/space.ts `decodeSpaceSnapshot`, which
+   * manufactures a confident-empty snapshot rather than a null one. Flight
+   * status is authoritative and survives that window.
+   */
+  readonly shipIsCapsule: boolean | null;
   readonly shipMode: string | null;
   readonly shipSpeedFraction: number | null;
   /** Present on current BFFs; absent only when talking to an older one. */

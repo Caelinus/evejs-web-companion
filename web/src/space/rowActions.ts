@@ -76,6 +76,12 @@ export interface RowActionContext {
   /** The gate link for this row, or null when it is not a stargate. */
   readonly gateLink: GateLink | null;
   /**
+   * The game's own inventory CATEGORY for the thing, exactly as the server
+   * stamped it, or null when it could not be read. Decides whether "Mine this"
+   * is offered at all — see `isMineableCategory`.
+   */
+  readonly categoryID?: number | null;
+  /**
    * R30 slice E — how many switched-on modules the player's own equipment list
    * reads as mining gear. 0 does not remove "Mine this"; it gives it a reason.
    */
@@ -112,6 +118,34 @@ export function isDockableKind(kind: string | null): boolean {
  */
 export function isLootableKind(kind: string | null): boolean {
   return kind === "wreck" || kind === "container";
+}
+
+/**
+ * Retail's Asteroid category. Every ore, ice and harvestable gas type lives in
+ * it and nothing else does — the same number `bridge/bayRouting.ts` routes a
+ * mining hold by and `nav/scriptMacros.ts` refines by, both of which checked it
+ * against the live static data.
+ */
+const CATEGORY_ASTEROID = 25;
+
+/**
+ * Could a laser be pointed at this at all?
+ *
+ * ⚠ THE GAME'S OWN CATEGORY, AND NEVER THE RUNTIME KIND. The kind cannot do
+ * this job: a rock and a stargate are BOTH `kind: "celestial"` (`tactical.ts`
+ * separates them by the mining fields and the group, not by the kind), so a
+ * kind test would either keep the verb on the gate or lose it on the rocks.
+ *
+ * ⚠ AND IT DOES NOT COST ICE OR GAS, which is the reason this was left
+ * unfiltered in the first place: category 25 is ore, ice and harvestable gas
+ * alike, so nothing a laser or a harvester can work falls out of it.
+ *
+ * ⚠ AN UNREADABLE CATEGORY STILL GETS THE VERB. null is "we could not tell",
+ * and refusing on a fact we do not have would be this side inventing a rule —
+ * the same direction `isLootableKind` leans when it declines to test range.
+ */
+export function isMineableCategory(categoryID: number | null | undefined): boolean {
+  return categoryID === null || categoryID === undefined || categoryID === CATEGORY_ASTEROID;
 }
 
 /**
@@ -168,12 +202,21 @@ export function actionsForRow(ctx: RowActionContext): readonly RowAction[] {
   // R30 slice E — "Mine this", the verb that made the Mining tab's own
   // instructions to go somewhere else untrue.
   //
-  // Deliberately NOT restricted to `kind === "asteroid"`. What can be mined is
-  // the server's call, and a browser that pre-filtered on the runtime kind
-  // would refuse ice and gas it has never been told about. Both reasons it can
-  // be unusable are the SERVER'S OWN rules restated, not invented ones: a
-  // module needs a lock before it will run on something, and there has to be
-  // mining equipment switched on for there to be anything to run.
+  // ⚠ OFFERED ONLY ON SOMETHING THE SERVER FILED AS MINEABLE. FOUND LIVE: a
+  // stargate's panel carried a greyed-out "Mine this" reading "No mining
+  // equipment is switched on", which is true, useless and misleading in one
+  // control — no amount of powering lasers up and locking will ever make a gate
+  // mineable, so the sentence points a player at a fix that cannot work. The
+  // same button sat on stations, wrecks and other players' ships.
+  //
+  // The gate is `isMineableCategory` — the game's own category, not the runtime
+  // kind, and not a guess this side made up. Ice and gas keep the verb, which is
+  // what leaving it unfiltered was protecting; see that function.
+  //
+  // Both reasons it can be unusable on a thing that IS mineable are still the
+  // SERVER'S OWN rules restated: a module needs a lock before it will run on
+  // something, and there has to be mining equipment switched on for there to be
+  // anything to run.
   //
   // R49 — NO DEPLETION GATE. Whether a rock is empty is the server's to decide,
   // and it decides it by REMOVING the rock from the grid when it is mined out. A
@@ -182,17 +225,19 @@ export function actionsForRow(ctx: RowActionContext): readonly RowAction[] {
   // the survey scan for the player to read; that is a readout, not a gate). The
   // two reasons that remain are the SERVER's own rules restated: a module needs a
   // lock before it runs, and there must be mining equipment switched on to run.
-  actions.push({
-    id: "mine",
-    label: "Mine this",
-    concern: "module",
-    unavailable:
-      (ctx.minerCount ?? 0) <= 0
-        ? "No mining equipment is switched on — power some up under Your equipment"
-        : !ctx.locked
-          ? "Lock it first — your equipment needs a fix on it before it will run"
-          : null,
-  });
+  if (isMineableCategory(ctx.categoryID)) {
+    actions.push({
+      id: "mine",
+      label: "Mine this",
+      concern: "module",
+      unavailable:
+        (ctx.minerCount ?? 0) <= 0
+          ? "No mining equipment is switched on — power some up under Your equipment"
+          : !ctx.locked
+            ? "Lock it first — your equipment needs a fix on it before it will run"
+            : null,
+    });
+  }
 
   // R23 — lock / release. GENERIC: the same button a combat goal uses, for the
   // same reason. Locking is not instant, so the middle state is shown honestly

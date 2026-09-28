@@ -22,6 +22,7 @@ import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/bo
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
+import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import {
   agentActionID,
   cargoRoom,
@@ -2204,58 +2205,197 @@ const fightTheRats: MacroDecider = (step, obs, mem) => {
   return tick(WAIT, "Fighting it.", "Fighting", ACTING, true, mem);
 };
 
-// ── warp-to-anomaly ──────────────────────────────────────────────────────────
-// Read the onboard scanner, warp to the next combat anomaly this run has not
-// visited (visited labels live on the BOARD so a repeat loop walks the system's
-// dens one by one), and finish once the warp lands. With Fight-the-rats after it
-// in a loop, this is the ratting bot.
+// ── warp-to-anomaly / warp-to-ore-anomaly ────────────────────────────────────
+// Read the onboard scanner, warp to the next anomaly OF THE WANTED KIND this run
+// has not visited (visited labels live on the BOARD so a repeat loop walks the
+// system's sites one by one), and finish once the warp lands. With Fight-the-rats
+// after it in a loop the combat one is the ratting bot; with Mine-at-a-belt after
+// it the ore one is the anomaly mining bot.
+//
+// ⚠ THE KIND FILTER IS THE POINT, AND IT IS NOT A NAME MATCH. Ore and combat
+// anomalies arrive in the SAME scanner slot, and the label a warp is issued
+// against ("QEE-288") says nothing about what is there. They are told apart by
+// the row's own scan-strength attribute — the same field the client's Probe
+// Scanner groups by (scanner/siteKind.ts). Before this filter existed, a ratting
+// loop would happily drop into an asteroid cluster and sit there with nothing to
+// shoot, which is what the two blocks now make impossible.
+//
+// A site whose kind could not be read is skipped by BOTH blocks rather than
+// being flown to on the chance it is the right one: an unreadable row is not a
+// den, and warping a mining barge into one on a guess is how a hull is lost.
 const WARP_START_WAIT_TICKS = 10; // ~20s for a warp to actually begin
+// ⚠ AN EMPTY SCANNER IS READ THREE TIMES BEFORE IT IS BELIEVED. The server does
+// not answer an unresolvable session with an error — it answers with an EMPTY
+// full state (scanMgrService.js, `systemID <= 0` -> buildEmptySignalTrackerFullState),
+// which is indistinguishable on the wire from a system that genuinely holds
+// nothing. Believing the first one ends the run over a moment the next tick
+// would have contradicted, and a re-read costs one call on a block that is
+// paying for the scanner every tick anyway. A read that FAILS is already
+// handled elsewhere (null -> keep waiting); this is the read that succeeds and
+// lies.
+const EMPTY_SCAN_CONFIRM_READS = 3; // ~6s of agreeing before "this system is empty"
 
-const warpToAnomaly: MacroDecider = (_step, obs, mem, board) => {
-  if (obs.flightStatus?.docked === true) {
-    return tick(WAIT, "Docked — there is no scanner to fly on from here.", "Scanning", {
-      kind: "blocked",
-      reason: "Undock first — put a Leave-the-station block before this one.",
-    });
+/** The words each variant uses about its own sites — the only thing that differs. */
+interface AnomalyFlavour {
+  /** The board slot holding this run's visited labels. Separate per kind so
+   *  one block's tour never marks the other block's sites as seen. */
+  readonly boardKey: string;
+  /** "den" / "ore site" — reads inside a sentence. */
+  readonly noun: string;
+  /** The same noun carrying its article ("a den" / "an ore site"). */
+  readonly oneNoun: string;
+  /** The step label the pilot sees while flying. */
+  readonly flying: string;
+  /** Appended when the scanner listed NOTHING AT ALL — the thing a player of
+   *  THIS block reliably mistakes for one of its sites. See the note below. */
+  readonly emptyScannerHint: string;
+}
+
+const COMBAT_FLAVOUR: AnomalyFlavour = {
+  boardKey: "anomsVisited",
+  noun: "den",
+  oneNoun: "a den",
+  flying: "Flying to the den",
+  emptyScannerHint:
+    "Rats on a belt or a gate are not a den: a den is a site the scanner lists.",
+};
+
+const ORE_FLAVOUR: AnomalyFlavour = {
+  boardKey: "oreAnomsVisited",
+  noun: "ore site",
+  oneNoun: "an ore site",
+  flying: "Flying to the ore site",
+  emptyScannerHint:
+    "Rocks on the overview are not an ore site: an asteroid belt is not a scanner site, and Mine-at-a-belt is the block that works one.",
+};
+
+// ── Why the dead end is THREE sentences and not one ──────────────────────────
+// The block used to answer every dead end with "The scanner shows no <site>
+// left to visit in this system", and that sentence is wrong in two of the three
+// states it was used for — wrong enough that a pilot parked in a field of rock
+// reads it as the bot failing to see what is plainly on the screen. The three:
+//
+//   • THE SCANNER LISTED NOTHING. The likeliest reason the pilot disagrees is
+//     that they are reading the OVERVIEW, which lists what is on THIS GRID —
+//     belt asteroids, rats, wrecks — and never lists a scanner site at all. So
+//     the sentence says which of the two panels the block reads.
+//   • IT LISTED SITES, NONE OF THIS KIND. Then the count is the useful fact and
+//     the number of UNREADABLE rows is the most useful of all: a site whose
+//     kind the server did not report is deliberately skipped (siteKind.ts), so
+//     "three sites here and none of them says what it is" is a different
+//     problem from "this system has no ore in it" and must not wear the same
+//     words — the first is a server that is not filling the field in, and no
+//     amount of flying around will fix it.
+//   • EVERY SITE OF THIS KIND IS VISITED. Which is no longer a dead end at all
+//     — see the lap note on `warpToAnomalyOfKind`.
+function noSiteReason(flavour: AnomalyFlavour, total: number, unreadable: number): string {
+  if (total === 0) {
+    return `The scanner lists no cosmic anomaly in this system, so there is no ${flavour.noun} to fly to. ${flavour.emptyScannerHint}`;
   }
-  if (flag(mem, "issued")) {
-    if (obs.inWarp === true) {
-      return tick(WAIT, "In warp to the den.", "Flying to the den", ACTING, false, { ...mem, sawWarp: true });
-    }
-    if (flag(mem, "sawWarp")) {
-      return tick(WAIT, "Arrived at the den.", "Arrived", { kind: "done" });
-    }
-    const waited = (num(mem, "waited") ?? 0) + 1;
-    if (waited > WARP_START_WAIT_TICKS) {
-      return tick(WAIT, "The warp never started.", "Scanning", {
+  const listed = total === 1 ? "1 cosmic anomaly" : `${total} cosmic anomalies`;
+  const head = `The scanner lists ${listed} in this system, and not one of them is ${flavour.oneNoun}.`;
+  if (unreadable === 0) {
+    return head;
+  }
+  const which =
+    unreadable === total
+      ? total === 1
+        ? "It did not say"
+        : "None of them said"
+      : unreadable === 1
+        ? "One of them did not say"
+        : `${unreadable} of them did not say`;
+  return `${head} ${which} what kind of site it is, and this block will not warp on a guess.`;
+}
+
+function warpToAnomalyOfKind(
+  wanted: ExplorationSiteKind,
+  flavour: AnomalyFlavour,
+): MacroDecider {
+  return (_step, obs, mem, board) => {
+    if (obs.flightStatus?.docked === true) {
+      return tick(WAIT, "Docked — there is no scanner to fly on from here.", "Scanning", {
         kind: "blocked",
-        reason: "The ship would not warp to the den, so the bot stopped.",
+        reason: "Undock first — put a Leave-the-station block before this one.",
       });
     }
-    return tick(WAIT, "Waiting for the warp to start.", "Flying to the den", ACTING, false, { ...mem, waited });
-  }
-  const anomalies = obs.anomalies ?? null;
-  if (anomalies === null) {
-    return tick(WAIT, "Reading the scanner.", "Scanning", ACTING, false, mem);
-  }
-  const visited = String(board["anomsVisited"] ?? "")
-    .split(",")
-    .filter((label) => label.length > 0);
-  const next = anomalies.find((label) => !visited.includes(label));
-  if (next === undefined) {
-    return tick(WAIT, "Every den here has been visited this run.", "Scanning", {
-      kind: "blocked",
-      reason: "The scanner shows no pirate den left to visit in this system.",
-    });
-  }
-  return {
-    ...tick({ kind: "warpScan", target: next }, "Warping to the next den.", "Flying to the den", ACTING, false, {
-      issued: true,
-      waited: 0,
-    }),
-    boardPatch: { anomsVisited: [...visited, next].join(",") },
+    if (flag(mem, "issued")) {
+      if (obs.inWarp === true) {
+        return tick(WAIT, `In warp to the ${flavour.noun}.`, flavour.flying, ACTING, false, { ...mem, sawWarp: true });
+      }
+      if (flag(mem, "sawWarp")) {
+        return tick(WAIT, `Arrived at the ${flavour.noun}.`, "Arrived", { kind: "done" });
+      }
+      const waited = (num(mem, "waited") ?? 0) + 1;
+      if (waited > WARP_START_WAIT_TICKS) {
+        return tick(WAIT, "The warp never started.", "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to the ${flavour.noun}, so the bot stopped.`,
+        });
+      }
+      return tick(WAIT, "Waiting for the warp to start.", flavour.flying, ACTING, false, { ...mem, waited });
+    }
+    const anomalies = obs.anomalies ?? null;
+    if (anomalies === null) {
+      return tick(WAIT, "Reading the scanner.", "Scanning", ACTING, false, mem);
+    }
+    if (anomalies.length === 0) {
+      const emptyReads = (num(mem, "emptyReads") ?? 0) + 1;
+      if (emptyReads < EMPTY_SCAN_CONFIRM_READS) {
+        return tick(WAIT, "The scanner came back empty — reading it again.", "Scanning", ACTING, false, {
+          ...mem,
+          emptyReads,
+        });
+      }
+      return tick(WAIT, "The scanner lists nothing in this system.", "Scanning", {
+        kind: "blocked",
+        reason: noSiteReason(flavour, 0, 0),
+      });
+    }
+    const visited = String(board[flavour.boardKey] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0);
+    const ofKind = anomalies.filter((site) => site.kind === wanted);
+    // A LAP, NOT A ONE-SHOT. `fresh` is undefined in two completely different
+    // situations and the old code answered both by stopping: there is no site of
+    // this kind here (a real dead end), or every one of them has been flown to
+    // once (not a dead end at all). A site is not finished because the ship has
+    // BEEN there — one miner does not empty an asteroid cluster in one hold, and
+    // in a system holding a single ore site the visited list retired it after one
+    // trip and stopped a bot that had barely scratched it. So a completed lap
+    // wipes the list and starts the next one, and the run now ends where it
+    // should: at Mine-at-a-belt, which is the block that can actually see there
+    // is no rock left and says so.
+    const fresh = ofKind.find((site) => !visited.includes(site.label));
+    const next = fresh ?? ofKind[0];
+    if (next === undefined) {
+      const unreadable = anomalies.filter((site) => site.kind === "unknown").length;
+      return tick(WAIT, `Nothing on the scanner is ${flavour.oneNoun}.`, "Scanning", {
+        kind: "blocked",
+        reason: noSiteReason(flavour, anomalies.length, unreadable),
+      });
+    }
+    const lapRestart = fresh === undefined;
+    return {
+      ...tick(
+        { kind: "warpScan", target: next.label },
+        lapRestart
+          ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
+          : `Warping to the next ${flavour.noun}.`,
+        flavour.flying,
+        ACTING,
+        false,
+        { issued: true, waited: 0 },
+      ),
+      boardPatch: {
+        [flavour.boardKey]: (lapRestart ? [next.label] : [...visited, next.label]).join(","),
+      },
+    };
   };
-};
+}
+
+const warpToAnomaly: MacroDecider = warpToAnomalyOfKind("combat", COMBAT_FLAVOUR);
+const warpToOreAnomaly: MacroDecider = warpToAnomalyOfKind("ore", ORE_FLAVOUR);
 
 // ── refit-ship ───────────────────────────────────────────────────────────────
 // The "reship and go" block, docked only: find the saved fitting BY NAME (the id
@@ -3753,6 +3893,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "hardeners-on": hardenersOn,
   "fight-the-rats": fightTheRats,
   "warp-to-anomaly": warpToAnomaly,
+  "warp-to-ore-anomaly": warpToOreAnomaly,
   "refit-ship": refitShip,
   "move-items": moveItems,
   "warp-to-bookmark": warpToBookmark,
