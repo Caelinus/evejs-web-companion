@@ -2,7 +2,7 @@
 // read and the existing live notification channel. It deliberately keeps the
 // three player-relevant states separate:
 //   • ready          — GetInitState named a real fleet;
-//   • not-in-fleet   — every bound read explicitly answered FleetNotFound;
+//   • not-in-fleet   — every bound read explicitly refused as fleetless;
 //   • unavailable    — the read failed or was partial in any other way.
 // A null fleetID alone is not enough to call somebody fleetless: the cached
 // session field is allowed to be stale, and a transport failure also decodes to
@@ -45,6 +45,12 @@ function positiveFleetID(value: number | string | null): boolean {
   return false;
 }
 
+// The server's two "you have no fleet" refusals. FleetNotFound comes from the
+// fleet runtime when the session's fleetid resolves to nothing; FleetNotInFleet
+// comes from fleetObjectHandler's member gate (_resolveFleetIDForMember), which
+// the bound reads pass through before the runtime is reached.
+const FLEETLESS_REFUSALS: ReadonlySet<string> = new Set(["FleetNotFound", "FleetNotInFleet"]);
+
 /** Classify one decoded read without turning an error-shaped empty into fleetless. */
 export function fleetAvailability(fleet: BoundFleet): FleetAvailability {
   if (
@@ -56,7 +62,10 @@ export function fleetAvailability(fleet: BoundFleet): FleetAvailability {
   if (
     !positiveFleetID(fleet.initState.value.fleetID) &&
     readCells(fleet).every(
-      (read) => read.error === "CALL_REFUSED" && read.message === "FleetNotFound",
+      (read) =>
+        read.error === "CALL_REFUSED" &&
+        read.message !== null &&
+        FLEETLESS_REFUSALS.has(read.message),
     )
   ) {
     return "not-in-fleet";

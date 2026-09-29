@@ -40,6 +40,37 @@ test("Fleet Center distinguishes an authoritative fleetless answer from an outag
   assert.equal(failed.availability, "unavailable");
 });
 
+test("Fleet Center reads the member gate's FleetNotInFleet refusal as fleetless", () => {
+  // The bound reads pass fleetObjectHandler's member gate before the fleet
+  // runtime, so a fleetless character is refused FleetNotInFleet on all five.
+  const gated = decodeFleetCenter({
+    ok: true,
+    characterID: 140000005,
+    fleetID: null,
+    reads: errorReads("FleetNotInFleet"),
+  } as never);
+  assert.equal(gated.availability, "not-in-fleet");
+  assert.deepEqual(authoritativeFleetMemberCharacterIDs(gated), []);
+
+  // Either fleetless refusal, mixed across reads, is still one settled answer.
+  const mixed = decodeFleetCenter({
+    ok: true,
+    characterID: 140000005,
+    fleetID: null,
+    reads: { ...errorReads("FleetNotInFleet"), GetMotd: { error: "CALL_REFUSED", message: "FleetNotFound" } },
+  } as never);
+  assert.equal(mixed.availability, "not-in-fleet");
+
+  // One read failing for any other reason keeps the whole answer unknown.
+  const partial = decodeFleetCenter({
+    ok: true,
+    characterID: 140000005,
+    fleetID: null,
+    reads: { ...errorReads("FleetNotInFleet"), GetWings: { error: "READ_FAILED", message: "timed out" } },
+  } as never);
+  assert.equal(partial.availability, "unavailable");
+});
+
 test("Fleet Center requires a successful GetInitState before calling a cached fleet ready", () => {
   const decoded = decodeFleetCenter({
     ok: true,
