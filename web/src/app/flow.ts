@@ -4877,9 +4877,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function launchDrones(itemIDs: readonly number[]): Promise<void> {
+    // The whole stack, as the retail client's Launch does: the panel picks
+    // stacks, the bay it was drawn from says how many are in each.
+    const request = wholeStackLaunch(itemIDs, droneStackSizes(store.drones.get().bay ?? []));
+    const requestedCount = request.reduce((sum, entry) => sum + entry.quantity, 0);
     await runDroneAction(
       "Launch",
-      () => api.launchDrones(itemIDs.map((itemID) => ({ itemID })), callOptions),
+      () => api.launchDrones(request, callOptions),
       (inSpace, launched) => {
         if (inSpace === null || launched === null) {
           return "The launch was accepted, but space could not be re-read, so what launched is unknown.";
@@ -4889,8 +4893,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // drone cap, a stack that moved. All of them answer an empty dict.
           return "No drones launched. Check your bandwidth and how many are already out.";
         }
-        if (launched.length < itemIDs.length) {
-          return `Only ${launched.length} of ${itemIDs.length} drones launched — the rest did not fit in your bandwidth or drone limit.`;
+        if (launched.length < requestedCount) {
+          return `Only ${launched.length} of ${requestedCount} drones launched — the rest did not fit in your bandwidth or drone limit.`;
         }
         return null;
       },
