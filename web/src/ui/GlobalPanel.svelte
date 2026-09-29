@@ -12,6 +12,7 @@
   import BotManager from "./BotManager.svelte";
   import FleetCompanions from "./FleetCompanions.svelte";
   import PiManager from "./PiManager.svelte";
+  import MiningOperations from "./MiningOperations.svelte";
   import type { Session } from "../app/sessions.ts";
   import type { TabID } from "./tabs.ts";
 
@@ -39,4 +40,6 @@
   <FleetCompanions {sessions} {onGoToPilot} />
 {:else if tab === "piManager"}
   <PiManager {sessions} />
+{:else if tab === "miningOperations"}
+  <MiningOperations reconnectVersion={0} onAuthExpired={() => {}} />
 {/if}

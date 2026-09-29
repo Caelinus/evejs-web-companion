@@ -4,7 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -30,7 +30,16 @@ const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
-const { createLootMemory } = require("./lootMemory");
+const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
+const { createMiningTargetBoard } = require("./miningTargetBoard");
+const { createMiningOperationStore } = require("./miningOperationStore");
+const { standardProfileFor, buildStandardProfile, familyCapabilities } = require("./miningOperationProfiles");
+const { miningResourceFamily } = require("./miningResourceFamily");
+const { validateResourcePolicy } = require("./miningResourcePolicy");
+const { extendMiningOperation } = require("./miningOperationGrant");
+const { normalizePolicies } = require("./miningOperationPolicies");
+const { createMiningOperationStopper } = require("./miningOperationStop");
+const { createMiningOperations, auditMiningScript, operationRoutineCompatibility, EXECUTABLE_TARGET_CLASSES } = require("./miningOperations");
 const { reconnectCandidate, hasPendingRecovery, recoveryReadyProof, handoffFlightReady } = require("./droneRecoveryGate");
 const { createBotLogStore } = require("./botLogStore");
 const {
@@ -141,7 +150,13 @@ const botHost =
     // botHost.resume() once listening, so a BFF restart brings them back.
     persistPath: path.join(config.dataDir, "server-bots.json"),
     loadAccount: (username) => store.getAccount(username),
-    loadScript: (scriptID) => botScripts.get(scriptID),
+    loadScript: (scriptID, row) => {
+      if (!scriptID.startsWith("mcc.")) return botScripts.get(scriptID);
+      const definition = miningOperationStore.get(row?.operationID);
+      const member = definition?.members.find(candidate => candidate.characterID === Number(row?.characterID));
+      const profile = member && buildStandardProfile(definition, member);
+      return profile?.scriptID === scriptID ? profile : null;
+    },
     // ONE HULL, ONE DRIVER, direction 1: a bot may not take a character any
     // live web session is flying. (Direction 2 — a tab may not take a bot's
     // character — is the guard in /api/bridge/select.)
@@ -163,6 +178,17 @@ app.locals.botScripts = botScripts;
 // belts repopulate and entries expire on their own.
 const beltMemory = options.beltMemory || createBeltMemory();
 app.locals.beltMemory = beltMemory;
+const miningTargetBoard = options.miningTargetBoard || createMiningTargetBoard();
+const miningOperationStore = options.miningOperationStore || createMiningOperationStore({
+  dataDir: config.dataDir,
+  resolveSystem: id => staticData.getSolarSystem(id),
+  resolveStation: id => staticData.getStation(id),
+});
+const miningOperations = options.miningOperations || createMiningOperations({
+  store: miningOperationStore, targetBoard: miningTargetBoard, beltMemory,
+});
+app.locals.miningTargetBoard = miningTargetBoard;
+app.locals.miningOperations = miningOperations;
 // Shared, in-process (never persisted — see src/squadBoard.js) call board: one
 // standing primary per FLEET, so pilots on one grid concentrate their fire
 // instead of each shooting whatever it ranked first for itself. Keyed by the
@@ -7288,7 +7314,52 @@ app.post("/api/bridge/ship/jettison", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This JETTISONS the selected items into space, where anyone can take them. This must be confirmed explicitly.")) {
     return;
   }
-  await dispatchBridgeWrite(req, res, next, "ship", "Jettison", [bridgeIDList((req.body || {}).itemIDs)]);
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+  if (!association) {
+    await dispatchBridgeWrite(req, res, next, "ship", "Jettison", [bridgeIDList((req.body || {}).itemIDs)]);
+    return;
+  }
+  let issued = false;
+  try {
+    const assignment = miningOperations.assignment(association.operationID, held.characterID);
+    if (assignment?.role !== "MINER" || !assignment.currentTarget || assignment.stopRequested) {
+      res.status(409).json({ ok: false, error: "OPERATION_TARGET_REQUIRED" }); return;
+    }
+    const readCans = async () => {
+      const scene = (await gateway.readSpaceSnapshot(held.bridgeSessionID, { userid: held.accountID })).space;
+      if (!Array.isArray(scene?.entities) || Number(scene.solarSystemID) !== assignment.currentTarget.systemID) {
+        throw Object.assign(new Error("Operation can scene is unreadable."), { code: "OPERATION_CONTAINER_SCENE_UNREADABLE" });
+      }
+      return scene.entities.filter(row => row.kind === "container" && Number(row.ownerID) === held.characterID)
+        .map(row => Number(row.itemID)).filter(id => Number.isSafeInteger(id) && id > 0);
+    };
+    const before = new Set(await readCans());
+    issued = true;
+    const outcome = await heldTopLevelCall(held, req.webSessionID, "ship", "Jettison", [bridgeIDList((req.body || {}).itemIDs)], null);
+    const first = Array.isArray(outcome.result) ? outcome.result[0] : outcome.result?.items?.[0];
+    const moved = Array.isArray(first) ? first : Array.isArray(first?.items) ? first.items : null;
+    let created = [];
+    for (let attempt = 0; attempt < 3 && created.length === 0; attempt++) {
+      if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 200));
+      created = (await readCans()).filter(id => !before.has(id));
+    }
+    if (created.length === 0 && moved?.length === 0) {
+      res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications }); return;
+    }
+    if (created.length !== 1 || !miningOperations.registerContainer(association.operationID,
+        held.characterID, created[0], assignment.currentTarget.systemID)) {
+      miningOperations.blockContainerProvenance(association.operationID);
+      res.status(409).json({ ok: false, error: "OPERATION_CONTAINER_PROVENANCE_UNCONFIRMED",
+        message: "Jettison may have committed, but its exact operation container could not be identified. Stop and reconcile before hauling." });
+      return;
+    }
+    res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
+  } catch (error) {
+    if (issued) miningOperations.blockContainerProvenance(association.operationID);
+    next(error);
+  }
 });
 
 // LaunchFromShip(itemIDs) — launch orbitals (drones/deployables) from the ship.
@@ -14580,21 +14651,33 @@ async function assertStructureService(held, webSessionID, structureID, serviceID
   }
 }
 
+async function operationStructureAccessCall(req, method, args, characterID = 0) {
+  const held = bridgeSessions.get(req.webSessionID);
+  if (!characterID && held) return heldTopLevelCall(held, req.webSessionID, "structureDirectory", method, args, null);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) throw Object.assign(
+    new Error("Choose an account pilot to check structure access."), { code: "STRUCTURE_PILOT_REQUIRED", statusCode: 409 });
+  const character = await store.getCharacterForAccount(req.account.accountID, characterID);
+  if (!character) throw Object.assign(new Error("The selected pilot does not belong to this account."),
+    { code: "STRUCTURE_PILOT_UNAVAILABLE", statusCode: 403 });
+  return gateway.callMethod("structureDirectory", method, args, null, {
+    userid: req.account.accountID, characterID, corporationID: character.corporationID || 0,
+    corpid: character.corporationID || 0, allianceID: character.allianceID || 0,
+  });
+}
+
 app.get("/api/dockable-structures/find", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) return;
   try {
     const q = String(req.query.q || "").trim().slice(0, 120);
+    const characterID = Number(req.query.characterID || 0);
     if (q.length < 2) { res.json({ ok: true, matches: [] }); return; }
-    const listed = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
-      "GetMyDockableStructures", [0], null);
+    const listed = await operationStructureAccessCall(req, "GetMyDockableStructures", [0], characterID);
     const ids = structureIDsFromList(listed.result);
     if (ids.length > 200) throw Object.assign(new Error("Too many accessible structures to search safely."),
       { code: "STRUCTURE_SEARCH_LIMIT", statusCode: 409 });
     const matches = [];
     for (let start = 0; start < ids.length; start += STRUCTURE_NAME_LOOKUP_CAP) {
       const group = ids.slice(start, start + STRUCTURE_NAME_LOOKUP_CAP);
-      const { records, failed } = await resolveRuntimeStructureNames(req, group);
+      const { records, failed } = await resolveRuntimeStructureNames(req, group, { publicWithoutHeld: characterID > 0 });
       if (failed.size) throw Object.assign(new Error("Accessible structure names could not be read."),
         { code: "STRUCTURE_SEARCH_UNREADABLE", statusCode: 503 });
       for (const id of group) {
@@ -14608,14 +14691,24 @@ app.get("/api/dockable-structures/find", requireAuth, async (req, res, next) => 
   } catch (error) { next(error); }
 });
 
+app.get("/api/dockable-structures/pilots", requireAuth, async (req, res, next) => {
+  try {
+    const characters = await store.listCharactersForAccount(req.account.accountID);
+    res.json({ ok: true, pilots: characters.filter(row => row.accountID === req.account.accountID)
+      .map(row => ({ characterID: row.characterID, characterName: row.characterName })) });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/dockable-structures/:id", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) return;
   try {
     const id = Number(req.params.id);
     if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return; }
-    await assertStructureDockAccess(held, req.webSessionID, id);
-    const { records, failed } = await resolveRuntimeStructureNames(req, [id]);
+    const characterID = Number(req.query.characterID || 0);
+    const checked = await operationStructureAccessCall(req, "CheckMyDockingAccessToStructures", [[id]], characterID);
+    if (!structureIDsFromList(checked.result).includes(id)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
+    }
+    const { records, failed } = await resolveRuntimeStructureNames(req, [id], { publicWithoutHeld: characterID > 0 });
     const record = records.get(id);
     if (failed.has(id) || !record?.name || !record.solarSystemID) {
       res.status(409).json({ ok: false, error: "STRUCTURE_UNRESOLVED" }); return;
@@ -14626,14 +14719,15 @@ app.get("/api/dockable-structures/:id", requireAuth, async (req, res, next) => {
 });
 
 app.get("/api/dockable-structures/:id/services", requireAuth, async (req, res, next) => {
-  const held = requireHeldBridgeSession(req, res);
-  if (!held) return;
   try {
     const id = Number(req.params.id);
     if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return; }
-    await assertStructureDockAccess(held, req.webSessionID, id);
-    const result = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
-      "GetMyAccessibleStructureServices", [id], null);
+    const characterID = Number(req.query.characterID || 0);
+    const checked = await operationStructureAccessCall(req, "CheckMyDockingAccessToStructures", [[id]], characterID);
+    if (!structureIDsFromList(checked.result).includes(id)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
+    }
+    const result = await operationStructureAccessCall(req, "GetMyAccessibleStructureServices", [id], characterID);
     res.json({ ok: true, structureID: id, serviceIDs: structureServiceIDsFromList(result.result) });
   } catch (error) { next(error); }
 });
@@ -17497,7 +17591,12 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
   // silently-ignored preference: it is refused rather than turned into a
   // personal-hangar unload the script never asked for.
   const wantsDivision = body.division !== undefined && body.division !== null;
+  const strictCorp = body.strictCorp === true;
   const division = wantsDivision ? Number(body.division) : 0;
+  if (strictCorp && !wantsDivision) {
+    res.status(400).json({ ok: false, error: "STRICT_CORP_DIVISION_REQUIRED" });
+    return;
+  }
   if (wantsDivision && !isValidDivision(division)) {
     res.status(400).json({
       ok: false,
@@ -17525,6 +17624,19 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
       return;
     }
     const unloadLocationID = await assertDockedInventoryAccess(held, req.webSessionID, wantsDivision ? 3 : 1);
+    if (strictCorp) {
+      const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+      const definition = association && miningOperations.definition(association.operationID);
+      const intended = [definition?.unloadDestination, definition?.policies?.parking]
+        .find(row => row && Number(row.corporationDivision) === division &&
+          Number(row.kind === "structure" ? row.id : row.destination?.kind === "structure" ? row.destination.id : row.stationID ?? row.destination?.stationID) === unloadLocationID);
+      if (!intended || !Number.isSafeInteger(intended.corporationID) ||
+          intended.corporationID !== Number(held.corporationID)) {
+        res.status(409).json({ ok: false, error: "STRICT_CORP_DESTINATION_MISMATCH",
+          message: "Operation, docked location, corporation and exact division must match before delivery." });
+        return;
+      }
+    }
     const shipID = held.activeShipID;
     if (!shipID) {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
@@ -17590,6 +17702,57 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
       if (!officeID && fellBack === null) {
         fellBack = "NO_CORP_OFFICE";
       }
+    }
+
+    if (strictCorp) {
+      if (!officeID) {
+        res.status(409).json({ ok: false, error: "CORP_OFFICE_UNAVAILABLE", message: fellBack || "Exact corporation office unavailable." });
+        return;
+      }
+      const officeSpec = held.structureID
+        ? { ...corpOfficeBindSpec(officeID), expectedDockedLocationID: unloadLocationID }
+        : corpOfficeBindSpec(officeID);
+      const readSource = async () => {
+        const rows = [];
+        for (const hold of MINING_HOLDS) {
+          const listed = await boundCall(held, req.webSessionID, spec, "List", [hold.flag], null);
+          rows.push(...decodeInventoryRows(listed.result));
+        }
+        return rows;
+      };
+      const readDivision = async () => decodeInventoryRows((await boundCall(
+        held, req.webSessionID, officeSpec, "List", [corpDivisionFlag(division)], null)).result);
+      const sourceBefore = await readSource();
+      const destinationBefore = await readDivision();
+      const selected = requested.map(itemID => sourceBefore.find(row => row.itemID === itemID));
+      if (selected.some(row => !row || !Number.isSafeInteger(row.quantity) || row.quantity <= 0)) {
+        res.status(409).json({ ok: false, error: "FREIGHT_SOURCE_UNVERIFIED", message: "Requested freight is not authoritatively present in the mining holds." });
+        return;
+      }
+      await addAll(requested, officeSpec, corpDivisionFlag(division));
+      let sourceAfter, destinationAfter;
+      try {
+        sourceAfter = await readSource();
+        destinationAfter = await readDivision();
+      } catch {
+        res.status(409).json({ ok: false, error: "CORP_TRANSFER_UNCONFIRMED", message: "Transfer was issued; inventories could not be reread. Reconcile before retrying." });
+        return;
+      }
+      const expectedByType = new Map();
+      for (const row of selected) expectedByType.set(row.typeID, (expectedByType.get(row.typeID) || 0) + row.quantity);
+      const total = (rows, typeID) => rows.filter(row => row.typeID === typeID).reduce((sum, row) => sum + row.quantity, 0);
+      const exact = selected.every(row => !sourceAfter.some(after => after.itemID === row.itemID)) &&
+        [...expectedByType].every(([typeID, qty]) =>
+          total(sourceBefore, typeID) - total(sourceAfter, typeID) === qty &&
+          total(destinationAfter, typeID) - total(destinationBefore, typeID) === qty);
+      if (!exact) {
+        res.status(409).json({ ok: false, error: "CORP_TRANSFER_UNCONFIRMED",
+          message: "Exact source loss and corporation-division gain did not match; no personal fallback was attempted. Reconcile before retrying." });
+        return;
+      }
+      res.json({ ok: true, requested, moved: requested, remaining: [], corpDivision: division,
+        movedToCorp: requested, fellBack: null, notifications });
+      return;
     }
 
     let deliveredToCorp = [];
@@ -18212,6 +18375,7 @@ function withOreStaticFields(space) {
       return {
         ...row,
         oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+        miningResourceFamily: miningResourceFamily(typeof staticData.getType === "function" ? staticData.getType(oreTypeID) : null),
         oreValuePerM3: typeof value === "number" && Number.isFinite(value) ? value : null,
       };
     }),
@@ -18363,6 +18527,7 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
     const noShip = () =>
       Promise.reject(Object.assign(new Error("No active ship."), { code: "NO_ACTIVE_SHIP" }));
     const observation = req.path === "/api/bridge/script/observation";
+    const observationStartedAt = Date.now();
     const scope = observation ? {
       bridgeSessionID: held.bridgeSessionID,
       accountID: held.accountID,
@@ -18476,6 +18641,10 @@ app.post("/api/bridge/drone-recovery/ready", requireAuth, async (req, res, next)
           message: "Nearby lost drones have not been confirmed back in the bay." });
         return;
       }
+      const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+      if (association) miningOperations.observeMemberLocation(
+        association.operationID, held.characterID, space, !held.dockedLocationID, observationStartedAt,
+      );
     }
     if (bridgeSessions.get(req.webSessionID) !== held) {
       res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE" });
@@ -20833,6 +21002,608 @@ app.post("/api/pi/plans/:planID/delete", requireAuth, (req, res, next) => {
   }
 });
 
+const MINING_OPERATION_STATUS = {
+  MINING_OPERATION_INVALID: 400,
+  MINING_OPERATION_NOT_FOUND: 404,
+  MINING_OPERATION_ACTIVE: 409,
+};
+function sendMiningOperationError(res, error, next) {
+  const status = error && MINING_OPERATION_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
+
+function operationPayload() {
+  return {
+    operations: miningOperations.list(botHost.listAll()),
+    targetBoard: miningTargetBoard.list(),
+    capabilities: {
+      hostedRunPolicy: config.hostedRunPolicy,
+      profileFamilies: familyCapabilities(),
+      targetClasses: {
+        BELT: { executable: true, note: "Current-system belt discovery and mining are supported." },
+        ORE_ANOMALY: { executable: true, note: "Current-system scanner sites only; explicit Ore Anomaly profiles." },
+        ICE: { executable: true, note: "Current-system ice sites; online Ice Harvesters required. No Mining Drones." },
+        GAS: { executable: false, note: "Scanner classification exists, but no gas-site travel block exists." },
+      },
+      reach: {
+        CURRENT_SYSTEM: { executable: true },
+        CURRENT_AND_ADJACENT: {
+          executable: false,
+          note: "Modeled; v0.1 executes in the anchor system and never invents remote scanner data.",
+        },
+      },
+      defender: {
+        executable: false,
+        note: "Modeled; current combat blocks have no operation-target escort authority.",
+      },
+      operationOwnedContainers: {
+        executable: false,
+        note: "Existing global leased container claims remain authoritative.",
+      },
+    },
+  };
+}
+
+app.get("/api/mining-operations", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/mining-operations/resources", requireAuth, (req, res, next) => {
+  try { res.json({ ok: true, resources: staticData.listMiningResources() }); } catch (error) { next(error); }
+});
+
+function canonicalOperationArea(area) {
+  const systemID = Number(area?.anchorSystemID);
+  const system = Number.isSafeInteger(systemID) && systemID > 0
+    ? staticData.getSolarSystem(systemID) : null;
+  if (!system) {
+    const error = new Error("Choose a known anchor solar system from the map catalog.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  const canonicalName = String(system.solarSystemName || "");
+  if (area.anchorSystemName && String(area.anchorSystemName).trim() !== canonicalName) {
+    const error = new Error("Anchor system name and ID do not identify the same solar system.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  return { ...area, anchorSystemID: systemID, anchorSystemName: canonicalName };
+}
+
+app.get("/api/mining-operations/routines", requireAuth, (req, res, next) => {
+  try {
+    const classes = String(req.query.classes || "BELT").split(",").filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+    const unloadPolicy = req.query.unloadPolicy === "SELF_UNLOAD" ? "SELF_UNLOAD" : "HAULER_SERVICE";
+    const definition = { unloadPolicy };
+    const routines = botScripts.list().map((summary) => {
+      const script = botScripts.get(summary.scriptID);
+      const audit = script ? auditMiningScript(script.doc) : null;
+      const roles = {};
+      for (const role of ["MINER", "HAULER", "DEFENDER"]) {
+        const reason = operationRoutineCompatibility(definition, role, audit, classes);
+        roles[role] = { compatible: reason === null, reason };
+      }
+      return { scriptID: summary.scriptID, name: summary.name, rev: summary.rev, roles };
+    });
+    res.json({ ok: true, routines });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/mining-operations/accounts/:accountName/pilots", requireAuth, async (req, res, next) => {
+  try {
+    const accountName = String(req.params.accountName || "").trim();
+    const account = accountName ? await store.getAccount(accountName) : null;
+    if (!account || account.banned) {
+      res.status(404).json({ ok: false, error: "ACCOUNT_NOT_FOUND", message: "That account is unavailable." });
+      return;
+    }
+    const characters = await store.listCharactersForAccount(account.accountID);
+    res.json({ ok: true, pilots: characters.map((row) => ({
+      accountName,
+      characterID: Number(row.characterID),
+      characterName: String(row.characterName || `Pilot ${row.characterID}`),
+    })) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/mining-operations", requireAuth, (req, res, next) => {
+  try {
+    const existingID = req.body && req.body.operationID;
+    if (existingID) {
+      const runtime = miningOperations.runtimeFor(existingID);
+      if (runtime && !["DRAFT", "STOPPED"].includes(runtime.state)) {
+        res.status(409).json({ ok: false, error: "MINING_OPERATION_ACTIVE", message: "Stop the operation before editing it." });
+        return;
+      }
+    }
+    const input = req.body || {};
+    validateResourcePolicy(input, input.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
+    const definition = miningOperationStore.save({ ...input, area: canonicalOperationArea(input.area) });
+    res.json({ ok: true, definition, ...operationPayload() });
+  } catch (error) {
+    sendMiningOperationError(res, error, next);
+  }
+});
+
+app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, next) => {
+  try {
+    const outcome = miningOperations.remove(req.params.operationID);
+    if (!outcome.ok) {
+      res.status(MINING_OPERATION_STATUS[outcome.code] || 404).json(outcome);
+      return;
+    }
+    res.json({ ok: true, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function prepareMiningOperationLaunch(definition) {
+  try {
+    normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    validateResourcePolicy(definition, definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
+  }
+  catch (error) { return { ok: false, code: "MINING_OPERATION_INVALID", message: error.message }; }
+  const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+  if (selectedExecutable.length === 0 || selectedExecutable.length !== definition.area.targetClasses.length) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
+    message: `The selected target classes are modeled but not executable yet: ${definition.area.targetClasses.join(", ")}.` };
+  const scripts = new Map();
+  const audits = new Map();
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const mode = member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD");
+    let script;
+    if (mode === "STANDARD") {
+      if (!standardProfileFor(definition, member)) return { ok: false, code: "STANDARD_OPERATION_PROFILE_UNAVAILABLE",
+        message: `${member.characterName}: No Standard profile exists for this target class, unload policy, and role. Choose a compatible Custom routine.` };
+      const destination = definition.unloadDestination;
+      const station = destination?.kind === "structure" ? null : destination && staticData.getStation(destination.stationID);
+      const validStructure = destination?.kind === "structure" && isPlayerStructureID(destination.id) &&
+        Boolean(destination.name) && staticData.getSolarSystemName(destination.solarSystemID) === destination.solarSystemName;
+      const validStation = station && station.stationName === destination.stationName &&
+        staticData.getSolarSystemName(Number(station.solarSystemID)) === destination.systemName;
+      if ((!validStation && !validStructure) ||
+          (destination.corporationDivision != null &&
+            (!Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7))) {
+        return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
+          message: "Standard mining operations need a resolved unload destination and a personal or exact corporation hangar. Edit the operation destination before Start." };
+      }
+      script = buildStandardProfile(definition, member);
+    } else {
+      script = botScripts.get(member.automationID);
+    }
+    if (!script) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+      message: `${member.characterName}: The referenced operation routine is unavailable.` };
+    scripts.set(member.characterID, script);
+    audits.set(member.characterID, auditMiningScript(script.doc));
+  }
+  const minerAudits = definition.members.filter((member) => member.role === "MINER")
+    .map((member) => audits.get(member.characterID)).filter(Boolean);
+  const commonClasses = selectedExecutable.filter((kind) => minerAudits.length > 0 &&
+    minerAudits.every((audit) => audit.targetClasses.includes(kind)));
+  if (commonClasses.length === 0) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+    message: "The member routines do not share an executable operation target class." };
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
+    if (reason) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}` };
+  }
+  const planHash = createHash("sha256").update(JSON.stringify({ definition, scripts: [...scripts] })).digest("hex");
+  const warnings = definition.members.filter((member) => member.role === "DEFENDER")
+    .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
+  if (definition.policies?.parking.mode !== undefined && definition.policies.parking.mode !== "STAY_IN_PLACE") {
+    const destination = definition.policies.parking.destination;
+    warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${destination.kind === "structure" ? destination.name : destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
+  }
+  return { ok: true, scripts, audits, commonClasses, planHash, warnings };
+}
+
+app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) { res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" }); return; }
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings,
+      members: definition.members.filter((member) => member.role !== "DEFENDER").map((member) => ({
+      characterID: member.characterID, routineMode: member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD"),
+      script: plan.scripts.get(member.characterID),
+    })) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) {
+      res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND", message: "That Mining Operation no longer exists." });
+      return;
+    }
+    try { canonicalOperationArea(definition.area); } catch (error) {
+      res.status(409).json({ ok: false, error: "MINING_OPERATION_INVALID", message: error.message });
+      return;
+    }
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    if ((definition.members.some((member) => member.role !== "DEFENDER" &&
+        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") ||
+        (definition.policies?.parking.mode && definition.policies.parking.mode !== "STAY_IN_PLACE")) &&
+        req.body?.planHash !== plan.planHash) {
+      res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
+        message: "The operation profile or destination changed since preflight. Review and Start again." });
+      return;
+    }
+    const parkingStructure = definition.policies?.parking?.destination?.kind === "structure"
+      ? definition.policies.parking.destination : null;
+    if (parkingStructure) {
+      // Check every intended member before begin() changes operation state or
+      // the first bot starts. The held-session check in botHost still repeats
+      // this against the actual ship and access state immediately before work.
+      for (const member of definition.members.filter((row) => row.role !== "DEFENDER")) {
+        const account = await store.getAccount(member.accountName);
+        const character = account && !account.banned
+          ? await store.getCharacterForAccount(account.accountID, member.characterID) : null;
+        if (!character) {
+          res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_PILOT_UNAVAILABLE",
+            message: `${member.characterName}: account-owned pilot is unavailable for structure preflight.` });
+          return;
+        }
+        const checked = await gateway.callMethod("structureDirectory", "CheckMyDockingAccessToStructures", [[parkingStructure.id]], null, {
+          userid: account.accountID, characterID: character.characterID,
+          corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+          allianceID: character.allianceID || 0,
+        });
+        if (!structureIDsFromList(checked.result).includes(parkingStructure.id)) {
+          res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_ACCESS_DENIED",
+            message: `${member.characterName}: docking access to the parking structure is unavailable. No member was started.` });
+          return;
+        }
+        if (definition.policies.parking.mode === "RETURN_HOME_UNLOAD_DOCK" &&
+            definition.policies.parking.corporationDivision !== null) {
+          const context = { userid: account.accountID, characterID: character.characterID,
+            corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+            allianceID: character.allianceID || 0 };
+          try {
+            const [services, offices] = await Promise.all([
+              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [parkingStructure.id], null, context),
+              gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
+            ]);
+            if (!structureIDsFromList(services.result).includes(3) ||
+                !decodeOfficeRows(offices.result).some((office) => office.stationID === parkingStructure.id)) {
+              res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_CORP_HANGAR_UNAVAILABLE",
+                message: `${member.characterName}: parking structure lacks an accessible corporation office. No member was started.` });
+              return;
+            }
+          } catch {
+            res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_CORP_PREFLIGHT_UNREADABLE",
+              message: `${member.characterName}: corporation hangar authority is unreadable. No member was started.` });
+            return;
+          }
+        }
+      }
+    }
+    const deliveryStructure = definition.unloadDestination?.kind === "structure"
+      ? definition.unloadDestination : null;
+    if (deliveryStructure) {
+      for (const member of definition.members.filter((row) => row.role !== "DEFENDER" &&
+        (row.routineMode || (row.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD")) {
+        const account = await store.getAccount(member.accountName);
+        const character = account && !account.banned
+          ? await store.getCharacterForAccount(account.accountID, member.characterID) : null;
+        if (!character) {
+          res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_PILOT_UNAVAILABLE",
+            message: `${member.characterName}: account-owned pilot is unavailable for structure delivery preflight.` });
+          return;
+        }
+        const context = { userid: account.accountID, characterID: character.characterID,
+          corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+          allianceID: character.allianceID || 0 };
+        try {
+          const access = await gateway.callMethod("structureDirectory", "CheckMyDockingAccessToStructures", [[deliveryStructure.id]], null, context);
+          if (!structureIDsFromList(access.result).includes(deliveryStructure.id)) {
+            res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_ACCESS_DENIED",
+              message: `${member.characterName}: docking access to the delivery structure is unavailable. No member was started.` });
+            return;
+          }
+          if (deliveryStructure.corporationDivision !== null) {
+            if (character.corporationID !== deliveryStructure.corporationID) {
+              res.status(409).json({ ok: false, error: "DELIVERY_CORPORATION_MISMATCH",
+                message: `${member.characterName}: the configured strict destination belongs to a different corporation. No member was started.` });
+              return;
+            }
+            const [services, offices] = await Promise.all([
+              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [deliveryStructure.id], null, context),
+              gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
+            ]);
+            if (!structureIDsFromList(services.result).includes(3) ||
+                !decodeOfficeRows(offices.result).some((office) => office.stationID === deliveryStructure.id)) {
+              res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_CORP_HANGAR_UNAVAILABLE",
+                message: `${member.characterName}: the destination structure has no accessible office service and corporation office. No member was started.` });
+              return;
+            }
+          }
+        } catch (error) {
+          res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_PREFLIGHT_UNREADABLE",
+            message: `${member.characterName}: structure service or corporation office authority is unreadable. No member was started.` });
+          return;
+        }
+      }
+    }
+    const { scripts, audits, commonClasses } = plan;
+    const begin = miningOperations.begin(definition.operationID, commonClasses);
+    if (!begin.ok) {
+      res.status(MINING_OPERATION_STATUS[begin.code] || 409).json(begin);
+      return;
+    }
+    const grants = req.body && typeof req.body.grants === "object" ? req.body.grants : {};
+    const results = [];
+    for (const member of definition.members) {
+      const script = scripts.get(member.characterID);
+      const audit = audits.get(member.characterID);
+      let failure = null;
+      if (member.role === "DEFENDER") failure = "DEFENDER execution is not supported yet; no escort routine was started.";
+      else if (!script || !audit) failure = "The referenced saved automation no longer exists.";
+      else failure = operationRoutineCompatibility(definition, member.role, audit, commonClasses);
+      if (failure) {
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "MEMBER_NOT_EXECUTABLE", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "MEMBER_NOT_EXECUTABLE", message: failure });
+        continue;
+      }
+      const account = await store.getAccount(member.accountName);
+      const character = account && !account.banned
+        ? await store.getCharacterForAccount(account.accountID, member.characterID)
+        : null;
+      if (!account || account.banned || !character) {
+        failure = "The pilot is not owned by the saved account, or that account is unavailable.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_NOT_FOUND", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_NOT_FOUND", message: failure });
+        continue;
+      }
+      let callerSessionID = null;
+      let callerHeld = null;
+      const ownHeld = bridgeSessions.get(req.webSessionID);
+      if (ownHeld && Number(ownHeld.characterID) === member.characterID) {
+        callerSessionID = req.webSessionID;
+        callerHeld = ownHeld;
+      }
+      if (hasPendingRecovery(callerHeld, member.characterID)) {
+        failure = "This pilot's lost-drone recovery must finish before server handoff.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "DRONE_RECOVERY_PENDING", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "DRONE_RECOVERY_PENDING", message: failure });
+        continue;
+      }
+      if (characterOperations.has(member.characterID) || (callerSessionID !== null && sessionOperations.has(callerSessionID))) {
+        failure = "This pilot is changing sessions. Try this member again shortly.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_IN_USE", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_IN_USE", message: failure });
+        continue;
+      }
+      const reservation = Symbol("mining-operation-handoff");
+      characterOperations.set(member.characterID, reservation);
+      if (callerSessionID !== null) sessionOperations.set(callerSessionID, reservation);
+      let released = false;
+      let outcome;
+      try {
+        outcome = await botHost.start({
+          account,
+          characterID: member.characterID,
+          kind: "script",
+          scriptID: script.scriptID,
+          scriptName: script.name,
+          scriptRev: script.rev,
+          doc: script.doc,
+          grant: grants[String(member.characterID)],
+          callerSessionID,
+          operationID: definition.operationID,
+          operationRole: member.role,
+          operationControllerAccountID: Number(req.account.accountID),
+          beforeStart: callerSessionID === null ? null : async () => {
+            const held = bridgeSessions.get(callerSessionID);
+            if (held && Number(held.characterID) === member.characterID) {
+              if (hasPendingRecovery(held, member.characterID)) {
+                throw Object.assign(new Error("Lost-drone recovery is still pending."), { code: "DRONE_RECOVERY_PENDING" });
+              }
+              const status = await readHeldFlight(held, callerSessionID);
+              if (status?.flight?.docked !== true) {
+                if (status?.flight?.inSpace !== true || !(Number(held.activeShipID) > 0) ||
+                    Number(status.flight.shipID) !== Number(held.activeShipID)) {
+                  throw Object.assign(new Error("Pilot or ship could not be confirmed before handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
+                }
+                let rows = null;
+                try { rows = (await readDronesInSpace(held)).drones; } catch { /* unknown is unsafe */ }
+                if (!handoffFlightReady(rows)) {
+                  throw Object.assign(new Error("Return controlled drones before operation handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
+                }
+              }
+              await releaseHeldBridgeSession(callerSessionID, { confirmed: true });
+              released = true;
+            }
+          },
+          parkingStructureID: definition.policies?.parking?.destination?.kind === "structure"
+            ? definition.policies.parking.destination.id : null,
+        });
+        if (
+          !outcome.ok &&
+          released &&
+          callerSessionID !== null &&
+          !bridgeSessions.has(callerSessionID) &&
+          botHost.claimedBy(member.characterID) === null &&
+          Number(callerHeld?.accountID) === Number(account.accountID)
+        ) {
+          try {
+            const payload = auth.verifySessionToken(readSessionToken(req));
+            if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID) &&
+                !(await isCharacterHeld(member.characterID, callerSessionID))) {
+              await selectHeldCharacter(callerSessionID, account, member.characterID);
+            }
+          } catch (error) {
+            errorLogger(error);
+            outcome.message = `${outcome.message || "This member could not start."} Bring this pilot online again; its browser session could not be restored.`;
+          }
+        }
+      } finally {
+        if (characterOperations.get(member.characterID) === reservation) characterOperations.delete(member.characterID);
+        if (callerSessionID !== null && sessionOperations.get(callerSessionID) === reservation) sessionOperations.delete(callerSessionID);
+      }
+      if (!outcome.ok) {
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: outcome.code, message: outcome.message || outcome.code });
+        results.push({ characterID: member.characterID, ok: false, error: outcome.code, message: outcome.message });
+      } else {
+        miningOperations.memberStarted(definition.operationID, member.characterID, outcome.bot.botID);
+        results.push({ characterID: member.characterID, ok: true, bot: outcome.bot });
+      }
+    }
+    miningOperations.finishLaunch(definition.operationID);
+    res.json({ ok: true, results, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const miningOperationStopper = createMiningOperationStopper({ operations: miningOperations, botHost });
+app.post("/api/mining-operations/:operationID/extend", requireAuth, async (req, res, next) => {
+  try {
+    const extension = await extendMiningOperation({ operations: miningOperations, botHost, operationID: req.params.operationID,
+      controllerAccountID: Number(req.account.accountID), minutes: req.body?.minutes });
+    // Partial per-member results are not a transport failure; never auto-retry a write.
+    res.json({ ok: true, extension, ...operationPayload() });
+  } catch (error) { next(error); }
+});
+app.post("/api/mining-operations/:operationID/stop", requireAuth, async (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) {
+      res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" });
+      return;
+    }
+    if (miningOperations.runtimeFor(definition.operationID)?.state === "ASSEMBLING") {
+      res.status(409).json({ ok: false, error: "OPERATION_START_IN_PROGRESS", message: "Pilot acquisition is still finishing. Retry Stop when assembly completes." });
+      return;
+    }
+    const policy = normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    const pending = miningOperationStopper.stop({ ...definition, policies: policy });
+    if (policy.parking.mode !== "STAY_IN_PLACE") {
+      void pending.catch(errorLogger);
+      res.status(202).json({ ok: true, ...operationPayload() });
+      return;
+    }
+    const failures = await pending;
+    res.status(failures.length > 0 ? 409 : 200).json({ ok: failures.length === 0, failures, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function requireMiningOperationClaim(req, res) {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return null;
+  const association = botHost.operationForClaim(held.characterID, req.get(botHostModule.BOT_HEADER));
+  if (!association) {
+    res.status(409).json({ ok: false, error: "MINING_OPERATION_CLAIM_REQUIRED" });
+    return null;
+  }
+  return { held, association };
+}
+
+app.get("/api/mining-operations/assignment/current", requireAuth, (req, res, next) => {
+  try {
+    const held = requireHeldBridgeSession(req, res);
+    if (!held) return;
+    const secret = req.get(botHostModule.BOT_HEADER);
+    if (!botHost.authorizesClaim(held.characterID, secret)) {
+      res.status(409).json({ ok: false, error: "BOT_CLAIM_REQUIRED" });
+      return;
+    }
+    // Ordinary hosted scripts probe once and receive null. Operation runners
+    // carry the same private host capability plus their stable association.
+    const association = botHost.operationForClaim(held.characterID, secret);
+    const assignment = association
+      ? miningOperations.assignment(association.operationID, held.characterID)
+      : null;
+    res.json({ ok: true, assignment });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/reserve", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates : [req.body || {}];
+    if (candidates.some(candidate => !candidate || Number(candidate.systemID) !== Number(claim.held.solarSystemID))) {
+      return res.status(409).json({ ok: false, error: "SITE_SYSTEM_AUTHORITY_MISMATCH", message: "Target selection requires the pilot's current-system observation." });
+    }
+    miningOperations.reconcileBots(botHost.listAll());
+    const outcome = miningOperations.reserveCandidates(claim.association.operationID, claim.held.characterID, candidates);
+    res.json({ ok: true, ...outcome });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/activate", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const applied = miningOperations.activateTarget(claim.association.operationID, claim.held.characterID, String(req.body?.targetKey || ""));
+    res.json({ ok: true, applied });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/depleted", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const applied = miningOperations.depleteTarget(
+      claim.association.operationID,
+      claim.held.characterID,
+      String(req.body?.targetKey || ""),
+      req.body?.evidence || {},
+    );
+    res.json({ ok: true, applied });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/member/ready", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    res.json({ ok: true, applied: miningOperations.markReady(claim.association.operationID, claim.held.characterID) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/member/drain-complete", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    res.json({
+      ok: true,
+      applied: miningOperations.finishDrain(
+        claim.association.operationID,
+        claim.held.characterID,
+        String(req.body?.targetKey || ""),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies: it keeps running when the tab that started it goes
 // away. Start names a saved Bot Builder script, OR (kind: "companion") carries
@@ -20864,7 +21635,7 @@ const BOT_START_STATUS = {
 
 app.get("/api/bots", requireAuth, (req, res, next) => {
   try {
-    res.json({ ok: true, bots: botHost.list(req.account.accountID) });
+    res.json({ ok: true, bots: botHost.list(req.account.accountID), hostedRunPolicy: config.hostedRunPolicy });
   } catch (error) {
     next(error);
   }

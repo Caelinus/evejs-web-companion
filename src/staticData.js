@@ -1228,6 +1228,21 @@ function findMarketTypes(filters = {}) {
 // player build a bot around ore the server will never actually hand them.
 const ASTEROID_CATEGORY_ID = 25;
 
+function listMiningResources() {
+  if (caches.has("miningResources")) return caches.get("miningResources");
+  const { miningResourceFamily } = require("./miningResourceFamily");
+  const compressed = readStaticTable("reprocessingStatic").sourceTypesByCompressedTypeID;
+  if (!compressed || typeof compressed !== "object") return [];
+  const rows = [...buildIndex("itemTypes", "types", "typeID").values()].flatMap(type => {
+    const family = miningResourceFamily(type);
+    return type.published === true && ["ore", "ice"].includes(family) &&
+      !Object.hasOwn(compressed, String(type.typeID))
+      ? [{ typeID: Number(type.typeID), name: String(type.name), family }] : [];
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.typeID - b.typeID);
+  caches.set("miningResources", rows);
+  return rows;
+}
+
 function listOreFamilies() {
   const namesByGroupID = new Map();
   for (const entry of buildIndex("itemTypes", "types", "typeID").values()) {
@@ -1639,6 +1654,7 @@ module.exports = {
   getTypeMaterials,
   findMarketTypes,
   listOreFamilies,
+  listMiningResources,
   getMarketGroupChildren,
   getMarketGroupTypes,
   getNpcIndustryFacility,

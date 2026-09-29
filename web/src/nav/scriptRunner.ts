@@ -54,6 +54,7 @@ import {
   type RefusalRecord,
 } from "./refusalLedger.ts";
 import { isSessionChangeSettling, refusalWords } from "../bridge/refusals.ts";
+import { createTravelAssist, type TravelAssistDeps } from "./travelAssist.ts";
 
 /**
  * What the next decide will look at — so `observe` reads ONLY what that macro
@@ -171,6 +172,7 @@ export interface ScriptRunnerSnapshot {
  * deciders (B1). All injected so the loop itself touches no globals.
  */
 export interface ScriptRunnerDeps {
+  readonly travelAssist?: Pick<TravelAssistDeps, "change">;
   observe(hint: ObserveHint): Promise<ScriptObservation>;
   /**
    * Perform one world call.
@@ -211,6 +213,8 @@ export interface ScriptRunnerDeps {
 }
 
 export interface ScriptRunnerController {
+  travelAssistPending?(): boolean;
+  confirmTravelAssistStopped?(activeModuleIDs: readonly number[] | null): void;
   start(script: BotScript): void;
   pause(): void;
   resume(): void;
@@ -288,6 +292,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   /** This run's id, minted by `start` — what groups a log's lines. */
   let runID = "";
   let claim: { runID: string; systemID: number; itemID: number } | null = null;
+  const travelAssist = deps.travelAssist ? createTravelAssist({ ...deps.travelAssist,
+    log: why => record({ t: now(), kind: "decide", run: runID, says: "travel assist", why }),
+  }) : null;
   const claimOwner = () => `${runID}:${runToken}`;
   async function releaseOwned(owned: { runID: string } | null): Promise<void> {
     if (owned && deps.claims) await deps.claims.release(owned.runID).catch(() => {});
@@ -434,6 +441,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
     readFailures = 0;
     lastObs = obs;
+    const operation = obs.miningOperation;
+    const ownedTarget = operation?.role === "HAULER" ? operation.logisticsTarget ?? operation.currentTarget : operation?.currentTarget;
+    const travelAuthority = operation?.travelAssist === "AUTO" && !operation.stopRequested &&
+      !!ownedTarget && ownedTarget.claimedByOperationID === operation.operationID &&
+      ["RESERVED", "ACTIVE", "DRAINING"].includes(ownedTarget.state);
+    if (travelAssist?.pending() && !travelAuthority) {
+      await travelAssist.beforeAction({ enabled: false, scope: null, action: { kind: "wait" },
+        snapshot: obs.snapshot ?? null, inWarp: obs.inWarp ?? null, docked: obs.docked ?? null,
+        modules: [], scrammed: obs.scrammed ?? null });
+      if (travelAssist.pending()) { pauseWith("Travel assist shutdown is unconfirmed; operation movement is blocked."); return; }
+      if (token !== runToken || status !== "running") return;
+    }
     if (activeMacroID(script, memory) === "loot-containers") {
       const systemID = obs.flightStatus?.solarSystemID ?? null;
       if (!deps.claims || !systemID) {
@@ -499,6 +518,17 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     } catch (error) {
       stopOrHeadHome(`${DECIDE_FAILED} (${String(error)})`);
       return;
+    }
+    if (travelAssist) {
+      const movementMacro = activeMacroID(script, memory);
+      const consumed = await travelAssist.beforeAction({
+        enabled: travelAuthority && result.status === "running" && result.memory.latched === null &&
+          ["mine-at-belt", "loot-containers"].includes(movementMacro ?? ""),
+        scope: ownedTarget ? `${ownedTarget.targetKey}:${result.stepPath}` : null,
+        action: result.action, snapshot: obs.snapshot ?? null, inWarp: obs.inWarp ?? null,
+        docked: obs.docked ?? null, modules: obs.travelPropulsionModules ?? [], scrammed: obs.scrammed ?? null,
+      });
+      if (consumed || token !== runToken || status !== "running") return;
     }
     memory = result.memory;
     const selected = result.containerTargetID;
@@ -575,7 +605,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           setError(SESSION_LOST);
           return;
         }
-        if (result.action.kind === "haulTransfer") {
+        if (result.action.kind === "haulTransfer" || (result.action.kind === "unloadOre" && result.action.strictCorp === true)) {
           // A transport error can arrive after an inventory mutation. Do not
           // retry or even auto-reconcile a route-owned transfer on the next
           // tick. Keep its pending manifest and require an explicit resume,
@@ -830,6 +860,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         runToken += 1;
         status = "paused";
         emit({ ...last, status: "paused" });
+        // Pausing abandons the owned approach. Keep shutdown custody if the
+        // off command is ambiguous; graceful Stop checks pending() again.
+        void travelAssist?.requestStop();
         releaseAfterIssue();
       }
     },
@@ -852,7 +885,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         status = "paused";
         emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after controlled drones return." });
       }
-      return (activeTick ?? Promise.resolve()).then(releaseClaim);
+      return (activeTick ?? Promise.resolve()).then(async () => {
+        await travelAssist?.requestStop();
+        await releaseClaim();
+      });
     },
     resumeHeadHome(reason: string): boolean {
       if (status !== "paused" || memory === null || script === null) return false;
@@ -882,6 +918,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     getStatus(): ScriptRunnerStatus {
       return status;
     },
+    travelAssistPending: () => travelAssist?.pending() ?? false,
+    confirmTravelAssistStopped: ids => travelAssist?.confirmStopped(ids),
   };
 }
 

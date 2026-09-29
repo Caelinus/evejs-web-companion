@@ -1,0 +1,51 @@
+import type { ScannedAnomaly, MiningOperationTarget } from "./scriptConditions.ts";
+import type { MiningHold, SpaceEntity, SpaceVector } from "../store/types.ts";
+import type { BotScript } from "../bots/botScript.ts";
+
+export type SiteFamily = "ORE_ANOMALY" | "ICE";
+
+export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], ice: readonly number[]): string | null {
+  function visit(nodes: BotScript["program"]): string | null {
+    for (const node of nodes) {
+      if (node.kind === "loop") { const reason = visit(node.body); if (reason) return reason; }
+      if (node.kind === "branch") { const reason = visit(node.then) ?? visit(node.else); if (reason) return reason; }
+      if (node.kind !== "macro" || node.macro !== "mine-at-belt") continue;
+      const belt = node.args["belt"];
+      if (belt?.kind !== "belt") continue;
+      if (belt.belt.mode === "ice-site" && ice.length === 0) return "ICE_MINING_CAPABILITY_REQUIRED: fit an online Ice Harvester; ore modules are not a fallback.";
+      if (belt.belt.mode === "site" && ore.length === 0) return "ORE_MINING_CAPABILITY_REQUIRED: fit an online ore mining module; Ice/Gas harvesters cannot mine ore.";
+    }
+    return null;
+  }
+  return visit(script.program);
+}
+// Scanner archetypes distinguish Ice from ore even though both use scan strength 211.
+export function miningSiteFamily(site: ScannedAnomaly): SiteFamily | null {
+  if (site.kind !== "ore") return null;
+  return site.archetypeID === 28 ? "ICE" : site.archetypeID === 27 ? "ORE_ANOMALY" : null;
+}
+export function siteIdentity(site: ScannedAnomaly): string | null {
+  if (!Number.isSafeInteger(site.siteID) || (site.siteID ?? 0) <= 0) return null;
+  return `site:${site.siteID}:instance:${site.instanceID ?? site.siteID}`;
+}
+export function atMiningSite(ship: SpaceVector | null | undefined, target: MiningOperationTarget): boolean {
+  const p = target.position;
+  return !!ship && !!p && Math.hypot(ship.x - p.x, ship.y - p.y, ship.z - p.z) < 150_000;
+}
+export function siteRockMatches(rock: SpaceEntity, family: SiteFamily): boolean {
+  return rock.miningResourceFamily === (family === "ICE" ? "ice" : "ore");
+}
+// Required Ice Harvesting skill 16281 is static dogma, not a module label.
+// High-slot mining-group/online eligibility is checked by the caller first.
+export function iceMiningType(attributes: Readonly<Record<number, number>> | undefined): boolean {
+  return !!attributes && (attributes[77] ?? 0) > 0 &&
+    [182, 183, 184, 1285, 1289, 1290].some(id => attributes[id] === 16281);
+}
+
+export function iceHoldFraction(holds: readonly MiningHold[] | null): number | null {
+  // Ice goes to the specialised ice hold, otherwise the GENERAL mining hold,
+  // never the ore-only asteroid hold. Unreadable is not empty/available.
+  const hold = holds?.find(row => row.key === "ice" && row.present) ?? holds?.find(row => row.key === "ore" && row.present);
+  const capacity = hold?.capacity;
+  return !hold || hold.error !== null || !capacity || capacity.capacity === null || capacity.used === null || capacity.capacity <= 0 ? null : capacity.used / capacity.capacity;
+}

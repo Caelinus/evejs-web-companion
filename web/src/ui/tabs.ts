@@ -33,6 +33,7 @@ export type TabID =
   | "skills"
   | "planets"
   | "piManager"
+  | "miningOperations"
   | "activity"
   | "fleet"
   | "scanner"
@@ -158,6 +159,7 @@ export const TABS: readonly TabDef[] = [
   // colonies on one board, read with no character selected. Out of the rail
   // like the Bot Manager: its door is beside the brand (GlobalLaunchers.svelte).
   { id: "piManager", label: "Planetary Industry", where: "both", launchable: false },
+  { id: "miningOperations", label: "Mining Command Center", where: "both", launchable: false },
   { id: "activity", label: "Activity", where: "both" },
   { id: "fleet", label: "Fleet", where: "both" },
   { id: "mail", label: "Mail", where: "both" },

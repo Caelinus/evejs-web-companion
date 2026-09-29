@@ -894,8 +894,8 @@ function readBelt(raw: unknown, label: string, ctx: Ctx): BeltArg {
   if (mode === "nearest") {
     return { mode: "nearest" };
   }
-  if (mode === "site") {
-    return { mode: "site" };
+  if (mode === "site" || mode === "ice-site") {
+    return { mode };
   }
   if (mode === "chosen") {
     return { mode: "chosen", ref: readWorldRef(obj["ref"], "belt", ctx, SAY.badArg(label)) };

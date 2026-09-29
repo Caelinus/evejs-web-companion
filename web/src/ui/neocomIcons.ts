@@ -61,6 +61,7 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   // rows in it. Deliberately NOT a bot head — that is `bots`, the built-in
   // launchers; this panel is the catalogue and the roster.
   botManager: ["M4 5h16v14H4z", "M8 10h8M8 14h5"],
+  miningOperations: ["M4 19l5-9 4 5 3-7 4 11z", "M5 5h4M12 5h7"],
   // Two ships in formation: a leader and a wingman holding station behind it.
   // Not a bot head and not the library shelf — this one is about flying WITH
   // somebody, which is the whole of what a companion does. It is drawn for the
