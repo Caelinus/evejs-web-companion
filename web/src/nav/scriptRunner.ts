@@ -183,7 +183,13 @@ export interface ScriptRunnerDeps {
    * which is what every performer did before this existed and what nearly all
    * still do, means "exactly as asked".
    */
-  issue(action: ScriptAction): Promise<void | string | null>;
+  issue(action: ScriptAction, claimRunID?: string): Promise<void | string | null>;
+  /** Optional for pure tests; a live loot-containers step requires it. */
+  readonly claims?: {
+    read(runID: string, systemID: number): Promise<readonly number[]>;
+    acquire(runID: string, systemID: number, itemID: number, renewOnly: boolean): Promise<boolean>;
+    release(runID: string): Promise<void>;
+  };
   sleep(ms: number): Promise<void>;
   onProgress(snapshot: ScriptRunnerSnapshot): void;
   isSessionLost(error: unknown): boolean;
@@ -281,6 +287,23 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   let lastObs: ScriptObservation | null = null;
   /** This run's id, minted by `start` — what groups a log's lines. */
   let runID = "";
+  let claim: { runID: string; systemID: number; itemID: number } | null = null;
+  const claimOwner = () => `${runID}:${runToken}`;
+  async function releaseOwned(owned: { runID: string } | null): Promise<void> {
+    if (owned && deps.claims) await deps.claims.release(owned.runID).catch(() => {});
+  }
+  async function releaseClaim(): Promise<void> {
+    const owned = claim;
+    claim = null;
+    await releaseOwned(owned);
+  }
+  function releaseAfterIssue(): void {
+    const owned = claim;
+    claim = null;
+    const pending = activeTick;
+    if (pending) void pending.finally(() => releaseOwned(owned)).catch(() => {});
+    else void releaseOwned(owned);
+  }
   /** The last decision actually written, so a quiet bot writes nothing. */
   let loggedDecision = "";
   /**
@@ -355,6 +378,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     runToken += 1;
     status = "error";
     emit({ ...last, status: "error", why: reason, pauseReason: reason });
+    releaseAfterIssue();
   }
 
   async function tickBody(): Promise<void> {
@@ -365,6 +389,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
     // Settle: let a just-issued action land before deciding again.
     if (settle > 0) {
+      if (claim && deps.claims) {
+        try {
+          if (!await deps.claims.acquire(claim.runID, claim.systemID, claim.itemID, true)) {
+            pauseWith("The container claim expired or changed owner.");
+            return;
+          }
+        } catch {
+          pauseWith("Container claim authority is unreadable.");
+          return;
+        }
+      }
+      if (token !== runToken || status !== "running") return;
       settle -= 1;
       emit({ ...last, status: "running", phase: SETTLING });
       return;
@@ -398,6 +434,23 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
     readFailures = 0;
     lastObs = obs;
+    if (activeMacroID(script, memory) === "loot-containers") {
+      const systemID = obs.flightStatus?.solarSystemID ?? null;
+      if (!deps.claims || !systemID) {
+        pauseWith("Container claim authority is unavailable.");
+        return;
+      }
+      try {
+        obs = { ...obs, claimedContainerIDs: await deps.claims.read(claimOwner(), systemID) };
+      } catch {
+        pauseWith("Container claim authority is unreadable.");
+        return;
+      }
+      if (token !== runToken || status !== "running") {
+        await releaseClaim();
+        return;
+      }
+    }
 
     // ⚠ THE HULL IS GONE. A destroyed ship does not end the run on its own: the
     // session survives, the reads keep working, and the decider happily goes on
@@ -448,6 +501,33 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return;
     }
     memory = result.memory;
+    const selected = result.containerTargetID;
+    if (claim && (selected !== claim.itemID || obs.flightStatus?.solarSystemID !== claim.systemID)) {
+      await releaseClaim();
+    }
+    if (selected !== undefined) {
+      const systemID = obs.flightStatus?.solarSystemID ?? null;
+      if (!systemID || !deps.claims) {
+        pauseWith("Container claim authority is unavailable.", result);
+        return;
+      }
+      const owner = claim?.runID ?? claimOwner();
+      try {
+        const acquired = await deps.claims.acquire(owner, systemID, selected, claim !== null);
+        if (!acquired) {
+          emit({ ...last, status: "running", phase: "Looting", why: "Another hauler has claimed this container." });
+          return;
+        }
+        claim = { runID: owner, systemID, itemID: selected };
+      } catch {
+        pauseWith("Container claim authority is unreadable.", result);
+        return;
+      }
+      if (token !== runToken || status !== "running") {
+        await releaseClaim();
+        return;
+      }
+    }
 
     if (result.status === "paused") {
       pauseWith(result.pauseReason ?? result.why, result);
@@ -457,6 +537,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       status = "stopped";
       emit(toSnapshot(result, "stopped"));
+      releaseAfterIssue();
       return;
     }
 
@@ -474,7 +555,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
       });
       try {
-        const note = await deps.issue(result.action);
+        const note = await deps.issue(result.action, result.action.kind === "lootContainer" ? claim?.runID : undefined);
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
         record({
@@ -488,9 +569,23 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         if (freesHoldSpace(result.action)) {
           ledger.forgetRefused(recoversHoldSpace(result.action));
         }
+        if (result.action.kind === "lootContainer") await releaseClaim();
       } catch (error) {
         if (deps.isSessionLost(error)) {
           setError(SESSION_LOST);
+          return;
+        }
+        if (result.action.kind === "haulTransfer") {
+          // A transport error can arrive after an inventory mutation. Do not
+          // retry or even auto-reconcile a route-owned transfer on the next
+          // tick. Keep its pending manifest and require an explicit resume,
+          // whose first fresh observation verifies both sides before new work.
+          const reason = deps.refusalReason(error);
+          record({
+            t: now(), kind: "result", run: runID, ok: false, refusal: reason,
+            says: describeAction(result.action), stepPath: result.stepPath,
+          });
+          pauseWith(`Corporate transfer needs reconciliation before the route continues: ${refusalWords(reason)}`, result);
           return;
         }
         // ⚠ A SETTLING SESSION CHANGE IS NOT A REFUSAL, AND COUNTING IT AS ONE
@@ -687,6 +782,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         ? { ...toSnapshot(result, "paused", ledger.records()), why: reason, pauseReason: reason }
         : { ...last, status: "paused", why: reason, pauseReason: reason, phase: "Stopped" },
     );
+    releaseAfterIssue();
   }
 
   async function run(): Promise<void> {
@@ -710,6 +806,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
   return {
     start(next: BotScript): void {
+      releaseAfterIssue();
       runToken += 1;
       script = next;
       memory = initialMemory(next);
@@ -733,6 +830,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         runToken += 1;
         status = "paused";
         emit({ ...last, status: "paused" });
+        releaseAfterIssue();
       }
     },
     resume(): void {
@@ -746,6 +844,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
+      releaseAfterIssue();
     },
     beginGracefulStop(): Promise<void> {
       if (status === "running") {
@@ -753,7 +852,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         status = "paused";
         emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after controlled drones return." });
       }
-      return activeTick ?? Promise.resolve();
+      return (activeTick ?? Promise.resolve()).then(releaseClaim);
     },
     resumeHeadHome(reason: string): boolean {
       if (status !== "paused" || memory === null || script === null) return false;

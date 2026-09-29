@@ -567,6 +567,13 @@ export async function transferItems(
   to: InventoryPlace,
   qty: number | null = null,
   options: ApiOptions = {},
+  authority?: {
+    readonly claimRunID?: string;
+    readonly haulContract?: {
+      readonly stationID: number; readonly corporationID: number; readonly division: number;
+      readonly typeID: number; readonly sourceQuantity: number;
+    };
+  },
 ): Promise<TransferResult> {
   const body: Record<string, JsonValue> = {
     itemIDs: [...itemIDs],
@@ -576,6 +583,8 @@ export async function transferItems(
   if (qty !== null) {
     body.qty = qty;
   }
+  if (authority?.claimRunID) body.claimRunID = authority.claimRunID;
+  if (authority?.haulContract) body.haulContract = authority.haulContract as unknown as JsonValue;
   const data = await postJson("/api/bridge/inventory/transfer", body, options);
   return {
     applied: data.applied === true,
@@ -707,10 +716,12 @@ export interface RawCorpDivision {
   readonly name: string | null;
   readonly list: JsonValue;
   readonly error: string | null;
+  readonly volumes: Readonly<Record<string, number>>;
 }
 
 export interface RawCorpHangar {
   readonly available: boolean;
+  readonly stationID: number | null;
   readonly reason: string | null;
   readonly divisions: readonly RawCorpDivision[];
 }
@@ -726,6 +737,7 @@ export async function loadCorpHangar(options: ApiOptions = {}): Promise<RawCorpH
   const divisions = Array.isArray(data.divisions) ? data.divisions : [];
   return {
     available: data.available === true,
+    stationID: asNumberOrNull(data.stationID),
     reason: typeof data.reason === "string" ? data.reason : null,
     divisions: divisions.map((entry) => {
       const row = (entry ?? {}) as Record<string, JsonValue>;
@@ -734,6 +746,9 @@ export async function loadCorpHangar(options: ApiOptions = {}): Promise<RawCorpH
         name: typeof row.name === "string" && row.name !== "" ? row.name : null,
         list: row.list ?? null,
         error: typeof row.error === "string" ? row.error : null,
+        volumes: typeof row.volumes === "object" && row.volumes !== null && !Array.isArray(row.volumes)
+          ? Object.fromEntries(Object.entries(row.volumes).filter(([, value]) => typeof value === "number" && Number.isFinite(value))) as Record<string, number>
+          : {},
       };
     }),
   };
@@ -3878,6 +3893,28 @@ function readDroneAction(data: Record<string, JsonValue>): DroneActionResult {
 export async function getDrones(options: ApiOptions = {}): Promise<DronesResult> {
   const data = await getJson("/api/bridge/drones", options);
   return readDronesResult(data);
+}
+
+/** One authenticated script generation's BFF-owned container lease. */
+export async function claimContainer(
+  runID: string, solarSystemID: number, itemID: number, renewOnly = false,
+  options: ApiOptions = {},
+): Promise<boolean> {
+  const data = await postJson("/api/bots/loot-memory/claim", { runID, system: solarSystemID, itemID, renewOnly }, options);
+  if (typeof data.claimed !== "boolean") throw new Error("Container claim authority did not return a verdict.");
+  return data.claimed;
+}
+
+export async function readClaimedContainers(
+  runID: string, solarSystemID: number, options: ApiOptions = {},
+): Promise<readonly number[]> {
+  const data = await getJson(`/api/bots/loot-memory/claims?system=${solarSystemID}&runID=${encodeURIComponent(runID)}`, options);
+  if (!Array.isArray(data.itemIDs)) throw new Error("Container claim authority is unreadable.");
+  return asNumberList(data.itemIDs);
+}
+
+export async function releaseContainerClaims(runID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bots/loot-memory/release", { runID }, options);
 }
 
 /** One fresh scene read, also projected as this observation's in-space drones. */

@@ -38,6 +38,11 @@ interface Recorded {
   readonly body: Record<string, unknown>;
 }
 
+function transferWithoutClaim(body: Record<string, unknown>): Record<string, unknown> {
+  const { claimRunID: _claimRunID, ...transfer } = body;
+  return transfer;
+}
+
 function makeFakeFetch(
   responder: (path: string, method: string, body: Record<string, unknown>) => { status: number; body: unknown },
 ): { fetch: typeof fetch; requests: Recorded[] } {
@@ -47,7 +52,14 @@ function makeFakeFetch(
     const method = (init && init.method) || "GET";
     const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
     requests.push({ path, method, body });
-    const outcome = responder(path, method, body);
+    // Every scripted container action now needs the BFF's authenticated
+    // five-minute lease. These dispatch tests fake that authority; claim
+    // contention/expiry are exercised in containerClaims.test.ts.
+    const outcome = path.startsWith("/api/bots/loot-memory/claims?")
+      ? { status: 200, body: { ok: true, itemIDs: [] } }
+      : path === "/api/bots/loot-memory/claim"
+        ? { status: 200, body: { ok: true, claimed: true } }
+        : responder(path, method, body);
     return {
       ok: outcome.status >= 200 && outcome.status < 300,
       status: outcome.status,
@@ -140,8 +152,9 @@ function script(step: BotScript["program"][number]): BotScript {
   };
 }
 
-test("a custom bot's loot-containers step dispatches openContainer + transferItems for ANY container, no ownership needed", async () => {
+test("a custom bot's loot-containers step leases and dispatches a container regardless of EVE item owner", async () => {
   const CONTAINER_ID = 80001;
+  let containerReadsCount = 0;
   const store = createClientStore();
   store.apply({
     type: "character/online",
@@ -179,11 +192,12 @@ test("a custom bot's loot-containers step dispatches openContainer + transferIte
     if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
     if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
     if (path.startsWith("/api/bridge/inventory/container/")) {
+      containerReadsCount += 1;
       return {
         status: 200,
-        body: containerReads(CONTAINER_ID, [
+        body: containerReads(CONTAINER_ID, containerReadsCount === 1 ? [
           packedRow({ itemID: 90001, typeID: 34, groupID: 18, categoryID: 4, flagID: null, quantity: 100, singleton: 0 }),
-        ]),
+        ] : []),
       };
     }
     if (path === "/api/bridge/inventory/transfer") {
@@ -200,14 +214,17 @@ test("a custom bot's loot-containers step dispatches openContainer + transferIte
   const opened = requests.find((r) => r.path === `/api/bridge/inventory/container/${CONTAINER_ID}`);
   assert.ok(opened, "it read the container's contents");
   assert.equal(opened.method, "GET");
+  assert.ok(containerReadsCount >= 2, "claimed loot re-reads the container after transfer before releasing the claim");
 
   const transfer = requests.find((r) => r.path === "/api/bridge/inventory/transfer");
   assert.ok(transfer, "it moved the loot into cargo");
-  assert.deepEqual(transfer.body, {
+  assert.deepEqual({ ...transfer.body, claimRunID: undefined }, {
     itemIDs: [90001],
     from: { kind: "container", itemID: CONTAINER_ID },
     to: { kind: "cargo" },
+    claimRunID: undefined,
   });
+  assert.equal(typeof transfer.body.claimRunID, "string");
 });
 
 test("a custom bot's loot-containers step splits ore-category loot into the ore hold, everything else into cargo", async () => {
@@ -276,7 +293,7 @@ test("a custom bot's loot-containers step splits ore-category loot into the ore 
 
   const transfers = requests.filter((r) => r.path === "/api/bridge/inventory/transfer");
   assert.ok(
-    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+    transfers.some((r) => JSON.stringify(transferWithoutClaim(r.body)) === JSON.stringify({
       itemIDs: [90010],
       from: { kind: "container", itemID: CONTAINER_ID },
       to: { kind: "shipBay", bay: "ore" },
@@ -284,7 +301,7 @@ test("a custom bot's loot-containers step splits ore-category loot into the ore 
     "the ore stack went to the ore hold, not cargo",
   );
   assert.ok(
-    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+    transfers.some((r) => JSON.stringify(transferWithoutClaim(r.body)) === JSON.stringify({
       itemIDs: [90011],
       from: { kind: "container", itemID: CONTAINER_ID },
       to: { kind: "cargo" },
@@ -369,7 +386,7 @@ test("a hull with NO ore hold gets its ore in cargo — the bay is never address
     "no transfer addressed an ore hold this hull does not have",
   );
   assert.ok(
-    transfers.some((r) => JSON.stringify(r.body) === JSON.stringify({
+    transfers.some((r) => JSON.stringify(transferWithoutClaim(r.body)) === JSON.stringify({
       itemIDs: [90020],
       from: { kind: "container", itemID: CONTAINER_ID },
       to: { kind: "cargo" },

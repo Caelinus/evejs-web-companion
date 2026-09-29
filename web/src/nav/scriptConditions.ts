@@ -384,6 +384,10 @@ export interface ScriptObservation {
    * world as a distance is, and unlike a per-step counter it survives the lap.
    */
   readonly refusals?: readonly RefusalRecord[] | null;
+  /** Other authenticated runs' active container leases; null means authority unreadable. */
+  readonly claimedContainerIDs?: readonly number[] | null;
+  /** Exact docked corporation division rows, keyed by the human division 1..7. */
+  readonly haulDivisions?: Readonly<Record<number, readonly InventoryItemRow[] | null>> | null;
   /** The docked station's hangar rows (the mission package is picked from here). */
   readonly stationHangar?: readonly InventoryItemRow[] | null;
   /**

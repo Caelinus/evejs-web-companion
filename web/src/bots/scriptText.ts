@@ -129,6 +129,10 @@ export function macroName(macro: MacroID): string {
       return "Empty the ship";
     case "load-cargo":
       return "Load the ship";
+    case "haul-all":
+      return "Haul selected corporation cargo";
+    case "route-hauler":
+      return "Run a corporation cargo route";
     case "salvage-wrecks":
       return "Salvage the wrecks";
     case "loot-wrecks":
@@ -646,6 +650,8 @@ function macroPhrase(step: MacroStep): string {
         ? load
         : `${load}, but leave the ${names.join(" and ")} alone`;
     }
+    case "haul-all": return "Haul selected corporation cargo";
+    case "route-hauler": return "Run a corporation cargo route";
     case "hardeners-on":
       // ⚠ "AND DAMAGE CONTROL" USED TO BE IN THIS LINE, AND IT PROMISED
       // SOMETHING THE BLOCK CANNOT DO. An ordinary damage control has no cycle:

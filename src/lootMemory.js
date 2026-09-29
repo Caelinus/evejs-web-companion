@@ -46,6 +46,7 @@ const DEFAULT_TTL_MS = 2 * 60 * 60 * 1000;
 // belt cannot grow this without limit. Oldest marks go first; losing one costs
 // a single wasted approach, which is exactly what the memory was saving.
 const DEFAULT_MAX_PER_SYSTEM = 4000;
+const CONTAINER_LEASE_MS = 5 * 60 * 1000;
 
 function normalizeID(value) {
   const numeric = Number(value);
@@ -69,6 +70,73 @@ function createLootMemory(options = {}) {
   // systemID -> Map<itemID, expiresAtMs>. Insertion order is the age order a
   // Map already keeps, which is what makes the cap above cost nothing.
   const systems = new Map();
+  // One active servicing run per physical container. An issued inventory move
+  // pins the lease through normal stop/session cleanup; uncertainty is bounded
+  // by the same five-minute lease rather than advertised as a free target.
+  const claims = new Map();
+  const claimKey = (systemID, itemID) => `${systemID}:${itemID}`;
+  function pruneClaims() {
+    const cutoff = now();
+    for (const [key, claim] of claims) {
+      if (claim.expiresAt <= cutoff) claims.delete(key);
+    }
+  }
+  function releaseClaims(sessionID, runID) {
+    pruneClaims();
+    for (const [key, claim] of claims) {
+      if (claim.sessionID !== sessionID || (runID !== undefined && claim.runID !== runID)) continue;
+      if (claim.inFlight > 0 || claim.ambiguous) claim.pendingRelease = true;
+      else claims.delete(key);
+    }
+  }
+  function claimContainer(sessionID, runID, systemID, itemID, renewOnly = false) {
+    const system = normalizeID(systemID), item = normalizeID(itemID);
+    if (!sessionID || !runID || !system || !item) throw new Error("Invalid container claim");
+    pruneClaims();
+    const key = claimKey(system, item);
+    const current = claims.get(key);
+    const owned = current?.sessionID === sessionID && current?.runID === runID;
+    if ((current && !owned) || (renewOnly && !owned) || current?.pendingRelease || current?.ambiguous) return false;
+    if (owned) {
+      // Never rewrite the record: an in-flight pin or ambiguous outcome is
+      // evidence that a later release must respect.
+      current.expiresAt = now() + CONTAINER_LEASE_MS;
+      return true;
+    }
+    // A run can service one target at a time. An earlier issued move is not
+    // surrendered just because the browser changed its selected target.
+    releaseClaims(sessionID, runID);
+    claims.set(key, {
+      sessionID, runID, expiresAt: now() + CONTAINER_LEASE_MS,
+      inFlight: 0, ambiguous: false, pendingRelease: false,
+    });
+    return true;
+  }
+  function claimedItemIDs(systemID, sessionID, runID) {
+    const system = normalizeID(systemID);
+    if (!system) return null;
+    pruneClaims();
+    return [...claims.entries()]
+      .filter(([key, claim]) => key.startsWith(`${system}:`) &&
+        !(claim.sessionID === sessionID && claim.runID === runID))
+      .map(([key]) => Number(key.slice(key.indexOf(":") + 1)));
+  }
+  function beginTransfer(sessionID, runID, systemID, itemID) {
+    pruneClaims();
+    const claim = claims.get(claimKey(systemID, itemID));
+    if (!claim || claim.sessionID !== sessionID || claim.runID !== runID || claim.pendingRelease) return false;
+    claim.inFlight += 1;
+    claim.expiresAt = now() + CONTAINER_LEASE_MS;
+    return true;
+  }
+  function endTransfer(sessionID, runID, systemID, itemID, settled) {
+    const key = claimKey(systemID, itemID);
+    const claim = claims.get(key);
+    if (!claim || claim.sessionID !== sessionID || claim.runID !== runID) return;
+    claim.inFlight = Math.max(0, claim.inFlight - 1);
+    if (!settled) claim.ambiguous = true;
+    if (claim.pendingRelease && claim.inFlight === 0 && !claim.ambiguous) claims.delete(key);
+  }
 
   function prune(itemMap) {
     const cutoff = now();
@@ -127,7 +195,7 @@ function createLootMemory(options = {}) {
     return [...itemMap.keys()];
   }
 
-  return { markEmptied, emptiedItemIDs };
+  return { markEmptied, emptiedItemIDs, claimContainer, claimedItemIDs, releaseClaims, beginTransfer, endTransfer };
 }
 
-module.exports = { createLootMemory };
+module.exports = { createLootMemory, CONTAINER_LEASE_MS };

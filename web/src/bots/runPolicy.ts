@@ -108,6 +108,9 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   // hangar and the holds and re-plans from what is actually there, so starting
   // the block over loads what still fits rather than replaying a move.
   "load-cargo": policy(["inventory"]),
+  // A restarted process cannot infer which part of a mixed hold this run owns.
+  "haul-all": policy(["inventory"], false),
+  "route-hauler": policy(["inventory"], false),
   "salvage-wrecks": policy(["combat", "inventory"]),
   "loot-wrecks": policy(["inventory"]),
   "loot-containers": policy(["inventory"]),

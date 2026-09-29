@@ -172,6 +172,8 @@ export function describeAction(action: ScriptAction): string {
       return `loot wreck ${action.wreckID}`;
     case "lootContainer":
       return `loot container ${action.containerID}`;
+    case "haulTransfer":
+      return `move ${action.quantity} of ${action.itemID} into route division ${action.division}`;
     case "reprocessOre":
       return `reprocess ${action.itemIDs.join(",")}`;
     case "warpScan":

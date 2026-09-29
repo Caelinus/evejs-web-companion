@@ -540,6 +540,10 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
   if (expected === "agent") {
     return { kind: "agent", ref: readWorldRef(obj["ref"], "agent", ctx, SAY.badArg(label)) };
   }
+  if (expected === "toggle") {
+    if (typeof obj["enabled"] !== "boolean") refuse(SAY.badArg(label));
+    return { kind: "toggle", enabled: obj["enabled"] as boolean };
+  }
   if (expected === "count") {
     const value = obj["value"];
     if (typeof value !== "number" || !Number.isSafeInteger(value)) {
@@ -1359,6 +1363,8 @@ function orderArg(arg: Arg): unknown {
         : { kind: "belt", belt: { mode: arg.belt.mode } };
     case "station":
       return { kind: "station", ref: orderRef(arg.ref) };
+    case "toggle":
+      return { kind: "toggle", enabled: arg.enabled };
     case "agent":
       return { kind: "agent", ref: orderRef(arg.ref) };
     case "equipment":

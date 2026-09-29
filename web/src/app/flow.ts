@@ -8560,12 +8560,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "fly-to-mission-site",
   ]);
   const CONVO_MACROS = new Set(["request-mission", "accept-mission", "turn-in-mission"]);
-  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo"]);
+  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo", "haul-all", "route-hauler"]);
   // Blocks that need the ACTIVE HULL'S BAY LIST, contents included. Kept apart
   // from CARGO_MACROS because the two reads have very different prices: the
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
-  const BAY_MACROS = new Set(["unload-cargo", "load-cargo"]);
+  const BAY_MACROS = new Set(["unload-cargo", "load-cargo", "haul-all", "route-hauler"]);
   // Blocks that WORK A ROCK, and so are worth running the mining surveyor for.
   // `travel-to-belt` and `compress-ore` are deliberately not here: neither one
   // reads a rock, and a scan they cannot use is a round trip nobody asked for.
@@ -8950,6 +8950,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     from: { readonly kind: "container"; readonly itemID: number },
     bays: readonly ShipBay[],
     freeFor: (bay: string | null) => number | null,
+    claim?: { readonly runID: string; readonly systemID: number },
   ): Promise<{ readonly planned: number; readonly moved: number }> {
     let moved = 0;
     let planned = 0;
@@ -8957,18 +8958,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     for (const transfer of planLootTransfers(rows, bays, freeFor)) {
       planned += 1;
       try {
-        await api.transferItems(
+        if (claim && !await api.claimContainer(claim.runID, claim.systemID, from.itemID, true, callOptions)) {
+          throw new Error("Container claim was lost before transfer.");
+        }
+        const result = await api.transferItems(
           transfer.itemIDs,
           from,
           transfer.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: transfer.bay },
           transfer.qty,
           callOptions,
+          claim ? { claimRunID: claim.runID } : undefined,
         );
+        if (!result.applied) throw new Error("The container transfer was not confirmed.");
         moved += 1;
       } catch (error) {
         if (isSessionLost(error)) {
           throw error;
         }
+        // A scripted claimant cannot treat a later failed/ambiguous move as a
+        // successful sweep merely because an earlier stack moved. Keep the
+        // lease and let the runner's refusal path reconcile on a fresh tick.
+        if (claim) throw error;
         // No spill-to-cargo backstop here any more, and none is needed: the
         // planner already walked this row's whole chain and ENDED at the cargo
         // hold, so a refusal means the destination it measured has less room
@@ -9017,6 +9027,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     containerID: number,
     bays: readonly ShipBay[],
     shipID: number | null,
+    claim?: { readonly runID: string; readonly systemID: number },
   ): Promise<LootOutcome> {
     // Room is asked for BY NAME, and only for the freight bays this hull has —
     // a handful of capacity calls rather than the twenty-seven a full bay read
@@ -9050,7 +9061,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       { kind: "container", itemID: containerID },
       bays,
       freeFor,
+      claim,
     );
+    if (claim) {
+      // The route keeps its lease until an authoritative post-action read says
+      // the container is actually empty. A planned transfer can fit only part
+      // of a stack, or leave another stack behind for this or another hull.
+      const remaining = await api.openContainer(containerID, callOptions);
+      if (decodeInventoryRows(remaining.list, remaining.volumes).length > 0) {
+        throw new Error("Container still holds cargo after the transfer; retaining its claim for the next observation.");
+      }
+      reportContainerEmptied(containerID);
+      return { stacks: rows.length, planned: outcome.planned, moved: outcome.moved };
+    }
     if (outcome.moved >= rows.length) {
       // Every stack it had, this ship took: it is empty NOW, which is the same
       // fact as "it was empty" to every pilot still to come. A PARTIAL move is
@@ -9217,11 +9240,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      * arithmetic and the per-bay transfers are one implementation, so a bot and
      * a player pressing "Take everything" cannot fill different holds.
      */
-    const lootFrom = async (containerID: number): Promise<void> => {
+    const lootFrom = async (containerID: number, claimRunID?: string): Promise<void> => {
+      const systemID = store.flight.get().status?.solarSystemID ?? null;
+      if (claimRunID && !systemID) throw new Error("Container system is unreadable.");
       await lootIntoShip(
         containerID,
         await activeShipBays(),
         capabilityCache.peek().shipID ?? store.inventory.get().activeShipID,
+        claimRunID && systemID ? { runID: claimRunID, systemID } : undefined,
       );
     };
     return {
@@ -9344,6 +9370,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let cargo: ScriptObservation["cargo"] = null;
         let stationHangar: ScriptObservation["stationHangar"] = null;
         let shipBays: ScriptObservation["shipBays"] = null;
+        let haulDivisions: ScriptObservation["haulDivisions"] = null;
         let typeNames: ScriptObservation["typeNames"] = null;
         let foundAgent: ScriptObservation["foundAgent"] = null;
         let jumpsToDropoff: ScriptObservation["jumpsToDropoff"] = null;
@@ -9744,6 +9771,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               shipBays = null;
             }
           }
+          if (macro === "haul-all" || macro === "route-hauler") {
+            try {
+              const corp = await api.loadCorpHangar(callOptions);
+              if (corp.available && corp.stationID === status.stationID) {
+                haulDivisions = Object.fromEntries(corp.divisions.map((division) => [division.division,
+                  division.error !== null || division.list === null ? null : decodeInventoryRows(division.list, division.volumes)]));
+              }
+            } catch (error) {
+              if (isSessionLost(error)) throw error;
+            }
+          }
           // Type NAMES, for a block matching items by name pattern — and only
           // for one. Every other block asks the game's own classification, which
           // already rides in on the row; paying for a name lookup on their ticks
@@ -9756,6 +9794,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // in the hangar (bridge/keepAboard.ts).
           if (hint.needsTypeNames === true) {
             const typeIDs = new Set<number>();
+            for (const row of Object.values(haulDivisions ?? {}).flatMap((rows) => rows ?? [])) typeIDs.add(row.typeID);
             for (const row of stationHangar ?? []) {
               typeIDs.add(row.typeID);
             }
@@ -9874,6 +9913,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           journal,
           cargo,
           shipBays,
+          haulDivisions,
           stationHangar,
           typeNames,
           travel,
@@ -9981,7 +10021,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           myCorporationID: store.station.get().online?.corporationID ?? null,
         };
       },
-      issue: async (action) => {
+      claims: {
+        read: (runID, systemID) => api.readClaimedContainers(runID, systemID, callOptions),
+        acquire: (runID, systemID, itemID, renewOnly) => api.claimContainer(runID, systemID, itemID, renewOnly, callOptions),
+        release: (runID) => api.releaseContainerClaims(runID, callOptions),
+      },
+      issue: async (action, claimRunID) => {
         switch (action.kind) {
           case "wait":
             return;
@@ -10230,6 +10275,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               );
             }
             return;
+          case "haulTransfer": {
+            const result = await api.transferItems(
+              [action.itemID], action.from, action.to, action.quantity, callOptions,
+              { haulContract: {
+                stationID: action.stationID, corporationID: action.corporationID,
+                division: action.division, typeID: action.typeID, sourceQuantity: action.sourceQuantity,
+              } },
+            );
+            if (!result.applied || result.declined.length > 0 || result.notFound.length > 0) {
+              throw new Error("The route transfer was not confirmed; reconcile both inventories before retrying.");
+            }
+            return; // The macro also verifies exact quantities on the next tick.
+          }
           case "salvageDrones":
             if (action.droneIDs.length > 0) {
               await api.salvageDrones(action.droneIDs, action.targetID, callOptions);
@@ -10335,7 +10393,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "lootContainer": {
             // Same shape as lootWreck — the server applies no ownership check to
             // a container, so nothing here needs to either.
-            await lootFrom(action.containerID);
+            if (!claimRunID) throw new Error("Container ownership was not confirmed.");
+            await lootFrom(action.containerID, claimRunID);
             return;
           }
           case "placeBuyOrder":

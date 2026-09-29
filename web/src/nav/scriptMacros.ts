@@ -17,6 +17,7 @@ import type {
   ScriptBoard,
 } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
+import { createCorporateHauler } from "./corporateHauling.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
@@ -2565,10 +2566,18 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   // list in step memory. The list was dropped every time the block was left, so
   // on a `forever` loop each stubborn can was reconsidered from scratch on every
   // lap — five fresh attempts, for ever. See `shouldSetAside`.
-  const cans = containersOnGrid(snapshot).filter(
+  if (obs.claimedContainerIDs === null) {
+    return tick(WAIT, "Container claim authority is unreadable; waiting safely.", "Looting", ACTING, false, mem);
+  }
+  const allCans = containersOnGrid(snapshot).filter(
     (c) => !shouldSetAside(obs.refusals, step.id, "lootContainer", c.itemID, MAX_BLOCK_ATTEMPTS),
   );
+  const claimed = new Set(obs.claimedContainerIDs ?? []);
+  const cans = allCans.filter((c) => !claimed.has(c.itemID));
   if (cans.length === 0) {
+    if (allCans.length > 0) {
+      return tick(WAIT, "Other haulers are servicing the remaining containers.", "Looting", ACTING, false, mem);
+    }
     // A can that has not shown up in THIS tick's snapshot is not proof the
     // grid never had one — landing on a belt and checking for containers on
     // the very next tick (no natural pause the way a player starting the bot
@@ -2591,6 +2600,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   if (target === null) {
     return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memClean);
   }
+  const servicing = (result: MacroTick): MacroTick => ({ ...result, containerTargetID: target.itemID });
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
   // ⚠ THE SERVER'S RANGE CHECK BEATS OUR MEASUREMENT. A bind that came back
   // "cannot reach" means the gateway's own scene/range test said no, whatever
@@ -2602,35 +2612,35 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     if (!unreachable && num(memClean, "approaching") === target.itemID) {
       const stall = closeInStall(measurement?.shipMode ?? null, memClean);
       if (stall.step === "reorder") {
-        return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem);
+        return servicing(tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem));
       }
       if (stall.step === "unstick") {
-        return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem);
+        return servicing(tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem));
       }
       if (stall.step === "stuck") {
         return tick(WAIT, STALL_STUCK_WHY, "Looting", { kind: "blocked", reason: STALL_STUCK_REASON });
       }
-      return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, stall.mem);
+      return servicing(tick(WAIT, "Flying to the container.", "Looting", ACTING, true, stall.mem));
     }
-    return tick(
+    return servicing(tick(
       { kind: "approach", targetID: target.itemID },
       unreachable ? "Too far to reach it, closing in." : "Heading for the container.",
       "Looting",
       ACTING,
       true,
       clearCloseInStall({ ...memClean, approaching: target.itemID }),
-    );
+    ));
   }
   // No `tries` counter here any more: the ledger counts, across laps, and
   // `shouldSetAside` above is what takes a hopeless can out of the list.
-  return tick(
+  return servicing(tick(
     { kind: "lootContainer", containerID: target.itemID },
     "Taking what's inside.",
     "Looting",
     ACTING,
     true,
     { ...memClean, approaching: null },
-  );
+  ));
 };
 
 // ── refine-ore ───────────────────────────────────────────────────────────────
@@ -5600,6 +5610,8 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   wait: waitBlock,
   "unload-cargo": unloadCargo,
   "load-cargo": loadCargo,
+  "haul-all": createCorporateHauler(rideAutopilotTo),
+  "route-hauler": createCorporateHauler(rideAutopilotTo),
   "salvage-wrecks": salvageWrecks,
   "loot-wrecks": lootWrecks,
   "loot-containers": lootContainers,

@@ -21,6 +21,7 @@ import {
   type MacroStep,
 } from "./botScript.ts";
 import { MACRO_SPECS } from "./macroSpecs.ts";
+import { haulingLeg } from "../nav/corporateHauling.ts";
 
 /**
  * One fixable — or merely worth-mentioning — problem, anchored to a row by its
@@ -67,6 +68,14 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   from: "where to move items from",
   to: "where to move items to",
   items: "something to load",
+  pickupStation: "a pickup station",
+  deliveryStation: "a delivery station",
+  pickupCorpDivision: "a pickup corporation division",
+  deliveryCorpDivision: "a delivery corporation division",
+  stationA: "station A",
+  stationB: "station B",
+  pickupDivisionA: "the pickup division at A",
+  deliveryDivisionB: "the delivery division at B",
 };
 
 /** Every fixable problem in a draft, in reading order. Empty means ready to start. */
@@ -231,6 +240,17 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     }
     if (arg.kind === "system" && arg.ref.id === null) {
       problems.push(blocking(step.id, "Pick the solar system for this step."));
+    }
+  }
+
+  if (step.macro === "haul-all" || step.macro === "route-hauler") {
+    const returning = step.args["returnCargo"];
+    if (!haulingLeg(step) || (returning?.kind === "toggle" && returning.enabled && !haulingLeg(step, true))) {
+      problems.push(blocking(step.id, "Choose valid corporation divisions and resolve every explicit item filter before hauling."));
+    }
+    const bay = step.args["transportBay"];
+    if (bay && (bay.kind !== "place" || !["cargo", "ore-hold"].includes(bay.place))) {
+      problems.push(blocking(step.id, "A hauling hold restriction must be cargo or ore hold."));
     }
   }
 
