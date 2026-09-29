@@ -39,8 +39,10 @@ import {
   LAUNCH_MAX_TRIES,
   RECALL_MAX_WAIT_TICKS,
   droneRoster,
+  droneStackSizes,
   launchRoleDrones,
   launchStalled,
+  wholeStackLaunch,
   type DroneRole,
 } from "./droneLaunch.ts";
 
@@ -505,4 +507,32 @@ test("a drone under another ship's control is nobody's to order", () => {
     myDrones: undefined,
   });
   assert.deepEqual(droneRoster(obs, "combat").out, [1000]);
+});
+
+test("a launch asks for every drone in the stack, and leaves the limits to the server", () => {
+  // Five repackaged Hobgoblins are ONE stack. Asking for one of them put one out,
+  // and the rung, seeing its role out, never asked again. How many of the five
+  // actually fly is the server's call (maxActiveDrones, bandwidth), so the
+  // request carries the whole stack, as the retail client's does.
+  const sizes = droneStackSizes([
+    { itemID: 501, quantity: 5 },
+    { itemID: 502, quantity: 1 },
+  ]);
+  assert.deepEqual(wholeStackLaunch([501, 502], sizes), [
+    { itemID: 501, quantity: 5 },
+    { itemID: 502, quantity: 1 },
+  ]);
+});
+
+test("a stack whose size was never read launches one, as it did before", () => {
+  assert.deepEqual(wholeStackLaunch([777], new Map()), [{ itemID: 777, quantity: 1 }]);
+});
+
+test("a stack size that is not a positive number counts as one", () => {
+  const sizes = droneStackSizes([
+    { itemID: 1, quantity: 0 },
+    { itemID: 2, quantity: -3 },
+    { itemID: 3, quantity: Number.NaN },
+  ]);
+  assert.deepEqual([...sizes.values()], [1, 1, 1]);
 });
