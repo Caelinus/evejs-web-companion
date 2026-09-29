@@ -246,10 +246,9 @@ export interface FleetCompanionRequest {
    * hull with a salvager bolted on can salvage whether or not it carries drones.
    * Found in live testing, 2026-09-11.
    *
-   * ⚠ THE TWO ARE NOT EXCLUSIVE. A ship carrying both runs both: the drones
-   * sweep on the server's own auto-pick while the salvager works the nearest
-   * wreck through approach -> lock -> activate. They are separate rungs because
-   * one costs a drone command and the other moves the ship.
+   * ⚠ THE TWO ARE NOT EXCLUSIVE. A ship carrying both runs both on the same
+   * wreck: approach -> lock, then the drones are sent at it and the salvager
+   * activated on it.
    */
   readonly salvagerModuleIDs: readonly number[];
   /**
@@ -1427,14 +1426,21 @@ export interface CompanionLadderMemory {
    */
   readonly lastDroneEngageTargetID: number | null;
   /**
-   * How many salvage drones the standing salvage order was last issued for.
+   * The locked wreck the salvage drones were last sent to, and how many drones
+   * that order went to.
    *
-   * ⚠ A COUNT AND NOT A FLAG, because the set of drones out can CHANGE while
-   * the order stands: one more launched, or one lost, is a different set, and
-   * the new ones have been told nothing. A bare "already ordered" flag would
-   * leave them drifting. The server auto-picks the wreck, so the order never
-   * needs re-aiming -- only re-issuing to drones that missed it.
+   * ⚠ THE WRECK IS NAMED, NEVER LEFT TO THE SERVER'S AUTO-PICK. Auto-pick only
+   * takes wrecks owned by the pilot or a CURRENT fleet mate, so a dropped fleet
+   * or a field another pilot killed left the drones launched and idle for
+   * hours. The salvage rung locks the wreck it is working and sends the drones
+   * at that.
+   *
+   * ⚠ A COUNT AS WELL AS THE WRECK, because the set of drones out can CHANGE
+   * while the order stands: one more launched is a drone that has been told
+   * nothing. Neither is re-sent on a beat: a repeated order restarts the
+   * drone's salvage cycle.
    */
+  readonly salvageDronesWreckID: number | null;
   readonly lastSalvageOrderedFor: number | null;
   /**
    * Wrecks and containers the `loot` order has already emptied this run, and
@@ -1739,6 +1745,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastDroneRepairTargetID: null,
     lastDroneEngageTargetID: null,
     lastSalvageOrderedFor: null,
+    salvageDronesWreckID: null,
     lootedItemIDs: [],
     lootApproaching: null,
     lootTargetID: null,
@@ -2080,6 +2087,7 @@ export function decideCompanionAction(
     lastDroneRepairTargetID: memory.lastDroneRepairTargetID,
     lastDroneEngageTargetID: memory.lastDroneEngageTargetID,
     lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
+    salvageDronesWreckID: memory.salvageDronesWreckID,
     lootedItemIDs: memory.lootedItemIDs,
     lootApproaching: memory.lootApproaching,
     lootTargetID: memory.lootTargetID,
@@ -6013,7 +6021,8 @@ function decideFollow(
 }
 
 /**
- * Run a fitted SALVAGER on the nearest wreck: close, lock, cycle.
+ * Salvage one wreck at a time: close, lock, then send the salvage drones at it
+ * and cycle a fitted SALVAGER on it.
  *
  * ⚠ THE OTHER HALF OF THE `salvage` ORDER, AND IT WAS MISSING. The first cut of
  * the verb acted on salvage DRONES alone, because that is how the order was
@@ -6022,11 +6031,10 @@ function decideFollow(
  * its FIT -- the same principle that deleted every module picker -- so the order
  * acts on whatever this ship actually has for the job.
  *
- * ⚠ IT RUNS ALONGSIDE THE DRONES, NOT INSTEAD OF THEM. A ship carrying both
- * sweeps with the drones on the server's own auto-pick AND works the nearest
- * wreck with the module. They are separate rungs because one costs a drone
- * command and the other moves the ship; nothing here recalls or blocks the
- * drones.
+ * ⚠ THE DRONES ARE SENT AT THE LOCKED WRECK BY ID. The server's auto-pick
+ * (`CmdSalvage` with target 0) only takes wrecks owned by the pilot or a
+ * CURRENT fleet mate, and left every salvage drone idle when the fleet had
+ * dropped or another pilot made the wrecks. The drone rung only launches them.
  *
  * ⚠ AND IT MOVES THE SHIP, so it sits at the bottom of the ladder beside the
  * loot rung. A salvager reaches about 5 km, so closing on a wreck can pull a
@@ -6038,7 +6046,9 @@ function decideSalvaging(
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
 ): CompanionDecision | null {
-  if (!salvageWasOrdered(memory) || request.salvagerModuleIDs.length === 0) {
+  const salvageDrones = obs.salvageDroneIDs ?? [];
+  const salvagers = request.salvagerModuleIDs;
+  if (!salvageWasOrdered(memory) || (salvagers.length === 0 && salvageDrones.length === 0)) {
     return null;
   }
   const snapshot = obs.snapshot ?? null;
@@ -6082,7 +6092,11 @@ function decideSalvaging(
   }
 
   const distance = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
-  if (distance > COMPANION_SALVAGE_RANGE_M) {
+  // A salvager needs the ship beside the wreck; drones fly there themselves,
+  // so a drone-only hull only has to be inside lock range. An unreadable lock
+  // range is no gate: the bounded lock wait below is the backstop.
+  const reach = salvagers.length > 0 ? COMPANION_SALVAGE_RANGE_M : (obs.maxTargetRangeM ?? null);
+  if (reach !== null && distance > reach) {
     // ⚠ ONLY BELIEVE AN APPROACH THAT IS STILL RUNNING. A move that was
     // refused, or that the server finished early, leaves the ship out of reach
     // -- and not necessarily stopped: `/flight/approach` opens the throttle
@@ -6125,9 +6139,22 @@ function decideSalvaging(
       salvageLockWaited: mem.salvageLockWaited + 1,
     });
   }
-  // Locked and in range. Start the first salvager that is not already cycling.
+  // Locked: the salvage drones onto it, once per wreck (and again if more
+  // drones came out since).
+  if (
+    salvageDrones.length > 0 &&
+    (mem.salvageDronesWreckID !== wreckID || mem.lastSalvageOrderedFor !== salvageDrones.length)
+  ) {
+    return {
+      action: { kind: "salvageDrones", droneIDs: salvageDrones, targetID: wreckID },
+      phase: "Salvaging",
+      why: "Sending the salvage drones to the wreck.",
+      memory: { ...mem, salvageDronesWreckID: wreckID, lastSalvageOrderedFor: salvageDrones.length },
+    };
+  }
+  // Start the first salvager that is not already cycling.
   const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
-  const next = request.salvagerModuleIDs.find((moduleID) => !active.has(moduleID));
+  const next = salvagers.find((moduleID) => !active.has(moduleID));
   if (next === undefined) {
     return waiting("Salvaging", "Salvaging the wreck.", mem);
   }
@@ -6469,22 +6496,9 @@ function decideDrones(
     };
   }
   if (role === "salvage") {
-    // ⚠ `targetID: 0` IS THE SERVER'S OWN AUTO-PICK, not a null we forgot to
-    // fill in: `resolveAutomaticSalvageTarget` chooses a wreck. It is the same
-    // call the DSL's `salvage-wrecks` macro makes, and it means this rung does
-    // not have to rank wrecks itself or re-issue as each one is consumed.
-    if (memory.lastSalvageOrderedFor === roleOut.length) {
-      return nothing;
-    }
-    return {
-      decision: {
-        action: { kind: "salvageDrones", droneIDs: roleOut, targetID: 0 },
-        phase: "Drones",
-        why: "Salvaging the wrecks here, as asked.",
-        memory: { ...memory, lastSalvageOrderedFor: roleOut.length },
-      },
-      memory,
-    };
+    // Launched, nothing more: the salvage rung locks a wreck and sends these
+    // drones at it by id. See `decideSalvaging`.
+    return nothing;
   }
   // Logistic. The ship to repair is whoever the fleet is calling reps for.
   const healTarget = healCallTargetID(obs);
@@ -7170,6 +7184,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastDroneRepairTargetID: null,
           lastDroneEngageTargetID: null,
           lastSalvageOrderedFor: null,
+          salvageDronesWreckID: null,
           lootedItemIDs: [],
           lootApproaching: null,
           lootTargetID: null,

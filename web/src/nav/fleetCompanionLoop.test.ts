@@ -4701,10 +4701,50 @@ test("a bare 'salvage' from a commander puts the SALVAGE drones out", () => {
   });
 });
 
-test("salvage drones out are set sweeping, with the SERVER picking the wreck", () => {
-  // ⚠ `targetID: 0` IS THE AUTO-PICK, not a value we forgot to fill in. It is
-  // why a standing salvage order never has to be re-aimed as each wreck goes.
+test("salvage drones out: lock the wreck, then send them at IT, never the server's auto-pick", () => {
+  // ⚠ `targetID: 0` IS THE SERVER'S AUTO-PICK, which only takes wrecks owned by
+  // the pilot or a current fleet mate. This wreck's owner is unknown, which is
+  // exactly the case that left every salvage drone idle.
+  const WRECK_ID = 980350000099;
+  const world = (overrides: Partial<FleetCompanionObservation> = {}) =>
+    mixedBayObs({
+      hostileOnGrid: false,
+      snapshot: gridWithWreck(),
+      chatMessages: [areaOrder("salvage")],
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+      ...overrides,
+    });
+  const locking = decideCompanionAction(WITH_DRONES, world());
+  assert.deepEqual(locking.action, { kind: "lock", targetID: WRECK_ID });
+
+  const sending = decideCompanionAction(WITH_DRONES, world({ lockedTargetIDs: [WRECK_ID] }), locking.memory);
+  assert.deepEqual(sending.action, {
+    kind: "salvageDrones",
+    droneIDs: [SALVAGE_DRONE_OUT],
+    targetID: WRECK_ID,
+  });
+
+  // Sent once: a repeated order would restart the drone's salvage cycle.
+  const after = decideCompanionAction(WITH_DRONES, world({ lockedTargetIDs: [WRECK_ID] }), sending.memory);
+  assert.notEqual(after.action.kind, "salvageDrones");
+});
+
+test("a drone-only salvager closes to lock range, not to the wreck", () => {
+  const WRECK_ID = 980350000099;
   const decision = decideCompanionAction(
+    WITH_DRONES,
+    mixedBayObs({
+      hostileOnGrid: false,
+      snapshot: gridWithWreck(), // wreck at 3 km
+      chatMessages: [areaOrder("salvage")],
+      myDroneIDs: [SALVAGE_DRONE_OUT],
+      salvageDroneIDs: [SALVAGE_DRONE_OUT],
+      maxTargetRangeM: 2_000,
+    }),
+  );
+  assert.equal(decision.action.kind, "approach");
+  const inReach = decideCompanionAction(
     WITH_DRONES,
     mixedBayObs({
       hostileOnGrid: false,
@@ -4712,13 +4752,10 @@ test("salvage drones out are set sweeping, with the SERVER picking the wreck", (
       chatMessages: [areaOrder("salvage")],
       myDroneIDs: [SALVAGE_DRONE_OUT],
       salvageDroneIDs: [SALVAGE_DRONE_OUT],
+      maxTargetRangeM: 40_000,
     }),
   );
-  assert.deepEqual(decision.action, {
-    kind: "salvageDrones",
-    droneIDs: [SALVAGE_DRONE_OUT],
-    targetID: 0,
-  });
+  assert.deepEqual(inReach.action, { kind: "lock", targetID: WRECK_ID });
 });
 
 test("nobody said salvage, so the salvage drones stay in the bay", () => {

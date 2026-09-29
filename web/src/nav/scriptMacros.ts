@@ -2212,7 +2212,6 @@ const returnToAgent: MacroDecider = (_step, obs, _mem, board) => {
 
 const LOOT_RANGE_M = 2400; // open a wreck inside retail's 2,500 m, with margin
 const SALVAGE_RANGE_M = 4500; // run a salvager inside its ~5-6 km range
-const SALVAGE_REISSUE_TICKS = 5; // re-point idle salvage drones every ~10 s
 
 function wrecksOnGrid(snapshot: SpaceSnapshot | null): readonly SpaceEntity[] {
   return (snapshot?.entities ?? []).filter((e) => e.kind === "wreck");
@@ -2228,9 +2227,9 @@ function isOwnWreck(wreck: SpaceEntity, obs: ScriptObservation): boolean {
   return (me !== null && wreck.ownerID === me) || (corp !== null && wreck.ownerID === corp);
 }
 
-// Salvage the grid: salvage drones sweep on auto-pick; fitted salvagers run the
-// nearest wreck through the approach→lock→activate ladder. Done (drones home)
-// when no wrecks remain. Salvaging any wreck is legal — only LOOTING is gated.
+// Salvage the grid, nearest wreck first: lock it, send the salvage drones at it,
+// run any fitted salvagers on it. Done (drones home) when no wrecks remain.
+// Salvaging any wreck is legal — only LOOTING is gated.
 const salvageWrecks: MacroDecider = (_step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
@@ -2249,26 +2248,7 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     return tick(WAIT, "Nothing left to salvage.", "Salvaging", { kind: "done" });
   }
 
-  if (roster.roleOut.length > 0) {
-    // SALVAGE drones out: point them at wrecks (auto-pick), re-issued on a slow
-    // beat so a drone that finished one wreck moves to the next without
-    // micromanagement. Only the salvage drones — a combat drone given this
-    // order is refused by the server, every beat, forever.
-    const sinceIssue = (num(mem, "sinceIssue") ?? SALVAGE_REISSUE_TICKS) + 1;
-    if (sinceIssue > SALVAGE_REISSUE_TICKS) {
-      return tick(
-        { kind: "salvageDrones", droneIDs: roster.roleOut, targetID: 0 },
-        "Setting the salvage drones on the wrecks.",
-        "Salvaging",
-        ACTING,
-        true,
-        { ...mem, sinceIssue: 0 },
-      );
-    }
-    // Fall through with the beat advanced: the MODULE ladder below still runs
-    // this tick if salvagers are fitted; otherwise we wait while the drones work.
-    mem = { ...mem, sinceIssue };
-  } else {
+  if (roster.roleOut.length === 0) {
     // None out: get the salvage drones (and ONLY them) out of the bay. Combat
     // drones still out from the fight before hold the slots, so they are called
     // in first — see launchRoleDrones.
@@ -2280,10 +2260,8 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
   }
 
   const salvagers = obs.salvageModuleIDs ?? [];
-  if (salvagers.length === 0) {
-    if (roster.roleOut.length > 0) {
-      return tick(WAIT, "The salvage drones are working the wrecks.", "Salvaging", ACTING, true, mem);
-    }
+  const dronesOut = roster.roleOut.length > 0;
+  if (salvagers.length === 0 && !dronesOut) {
     if (roster.roleBay.length > 0 && !launchStalled(mem)) {
       return tick(WAIT, "Waiting for the other drones to come home so the salvage drones can go out.", "Salvaging", ACTING, true, mem);
     }
@@ -2306,28 +2284,60 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     });
   }
 
-  // The module ladder, one wreck at a time — the mine block's shape on a wreck.
+  // One wreck at a time, the way a pilot does it: pick it, lock it, send the
+  // salvage drones at it and run the salvagers on it. The mine block's shape on
+  // a wreck.
+  //
+  // ⚠ THE DRONES ARE SENT AT THE LOCKED WRECK BY ID, NEVER ON AUTO-PICK. The
+  // server's auto-pick (`CmdSalvage` with target 0) only takes wrecks owned by
+  // the pilot or a CURRENT fleet mate, so a fleet that had dropped, or a field
+  // another pilot killed, left every salvage drone launched and idle for hours
+  // while this block said they were working. A named wreck may be anyone's.
   const measurement = measureSpace(snapshot);
+  const passedRaw = mem["passedWrecks"];
+  const passed = new Set<number>(Array.isArray(passedRaw) ? (passedRaw as number[]) : []);
+  const candidates = wrecks.filter((w) => !passed.has(w.itemID));
   let wreckID = num(mem, "wreckID");
-  if (wreckID !== null && !wrecks.some((w) => w.itemID === wreckID)) {
+  if (wreckID !== null && !candidates.some((w) => w.itemID === wreckID)) {
     wreckID = null; // it salvaged away — pick the next
   }
   if (wreckID === null) {
-    const pick = nearest(wrecks, measurement);
+    if (candidates.length === 0) {
+      // Every wreck left would not lock. Finish rather than re-lock the same
+      // wrecks forever; the drones come home first, as on a clean grid.
+      if (roster.out.length > 0) {
+        return tick({ kind: "recallDrones", droneIDs: roster.out }, "The wrecks left would not lock — calling the drones home.", "Salvaging", ACTING);
+      }
+      return tick(WAIT, "The wrecks left would not lock.", "Salvaging", { kind: "done" });
+    }
+    const pick = nearest(candidates, measurement);
     if (pick === null) {
       return tick(WAIT, "Nothing pickable to salvage.", "Salvaging", ACTING, true, { ...mem, wreckID: null });
     }
+    const picked = clearCloseInStall({ ...mem, wreckID: pick.itemID, lockIssued: false, waited: 0, dronesOn: null });
+    if (salvagers.length > 0) {
+      return tick({ kind: "approach", targetID: pick.itemID }, "Closing in on a wreck.", "Salvaging", ACTING, true, picked);
+    }
+    // Drones only: the drones fly to the wreck, the ship only needs to lock it.
+    wreckID = pick.itemID;
+    mem = picked;
+  }
+  const dist = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
+  // Salvagers need the ship inside their range; drones only need the lock.
+  // An unreadable lock range is no gate: the bounded lock wait is the backstop.
+  const lockRange = obs.maxTargetRangeM ?? null;
+  const reach = salvagers.length > 0 ? SALVAGE_RANGE_M : lockRange;
+  if (reach !== null && dist > reach && salvagers.length === 0 && num(mem, "approachedWreckID") !== wreckID) {
     return tick(
-      { kind: "approach", targetID: pick.itemID },
-      "Closing in on a wreck.",
+      { kind: "approach", targetID: wreckID },
+      "Closing in on the wreck to lock it.",
       "Salvaging",
       ACTING,
       true,
-      clearCloseInStall({ ...mem, wreckID: pick.itemID, lockIssued: false, waited: 0 }),
+      clearCloseInStall({ ...mem, approachedWreckID: wreckID }),
     );
   }
-  const dist = measurement?.distances.get(wreckID) ?? Number.POSITIVE_INFINITY;
-  if (dist > SALVAGE_RANGE_M) {
+  if (reach !== null && dist > reach) {
     // ⚠ NEVER A BARE WAIT HERE. Until this rung existed, an approach the server
     // accepted and ignored left this block saying "flying to the wreck" for as
     // long as the wreck was on grid — the hull motionless (or flying a straight
@@ -2353,9 +2363,25 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
     if (waited > MAX_LOCK_WAIT_TICKS) {
-      return tick(WAIT, "That wreck would not lock — moving on.", "Salvaging", ACTING, true, { ...mem, wreckID: null });
+      return tick(WAIT, "That wreck would not lock — moving on.", "Salvaging", ACTING, true, {
+        ...mem,
+        wreckID: null,
+        passedWrecks: [...passed, wreckID],
+      });
     }
     return tick(WAIT, "Waiting for the lock.", "Salvaging", ACTING, true, { ...mem, waited });
+  }
+  // Locked: the salvage drones onto it, once per wreck. Re-sending the order
+  // restarts the drone's salvage cycle, so it is never repeated on a beat.
+  if (dronesOut && num(mem, "dronesOn") !== wreckID) {
+    return tick(
+      { kind: "salvageDrones", droneIDs: roster.roleOut, targetID: wreckID },
+      "Sending the salvage drones to the wreck.",
+      "Salvaging",
+      ACTING,
+      true,
+      { ...mem, dronesOn: wreckID },
+    );
   }
   const active = new Set(snapshot.ship?.activeModuleIDs ?? []);
   const nextSalvager = salvagers.find((id) => !active.has(id));
