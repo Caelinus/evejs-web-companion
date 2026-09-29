@@ -17762,12 +17762,16 @@ async function readDronesInSpace(held) {
   const outcome = await gateway.readSpaceSnapshot(held.bridgeSessionID, {
     userid: held.accountID,
   });
-  const space = outcome && outcome.space ? outcome.space : null;
+  return { drones: projectDronesInSpace(held, outcome && outcome.space), notifications: outcome ? outcome.notifications : [] };
+}
+
+/** Project this pilot's visible drones from a caller-owned scene read. */
+function projectDronesInSpace(held, space) {
   const entities = space && Array.isArray(space.entities) ? space.entities : null;
   if (entities === null) {
     // null, not [] — "we could not look" is not "you have no drones in space",
     // and a page that confuses the two invites a player to launch a second set.
-    return { drones: null, notifications: outcome ? outcome.notifications : [] };
+    return null;
   }
   const shipID = Number(held.activeShipID) || 0;
   const characterID = Number(held.characterID) || 0;
@@ -17805,7 +17809,7 @@ async function readDronesInSpace(held) {
       armorRatio: typeof row.armorRatio === "number" ? row.armorRatio : null,
       hullRatio: typeof row.hullRatio === "number" ? row.hullRatio : null,
     }));
-  return { drones, notifications: outcome ? outcome.notifications : [] };
+  return drones;
 }
 
 // The whole Drones panel: what is in the bay, what is in space, and the two
@@ -17819,7 +17823,7 @@ async function readDronesInSpace(held) {
 //
 // The three reads are INDEPENDENT (allSettled): a bay that cannot be read must
 // not blank the drones already flying, and vice versa.
-app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
+app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
     return;
@@ -17833,6 +17837,26 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
     }
     const noShip = () =>
       Promise.reject(Object.assign(new Error("No active ship."), { code: "NO_ACTIVE_SHIP" }));
+    const observation = req.path === "/api/bridge/script/observation";
+    const scope = observation ? {
+      bridgeSessionID: held.bridgeSessionID,
+      accountID: held.accountID,
+      characterID: held.characterID,
+      activeShipID: held.activeShipID,
+      solarSystemID: held.solarSystemID,
+      transitionEpoch: held.transitionEpoch,
+    } : null;
+    const readObservation = async () => {
+      const outcome = await gateway.readSpaceSnapshot(scope.bridgeSessionID, { userid: scope.accountID });
+      if (!outcome || !outcome.space || typeof outcome.space !== "object" || Array.isArray(outcome.space)) {
+        throw Object.assign(new Error("Space snapshot is unreadable."), { code: "SPACE_SNAPSHOT_UNREADABLE" });
+      }
+      return {
+        space: outcome.space,
+        drones: projectDronesInSpace(scope, outcome.space),
+        notifications: outcome.notifications ?? [],
+      };
+    };
     const [bay, shipInfo, inSpace] = await Promise.allSettled([
       boundCall(
         held,
@@ -17843,11 +17867,23 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
         null,
       ),
       heldTopLevelCall(held, req.webSessionID, "dogmaIM", "ShipGetInfo", [], null),
-      shipID ? readDronesInSpace(held) : noShip(),
+      shipID ? (observation ? readObservation() : readDronesInSpace(held)) : noShip(),
     ]);
     for (const settled of [bay, shipInfo, inSpace]) {
       if (settled.status === "rejected" && settled.reason && settled.reason.code === "SESSION_NOT_FOUND") {
         next(settled.reason);
+        return;
+      }
+    }
+    if (observation) {
+      if (inSpace.status === "rejected") throw inSpace.reason;
+      const space = inSpace.value.space;
+      if (bridgeSessions.get(req.webSessionID) !== held ||
+          Object.keys(scope).some((key) => held[key] !== scope[key]) ||
+          (space.ship?.itemID != null && Number(space.ship.itemID) !== Number(shipID)) ||
+          (space.solarSystemID != null && Number(space.solarSystemID) !== Number(scope.solarSystemID))) {
+        res.status(409).json({ ok: false, error: "OBSERVATION_SCOPE_CHANGED",
+          message: "Pilot, ship or scene changed during the observation. Read again." });
         return;
       }
     }
@@ -17868,6 +17904,10 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       activeShipID: shipID,
+      ...(observation ? {
+        space: withOreStaticFields(inSpace.value.space),
+        notifications: inSpace.value.notifications,
+      } : {}),
       // null (not []) on a failed read: "we could not look in the bay" is not
       // "the bay is empty", and the panel says which.
       bay: bayRows,

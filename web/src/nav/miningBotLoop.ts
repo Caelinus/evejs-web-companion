@@ -74,6 +74,25 @@ export const MINING_BOT_CADENCE_MS = 2000;
  */
 export const BELT_ARRIVAL_RADIUS_M = 20_000;
 
+/**
+ * The minimum measured belt SURFACE distance at which EveJS accepts a warp.
+ * Its belt stop is 2,500 + 2 × shipRadius before the belt centre; measureSpace
+ * has already subtracted shipRadius and beltRadius from centre distance.
+ */
+export function beltWarpFloorMeters(shipRadius: number, beltRadius: number): number {
+  const ship = Number.isFinite(shipRadius) ? Math.max(0, shipRadius) : 0;
+  const belt = Number.isFinite(beltRadius) ? Math.max(0, beltRadius) : 0;
+  return Math.max(0, 150_000 + 2_500 + ship - belt);
+}
+
+/** Preserve 20 km arrival; close a non-warpable same-belt gap under sublight. */
+export function beltTravelStep(belt: SpaceEntity, measurement: SpaceMeasurement | null): "arrive" | "approach" | "warp" {
+  const distance = measurement?.distances.get(belt.itemID);
+  if (distance === undefined || measurement === null) return "warp";
+  if (distance <= BELT_ARRIVAL_RADIUS_M) return "arrive";
+  return distance < beltWarpFloorMeters(measurement.shipRadius, belt.radius) ? "approach" : "warp";
+}
+
 /** Settle windows for asynchronous movement/writes and recoverable refusals. */
 const SETTLE_DOCK_REFUSAL = 2;
 const SETTLE_WARP = 2;

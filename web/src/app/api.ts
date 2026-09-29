@@ -3877,6 +3877,20 @@ function readDroneAction(data: Record<string, JsonValue>): DroneActionResult {
 
 export async function getDrones(options: ApiOptions = {}): Promise<DronesResult> {
   const data = await getJson("/api/bridge/drones", options);
+  return readDronesResult(data);
+}
+
+/** One fresh scene read, also projected as this observation's in-space drones. */
+export async function getScriptObservation(options: ApiOptions = {}): Promise<SpaceSnapshotResult & DronesResult> {
+  const data = await getJson("/api/bridge/script/observation", options);
+  return {
+    ...readDronesResult(data),
+    space: data.space ?? null,
+    notifications: Array.isArray(data.notifications) ? data.notifications : [],
+  };
+}
+
+function readDronesResult(data: Record<string, JsonValue>): DronesResult {
   const rawErrors =
     typeof data.errors === "object" && data.errors !== null && !Array.isArray(data.errors)
       ? (data.errors as Record<string, JsonValue>)

@@ -12,6 +12,7 @@ import type { MacroStep } from "../bots/botScript.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
+import { beltWarpFloorMeters } from "./miningBotLoop.ts";
 import {
   emptyLedger,
   encodeLedger,
@@ -167,6 +168,36 @@ test("travel-to-belt: already on the belt -> done, no mining involved", () => {
   const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const t = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([belt]) }), NM, {});
   assert.equal(t.outcome.kind, "done");
+});
+
+test("same-belt short warp uses belt surface geometry, not only the 20 km arrival radius", () => {
+  const shipRadius = 100;
+  const beltRadius = 1_000;
+  const floor = beltWarpFloorMeters(shipRadius, beltRadius);
+  assert.equal(floor, 151_600);
+  const atSurface = (surface: number) => entity({ itemID: 40001, name: "Asteroid Belt 1",
+    radius: beltRadius, position: { x: surface + shipRadius + beltRadius, y: 0, z: 0 } });
+  const local = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([atSurface(floor - 1)]) }), NM, {});
+  assert.equal(local.action.kind, "approach", "a warp EveJS refuses is closed under sublight");
+  const arrived = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([atSurface(20_000)]) }), NM, {});
+  assert.equal(arrived.outcome.kind, "done", "normal 20 km arrival still decides completion");
+  const warpable = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([atSurface(floor)]) }), NM, {});
+  assert.equal(warpable.action.kind, "warp", "exact warp floor remains warpable");
+});
+
+test("empty pinned and nearest belts use the same short-warp reachability", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", radius: 1_000,
+    position: { x: 100_000, y: 0, z: 0 } });
+  const pinned: MacroStep = { ...mineStep, args: { belt: { kind: "belt", belt: {
+    mode: "chosen", ref: { entity: "belt", id: belt.itemID, name: belt.name!, systemName: null },
+  } } } };
+  const pinnedTick = mine(pinned, obs({ snapshot: snapshot([belt]) }), NM, {});
+  assert.equal(pinnedTick.action.kind, "approach", "pinned empty belt closes locally before deciding depletion");
+  const nearestTick = mine(mineStep, obs({ snapshot: snapshot([belt]) }), NM, {});
+  assert.equal(nearestTick.action.kind, "approach", "nearest rotation must not mark a 100 km belt dry");
+  const arrivedBelt = { ...belt, position: { x: 5_000, y: 0, z: 0 } };
+  assert.equal(mine(pinned, obs({ snapshot: snapshot([arrivedBelt]) }), NM, {}).outcome.kind, "blocked");
+  assert.equal(mine(mineStep, obs({ snapshot: snapshot([arrivedBelt]) }), NM, {}).action.kind, "rememberBeltDry");
 });
 
 test("travel-to-belt: a pinned belt not on this grid -> blocked, never a silent fallback to nearest", () => {
@@ -3438,6 +3469,19 @@ const ORE_ANOM_STEP = { id: "w", kind: "macro", macro: "warp-to-ore-anomaly", ar
 
 /** The scanner row for an ore site at a point in the system, in metres. */
 const rocksAt = (label: string, x: number) => ({ label, kind: "ore" as const, position: { x, y: 0, z: 0 } });
+
+test("the belt short-warp rule does not turn a nearby scanner ore site into an arrival", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", radius: 1_000,
+    position: { x: 100_000, y: 0, z: 0 } });
+  assert.equal(travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([belt]) }), NM, {}).action.kind, "approach");
+  const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
+  const nearbySite = rocksAt("ABC-123", 100_000);
+  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [nearbySite], completedWarps: 3 }), {}, {});
+  assert.equal(issued.action.kind, "warpScan", "site point distance alone never implies arrival");
+  const refused = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [nearbySite], completedWarps: 3,
+    refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]), hostileOnGrid: false }), issued.nextMem, {});
+  assert.equal(refused.outcome.kind, "done", "only the targeted scanner refusal proves already-at-site");
+});
 
 test("warp-to-ore-anomaly: a refusal with the ship INSIDE the site it aimed at is an arrival", () => {
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;

@@ -158,7 +158,7 @@ test("a custom bot's loot-containers step dispatches openContainer + transferIte
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -228,7 +228,7 @@ test("a custom bot's loot-containers step splits ore-category loot into the ore 
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -319,7 +319,7 @@ test("a hull with NO ore hold gets its ore in cargo — the bay is never address
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -426,7 +426,7 @@ test("a can holding MORE than the hold can take is drained, not refused", async 
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -498,7 +498,7 @@ test("a hold with no room at all provokes no transfer whatsoever", async () => {
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -573,7 +573,7 @@ test("a can that fits nowhere is SAID so, rather than retried in silence", async
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -651,7 +651,7 @@ test("a wreck holding nothing but an ASSEMBLED module is looted, not refused as 
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -727,7 +727,7 @@ test("a custom bot's loot-wrecks step dispatches openContainer + transferItems f
 
   const { fetch, requests } = makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({
@@ -798,7 +798,7 @@ function manualLootFetch(options: {
 }) {
   return makeFakeFetch((path, _method, body) => {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-    if (path === "/api/bridge/space/snapshot") {
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) {
       return {
         status: 200,
         body: spaceBodyWith({

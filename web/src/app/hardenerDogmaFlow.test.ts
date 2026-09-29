@@ -323,7 +323,7 @@ function makeFakeFetch(modules: readonly TestModule[]): { fetch: typeof fetch; r
 
   function respond(path: string, body: Record<string, unknown>): { status: number; body: unknown } {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody() };
-    if (path === "/api/bridge/space/snapshot") return { status: 200, body: spaceBody(running) };
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) return { status: 200, body: spaceBody(running) };
     if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody(modules) };
     if (path === "/api/bridge/bound-dogma") return { status: 200, body: boundDogmaBody(modules) };
     if (path === "/api/names") return { status: 200, body: namesBody(body, modules) };
