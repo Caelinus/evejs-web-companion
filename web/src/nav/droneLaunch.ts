@@ -197,6 +197,45 @@ export function launchRoleDrones(
   };
 }
 
+/**
+ * The size of every bay stack, by its itemID, from one read of the bay.
+ *
+ * A quantity that is not a positive number counts as 1: a stack exists because
+ * something is in it, and 0 would ask the server to launch nothing.
+ */
+export function droneStackSizes(
+  bay: readonly { readonly itemID: number; readonly quantity: number }[],
+): ReadonlyMap<number, number> {
+  return new Map(
+    bay.map((stack) => [stack.itemID, Number.isFinite(stack.quantity) ? Math.max(1, stack.quantity) : 1]),
+  );
+}
+
+/**
+ * The `ship.LaunchDrones` request for these bay stacks: EVERY drone in each.
+ *
+ * ⚠ THE LADDERS DEAL IN STACK IDS AND KNOW NOTHING OF QUANTITY, deliberately:
+ * they decide WHICH stacks fly. How many are in one is a fact about the bay, and
+ * without it the request fell back to one per stack -- five repackaged drones
+ * (one stack) put out one, and the rung, seeing its role out, never asked again.
+ *
+ * ⚠ THE SHIP'S AND THE PILOT'S LIMITS ARE THE SERVER'S JOB, NOT OURS. The whole
+ * stack is exactly what the retail client asks for (`eveMisc.LaunchFromShip`
+ * sends each stack's full quantity), and the server launches one at a time until
+ * `maxActiveDrones` (the pilot's drone skills) or the hull's bandwidth is spent,
+ * then stops with its own reason. Clamping here would be a second copy of those
+ * rules that can only ever disagree with the first.
+ *
+ * A stack whose size was never read launches 1, which is what the request meant
+ * before this existed.
+ */
+export function wholeStackLaunch(
+  itemIDs: readonly number[],
+  stackSizes: ReadonlyMap<number, number>,
+): { readonly itemID: number; readonly quantity: number }[] {
+  return itemIDs.map((itemID) => ({ itemID, quantity: stackSizes.get(itemID) ?? 1 }));
+}
+
 /** True once the role's launch has been tried its full budget and still nothing is out. */
 export function launchStalled(mem: MacroMemory): boolean {
   return (num(mem, "launchTries") ?? 0) >= LAUNCH_MAX_TRIES;

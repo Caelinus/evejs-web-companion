@@ -238,6 +238,7 @@ import {
   type RatThreat,
 } from "../nav/ratThreat.ts";
 import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
+import { droneStackSizes, wholeStackLaunch } from "../nav/droneLaunch.ts";
 import {
   DRONE_RANGE_BONUS_ATTRIBUTE_ID,
   DRONE_RANGE_SKILL_TYPE_IDS,
@@ -5909,7 +5910,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * `launchDronesForSession` stops at `maxActiveDrones` by itself, so asking for
    * the whole stack is safe: it launches what it can and ignores the rest.
    */
-  let companionDroneStackSizes = new Map<number, number>();
+  let companionDroneStackSizes: ReadonlyMap<number, number> = new Map();
 
   /**
    * The reload rung's three facts, and the clock that rations them.
@@ -6287,9 +6288,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const companionBay = droneRaw === null ? null : decodeDroneBay(droneRaw.bay);
         const droneBayItemIDs = companionBay?.map((stack) => stack.itemID) ?? null;
         if (companionBay !== null) {
-          companionDroneStackSizes = new Map(
-            companionBay.map((stack) => [stack.itemID, Math.max(1, stack.quantity)]),
-          );
+          companionDroneStackSizes = droneStackSizes(companionBay);
         }
         // ⚠ SPLIT BY ROLE, AND THIS IS THE FIX FOR THE ONE PLACE IN THIS APP
         // THAT MIXED DRONE TYPES. Rung 6 used to launch `droneBayItemIDs` whole,
@@ -6617,12 +6616,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // does not consult even that -- it watches the grid on the next tick,
           // which is the only authority either way.
           case "launchDrones":
-            // ⚠ THE WHOLE STACK, NOT ONE FROM IT. See companionDroneStackSizes.
+            // ⚠ THE WHOLE STACK, NOT ONE FROM IT. See wholeStackLaunch.
             await api.launchDrones(
-              action.droneItemIDs.map((itemID) => ({
-                itemID,
-                quantity: companionDroneStackSizes.get(itemID) ?? 1,
-              })),
+              wholeStackLaunch(action.droneItemIDs, companionDroneStackSizes),
               callOptions,
             );
             return;
@@ -6823,6 +6819,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   function makeMiningBotDeps(): MiningBotDeps {
+    // The bay's stack sizes from its last read, for `launchDrones` below: the
+    // loop hands over stack ids only. See wholeStackLaunch.
+    let droneStackSizesSeen: ReadonlyMap<number, number> = new Map();
     return {
       getStatus: async () => {
         const step = await api.getFlightStatus(callOptions);
@@ -6866,7 +6865,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       getDroneBayItemIDs: async () => {
         const result = await api.getDrones(callOptions);
         const bay = decodeDroneBay(result.bay);
-        return bay === null ? null : bay.map((stack) => stack.itemID);
+        if (bay === null) {
+          return null;
+        }
+        droneStackSizesSeen = droneStackSizes(bay);
+        return bay.map((stack) => stack.itemID);
       },
       undock: async () => {
         await api.undock(callOptions);
@@ -6892,10 +6895,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         await api.activateModule(moduleID, { targetID, repeat: -1 }, callOptions);
       },
       launchDrones: async (itemIDs) => {
-        await api.launchDrones(
-          itemIDs.map((itemID) => ({ itemID, quantity: 1 })),
-          callOptions,
-        );
+        await api.launchDrones(wholeStackLaunch(itemIDs, droneStackSizesSeen), callOptions);
       },
       unloadHolds: async (itemIDs) => {
         await api.unloadMiningHolds(itemIDs, callOptions);
@@ -9116,6 +9116,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // level is deliberately NOT cached or consulted: the server rules on room,
     // and a refused bay spills into cargo.
     let bayCache: { readonly shipID: number; readonly bays: readonly ShipBay[] } | null = null;
+    // The drone bay's stack sizes from the last observation, for `launchDrones`
+    // in `issue`: the blocks hand over stack ids only. See wholeStackLaunch.
+    let droneStackSizesSeen: ReadonlyMap<number, number> = new Map();
     async function activeShipBays(): Promise<readonly ShipBay[]> {
       const shipID = capabilityCache.peek().shipID;
       if (shipID === null) {
@@ -9184,6 +9187,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         store.apply({ type: "mining/holds", holds });
         const bay = decodeDroneBay(dronesResult.bay);
         const droneBayItemIDs = bay === null ? null : bay.map((stack) => stack.itemID);
+        if (bay !== null) {
+          droneStackSizesSeen = droneStackSizes(bay);
+        }
 
         const ship = snapshot?.ship ?? null;
         const droneRoles = await classifyDroneRoles(bay, snapshot, ship?.itemID ?? null);
@@ -9984,7 +9990,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "launchDrones":
             if (action.droneItemIDs.length > 0) {
               await api.launchDrones(
-                action.droneItemIDs.map((itemID) => ({ itemID, quantity: 1 })),
+                wholeStackLaunch(action.droneItemIDs, droneStackSizesSeen),
                 callOptions,
               );
             }
