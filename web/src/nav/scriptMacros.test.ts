@@ -966,14 +966,22 @@ test("travel-to-system: an unpicked system blocks instead of flying somewhere ar
   assert.equal(flyToSystem(unbound, obs({ snapshot: snapshot([]) }), {}, {}).outcome.kind, "blocked");
 });
 
-test("salvage: wrecks + drones out -> set them salvaging (auto-pick); grid clean -> recall, then done", () => {
+test("salvage: wrecks + drones out -> lock the wreck, send the drones at IT; grid clean -> recall, then done", () => {
   const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
   const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
   const wreck = entity({ itemID: 70001, kind: "wreck", name: "Wreck", position: { x: 3000, y: 0, z: 0 } });
   const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const world = (locked: number[]) =>
+    obs({ snapshot: snapshot([wreck, drone]), dronesOut: true, salvageDroneIDs: [111], lockedTargetIDs: locked });
 
-  const sweep = salvage(s, obs({ snapshot: snapshot([wreck, drone]), dronesOut: true, salvageDroneIDs: [111] }), {}, {});
-  assert.ok(sweep.action.kind === "salvageDrones" && sweep.action.targetID === 0 && sweep.action.droneIDs.includes(111));
+  // ⚠ NEVER targetID 0: the server's auto-pick only takes the pilot's or a
+  // current fleet mate's wrecks, and left the drones idle beside everyone else's.
+  const lock = salvage(s, world([]), {}, {});
+  assert.ok(lock.action.kind === "lock" && lock.action.targetID === 70001);
+  const send = salvage(s, world([70001]), lock.nextMem, {});
+  assert.ok(send.action.kind === "salvageDrones" && send.action.targetID === 70001 && send.action.droneIDs.includes(111));
+  const hold = salvage(s, world([70001]), send.nextMem, {});
+  assert.equal(hold.action.kind, "wait", "sent once: a repeated order restarts the salvage cycle");
 
   const recall = salvage(s, obs({ snapshot: snapshot([drone]), dronesOut: true, salvageDroneIDs: [111] }), {}, {});
   assert.ok(recall.action.kind === "recallDrones");
@@ -988,13 +996,34 @@ test("salvage: a mixed flight out -> only the SALVAGE drones get the order; the 
   const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
   const hob = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
   const salvager = entity({ itemID: 113, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
-  const t = salvage(s, obs({ snapshot: snapshot([wreck, hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113] }), {}, {});
+  const t = salvage(s, obs({ snapshot: snapshot([wreck, hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113], lockedTargetIDs: [70001] }), { wreckID: 70001, lockIssued: true }, {});
   assert.ok(t.action.kind === "salvageDrones");
   assert.deepEqual(t.action.droneIDs, [113]);
   // Grid swept: EVERY drone comes home, whatever it is.
   const recall = salvage(s, obs({ snapshot: snapshot([hob, salvager]), dronesOut: true, combatDroneIDs: [111], salvageDroneIDs: [113] }), {}, {});
   assert.ok(recall.action.kind === "recallDrones");
   assert.deepEqual([...recall.action.droneIDs].sort(), [111, 113]);
+});
+
+test("salvage: drones only -> close to lock range when outside it; a wreck that will not lock is passed, then the block finishes", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 50000, y: 0, z: 0 } });
+  const drone = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+  const world = (range: number | null) =>
+    obs({ snapshot: snapshot([wreck, drone]), dronesOut: true, salvageDroneIDs: [111], maxTargetRangeM: range });
+
+  const close = salvage(s, world(30000), {}, {});
+  assert.ok(close.action.kind === "approach" && close.action.targetID === 70001);
+
+  // Lock range unreadable: no approach, the bounded lock wait is the backstop.
+  let mem: MacroMemory = {};
+  let last = salvage(s, world(null), mem, {});
+  for (let i = 0; i < 20 && last.action.kind !== "recallDrones"; i += 1) {
+    mem = last.nextMem;
+    last = salvage(s, world(null), mem, {});
+  }
+  assert.ok(last.action.kind === "recallDrones", "the only wreck would not lock, so the drones come home");
 });
 
 test("salvage: combat drones out from the fight, salvage drones in the bay -> call the combat drones in, then launch ONLY the salvage drones", () => {
