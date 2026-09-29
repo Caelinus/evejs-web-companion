@@ -1412,6 +1412,13 @@
   .pi-manager section::before {
     content: none;
   }
+  /* ⚠ THE PANEL IS ITS OWN SIZE CONTAINER, or the `@container` rules at the
+     bottom never fire: nothing between here and the page is one, so a query
+     finds no container and the rail stayed a rail in a 450px window. Safe to
+     contain: a panel's width comes from its window, never its contents. */
+  .pi-manager {
+    container-type: inline-size;
+  }
 
   .pi-summary {
     display: grid;
