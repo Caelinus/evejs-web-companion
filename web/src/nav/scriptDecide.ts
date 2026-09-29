@@ -168,7 +168,7 @@ export type ScriptAction =
   | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number;
       readonly from: import("../store/types.ts").InventoryPlace;
       readonly to: import("../store/types.ts").InventoryPlace;
-      readonly stationID: number; readonly corporationID: number; readonly division: number;
+      readonly stationID: number; readonly locationKind?: "station" | "structure"; readonly corporationID: number; readonly division: number;
       readonly typeID: number; readonly sourceQuantity: number }
   /** Run these hangar stacks through the station refinery (verified server-side). */
   | { readonly kind: "reprocessOre"; readonly itemIDs: readonly number[] }
@@ -1772,6 +1772,10 @@ function continueRecovering(
   travelHome: HomeTravelDecider,
 ): ScriptTickResult {
   const latched = mem.latched;
+  if (script.home.entity === "structure" && latched?.recover !== undefined) {
+    return paused("Repair watches require a verified NPC station repair path.",
+      { ...mem, latched: null }, latched.interruptID);
+  }
   if (latched === null || latched.recover === undefined) {
     // Not a repair trip at all — the ordinary "fly home and stop" latch.
     return continueHeadingHome(obs, mem, travelHome);

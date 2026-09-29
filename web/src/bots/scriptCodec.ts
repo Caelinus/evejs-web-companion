@@ -113,10 +113,11 @@ const RETIRED_WEB_COMPANION_MACROS = new Set(["attack-player", "hunt-player", "s
 const RETIRED_WEB_COMPANION_CHAT_CONDITIONS = new Set(["players-in-system-above"]);
 // Derived from the format's own list, so a new response can never be forgotten here.
 const KNOWN_RESPONSES = new Set<InterruptResponse>(INTERRUPT_RESPONSES);
-const WORLD_ENTITIES = new Set<WorldEntity>(["station", "belt", "agent", "system"]);
+const WORLD_ENTITIES = new Set<WorldEntity>(["station", "structure", "belt", "agent", "system"]);
 const DOC_KEYS = new Set(["format", "version", "name", "notes", "home", "interrupts", "program"]);
 
 const MAX_ID_LEN = 40;
+const STRUCTURE_ID_FLOOR = 1_000_000_000_000;
 export const MAX_WORLD_NAME_LEN = 100;
 const MAX_ECHO_LEN = 24;
 
@@ -289,7 +290,7 @@ function readDocument(raw: unknown, ctx: Ctx): BotScript {
   const home =
     obj["home"] === undefined
       ? { entity: "station" as const, id: null, name: null, systemName: null, starting: true }
-      : readWorldRef(obj["home"], "station", ctx, SAY.noHome);
+      : readWorldRef(obj["home"], "station", ctx, SAY.noHome, ["station", "structure"]);
   const interrupts = readInterrupts(obj["interrupts"], ctx);
   const program = readProgram(obj["program"], ctx);
 
@@ -532,12 +533,12 @@ function readArgs(
       }
       continue;
     }
-    out[argSpec.key] = readArg(value, argSpec.kind, argSpec.key, ctx);
+    out[argSpec.key] = readArg(value, argSpec.kind, argSpec.key, ctx, argSpec.dockable === true);
   }
   return out;
 }
 
-function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): Arg {
+function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx, dockable = false): Arg {
   const obj = asObject(raw, SAY.badArg(label));
   if (obj["kind"] !== expected) {
     refuse(SAY.badArg(label));
@@ -546,7 +547,8 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
     return { kind: "belt", belt: readBelt(obj["belt"], label, ctx) };
   }
   if (expected === "station") {
-    return { kind: "station", ref: readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label)) };
+    return { kind: "station", ref: readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label),
+      dockable ? ["station", "structure"] : null) };
   }
   if (expected === "agent") {
     return { kind: "agent", ref: readWorldRef(obj["ref"], "agent", ctx, SAY.badArg(label)) };
@@ -695,7 +697,7 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
   if (expected === "destination") {
     // A station OR a system — and which one it is decides how the autopilot flies
     // it, so the entity is validated against exactly those two (never "belt").
-    const ref = readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label), ["station", "system"]);
+    const ref = readWorldRef(obj["ref"], "station", ctx, SAY.badArg(label), ["station", "structure", "system"]);
     return { kind: "destination", ref };
   }
   if (expected === "system") {
@@ -1092,11 +1094,13 @@ function readWorldRef(
   // With a widened set, the ref keeps its OWN entity (a system stays a system);
   // the branches below that are station-only still test `expected`.
   if (alsoAllowed !== null && entity !== expected) {
+    if (obj["slot"] !== undefined || obj["starting"] !== undefined) refuse(refuseSentence);
     const otherID = obj["id"];
     const otherName = readNullableText(obj["name"], MAX_WORLD_NAME_LEN, ctx);
     const otherSystemName = readNullableText(obj["systemName"], MAX_WORLD_NAME_LEN, ctx);
     let resolvedID: number | null = null;
     if (typeof otherID === "number" && Number.isSafeInteger(otherID) && otherID > 0) {
+      if (entity === "structure" && otherID < STRUCTURE_ID_FLOOR) refuse(refuseSentence);
       resolvedID = otherID;
     } else if (otherID !== null && otherID !== undefined) {
       ctx.warn(WARN.forgotWorldId);
@@ -1109,6 +1113,7 @@ function readWorldRef(
   if (rawId === null || rawId === undefined) {
     id = null;
   } else if (typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0) {
+    if (entity === "station" && rawId >= STRUCTURE_ID_FLOOR) refuse(refuseSentence);
     id = rawId;
   } else {
     id = null;

@@ -1,0 +1,19 @@
+{
+  "evejsVersion": "0.12.9",
+  "scope": "Shared WC Upwell authority only; no Pilot Training or other runtime changes",
+  "applyInOrder": [
+    {
+      "file": "dockable-structure-search.patch",
+      "sha256": "151AC6A5910A92F34837E1E76183D9442BC4DDA4E5C87FB0F5728A2734C01856"
+    },
+    {
+      "file": "accessible-structure-services.patch",
+      "sha256": "6D85906B971AC35C5229BFAF65222C13B1BB309AF369CB7A073FF6A27EE02270"
+    }
+  ],
+  "cleanReferenceFiles": {
+    "server/src/services/structure/structureDirectoryService.js": "2B9F24731397DF582CA0240644754985FF84188690C9AEBA9A8A54D194EB2C73",
+    "server/src/_secondary/express/evejsWebGatewayRuntime.js": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
+    "server/contracts/evejs-web-bridge-contract.json": "2BD2DBF365DC37E7B58F79BD5B563D6D73556ED7182C27605769E9D4819AD17C"
+  }
+}

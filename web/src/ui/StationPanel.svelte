@@ -87,6 +87,7 @@
   import { panelErrorWords } from "../bridge/refusals.ts";
   import { resolvedName, nameKey, type NameKind, type NameRef } from "../store/names.ts";
   import { formatIsk } from "./isk.ts";
+  import { structureHasCapability } from "../nav/dockableLocation.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
   import type {
@@ -155,6 +156,8 @@
   const inventory = store.inventory;
   // svelte-ignore state_referenced_locally
   const station = store.station;
+  // svelte-ignore state_referenced_locally
+  const flight = store.flight;
   // svelte-ignore state_referenced_locally
   const names = store.names;
   // svelte-ignore state_referenced_locally
@@ -887,7 +890,7 @@
   const stationHint = $derived.by<string>(() => {
     const here = $station.station;
     if (!here) {
-      return "";
+      return $station.online?.structureID ? ($flight.structureName ?? "Player structure") : "";
     }
     return here.solarSystemName ? `${here.stationName} · ${here.solarSystemName}` : here.stationName;
   });
@@ -1240,6 +1243,59 @@
   </section>
 {/snippet}
 
+{#snippet repairControls()}
+  <p class="stn-controls">
+    <button type="button" class="stn-btn stn-btn-wide" disabled={busy} onclick={() => run(askRepairQuote)}>
+      Repair ship
+    </button>
+  </p>
+  {#if repairQuote !== null && repairQuote.length > 0}
+    <div class="table-wrap overflow-x-auto">
+      <table class="reflow">
+        <thead><tr><th>Damaged</th><th>Cost</th></tr></thead>
+        <tbody>
+          {#each repairQuote as quoted (quoted.itemID)}
+            <tr>
+              <td data-label="Damaged">{quotedName(quoted.itemID)}</td>
+              <td data-label="Cost">{quoted.cost === null ? "—" : formatIsk(quoted.cost.toFixed(2))}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <p class="stn-note">
+      {#if repairTotal === null}
+        The repair service did not quote a price; repairing still charges your wallet.
+      {:else}
+        The repair service will charge {formatIsk(repairTotal.toFixed(2))}.
+      {/if}
+    </p>
+    <p class="stn-controls">
+      <button type="button" class="stn-btn stn-btn-go" disabled={busy}
+        onclick={() => run(() => payRepairQuote(repairQuote ?? []))}>
+        Repair {repairQuote.length === 1 ? "it" : `all ${repairQuote.length}`} and pay
+      </button>
+      <button type="button" class="stn-btn" disabled={busy} onclick={() => { repairQuote = null; repairNote = ""; }}>
+        Cancel
+      </button>
+    </p>
+  {:else if repairNote}
+    <p class="stn-note">{repairNote}</p>
+  {/if}
+{/snippet}
+
+{#snippet sessionControls()}
+  <h3 class="stn-section">Session</h3>
+  <p class="stn-controls">
+    <button type="button" class="stn-btn stn-btn-ghost" disabled={busy} onclick={() => run(() => flow.releaseSession())}>
+      Go offline
+    </button>
+    <button type="button" class="stn-btn stn-btn-danger" disabled={busy} onclick={() => run(() => flow.logout())}>
+      Log out
+    </button>
+  </p>
+{/snippet}
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="stn-panel" bind:this={panelEl} onkeydown={onKeydown}>
   <!-- ============================================================= header -->
@@ -1250,7 +1306,7 @@
       undocked from is exactly the kind of stale label this rewrite exists to
       remove. In space it says what it is actually showing.
     -->
-    <span class="stn-head-title">{isDocked ? "Station" : "Ship"}</span>
+    <span class="stn-head-title">{isDocked ? $station.online?.structureID ? "Structure" : "Station" : "Ship"}</span>
     <span class="stn-head-hint">{stationHint}</span>
     <button
       type="button"
@@ -1503,7 +1559,7 @@
     </section>
 
     <!-- -------------------------------------------------- station services -->
-    {#if isDocked}
+    {#if isDocked && !$station.online?.structureID}
     <section class="stn-view stn-services" id="stn-view-services" role="tabpanel" aria-labelledby="stn-tab-services" hidden={view !== "services"}>
       <div class="stn-services-col">
         <h3 class="stn-section">Station</h3>
@@ -1520,9 +1576,6 @@
         <p class="stn-controls">
           <!-- The repair shop. This press only ASKS for the quote; the wallet is
                charged by the priced press that appears with the answer. -->
-          <button type="button" class="stn-btn stn-btn-wide" disabled={busy} onclick={() => run(askRepairQuote)}>
-            Repair ship
-          </button>
           <button type="button" class="stn-btn stn-btn-wide" disabled={busy} onclick={() => run(() => flow.boardCorvette())}>
             Board corvette
           </button>
@@ -1530,63 +1583,8 @@
             Leave ship → capsule
           </button>
         </p>
-        {#if repairQuote !== null && repairQuote.length > 0}
-          <div class="table-wrap overflow-x-auto">
-            <table class="reflow">
-              <thead>
-                <tr><th>Damaged</th><th>Cost</th></tr>
-              </thead>
-              <tbody>
-                {#each repairQuote as quoted (quoted.itemID)}
-                  <tr>
-                    <td data-label="Damaged">{quotedName(quoted.itemID)}</td>
-                    <td data-label="Cost">{quoted.cost === null ? "—" : formatIsk(quoted.cost.toFixed(2))}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-          <p class="stn-note">
-            {#if repairTotal === null}
-              The shop did not quote a price; repairing still charges your wallet.
-            {:else}
-              The station will charge {formatIsk(repairTotal.toFixed(2))}.
-            {/if}
-          </p>
-          <p class="stn-controls">
-            <button
-              type="button"
-              class="stn-btn stn-btn-go"
-              disabled={busy}
-              onclick={() => run(() => payRepairQuote(repairQuote ?? []))}
-            >
-              Repair {repairQuote.length === 1 ? "it" : `all ${repairQuote.length}`} and pay
-            </button>
-            <button
-              type="button"
-              class="stn-btn"
-              disabled={busy}
-              onclick={() => {
-                repairQuote = null;
-                repairNote = "";
-              }}
-            >
-              Cancel
-            </button>
-          </p>
-        {:else if repairNote}
-          <p class="stn-note">{repairNote}</p>
-        {/if}
-
-        <h3 class="stn-section">Session</h3>
-        <p class="stn-controls">
-          <button type="button" class="stn-btn stn-btn-ghost" disabled={busy} onclick={() => run(() => flow.releaseSession())}>
-            Go offline
-          </button>
-          <button type="button" class="stn-btn stn-btn-danger" disabled={busy} onclick={() => run(() => flow.logout())}>
-            Log out
-          </button>
-        </p>
+        {@render repairControls()}
+        {@render sessionControls()}
       </div>
 
       <div class="stn-services-col">
@@ -1629,6 +1627,27 @@
             </table>
           </div>
         {/if}
+      </div>
+    </section>
+    {:else if isDocked}
+    <section class="stn-view stn-services" id="stn-view-services" role="tabpanel" aria-labelledby="stn-tab-services" hidden={view !== "services"}>
+      <div class="stn-services-col">
+        <h3 class="stn-section">Structure services</h3>
+        {#if $station.structureServiceIDs === null}
+          <p class="stn-note">{$station.readError ?? "Checking current structure services…"}</p>
+        {:else}
+          <p class="stn-note">Personal hangar: {structureHasCapability($station.structureServiceIDs, "personalInventory") ? "available" : "unavailable"}</p>
+          <p class="stn-note">Corporation office: {structureHasCapability($station.structureServiceIDs, "corporationHangar") ? "available; office and division rights still required" : "unavailable"}</p>
+          <p class="stn-note">Manual fitting: {structureHasCapability($station.structureServiceIDs, "fitting") ? "available" : "unavailable"}</p>
+          <p class="stn-note">Reprocessing: {structureHasCapability($station.structureServiceIDs, "reprocessing") ? "online; action support is separate" : "unavailable"}</p>
+          <p class="stn-note">Market: {structureHasCapability($station.structureServiceIDs, "market") ? "online; action support is separate" : "unavailable"}</p>
+          <p class="stn-note">Industry: {structureHasCapability($station.structureServiceIDs, "industry") ? "online; facility authority is separate" : "unavailable"}</p>
+          <p class="stn-note">Repair: {structureHasCapability($station.structureServiceIDs, "repair") ? "available" : "unavailable"}</p>
+        {/if}
+        {#if structureHasCapability($station.structureServiceIDs, "repair")}
+          {@render repairControls()}
+        {/if}
+        {@render sessionControls()}
       </div>
     </section>
     {/if}

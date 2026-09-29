@@ -1073,7 +1073,7 @@ export interface AppFlow {
    */
   searchDestinations(
     query: string,
-    kind?: "system" | "station" | null,
+    kind?: "system" | "station" | "dockable" | null,
   ): Promise<DestinationMatch[]>;
   // --- R26: the mining bot -----------------------------------------------
   //
@@ -1853,6 +1853,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function refreshStationPanel(): Promise<void> {
+    const structureID = store.station.get().online?.structureID;
+    if (structureID) {
+      try {
+        const serviceIDs = await api.readAccessibleStructureServices(structureID, callOptions);
+        if (store.station.get().online?.structureID === structureID) {
+          store.apply({ type: "station/structure-services", serviceIDs });
+          store.apply({ type: "station/read-error", message: null });
+        }
+      } catch (error) {
+        if (isSessionLost(error)) {
+          stopLiveStream();
+          store.apply({ type: "character/offline" });
+          throw error;
+        }
+        if (store.station.get().online?.structureID === structureID) {
+          store.apply({ type: "station/structure-services", serviceIDs: null });
+          store.apply({ type: "station/read-error", message: `Structure services are unreadable: ${errorWords(error)}` });
+        }
+      }
+      return;
+    }
     // Retail issues these when the docked UI loads; the page issues them after
     // select succeeds (push forwarding is a later goal, G6). The three reads
     // are INDEPENDENT: a slow or failed map.GetStationInfo (the heavy
@@ -1927,6 +1948,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     store.apply({
       type: "inventory/loaded",
       stationID: panel.stationID,
+      structureID: panel.structureID,
       activeShipID: panel.activeShipID,
       hangar: decodeContainer(panel.hangar.list, panel.hangar.capacity, panel.hangar.error, panel.volumes),
       cargo: decodeContainer(panel.cargo.list, panel.cargo.capacity, panel.cargo.error, panel.volumes),
@@ -3952,19 +3974,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   async function relocateStationContext(
     stationID: number,
     solarSystemID: number | null,
+    kind: "station" | "structure" = "station",
   ): Promise<void> {
     let station: StationStatic | null = null;
-    try {
-      station = await api.loadStationStatic(stationID, callOptions);
-    } catch {
-      // Static identity is a display nicety; fall back to ID-only rather than
-      // fail the whole relocate if the read hiccups.
-      station = null;
+    if (kind === "station") {
+      try { station = await api.loadStationStatic(stationID, callOptions); }
+      catch { station = null; }
     }
-    store.apply({ type: "station/relocated", stationID, solarSystemID, station });
+    store.apply({ type: "station/relocated", stationID: kind === "station" ? stationID : null,
+      structureID: kind === "structure" ? stationID : null, solarSystemID, station });
 
     await refreshStationPanel();
-    if (store.agents.get().loaded) {
+    if (kind === "station" && store.agents.get().loaded) {
       await loadAgents();
     }
     if (store.inventory.get().loaded) {
@@ -3992,14 +4013,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (store.station.get().online === null) {
       return;
     }
-    const stationID = status.docked ? status.stationID : null;
+    const stationID = status.docked ? status.structureID ?? status.stationID : null;
     if (stationID === null || stationID === syncedStationID || relocating) {
       return;
     }
     syncedStationID = stationID;
     relocating = true;
     try {
-      await relocateStationContext(stationID, status.solarSystemID);
+      await relocateStationContext(stationID, status.solarSystemID, status.structureID === stationID ? "structure" : "station");
     } catch {
       // Session-loss already unwound to offline; nothing more to do here.
     } finally {
@@ -5586,26 +5607,37 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return planFailed(`Unknown destination ${destinationID}.`);
     }
 
+    let structure: Awaited<ReturnType<typeof api.resolveAccessibleStructure>> | null = null;
+    if (destination.kind === "structure") {
+      try {
+        structure = await api.resolveAccessibleStructure(destinationID, callOptions);
+      } catch (error) {
+        return planFailed(`Structure access could not be confirmed: ${errorWords(error)}`, error);
+      }
+    }
+    const targetSystemID = structure?.solarSystemID ?? destination.solarSystemID;
+
     // 4. Solve the route (fewest jumps).
-    const route = solveRoute(graph, originSystem, destination.solarSystemID);
+    const route = solveRoute(graph, originSystem, targetSystemID);
     if (!route.reachable) {
       return planFailed(
-        `No gate route from ${graph.systemName(originSystem) ?? originSystem} to ${destination.systemName ?? destination.solarSystemID}.`,
+        `No gate route from ${graph.systemName(originSystem) ?? originSystem} to ${structure?.solarSystemName ?? destination.systemName ?? targetSystemID}.`,
       );
     }
 
-    const destinationStationID = destination.kind === "station" ? destination.stationID : null;
-    const destinationName = destination.kind === "station" ? destination.stationName : destination.systemName;
+    const destinationStationID = structure?.id ?? (destination.kind === "station" ? destination.stationID : null);
+    const destinationName = structure?.name ?? (destination.kind === "station" ? destination.stationName : destination.systemName);
     const plan: RoutePlan = {
-      destinationSystemID: destination.solarSystemID,
+      destinationSystemID: targetSystemID,
       destinationStationID,
+      destinationKind: structure ? "structure" : destination.kind === "station" ? "station" : null,
       destinationName,
       hops: route.hops,
     };
 
     store.apply({
       type: "travel/planned",
-      destinationSystemID: destination.solarSystemID,
+      destinationSystemID: targetSystemID,
       destinationStationID,
       destinationName,
       route: route.hops.map((hop) => ({
@@ -5696,22 +5728,38 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return;
     }
 
-    // The station's NAME, for the readout (R7d: the panel must never show the
-    // id). Static reference data, best-effort — an unnamed station still docks.
+    // Resolve the dockable kind before constructing a zero-hop plan; a
+    // structure must be access-checked, never inferred from its numeric ID.
     let destinationName: string | null = null;
+    let destinationKind: "station" | "structure";
     try {
       const resolved = await api.resolveDestination(stationID, callOptions);
-      destinationName = resolved.kind === "station" ? resolved.stationName : resolved.systemName;
-    } catch {
-      destinationName = null;
+      if (resolved.kind !== "station" && resolved.kind !== "structure") throw new Error("Not a dockable location.");
+      destinationKind = resolved.kind;
+      if (resolved.kind === "structure") {
+        const accessible = await api.resolveAccessibleStructure(stationID, callOptions);
+        if (accessible.solarSystemID !== status.solarSystemID) throw new Error("Structure is not in this system.");
+        destinationName = accessible.name;
+      } else {
+        if (resolved.solarSystemID !== status.solarSystemID) throw new Error("Station is not in this system.");
+        destinationName = resolved.stationName;
+      }
+    } catch (error) {
+      store.apply({ type: "travel/plan-error", message: `Could not confirm docking destination: ${errorWords(error)}` });
+      return;
     }
     if (shouldAbort()) return;
+    if (status.docked && (destinationKind === "structure" ? status.structureID : status.stationID) === stationID) {
+      store.apply({ type: "travel/plan-error", message: "You are already docked here." });
+      return;
+    }
 
     // A plan with NO hops: same system, one station to reach. Everything else
     // about the loop is unchanged.
     const plan: RoutePlan = {
       destinationSystemID: status.solarSystemID,
       destinationStationID: stationID,
+      destinationKind,
       destinationName,
       hops: [],
     };
@@ -10028,6 +10076,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           walletBalance,
           startingStationID,
           homeStationID: resolveStationRef(home, startingStationID, hint.board),
+          homeDockableKind: home.entity === "structure" ? "structure" : "station",
           myCharacterID: store.station.get().online?.characterID ?? null,
           myCorporationID: store.station.get().online?.corporationID ?? null,
         };
@@ -10290,7 +10339,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             const result = await api.transferItems(
               [action.itemID], action.from, action.to, action.quantity, callOptions,
               { haulContract: {
-                stationID: action.stationID, corporationID: action.corporationID,
+                stationID: action.stationID, locationKind: action.locationKind ?? "station", corporationID: action.corporationID,
                 division: action.division, typeID: action.typeID, sourceQuantity: action.sourceQuantity,
               } },
             );
@@ -10364,11 +10413,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           }
           case "applyFitting": {
+            const fittingFlight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+            if (fittingFlight.structureID) {
+              throw new Error("Scripted fitting at a player structure is not supported by the current fitting contract.");
+            }
             // Re-read the library at issue time (never a stale module list), then
             // hand the server the {flag: type} plan; it pulls from this hangar.
             const library = decodeFittings(await api.loadSavedFittings(callOptions));
             const fitting = library.find((f) => f.fittingID === action.fittingID);
-            const stationID = store.flight.get().status?.stationID ?? null;
+            const stationID = fittingFlight.stationID;
             const shipID = store.inventory.get().activeShipID;
             if (fitting !== undefined && stationID !== null && shipID !== null) {
               const modulesByFlag: Record<number, number> = {};
@@ -10797,13 +10850,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // distance. A hard read failure throws so the caller can surface it.
   async function searchDestinations(
     query: string,
-    kind: "system" | "station" | null = null,
+    kind: "system" | "station" | "dockable" | null = null,
   ): Promise<DestinationMatch[]> {
     const trimmed = query.trim();
     if (trimmed.length < 2) {
       return [];
     }
-    const result = await api.findMapLocations(trimmed, kind, callOptions);
+    const result = await api.findMapLocations(trimmed, kind === "dockable" ? "station" : kind, callOptions);
+    const structures = kind === null || kind === "dockable"
+      ? await api.findAccessibleStructures(trimmed, callOptions) : [];
 
     // The origin is the live location if known (in space or docked), else the
     // docked character's system. Distances come from ONE BFS over the map graph.
@@ -10820,7 +10875,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       }
     }
 
-    return result.matches.map((match) => ({
+    return [...result.matches, ...structures].map((match) => ({
       ...match,
       jumps:
         distances !== null && match.solarSystemID !== null
@@ -11088,7 +11143,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // Anchor the docked-station sync to where select landed so the first
       // flight read at this station doesn't trigger a redundant relocate; a
       // later dock elsewhere on this session will.
-      syncedStationID = result.character.stationID;
+      syncedStationID = result.character.structureID ?? result.character.stationID;
       // R10: the session is live, so open the push channel before the docked
       // reads — anything the reads trigger is then already being observed.
       startLiveStream();

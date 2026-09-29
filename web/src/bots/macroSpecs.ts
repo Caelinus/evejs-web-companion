@@ -10,6 +10,8 @@ export interface MacroArgSpec {
   readonly key: string;
   readonly kind: Arg["kind"];
   readonly required: boolean;
+  /** Station-shaped argument which also accepts a dockable player structure. */
+  readonly dockable?: boolean;
 }
 
 export interface MacroSpec {
@@ -21,7 +23,7 @@ export interface MacroSpec {
 export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   undock: { args: [], untilRequired: false },
   "travel-to-station": {
-    args: [{ key: "station", kind: "station", required: true }],
+    args: [{ key: "station", kind: "station", required: true, dockable: true }],
     untilRequired: false,
   },
   // Same belt arg as mine-at-belt (a pinned one, or "nearest") — just the trip,
@@ -56,7 +58,7 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "deliver-ore": {
     args: [
-      { key: "station", kind: "station", required: true },
+      { key: "station", kind: "station", required: true, dockable: true },
       // Optional: absent = the pilot's own hangar, the shipped behaviour. Set,
       // the load is aimed at that corporation division — and still lands in the
       // pilot's own hangar if the office or the role is not there when the ship
@@ -131,9 +133,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "haul-all": {
     args: [
-      { key: "pickupStation", kind: "station", required: true },
+      { key: "pickupStation", kind: "station", dockable: true, required: true },
       { key: "pickupCorpDivision", kind: "corpDivision", required: true },
-      { key: "deliveryStation", kind: "station", required: true },
+      { key: "deliveryStation", kind: "station", dockable: true, required: true },
       { key: "deliveryCorpDivision", kind: "corpDivision", required: true },
       { key: "item", kind: "itemType", required: false },
       { key: "transportBay", kind: "place", required: false },
@@ -141,8 +143,8 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "route-hauler": {
     args: [
-      { key: "stationA", kind: "station", required: true },
-      { key: "stationB", kind: "station", required: true },
+      { key: "stationA", kind: "station", dockable: true, required: true },
+      { key: "stationB", kind: "station", dockable: true, required: true },
       { key: "pickupDivisionA", kind: "corpDivision", required: true },
       { key: "deliveryDivisionB", kind: "corpDivision", required: true },
       { key: "itemsAToB", kind: "itemList", required: false },

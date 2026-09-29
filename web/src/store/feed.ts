@@ -143,12 +143,14 @@ export type FeedEvent =
   // the previous station's panel reads so the flow's re-fetch repopulates them.
   | {
       readonly type: "station/relocated";
-      readonly stationID: number;
+      readonly stationID: number | null;
+      readonly structureID?: number | null;
       readonly solarSystemID: number | null;
       readonly station: StationStatic | null;
     }
   // Docked station-panel reads on the live session.
   | { readonly type: "station/bits"; readonly bits: StationServiceBits }
+  | { readonly type: "station/structure-services"; readonly serviceIDs: readonly number[] | null }
   | { readonly type: "station/guests"; readonly guests: readonly StationGuest[] }
   // map.GetStationInfo answered with its retail CachedMethodCallResult
   // envelope (the rowset itself rides the retail object cache).
@@ -164,6 +166,7 @@ export type FeedEvent =
   | {
       readonly type: "inventory/loaded";
       readonly stationID: number | null;
+      readonly structureID?: number | null;
       readonly activeShipID: number | null;
       readonly hangar: InventoryContainerState;
       readonly cargo: InventoryContainerState;

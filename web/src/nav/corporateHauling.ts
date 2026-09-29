@@ -6,9 +6,10 @@ import { planLootTransfers } from "../bridge/bayRouting.ts";
 import { pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import type { MacroDecider, MacroTick, ScriptAction } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
+import type { DockableKind } from "./dockableLocation.ts";
 
 type Place = Extract<InventoryPlace, { kind: "corp" | "cargo" | "shipBay" }>;
-interface Leg { source: number; destination: number; pickup: number; delivery: number; rules: readonly KeepRule[] }
+interface Leg { source: number; sourceKind: DockableKind; destination: number; destinationKind: DockableKind; pickup: number; delivery: number; rules: readonly KeepRule[] }
 interface Owned { itemID: number; typeID: number; quantity: number; bay: string | null }
 interface Pending {
   from: Place; to: Place; itemID: number; typeID: number; quantity: number;
@@ -20,7 +21,8 @@ interface State {
   pending?: Pending; blind?: number; fault?: string;
 }
 const fresh = (): State => ({ reverse: false, delivering: false, manifest: [] });
-const station = (s: MacroStep, key: string) => { const a = s.args[key]; return a?.kind === "station" ? a.ref.id : null; };
+const location = (s: MacroStep, key: string) => { const a = s.args[key]; return a?.kind === "station" &&
+  (a.ref.entity === "station" || a.ref.entity === "structure") ? { id: a.ref.id, kind: a.ref.entity } : null; };
 const division = (s: MacroStep, key: string) => { const a = s.args[key]; return a?.kind === "corpDivision" ? a.division : null; };
 const validID = (n: number | null): n is number => n !== null && Number.isSafeInteger(n) && n > 0;
 const validDivision = (n: number | null): n is number => validID(n) && n <= 7;
@@ -38,14 +40,14 @@ function rules(s: MacroStep, key: string): readonly KeepRule[] | null {
 }
 export function haulingLeg(step: MacroStep, reverse = false): Leg | null {
   const all = step.macro === "haul-all";
-  const source = station(step, all ? "pickupStation" : reverse ? "stationB" : "stationA");
-  const destination = station(step, all ? "deliveryStation" : reverse ? "stationA" : "stationB");
+  const source = location(step, all ? "pickupStation" : reverse ? "stationB" : "stationA");
+  const destination = location(step, all ? "deliveryStation" : reverse ? "stationA" : "stationB");
   const pickup = division(step, all ? "pickupCorpDivision" : reverse ? "pickupDivisionB" : "pickupDivisionA");
   const delivery = division(step, all ? "deliveryCorpDivision" : reverse ? "deliveryDivisionA" : "deliveryDivisionB");
   const filter = rules(step, all ? "item" : reverse ? "itemsBToA" : "itemsAToB");
-  if (!validID(source) || !validID(destination) || !validDivision(pickup) || !validDivision(delivery) ||
-      (source === destination && pickup === delivery) || filter === null) return null;
-  return { source, destination, pickup, delivery, rules: filter };
+  if (!source || !destination || !validID(source.id) || !validID(destination.id) || !validDivision(pickup) || !validDivision(delivery) ||
+      (source.id === destination.id && pickup === delivery) || filter === null) return null;
+  return { source: source.id, sourceKind: source.kind, destination: destination.id, destinationKind: destination.kind, pickup, delivery, rules: filter };
 }
 function rowsAt(o: ScriptObservation, p: Place): readonly InventoryItemRow[] | null {
   if (p.kind === "corp") return o.haulDivisions?.[p.division] ?? null;
@@ -72,7 +74,7 @@ export function verifyHaulMovement(p: Pending, source: readonly InventoryItemRow
   return added.reduce((n, r) => n + r.quantity, 0) === p.quantity ? added : null;
 }
 
-export function createCorporateHauler(ride: (o: ScriptObservation, stationID: number, phase: string) => MacroTick | null): MacroDecider {
+export function createCorporateHauler(ride: (o: ScriptObservation, stationID: number, phase: string, kind?: DockableKind) => MacroTick | null): MacroDecider {
   return (step, obs, mem) => {
     let state: State = (mem["haul"] as State | undefined) ?? fresh();
     const emit = (why: string, action: ScriptAction = { kind: "wait" }, outcome: MacroTick["outcome"] = { kind: "acting" }): MacroTick => ({
@@ -88,7 +90,8 @@ export function createCorporateHauler(ride: (o: ScriptObservation, stationID: nu
     const bayArg = step.args["transportBay"];
     if (bayArg && (bayArg.kind !== "place" || !["cargo", "ore-hold"].includes(bayArg.place))) return fail("Choose cargo, ore hold, or leave the hold choice unset for automatic routing.");
     const at = state.delivering ? leg.destination : leg.source;
-    const trip = ride(obs, at, "Following the hauling route");
+    const atKind = state.delivering ? leg.destinationKind : leg.sourceKind;
+    const trip = ride(obs, at, "Following the hauling route", atKind);
     if (trip) {
       if (state.pending) return fail("The ship changed station before its last transfer was verified. Check the route cargo before restarting.");
       return { ...trip, nextMem: { ...mem, haul: state } };
@@ -126,7 +129,7 @@ export function createCorporateHauler(ride: (o: ScriptObservation, stationID: nu
           !validID(obs.myCorporationID ?? null)) return fail("Transfer quantities, corporation, or contents are unreadable.");
       state = { ...state, pending: { from, to, itemID: row.itemID, typeID: row.typeID, quantity, source, destination, bay } };
       return emit("Moving the route's cargo; both inventories will be checked.", { kind: "haulTransfer", itemID: row.itemID, quantity, from, to,
-        stationID: at, corporationID: obs.myCorporationID as number, division: corp.division,
+        stationID: at, locationKind: atKind, corporationID: obs.myCorporationID as number, division: corp.division,
         typeID: row.typeID, sourceQuantity: row.quantity });
     };
     if (state.delivering) {

@@ -96,6 +96,9 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   ) {
     problems.push(blocking("home", "Pick where the bot docks when a watch tells it to."));
   }
+  if (script.home.entity === "structure" && script.interrupts.some((row) => row.respond === "dock-and-repair")) {
+    problems.push(blocking("home", "Repair watches require a verified NPC station repair path."));
+  }
   if (script.program.length === 0) {
     problems.push(blocking("program", "Add at least one step for the bot to do."));
   }

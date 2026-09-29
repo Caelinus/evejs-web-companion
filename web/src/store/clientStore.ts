@@ -128,6 +128,8 @@ export interface StationSlice {
   readonly online: OnlineCharacterState | null;
   readonly station: StationStatic | null;
   readonly bits: StationServiceBits | null;
+  /** Access-scoped, online structure services; null means unreadable. */
+  readonly structureServiceIDs: readonly number[] | null;
   readonly guests: readonly StationGuest[];
   /** null until map.GetStationInfo answered; then whether it was the cached envelope. */
   readonly stationInfoCached: boolean | null;
@@ -203,6 +205,7 @@ const INITIAL_STATION: StationSlice = Object.freeze({
   online: null,
   station: null,
   bits: null,
+  structureServiceIDs: null,
   guests: Object.freeze([]) as readonly StationGuest[],
   stationInfoCached: null,
   readError: null,
@@ -227,6 +230,7 @@ const EMPTY_CORP_HANGAR: CorpHangarState = Object.freeze({
 
 const INITIAL_INVENTORY: InventoryState = Object.freeze({
   stationID: null,
+  structureID: null,
   activeShipID: null,
   hangar: EMPTY_CONTAINER,
   cargo: EMPTY_CONTAINER,
@@ -1089,10 +1093,12 @@ export function createClientStore(): ClientStore {
           online: {
             ...current.online,
             stationID: event.stationID,
+            structureID: event.structureID ?? null,
             solarSystemID: event.solarSystemID,
           },
           station: event.station,
           bits: null,
+          structureServiceIDs: null,
           guests: [],
           stationInfoCached: null,
           readError: null,
@@ -1101,6 +1107,9 @@ export function createClientStore(): ClientStore {
       }
       case "station/bits":
         station.set({ ...station.get(), bits: event.bits });
+        break;
+      case "station/structure-services":
+        station.set({ ...station.get(), structureServiceIDs: event.serviceIDs });
         break;
       case "station/guests":
         station.set({ ...station.get(), guests: [...event.guests] });
@@ -1169,6 +1178,7 @@ export function createClientStore(): ClientStore {
         inventory.set({
           ...previous,
           stationID: event.stationID,
+          structureID: event.structureID ?? null,
           activeShipID: event.activeShipID,
           hangar: event.hangar,
           cargo: event.cargo,

@@ -690,7 +690,7 @@
         {flow}
         value={worldRefValue(step, arg.key, arg.kind)}
         current={currentStation}
-        scope={arg.widget === "destination-picker" ? "any" : arg.widget === "system-picker" ? "system" : "station"}
+          scope={arg.widget === "destination-picker" ? "any" : arg.widget === "system-picker" ? "system" : arg.dockable ? "dockable" : "station"}
         onPick={(ref) => setWorldRef(arg, ref)}
       />
     </div>

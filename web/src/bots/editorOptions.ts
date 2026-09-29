@@ -246,6 +246,7 @@ export interface ArgDescriptor {
   readonly key: string;
   readonly kind: Arg["kind"];
   readonly required: boolean;
+  readonly dockable?: boolean;
   readonly label: string;
   readonly widget: WidgetKind;
 }
@@ -255,6 +256,7 @@ function argDescriptor(arg: MacroArgSpec): ArgDescriptor {
     key: arg.key,
     kind: arg.kind,
     required: arg.required,
+    dockable: arg.dockable,
     label: argLabel(arg),
     widget: ARG_KIND_WIDGET[arg.kind],
   };

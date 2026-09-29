@@ -78,6 +78,10 @@ function fakeGateway() {
         },
       };
     },
+    async readFlightStatus() {
+      return { flight: { inSpace: false, docked: true, stationID: STATION_ID,
+        structureID: null, solarSystemID: 30000142, shipID: SHIP_ID }, notifications: [] };
+    },
     async callMethod(service, method, args, kwargs, sessionFields, bridgeSessionID) {
       calls.push({ service, method, args, kwargs, sessionFields, bridgeSessionID });
       return {

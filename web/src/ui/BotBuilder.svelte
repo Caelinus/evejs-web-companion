@@ -1139,7 +1139,7 @@
       <div class="controls">
         <label>
           Home station — where a watch docks
-          <StationPicker {flow} value={home} current={currentStation} onPick={(ref) => (home = ref)} />
+          <StationPicker {flow} value={home} current={currentStation} scope="dockable" onPick={(ref) => (home = ref)} />
         </label>
       </div>
       {@render problemNotes("home")}

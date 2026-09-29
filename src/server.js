@@ -861,6 +861,8 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     accountID: Number(account.accountID),
     corporationID: Number(outcome.session.corporationID) || null,
     stationID: Number(outcome.session.stationID) || null,
+    structureID: Number(outcome.session.structureID) || null,
+    dockedLocationID: Number(outcome.session.structureID) || Number(outcome.session.stationID) || null,
     solarSystemID: Number(outcome.session.solarSystemID) || null,
     activeShipID: Number(outcome.session.shipID) || null,
     boundHandles: new Map(),
@@ -1011,13 +1013,28 @@ function requireHeldBridgeSession(req, res) {
   return held;
 }
 
+function inventoryLocationID(held) {
+  return "dockedLocationID" in held ? held.dockedLocationID : held.stationID;
+}
+
+async function assertDockedInventoryAccess(held, webSessionID, serviceID = 1) {
+  const outcome = await readHeldFlight(held, webSessionID);
+  if (outcome.flight?.docked !== true || !inventoryLocationID(held)) {
+    throw Object.assign(new Error("Dock before using the hangar."),
+      { code: "NOT_DOCKED", statusCode: 409 });
+  }
+  if (held.structureID) await assertStructureService(held, webSessionID, held.structureID, serviceID);
+  return inventoryLocationID(held);
+}
+
 // Bind spec factories for the semantic targets the page addresses.
 function hangarBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `hangar:${held.stationID}`,
+    key: `hangar:${locationID}`,
     service: "invbroker",
     method: "GetInventory",
-    args: [held.stationID],
+    args: [locationID],
     kwargs: null,
   };
 }
@@ -1033,11 +1050,12 @@ function cargoBindSpec(held, shipID) {
 }
 
 function shipBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `ship:${held.stationID}`,
+    key: `ship:${locationID}`,
     service: "ship",
     method: "MachoBindObject",
-    args: [[held.stationID, SHIP_BIND_GROUP_STATION]],
+    args: [[locationID, SHIP_BIND_GROUP_STATION]],
     kwargs: null,
   };
 }
@@ -1186,6 +1204,27 @@ function planetBindSpec(planetID) {
 // (BOUND_HANDLE_NOT_FOUND) rebinds once; a lost persistent session drops the
 // whole held session (as /api/bridge/call).
 async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
+  if (bindSpec.service === "invbroker" &&
+      ["Add", "MultiAdd", "MultiMerge", "StackAll", "TrashItems", "SplitStack"].includes(method)) {
+    // A picked structure or earlier service read is not mutation authority.
+    // Recheck the live location and access before every inventory write.
+    const flight = await readHeldFlight(held, webSessionID);
+    if (bindSpec.expectedDockedLocationID &&
+        (flight.flight?.docked !== true || inventoryLocationID(held) !== bindSpec.expectedDockedLocationID ||
+         (isPlayerStructureID(bindSpec.expectedDockedLocationID) && held.structureID !== bindSpec.expectedDockedLocationID))) {
+      throw Object.assign(new Error("The pilot left the intended docked inventory location."),
+        { code: "INVENTORY_LOCATION_CHANGED", statusCode: 409 });
+    }
+    if (flight.flight?.docked === true && held.structureID) {
+      await assertStructureService(held, webSessionID, held.structureID,
+        bindSpec.key.startsWith("corpOffice:") ? 3 : 1);
+    }
+    if ((bindSpec.key.startsWith("hangar:") || bindSpec.key.startsWith("invManager:")) &&
+        !bindSpec.key.endsWith(`:${inventoryLocationID(held)}`)) {
+      throw Object.assign(new Error("Docked location changed before inventory transfer."),
+        { code: "INVENTORY_LOCATION_CHANGED", statusCode: 409 });
+    }
+  }
   const sessionFields = { userid: held.accountID };
   function ensureHandle(forceRebind) {
     if (!forceRebind && held.boundHandles.has(bindSpec.key)) {
@@ -1264,6 +1303,7 @@ app.get("/api/bridge/inventory", requireAuth, async (req, res, next) => {
     // binds target the CURRENT station + active ship after a new dock, not the
     // select-time ones.
     await readHeldFlight(held, req.webSessionID);
+    if (held.structureID) await assertStructureService(held, req.webSessionID, held.structureID, 1);
     const shipID = held.activeShipID;
     const hangarSpec = hangarBindSpec(held);
     const cargoSpec = shipID ? cargoBindSpec(held, shipID) : null;
@@ -1297,6 +1337,7 @@ app.get("/api/bridge/inventory", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       stationID: held.stationID,
+      structureID: held.structureID,
       activeShipID: shipID,
       hangar: {
         list: settledValue(hangarList),
@@ -2208,17 +2249,54 @@ app.post("/api/bridge/inventory/move", requireAuth, async (req, res, next) => {
   if (Number.isSafeInteger(qty) && qty > 0) {
     kwargs.qty = qty;
   }
-  const destSpec = direction === "toCargo" ? cargoBindSpec(held, shipID) : hangarBindSpec(held);
-  const sourceLocationID = direction === "toCargo" ? held.stationID : shipID;
   try {
+    const locationID = await assertDockedInventoryAccess(held, req.webSessionID);
+    const destSpec = direction === "toCargo" ? cargoBindSpec(held, shipID) : hangarBindSpec(held);
+    const sourceSpec = direction === "toCargo" ? hangarBindSpec(held) : cargoBindSpec(held, shipID);
+    const sourceFlag = direction === "toCargo" ? ITEM_FLAG_HANGAR : ITEM_FLAG_CARGO_HOLD;
+    const destinationFlag = direction === "toCargo" ? ITEM_FLAG_CARGO_HOLD : ITEM_FLAG_HANGAR;
+    let beforeSource, beforeDestination, expected, movedTypeID;
+    if (held.structureID) {
+      const [source, destination] = await Promise.all([
+        boundCall(held, req.webSessionID, sourceSpec, "List", [sourceFlag], null),
+        boundCall(held, req.webSessionID, destSpec, "List", [destinationFlag], null),
+      ]);
+      beforeSource = decodeInventoryRows(source.result);
+      beforeDestination = decodeInventoryRows(destination.result);
+      const row = beforeSource.find((item) => item.itemID === itemID);
+      expected = Number.isSafeInteger(qty) && qty > 0 ? qty : row?.quantity;
+      movedTypeID = row?.typeID;
+      if (!row || !Number.isSafeInteger(expected) || expected <= 0 || expected > row.quantity) {
+        res.status(409).json({ ok: false, error: "PERSONAL_SOURCE_CHANGED" }); return;
+      }
+    }
+    const sourceLocationID = direction === "toCargo" ? locationID : shipID;
     const outcome = await boundCall(
       held,
       req.webSessionID,
-      destSpec,
+      held.structureID ? { ...destSpec, expectedDockedLocationID: locationID } : destSpec,
       "Add",
       [itemID, sourceLocationID],
       kwargs,
     );
+    if (held.structureID) {
+      const [source, destination] = await Promise.all([
+        boundCall(held, req.webSessionID, sourceSpec, "List", [sourceFlag], null),
+        boundCall(held, req.webSessionID, destSpec, "List", [destinationFlag], null),
+      ]);
+      const afterSource = decodeInventoryRows(source.result);
+      const afterDestination = decodeInventoryRows(destination.result);
+      const count = (rows) => rows.filter((row) => row.typeID === movedTypeID).reduce((sum, row) => sum + row.quantity, 0);
+      const sourceRowBefore = beforeSource.find((row) => row.itemID === itemID);
+      const sourceRowAfter = afterSource.find((row) => row.itemID === itemID);
+      if (sourceRowBefore.quantity - (sourceRowAfter?.quantity ?? 0) !== expected ||
+          count(beforeSource) - count(afterSource) !== expected ||
+          count(afterDestination) - count(beforeDestination) !== expected) {
+        res.status(409).json({ ok: false, error: "PERSONAL_TRANSFER_UNCONFIRMED",
+          message: "The exact movement between ship and structure hangar could not be confirmed. Refresh both inventories before retrying." });
+        return;
+      }
+    }
     res.json({ ok: true, notifications: outcome.notifications });
   } catch (error) {
     next(error);
@@ -2313,11 +2391,12 @@ function corpOfficeBindSpec(officeID) {
 // Moniker('invbroker', (stationID, groupStation)) — the inventory MANAGER.
 // TrashItems dispatches on this, not on a per-container binding.
 function inventoryManagerBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `invManager:${held.stationID}`,
+    key: `invManager:${locationID}`,
     service: "invbroker",
     method: "MachoBindObject",
-    args: [[held.stationID, SHIP_BIND_GROUP_STATION]],
+    args: [[locationID, SHIP_BIND_GROUP_STATION]],
     kwargs: null,
   };
 }
@@ -2418,8 +2497,9 @@ function decodeDivisionNames(result) {
  * from the LISTED ROW's own locationID instead of assuming.
  */
 async function readCorpOffice(held, webSessionID) {
+  if (held.structureID) await assertStructureService(held, webSessionID, held.structureID, 3);
   const offices = await readCorpOffices(held, webSessionID);
-  const here = offices.find((office) => office.stationID === held.stationID);
+  const here = offices.find((office) => office.stationID === inventoryLocationID(held));
   return here ? here.officeID : 0;
 }
 
@@ -2456,7 +2536,7 @@ async function readCorpOffices(held, webSessionID) {
 async function resolvePlace(held, webSessionID, descriptor) {
   const kind = String((descriptor && descriptor.kind) || "");
   if (kind === "hangar") {
-    return { spec: hangarBindSpec(held), flag: ITEM_FLAG_HANGAR, locationID: held.stationID };
+    return { spec: hangarBindSpec(held), flag: ITEM_FLAG_HANGAR, locationID: inventoryLocationID(held) };
   }
   if (kind === "cargo") {
     if (!held.activeShipID) {
@@ -2642,14 +2722,20 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
   }
   try {
     const flight = await readHeldFlight(held, req.webSessionID);
+    const expectedStructureID = flight.flight?.docked === true ? held.structureID : null;
+    if (flight.flight?.docked === true && held.structureID) {
+      await assertStructureService(held, req.webSessionID, held.structureID, 1);
+    }
     const from = await resolvePlace(held, req.webSessionID, body.from);
     const to = await resolvePlace(held, req.webSessionID, body.to);
     const contract = body.haulContract;
     if (contract !== undefined) {
       const sourceKind = body.from?.kind, destinationKind = body.to?.kind;
       const shipKind = (kind) => kind === "cargo" || kind === "shipBay";
-      if (!flight.flight?.docked || !Number.isSafeInteger(contract?.stationID) ||
-          contract.stationID !== held.stationID || !Number.isSafeInteger(contract.corporationID) ||
+      if (!flight.flight?.docked || ![undefined, "station", "structure"].includes(contract?.locationKind) ||
+          (contract.locationKind === "structure" ? flight.flight.structureID !== contract.stationID :
+            flight.flight.stationID !== contract.stationID) || !Number.isSafeInteger(contract?.stationID) ||
+          contract.stationID !== inventoryLocationID(held) || !Number.isSafeInteger(contract.corporationID) ||
           contract.corporationID <= 0 || contract.corporationID !== held.corporationID ||
           !isValidDivision(contract.division) || itemIDs.length !== 1 || !hasQty ||
           !Number.isSafeInteger(contract.typeID) || contract.typeID <= 0 ||
@@ -2671,7 +2757,7 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
       res.status(409).json({ ok: false, error: "HAUL_SOURCE_CHANGED" });
       return;
     }
-    const destinationRowsBefore = contract === undefined && body.claimRunID === undefined
+    const destinationRowsBefore = contract === undefined && body.claimRunID === undefined && !held.structureID
       ? null : await listPlace(held, req.webSessionID, to);
     const missing = itemIDs.filter((itemID) => !sourceByID.has(itemID));
     if (missing.length === itemIDs.length) {
@@ -2713,12 +2799,14 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     // rethrown here, and the re-read below decides. If the re-read shows
     // nothing moved, the original error is raised unchanged.
     let dispatchError = null;
+    const writeSpec = expectedStructureID
+      ? { ...to.spec, expectedDockedLocationID: expectedStructureID } : to.spec;
     try {
       if (present.length === 1 && hasQty) {
         outcome = await boundCall(
           held,
           req.webSessionID,
-          to.spec,
+          writeSpec,
           "Add",
           [present[0], sourceLocationID],
           { ...kwargs, qty },
@@ -2727,7 +2815,7 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
         outcome = await boundCall(
           held,
           req.webSessionID,
-          to.spec,
+          writeSpec,
           "Add",
           [present[0], sourceLocationID],
           kwargs,
@@ -2736,7 +2824,7 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
         outcome = await boundCall(
           held,
           req.webSessionID,
-          to.spec,
+          writeSpec,
           "MultiAdd",
           [present, sourceLocationID],
           kwargs,
@@ -2752,6 +2840,26 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
       listPlace(held, req.webSessionID, to),
       listPlace(held, req.webSessionID, from),
     ]);
+    if (held.structureID && (body.from?.kind === "hangar" || body.to?.kind === "hangar") &&
+        destinationRowsBefore !== null) {
+      const expectedByType = new Map();
+      for (const itemID of present) {
+        const row = sourceByID.get(itemID);
+        const amount = hasQty ? qty : row.quantity;
+        expectedByType.set(row.typeID, (expectedByType.get(row.typeID) || 0) + amount);
+        const after = sourceRowsAfter.find((entry) => entry.itemID === itemID);
+        if (row.quantity - (after?.quantity ?? 0) !== amount) {
+          res.status(409).json({ ok: false, error: "PERSONAL_TRANSFER_UNCONFIRMED" }); return;
+        }
+      }
+      const countType = (rows, typeID) => rows.filter((row) => row.typeID === typeID)
+        .reduce((sum, row) => sum + row.quantity, 0);
+      if ([...expectedByType].some(([typeID, amount]) =>
+        countType(destinationRows, typeID) - countType(destinationRowsBefore, typeID) !== amount ||
+        countType(sourceRowsBefore, typeID) - countType(sourceRowsAfter, typeID) !== amount)) {
+        res.status(409).json({ ok: false, error: "PERSONAL_TRANSFER_UNCONFIRMED" }); return;
+      }
+    }
     if (pinnedClaim) {
       // A source-side `applied` bit is insufficient for a claimed container:
       // the destination must gain exactly what this run took. Otherwise a
@@ -3456,6 +3564,7 @@ app.post("/api/bridge/fitting/fit", requireAuth, async (req, res, next) => {
     return;
   }
   try {
+    const locationID = await assertDockedInventoryAccess(held, req.webSessionID, 2);
     // The slots BEFORE, so a fit that arrives under a new itemID is still
     // recognised. Fitting ONE module out of a STACK peels a unit off and mints
     // a fresh row: measured live, fitting two turrets from a stack of three
@@ -3465,9 +3574,9 @@ app.post("/api/bridge/fitting/fit", requireAuth, async (req, res, next) => {
     const outcome = await boundCall(
       held,
       req.webSessionID,
-      cargoBindSpec(held, shipID),
+      held.structureID ? { ...cargoBindSpec(held, shipID), expectedDockedLocationID: locationID } : cargoBindSpec(held, shipID),
       "Add",
-      [itemID, source === "cargo" ? shipID : held.stationID],
+      [itemID, source === "cargo" ? shipID : locationID],
       { qty: 1, flag: slotFlag },
     );
     // Verify: a silent decline is indistinguishable from success at the call
@@ -3507,13 +3616,13 @@ app.post("/api/bridge/fitting/unfit", requireAuth, async (req, res, next) => {
     res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship to unfit from." });
     return;
   }
-  const destSpec =
-    destination === "cargo" ? cargoBindSpec(held, shipID) : hangarBindSpec(held);
   try {
+    const locationID = await assertDockedInventoryAccess(held, req.webSessionID, 2);
+    const destSpec = destination === "cargo" ? cargoBindSpec(held, shipID) : hangarBindSpec(held);
     const outcome = await boundCall(
       held,
       req.webSessionID,
-      destSpec,
+      held.structureID ? { ...destSpec, expectedDockedLocationID: locationID } : destSpec,
       "Add",
       [itemID, shipID],
       { qty: 1, flag: destination === "cargo" ? ITEM_FLAG_CARGO_HOLD : ITEM_FLAG_HANGAR },
@@ -4507,6 +4616,7 @@ app.post("/api/bridge/market/buy", requireAuth, async (req, res, next) => {
   try {
     await readHeldFlight(held, req.webSessionID);
     // BEFORE. Read first, so the difference afterwards is the real charge.
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 5);
     const balanceBefore = await readMarketBalance(held, req.webSessionID);
     const outcome = await heldTopLevelCall(
       held,
@@ -4514,7 +4624,7 @@ app.post("/api/bridge/market/buy", requireAuth, async (req, res, next) => {
       "marketProxy",
       "PlaceBuyOrder",
       [
-        held.stationID,
+        inventoryLocationID(held),
         typeID,
         price,
         quantity,
@@ -4614,6 +4724,7 @@ app.post("/api/bridge/market/sell", requireAuth, async (req, res, next) => {
   }
   try {
     await readHeldFlight(held, req.webSessionID);
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 5);
     const balanceBefore = await readMarketBalance(held, req.webSessionID);
     const outcome = await heldTopLevelCall(
       held,
@@ -4621,7 +4732,7 @@ app.post("/api/bridge/market/sell", requireAuth, async (req, res, next) => {
       "marketProxy",
       "PlaceMultiSellOrder",
       [
-        [{ itemID, typeID, stationID: held.stationID, price, quantity }],
+        [{ itemID, typeID, stationID: inventoryLocationID(held), price, quantity }],
         false,
         durationDays,
         // Same reasoning as the buy route: a rate we cannot know is not asserted.
@@ -4755,6 +4866,7 @@ app.post("/api/bridge/market/modify", requireAuth, async (req, res, next) => {
   }
   try {
     await readHeldFlight(held, req.webSessionID);
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 5);
     const balanceBefore = await readMarketBalance(held, req.webSessionID);
     const outcome = await heldTopLevelCall(
       held,
@@ -4767,7 +4879,7 @@ app.post("/api/bridge/market/modify", requireAuth, async (req, res, next) => {
         // Everything from here down is re-derived server-side. Sent for shape
         // fidelity only — see the note above.
         Boolean(body.bid),
-        held.stationID,
+        inventoryLocationID(held),
         held.solarSystemID || 0,
         roundMarketPrice(body.oldPrice),
         Number(body.range) || MARKET_RANGE_STATION,
@@ -10025,6 +10137,10 @@ async function dispatchBoundInventoryWrite(req, res, next, method, args, kwargs 
     // Sync held station/ship to the live position first so the manager bind
     // targets the CURRENT station (matching /api/bridge/bound-inventory).
     await readHeldFlight(held, req.webSessionID);
+    if (method === "FitFitting" && held.structureID) {
+      throw Object.assign(new Error("Scripted fitting requires the active ship at its NPC station hangar."),
+        { code: "SCRIPTED_FITTING_STATION_ONLY", statusCode: 409 });
+    }
     const outcome = await boundCall(held, req.webSessionID, inventoryManagerBindSpec(held), method, args, kwargs);
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
@@ -14272,6 +14388,119 @@ app.get("/api/bridge/structures", requireAuth, async (req, res, next) => {
   }
 });
 
+// A structure becomes a selectable destination only after this pilot's
+// access-filtered directory lists it. Never search the operational directory.
+function structureIDsFromList(result) {
+  if (!result || result.type !== "list" || !Array.isArray(result.items)) {
+    throw Object.assign(new Error("Structure access authority is unreadable."),
+      { code: "STRUCTURE_ACCESS_UNREADABLE", statusCode: 503 });
+  }
+  return [...new Set(result.items.map(Number).filter((id) => Number.isSafeInteger(id) && isPlayerStructureID(id)))];
+}
+function structureServiceIDsFromList(result) {
+  if (!result || result.type !== "list" || !Array.isArray(result.items)) {
+    throw Object.assign(new Error("Structure service authority is unreadable."),
+      { code: "STRUCTURE_SERVICE_UNREADABLE", statusCode: 503 });
+  }
+  return [...new Set(result.items.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
+async function assertStructureDockAccess(held, webSessionID, structureID) {
+  const result = await heldTopLevelCall(held, webSessionID, "structureDirectory",
+    "CheckMyDockingAccessToStructures", [[structureID]], null);
+  if (!structureIDsFromList(result.result).includes(structureID)) {
+    throw Object.assign(new Error("Docking access to this structure is unavailable."),
+      { code: "STRUCTURE_DOCK_ACCESS_DENIED", statusCode: 409 });
+  }
+}
+
+async function assertStructureService(held, webSessionID, structureID, serviceID) {
+  await assertStructureDockAccess(held, webSessionID, structureID);
+  const result = await heldTopLevelCall(held, webSessionID, "structureDirectory",
+    "GetMyAccessibleStructureServices", [structureID], null);
+  if (!structureServiceIDsFromList(result.result).includes(serviceID)) {
+    throw Object.assign(new Error("The required structure service is unavailable."),
+      { code: "STRUCTURE_SERVICE_UNAVAILABLE", statusCode: 409 });
+  }
+}
+
+app.get("/api/dockable-structures/find", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    if (q.length < 2) { res.json({ ok: true, matches: [] }); return; }
+    const listed = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
+      "GetMyDockableStructures", [0], null);
+    const ids = structureIDsFromList(listed.result);
+    if (ids.length > 200) throw Object.assign(new Error("Too many accessible structures to search safely."),
+      { code: "STRUCTURE_SEARCH_LIMIT", statusCode: 409 });
+    const matches = [];
+    for (let start = 0; start < ids.length; start += STRUCTURE_NAME_LOOKUP_CAP) {
+      const group = ids.slice(start, start + STRUCTURE_NAME_LOOKUP_CAP);
+      const { records, failed } = await resolveRuntimeStructureNames(req, group);
+      if (failed.size) throw Object.assign(new Error("Accessible structure names could not be read."),
+        { code: "STRUCTURE_SEARCH_UNREADABLE", statusCode: 503 });
+      for (const id of group) {
+        const record = records.get(id);
+        if (!record?.name || !record.solarSystemID || !record.name.toLocaleLowerCase().includes(q.toLocaleLowerCase())) continue;
+        matches.push({ kind: "structure", id, name: record.name, solarSystemID: record.solarSystemID,
+          solarSystemName: staticData.getSolarSystemName(record.solarSystemID) });
+      }
+    }
+    res.json({ ok: true, matches: matches.sort((a, b) => a.name.localeCompare(b.name)).slice(0, 25) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/dockable-structures/:id", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const id = Number(req.params.id);
+    if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return; }
+    await assertStructureDockAccess(held, req.webSessionID, id);
+    const { records, failed } = await resolveRuntimeStructureNames(req, [id]);
+    const record = records.get(id);
+    if (failed.has(id) || !record?.name || !record.solarSystemID) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_UNRESOLVED" }); return;
+    }
+    res.json({ ok: true, location: { kind: "structure", id, name: record.name,
+      solarSystemID: record.solarSystemID, solarSystemName: staticData.getSolarSystemName(record.solarSystemID) } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/dockable-structures/:id/services", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const id = Number(req.params.id);
+    if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return; }
+    await assertStructureDockAccess(held, req.webSessionID, id);
+    const result = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
+      "GetMyAccessibleStructureServices", [id], null);
+    res.json({ ok: true, structureID: id, serviceIDs: structureServiceIDsFromList(result.result) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/bridge/corp-office/rent-at-structure", requireAuth, async (req, res, next) => {
+  if (!requireWriteConfirmation(req, res, "Rent a corporation office at this structure and pay its rental cost?")) return;
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const locationID = await assertDockedInventoryAccess(held, req.webSessionID, 3);
+    if (!held.structureID || locationID !== held.structureID) {
+      res.status(409).json({ ok: false, error: "NOT_DOCKED_IN_STRUCTURE" }); return;
+    }
+    let officeID = await readCorpOffice(held, req.webSessionID);
+    if (!officeID) {
+      await heldTopLevelCall(held, req.webSessionID, "officeManager", "RentOffice", [], null);
+      officeID = await readCorpOffice(held, req.webSessionID);
+    }
+    if (!officeID) { res.status(409).json({ ok: false, error: "CORP_OFFICE_RENT_UNCONFIRMED" }); return; }
+    res.json({ ok: true, structureID: locationID, officeID });
+  } catch (error) { next(error); }
+});
+
 // --- R66 plumbing sweep: pvp-info READS (bounties / wars / killmail) — no UI ---
 // PLUMBING ONLY: three routes make the bounty / war / killmail READS reachable +
 // decodable so a later goal builds UI cheaply. No panel/tab/store slice ships.
@@ -15368,6 +15597,21 @@ async function readHeldFlight(held, webSessionID) {
     const flight = outcome && outcome.flight ? outcome.flight : {};
     if (flight.docked === true && Number(flight.stationID) > 0) {
       held.stationID = Number(flight.stationID);
+      held.structureID = null;
+      held.dockedLocationID = held.stationID;
+    } else if (flight.docked === true && isPlayerStructureID(Number(flight.structureID))) {
+      held.stationID = null;
+      held.structureID = Number(flight.structureID);
+      held.dockedLocationID = held.structureID;
+    } else if (flight.docked !== true) {
+      held.dockedLocationID = null;
+      held.structureID = null;
+    } else {
+      // A docked status without either authoritative location is unknown, not
+      // permission to reuse the previously held hangar after a transition.
+      held.stationID = null;
+      held.structureID = null;
+      held.dockedLocationID = null;
     }
     // The solar system the character is in RIGHT NOW. Tracked here because
     // R15's industry deliver/cancel take it as an argument
@@ -15809,6 +16053,8 @@ app.get("/api/bridge/station/repair-quotes", requireAuth, async (req, res, next)
     return;
   }
   try {
+    await readHeldFlight(held, req.webSessionID);
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 8);
     const outcome = await heldTopLevelCall(held, req.webSessionID, "repairSvc", "GetRepairQuotes", [itemIDs], null);
     res.json({ ok: true, quotes: outcome.result });
   } catch (error) {
@@ -15833,6 +16079,8 @@ app.post("/api/bridge/station/repair", requireAuth, async (req, res, next) => {
     return;
   }
   try {
+    await readHeldFlight(held, req.webSessionID);
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 8);
     const outcome = await heldTopLevelCall(held, req.webSessionID, "repairSvc", "RepairItems", [itemIDs, null], null);
     res.json({ ok: true, result: outcome.result, notifications: outcome.notifications });
   } catch (error) {
@@ -16125,6 +16373,7 @@ app.post("/api/bridge/flight/dock", requireAuth, async (req, res, next) => {
     if (!requireInSpace(res, before.flight)) {
       return;
     }
+    if (isPlayerStructureID(stationID)) await assertStructureDockAccess(held, req.webSessionID, stationID);
     const shipID = Number(before.flight.shipID) || 0;
     const expected = { stationID, shipID };
     if (!await acquireRouteTransition(res, held, "dock", expected)) {
@@ -17119,12 +17368,14 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
       });
       return;
     }
+    const unloadLocationID = await assertDockedInventoryAccess(held, req.webSessionID, wantsDivision ? 3 : 1);
     const shipID = held.activeShipID;
     if (!shipID) {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
       return;
     }
-    const hangarSpec = hangarBindSpec(held);
+    const hangarSpec = held.structureID
+      ? { ...hangarBindSpec(held), expectedDockedLocationID: unloadLocationID } : hangarBindSpec(held);
     const notifications = [];
 
     // A 200 is not proof — invbroker can decline a move silently. The answer is
@@ -17188,7 +17439,10 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
     let deliveredToCorp = [];
     let stillHeld;
     if (officeID) {
-      const refusal = await addAll(requested, corpOfficeBindSpec(officeID), corpDivisionFlag(division));
+      const officeSpec = held.structureID
+        ? { ...corpOfficeBindSpec(officeID), expectedDockedLocationID: unloadLocationID }
+        : corpOfficeBindSpec(officeID);
+      const refusal = await addAll(requested, officeSpec, corpDivisionFlag(division));
       stillHeld = await readStillHeld();
       deliveredToCorp = requested.filter((itemID) => !stillHeld.has(itemID));
       const stranded = requested.filter((itemID) => stillHeld.has(itemID));
@@ -17528,11 +17782,12 @@ app.post("/api/bridge/mining/compress", requireAuth, async (req, res, next) => {
 // Keyed by station so docking somewhere else binds that station's refinery
 // rather than reusing a stale OID.
 function reprocessingBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `reprocessing:${held.stationID}`,
+    key: `reprocessing:${locationID}`,
     service: "reprocessingSvc",
     method: "MachoBindObject",
-    args: [held.stationID],
+    args: [locationID],
     kwargs: null,
   };
 }
@@ -17641,6 +17896,7 @@ app.get("/api/bridge/reprocessing/quote", requireAuth, async (req, res, next) =>
       });
       return;
     }
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 4);
     const outcome = await boundCall(
       held,
       req.webSessionID,
@@ -17703,6 +17959,7 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
       });
       return;
     }
+    if (held.structureID) await assertDockedInventoryAccess(held, req.webSessionID, 4);
     const spec = reprocessingBindSpec(held);
     // Reprocess(itemIDs, fromLocationID, ownerID, outputLocationID?, outputFlagID?)
     // — the station hangar is both the source and the destination, so the
@@ -17712,7 +17969,7 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
       req.webSessionID,
       spec,
       "Reprocess",
-      [itemIDs, held.stationID, held.characterID || 0, null, null],
+      [itemIDs, inventoryLocationID(held), held.characterID || 0, null, null],
       null,
     );
     // A 200 is not proof: re-read the hangar and report which stacks are

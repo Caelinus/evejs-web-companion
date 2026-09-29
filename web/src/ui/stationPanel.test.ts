@@ -122,6 +122,8 @@ const PROCURER_BAYS = [
 ];
 
 interface Scene {
+  readonly structure?: boolean;
+  readonly structureRepair?: boolean;
   readonly docked?: boolean;
   readonly loaded?: boolean;
   readonly bays?: boolean;
@@ -144,12 +146,12 @@ function panel(options: Scene = {}): string {
     character: {
       characterID: 90000001,
       characterName: "Farmer",
-      stationID: options.docked === false ? null : STATION_ID,
-      structureID: null,
+      stationID: options.docked === false || options.structure ? null : STATION_ID,
+      structureID: options.structure ? 1_030_000_000_002 : null,
       solarSystemID: 30000142,
       corporationID: 1000001,
     },
-    station: {
+    station: options.structure ? null : {
       stationID: STATION_ID,
       stationName: "Reprocessing Plant",
       solarSystemName: "Jita",
@@ -160,6 +162,10 @@ function panel(options: Scene = {}): string {
       security: 0.54,
     },
   } as never);
+  if (options.structure) {
+    store.apply({ type: "station/structure-services",
+      serviceIDs: options.structureRepair === false ? [1, 2, 3] : [1, 2, 3, 8] } as never);
+  }
   store.apply({
     type: "station/bits",
     bits: { ownerID: 1000035, stationID: STATION_ID, operationID: null, stationTypeID: 1531 },
@@ -456,6 +462,20 @@ test("the repair shop is not charged until it has been asked for a quote", () =>
   const services = visibleText(locationView(panel(), "services"));
   assert.match(services, /Repair ship/, "the quote press is offered");
   assert.doesNotMatch(services, /and pay/, "the paying press must not appear before a quote");
+});
+
+test("structure services keep session controls and gate repair by current service authority", () => {
+  const available = panel({ structure: true });
+  const services = visibleText(locationView(available, "services"));
+  assert.match(available, /stn-head-title[^>]*>Structure/);
+  assert.match(services, /Corporation office/);
+  assert.match(services, /Repair ship/);
+  assert.match(services, /Go offline/);
+  assert.match(services, /Log out/);
+  assert.doesNotMatch(services, /Caldari Navy|Guests|undefined/);
+  const unavailable = visibleText(locationView(panel({ structure: true, structureRepair: false }), "services"));
+  assert.doesNotMatch(unavailable, /Repair ship/);
+  assert.match(unavailable, /Go offline/);
 });
 
 test("the guests are still listed, with the pilot marked as themselves", () => {

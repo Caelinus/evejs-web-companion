@@ -273,6 +273,81 @@ test("a dock at a NEW station re-targets station-scoped reads (held station sync
   );
 });
 
+test("structure personal hangar uses structureID and verifies both sides of load and unload", async () => {
+  const structureID = 1_030_000_000_011;
+  const FLAG_HANGAR = 4, FLAG_CARGO = 5;
+  const placement = new Map([[100, { flag: FLAG_HANGAR, quantity: 5, typeID: 34 }],
+    [101, { flag: FLAG_CARGO, quantity: 3, typeID: 35 }]]);
+  let serviceOnline = true, permitMove = true;
+  const gateway = fakeGateway();
+  const select = gateway.selectCharacter.bind(gateway);
+  gateway.selectCharacter = async (...args) => {
+    const result = await select(...args);
+    return { ...result, session: { ...result.session, stationID: null, structureID } };
+  };
+  gateway.readFlightStatus = async () => ({ flight: { docked: true, inSpace: false, stationID: null,
+    structureID, solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] });
+  gateway.callMethod = async (_service, method) => ({ result: { type: "list", items:
+    method === "CheckMyDockingAccessToStructures" ? [structureID] : method === "GetMyAccessibleStructureServices" ? (serviceOnline ? [1, 2, 3] : []) : [] }, notifications: [] });
+  gateway.callBoundMethod = async (service, method, args, kwargs, sessionFields, bridgeSessionID, boundHandle) => {
+    gateway.calls.boundCall.push({ service, method, args, kwargs, sessionFields, bridgeSessionID, boundHandle });
+    if (method === "Add") {
+      const item = placement.get(args[0]);
+      assert.ok(item);
+      assert.equal(args[1], item.flag === FLAG_HANGAR ? structureID : ACTIVE_SHIP_ID);
+      if (permitMove) item.flag = kwargs.flag;
+    }
+    if (method === "List") return { result: { type: "list", items: [...placement].filter(([, item]) => item.flag === args[0])
+      .map(([itemID, item]) => packedRow({ itemID, typeID: item.typeID, categoryID: 4, flagID: item.flag,
+        quantity: item.quantity, singleton: 0 })) }, notifications: [] };
+    if (method === "GetCapacity") return { result: keyVal([["capacity", 1000], ["used", 1]]), notifications: [] };
+    return { result: null, notifications: [] };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const panel = await apiRequest(baseUrl, "/api/bridge/inventory");
+  assert.equal(panel.response.status, 200);
+  assert.equal(panel.payload.stationID, null);
+  assert.equal(panel.payload.structureID, structureID);
+  assert.ok(gateway.calls.bind.some((bind) => bind.method === "GetInventory" && bind.args[0] === structureID));
+  const scriptedFit = await apiRequest(baseUrl, "/api/bridge/inventory/fit-fitting", { method: "POST",
+    body: { shipID: ACTIVE_SHIP_ID, sourceLocationID: structureID, modulesByFlag: {}, confirm: true } });
+  assert.equal(scriptedFit.response.status, 409, "scripted fitting remains station-only");
+  assert.equal(gateway.calls.boundCall.some((call) => call.method === "FitFitting"), false);
+  serviceOnline = false;
+  const offline = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID: 100, direction: "toCargo" } });
+  assert.equal(offline.response.status, 409, "offline docking/personal-inventory service blocks mutation");
+  serviceOnline = true;
+  permitMove = false;
+  const unconfirmed = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID: 100, direction: "toCargo" } });
+  assert.equal(unconfirmed.response.status, 409, "an Add acknowledgement is not delivery proof");
+  permitMove = true;
+  for (const [itemID, direction, finalFlag] of [[100, "toCargo", FLAG_CARGO], [101, "toHangar", FLAG_HANGAR]]) {
+    const moved = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID, direction } });
+    assert.equal(moved.response.status, 200, JSON.stringify(moved.payload));
+    assert.equal(placement.get(itemID).flag, finalFlag);
+  }
+  assert.ok(gateway.calls.boundCall.filter((call) => call.method === "List").length >= 8,
+    "source and destination were reread after each mutation");
+});
+
+test("ambiguous docked flight cannot reuse the previously held hangar location", async () => {
+  const gateway = fakeGateway({
+    async readFlightStatus() {
+      return { flight: { docked: true, inSpace: false, stationID: null, structureID: null,
+        solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] };
+    },
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl); // a valid station was present at select time
+  const move = await apiRequest(baseUrl, "/api/bridge/inventory/move", {
+    method: "POST", body: { itemID: 100, direction: "toCargo" },
+  });
+  assert.equal(move.response.status, 409);
+  assert.equal(move.payload.error, "NOT_DOCKED");
+  assert.equal(gateway.calls.boundCall.some((call) => call.method === "Add"), false);
+});
+
 test("a bind handle is reused across reads (cached per semantic key)", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });

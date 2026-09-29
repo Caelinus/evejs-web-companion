@@ -444,6 +444,7 @@ export interface RawContainer {
 
 export interface RawInventoryPanel {
   readonly stationID: number | null;
+  readonly structureID: number | null;
   readonly activeShipID: number | null;
   readonly hangar: RawContainer;
   readonly cargo: RawContainer & { readonly shipID: number | null };
@@ -472,6 +473,7 @@ export async function loadInventory(
       : {};
   return {
     stationID: asNumberOrNull(data.stationID),
+    structureID: asNumberOrNull(data.structureID),
     activeShipID: asNumberOrNull(data.activeShipID),
     hangar: readRawContainer(data.hangar),
     cargo: { ...readRawContainer(data.cargo), shipID: asNumberOrNull(cargo.shipID) },
@@ -570,7 +572,8 @@ export async function transferItems(
   authority?: {
     readonly claimRunID?: string;
     readonly haulContract?: {
-      readonly stationID: number; readonly corporationID: number; readonly division: number;
+      readonly stationID: number; readonly locationKind?: "station" | "structure";
+      readonly corporationID: number; readonly division: number;
       readonly typeID: number; readonly sourceQuantity: number;
     };
   },
@@ -3093,7 +3096,7 @@ export async function resolveDestination(
 export interface MapLocation {
   readonly id: number;
   readonly name: string;
-  readonly kind: "system" | "station";
+  readonly kind: "system" | "station" | "structure";
   readonly solarSystemID: number | null;
   readonly solarSystemName: string | null;
 }
@@ -3897,6 +3900,40 @@ function readDroneAction(data: Record<string, JsonValue>): DroneActionResult {
 export async function getDrones(options: ApiOptions = {}): Promise<DronesResult> {
   const data = await getJson("/api/bridge/drones", options);
   return readDronesResult(data);
+}
+
+/** Access-scoped Upwell identity. A failed authority read rejects, not []. */
+export async function findAccessibleStructures(q: string, options: ApiOptions = {}): Promise<readonly MapLocation[]> {
+  const data = await getJson(`/api/dockable-structures/find?q=${encodeURIComponent(q)}`, options);
+  if (!Array.isArray(data.matches)) throw new Error("Structure search authority is unreadable.");
+  return data.matches.map((raw) => {
+    const row = (raw ?? {}) as Record<string, JsonValue>;
+    const id = asNumberOrNull(row.id), solarSystemID = asNumberOrNull(row.solarSystemID);
+    if (row.kind !== "structure" || id === null || id < 1_000_000_000_000 || solarSystemID === null ||
+        typeof row.name !== "string" || !row.name) throw new Error("Structure search response is malformed.");
+    return { kind: "structure" as const, id, name: row.name, solarSystemID,
+      solarSystemName: typeof row.solarSystemName === "string" ? row.solarSystemName : null };
+  });
+}
+
+/** Revalidate this pilot's access and structure identity immediately before routing. */
+export async function resolveAccessibleStructure(id: number, options: ApiOptions = {}): Promise<import("../nav/dockableLocation.ts").DockableLocation> {
+  const data = await getJson(`/api/dockable-structures/${id}`, options);
+  const row = (data.location ?? {}) as Record<string, JsonValue>;
+  const solarSystemID = asNumberOrNull(row.solarSystemID);
+  if (row.kind !== "structure" || asNumberOrNull(row.id) !== id || solarSystemID === null ||
+      typeof row.name !== "string" || !row.name) throw new Error("Structure access is unreadable.");
+  return { kind: "structure", id, name: row.name, solarSystemID,
+    solarSystemName: typeof row.solarSystemName === "string" ? row.solarSystemName : null };
+}
+
+export async function readAccessibleStructureServices(id: number, options: ApiOptions = {}): Promise<readonly number[]> {
+  const data = await getJson(`/api/dockable-structures/${id}/services`, options);
+  if (asNumberOrNull(data.structureID) !== id || !Array.isArray(data.serviceIDs) ||
+      data.serviceIDs.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new Error("Structure service authority is unreadable.");
+  }
+  return data.serviceIDs as number[];
 }
 
 /** One authenticated script generation's BFF-owned container lease. */

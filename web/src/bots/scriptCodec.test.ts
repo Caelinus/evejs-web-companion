@@ -103,6 +103,25 @@ test("encode then decode is a lossless round trip", () => {
   assert.deepStrictEqual(doc, golden());
   assert.deepStrictEqual([...warnings], []);
 });
+test("dockable structure refs round-trip in v1 while old station refs and NPC-only slots stay distinct", () => {
+  const old = mustAccept(decodeScriptValue(golden())).doc;
+  assert.equal(old.home.entity, "station");
+  const structure = { entity: "structure", id: 1_000_000_000_001, name: "QA Astrahus", systemName: "Nonni" };
+  const raw = clone();
+  raw.home = structure;
+  raw.program[0].body[1].args.station.ref = structure;
+  const doc = mustAccept(decodeScriptValue(raw)).doc;
+  assert.equal(doc.version, 1);
+  assert.deepEqual(mustAccept(decodeScriptText(encodeScriptDoc(doc))).doc, doc);
+  raw.program[0].body[1].args.station.ref = { ...structure, id: 60000004 };
+  mustRefuse(decodeScriptValue(raw));
+  raw.program[0].body[1].args.station.ref = structure;
+  raw.home = { entity: "station", id: structure.id, name: "Bad", systemName: null };
+  mustRefuse(decodeScriptValue(raw));
+  raw.home = structure;
+  raw.program[0].body[1].args.station.ref = { ...structure, slot: "agent-station" };
+  mustRefuse(decodeScriptValue(raw));
+});
 
 test("legacy Distribution finder remains level 1 without fallback; explicit policy round-trips in v1", () => {
   const legacy = { ...golden(), program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: {} }] };
