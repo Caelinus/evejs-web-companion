@@ -4,6 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { randomUUID } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -30,6 +31,7 @@ const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
 const { createLootMemory } = require("./lootMemory");
+const { reconnectCandidate, hasPendingRecovery, recoveryReadyProof, handoffFlightReady } = require("./droneRecoveryGate");
 const { createBotLogStore } = require("./botLogStore");
 const {
   isBridgeWritePair,
@@ -492,6 +494,11 @@ app.post("/api/logout", async (req, res) => {
     res.status(409).json({ ok: false, error: "PILOT_RELEASE_UNVERIFIED", message: "The signed account does not own this pilot session." });
     return;
   }
+  if (held && hasPendingRecovery(held, held.characterID)) {
+    res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+      message: "Finish nearby drone recovery before logging out this pilot." });
+    return;
+  }
   if (held && Number(held.accountID) === Number(payload.accountID)) {
     // Even an expired caller may clean up its own signed session, but an
     // ambiguous gateway answer must retain the held owner for reconciliation.
@@ -908,6 +915,9 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     streamCursor: null,
     streamRetryTimer: null,
     chat: null,
+    droneRecoveryReady: false,
+    droneRecoveryCheckID: randomUUID(),
+    recoveryDroneIDs: new Set(),
   });
   joinHeldChat(bridgeSessions.get(webSessionID));
   return outcome;
@@ -937,6 +947,14 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
+    const previousHeld = bridgeSessions.get(req.webSessionID);
+    if (previousHeld && hasPendingRecovery(previousHeld, previousHeld.characterID) &&
+        Number(previousHeld.characterID) !== characterID &&
+        !botHost.authorizesClaim(previousHeld.characterID, req.get(botHostModule.BOT_HEADER))) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "Finish the selected pilot's nearby drone recovery before selecting a pilot again." });
+      return;
+    }
     // ONE HULL, ONE DRIVER, direction 2: while a server bot claims this
     // character, a tab selecting it would put two drivers on one ship — the
     // takeover would kick the bot mid-script. Refused with a plain remedy;
@@ -960,6 +978,34 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is changing sessions. Try again shortly." });
       return;
     }
+    // A tab can reload after select but before its recovery check is ACKed.
+    // Reopening that exact held pilot must return the SAME check identity,
+    // after proving the gateway session still exists. Re-selecting would
+    // disconnect the recovery owner; refusing would strand the tab forever.
+    if (previousHeld && Number(previousHeld.characterID) === characterID &&
+        hasPendingRecovery(previousHeld, characterID) &&
+        !botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+      const current = await readHeldFlight(previousHeld, req.webSessionID);
+      const liveShipID = Number(current.flight?.shipID);
+      const heldShipID = Number(previousHeld.activeShipID);
+      if (bridgeSessions.get(req.webSessionID) !== previousHeld ||
+          (current.flight?.docked !== true && current.flight?.inSpace !== true) ||
+          !Number.isSafeInteger(liveShipID) || liveShipID <= 0 ||
+          !Number.isSafeInteger(heldShipID) || heldShipID <= 0 ||
+          liveShipID !== heldShipID) {
+        res.status(409).json({ ok: false, error: "DRONE_RECOVERY_UNCONFIRMED",
+          message: "The held pilot or ship could not be confirmed. Retry recovery after the session is reconciled." });
+        return;
+      }
+      res.json({ ok: true,
+        character: { characterID, characterName: String(character.characterName || ""),
+          stationID: previousHeld.stationID, structureID: previousHeld.structureID,
+          solarSystemID: previousHeld.solarSystemID, corporationID: previousHeld.corporationID },
+        station: buildStationStatic(previousHeld.stationID),
+        notifications: current.notifications || [],
+        droneRecoveryCheckID: previousHeld.droneRecoveryCheckID });
+      return;
+    }
     const reservation = Symbol("select");
     const ownsCharacterReservation = !characterOperations.has(characterID);
     if (ownsCharacterReservation) characterOperations.set(characterID, reservation);
@@ -970,6 +1016,11 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     // the handler's own refusals pass through as CALL_REFUSED).
     await releaseHeldBridgeSession(req.webSessionID);
     const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
+    // Hosted bots already own their claim; browser sessions must complete the
+    // nearby lost-flight check before any automation handoff or movement.
+    if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+      bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
+    }
     res.json({
       ok: true,
       character: {
@@ -990,6 +1041,7 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       },
       station: buildStationStatic(outcome.session.stationID),
       notifications: outcome.notifications,
+      droneRecoveryCheckID: bridgeSessions.get(req.webSessionID)?.droneRecoveryCheckID ?? null,
     });
     } finally {
       if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
@@ -1009,6 +1061,12 @@ app.post("/api/bridge/release", requireAuth, async (req, res, next) => {
       return;
     }
     const held = bridgeSessions.get(req.webSessionID);
+    if (held && hasPendingRecovery(held, held.characterID) &&
+        !botHost.authorizesClaim(held.characterID, req.get(botHostModule.BOT_HEADER))) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "Finish nearby drone recovery before releasing this pilot." });
+      return;
+    }
     if (held && characterOperations.has(held.characterID)) {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is changing sessions. Try again shortly." });
       return;
@@ -1045,6 +1103,22 @@ function requireHeldBridgeSession(req, res) {
   }
   return held;
 }
+
+// The browser cannot leave the recovery grid while its login check is
+// unresolved. StopShip remains available; the hosted bot's own claim is not a
+// browser recovery session. All normal flight entry points share this gate.
+app.use("/api/bridge/flight", requireAuth, (req, res, next) => {
+  if (req.method === "POST" && req.path !== "/stop") {
+    const held = bridgeSessions.get(req.webSessionID);
+    if (held && hasPendingRecovery(held, held.characterID) &&
+        !botHost.authorizesClaim(held.characterID, req.get(botHostModule.BOT_HEADER))) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "Finish nearby lost-drone recovery before moving this pilot." });
+      return;
+    }
+  }
+  next();
+});
 
 function inventoryLocationID(held) {
   return "dockedLocationID" in held ? held.dockedLocationID : held.stationID;
@@ -18248,6 +18322,7 @@ function projectDronesInSpace(held, space) {
       // A BOOLEAN, not the controllerID — the id itself must not reach the
       // browser (R7d), and the only question the page has is this one.
       controlled: shipID > 0 && (Number(row.controllerID) || 0) === shipID,
+      reconnectCandidate: reconnectCandidate(row, characterID),
       // A WORD, or null for "we could not tell" — never a raw activity enum.
       activity: typeof row.droneActivity === "string" ? row.droneActivity : null,
       // What it is busy with, so the page can name the rock or the rat.
@@ -18256,6 +18331,9 @@ function projectDronesInSpace(held, space) {
       armorRatio: typeof row.armorRatio === "number" ? row.armorRatio : null,
       hullRatio: typeof row.hullRatio === "number" ? row.hullRatio : null,
     }));
+  if (held.recoveryDroneIDs instanceof Set && !held.droneRecoveryReady) {
+    for (const row of drones) if (row.reconnectCandidate === true) held.recoveryDroneIDs.add(row.itemID);
+  }
   return drones;
 }
 
@@ -18370,6 +18448,42 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
   } catch (error) {
     next(error);
   }
+});
+
+// The browser reports that its bounded reconnect/return workflow completed.
+// The check ID binds this acknowledgement to the selected held session, and a
+// final independent gateway read prevents an early/forged ACK from opening the
+// bot handoff gate while a nearby recoverable flight is still present.
+app.post("/api/bridge/drone-recovery/ready", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  if (typeof req.body?.checkID !== "string" || req.body.checkID !== held.droneRecoveryCheckID) {
+    res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE" });
+    return;
+  }
+  try {
+    const status = await readHeldFlight(held, req.webSessionID);
+    if (status?.flight?.docked === true && held.recoveryDroneIDs.size > 0) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_UNCONFIRMED",
+        message: "The pilot moved before the recovered flight was confirmed home." });
+      return;
+    }
+    if (status?.flight?.docked !== true) {
+      if (status?.flight?.inSpace !== true) throw new Error("Pilot location is unreadable.");
+      const result = await readDronesInSpace(held);
+      if (!recoveryReadyProof(result.drones, held.recoveryDroneIDs)) {
+        res.status(409).json({ ok: false, error: "DRONE_RECOVERY_UNCONFIRMED",
+          message: "Nearby lost drones have not been confirmed back in the bay." });
+        return;
+      }
+    }
+    if (bridgeSessions.get(req.webSessionID) !== held) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE" });
+      return;
+    }
+    held.droneRecoveryReady = true;
+    res.json({ ok: true });
+  } catch (error) { next(error); }
 });
 
 /**
@@ -20741,6 +20855,8 @@ const BOT_START_STATUS = {
   CHARACTER_OWNERSHIP_UNVERIFIED: 409,
   PILOT_RELEASE_UNVERIFIED: 409,
   DRONE_RETURN_UNCONFIRMED: 409,
+  DRONE_HANDOFF_UNSAFE: 409,
+  DRONE_RECOVERY_PENDING: 409,
   CONTROL_SETTLEMENT_UNCONFIRMED: 409,
   BOT_STACK_UNAVAILABLE: 500,
   BOT_START_FAILED: 502,
@@ -21094,6 +21210,12 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
     // request in the body, and botHost.start() is the one place that decodes
     // and trusts it (decodeFleetCompanionRequestValue).
 
+    if (hasPendingRecovery(bridgeSessions.get(req.webSessionID), characterID)) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "Finish this pilot's lost-drone recovery before server handoff." });
+      return;
+    }
+
     // Reserve only the await window, not another ownership registry. The host
     // validates the grant and claims the hull before releasing this caller's
     // live session. A failed start may restore it only after a fresh authority
@@ -21110,6 +21232,23 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
       const beforeStart = async () => {
         const held = bridgeSessions.get(req.webSessionID);
         if (!held || Number(held.characterID) !== characterID) return;
+        if (hasPendingRecovery(held, characterID)) {
+          throw Object.assign(new Error("Lost-drone recovery is still pending."), { code: "DRONE_RECOVERY_PENDING" });
+        }
+        const status = await readHeldFlight(held, req.webSessionID);
+        if (status?.flight?.docked !== true) {
+          if (status?.flight?.inSpace !== true) {
+            throw Object.assign(new Error("Pilot location could not be confirmed before handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
+          }
+          if (!(Number(held.activeShipID) > 0) || Number(status.flight.shipID) !== Number(held.activeShipID)) {
+            throw Object.assign(new Error("The active ship changed before drone handoff could be checked."), { code: "DRONE_HANDOFF_UNSAFE" });
+          }
+          let rows = null;
+          try { rows = (await readDronesInSpace(held)).drones; } catch { /* unreadable is unsafe */ }
+          if (!handoffFlightReady(rows)) {
+            throw Object.assign(new Error("Return controlled drones to the bay before server handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
+          }
+        }
         await releaseHeldBridgeSession(req.webSessionID, { confirmed: true });
         releasedCaller = true;
       };

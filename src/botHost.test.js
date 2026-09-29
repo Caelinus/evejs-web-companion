@@ -272,6 +272,18 @@ test("start flies the character on its own session and lists it", async () => {
   assert.deepEqual(flowCall.slice(2), [true, "bot-token"]);
 });
 
+test("unsafe browser handoff refuses before hosted selection and releases only its temporary claim", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  const outcome = await host.start({ ...START, beforeStart: async () => {
+    throw Object.assign(new Error("Return controlled drones before handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
+  } });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, "DRONE_HANDOFF_UNSAFE");
+  assert.equal(log.some(([name]) => name === "selectCharacter"), false);
+  assert.equal(host.claimedBy(START.characterID), null);
+});
+
 test("the approved runtime deadline stops, logs out, and releases the character claim", async () => {
   const log = [];
   let deadline = null;

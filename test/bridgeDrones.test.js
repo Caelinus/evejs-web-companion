@@ -358,6 +358,62 @@ test.afterEach(async () => {
   await Promise.all(closing);
 });
 
+test("a pending recovery can reopen the same held pilot after a tab reload without selecting twice", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  const first = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: CHARACTER_ID },
+  });
+  const again = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: CHARACTER_ID },
+  });
+  assert.equal(first.response.status, 200);
+  assert.equal(again.response.status, 200);
+  assert.equal(again.payload.droneRecoveryCheckID, first.payload.droneRecoveryCheckID);
+  assert.equal(again.payload.character.characterID, CHARACTER_ID);
+  assert.equal(gateway.calls.select.length, 1, "the live owner is not disconnected or reselected");
+  assert.equal(gateway.calls.flightStatus.length, 1, "the held gateway session is checked afresh");
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: again.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200);
+  assert.equal(ready.payload.ok, true);
+});
+
+test("pending recovery still refuses another pilot and unreadable same-pilot reentry", async () => {
+  const gateway = fakeGateway();
+  const store = fakeStore();
+  store.getCharacterForAccount = async (accountID, characterID) =>
+    Number(accountID) === ACCOUNT.accountID && [CHARACTER_ID, 8].includes(Number(characterID))
+      ? { characterID, accountID, characterName: `Pilot ${characterID}` } : null;
+  const { baseUrl } = await startTestServer({ gateway, store });
+  await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: CHARACTER_ID },
+  });
+  const other = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: 8 },
+  });
+  assert.equal(other.response.status, 409);
+  assert.equal(other.payload.error, "DRONE_RECOVERY_PENDING");
+  gateway.readFlightStatus = async () => ({ flight: null, notifications: [] });
+  const unreadable = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: CHARACTER_ID },
+  });
+  assert.equal(unreadable.response.status, 409);
+  assert.equal(unreadable.payload.error, "DRONE_RECOVERY_UNCONFIRMED");
+  for (const shipID of [null, SHIP_ID + 1]) {
+    gateway.readFlightStatus = async () => ({ flight: {
+      inSpace: true, docked: false, shipID, solarSystemID: ORIGIN_SYSTEM_ID,
+    }, notifications: [] });
+    const changed = await apiRequest(baseUrl, "/api/bridge/select", {
+      method: "POST", body: { characterID: CHARACTER_ID },
+    });
+    assert.equal(changed.response.status, 409);
+    assert.equal(changed.payload.error, "DRONE_RECOVERY_UNCONFIRMED");
+  }
+  assert.equal(gateway.calls.select.length, 1);
+});
+
 // --- The panel read ---------------------------------------------------------
 
 test("the drones read is the bay, the snapshot and ShipGetInfo — and no new call", async () => {

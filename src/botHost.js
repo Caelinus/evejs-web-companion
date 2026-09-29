@@ -1083,7 +1083,8 @@ function createBotHost(options) {
       record.status = "error";
       record.why = error && error.message ? String(error.message) : "The bot could not be started.";
       await finalize(record);
-      return { ok: false, code: error && error.code === "PILOT_RELEASE_UNVERIFIED" ? "PILOT_RELEASE_UNVERIFIED" : "BOT_START_FAILED", message: record.why };
+      return { ok: false, code: error && ["PILOT_RELEASE_UNVERIFIED", "DRONE_HANDOFF_UNSAFE", "DRONE_RECOVERY_PENDING"].includes(error.code)
+        ? error.code : "BOT_START_FAILED", message: record.why };
     }
   }
 

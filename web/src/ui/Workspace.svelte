@@ -21,6 +21,7 @@
   import DockWipe from "./DockWipe.svelte";
   import Toasts from "./Toasts.svelte";
   import NoticeBridge from "./NoticeBridge.svelte";
+  import DroneRecoveryNotice from "./DroneRecoveryNotice.svelte";
   import { showInfoTarget } from "./showInfo.ts";
   import TargetsPanel from "./TargetsPanel.svelte";
   import CustomBotReadout from "./CustomBotReadout.svelte";
@@ -340,6 +341,7 @@
        it would be strange for only one of them to acknowledge it. -->
   <DockWipe {isDocked} />
   <NoticeBridge {store} />
+  <DroneRecoveryNotice {flow} />
   <Toasts />
   <MobileWorkspace {store} {flow} {isDocked} {sessions} openRequest={mobileOpenRequest} />
 {:else}
@@ -349,6 +351,7 @@
        the flash is where one APPEARS. Both have to outlive the panel the event
        came from — that is the entire point — so neither can live in a panel. -->
   <NoticeBridge {store} />
+  <DroneRecoveryNotice {flow} />
   <Toasts />
   <div class="workspace" class:in-space={!isDocked}>
     <!-- Every piece of always-on chrome gets its own boundary. These are mounted
