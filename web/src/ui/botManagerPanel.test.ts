@@ -100,6 +100,29 @@ test("THE COMPANIONS GROUP IS THERE WITH NOTHING IN IT", () => {
   assert.match(text, /Pilot Hangar/);
 });
 
+test("the group list says once what is true of every row", () => {
+  // ⚠ ONCE, UNDER THE LIST. These used to be repeated under every group, where
+  // they were most of each row's height. They moved; they did not go:
+  //  - a built-in's absence from the group picker is deliberate (it is set up
+  //    against one pilot's own ship) and has to read as such, and
+  //  - a server start outlives the tab, which is the difference a player is
+  //    choosing between.
+  const text = visibleText(renderPanel());
+  assert.match(text, /Built-in bots/i);
+  assert.match(text, /that pilot's row/i);
+  assert.match(text, /keeps flying if this tab closes/i);
+  assert.match(text, /stops when this tab closes/i);
+});
+
+test("the window has PI's rail: one tab per region, Groups first", () => {
+  const body = renderPanel();
+  const tabs = [...body.matchAll(/role="tab"[^>]*>\s*<span>([^<]+)<\/span>/g)].map((m) => m[1]);
+  assert.deepEqual(tabs, ["Groups", "Pilots", "Recent runs", "Saved bots"]);
+  // Only the open view is shown, but every view is rendered (hidden), so each
+  // one's loading wording is decided the same way whether or not it is open.
+  assert.equal([...body.matchAll(/role="tabpanel"/g)].length, 4);
+});
+
 test("region A reads as loading on first mount, never as 'no pilots'", () => {
   // The SSR harness never runs onMount, so the server roster fetch has not
   // fired — the panel must not guess "No pilots online" before it knows.
