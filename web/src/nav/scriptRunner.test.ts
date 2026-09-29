@@ -241,6 +241,39 @@ test("headHome has nothing to send when no script is running", () => {
   assert.equal(h.runner.headHome("The approved run time ended."), false);
 });
 
+test("hosted graceful Stop waits for an issued action, then can resume only the home trip", async () => {
+  let issueStarted: () => void = () => {};
+  let finishIssue: () => void = () => {};
+  const started = new Promise<void>((resolve) => { issueStarted = resolve; });
+  const held = new Promise<void>((resolve) => { finishIssue = resolve; });
+  const issued: ScriptAction[] = [];
+  const runner = createScriptRunner({
+    observe: async () => calm({ holdEmpty: false }),
+    issue: async (action) => {
+      issued.push(action);
+      if (action.kind === "unloadOre") { issueStarted(); await held; }
+      return null;
+    },
+    sleep: async () => {}, onProgress: () => {},
+    isSessionLost: () => false, refusalReason: (error) => String(error), registry, travelHome: home,
+  });
+  runner.start(script([macroStep("a", "deliver-ore")]));
+  const ticking = runner.tick();
+  await started;
+  let settled = false;
+  const stopping = runner.beginGracefulStop().then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false, "an in-flight issue still owns the pilot");
+  assert.equal(runner.getStatus(), "paused");
+  finishIssue();
+  await ticking;
+  await stopping;
+  assert.equal(settled, true);
+  assert.equal(runner.resumeHeadHome("Deadline reached"), true);
+  await runner.tick();
+  assert.ok(issued.some((action) => action.kind === "warp"), "Farmer's home trip still runs after safety settlement");
+});
+
 test("the pause reason survives the decider's cheerful why", async () => {
   // The decider's tick knows nothing about a refusal the issue then hit, so a
   // snapshot built from it alone would pause the run and still show "why".

@@ -168,6 +168,13 @@ function makeFakeStack(log, extendFlow = null) {
         stopFleetCompanion() {
           log.push(["stopFleetCompanion"]);
         },
+        async prepareHostedBotStop(kind) {
+          log.push(["prepareHostedBotStop", kind]);
+          if (kind === "companion") this.stopFleetCompanion();
+          else this.stopCustomBot();
+          // The fake has no drones; the real flow separately proves its
+          // authoritative read/recall/return gate.
+        },
         async logout() {
           log.push(["logout"]);
         },
@@ -436,6 +443,94 @@ test("a player's Stop during the wind-down logs off at once", async () => {
   assert.equal(stopped.ok, true);
   assert.equal(host.claimedBy(START.characterID), null);
   assert.equal(log.filter(([name]) => name === "logout").length, 1);
+  assert.ok(log.some(([name]) => name === "stopCustomBot"), "the home runner is cancelled before manual finalization");
+});
+
+test("manual Stop cancels a pending deadline fallback before it can dock", async () => {
+  const log = [];
+  let enteredPanic;
+  let finishRead;
+  const entered = new Promise((resolve) => { enteredPanic = resolve; });
+  const heldRead = new Promise((resolve) => { finishRead = resolve; });
+  const { host, fire } = deadlineHost(log, (flow) => ({
+    ...flow,
+    async panicRecallAndDock(shouldAbort) {
+      enteredPanic();
+      await heldRead;
+      if (!shouldAbort()) log.push(["dock-command"]);
+    },
+  }));
+  const started = await host.start(START);
+  fire();
+  await entered;
+  const stopped = host.stop(started.bot.botID, ACCOUNT.accountID);
+  finishRead();
+  assert.equal((await stopped).ok, true);
+  assert.equal(log.some(([name]) => name === "dock-command"), false);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("manual Stop during the deadline home runner waits for its last issued action", async () => {
+  const log = [];
+  let enteredHome;
+  let enteredCancellation;
+  let settleIssuedAction;
+  const homeEntered = new Promise((resolve) => { enteredHome = resolve; });
+  const cancelEntered = new Promise((resolve) => { enteredCancellation = resolve; });
+  const issuedAction = new Promise((resolve) => { settleIssuedAction = resolve; });
+  const { host, fire } = deadlineHost(log, (flow, store) => ({
+    ...flow,
+    headCustomBotHome() { enteredHome(); return true; },
+    cancelHostedHome() {
+      store._set({ customBot: { ...store.customBot.get(), status: "paused" } });
+      enteredCancellation();
+      return issuedAction;
+    },
+  }));
+  const started = await host.start(START);
+  fire();
+  await homeEntered;
+  const manual = host.stop(started.bot.botID, ACCOUNT.accountID);
+  await cancelEntered;
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  settleIssuedAction();
+  assert.equal((await manual).ok, true);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("an unconfirmed deadline home action blocks manual Stop without releasing control", async () => {
+  const log = [];
+  let enteredHome;
+  let finishIssue;
+  let attempts = 0;
+  const homeEntered = new Promise((resolve) => { enteredHome = resolve; });
+  const issueSettled = new Promise((resolve) => { finishIssue = resolve; });
+  const { host, fire } = deadlineHost(log, (flow, store) => ({
+    ...flow,
+    headCustomBotHome() { enteredHome(); return true; },
+    async cancelHostedHome() {
+      store._set({ customBot: { ...store.customBot.get(), status: "paused" } });
+      if (++attempts === 1) throw new Error("Home action still in flight");
+      await issueSettled;
+    },
+  }));
+  const started = await host.start(START);
+  fire();
+  await homeEntered;
+  const blocked = await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.code, "CONTROL_SETTLEMENT_UNCONFIRMED");
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  const retry = host.stop(started.bot.botID, ACCOUNT.accountID);
+  await Promise.resolve();
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  finishIssue();
+  assert.equal((await retry).ok, true);
+  assert.equal(attempts, 2);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
 });
 
 // ⚠ THE REGRESSION THIS PINS COST FIVE PILOTS HALF AN HOUR IN SPACE.
@@ -462,6 +557,120 @@ test("the bot's token outlives its own deadline, so the teardown can still authe
     minted[0].ttlMs > 30 * 60_000,
     `a ${minted[0].ttlMs}ms token cannot end a ${30 * 60_000}ms run`,
   );
+  assert.equal(minted[0].ttlMs, (30 + 3 + 15 + 5) * 60_000,
+    "approved run plus controlled-drone, dock, and teardown bounds");
+});
+
+test("manual Stop retains claim and session until the controlled-flight gate settles", async () => {
+  const log = [];
+  let finishGate;
+  const gate = new Promise((resolve) => { finishGate = resolve; });
+  const host = makeHost({ log, loadStack: makeFakeStack(log, (flow) => ({
+    ...flow,
+    async prepareHostedBotStop() { log.push(["safety-gate"]); await gate; },
+  })) });
+  const started = await host.start(START);
+  const pending = host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  const repeated = host.stop(started.bot.botID, ACCOUNT.accountID);
+  finishGate();
+  assert.equal((await pending).ok, true);
+  assert.equal((await repeated).ok, true);
+  assert.equal(log.filter(([name]) => name === "safety-gate").length, 1);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+  assert.equal(host.claimedBy(START.characterID), null);
+});
+
+test("unconfirmed controlled flight blocks Stop without logout and can be retried", async () => {
+  const log = [];
+  let attempts = 0;
+  const host = makeHost({ log, loadStack: makeFakeStack(log, (flow) => ({
+    ...flow,
+    async prepareHostedBotStop() {
+      if (++attempts === 1) throw new Error("Authoritative drone state unreadable");
+    },
+  })) });
+  const started = await host.start(START);
+  const blocked = await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.code, "DRONE_RETURN_UNCONFIRMED");
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  assert.equal((await host.stop(started.bot.botID, ACCOUNT.accountID)).ok, true);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("unconfirmed session logout retains the claim and a retry can release it", async () => {
+  const log = [];
+  let attempts = 0;
+  const host = makeHost({ log, loadStack: makeFakeStack(log, (flow) => ({
+    ...flow,
+    async logout() {
+      log.push(["logout"]);
+      if (++attempts === 1) throw new Error("Gateway release unknown");
+    },
+  })) });
+  const started = await host.start(START);
+  const blocked = await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(blocked.code, "PILOT_RELEASE_UNVERIFIED");
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(host.list(ACCOUNT.accountID)[0].status, "paused");
+  const retried = await host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(retried.ok, true);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.equal(attempts, 2);
+  assert.equal(log.filter(([name]) => name === "prepareHostedBotStop").length, 1,
+    "a lost logout response retries release without requiring a now-dead drone session read");
+});
+
+test("pending logout retains a durable stop row and repeated Stop cannot report completion early", async () => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  let beginLogout;
+  let finishLogout;
+  const entered = new Promise((resolve) => { beginLogout = resolve; });
+  const held = new Promise((resolve) => { finishLogout = resolve; });
+  const host = makeHost({ log, persistPath: rosterPath, loadStack: makeFakeStack(log, (flow) => ({
+    ...flow,
+    async logout() { beginLogout(); await held; log.push(["logout"]); },
+  })) });
+  const started = await host.start(START);
+  const first = host.stop(started.bot.botID, ACCOUNT.accountID);
+  await entered;
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(readRosterFile(rosterPath)[0].stopRequested, true);
+  let repeatedResolved = false;
+  const repeated = host.stop(started.bot.botID, ACCOUNT.accountID).then((outcome) => {
+    repeatedResolved = true;
+    return outcome;
+  });
+  await Promise.resolve();
+  assert.equal(repeatedResolved, false);
+  finishLogout();
+  assert.equal((await first).ok, true);
+  assert.equal((await repeated).ok, true);
+  assert.equal(readRosterFile(rosterPath).length, 0);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("deadline and manual Stop share one pending drone gate before logout", async () => {
+  const log = [];
+  let finishGate;
+  const gate = new Promise((resolve) => { finishGate = resolve; });
+  const { host, fire } = deadlineHost(log, (flow) => ({
+    ...flow,
+    async prepareHostedBotStop() { log.push(["safety-gate"]); await gate; },
+  }));
+  const started = await host.start(START);
+  fire();
+  const manual = host.stop(started.bot.botID, ACCOUNT.accountID);
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  finishGate();
+  assert.equal((await manual).ok, true);
+  assert.equal(log.filter(([name]) => name === "safety-gate").length, 1);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
 });
 
 test("a resumed bot's token covers what its ORIGINAL grant has left, not a fresh run", async () => {
@@ -644,6 +853,8 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
     maxRuntimeMinutes: 720,
     expiresAt: started.bot.expiresAt,
     startedAt: started.bot.startedAt,
+    stopRequested: false,
+    stopBlocked: false,
   });
   assert.match(persisted[0].scriptHash, /^[a-f0-9]{64}$/);
   await host.stop(started.bot.botID, 7);

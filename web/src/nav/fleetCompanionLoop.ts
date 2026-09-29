@@ -1144,6 +1144,8 @@ export interface FleetCompanionController {
   pause(): void;
   resume(): void;
   stop(): void;
+  /** Stop new work and settle the tick already issuing an order. */
+  beginGracefulStop(): Promise<void>;
   /** One decision cycle: read, decide, issue at most one atomic call. */
   tick(): Promise<FleetCompanionAction>;
   /** Drive until the loop leaves the running state (production driver). */
@@ -7027,6 +7029,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
    * construction the other loops use.
    */
   let runToken = 0;
+  let activeTick: Promise<FleetCompanionAction> | null = null;
 
   function report(): void {
     deps.onProgress?.(snapshot());
@@ -7047,7 +7050,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     };
   }
 
-  async function tick(): Promise<FleetCompanionAction> {
+  async function tickBody(): Promise<FleetCompanionAction> {
     if (mem.status !== "running") {
       return { kind: "wait" };
     }
@@ -7150,6 +7153,14 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     }
     report();
     return decision.action;
+  }
+
+  function tick(): Promise<FleetCompanionAction> {
+    const pending = tickBody();
+    activeTick = pending;
+    return pending.finally(() => {
+      if (activeTick === pending) activeTick = null;
+    });
   }
 
   return {
@@ -7286,6 +7297,15 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       mem.action = null;
       mem.why = null;
       report();
+    },
+    beginGracefulStop(): Promise<void> {
+      runToken += 1;
+      mem.status = "paused";
+      mem.phase = "Recalling drones";
+      mem.why = "Stopping after controlled drones return.";
+      mem.action = null;
+      report();
+      return activeTick?.then(() => undefined) ?? Promise.resolve();
     },
     tick,
     /**

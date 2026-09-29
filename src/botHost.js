@@ -109,6 +109,11 @@ const SESSION_TEARDOWN_MARGIN_MS = 5 * 60_000;
 // inside webAuth's MAX_SESSION_TTL_MS.
 const DEADLINE_DOCK_GRACE_MS = 15 * 60_000;
 
+// A stopped controller may still own drones in space. Spend at most three
+// minutes confirming their return before Farmer's full dock grace begins.
+// The token covers BOTH bounds and the teardown margin.
+const CONTROLLED_DRONE_CLEANUP_MS = 3 * 60_000;
+
 // How often the wind-down re-reads flight status while it waits to be docked.
 const DOCK_POLL_MS = 5_000;
 
@@ -267,6 +272,8 @@ function createBotHost(options) {
             maxRuntimeMinutes: record.maxRuntimeMinutes,
             expiresAt: record.expiresAt,
             startedAt: record.startedAt,
+            stopRequested: record.windingDown === true,
+            stopBlocked: record.stopBlocked === true,
           };
           if (record.kind === "companion") {
             // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
@@ -488,12 +495,18 @@ function createBotHost(options) {
   // End of a run, from EITHER side (script finished/errored, or stop()):
   // release the claim and the character. Idempotent — the store subscription
   // and an explicit stop can both land here.
-  async function finalize(record) {
-    if (record.finalized) {
-      return;
-    }
-    record.finalized = true;
-    record.endedAt = nowISO();
+  function finalize(record) {
+    if (record.finalized) return Promise.resolve(true);
+    if (record.finalizePromise) return record.finalizePromise;
+    const pending = finalizeBody(record);
+    record.finalizePromise = pending.finally(() => { record.finalizePromise = null; });
+    return record.finalizePromise;
+  }
+
+  async function finalizeBody(record) {
+    // Keep the stopped row durable through logout. If the process dies in
+    // teardown, resume sees stopRequested and will not restart bot work.
+    record.windingDown = true;
     if (record.deadlineTimer) {
       clearDeadlineTimeout(record.deadlineTimer);
       record.deadlineTimer = null;
@@ -504,19 +517,11 @@ function createBotHost(options) {
       } catch {}
       record.unsubscribe = null;
     }
-    if (claims.get(record.characterID) === record.botID) {
-      claims.delete(record.characterID);
-    }
-    // The roster on disk must stop naming this bot BEFORE the slow logout —
-    // a crash mid-teardown must not resurrect a bot that already ended.
     persistRoster();
-    // Now that this record is finalized, keep the ended-run ring within
-    // MAX_ENDED_RUNS. Purely an in-memory trim — it never touches the disk
-    // roster, which only ever held running bots.
-    evictOldEndedRuns();
     const flow = record.flow;
     record.flow = null;
     record.store = null;
+    let released = true;
     if (flow) {
       try {
         // Two different stop switches on the SAME flow object — stopCustomBot
@@ -542,8 +547,26 @@ function createBotHost(options) {
         await flow.logout();
       } catch (error) {
         logError(error);
+        released = false;
       }
     }
+    if (!released) {
+      record.flow = flow;
+      record.status = "paused";
+      record.phase = "Session release blocked";
+      record.why = "The pilot session release could not be confirmed. Retry Stop before selecting this character elsewhere.";
+      record.stopBlocked = true;
+      persistRoster();
+      return false;
+    }
+    record.finalized = true;
+    record.endedAt = nowISO();
+    persistRoster();
+    // Keep the private claim through logout; a tab may not select a hull while
+    // its old controller is still releasing the gateway session.
+    if (claims.get(record.characterID) === record.botID) claims.delete(record.characterID);
+    evictOldEndedRuns();
+    return true;
   }
 
   /** True only when flight status says the ship is docked right now. */
@@ -575,14 +598,14 @@ function createBotHost(options) {
    * 3. Log off once flight status says docked, or when DEADLINE_DOCK_GRACE_MS
    *    runs out, and say which of the two it was.
    *
-   * A player's Stop during any of this finalizes at once; every wait below
-   * checks `finalized` and steps aside.
+   * A player's Stop during this wind-down shares its pending safety gate and
+   * then overrides docking, as the old manual Stop did.
    */
   async function endRunDocked(record) {
-    record.windingDown = true;
+    record.deadlineDockingStarted = true;
     record.why = DEADLINE_WHY_DOCKING;
     const giveUpAt = now() + DEADLINE_DOCK_GRACE_MS;
-    const stillWaiting = () => !record.finalized && now() < giveUpAt;
+    const stillWaiting = () => !record.finalized && !record.manualStopRequested && now() < giveUpAt;
     let docked = false;
     try {
       const flow = record.flow;
@@ -596,12 +619,12 @@ function createBotHost(options) {
           await sleep(DOCK_POLL_MS);
         }
       }
-      docked = await isDocked(record);
+      if (!record.manualStopRequested) docked = await isDocked(record);
       if (!docked && stillWaiting() && record.flow && typeof record.flow.panicRecallAndDock === "function") {
         if (record.kind === "companion") {
           record.flow.stopFleetCompanion();
         }
-        await record.flow.panicRecallAndDock();
+        await record.flow.panicRecallAndDock(() => record.manualStopRequested);
         while (stillWaiting()) {
           docked = await isDocked(record);
           if (docked) {
@@ -616,11 +639,122 @@ function createBotHost(options) {
     if (record.finalized) {
       return;
     }
+    if (record.manualStopRequested) {
+      try {
+        if (record.manualCancellationPromise) {
+          const settlement = await record.manualCancellationPromise;
+          if (!settlement.ok) throw settlement.error;
+        }
+      } catch (error) {
+        record.status = "paused";
+        record.phase = "Stop blocked";
+        record.why = "The deadline home action did not settle; pilot control remains held.";
+        record.stopBlocked = true;
+        record.stopFailureCode = "CONTROL_SETTLEMENT_UNCONFIRMED";
+        persistRoster();
+        logError(error);
+        return false;
+      }
+      record.status = "stopped";
+      record.why = "The player stopped this bot after controlled drones returned.";
+      return finalize(record);
+    }
     // Set immediately before finalize, which unsubscribes before its first
     // await — no store push can overwrite these between here and there.
     record.status = "stopped";
     record.why = docked ? DEADLINE_WHY_DOCKED : DEADLINE_WHY_UNDOCKED;
-    await finalize(record);
+    return finalize(record);
+  }
+
+  /** One pending safety gate for manual Stop and the deadline timer. */
+  function requestGracefulStop(record, fromDeadline) {
+    if (record.finalized) return Promise.resolve({ ok: true, bot: publicBot(record) });
+    if (fromDeadline) record.deadlineRequested = true;
+    else record.manualStopRequested = true;
+    if (record.finalizePromise) {
+      return record.finalizePromise.then((released) => released
+        ? { ok: true, bot: publicBot(record) }
+        : { ok: false, code: "PILOT_RELEASE_UNVERIFIED", message: record.why, bot: publicBot(record) });
+    }
+    if (record.stopPromise) {
+      if (!fromDeadline && record.deadlineDockingStarted && record.flow && !record.manualCancellationIssued) {
+        // The shared safety gate may already have finished and Farmer's home
+        // runner may now be active. Cancel it before the next tick can steer.
+        record.manualCancellationIssued = true;
+        if (typeof record.flow.cancelHostedHome === "function") {
+          const flow = record.flow;
+          record.manualCancellationPromise = Promise.resolve()
+            .then(() => flow.cancelHostedHome(record.kind))
+            .then(() => ({ ok: true }), (error) => ({ ok: false, error }));
+        } else {
+          try {
+            if (record.kind === "companion") record.flow.stopFleetCompanion();
+            else record.flow.stopCustomBot();
+          } catch (error) { logError(error); }
+        }
+        try {
+          if (typeof record.flow.abortRoute === "function") record.flow.abortRoute();
+        } catch (error) { logError(error); }
+      }
+      return record.stopPromise;
+    }
+    // Set before any flow action: stopping a controller emits a terminal store
+    // snapshot, and the subscription must not finalize/logout ahead of recall.
+    record.windingDown = true;
+    record.stopBlocked = false;
+    persistRoster(); // a process restart must not replay a requested Stop
+    const pending = (async () => {
+      try {
+        if (!record.droneSafetyConfirmed && (!record.flow || typeof record.flow.prepareHostedBotStop !== "function")) {
+          if (record.flow) {
+            if (record.kind === "companion") record.flow.stopFleetCompanion();
+            else record.flow.stopCustomBot();
+          }
+          throw new Error("The controlled-drone safety read is unavailable.");
+        }
+        if (!record.droneSafetyConfirmed) {
+          await record.flow.prepareHostedBotStop(record.kind, now() + CONTROLLED_DRONE_CLEANUP_MS);
+          record.droneSafetyConfirmed = true;
+        }
+      } catch (error) {
+        const reason = error && error.message ? String(error.message) : "Controlled drone return could not be confirmed.";
+        record.status = "paused";
+        record.phase = "Stop blocked";
+        record.why = `Controlled-drone cleanup is blocked. ${reason}`;
+        record.pauseReason = record.why;
+        record.stopBlocked = true;
+        persistRoster();
+        return { ok: false, code: "DRONE_RETURN_UNCONFIRMED", message: record.why, bot: publicBot(record) };
+      }
+      if (record.manualStopRequested) {
+        // A previous manual interruption may have timed out while a deadline
+        // home issue was still settling. Retry that exact prerequisite before
+        // finalization; confirmed drones alone cannot authorize logout here.
+        if (record.stopFailureCode === "CONTROL_SETTLEMENT_UNCONFIRMED") {
+          try {
+            await record.flow.cancelHostedHome(record.kind);
+            record.stopFailureCode = null;
+          } catch (error) {
+            logError(error);
+            record.stopBlocked = true;
+            persistRoster();
+            return { ok: false, code: "CONTROL_SETTLEMENT_UNCONFIRMED", message: record.why, bot: publicBot(record) };
+          }
+        }
+        record.status = "stopped";
+        record.why = "The player stopped this bot after controlled drones returned.";
+        if (!(await finalize(record))) {
+          return { ok: false, code: "PILOT_RELEASE_UNVERIFIED", message: record.why, bot: publicBot(record) };
+        }
+      } else {
+        if (!(await endRunDocked(record))) {
+          return { ok: false, code: record.stopFailureCode || "PILOT_RELEASE_UNVERIFIED", message: record.why, bot: publicBot(record) };
+        }
+      }
+      return { ok: true, bot: publicBot(record) };
+    })();
+    record.stopPromise = pending.finally(() => { record.stopPromise = null; });
+    return record.stopPromise;
   }
 
   async function start({
@@ -638,6 +772,8 @@ function createBotHost(options) {
     expectedScriptRev = null,
     expectedScriptHash = null,
     expectedExpiresAt = null,
+    callerSessionID = null,
+    beforeStart = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -766,7 +902,19 @@ function createBotHost(options) {
     if (claims.has(characterID)) {
       return { ok: false, code: "BOT_ALREADY_RUNNING", message: "A server bot is already flying this character." };
     }
-    if (isCharacterHeld(characterID)) {
+    let heldByAnother;
+    try {
+      heldByAnother = await isCharacterHeld(characterID, callerSessionID);
+    } catch (error) {
+      logError(error);
+      return { ok: false, code: "CHARACTER_OWNERSHIP_UNVERIFIED",
+        message: "The live pilot owner could not be confirmed. Try again when the gateway is reachable." };
+    }
+    // The gateway probe awaited; another start may have claimed the hull then.
+    if (claims.has(characterID)) {
+      return { ok: false, code: "BOT_ALREADY_RUNNING", message: "A server bot is already flying this character." };
+    }
+    if (heldByAnother) {
       return {
         ok: false,
         code: "CHARACTER_IN_USE",
@@ -812,6 +960,15 @@ function createBotHost(options) {
       // out by readableSessionOf below, and never serialized.
       webSessionID: null,
       deadlineTimer: null,
+      deadlineRequested: false,
+      deadlineDockingStarted: false,
+      manualStopRequested: false,
+      manualCancellationIssued: false,
+      manualCancellationPromise: null,
+      stopFailureCode: null,
+      stopPromise: null,
+      stopBlocked: false,
+      droneSafetyConfirmed: false,
       // Set once the deadline has fired and endRunDocked is bringing the ship
       // in; the store subscription then leaves finalizing to it.
       windingDown: false,
@@ -849,7 +1006,7 @@ function createBotHost(options) {
       // A resumed bot asks for the time its ORIGINAL grant has left, because
       // `expiresAt` is the persisted deadline, not a fresh one.
       const token = auth.createSessionToken(account, {
-        ttlMs: deadlineMs - now() + DEADLINE_DOCK_GRACE_MS + SESSION_TEARDOWN_MARGIN_MS,
+        ttlMs: deadlineMs - now() + CONTROLLED_DRONE_CLEANUP_MS + DEADLINE_DOCK_GRACE_MS + SESSION_TEARDOWN_MARGIN_MS,
       });
       const tokenPayload =
         typeof auth.verifySessionToken === "function" ? auth.verifySessionToken(token) : null;
@@ -872,6 +1029,7 @@ function createBotHost(options) {
       record.flow = flow;
       record.store = store;
 
+      if (beforeStart) await beforeStart();
       await flow.selectCharacter(characterID);
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;
@@ -910,7 +1068,7 @@ function createBotHost(options) {
         if (record.finalized || record.windingDown) {
           return;
         }
-        void endRunDocked(record);
+        void requestGracefulStop(record, true).catch(logError);
       }, remainingMs);
       if (typeof record.deadlineTimer.unref === "function") {
         record.deadlineTimer.unref();
@@ -925,7 +1083,7 @@ function createBotHost(options) {
       record.status = "error";
       record.why = error && error.message ? String(error.message) : "The bot could not be started.";
       await finalize(record);
-      return { ok: false, code: "BOT_START_FAILED", message: record.why };
+      return { ok: false, code: error && error.code === "PILOT_RELEASE_UNVERIFIED" ? "PILOT_RELEASE_UNVERIFIED" : "BOT_START_FAILED", message: record.why };
     }
   }
 
@@ -934,23 +1092,7 @@ function createBotHost(options) {
     if (!record || record.accountID !== Number(accountID)) {
       return { ok: false, code: "BOT_NOT_FOUND" };
     }
-    if (!record.finalized) {
-      if (record.flow) {
-        try {
-          // Same two-switch distinction as finalize() below — stop the
-          // controller this record actually holds, not the script runner by
-          // default.
-          if (record.kind === "companion") {
-            record.flow.stopFleetCompanion();
-          } else {
-            record.flow.stopCustomBot();
-          }
-        } catch {}
-      }
-      record.status = "stopped";
-      await finalize(record);
-    }
-    return { ok: true, bot: publicBot(record) };
+    return requestGracefulStop(record, false);
   }
 
   function list(accountID) {
@@ -1159,6 +1301,10 @@ function createBotHost(options) {
         }
         if (row.restartSafe !== true) {
           recordResumeFailure(row, "it can repeat a consequential action. Review and start it again manually.");
+          continue;
+        }
+        if (row.stopRequested === true || row.stopBlocked === true) {
+          recordResumeFailure(row, "a graceful Stop was blocked before restart. Review this pilot manually.");
           continue;
         }
         if (!Number.isFinite(Date.parse(String(row.expiresAt || ""))) || Date.parse(String(row.expiresAt)) <= now()) {
