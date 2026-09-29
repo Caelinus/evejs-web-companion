@@ -10,6 +10,7 @@
 import "./styles.css";
 import { mount } from "svelte";
 import App from "./ui/App.svelte";
+import { isGoblinFactoryPath, isPilotTrainingPath } from "./app/pageRoute.ts";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -21,6 +22,12 @@ installErrorOverlay();
 // pilot (store + per-session-token flow) and warms each one's health ping
 // itself (app/sessions.ts). There is no single app-wide store/flow any more.
 const target = document.getElementById("app");
-if (target) {
-  mount(App, { target });
+if (isGoblinFactoryPath(window.location.pathname)) window.location.replace(`/pilot-training${window.location.search}${window.location.hash}`);
+if (target && !isGoblinFactoryPath(window.location.pathname)) {
+  if (isPilotTrainingPath(window.location.pathname)) {
+    // Standalone: no cockpit restore, active bot or space polling is mounted.
+    void import("./ui/GoblinFactory.svelte").then(({ default: Training }) => mount(Training, { target }));
+  } else {
+    mount(App, { target });
+  }
 }

@@ -1,0 +1,51 @@
+{
+  "evejsVersion": "0.12.9",
+  "scope": "Pilot Training Factory authority on the frozen Farmer forward-port; no live runtime files are included",
+  "requiresFirst": "upwell-0.12.9-manifest.json when both capabilities are deployed",
+  "applyAfterUpwellInOrder": [
+    {
+      "file": "live-factory-gateway.patch",
+      "sha256": "C83F97D8AF8C47DA7C56EECC431B25746D70BAD41602C30313AAB78CF36A1022",
+      "gitApplyOptions": ["--unidiff-zero"]
+    },
+    {
+      "file": "pilot-training-generic.patch",
+      "sha256": "0814A1A546F2B03E46211E73E811A384261B82FFEE066FB8567CC946B21B4B2F",
+      "gitApplyOptions": ["--include=server/src/_secondary/express/evejsWebGatewayRuntime.js"]
+    },
+    {
+      "file": "factory-gateway-placement.patch",
+      "sha256": "9A8ECBE62582F34149D03A3A538F14F0C0DB002F971B67B6695247D52ED5322E",
+      "action": "correct zero-context hunk placement in the gateway runtime after both historical Factory patches"
+    },
+    {
+      "file": "factorySkillAcquisition.js",
+      "sha256": "2CCE918E86B0BD20A2AA9FA2FA7AD374FC79CDE8D40F8196AD3488546A6F2F24",
+      "action": "install the complete helper after both patches; do not apply the generic patch's helper hunk to this copy"
+    }
+  ],
+  "cleanReferenceFiles": {
+    "server/src/_secondary/express/evejsWebGatewayRuntime.js": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
+    "server/src/_secondary/express/evejsWebGateway.js": "66E957ED82CDDC41AFAB1AFE4533B4A2DBA30DF75B64FBF207AB0A3166DF087B",
+    "server/src/edge/gateway/gatewayRuntimeProtocol.js": "E4FBD529F190AF3F27C4CD5387BC8DFF840A416B029BA87BD5BAD4671298DF31",
+    "server/src/services/character/charService.js": "B97A32A16225DD32E382289F28CC2E60F107D791CA9C486CD792733BF1427606"
+  },
+  "verifiedDisposableCompositionSHA256": {
+    "server/src/services/structure/structureDirectoryService.js": "56C49AE470B49CB4FFEB2FEFB0C00967602438336CBF1E8CCBBA3085833A59F0",
+    "server/src/_secondary/express/evejsWebGatewayRuntime.js": "2ECE590208759DAC56295C3F92B39358A924D3E5A9E591E3F2F63134C099E2D2",
+    "server/contracts/evejs-web-bridge-contract.json": "8FF82A37CC4B2906E88D35839666355C9A80F7E7AFED7F266909A367BE9879C2",
+    "server/src/_secondary/express/evejsWebGateway.js": "6CA6A0B5D9B22D9EDBDD0485FD795A0C12F7F29EF2BCF79ECCBAFB266D1F9954",
+    "server/src/edge/gateway/gatewayRuntimeProtocol.js": "CD5941AFDB228566DF97829853FF25C92FE8C80B0D9AE2F33A79E83BCFA895D0",
+    "server/src/services/character/charService.js": "70F57A9726635F4167601A3F5A3F7BC88B330D893AA3E6A68F2D11F3DD246C88",
+    "server/src/_secondary/express/factorySkillAcquisition.js": "2CCE918E86B0BD20A2AA9FA2FA7AD374FC79CDE8D40F8196AD3488546A6F2F24"
+  },
+  "acceptedInstalledRuntimeSHA256": {
+    "server/src/services/structure/structureDirectoryService.js": "5AD3F29BADC4FE14B1E86188ECE16CA7CFE3B8D13F54AD5E10D0A8A4BE28B8BC",
+    "server/src/_secondary/express/evejsWebGatewayRuntime.js": "640834B30D4061EEECF7A5C4A468F2E90DCB286BF4300BD9998CD6A73C136742",
+    "server/contracts/evejs-web-bridge-contract.json": "D6511884988EDD6958C113FAE03D1F55283CF952E28ED1B9A9EDC98F118EEC2E",
+    "server/src/_secondary/express/evejsWebGateway.js": "154ECF68C1F828A5AB27A4168DE1FD03AE1B41A485916F4E1883E073733EF685",
+    "server/src/edge/gateway/gatewayRuntimeProtocol.js": "987E1B06634DA05A1A278BC56D07EE1859B84DA5D758F20759970C144E86C307",
+    "server/src/services/character/charService.js": "6EFCA5B0C98B412F3DB1F021C29A20E96A27DB1BA56487C8319398DD61693D28",
+    "server/src/_secondary/express/factorySkillAcquisition.js": "2CCE918E86B0BD20A2AA9FA2FA7AD374FC79CDE8D40F8196AD3488546A6F2F24"
+  }
+}

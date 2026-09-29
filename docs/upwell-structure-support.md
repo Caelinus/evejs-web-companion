@@ -6,7 +6,7 @@ The selected pilot's access-filtered `GetMyDockableStructures(0)` supplies all-s
 
 When docked in a structure, WC binds personal inventory to its actual location ID. Manual fitting uses that location after checking fitting service. Corporation inventory requires the office service, a real corporation office, division access, and the existing strict Batch 3 before/after transfer contract. A personal-hangar fallback cannot satisfy a strict corporation delivery. Scripted `applyFitting` remains station-only because its existing action contract still uses `stationID`.
 
-Service availability is a separate access-scoped read, not an inference from docking. IDs currently exposed by EveJS are docking 1, fitting 2, office 3, reprocessing 4, market 5, repair 8, and industry 20. An unreadable service state grants nothing. An online service does not by itself prove that every WC action using it works; each action still needs its own location and authority checks. MCC and Pilot Training consumers are planned for later batches and are not part of this port.
+Service availability is a separate access-scoped read, not an inference from docking. IDs currently exposed by EveJS are docking 1, fitting 2, office 3, reprocessing 4, market 5, repair 8, and industry 20. An unreadable service state grants nothing. An online service does not by itself prove that every WC action using it works; each action still needs its own location and authority checks. Pilot Training reuses this access-scoped picker for its configuration-only Home; MCC remains a later batch.
 
 ## EveJS 0.12.9 dependency
 

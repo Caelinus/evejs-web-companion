@@ -31,6 +31,7 @@ import {
   type RequestPriority,
 } from "./transport.ts";
 import type { JsonValue } from "../bridge/wire.ts";
+import type { MinerTrainingRead, StageFittingSelection, TrainingCharacter, QueueReview, QueueApplyOutcome } from "../training/types.ts";
 import type {
   AgentRow,
   IndustryActivity,
@@ -720,6 +721,17 @@ export interface RawCorpDivision {
   readonly list: JsonValue;
   readonly error: string | null;
   readonly volumes: Readonly<Record<string, number>>;
+}
+
+export interface CharacterCreationState {
+  slots: number; freeSlots: number; pendingName: string | null; recoveredCharacterID: number | null;
+  characters: readonly { characterID: number; name: string }[];
+}
+export async function loadCharacterCreationState(options: ApiOptions = {}): Promise<CharacterCreationState> {
+  const data = await getJson("/api/bridge/character/creation-state", options);
+  if (!Number.isSafeInteger(data.slots) || !Number.isSafeInteger(data.freeSlots) || !Array.isArray(data.characters))
+    throw new BridgeCallError("CREATION_STATE_UNKNOWN", "Account slot authority is unreadable.", 502);
+  return data as unknown as CharacterCreationState;
 }
 
 export interface RawCorpHangar {
@@ -3111,7 +3123,7 @@ export interface FindMapLocationsResult {
 
 function asMapLocation(value: JsonValue): MapLocation {
   const row = (value ?? {}) as Record<string, JsonValue>;
-  const kind = row.kind === "station" ? "station" : "system";
+  const kind = row.kind === "station" ? "station" : row.kind === "structure" ? "structure" : "system";
   return {
     id: asNumberOrNull(row.id) ?? 0,
     name: typeof row.name === "string" ? row.name : `Location ${asNumberOrNull(row.id) ?? 0}`,
@@ -4661,4 +4673,118 @@ export interface PiSchematicsResult {
 export async function getPiSchematics(options: ApiOptions = {}): Promise<PiSchematicsResult> {
   const data = await getJson("/api/pi/schematics", options);
   return { recipes: data as JsonValue };
+}
+
+// --- Pilot Training: account-owned read-only qualification -------------------
+
+/** Existing accounts only; no cookie/global-token change and no pilot selection. */
+export async function loginFactoryAccount(username: string, options: ApiOptions = {}, password?: string): Promise<{ account: string; token: string }> {
+  const data = await postJson("/api/pilot-training/login", { username, ...(password === undefined ? {} : { password }) }, { ...options, token: null });
+  const account = data.account as { username?: unknown } | null;
+  if (typeof data.sessionToken !== "string" || !data.sessionToken || typeof account?.username !== "string") {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Account authentication is incomplete.", 502);
+  }
+  return { account: account.username, token: data.sessionToken };
+}
+export interface TrainingAccountOutcome { status: "ACCOUNT_CREATED" | "ACCOUNT_RECOVERED" | "ACCOUNT_CONFIRMED" | "RECOVERY_REQUIRED"; account: { username: string; accountID: number } | null; message?: string }
+export async function trainingAccount(action: "create" | "recover", username: string, options: ApiOptions = {}): Promise<TrainingAccountOutcome> {
+  return await postJson(`/api/pilot-training/accounts/${action}`, { username, ...(action === "create" ? { confirm: true } : {}) }, { ...options, token: null }) as unknown as TrainingAccountOutcome;
+}
+
+export async function reviewSkillAcquisition(body: unknown, options: ApiOptions = {}): Promise<import("../training/types.ts").AcquisitionReview> {
+  return (await postJson("/api/pilot-training/skills/review", body, options)).outcome as unknown as import("../training/types.ts").AcquisitionReview;
+}
+export async function acquireFactorySkills(reviewID: string, funding: import("../training/types.ts").FactoryFunding | null, options: ApiOptions = {}): Promise<import("../training/types.ts").AcquisitionOutcome> {
+  return (await postJson("/api/pilot-training/skills/acquire", { reviewID, funding, confirm: true }, options)).outcome as unknown as import("../training/types.ts").AcquisitionOutcome;
+}
+export async function trainingOnboarding(action: "review" | "apply", body: unknown, options: ApiOptions): Promise<Record<string, any>> {
+  return (await postJson(`/api/pilot-training/onboarding/${action}`, body, options)).outcome as Record<string, any>;
+}
+export async function resolveTrainingHome(locationID: number, options: ApiOptions, characterID?: number): Promise<import("../training/settings.ts").TrainingSettings["home"]> {
+  return (await getJson(`/api/pilot-training/home?locationID=${locationID}${characterID ? `&characterID=${characterID}` : ""}`, options)).home as unknown as import("../training/settings.ts").TrainingSettings["home"];
+}
+export async function loadTrainingSettingsContext(options: ApiOptions): Promise<import("../training/settings.ts").TrainingSettingsContext> {
+  return await getJson("/api/pilot-training/settings-context", options) as unknown as import("../training/settings.ts").TrainingSettingsContext;
+}
+export async function searchTrainingHomes(query: string, options: ApiOptions, characterID?: number): Promise<{ matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean; structureWarning: string | null }> {
+  const data = await getJson(`/api/pilot-training/homes?q=${encodeURIComponent(query)}${characterID ? `&characterID=${characterID}` : ""}`, options);
+  if (!Array.isArray(data.matches)) throw new Error("Training Home search is unreadable.");
+  const matches = data.matches.map(asMapLocation).filter(row =>
+    (row.kind === "station" || row.kind === "structure") && row.id > 0 && !!row.name && row.solarSystemID !== null);
+  return { matches: matches as import("../training/settings.ts").TrainingHomeMatch[], capped: data.capped === true,
+    structureWarning: typeof data.structureWarning === "string" ? data.structureWarning : null };
+}
+
+export async function factoryOwnership(characterID: number, options: ApiOptions = {}): Promise<{ owner: string; online: boolean }> {
+  return (await getJson(`/api/pilot-training/ownership?characterID=${characterID}`, options)).ownership as unknown as { owner: string; online: boolean };
+}
+
+/** Account-owned identities for a read-only training preview; no selection. */
+export async function loadTrainingCharacters(options: ApiOptions = {}): Promise<{
+  readonly account: string;
+  readonly characters: readonly TrainingCharacter[];
+}> {
+  const data = await getJson("/api/pilot-training/characters", options);
+  if (typeof data.account !== "string" || !Array.isArray(data.characters)) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training roster is incomplete.", 502);
+  }
+  const characters = data.characters as unknown as TrainingCharacter[];
+  if (characters.some((character) => !Number.isSafeInteger(character.characterID) ||
+      character.characterID <= 0 || typeof character.name !== "string")) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training roster is incomplete.", 502);
+  }
+  return { account: data.account, characters };
+}
+
+/** Gateway-owned skills plus static EveJS prerequisite closure, without a held session. */
+export async function loadMinerTraining(
+  characterID: number,
+  selections: Readonly<Record<string, StageFittingSelection>> = {},
+  options: ApiOptions = {},
+  targetStage: string | null = null,
+): Promise<MinerTrainingRead> {
+  const query = new URLSearchParams({ characterID: String(characterID), selections: JSON.stringify(selections) });
+  if (targetStage) query.set("targetStage", targetStage);
+  const data = await getJson(`/api/pilot-training/miner?${query}`, options);
+  const report = data.report as unknown as MinerTrainingRead["report"] | null;
+  if (!report || report.role !== "MINER" || !Array.isArray(report.stages) ||
+      !report.previews || report.pilot?.characterID !== characterID ||
+      !Number.isSafeInteger(data.corporationID) || !Array.isArray(data.fittings)) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training qualification read is incomplete.", 502);
+  }
+  return { report, corporationID: data.corporationID as number,
+    queue: data.queue as unknown as MinerTrainingRead["queue"],
+    fittings: data.fittings as unknown as MinerTrainingRead["fittings"] };
+}
+
+export async function loadQualification(characterID: number, role: string,
+  configurations: readonly import("../training/configurations.ts").TrainingConfiguration[], options: ApiOptions,
+  targetConfigurationID: string | null): Promise<MinerTrainingRead> {
+  const query = new URLSearchParams({ characterID: String(characterID), role, configurations: JSON.stringify(configurations) });
+  if (targetConfigurationID) query.set("targetConfigurationID", targetConfigurationID);
+  const data = await getJson(`/api/pilot-training/qualification?${query}`, options);
+  const report = data.report as unknown as MinerTrainingRead["report"];
+  if (!report || report.role !== role || report.pilot?.characterID !== characterID || !Array.isArray(report.stages) ||
+    !Array.isArray(data.fittings) || !Number.isSafeInteger(data.corporationID)) throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Qualification read is incomplete.", 502);
+  return { report, corporationID: data.corporationID as number, fittings: data.fittings as unknown as MinerTrainingRead["fittings"], queue: data.queue as unknown as MinerTrainingRead["queue"] };
+}
+
+export async function reviewTrainingQueue(
+  request: { characterID: number; role: string; configurations?: readonly import("../training/configurations.ts").TrainingConfiguration[]; mode: "FAST" | "BALANCED" | "MASTERY";
+    stage: string | null; targetStage?: string | null; displayedTargets: readonly { typeID: number; level: number }[];
+    selections: Readonly<Record<string, StageFittingSelection>> }, options: ApiOptions,
+): Promise<QueueReview> {
+  const data = await postJson("/api/pilot-training/queue/review", request, options);
+  const review = data.review as unknown as QueueReview;
+  if (!review || !Array.isArray(review.additions) || !Array.isArray(review.blockers) || review.fresh?.report?.pilot?.characterID !== request.characterID)
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Queue review is incomplete.", 502);
+  return review;
+}
+
+export async function applyTrainingQueue(reviewID: string, options: ApiOptions): Promise<QueueApplyOutcome> {
+  const data = await postJson("/api/pilot-training/queue/apply", { reviewID, confirm: true }, options);
+  const outcome = data.outcome as unknown as QueueApplyOutcome;
+  if (!outcome || !["APPLIED", "REFUSED", "APPLY_UNVERIFIED"].includes(outcome.status) || typeof outcome.verified !== "boolean")
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Apply outcome is unreadable; refresh the queue before reviewing again.", 502);
+  return outcome;
 }
