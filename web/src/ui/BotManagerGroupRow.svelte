@@ -25,6 +25,7 @@
   import {
     startServerBot as apiStartServerBot,
     startServerCompanion,
+    stopServerBot,
     getBotScript,
     type ApiOptions,
     type BotScriptSummary,
@@ -34,9 +35,12 @@
   import {
     groupMemberStates,
     groupStartEmptyWords,
+    groupCanStop,
+    groupRosterWords,
+    groupRunStatusWords,
     groupStatusWords,
     planGroupLaunch,
-    runHereReachWords,
+    planGroupStop,
     type PilotGroup,
   } from "../bots/pilotGroups.ts";
   import { groupStartSummary, type GroupStartEntry } from "../bots/groupStart.ts";
@@ -59,6 +63,7 @@
     libraryOptions,
     companionSetups,
     nameOf,
+    runtimeMinutes,
     onChanged,
   }: {
     group: PilotGroup;
@@ -78,6 +83,12 @@
     /** Each companion's saved setup, by characterID. Empty for a squad group. */
     companionSetups: ReadonlyMap<number, CompanionSetup>;
     nameOf: (characterID: number) => string | null;
+    /**
+     * How long a server start may fly. ONE setting for the whole list, owned by
+     * the panel: a limit per row was a picker repeated five times that nobody
+     * set differently.
+     */
+    runtimeMinutes: number;
     /** Fires after a start, so the panel re-reads the roster. */
     onChanged: () => void;
   } = $props();
@@ -124,7 +135,10 @@
   );
   const plan = $derived(planGroupLaunch(states));
   const statusWords = $derived(groupStatusWords(states));
-  const reachNote = $derived(runHereReachWords(plan));
+  const roster = $derived(groupRosterWords(states));
+  const stopPlan = $derived(planGroupStop(states, serverBots));
+  /** The row's one button is Stop while anything this row may stop is flying. */
+  const canStop = $derived(groupCanStop(stopPlan));
 
   // --- the picker -----------------------------------------------------------
   //
@@ -135,7 +149,19 @@
   // "which belt, which station, which agent" is a different answer per pilot,
   // so a built-in in this list would be a choice with no button under it.
   let selectedScriptID = $state<string | null>(null);
-  let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
+
+  /**
+   * Where Start flies the group: unticked (the default), only the pilots
+   * signed in to this tab; ticked, on the server, where it outlives the tab.
+   * Unticked by default at the player's request: a server run is the one that
+   * keeps flying unwatched, so it is the one a player opts into.
+   *
+   * ⚠ ONE BUTTON, AND THIS IS WHAT USED TO BE THE SECOND ONE. The two starts
+   * differ only in what happens when the tab closes, so it is a setting on the
+   * start rather than a second start. Companions always fly on the server and
+   * have no box to untick.
+   */
+  let onServer = $state(false);
 
   const isCompanions = $derived(group.kind === "companions");
   /** Companions flies itself; a squad needs a bot chosen first. */
@@ -331,15 +357,79 @@
     }
   }
 
-  function stateWords(entry: GroupStartEntry): string {
-    if (entry.state === "queued") return "waiting";
-    if (entry.state === "starting") return "starting";
-    if (entry.state === "started") return "flying";
-    return entry.sentence ?? "could not start";
+  const startTargets = $derived(isCompanions || onServer ? plan.onServer : plan.here);
+  const startLabel = $derived(
+    busy ? "Starting" : isCompanions || onServer ? "Start on the server" : "Start in this tab",
+  );
+
+  function start(): void {
+    void (isCompanions || onServer ? runOnServer() : runHere());
   }
+
+  // --- stopping it ----------------------------------------------------------
+  let stopping = $state(false);
+
+  /**
+   * Stop every member this row may stop: the pilot row's Stop, once per member.
+   *
+   * ⚠ ONE FAILURE DOES NOT STRAND THE REST, the same rule as a group start. Each
+   * member is stopped on its own call as its own account, and a refusal is said
+   * after the others have been tried.
+   */
+  async function stopGroup(): Promise<void> {
+    if (stopping || !canStop) return;
+    stopping = true;
+    startError = null;
+    summary = null;
+    rows = [];
+    let failed = 0;
+    try {
+      for (const characterID of stopPlan.here) {
+        try {
+          sessionFor(characterID)?.flow.stopCustomBot();
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const { characterID, botID } of stopPlan.onServer) {
+        try {
+          await stopServerBot(botID, await optionsFor(characterID));
+        } catch {
+          failed += 1;
+        }
+      }
+      if (failed > 0) {
+        startError = `Could not stop ${failed === 1 ? "1 pilot" : `${failed} pilots`} - they may have already ended.`;
+      }
+    } finally {
+      stopping = false;
+      onChanged();
+    }
+  }
+
+  /** What the Status cell says, in order of what the player most needs. */
+  const statusLine = $derived.by(() => {
+    if (busy && rows.length > 0) {
+      const started = rows.filter((row) => row.state === "started").length;
+      return `${started} of ${rows.length} started`;
+    }
+    if (stopping) return "Stopping";
+    const words = groupRunStatusWords(plan, isCompanions || onServer);
+    // The bot the whole group flies, said once here rather than per name.
+    return plan.busy.length > 0 && roster.commonBot !== null ? `${words} - ${roster.commonBot}` : words;
+  });
+
+  /** Members a start refused, with the server's own reason -- never dropped. */
+  const refusals = $derived(rows.filter((row) => row.state === "refused"));
 </script>
 
-<tr>
+<!--
+  ⚠ ONE LINE OF CONTROLS PER GROUP: a bot, where it flies, and one button that
+  is Start or Stop. What is true of every group alike -- what the Server box
+  means, the time limit, why built-ins are not in the picker -- is said once
+  under the list by BotManager.svelte.
+-->
+<tr class="bot-group-row">
   <td data-label="Group">
     <span class="bot-group-name">
       {#if group.color}
@@ -349,122 +439,89 @@
       {/if}
       {group.name}
     </span>
+    <span class="bot-group-count">{statusWords}</span>
     {#if isCompanions}
       <!-- What makes this group the special one, in the place a player is
            deciding whether to press its button. -->
       <p class="note why">Always flies the fleet companion.</p>
     {/if}
-  </td>
-  <td data-label="Pilots">
-    {statusWords}
     {#if states.length > 0}
-      <p class="note why">
-        {states.map((s) => (s.botName === null ? s.name : `${s.name} (${s.botName})`)).join(", ")}
-      </p>
+      <p class="note why">{roster.names}</p>
     {/if}
   </td>
-  <td data-label="Launch">
-    {#if group.members.length === 0}
+  {#if group.members.length === 0}
+    <td data-label="Bot" colspan="4">
       <span class="note">{groupStartEmptyWords(group.kind, 0)}</span>
-    {:else}
-      <div class="pilot-launch">
-        {#if !isCompanions}
-          <label class="pilot-launch-bot">
-            Bot
-            <select bind:value={selectedScriptID} disabled={busy}>
-              <option value={null}>Choose a bot</option>
-              {#each scripts as script (script.scriptID)}
-                <option value={script.scriptID}>{script.name}</option>
-              {/each}
-            </select>
-          </label>
-          {#if scripts.length === 0}
-            <span class="note">No saved bots yet.</span>
-          {/if}
-          <!-- Why the built-ins are not in that list. Without this the absence
-               reads as a missing feature rather than a deliberate one. -->
-          <span class="note why">
-            Built-in bots are set up against one pilot's own ship, so they start
-            from that pilot's row below.
-          </span>
-        {/if}
-
-        {#if !isCompanions}
-          <div class="pilot-launch-run">
-            <ActionButton
-              action="run-here"
-              primary
-              disabled={busy || !canStart || plan.here.length === 0}
-              onclick={runHere}
-            />
-            <span class="pilot-launch-where">
-              in this tab{plan.here.length > 0 ? ` (${plan.here.length})` : ""}
-            </span>
-          </div>
-          {#if reachNote}
-            <span class="note why">{reachNote}</span>
-          {/if}
-        {:else}
-          <!-- A companion in THIS TAB is the Fleet companions window's whole
-               job, and it is where an op is watched and stopped. Offering a
-               second, weaker door onto it here would split one operation
-               across two windows. -->
-          <span class="note why">
-            To fly companions in this tab, use the Companions window.
-          </span>
-        {/if}
-
-        <div class="pilot-launch-run">
-          <ActionButton
-            action="run-on-server"
-            primary={isCompanions}
-            disabled={busy || !canStart || plan.onServer.length === 0}
-            label={busy ? "Starting" : undefined}
-            onclick={runOnServer}
-          />
-          <span class="pilot-launch-where">
-            on the server{plan.onServer.length > 0 ? ` (${plan.onServer.length})` : ""}
-          </span>
-          {#if !isCompanions}
-            <label class="pilot-launch-limit">
-              for up to
-              <select bind:value={runtimeMinutes} disabled={busy}>
-                <option value={60}>1 hour</option>
-                <option value={240}>4 hours</option>
-                <option value={720}>12 hours</option>
-                <option value={1440}>24 hours</option>
-                <option value={2880}>48 hours</option>
-                <option value={4320}>72 hours</option>
-              </select>
-            </label>
-          {/if}
-        </div>
-        <span class="note why">Keeps flying if this tab closes.</span>
-      </div>
-    {/if}
-
-    {#if startError}
-      <p class="note error">{startError}</p>
-    {/if}
-  </td>
-  <td data-label="Progress">
-    {#if rows.length === 0 && summary === null}
-      —
-    {:else}
-      {#if rows.length > 0}
-        <ul class="bot-group-progress">
-          {#each rows as row (row.characterID)}
-            <li class="note">
-              {nameOf(row.characterID) ?? "Unknown pilot"} - {stateWords(row)}
-            </li>
+    </td>
+  {:else}
+    <td data-label="Bot">
+      {#if isCompanions}
+        <span class="note">Fleet companion</span>
+      {:else}
+        <select
+          class="bot-group-pick"
+          aria-label={`Bot for ${group.name}`}
+          bind:value={selectedScriptID}
+          disabled={busy || stopping}
+        >
+          <option value={null}>Choose a bot</option>
+          {#each scripts as script (script.scriptID)}
+            <option value={script.scriptID}>{script.name}</option>
           {/each}
-        </ul>
+        </select>
+        {#if scripts.length === 0}
+          <span class="note">No saved bots yet.</span>
+        {/if}
       {/if}
-      {#if summary !== null}
-        <p class="note"><strong>{summary}</strong></p>
+    </td>
+    <td data-label="Server">
+      {#if isCompanions}
+        <span class="note">Always</span>
+      {:else}
+        <label class="bot-group-server">
+          <input type="checkbox" bind:checked={onServer} disabled={busy || stopping} />
+          Server
+        </label>
       {/if}
-    {/if}
-  </td>
+    </td>
+    <td data-label="Run" class="bot-group-run">
+      {#if canStop && !isCompanions}
+        <ActionButton
+          action="stop"
+          danger
+          disabled={stopping}
+          label={stopping ? "Stopping" : `Stop ${group.name}`}
+          onclick={() => void stopGroup()}
+        />
+      {:else}
+        <ActionButton
+          action="run-here"
+          primary
+          disabled={busy || !canStart || startTargets.length === 0}
+          label={startLabel}
+          onclick={start}
+        />
+      {/if}
+    </td>
+    <td data-label="Status">
+      <span class="bot-group-status" class:is-flying={plan.busy.length > 0}>{statusLine}</span>
+      {#if isCompanions}
+        <!-- A companion in THIS TAB, and stopping any companion, is the Fleet
+             companions window's whole job. Offering a second, weaker door onto
+             it here would split one operation across two windows. -->
+        <p class="note why">To fly companions in this tab, or stop them, use the Companions window.</p>
+      {/if}
+      {#if summary !== null && !busy && plan.busy.length === 0}
+        <p class="note">{summary}</p>
+      {/if}
+      {#each refusals as row (row.characterID)}
+        <p class="note error">{nameOf(row.characterID) ?? "Unknown pilot"}: {row.sentence ?? "could not start"}</p>
+      {/each}
+      {#if startError}
+        <p class="note error">{startError}</p>
+      {/if}
+    </td>
+  {/if}
 </tr>
 
 <style>
@@ -475,12 +532,47 @@
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
+    color: var(--color-text-bright);
   }
+  /* Square, as the hangar's own squad swatches are. */
   .bot-group-swatch {
     width: 0.6rem;
     height: 0.6rem;
-    border-radius: 50%;
     flex: 0 0 auto;
+  }
+  .bot-group-count {
+    display: block;
+    margin-left: 1rem;
+    color: var(--color-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .bot-group-row .note.why {
+    margin: 0.2rem 0 0;
+  }
+  .bot-group-row td[data-label="Group"] > .note.why {
+    margin-left: 1rem;
+  }
+  .bot-group-pick {
+    width: 100%;
+    min-width: 8rem;
+  }
+  .bot-group-server {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 40px;
+    color: var(--color-text);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .bot-group-status {
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .bot-group-status.is-flying {
+    color: var(--color-good);
   }
   /* Companions has no squad colour to show. A ring rather than a filled dot,
      so it reads as "not one of your squads" instead of borrowing a palette
@@ -488,9 +580,5 @@
   .bot-group-swatch.is-special {
     background: transparent;
     border: 2px solid var(--color-accent);
-  }
-  .bot-group-progress {
-    margin: 0;
-    padding-left: 1rem;
   }
 </style>

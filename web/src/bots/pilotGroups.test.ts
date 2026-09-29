@@ -25,7 +25,10 @@ import {
   groupStatusWords,
   pilotGroups,
   planGroupLaunch,
-  runHereReachWords,
+  planGroupStop,
+  groupCanStop,
+  groupRosterWords,
+  groupRunStatusWords,
   type GroupMemberState,
 } from "./pilotGroups.ts";
 
@@ -247,10 +250,12 @@ test("the status line counts the group, the busy and the free", () => {
   );
 });
 
-test("'Run here' says when it reaches fewer pilots than the server would", () => {
+test("with Server unticked, the status says when Start reaches fewer pilots", () => {
   // ⚠ A DISABLED BUTTON WITH NO SENTENCE BESIDE IT READS AS BROKEN.
   const noTabs = planGroupLaunch(states([[PILOT_A, "free"]]));
-  assert.equal(runHereReachWords(noTabs), "No pilot in this group has a tab open here.");
+  assert.equal(groupRunStatusWords(noTabs, false), "No tab open here");
+  // Ticked, the server reaches everyone free: nothing to warn about.
+  assert.equal(groupRunStatusWords(noTabs, true), "Idle");
 
   const some = planGroupLaunch(
     states([
@@ -258,15 +263,63 @@ test("'Run here' says when it reaches fewer pilots than the server would", () =>
       [PILOT_B, "free"],
     ]),
   );
-  assert.equal(
-    runHereReachWords(some),
-    "Only 1 pilot of the 2 free have a tab open here.",
-  );
+  assert.equal(groupRunStatusWords(some, false), "1 of 2 here");
+  assert.equal(groupRunStatusWords(planGroupLaunch(states([[PILOT_A, "held"]])), false), "Idle");
+});
 
-  // Nothing to warn about: both buttons reach the same pilots.
-  assert.equal(runHereReachWords(planGroupLaunch(states([[PILOT_A, "held"]]))), null);
-  // Nothing to start at all; the status line has already said so.
-  assert.equal(runHereReachWords(planGroupLaunch(states([[PILOT_A, "running-here"]]))), null);
+test("the status counts who is flying before anything else", () => {
+  const plan = planGroupLaunch(
+    states([
+      [PILOT_A, "running-server"],
+      [PILOT_B, "running-here"],
+      [PILOT_C, "free"],
+    ]),
+  );
+  assert.equal(groupRunStatusWords(plan, false), "2 flying");
+});
+
+test("a group Stop reaches only what is flying, and never a companion", () => {
+  // ⚠ STOPPING A COMPANION IS THE FLEET COMPANIONS WINDOW'S ACT. A group row
+  // that stopped one would split one operation across two windows.
+  const bots = [
+    serverBot({ botID: "bot-a", characterID: PILOT_A }),
+    serverBot({ botID: "bot-b", characterID: PILOT_B, kind: "companion" }),
+  ];
+  const rows = states([
+    [PILOT_A, "running-server"],
+    [PILOT_B, "running-server"],
+    [PILOT_C, "running-here"],
+  ]);
+  const stop = planGroupStop(rows, bots);
+  assert.deepEqual(stop.onServer, [{ characterID: PILOT_A, botID: "bot-a" }]);
+  assert.deepEqual(stop.here, [PILOT_C]);
+  assert.deepEqual(stop.companions, [PILOT_B]);
+  assert.equal(groupCanStop(stop), true);
+
+  // Only companions flying: nothing this row may stop, so its button stays Start.
+  const onlyCompanion = planGroupStop(states([[PILOT_B, "running-server"]]), bots);
+  assert.equal(groupCanStop(onlyCompanion), false);
+
+  // Idle members are not in the plan at all.
+  assert.equal(groupCanStop(planGroupStop(states([[PILOT_A, "free"]]), bots)), false);
+});
+
+test("the group names its bot once, and per pilot only when they differ", () => {
+  const row = (name: string, botName: string | null): GroupMemberState => ({
+    characterID: PILOT_A,
+    name,
+    where: botName === null ? "free" : "running-server",
+    botName,
+  });
+  const same = groupRosterWords([row("One", "Belt loop"), row("Two", "Belt loop"), row("Three", null)]);
+  assert.equal(same.names, "One, Two, Three");
+  assert.equal(same.commonBot, "Belt loop");
+
+  const mixed = groupRosterWords([row("One", "Belt loop"), row("Two", "Fleet companion")]);
+  assert.equal(mixed.names, "One (Belt loop), Two (Fleet companion)");
+  assert.equal(mixed.commonBot, null);
+
+  assert.equal(groupRosterWords([row("One", null)]).commonBot, null);
 });
 
 test("the empty sentence names what the player has to go and do", () => {
@@ -286,8 +339,9 @@ test("every sentence this module prints is plain ASCII", () => {
     groupStartEmptyWords("companions", 0),
     groupStartEmptyWords("squad", 0),
     groupStartEmptyWords("squad", 2),
-    runHereReachWords(planGroupLaunch(states([[PILOT_A, "free"]]))) ?? "",
-    runHereReachWords(planGroupLaunch(states([[PILOT_A, "held"], [PILOT_B, "free"]]))) ?? "",
+    groupRunStatusWords(planGroupLaunch(states([[PILOT_A, "free"]])), false),
+    groupRunStatusWords(planGroupLaunch(states([[PILOT_A, "held"], [PILOT_B, "free"]])), false),
+    groupRunStatusWords(planGroupLaunch(states([[PILOT_A, "running-here"]])), true),
   ];
   for (const line of words) {
     assert.match(line, /^[\x20-\x7e]*$/, `not plain ASCII: ${line}`);
