@@ -486,6 +486,17 @@ function readMacroStep(obj: Readonly<Record<string, unknown>>, ctx: Ctx): MacroS
   }
   const id = readRawId(obj["id"]);
   const spec = MACRO_SPECS[macro as MacroID];
+  // A count normally clamps into its broad document range. Mission level is a
+  // policy choice: an explicit 0 or 5 must never decode as another level.
+  if (macro === "find-distribution-agent" && obj["args"] !== undefined) {
+    const rawArgs = asObject(obj["args"], SAY.unknownArg);
+    if (rawArgs["level"] !== undefined) {
+      const rawLevel = asObject(rawArgs["level"], SAY.badArg("level"));
+      const value = rawLevel["value"];
+      if (rawLevel["kind"] !== "count" || typeof value !== "number" ||
+          !Number.isSafeInteger(value) || value < 1 || value > 4) refuse(SAY.badArg("level"));
+    }
+  }
   const args = readArgs(obj["args"], spec, ctx);
 
   let until: Condition | undefined;

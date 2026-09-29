@@ -1610,8 +1610,14 @@ function makeFindAgent(kindWord: string, finderKind: string): MacroDecider {
           agentStationID: found.stationID,
           agentName: found.name,
           agentStationName: found.stationName,
+          ...(found.level === undefined ? {} : { agentLevel: found.level }),
         },
       };
+    }
+    if (finderKind === "courier" && obs.agentSearchFailure) {
+      return tick(WAIT, obs.agentSearchFailure, "Finding an agent", {
+        kind: "blocked", reason: obs.agentSearchFailure,
+      });
     }
     // Publish the criteria (once) so the flow's next read can run the search.
     return {
@@ -1619,6 +1625,7 @@ function makeFindAgent(kindWord: string, finderKind: string): MacroDecider {
       boardPatch: {
         findKind: finderKind,
         findLevel: countArg(step, "level") ?? 1,
+        ...(finderKind === "courier" ? { findFallback: step.args["fallback"]?.kind === "toggle" && step.args["fallback"].enabled ? 1 : 0 } : {}),
         findMaxJumps: countArg(step, "maxJumps"),
         findCorpID: (() => {
           const corp = step.args["corporation"];
@@ -1628,7 +1635,20 @@ function makeFindAgent(kindWord: string, finderKind: string): MacroDecider {
     };
   };
 }
-const findDistributionAgent: MacroDecider = makeFindAgent("delivery", "courier");
+const distributionFinder = makeFindAgent("delivery", "courier");
+const findDistributionAgent: MacroDecider = (step, obs, mem, board) => {
+  const level = step.args["level"];
+  const fallback = step.args["fallback"];
+  const corp = step.args["corporation"];
+  if ((level && (level.kind !== "count" || !Number.isSafeInteger(level.value) || level.value < 1 || level.value > 4)) ||
+      (fallback && (fallback.kind !== "toggle" || typeof fallback.enabled !== "boolean")) ||
+      (corp && (corp.kind !== "corp" || !Number.isSafeInteger(corp.id) || corp.id === null || corp.id <= 0))) {
+    return tick(WAIT, "Distribution agent configuration is invalid.", "Finding an agent", {
+      kind: "blocked", reason: "Choose a level from 1 to 4 and resolve the fallback and corporation settings.",
+    });
+  }
+  return distributionFinder(step, obs, mem, board);
+};
 const findCombatAgent: MacroDecider = makeFindAgent("combat", "encounter");
 
 // ── request-mission ──────────────────────────────────────────────────────────

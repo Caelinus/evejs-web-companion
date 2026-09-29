@@ -104,6 +104,31 @@ test("encode then decode is a lossless round trip", () => {
   assert.deepStrictEqual([...warnings], []);
 });
 
+test("legacy Distribution finder remains level 1 without fallback; explicit policy round-trips in v1", () => {
+  const legacy = { ...golden(), program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: {} }] };
+  const old = mustAccept(decodeScriptValue(legacy)).doc;
+  assert.deepEqual(old.program[0], legacy.program[0]);
+  const explicit = { ...golden(), program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: {
+    level: { kind: "count", value: 4 }, fallback: { kind: "toggle", enabled: true },
+  } }] };
+  const newer = mustAccept(decodeScriptValue(explicit)).doc;
+  assert.equal(newer.version, 1);
+  assert.deepEqual(mustAccept(decodeScriptText(encodeScriptDoc(newer))).doc, newer);
+});
+
+test("malformed explicit Distribution policy is refused, not converted to a different search", () => {
+  for (const level of [0, 5, "4", null]) {
+    const raw = { ...golden(), program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: {
+      level: { kind: "count", value: level },
+    } }] };
+    assert.match(mustRefuse(decodeScriptValue(raw)), /level|argument/i);
+  }
+  for (const fallback of [{ kind: "toggle", enabled: "yes" }, { kind: "count", value: 1 }]) {
+    const raw = { ...golden(), program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: { fallback } }] };
+    mustRefuse(decodeScriptValue(raw));
+  }
+});
+
 // The golden fixture only exercises belt/station/equipment args, so on its own it
 // cannot catch a serialiser that forgets a kind. This document uses EVERY OTHER
 // arg kind (count, corp, agent, fitting, itemType, place, bookmark, character,

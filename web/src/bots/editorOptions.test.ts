@@ -239,7 +239,10 @@ test("no label reads like a raw enum/token (kebab-case, underscores)", () => {
 test("argBounds narrows a count argument to what that argument actually means", () => {
   const level = MACRO_ARG_DESCRIPTORS["find-distribution-agent"].all.find((a) => a.key === "level");
   assert.ok(level, "find-distribution-agent has no level argument");
-  assert.deepEqual(argBounds("find-distribution-agent", level), { min: 1, max: 5 }, "agent levels run 1-5");
+  assert.deepEqual(argBounds("find-distribution-agent", level), { min: 1, max: 4 }, "Distribution levels run 1-4");
+  const fallback = MACRO_ARG_DESCRIPTORS["find-distribution-agent"].all.find((a) => a.key === "fallback");
+  assert.equal(fallback?.kind, "toggle");
+  assert.equal(fallback?.required, false);
 
   const seconds = MACRO_ARG_DESCRIPTORS["wait"].all.find((a) => a.key === "seconds");
   assert.ok(seconds);

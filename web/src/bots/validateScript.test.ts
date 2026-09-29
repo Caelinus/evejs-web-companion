@@ -45,6 +45,19 @@ test("a complete draft has no problems", () => {
   assert.deepEqual(validateScript(ready()), []);
 });
 
+test("Distribution finder accepts legacy defaults and blocks invalid explicit policy", () => {
+  const finder = (args: MacroStep["args"]): BotScript => ({ ...ready(), program: [
+    { id: "finder", kind: "macro", macro: "find-distribution-agent", args },
+  ] });
+  assert.deepEqual(validateScript(finder({})), []);
+  assert.deepEqual(validateScript(finder({ level: { kind: "count", value: 4 },
+    fallback: { kind: "toggle", enabled: true } })), []);
+  assert.ok(validateScript(finder({ level: { kind: "count", value: 5 } }))
+    .some((problem) => problem.path === "finder" && problem.severity === "blocking"));
+  assert.ok(validateScript(finder({ fallback: { kind: "toggle", enabled: "yes" } as unknown as MacroStep["args"][string] }))
+    .some((problem) => problem.path === "finder" && problem.severity === "blocking"));
+});
+
 test("a blank name and unbound home are each flagged, and both are blocking", () => {
   const draft = { ...ready(), name: "  ", home: { entity: "station" as const, id: null, name: null, systemName: null } };
   const problems = validateScript(draft);

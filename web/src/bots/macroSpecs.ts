@@ -67,12 +67,13 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "defend-with-drones": { args: [], untilRequired: false },
   // ── The distribution-mission set. Every arg is OPTIONAL by design: the find
-  // block defaults to level 1 / any corp / any distance, and the later blocks
+  // block defaults to level 1 / no lower-level fallback / any corp / any distance, and the later blocks
   // default to the agent/mission the find block published on the run's board —
   // so a bare wired-up chain of blocks is valid out of the box.
   "find-distribution-agent": {
     args: [
       { key: "level", kind: "count", required: false },
+      { key: "fallback", kind: "toggle", required: false },
       { key: "maxJumps", kind: "count", required: false },
       { key: "corporation", kind: "corp", required: false },
     ],
