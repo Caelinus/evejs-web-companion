@@ -179,6 +179,7 @@ export function startingStation(): WorldRef {
 export type BeltArg =
   | { readonly mode: "nearest" }
   | { readonly mode: "site" }
+  | { readonly mode: "ice-site" }
   | { readonly mode: "chosen"; readonly ref: WorldRef };
 
 /**

@@ -52,4 +52,11 @@ module.exports = {
   port: Number.parseInt(process.env.PORT || "26500", 10) || 26500,
   sessionCookieName: "evejs_web_poc",
   sessionTtlMs: 12 * 60 * 60 * 1000,
+  // Farmer's hosted grant is bounded to 72 hours; its token remains valid
+  // through the additional bounded home/dock cleanup window.
+  hostedRunPolicy: Object.freeze({
+    maxRuntimeMinutes: 72 * 60,
+    defaultRuntimeMinutes: 12 * 60,
+    durationChoices: Object.freeze([60, 240, 720, 1440, 2880, 4320]),
+  }),
 };

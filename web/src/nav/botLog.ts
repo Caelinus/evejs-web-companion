@@ -200,6 +200,18 @@ export function describeAction(action: ScriptAction): string {
       return `repair ${action.itemIDs.join(",")}`;
     case "rememberBeltDry":
       return `note ${action.beltName} in ${action.systemName} dry${action.groupID === null ? "" : ` of group ${action.groupID}`}`;
+    case "reserveMiningTarget":
+      return `reserve operation target ${action.targetName} in ${action.systemName}`;
+    case "bookmarkMiningSite":
+      return `save logistics return point for ${action.targetKey}`;
+    case "activateMiningTarget":
+      return `activate operation target ${action.targetKey}`;
+    case "depleteMiningTarget":
+      return `mark operation target ${action.targetKey} depleted`;
+    case "miningMemberReady":
+      return "mark operation member ready";
+    case "miningDrainComplete":
+      return `finish logistics tail at ${action.targetKey}`;
     case "callPrimary":
       return action.targetID === null ? "clear the fleet's called primary" : `call ${action.targetID} as the fleet's primary`;
     case "moveItems":

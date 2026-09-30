@@ -47,6 +47,7 @@ import type {
 } from "../bots/botScript.ts";
 import { alertSentence, conditionSentence, stepSentence } from "../bots/scriptText.ts";
 import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory } from "./miningDroneFlight.ts";
+import { confirmedDrain } from "./miningLogistics.ts";
 import { hostileRows } from "../space/overview.ts";
 import {
   SENTENCE as COND_SENTENCE,
@@ -114,6 +115,7 @@ export type ScriptAction =
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "mineDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
+  | { readonly kind: "bookmarkMiningSite"; readonly targetKey: string }
   /**
    * Put the freight ashore at the station the ship is docked at.
    *
@@ -124,7 +126,7 @@ export type ScriptAction =
    * and the bridge then lands the load in the pilot's own hangar and reports
    * which happened. A block that named a division still finishes its lap.
    */
-  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number }
+  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number; readonly strictCorp?: boolean }
   // ── Mission actions (the distribution blocks). Each is one proven mission-bot
   //    operation: a labeled button press in the agent conversation, a handoff to
   //    the shared autopilot, or a package move confirmed by re-read next tick.
@@ -234,6 +236,15 @@ export type ScriptAction =
    * by other pilots running the same bot, possibly in other systems.
    */
   | { readonly kind: "rememberBeltDry"; readonly systemName: string; readonly beltName: string; readonly groupID: number | null }
+  | { readonly kind: "reserveMiningTarget"; readonly candidates?: readonly import("../app/api.ts").MiningTargetCandidate[];
+      readonly targetType: "BELT" | "ORE_ANOMALY" | "ICE"; readonly siteIdentity?: string;
+      readonly siteID?: number; readonly instanceID?: number | null; readonly position?: import("../store/types.ts").SpaceVector;
+      readonly systemID: number; readonly systemName: string; readonly targetName: string }
+  | { readonly kind: "activateMiningTarget"; readonly targetKey: string }
+  | { readonly kind: "depleteMiningTarget"; readonly targetKey: string;
+      readonly evidence: Readonly<Record<string, string | number | boolean | null>> }
+  | { readonly kind: "miningMemberReady" }
+  | { readonly kind: "miningDrainComplete"; readonly targetKey: string }
   /**
    * Tell the BFF's SHARED squad board which ship this pilot is on, so the fleet
    * can concentrate its fire (`targetID` null clears the call). Like
@@ -642,6 +653,7 @@ export type MacroOutcome =
 export type ScriptBoard = Readonly<Record<string, number | string | null>>;
 
 export interface MacroTick {
+  readonly settleDrones?: boolean;
   readonly action: ScriptAction;
   readonly why: string;
   readonly phase: string;
@@ -968,11 +980,11 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
     return false;
   }
   const step = activeStep(script, mem.position);
-  if (step === undefined || step === null || step.macro !== "mine-at-belt") {
+  if (step === undefined || step === null || !["mine-at-belt", "travel-to-belt"].includes(step.macro)) {
     return false;
   }
   const belt = step.args["belt"];
-  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "site";
+  return belt !== undefined && belt.kind === "belt" && ["site", "ice-site"].includes(belt.belt.mode);
 }
 
 /**
@@ -1004,6 +1016,7 @@ export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): 
 export type RunStatus = "running" | "paused" | "done";
 
 export interface ScriptTickResult {
+  readonly settleDrones?: boolean;
   readonly action: ScriptAction;
   readonly why: string;
   readonly phase: string;
@@ -1048,7 +1061,32 @@ export function decideScriptAction(
   registry: MacroRegistry,
   travelHome: HomeTravelDecider,
 ): ScriptTickResult {
+  if (obs.miningOperation?.stopRequested === true) {
+    return { action: WAIT, memory: mem, stepPath: null, interruptID: null,
+      status: "running", pauseReason: null,
+      phase: "Stopping operation", why: "Operation Stop is settling this pilot; new work is disabled." };
+  }
   const base = decideScriptCore(script, obs, mem, registry, travelHome);
+  const operationHeld = obs.miningOperationRequired === true &&
+    (obs.miningOperation == null ||
+      (obs.miningOperation.role === "MINER" && obs.miningOperation.currentTarget === null));
+  if (operationHeld && base.memory.latched === null) {
+    const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+    const miner = obs.miningModuleIDs?.find(id => active.has(id));
+    if (miner !== undefined) return { ...base, action: { kind: "deactivate", moduleID: miner },
+      status: "running", pauseReason: null, phase: "Target authority unavailable",
+      why: "Settling mining equipment until the operation owns a target." };
+    const controlled = obs.miningDrones?.out?.filter(drone => drone.controlled) ?? [];
+    if (controlled.length > 0 && obs.hostileOnGrid !== true) return { ...base,
+      action: { kind: "recallDrones", droneIDs: controlled.map(drone => drone.itemID) },
+      status: "running", pauseReason: null, phase: "Target authority unavailable",
+      why: "Recalling controlled drones until operation target authority is restored." };
+    const macro = activeMacroID(script, mem);
+    if (obs.miningOperation == null || !["undock", "mine-at-belt", "warp-to-ore-anomaly", "deliver-ore", "travel-to-station"].includes(macro ?? "")) {
+      return { ...base, action: WAIT, status: "running", pauseReason: null,
+        phase: "Waiting for operation target", why: obs.miningOperationReadError ?? "No owned operation target is available." };
+    }
+  }
   // A health-critical watch owns the escape for its entire latched trip, not
   // just the first tick. A normal blocked macro can also latch a trip home,
   // but that trip must settle its flight before ordinary travel.
@@ -1093,10 +1131,12 @@ export function decideScriptAction(
     hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
   const picked = step === null ? null : base.memory.macroMem[step.id]?.["rockID"] ??
     mem.macroMem[step.id]?.["rockID"] ?? null;
-  const rockID = typeof picked === "number" && obs.lockedTargetIDs?.includes(picked) &&
+  const ice = obs.miningOperation?.currentTarget?.targetType === "ICE" ||
+    (step?.args["belt"]?.kind === "belt" && step.args["belt"].belt.mode === "ice-site");
+  const rockID = !ice && typeof picked === "number" && obs.lockedTargetIDs?.includes(picked) &&
     obs.snapshot?.entities.some((entity) => entity.itemID === picked && entity.miningYieldTypeID !== null)
     ? picked : null;
-  const leaving = !mining || base.memory.latched !== null ||
+  const leaving = base.settleDrones === true || !mining || base.memory.latched !== null ||
     (step !== null && activeMacroID(script, base.memory) !== "mine-at-belt") ||
     ["warp", "warpScan", "warpBookmark", "approach", "orbit", "align", "dock", "undock",
       "startRoute", "startSystemRoute"].includes(base.action.kind);
@@ -2066,7 +2106,13 @@ function runProgram(
         loopBodyIndex !== null
           ? ((script.program[branchNode] as LoopBlock).body[loopBodyIndex] as BranchBlock)
           : (script.program[branchNode] as BranchBlock);
-      const verdict = evaluateCondition(branch.when, obs);
+      // A draining operation must deliver the last partial hold even when the
+      // normal full-hold threshold is not met. Keep this scoped to the
+      // operation's single delivery branch.
+      const finalDelivery = branch.when.kind === "ore-hold-at-least" &&
+        branch.then.length === 1 && branch.then[0]?.kind === "macro" &&
+        branch.then[0].macro === "deliver-ore" && confirmedDrain(obs, board);
+      const verdict = finalDelivery ? "met" : evaluateCondition(branch.when, obs);
       if (verdict === "cannot-tell") {
         // No `isSilent` test here: a branch whose `when` cannot be read waits,
         // full stop, so every tick counted at this position is already a silent
@@ -2283,6 +2329,7 @@ function runProgram(
     return {
       action: tick.action,
       containerTargetID: tick.containerTargetID,
+      settleDrones: tick.settleDrones,
       why: tick.why,
       phase: tick.phase,
       stepPath: step.id,

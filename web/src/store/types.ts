@@ -1583,6 +1583,7 @@ export interface SpaceEntity {
    */
   readonly remainingQuantity: number | null;
   readonly miningYieldTypeID: number | null;
+  readonly miningResourceFamily?: "ore" | "ice" | "gas" | null;
   readonly beltID: number | null;
   /**
    * The rock's ORE GRADE — dogma attribute 2699 (asteroid meta level), read by

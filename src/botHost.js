@@ -274,6 +274,9 @@ function createBotHost(options) {
             startedAt: record.startedAt,
             stopRequested: record.windingDown === true,
             stopBlocked: record.stopBlocked === true,
+            ...(record.operationID ? { operationID: record.operationID, operationRole: record.operationRole,
+              operationControllerAccountID: record.operationControllerAccountID,
+              operationStopRequested: record.operationStopRequested === true } : {}),
           };
           if (record.kind === "companion") {
             // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
@@ -335,6 +338,9 @@ function createBotHost(options) {
       scriptName: record.scriptName,
       scriptRev: record.scriptRev,
       scriptHash: record.scriptHash,
+      operationID: record.operationID,
+      operationRole: record.operationRole,
+      parking: record.parking,
       restartSafe: record.restartSafe,
       riskClasses: record.riskClasses,
       maxRuntimeMinutes: record.maxRuntimeMinutes,
@@ -774,6 +780,9 @@ function createBotHost(options) {
     expectedExpiresAt = null,
     callerSessionID = null,
     beforeStart = null,
+    operationID = null,
+    operationRole = null,
+    operationControllerAccountID = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -934,6 +943,13 @@ function createBotHost(options) {
       scriptName: recordScriptName,
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
+      operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
+      operationRole: ["MINER", "HAULER"].includes(operationRole) ? operationRole : null,
+      operationControllerAccountID: Number.isSafeInteger(Number(operationControllerAccountID)) && Number(operationControllerAccountID) > 0 ? Number(operationControllerAccountID) : null,
+      operationStopRequested: false,
+      parking: null,
+      prepareParkingPromise: null,
+      parkingPromise: null,
       restartSafe: runPolicy.restartSafe === true,
       riskClasses: [...runPolicy.riskClasses],
       maxRuntimeMinutes: grantVerdict.grant.maxRuntimeMinutes,
@@ -1025,6 +1041,7 @@ function createBotHost(options) {
         perSessionToken: true,
         initialSessionToken: token,
         eventSource: stubEventSource,
+        miningOperationID: record.operationID,
       });
       record.flow = flow;
       record.store = store;
@@ -1094,6 +1111,89 @@ function createBotHost(options) {
       return { ok: false, code: "BOT_NOT_FOUND" };
     }
     return requestGracefulStop(record, false);
+  }
+
+  function operationRecord(botID, accountID, operationID) {
+    const record = records.get(botID);
+    return record && !record.finalized && record.accountID === Number(accountID) &&
+      record.operationID === operationID && claims.get(record.characterID) === botID ? record : null;
+  }
+
+  async function prepareOperationStop(botID, accountID, operationID) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.prepareParkingPromise) return record.prepareParkingPromise;
+    if (record.stopPromise || record.deadlineRequested) {
+      return { ok: false, code: "PARKING_STOP_IN_PROGRESS", message: "A hosted Stop or deadline is already settling this pilot." };
+    }
+    record.operationStopRequested = true;
+    record.windingDown = true;
+    record.parking = { state: "SETTLING", reason: null };
+    persistRoster();
+    const pending = (async () => {
+      try {
+        await record.flow.prepareCustomBotParking();
+        record.droneSafetyConfirmed = true;
+        record.parking = { state: "READY", reason: null };
+        persistRoster();
+        return { ok: true };
+      } catch (error) {
+        const reason = error?.message || "Mining equipment or controlled drones could not be settled.";
+        record.parking = { state: "PARKING_FAILED", reason };
+        record.status = "paused";
+        record.phase = "Parking settlement blocked";
+        record.why = reason;
+        record.stopBlocked = true;
+        persistRoster();
+        return { ok: false, code: "PARKING_PREPARE_FAILED", message: reason };
+      }
+    })();
+    record.prepareParkingPromise = pending;
+    try { return await pending; } finally { record.prepareParkingPromise = null; }
+  }
+
+  async function parkOperationMember(botID, accountID, operationID, policy) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.parkingPromise) return record.parkingPromise;
+    if (record.parking?.state !== "READY") return { ok: false, code: "PARKING_NOT_SETTLED", message: "Settle this member before parking." };
+    const pending = (async () => {
+      try {
+        record.parking = { state: "PARKING", reason: null };
+        persistRoster();
+        await record.flow.parkCustomBot(policy, Math.min(Date.parse(record.expiresAt) + DEADLINE_DOCK_GRACE_MS, now() + DEADLINE_DOCK_GRACE_MS));
+        record.parking = { state: "PARKED", reason: null };
+        persistRoster();
+        // The existing graceful Stop remains the sole release authority.
+        return await requestGracefulStop(record, false);
+      } catch (error) {
+        const reason = error?.message || "Parking could not be confirmed.";
+        record.status = "paused";
+        record.phase = "Parking failed";
+        record.why = reason;
+        record.parking = { state: "PARKING_FAILED", reason };
+        record.stopBlocked = true;
+        persistRoster();
+        return { ok: false, code: "PARKING_FAILED", message: reason };
+      }
+    })();
+    record.parkingPromise = pending;
+    try { return await pending; } finally { record.parkingPromise = null; }
+  }
+
+  async function extendOperationGrant() {
+    return { ok: false, code: "OPERATION_GRANT_EXTENSION_UNAVAILABLE",
+      message: "This hosted credential cannot be extended in place. Start a newly approved run after safely stopping this one." };
+  }
+
+  function listAll() {
+    return [...records.values()].map(publicBot);
+  }
+
+  function operationForClaim(characterID, secret) {
+    if (!authorizesClaim(characterID, secret)) return null;
+    const record = records.get(claims.get(Number(characterID)));
+    return record?.operationID ? { operationID: record.operationID, operationRole: record.operationRole } : null;
   }
 
   function list(accountID) {
@@ -1238,6 +1338,10 @@ function createBotHost(options) {
       scriptName: String(row.scriptName || "Untitled bot"),
       scriptRev: Number(row.scriptRev || 0),
       scriptHash: String(row.scriptHash || ""),
+      operationID: typeof row.operationID === "string" ? row.operationID : null,
+      operationRole: row.operationRole ?? null,
+      operationStopRequested: row.operationStopRequested === true,
+      parking: row.operationStopRequested ? { state: "PARKING_FAILED", reason: "A restart interrupted operation parking." } : null,
       restartSafe: false,
       riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses.map(String) : [],
       maxRuntimeMinutes: Number(row.maxRuntimeMinutes || 0),
@@ -1282,7 +1386,7 @@ function createBotHost(options) {
         }
         let script = null;
         if (kind === "script") {
-          script = loadScript(String(row.scriptID || ""));
+          script = loadScript(String(row.scriptID || ""), row);
           if (!script) {
             recordResumeFailure(row, "the saved bot no longer exists.");
             continue;
@@ -1304,7 +1408,7 @@ function createBotHost(options) {
           recordResumeFailure(row, "it can repeat a consequential action. Review and start it again manually.");
           continue;
         }
-        if (row.stopRequested === true || row.stopBlocked === true) {
+        if (row.stopRequested === true || row.stopBlocked === true || row.operationStopRequested === true) {
           recordResumeFailure(row, "a graceful Stop was blocked before restart. Review this pilot manually.");
           continue;
         }
@@ -1351,6 +1455,9 @@ function createBotHost(options) {
                 expectedScriptRev: row.scriptRev,
                 expectedScriptHash: row.scriptHash,
                 expectedExpiresAt: row.expiresAt,
+                operationID: row.operationID ?? null,
+                operationRole: row.operationRole ?? null,
+                operationControllerAccountID: row.operationControllerAccountID ?? null,
               });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
@@ -1373,6 +1480,11 @@ function createBotHost(options) {
   return {
     start,
     stop,
+    extendOperationGrant,
+    prepareOperationStop,
+    parkOperationMember,
+    listAll,
+    operationForClaim,
     list,
     claimedBy,
     authorizesClaim,

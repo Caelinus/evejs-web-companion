@@ -114,6 +114,7 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     // An ABSENT oreGrade decodes to null ("unknown"), never 0: 0-Grade ore is a
     // real, meaningful grade and must not collide with "we don't know".
     oreGrade: countOrNull(raw.oreGrade),
+    miningResourceFamily: raw.miningResourceFamily === "ice" || raw.miningResourceFamily === "ore" ? raw.miningResourceFamily : null,
     // ISK per m³ for the rock's ore, stamped by the BFF from static data. A
     // FLOAT read (it is a price, not a count) and absent decodes to null: an
     // unpriceable ore is unknown, never worthless.
