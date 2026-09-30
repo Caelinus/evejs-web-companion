@@ -114,6 +114,21 @@ export function isGlobalTab(id: TabID): boolean {
 }
 
 /**
+ * The Bot Builder, when NOBODY is in the client.
+ *
+ * It is a pilot's panel and not a global tab: with a pilot on screen it opens
+ * on that pilot's desktop, where its pickers can read their ship. But the Bot
+ * Manager's New and Edit work from the Pilot Hangar too, and there is no
+ * desktop there, so App floats it on this layer instead (HangarBotBuilder.svelte).
+ *
+ * ⚠ NOT IN `GLOBAL_TABS`. That would pull it off every pilot's desktop and
+ * demand a launcher it has never had. Nor is it restored from storage (`readWin`
+ * drops it): it floats only because somebody pressed New or Edit with nobody in
+ * the client, and a reload is not that.
+ */
+export const PILOTLESS_BUILDER: TabID = "botBuilder";
+
+/**
  * Where a global window first appears: offset from the top-left of its layer,
  * and roomier than a default workspace window because both of these lead with a
  * multi-column table of pilots.
@@ -163,10 +178,11 @@ function topGlobalZ(wins: readonly WinState[]): number {
  *
  * A tab that is not global is refused rather than placed here: it belongs to a
  * pilot's desktop, and drawing it on this layer would put a character-scoped
- * panel above the character bar that switches characters.
+ * panel above the character bar that switches characters. The one exception is
+ * `PILOTLESS_BUILDER`, which is scoped to nobody when it is opened here.
  */
 export function openGlobal(wins: readonly WinState[], id: TabID): WinState[] {
-  if (!isGlobalTab(id)) return wins.slice();
+  if (!isGlobalTab(id) && id !== PILOTLESS_BUILDER) return wins.slice();
   const z = topGlobalZ(wins) + 1;
   const existing = wins.find((w) => w.id === id);
   if (existing) {

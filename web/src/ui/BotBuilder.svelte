@@ -106,11 +106,11 @@
   import StationPicker from "./StationPicker.svelte";
   import { onMount } from "svelte";
   import type { ClientStore } from "../store/clientStore.ts";
-  import type { AppFlow } from "../app/flow.ts";
+  import type { BuilderFlow } from "../bots/builderFlow.ts";
   import { nameKey } from "../store/names.ts";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
 
-  let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
+  let { store, flow }: { store: ClientStore; flow: BuilderFlow } = $props();
 
   // svelte-ignore state_referenced_locally
   const flight = store.flight;
@@ -777,7 +777,7 @@
 
   async function refreshSaved(): Promise<void> {
     try {
-      savedList = await listBotScripts(botOpts());
+      savedList = await listBotScripts(await botOpts());
       libraryError = null;
       noticeOpenBotIsGone();
     } catch {
@@ -816,11 +816,11 @@
     const sent = encodeScriptDoc(builtDoc);
     try {
       if (currentSavedId !== null) {
-        const { rev } = await updateBotScript(currentSavedId, builtDoc, currentRev, botOpts());
+        const { rev } = await updateBotScript(currentSavedId, builtDoc, currentRev, await botOpts());
         currentRev = rev;
         importNote = `Saved changes to "${name}".`;
       } else {
-        const { scriptID, rev } = await createBotScript(builtDoc, botOpts());
+        const { scriptID, rev } = await createBotScript(builtDoc, await botOpts());
         currentSavedId = scriptID;
         currentRev = rev;
         importNote = `Saved "${name}".`;
@@ -863,7 +863,7 @@
   }
   async function loadSaved(id: string): Promise<void> {
     try {
-      const record = await getBotScript(id, botOpts());
+      const record = await getBotScript(id, await botOpts());
       if (record === null) {
         importNote = "That saved bot could not be found.";
         return;
@@ -981,7 +981,7 @@
    */
   async function insertSavedBot(meta: BotScriptSummary): Promise<void> {
     try {
-      const record = await getBotScript(meta.scriptID, botOpts());
+      const record = await getBotScript(meta.scriptID, await botOpts());
       if (record === null) {
         insertNote = "That saved bot could not be found.";
         return;

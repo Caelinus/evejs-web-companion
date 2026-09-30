@@ -51,6 +51,7 @@
     isGlobalTab,
     loadGlobalWindows,
     openGlobal,
+    PILOTLESS_BUILDER,
     saveGlobalWindows,
   } from "./globalWindow.ts";
   import { watchIsMobile } from "./viewport.ts";
@@ -556,6 +557,18 @@
       return;
     }
     const target = sessionID ?? activeId;
+    // The Bot Builder with nobody in the client has no workspace to open on, so
+    // it floats over the hangar instead (globalWindow.ts `PILOTLESS_BUILDER`).
+    // While that one is showing it stays THE builder even once a pilot is in:
+    // two mounted builders would race for the one Edit/New request
+    // (bots/builderTarget.ts), and the draft in the floating one would be
+    // stranded behind the desktop's.
+    const builderFloats =
+      globalWins.some((win) => win.id === PILOTLESS_BUILDER) && (!isMobile || active === null);
+    if (id === PILOTLESS_BUILDER && (target === null || builderFloats)) {
+      globalWins = openGlobal(globalWins, id);
+      return;
+    }
     if (target === null) return;
     // The panel opens on a pilot's workspace, which the hangar covers: asking
     // for the Bot Builder from a Bot Manager opened over the hangar must show
@@ -691,7 +704,6 @@
           <GlobalPanel
             tab={win.id}
             {sessions}
-            hasPilot={active !== null}
             onOpen={requestOpenInWorkspace}
             onGoToPilot={(id) => {
               hangarOpen = false;
