@@ -627,6 +627,139 @@ test("a fight-back watch with no ratting macro in the registry leaves the progra
   assert.equal(r.status, "running");
 });
 
+// ─── fight-back: a pirate out of reach does not seize the ship ───────────────
+//
+// Caught live 2026-09-30: `hostile-on-grid` counts the whole grid, the ladder
+// only what is inside targeting range. A rat parked beyond it made the ladder
+// spend its three empty-grid confirm reads, release for one tick, and be
+// borrowed again — the step under the watch ran one tick in four.
+
+/** A grid holding NPC hostiles at the given distances (metres, along x). */
+function pirateGrid(...metres: number[]): ScriptObservation["snapshot"] {
+  return {
+    inSpace: true,
+    solarSystemID: 30000142,
+    shipID: 9001,
+    sampledAtMs: 1,
+    entities: metres.map((x, i) => ({
+      itemID: 6661 + i, kind: "ship", isNpc: true, npcEntityType: "npc", isSelf: false,
+      position: { x, y: 0, z: 0 },
+    })),
+    ship: { itemID: 9001, position: { x: 0, y: 0, z: 0 }, activeModuleIDs: [] },
+  } as unknown as ScriptObservation["snapshot"];
+}
+
+/** A stand-in for the real ladder's empty-grid rung: three confirm reads, then done. */
+function confirmingLadder(calls: { n: number }): MacroDecider {
+  return (_s, _o, mem) => {
+    calls.n += 1;
+    const reads = (typeof mem["emptyGridReads"] === "number" ? mem["emptyGridReads"] : 0) + 1;
+    return reads < 3
+      ? tick({ kind: "wait" }, { kind: "acting" }, false, { emptyGridReads: reads })
+      : tick({ kind: "wait" }, { kind: "done" });
+  };
+}
+
+test("fight-back: a pirate beyond targeting range leaves the step every tick", () => {
+  const calls = { n: 0 };
+  const reg = { ...registry, "fight-the-rats": confirmingLadder(calls) };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const far = obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000), maxTargetRangeM: 30_000 });
+  const { results } = run(s, [far, far, far, far, far, far, far, far], reg);
+  assert.equal(results.length, 8);
+  for (const r of results) {
+    assert.equal(r.stepPath, "m", "the step, not the watch");
+    assert.equal(r.action.kind, "activate");
+    assert.equal(r.interruptID, null);
+  }
+  assert.equal(calls.n, 0, "the ladder is never borrowed for a rat it would gate out");
+});
+
+test("fight-back: the watch still takes the ship the moment the pirate closes into range", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const far = decideScriptAction(
+    s, obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000), maxTargetRangeM: 30_000 }), initialMemory(s), fightRegistry, home,
+  );
+  assert.equal(far.stepPath, "m");
+  const near = decideScriptAction(
+    s, obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000, 20_000), maxTargetRangeM: 30_000 }), far.memory, fightRegistry, home,
+  );
+  assert.equal(near.interruptID, "fb");
+  assert.equal(near.action.kind, "lock");
+});
+
+test("fight-back: the tank still goes up against a pirate out of reach", () => {
+  // It may be shooting from beyond our lock range; the hardeners cost one tick each.
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000), maxTargetRangeM: 30_000, hardenerModuleIDs: [40] }),
+    initialMemory(s),
+    fightRegistry,
+    home,
+  );
+  assert.equal(r.interruptID, "fb");
+  assert.equal(r.action.kind === "activate" ? r.action.moduleID : 0, 40);
+});
+
+test("fight-back: a fight already under way still winds down through the ladder", () => {
+  // The last rat in reach just died and a far one remains: the ladder's memory is
+  // present, so it keeps the ship long enough to confirm, stand down and recall.
+  const calls = { n: 0 };
+  const reg = { ...registry, "fight-the-rats": confirmingLadder(calls) };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  const mid: ScriptMemory = { ...initialMemory(s), macroMem: { fb: { targetID: 6660 } } };
+  const far = obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000), maxTargetRangeM: 30_000 });
+  const first = decideScriptAction(s, far, mid, reg, home);
+  assert.equal(first.interruptID, "fb", "the fight in progress is the ladder's to finish");
+  assert.equal(calls.n, 1);
+  const second = decideScriptAction(s, far, first.memory, reg, home);
+  assert.equal(second.interruptID, "fb");
+  // Third read: the ladder reports done and releases, dropping its memory...
+  const third = decideScriptAction(s, far, second.memory, reg, home);
+  assert.equal(third.stepPath, "m");
+  assert.equal("fb" in third.memory.macroMem, false);
+  // ...and from then on the far rat no longer borrows it at all.
+  const fourth = decideScriptAction(s, far, third.memory, reg, home);
+  assert.equal(fourth.stepPath, "m");
+  assert.equal(calls.n, 3);
+});
+
+test("fight-back: an unreadable targeting range, or a grid with no hostile rows, is still the ladder's call", () => {
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, fightBack]);
+  // No range: no gate at all, so the far rat is a target (the bounded lock is the backstop).
+  const noRange = decideScriptAction(
+    s, obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000) }), initialMemory(s), fightRegistry, home,
+  );
+  assert.equal(noRange.interruptID, "fb");
+  // No hostile rows on the snapshot: an empty grid gets the ladder's confirm reads,
+  // never this shortcut.
+  const calls = { n: 0 };
+  const empty = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, snapshot: pirateGrid(), maxTargetRangeM: 30_000 }),
+    initialMemory(s),
+    { ...registry, "fight-the-rats": confirmingLadder(calls) },
+    home,
+  );
+  assert.equal(calls.n, 1);
+  assert.equal(empty.interruptID, "fb");
+});
+
+test("fight-back: standing aside for an unreachable pirate lets a lower watch fire", () => {
+  const flee: InterruptRow = { id: "flee", when: { kind: "armor-below", fraction: 0.5 }, respond: "dock-and-pause" };
+  const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [fightBack, flee]);
+  const r = decideScriptAction(
+    s,
+    obs({ hostileOnGrid: true, snapshot: pirateGrid(90_000), maxTargetRangeM: 30_000, armorRatio: 0.2 }),
+    initialMemory(s),
+    fightRegistry,
+    home,
+  );
+  assert.equal(r.interruptID, "flee");
+  assert.equal(r.action.kind, "warp");
+});
+
 test("a launch-drones interrupt with no combat drones to launch yields to the step rather than spinning", () => {
   const drones: InterruptRow = { id: "d", when: { kind: "hostile-on-grid" }, respond: "launch-drones" };
   const s = script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [floor, drones]);

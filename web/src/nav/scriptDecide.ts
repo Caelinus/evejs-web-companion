@@ -55,6 +55,7 @@ import {
   cannotTellStreakExhausted,
   evaluateCondition,
   firstArmedInterrupt,
+  hostilesInReach,
   releaseSpentAlerts,
   resolveInterrupt,
   type ScriptObservation,
@@ -1433,6 +1434,26 @@ function releaseRecoverTrips(script: BotScript, obs: ScriptObservation, mem: Scr
 }
 
 /**
+ * Does the grid show hostiles, all of them beyond what the Fight-the-rats ladder
+ * would reach? `hostilesInReach` is the ladder's own gate, shared so the two
+ * cannot disagree about what "in reach" means.
+ *
+ * ⚠ ONLY A POSITIVE ANSWER STANDS THE WATCH ASIDE. No snapshot, an unreadable
+ * targeting range (no gate at all, so everything counts as in reach) and a grid
+ * with no hostile rows all read false and hand the tick to the ladder as before
+ * — the last one on purpose: an empty grid is the ladder's call to make, with
+ * its confirm reads, never this shortcut's.
+ */
+function outOfReachOnly(obs: ScriptObservation): boolean {
+  const snapshot = obs.snapshot ?? null;
+  if (snapshot === null || (obs.maxTargetRangeM ?? null) === null) {
+    return false;
+  }
+  const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
+  return hostileRows(snapshot, origin).length > 0 && hostilesInReach(obs, snapshot, origin).length === 0;
+}
+
+/**
  * The next fitted hardener a fight-back watch should light, or null when there
  * is nothing to do.
  *
@@ -1693,6 +1714,24 @@ function fireInterrupt(
             },
           },
         };
+      }
+      // ⚠ A PIRATE THE LADDER CANNOT REACH DOES NOT GET THE SHIP. The condition
+      // counts the whole grid; the ladder counts only what is inside targeting
+      // range. Borrowing the ladder for a rat parked out of reach made it spend
+      // its three empty-grid confirm reads, report done, release for ONE tick,
+      // and get borrowed again on the next — so the step under the watch ran one
+      // tick in four until the rat closed or left (caught live 2026-09-30: loot,
+      // salvage and travel steps crawling under a `hostile-on-grid` watch).
+      //
+      // Those confirm reads guard against a grid that has not ARRIVED after a
+      // warp (2026-09-14), and this gate leaves them alone: it stands aside only
+      // when the grid HAS arrived — it shows a hostile — and every hostile it
+      // shows is beyond the range the ladder would gate them out by. A watch
+      // mid-fight (ladder memory present: the last rat in reach just died) still
+      // hands the tick to the ladder, so the fleet call is stood down and the
+      // drones are recalled exactly as they always were before it releases.
+      if (!(row.id in mem.macroMem) && outOfReachOnly(obs)) {
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       // The ladder's memory (which target is primary, whether the lock was
       // issued, which target the drones are already on) is keyed by the WATCH

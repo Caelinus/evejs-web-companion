@@ -1743,6 +1743,49 @@ test("fight: a rat beyond the hull's targeting range is not a target at all", ()
   assert.equal(unreachable.outcome.kind, "done");
 });
 
+test("fight: the BLOCK still spends its confirm reads when only an out-of-reach rat is visible", () => {
+  // The fight-back watch stands aside for this grid (scriptDecide), but the block
+  // keeps the 2026-09-14 rule untouched: "done" here can mean warping on to the
+  // next site, so it is still read three times before it is believed.
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const far = entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 90000, y: 0, z: 0 } });
+  const o = obs({ snapshot: snapshot([far]), weaponModuleIDs: [500], maxTargetRangeM: 30_000 });
+  const first = fight(s, o, {}, {});
+  assert.equal(first.outcome.kind, "acting");
+  assert.equal(first.action.kind, "wait");
+  assert.match(first.why, /reading it again/);
+  const second = fight(s, o, first.nextMem, {});
+  assert.equal(second.outcome.kind, "acting");
+  assert.equal(fight(s, o, second.nextMem, {}).outcome.kind, "done");
+});
+
+test("fight-back watch + the real ladder: a rat beyond targeting range no longer starves the step", () => {
+  // The 2026-09-30 cycle end to end: before the reach gate the watch borrowed
+  // the ladder, it confirmed an "empty" grid for three ticks, released for one,
+  // and was borrowed again — the step under it got one tick in four.
+  const work = (): MacroTick => ({
+    action: { kind: "activate", moduleID: 1, targetID: 2 }, why: "working", phase: "Working", armed: true,
+    outcome: { kind: "acting" }, nextMem: {},
+  });
+  const script: BotScript = {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 1, name: "Home", systemName: null },
+    interrupts: [{ id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" }],
+    program: [{ id: "m", kind: "macro", macro: "mine-at-belt", args: {}, until: { kind: "ore-hold-at-least", fraction: 0.9 } }],
+  };
+  const registry = { ...SCRIPT_MACROS, "mine-at-belt": work };
+  const far = entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 90000, y: 0, z: 0 } });
+  const o = obs({ hostileOnGrid: true, snapshot: snapshot([far]), weaponModuleIDs: [500], maxTargetRangeM: 30_000 });
+  let mem = initialMemory(script);
+  for (let t = 0; t < 8; t += 1) {
+    const r = decideScriptAction(script, o, mem, registry, scriptTravelHome);
+    assert.equal(r.stepPath, "m", `tick ${t}: the step has the ship`);
+    assert.equal(r.interruptID, null);
+    mem = r.memory;
+  }
+});
+
 test("fight: an unreadable targeting range does NOT gate — the bounded lock stays the backstop", () => {
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
   const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;

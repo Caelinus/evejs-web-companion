@@ -37,6 +37,7 @@ import type { ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import type { PropulsionModule } from "./propulsion.ts";
 import type { MiningDroneState } from "./miningDroneFlight.ts";
+import { hostileRows, type OverviewRow } from "../space/overview.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -687,6 +688,32 @@ export interface ScriptObservation {
    * `tacklersHolding` would make here.
    */
   readonly scrammed?: boolean | null;
+}
+
+/**
+ * The hostiles this ship can actually shoot at: nearest first, and — when the
+ * hull's targeting range is readable — nothing beyond it.
+ *
+ * ⚠ THE GATE IS WHAT STOPS THE LADDER SPINNING. Without it, one rat parked 300 km
+ * out is still "the nearest hostile", so the ladder locks it, waits out
+ * `MAX_LOCK_WAIT_TICKS`, gives up, picks the same rat again, and repeats forever
+ * — harmless as a block a player watched start, fatal as an always-watching
+ * response, which would own the ship and starve the step under it. Out of range
+ * reads as an empty grid, which the callers already know how to finish on.
+ *
+ * Range unreadable (the usual case — see `maxTargetRangeM`) means NO gate, and
+ * the bounded lock stays the only backstop. That is a weaker guarantee, not none:
+ * it gives up on each target in turn rather than never.
+ *
+ * It lives here, beside the observation, and not in scriptMacros.ts because TWO
+ * callers must agree on it: the Fight-the-rats ladder, and the fight-back watch
+ * in scriptDecide.ts that decides whether to borrow that ladder at all. One
+ * definition is how the two can never drift apart.
+ */
+export function hostilesInReach(obs: ScriptObservation, snapshot: SpaceSnapshot, origin: SpaceVector): readonly OverviewRow[] {
+  const rows = hostileRows(snapshot, origin);
+  const range = obs.maxTargetRangeM ?? null;
+  return range === null ? rows : rows.filter((row) => row.distance <= range);
 }
 
 // ─── Tri-state condition evaluation ──────────────────────────────────────────
