@@ -733,6 +733,75 @@ test("rung 1: a pirate with no drones of ours out LAUNCHES — launching IS the 
   assert.match(decision.why, /defend the ship on their own/i);
 });
 
+test("depleted belt returns mining and combat drones before a clean pause", () => {
+  const empty = snapshot([entity({ itemID: BELT, kind: "celestial", name: "Asteroid Belt 1",
+    position: { x: 500, y: 0, z: 0 } })]);
+  for (const typeID of [101, 102]) {
+    const drone = { itemID: 700, typeID, name: null, activity: "mining", targetID: ROCK_A,
+      controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+    const state = (out: readonly typeof drone[] | null) => ({ bay: [], out, maxActive: 5,
+      roles: { 101: "mining" as const, 102: "combat" as const } });
+    const first = decideMiningAction(observe({ snapshot: empty, drones: state([drone]) }), PLAN, memory());
+    assert.equal(first.action.kind, "recallDrones");
+    const waiting = decideMiningAction(observe({ snapshot: empty,
+      drones: state([{ ...drone, activity: "returning" }]) }), PLAN,
+      memory({ droneFlight: first.droneFlight }));
+    assert.equal(waiting.action.kind, "wait");
+    const returned = decideMiningAction(observe({ snapshot: empty, drones: state([]) }), PLAN,
+      memory({ droneFlight: waiting.droneFlight }));
+    assert.equal(returned.action.kind, "pause");
+    const unreadable = decideMiningAction(observe({ snapshot: empty, drones: null }), PLAN, memory());
+    assert.equal(unreadable.action.kind, "wait");
+  }
+});
+
+test("classic no-drone plan still settles a manually controlled flight at depletion", () => {
+  const empty = snapshot([entity({ itemID: BELT, kind: "celestial", name: "Asteroid Belt 1",
+    position: { x: 500, y: 0, z: 0 } })]);
+  const controlled = { itemID: 700, typeID: 102, name: null, activity: "fighting", targetID: PIRATE,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const state = (out: readonly typeof controlled[] | null) => ({ bay: [], out, maxActive: 5,
+    roles: { 102: "combat" as const } });
+  const plan = { ...PLAN, useDrones: false };
+  const recall = decideMiningAction(observe({ snapshot: empty, drones: state([controlled]) }), plan, memory());
+  assert.equal(recall.action.kind, "recallDrones");
+  const waiting = decideMiningAction(observe({ snapshot: empty, drones: state([{ ...controlled, activity: "returning" }]) }),
+    plan, memory({ droneFlight: recall.droneFlight }));
+  assert.equal(waiting.action.kind, "wait");
+  const returned = decideMiningAction(observe({ snapshot: empty, drones: state([]) }),
+    plan, memory({ droneFlight: waiting.droneFlight }));
+  assert.equal(returned.action.kind, "pause");
+  const unreadable = decideMiningAction(observe({ snapshot: empty, drones: null }), plan, memory());
+  assert.equal(unreadable.action.kind, "wait");
+});
+
+test("classic miner uses role-matched defensive flight and recalls before normal movement", () => {
+  const roles = { 101: "mining" as const, 102: "combat" as const };
+  const miningOut = [{ itemID: 700, typeID: 101, name: null, activity: "mining", targetID: ROCK_A,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }];
+  const threatened = decide({
+    snapshot: snapshot([pirate(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
+    drones: { bay: [{ itemID: 800, typeID: 102, quantity: 5 }], out: miningOut, maxActive: 5, roles },
+  });
+  assert.equal(threatened.action.kind, "recallDrones", "mining flight returns before combat launches");
+  const travelling = decide({
+    snapshot: snapshot([rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
+    holds: [oreHold(5_000)],
+    drones: { bay: [], out: miningOut, maxActive: 5, roles },
+  });
+  assert.equal(travelling.action.kind, "recallDrones", "approach cannot abandon a controlled flight");
+});
+
+test("classic miner launches a compatible mining stack for a locked rock", () => {
+  const decision = decideMiningAction(observe({
+    snapshot: snapshot([rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
+    lockedTargetIDs: [ROCK_A],
+    drones: { bay: [{ itemID: 801, typeID: 101, quantity: 5 }], out: [], maxActive: 5,
+      roles: { 101: "mining" } },
+  }), PLAN, memory({ currentRockID: ROCK_A }));
+  assert.deepEqual(decision.action, { kind: "launch", droneItemIDs: [801] });
+});
+
 test("rung 1: drones already out are not launched again — the SNAPSHOT is the authority", () => {
   const decision = decide({
     snapshot: snapshot([pirate(), myDrone(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),

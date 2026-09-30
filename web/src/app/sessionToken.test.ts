@@ -5,7 +5,7 @@
 //
 // What these cover: login stores the token and every request helper picks it
 // up; the bridge callMethod route picks it up too (it is the client's second
-// fetch site); logout clears it even when the request itself failed; a signed
+// fetch site); confirmed logout clears it while a rejected release retains it; a signed
 // out tab sends no header at all so the legacy cookie can still carry it; and
 // two tokens in flight reach the BFF as two different identities.
 
@@ -137,14 +137,14 @@ test("a signed-out tab sends NO Authorization header, so the cookie can still ca
   assert.deepEqual(sessionAuthHeaders(), {});
 });
 
-test("logout clears the stored token even when the request fails", async () => {
+test("rejected logout retains its token for recovery; confirmed logout clears it", async () => {
   setSessionToken("signed.token-for-farmer");
   const failing = (async () => {
     throw new Error("network down");
   }) as unknown as typeof fetch;
 
   await assert.rejects(logout({ fetch: failing }));
-  assert.equal(getSessionToken(), null, "a failed logout still signs this tab out locally");
+  assert.equal(getSessionToken(), "signed.token-for-farmer", "the held owner can finish cleanup after a refused logout");
 
   setSessionToken("signed.token-for-farmer");
   const { fetch } = stubFetch(() => ({ ok: true }));

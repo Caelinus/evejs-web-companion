@@ -1488,6 +1488,108 @@ test("a mining block set to SITE asks for the scanner read — nearest and chose
   assert.equal(activeStepToursOreSites(hauling, initialMemory(hauling)), false);
 });
 
+test("site miner recalls a controlled mining flight before its next movement order", () => {
+  const site = script([{ id: "m", kind: "macro", macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "site" } } } }], []);
+  const moving: MacroDecider = () => tick({ kind: "warpScan", target: "QA-001" }, { kind: "acting" });
+  const drone = { itemID: 201, typeID: 101, name: null, activity: "mining", targetID: 800,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const snapshot = { ship: { position: { x: 0, y: 0, z: 0 } }, entities: [] } as unknown as NonNullable<ScriptObservation["snapshot"]>;
+  const reading = (out: readonly typeof drone[]) => obs({
+    snapshot, hostileOnGrid: false, dronesOut: out.length > 0,
+    miningDrones: { bay: [], out, maxActive: 5, roles: { 101: "mining" } },
+  });
+  const first = decideScriptAction(site, reading([drone]), initialMemory(site), { ...registry, "mine-at-belt": moving }, home);
+  assert.equal(first.action.kind, "recallDrones");
+  const pending = decideScriptAction(site, reading([{ ...drone, activity: "returning" }]), first.memory,
+    { ...registry, "mine-at-belt": moving }, home);
+  assert.equal(pending.action.kind, "wait");
+  const returned = decideScriptAction(site, reading([]), pending.memory, { ...registry, "mine-at-belt": moving }, home);
+  assert.equal(returned.action.kind, "warpScan");
+});
+
+test("terminal DONE waits for fresh empty controlled flight after recall, including counted completion", () => {
+  const s = script([{ id: "L", kind: "loop", repeat: { kind: "times", count: 1 },
+    body: [macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })] }], []);
+  const drone = { itemID: 201, typeID: 101, name: null, activity: "mining", targetID: 800,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const snapshot = { ship: { position: { x: 0, y: 0, z: 0 } }, entities: [] } as unknown as NonNullable<ScriptObservation["snapshot"]>;
+  const reading = (out: readonly typeof drone[] | null) => obs({ oreHoldFraction: 0.95, snapshot,
+    miningDrones: { bay: [], out, maxActive: 5, roles: { 101: "mining" } } });
+  let mem = initialMemory(s);
+  let result = decideScriptAction(s, reading([drone]), mem, registry, home);
+  mem = result.memory;
+  for (let n = 0; n < 4 && result.action.kind !== "recallDrones"; n++) {
+    result = decideScriptAction(s, reading([drone]), mem, registry, home);
+    mem = result.memory;
+  }
+  assert.equal(result.action.kind, "recallDrones");
+  assert.equal(result.status, "running");
+  result = decideScriptAction(s, reading([{ ...drone, activity: "returning" }]), mem, registry, home);
+  assert.equal(result.status, "running", "recall acknowledgement is not return");
+  result = decideScriptAction(s, reading([]), result.memory, registry, home);
+  assert.equal(result.status, "done");
+});
+
+test("terminal drone authority UNKNOWN cannot become clean DONE", () => {
+  const s = script([], []);
+  const mem = { ...initialMemory(s), position: { kind: "done" as const } };
+  const unknown = decideScriptAction(s, obs({ miningDrones: null }), mem, registry, home);
+  assert.equal(unknown.status, "running");
+  assert.equal(unknown.action.kind, "wait");
+  const confirmed = decideScriptAction(s, obs({ miningDrones: { bay: null, out: [], maxActive: null, roles: {} } }),
+    unknown.memory, registry, home);
+  assert.equal(confirmed.status, "done");
+  const combat = { itemID: 81, typeID: 102, name: null, activity: "fighting", targetID: 9,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const fighting = decideScriptAction(s, obs({ miningDrones: { bay: [], out: [combat], maxActive: 5,
+    roles: { 102: "combat" } } }), mem, registry, home);
+  assert.equal(fighting.action.kind, "recallDrones");
+  assert.equal(fighting.status, "running");
+  const expired = decideScriptAction(s, obs({ miningDrones: null }),
+    { ...unknown.memory, terminalDroneTicks: 90 }, registry, home);
+  assert.equal(expired.status, "paused", "bounded failure retains ownership without clean completion");
+});
+
+test("ordinary depleted site recalls before heading home; emergency watch may escape", () => {
+  const s = script([macroStep("m", "mine-at-belt")], []);
+  const drone = { itemID: 201, typeID: 102, name: null, activity: "fighting", targetID: 800,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const snapshot = { ship: { position: { x: 0, y: 0, z: 0 } }, entities: [] } as unknown as NonNullable<ScriptObservation["snapshot"]>;
+  const reading = (out: readonly typeof drone[]) => obs({ snapshot,
+    miningDrones: { bay: [], out, maxActive: 5, roles: { 102: "combat" } } });
+  const blocked: MacroDecider = () => tick({ kind: "wait" }, { kind: "blocked", reason: "Site depleted." });
+  const first = decideScriptAction(s, reading([drone]), initialMemory(s), { ...registry, "mine-at-belt": blocked }, home);
+  assert.equal(first.action.kind, "recallDrones");
+  const pending = decideScriptAction(s, reading([{ ...drone, activity: "returning" }]), first.memory,
+    { ...registry, "mine-at-belt": blocked }, home);
+  assert.equal(pending.action.kind, "wait");
+  const returned = decideScriptAction(s, reading([]), pending.memory, { ...registry, "mine-at-belt": blocked }, home);
+  assert.equal(returned.action.kind, "warp");
+
+  const danger = script([macroStep("m", "mine-at-belt")], [floor]);
+  const escape = decideScriptAction(danger, obs({ ...reading([drone]), shieldRatio: 0.2, health: 0.2 }),
+    initialMemory(danger), registry, home);
+  assert.equal(escape.action.kind, "warp", "a newly fired health watch keeps its survival route");
+  const continuingEscape = decideScriptAction(danger,
+    obs({ ...reading([drone]), shieldRatio: 0.2, health: 0.2 }), escape.memory, registry, home);
+  assert.equal(continuingEscape.action.kind, "warp", "the latched emergency remains exempt until safe");
+});
+
+test("site miner launches mining-role stacks for its confirmed locked rock", () => {
+  const site = script([{ id: "m", kind: "macro", macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "site" } } } }], []);
+  const snapshot = { ship: { position: { x: 0, y: 0, z: 0 } },
+    entities: [{ itemID: 800, miningYieldTypeID: 1230 }] } as unknown as NonNullable<ScriptObservation["snapshot"]>;
+  const prior = { ...initialMemory(site), macroMem: { m: { rockID: 800 } } };
+  const result = decideScriptAction(site, obs({ snapshot, lockedTargetIDs: [800],
+    miningDrones: { bay: [{ itemID: 100, typeID: 101, quantity: 5 },
+      { itemID: 101, typeID: 102, quantity: 5 }], out: [], maxActive: 5,
+      roles: { 101: "mining", 102: "combat" } },
+  }), prior, registry, home);
+  assert.deepEqual(result.action, { kind: "launchDrones", droneItemIDs: [100] });
+});
+
 test("a latched repair trip does not order the scanner read on the site block's behalf", () => {
   // The trip is running the borrowed Repair-ship block, not the mining one (see
   // `activeMacroID` above), and the read is priced per block.

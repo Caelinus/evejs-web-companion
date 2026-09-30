@@ -48,6 +48,7 @@ import { refusalWords } from "../bridge/refusals.ts";
 // is never read by the ladder below, which returns bare identifiers.
 import type { MiningCallerRungID, MiningRungID, MiningStepID } from "./miningLadder.ts";
 import { canMyShipOrderDrone, formatDistance, hostileRows } from "../space/overview.ts";
+import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory, type MiningDroneState } from "./miningDroneFlight.ts";
 import type {
   FlightStatus,
   MiningHold,
@@ -160,6 +161,8 @@ export interface MiningObservation {
   readonly holds: readonly MiningHold[] | null;
   /** The drone bay's stacks. null = not read this tick (or the read failed). */
   readonly droneBayItemIDs: readonly number[] | null;
+  /** Fresh authoritative flight, bay, limits and resolved roles. null is unreadable. */
+  readonly drones?: MiningDroneState | null;
 }
 
 /** What the player set the bot to do. */
@@ -205,6 +208,8 @@ export type MiningBotAction =
       readonly label: string;
     }
   | { readonly kind: "launch"; readonly droneItemIDs: readonly number[] }
+  | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
+  | { readonly kind: "engageDrones" | "mineDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "wait"; readonly reason: string }
   | { readonly kind: "pause"; readonly reason: string }
   | { readonly kind: "stopped" };
@@ -260,6 +265,7 @@ export interface MiningDecision {
   readonly dropRock?: string;
   /** This tick chose a rock to work. */
   readonly takeRock?: number;
+  readonly droneFlight?: MiningDroneMemory;
 }
 
 export type MiningBotStatus = "idle" | "running" | "paused" | "stopped" | "error";
@@ -568,6 +574,7 @@ export interface MiningDecisionMemory {
   readonly launchGaveUp: boolean;
   /** Ticks the lasers have run on this rock with the hold not growing. */
   readonly noYieldCycles: number;
+  readonly droneFlight?: MiningDroneMemory;
 }
 
 /**
@@ -590,6 +597,72 @@ export interface MiningDecisionMemory {
  * grid" is that removal seen reactively. The client never predicts depletion.
  */
 export function decideMiningAction(
+  observation: MiningObservation,
+  plan: MiningPlan,
+  memory: MiningDecisionMemory,
+): MiningDecision {
+  const base = decideMiningWork(observation, plan, memory);
+  // A no-drone plan skips this extra authority read only when its fresh space
+  // snapshot shows no controlled flight. Older pure callers also omit it.
+  if (observation.drones === undefined || observation.status.docked ||
+      !observation.status.inSpace || base.rung === "health-floor") return base;
+  const snapshot = observation.snapshot;
+  const origin = snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
+  const hostileID = snapshot === null ? null : hostileRows(snapshot, origin)[0]?.itemID ?? null;
+  const rock = base.takeRock ?? memory.currentRockID;
+  const rockID = rock !== null && observation.lockedTargetIDs?.includes(rock) &&
+    snapshot?.entities.some((entity) => entity.itemID === rock && isMineableRock(entity)) ? rock : null;
+  const terminal = (base.action.kind === "pause" || base.action.kind === "stopped") &&
+    (base.step === "belt-empty" || base.rung === "no-yield-stop");
+  const moving = terminal || base.action.kind === "warp" || base.action.kind === "dock" ||
+    base.action.kind === "approach" || base.action.kind === "undock";
+  // A flight may have been launched manually before a classic plan that does
+  // not itself use drones. Such a plan must still settle it before leaving or
+  // reporting a clean terminal outcome; it must never launch a new flight.
+  if (!plan.useDrones && !moving) return base;
+  const flight = decideMiningDroneFlight(
+    snapshot === null ? null : observation.drones,
+    memory.droneFlight ?? freshDroneMemory(), plan.useDrones ? hostileID : null,
+    plan.useDrones ? rockID : null, moving,
+  );
+  // The controller owns its memory across observations; the bot loop copies it
+  // from this decision before issuing the one selected action.
+  const withFlight = { ...base, droneFlight: flight.memory };
+  if (flight.action?.kind === "wait" && flight.memory.recallTicks > 90) return {
+    ...withFlight, action: { kind: "pause", reason: flight.action.reason },
+    why: flight.action.reason,
+  };
+  // Depletion and normal no-yield stops are terminal decisions, not movement
+  // decisions. They still need a confirmed empty controlled flight first.
+  if (base.action.kind === "pause" || base.action.kind === "stopped") {
+    if (base.step !== "belt-empty" && base.rung !== "no-yield-stop") return withFlight;
+    const rows = observation.drones?.out;
+    if (rows !== null && rows !== undefined && rows.every((drone) => !drone.controlled)) return withFlight;
+    const terminalTicks = (memory.droneFlight?.terminalTicks ?? 0) + 1;
+    if (terminalTicks > 90) return { ...withFlight,
+      droneFlight: { ...flight.memory, terminalTicks },
+      action: { kind: "pause", reason: "Controlled drone return could not be confirmed." },
+      why: "Controlled drone return could not be confirmed; automation is blocked." };
+    const controlled = rows?.filter((drone) => drone.controlled) ?? [];
+    const order = controlled.filter((drone) => drone.activity !== "returning");
+    return { ...withFlight, droneFlight: { ...flight.memory, terminalTicks }, action: order.length > 0
+      ? { kind: "recallDrones", droneIDs: order.map((drone) => drone.itemID) }
+      : { kind: "wait", reason: "Waiting for authoritative controlled-drone return." },
+      why: rows == null ? "Controlled drone state is unreadable; completion is blocked."
+        : "Waiting for authoritative controlled-drone return." };
+  }
+  // The old combat-only rung would launch the whole mixed bay. Once the
+  // capability controller is present, it alone selects a role-matched flight.
+  if (flight.action === null) return base.action.kind === "launch"
+    ? { ...withFlight, action: { kind: "wait", reason: "Waiting for a compatible drone flight." } }
+    : withFlight;
+  const action = flight.action.kind === "launch" ? { ...flight.action, kind: "launch" as const } : flight.action;
+  return { ...withFlight, action, why: action.kind === "wait" ? action.reason :
+    `Controlling ${action.kind === "mineDrones" ? "mining" : "defensive"} drones.`,
+    rung: "launch-drones", step: null };
+}
+
+function decideMiningWork(
   observation: MiningObservation,
   plan: MiningPlan,
   memory: MiningDecisionMemory,
@@ -1088,6 +1161,7 @@ export interface MiningBotDeps {
   getHolds(): Promise<readonly MiningHold[] | null>;
   /** The drone bay's stacks. Only read when a launch is being considered. */
   getDroneBayItemIDs(): Promise<readonly number[] | null>;
+  getDroneState?(): Promise<MiningDroneState | null>;
   undock(): Promise<void>;
   warp(destinationID: number): Promise<void>;
   approach(destinationID: number): Promise<void>;
@@ -1095,6 +1169,9 @@ export interface MiningBotDeps {
   lockTarget(targetID: number): Promise<void>;
   activateModule(moduleID: number, targetID: number): Promise<void>;
   launchDrones(itemIDs: readonly number[]): Promise<void>;
+  recallDrones?(ids: readonly number[]): Promise<void>;
+  engageDrones?(ids: readonly number[], targetID: number): Promise<void>;
+  mineDrones?(ids: readonly number[], targetID: number): Promise<void>;
   unloadHolds(itemIDs: readonly number[]): Promise<void>;
   sleep(ms: number): Promise<void>;
   onProgress(progress: MiningBotProgress): void;
@@ -1133,6 +1210,7 @@ interface BotMemory {
   headingHome: string | null;
   launchGaveUp: boolean;
   noYieldCycles: number;
+  droneFlight: MiningDroneMemory;
   // Every one of these counts CONSECUTIVE decisions of one kind whose authority
   // has not changed. A landed action resets its own counter by construction,
   // because the decision stops choosing it.
@@ -1180,6 +1258,7 @@ function freshMemory(): BotMemory {
     headingHome: null,
     launchGaveUp: false,
     noYieldCycles: 0,
+    droneFlight: freshDroneMemory(),
     lockTargetID: null,
     lockAttempts: 0,
     consecutiveLockFailures: 0,
@@ -1230,6 +1309,10 @@ function phaseFor(action: MiningBotAction, plan: MiningPlan): string {
       return "Starting the equipment";
     case "launch":
       return "Defending";
+    case "recallDrones":
+    case "engageDrones":
+    case "mineDrones":
+      return "Drones";
     case "pause":
       return "Stopped";
     case "stopped":
@@ -1253,6 +1336,12 @@ function actionText(action: MiningBotAction): string {
       return `Unloading ${action.itemIDs.length} ${action.itemIDs.length === 1 ? "stack" : "stacks"}`;
     case "launch":
       return "Launching drones";
+    case "recallDrones":
+      return "Recalling drones";
+    case "engageDrones":
+      return "Engaging with drones";
+    case "mineDrones":
+      return "Mining with drones";
     case "wait":
       return "Working";
     case "pause":
@@ -1389,6 +1478,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
         lockedTargetIDs: null,
         holds: await safely(() => deps.getHolds()),
         droneBayItemIDs: null,
+        drones: null,
       };
     }
     const [space, locked, holds] = await Promise.all([
@@ -1400,7 +1490,15 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     // real call, and polling it every tick for a belt with no pirates in it
     // would be load for nothing.
     let bay: readonly number[] | null = null;
-    if (current.useDrones && !memory.launchGaveUp && space) {
+    const shipID = status.shipID ?? space?.shipID ?? null;
+    const controlledFlightVisible = space?.entities.some(
+      (entity) => canMyShipOrderDrone(entity, shipID) === true,
+    ) ?? false;
+    const inspectDrones = current.useDrones || controlledFlightVisible;
+    const drones = inspectDrones && deps.getDroneState
+      ? await safely(() => deps.getDroneState!())
+      : controlledFlightVisible ? null : undefined;
+    if (drones === undefined && current.useDrones && !memory.launchGaveUp && space) {
       const origin = space.ship?.position ?? { x: 0, y: 0, z: 0 };
       const shipID = status.shipID ?? space.shipID ?? null;
       // Same control test as the launch rung (R48): only drones this ship
@@ -1420,6 +1518,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
       lockedTargetIDs: locked,
       holds,
       droneBayItemIDs: bay,
+      drones,
     };
   }
 
@@ -1624,6 +1723,15 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
           await deps.launchDrones(action.droneItemIDs);
           memory.settleTicks = SETTLE_LAUNCH;
           return;
+        case "recallDrones":
+          await deps.recallDrones?.(action.droneIDs);
+          return;
+        case "engageDrones":
+          await deps.engageDrones?.(action.droneIDs, action.targetID);
+          return;
+        case "mineDrones":
+          await deps.mineDrones?.(action.droneIDs, action.targetID);
+          return;
         default:
           return;
       }
@@ -1754,6 +1862,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
       emit();
       return { kind: memory.status === "stopped" ? "stopped" : "wait", reason: "stopped" };
     }
+    if (status.docked) memory.droneFlight = freshDroneMemory();
 
     // Settle asynchronous movement/writes and recoverable refusals. Successful
     // BFF undock/dock returns are already authoritative and skip this window.
@@ -1809,7 +1918,10 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
       headingHome: memory.headingHome,
       launchGaveUp: memory.launchGaveUp,
       noYieldCycles: memory.noYieldCycles,
+      droneFlight: memory.droneFlight,
     });
+
+    if (decision.droneFlight) memory.droneFlight = decision.droneFlight;
 
     // Record what the decision discovered.
     if (decision.headHome && !memory.headingHome) {

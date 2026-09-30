@@ -69,6 +69,7 @@ export interface SelectResult {
   readonly character: OnlineCharacterState;
   readonly station: StationStatic | null;
   readonly notifications: readonly JsonValue[];
+  readonly droneRecoveryCheckID: string | null;
 }
 
 export interface ApiOptions {
@@ -256,20 +257,11 @@ export async function login(
 }
 
 export async function logout(options: ApiOptions = {}): Promise<void> {
-  try {
-    await postJson("/api/logout", {}, options);
-  } finally {
-    // R42/R107 — logout clears the carriers the BFF expires the cookie itself.
-    // In single-session mode this also drops the tab's stored global token; in
-    // per-session mode the global was never written (the flow owns its token and
-    // clears its own call options), so leave it untouched. In a `finally`
-    // because a logout that failed on the wire must still sign this session out
-    // locally, or the next request would wear a session the player thinks they
-    // left.
-    if (!("token" in options)) {
-      clearSessionToken();
-    }
-  }
+  await postJson("/api/logout", {}, options);
+  // A rejected logout keeps the pilot held on the BFF. Preserve the carrier
+  // so the exact same owner can finish recovery or retry a failed release.
+  // Per-session flows clear their own token after this confirmed response.
+  if (!("token" in options)) clearSessionToken();
 }
 
 /**
@@ -300,7 +292,13 @@ export async function selectCharacter(
         ? (station as unknown as StationStatic)
         : null,
     notifications: Array.isArray(data.notifications) ? data.notifications : [],
+    droneRecoveryCheckID: typeof data.droneRecoveryCheckID === "string" ? data.droneRecoveryCheckID : null,
   };
+}
+
+/** Completes the selected session's lost-flight gate after authoritative return. */
+export async function markDroneRecoveryReady(checkID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/drone-recovery/ready", { checkID }, options);
 }
 
 // --- character creation -------------------------------------------------------

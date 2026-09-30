@@ -16,6 +16,8 @@ import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
 import { confirmControlledDronesHome } from "../nav/controlledDroneStop.ts";
+import { readRecoveryDrones, recoverLostDroneFlight, type DroneRecoveryState } from "../nav/lostDroneRecovery.ts";
+import { createSignal, readonlySignal, type ReadableSignal } from "../store/signals.ts";
 import { buildSlots, decodeChargeFits, decodeResources, decodeShipAttributes } from "../bridge/fitting.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import {
@@ -104,7 +106,7 @@ import { decodeRecipeBook } from "../bridge/piRecipes.ts";
 import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
 import type { RequestPriority } from "./transport.ts";
-import type { CorpOfficesResult, FlightStepResult } from "./api.ts";
+import type { CorpOfficesResult, DronesResult, FlightStepResult } from "./api.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
 import { classifyDistributionAgentConversation, selectDistributionAgent } from "../nav/distributionAgentSelection.ts";
 import { refusalWords as sayRefusalWords } from "../bridge/refusals.ts";
@@ -120,6 +122,7 @@ import type {
   ContractDetail,
   DestinationMatch,
   DroneInSpace,
+  DroneBayStack,
   DroneOrderReport,
   FittingSlot,
   FleetAction,
@@ -239,7 +242,8 @@ import {
   threatFromAttributes,
   type RatThreat,
 } from "../nav/ratThreat.ts";
-import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
+import { droneRoleForGroup, splitDroneRoles, type DroneRole, type DroneRoleIDs } from "../nav/droneRoles.ts";
+import type { MiningDroneState } from "../nav/miningDroneFlight.ts";
 import { droneStackSizes, wholeStackLaunch } from "../nav/droneLaunch.ts";
 import {
   DRONE_RANGE_BONUS_ATTRIBUTE_ID,
@@ -356,6 +360,8 @@ export interface AppFlowOptions {
    * connections for its whole life. See AppFlow.setLivePush.
    */
   readonly livePush?: boolean;
+  /** Browser-selected pilots must settle a nearby lost flight before automation. */
+  readonly browserPilotRecovery?: boolean;
   /**
    * Character IDs THIS HOST is flying with a bot of its own — the fleet
    * companion's supervision gate (decision 5) subtracts them from the fleet
@@ -433,6 +439,9 @@ export interface LootOutcome {
 }
 
 export interface AppFlow {
+  readonly droneRecovery: ReadableSignal<DroneRecoveryState>;
+  retryDroneRecovery(): Promise<void>;
+  requireAutomationReady(): void;
   /** Boot health ping — sets the health slice online/offline (gates the login). */
   checkHealth(): Promise<void>;
   /** Who-cares login, then the typed reference call to fill the character list. */
@@ -1348,6 +1357,59 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     ...(options.eventSource !== undefined ? { eventSource: options.eventSource } : {}),
     ...(options.perSessionToken ? { token: options.initialSessionToken ?? null } : {}),
   };
+
+  const recoverySignal = createSignal<DroneRecoveryState>({ phase: options.browserPilotRecovery ? "checking" : "ready", reason: null });
+  let recoveryGeneration = 0;
+  let recoveryTask: Promise<void> | null = null;
+  const recoveryIDs = new Set<number>();
+  const confirmedRecoveryIDs = new Set<number>();
+  let recoveryCheckID: string | null = null;
+
+  function requireAutomationReady(): void {
+    if (options.browserPilotRecovery && recoverySignal.get().phase !== "ready") {
+      throw new Error(recoverySignal.get().reason ?? "Drone recovery is still checking this pilot. Wait or retry recovery.");
+    }
+  }
+
+  function retryDroneRecovery(): Promise<void> {
+    if (!options.browserPilotRecovery || recoverySignal.get().phase === "ready") return Promise.resolve();
+    if (recoveryTask !== null) return recoveryTask;
+    const generation = recoveryGeneration;
+    const current = () => {
+      if (generation !== recoveryGeneration) throw new Error("This pilot session changed during drone recovery.");
+    };
+    const task = (async () => {
+      try {
+        await recoverLostDroneFlight({
+          inSpace: async () => {
+            current();
+            const raw = (await api.getFlightStatus(callOptions)).flight;
+            current();
+            if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+            const row = raw as Record<string, JsonValue>;
+            return row.inSpace === true ? true : row.docked === true ? false : null;
+          },
+          read: async () => { current(); const raw = await api.getDrones(callOptions); current(); return readRecoveryDrones(raw.inSpace); },
+          reconnect: async ids => { current(); await api.reconnectDrones(ids, callOptions); current(); },
+          recall: async ids => { current(); await api.recallDrones(ids, callOptions); current(); },
+          sleep: async ms => { await new Promise(resolve => setTimeout(resolve, ms)); current(); },
+          pendingIDs: recoveryIDs,
+          confirmedIDs: confirmedRecoveryIDs,
+          report: state => { if (generation === recoveryGeneration && state.phase !== "ready") recoverySignal.set(state); },
+        });
+        current();
+        if (recoveryCheckID === null) throw new Error("The selected pilot's recovery check could not be identified.");
+        await api.markDroneRecoveryReady(recoveryCheckID, callOptions);
+        current();
+        recoverySignal.set({ phase: "ready", reason: null });
+      } catch (error) {
+        if (generation === recoveryGeneration) recoverySignal.set({ phase: "blocked",
+          reason: error instanceof Error ? error.message : "Lost-drone recovery could not be confirmed." });
+      }
+    })();
+    recoveryTask = task.finally(() => { if (generation === recoveryGeneration) recoveryTask = null; });
+    return recoveryTask;
+  }
 
   // R6b — the docked station the station-scoped panels are currently synced to,
   // and a guard so an in-flight relocate is not re-entered. Set on select and
@@ -5219,6 +5281,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     label: string,
     step: () => Promise<FlightStepResult>,
   ): Promise<void> {
+    if (label !== "Stop") requireAutomationReady();
     let result: FlightStepResult;
     try {
       result = await step();
@@ -5555,6 +5618,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     function planFailed(reason: string, cause?: unknown): RouteStartOutcome {
       store.apply({ type: "travel/plan-error", message: reason });
       return { started: false, reason, cause };
+    }
+    try { requireAutomationReady(); } catch (error) {
+      return planFailed(error instanceof Error ? error.message : "Drone recovery is pending.", error);
     }
 
     // 1. The client-side route graph (retail's clientPathfinderService is local;
@@ -6933,6 +6999,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         droneStackSizesSeen = droneStackSizes(bay);
         return bay.map((stack) => stack.itemID);
       },
+      getDroneState: async () => {
+        const state = await miningDroneState(await api.getDrones(callOptions));
+        if (state?.bay) droneStackSizesSeen = droneStackSizes(state.bay);
+        return state;
+      },
       undock: async () => {
         await api.undock(callOptions);
       },
@@ -6959,6 +7030,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       launchDrones: async (itemIDs) => {
         await api.launchDrones(wholeStackLaunch(itemIDs, droneStackSizesSeen), callOptions);
       },
+      recallDrones: async (ids) => { await api.recallDrones(ids, callOptions); },
+      engageDrones: async (ids, targetID) => { await api.engageDrones(ids, targetID, callOptions); },
+      mineDrones: async (ids, targetID) => { await api.mineWithDrones(ids, targetID, callOptions); },
       unloadHolds: async (itemIDs) => {
         await api.unloadMiningHolds(itemIDs, callOptions);
       },
@@ -7412,6 +7486,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMissionBot(request: MissionBotRequest): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "mission-bot/start-error", message: null });
 
     // ⚠ THE CLAIM COMES FIRST, BEFORE THE PREFLIGHT CAN REFUSE. The player has
@@ -7452,6 +7527,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMiningBot(request: MiningBotRequest): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "bot/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -7787,6 +7863,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     setup: CompanionSetup,
     resuming: CompanionAbandonmentRecord | null = null,
   ): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "companion/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -8154,6 +8231,31 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * trip per NEW drone type, not one per tick. A name read that fails leaves
    * those drones in no role for the tick: cannot tell, so never launched.
    */
+  async function miningDroneState(result: DronesResult): Promise<MiningDroneState | null> {
+    // The generic panel decoder treats an absent control flag as false. That is
+    // safe for a button, but a flight switch must not call it confirmed empty.
+    if (Array.isArray(result.inSpace) && result.inSpace.some((row) =>
+      row === null || typeof row !== "object" || Array.isArray(row) ||
+      typeof (row as Record<string, unknown>).controlled !== "boolean")) return null;
+    const bay = decodeDroneBay(result.bay);
+    const out = decodeDronesInSpace(result.inSpace);
+    const maxActive = decodeDroneLimits(result.shipInfo).maxActiveDrones;
+    if (out === null) return null;
+    const typeIDs = [...new Set([
+      ...(bay ?? []).map((stack: DroneBayStack) => stack.typeID),
+      ...out.map((drone: DroneInSpace) => drone.typeID).filter((id): id is number => id !== null),
+    ])];
+    if (typeIDs.length > 0) {
+      try {
+        await resolveNamesNow(typeIDs.map((id) => ({ kind: "typeGroup" as const, id })));
+      } catch { /* Unresolved roles remain unknown and cannot launch. */ }
+    }
+    const resolved = store.names.get().resolved;
+    const roles: Record<number, DroneRole | null> = {};
+    for (const id of typeIDs) roles[id] = droneRoleForGroup(resolved[nameKey("typeGroup", id)] ?? null);
+    return { bay, out, maxActive, roles };
+  }
+
   async function classifyDroneRoles(
     bay: ReturnType<typeof decodeDroneBay>,
     snapshot: ReturnType<typeof decodeSpaceSnapshot>,
@@ -9340,6 +9442,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
         const ship = snapshot?.ship ?? null;
         const droneRoles = await classifyDroneRoles(bay, snapshot, ship?.itemID ?? null);
+        const miningDrones = await miningDroneState(dronesResult);
         const hold = destinationHold(holds);
         const capacity = hold?.capacity ?? null;
         const used = capacity?.used ?? null;
@@ -10014,6 +10117,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           lockedTargetIDs,
           holds,
           droneBayItemIDs,
+          miningDrones,
           combatDroneBayItemIDs: droneRoles.bay?.combat ?? null,
           salvageDroneBayItemIDs: droneRoles.bay?.salvage ?? null,
           combatDroneIDs: droneRoles.out?.combat ?? null,
@@ -10174,6 +10278,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "engageDrones":
             if (action.droneIDs.length > 0) {
               await api.engageDrones(action.droneIDs, action.targetID, callOptions);
+            }
+            return;
+          case "mineDrones":
+            if (action.droneIDs.length > 0) {
+              await api.mineWithDrones(action.droneIDs, action.targetID, callOptions);
             }
             return;
           case "recallDrones":
@@ -10586,6 +10695,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startCustomBot(input: BotScript, sourceScriptID: string | null = null): Promise<void> {
+    requireAutomationReady();
     // Restarting the SAME controller is the one case createShipClaim deliberately
     // does not stop. Cancel it here, then take the structural claim so mining and
     // mission are stopped exhaustively from the shared registry.
@@ -11081,6 +11191,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   return {
+    droneRecovery: readonlySignal(recoverySignal),
+    retryDroneRecovery,
+    requireAutomationReady,
     async checkHealth() {
       // One shot, called at boot (main.ts) — never a poll. Any failure resolves
       // to offline inside api.getHealth, so this never throws.
@@ -11133,8 +11246,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async selectCharacter(characterID) {
-      store.apply({ type: "character/selected", characterID });
+      // A refused switch leaves the previous pilot held. Keep its recovery
+      // proof and live state until the server actually selects the new one.
       const result = await api.selectCharacter(characterID, callOptions);
+      recoveryGeneration++;
+      recoveryTask = null;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: options.browserPilotRecovery ? "checking" : "ready", reason: null });
+      store.apply({ type: "character/selected", characterID });
+      recoveryCheckID = result.droneRecoveryCheckID;
       store.apply({
         type: "character/online",
         character: result.character,
@@ -11147,6 +11269,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // R10: the session is live, so open the push channel before the docked
       // reads — anything the reads trigger is then already being observed.
       startLiveStream();
+      void retryDroneRecovery();
       await refreshStationPanel();
     },
 
@@ -11823,38 +11946,35 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async releaseSession() {
-      // R10: stop consuming the push channel first — the session it belongs to
-      // is about to end.
+      requireAutomationReady();
+      await api.releaseSession(callOptions);
+      recoveryGeneration++;
+      recoveryTask = null;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: "checking", reason: null });
+      syncedStationID = null;
       stopLiveStream();
-      try {
-        await api.releaseSession(callOptions);
-      } finally {
-        syncedStationID = null;
-        stopLiveStream();
-        store.apply({ type: "character/offline" });
-        store.apply({ type: "character/selected", characterID: null });
-      }
+      store.apply({ type: "character/offline" });
+      store.apply({ type: "character/selected", characterID: null });
     },
 
     async logout() {
+      // The server may refuse logout while recovery is pending. In that case
+      // the held pilot, recovery check and push stream must stay usable.
+      await api.logout(callOptions);
+      recoveryGeneration++;
+      recoveryTask = null;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: "checking", reason: null });
       stopLiveStream();
-      let completed = false;
-      try {
-        await api.logout(callOptions);
-        completed = true;
-      } finally {
-        // R107 — this flow is fully signed out, so drop its per-session token
-        // (in single-session mode `token` is not a key here and api.logout
-        // cleared the global instead). releaseSession keeps the token: it only
-        // takes the character offline, the web login stays.
-        if (options.perSessionToken && completed) {
-          callOptions.token = null;
-        }
-        if (completed || !options.perSessionToken) {
-          syncedStationID = null;
-          store.apply({ type: "session/logged-out" });
-        }
-      }
+      // R107 — releaseSession keeps its token; a completed logout does not.
+      if (options.perSessionToken) callOptions.token = null;
+      syncedStationID = null;
+      store.apply({ type: "session/logged-out" });
     },
   };
 }

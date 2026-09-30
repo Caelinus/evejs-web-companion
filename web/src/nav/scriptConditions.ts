@@ -36,6 +36,7 @@ import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import type { PropulsionModule } from "./propulsion.ts";
+import type { MiningDroneState } from "./miningDroneFlight.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -212,6 +213,8 @@ export interface ScriptObservation {
   readonly lockedTargetIDs?: readonly number[] | null;
   readonly holds?: readonly MiningHold[] | null;
   readonly droneBayItemIDs?: readonly number[] | null;
+  /** Fresh bay, controlled flight, limits and roles for the mining-flight policy. */
+  readonly miningDrones?: MiningDroneState | null;
   /**
    * The drone bay and the drones out BY ROLE, classified from the game's own
    * group name (see nav/droneRoles.ts). A block launches and orders drones for

@@ -146,6 +146,8 @@ export function describeAction(action: ScriptAction): string {
       return `launch drones ${action.droneItemIDs.join(",")}`;
     case "engageDrones":
       return `drones ${action.droneIDs.join(",")} onto ${action.targetID}`;
+    case "mineDrones":
+      return `mining drones ${action.droneIDs.join(",")} onto ${action.targetID}`;
     case "recallDrones":
       return `recall drones ${action.droneIDs.join(",")}`;
     case "unloadOre":
