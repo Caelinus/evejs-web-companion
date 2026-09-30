@@ -175,7 +175,7 @@ export interface RefusalLedger {
    * `gone` and `unreachable` survive on purpose: emptying a hold does not bring
    * back a despawned container, and does not close a distance.
    */
-  forgetRefused(): void;
+  forgetRefused(capacityRecovered?: boolean): void;
   /** Consecutive failures on this key, 0 when it is not failing. */
   consecutive(key: string): number;
   /** Everything currently failing, worst first — what a readout shows. */
@@ -206,9 +206,9 @@ export function createRefusalLedger(): RefusalLedger {
     clear(key) {
       byKey.delete(key);
     },
-    forgetRefused() {
+    forgetRefused(capacityRecovered = false) {
       for (const [key, record] of byKey) {
-        if (record.kind === "refused") {
+        if (record.kind === "refused" || (capacityRecovered && record.kind === "no-room")) {
           byKey.delete(key);
         }
       }

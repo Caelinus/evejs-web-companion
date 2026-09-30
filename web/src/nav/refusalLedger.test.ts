@@ -148,6 +148,22 @@ test("emptying a hold does NOT bring back a despawned can, or close a distance",
   assert.equal(ledger.consecutive(far), 1, "unreachable survives");
 });
 
+test("confirmed hold recovery clears NO_ROOM_ABOARD but retains durable target evidence", () => {
+  const ledger = createRefusalLedger();
+  const full = refusalKey("s1", "lootContainer", 3);
+  const gone = refusalKey("s1", "lootContainer", 4);
+  const far = refusalKey("s1", "lootContainer", 5);
+  ledger.note(full, `${NO_ROOM_CODE}: full`, 1, true);
+  ledger.note(gone, "CALL_REFUSED: FakeItemNotFound", 1, false);
+  ledger.note(far, "CALL_REFUSED: FakeItemNotFound", 1, true);
+  ledger.forgetRefused();
+  assert.equal(ledger.consecutive(full), 1, "movement into a hold does not prove room");
+  ledger.forgetRefused(true);
+  assert.equal(ledger.consecutive(full), 0);
+  assert.equal(ledger.consecutive(gone), 1);
+  assert.equal(ledger.consecutive(far), 1);
+});
+
 // ── The read side a decider uses ────────────────────────────────────────────
 
 test("a target nothing is recorded against is not set aside", () => {

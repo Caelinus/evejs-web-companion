@@ -45,6 +45,23 @@ test("the server rejects a session ID changed without a valid signature", () => 
   assert.equal(webAuth.verifySessionToken(`${changedPayload}.${signature}`), null);
 });
 
+test("only a correctly signed expired credential can authenticate its own cleanup", () => {
+  const token = webAuth.createSessionToken({ username: "pilot", accountID: 42 }, { ttlMs: 1 });
+  const [encoded, signature] = token.split(".");
+  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  const originalNow = Date.now;
+  try {
+    Date.now = () => payload.exp + 1;
+    assert.equal(webAuth.verifySessionToken(token), null);
+    assert.equal(webAuth.verifySessionToken(token, { allowExpired: true }).sessionID, payload.sessionID);
+    payload.accountID = 99;
+    const forged = `${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${signature}`;
+    assert.equal(webAuth.verifySessionToken(forged, { allowExpired: true }), null);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 // ── How long a token lives ──────────────────────────────────────────────────
 // A sign-in takes the configured default. A caller that knows how long its work
 // runs says so instead — see createSessionToken's header for the twelve-hour

@@ -56,6 +56,12 @@ const lostSessions = new Set();
 
 function fakeGateway(log) {
   return {
+    async readFlightStatus(bridgeSessionID) {
+      if (lostSessions.has(bridgeSessionID)) {
+        throw Object.assign(new Error("Session not found."), { code: "SESSION_NOT_FOUND" });
+      }
+      return { docked: true };
+    },
     async selectCharacter(args) {
       const characterID = Number(args[0]);
       return {
@@ -83,6 +89,7 @@ function fakeGateway(log) {
 function fakeBotHost(log) {
   return {
     async start(input) {
+      if (input.beforeStart) await input.beforeStart();
       // The full input, not just the characterID — the companion tests below
       // need to see which branch of /api/bots/start actually built it.
       log.push(["start", input]);
@@ -107,10 +114,10 @@ function fakeBotHost(log) {
   };
 }
 
-async function startTestServer(log, suppliedBotHost = null) {
+async function startTestServer(log, suppliedBotHost = null, suppliedGateway = null) {
   const app = createApp({
     eveStore: fakeStore(),
-    eveGatewayClient: fakeGateway(log),
+    eveGatewayClient: suppliedGateway || fakeGateway(log),
     webAuth,
     botHost: suppliedBotHost || fakeBotHost(log),
     // The script library is platform-wide, so get() looks up by scriptID alone
@@ -187,6 +194,88 @@ test("run-on-server releases the CALLER's held hull before the bot starts", asyn
     log.filter((row) => row[0] !== "start" || true).map((row) => row[0]),
     ["release", "start"],
   );
+});
+
+test("an unconfirmed browser release blocks handoff without forgetting the owner", async () => {
+  const log = [];
+  const gateway = fakeGateway(log);
+  gateway.releaseBridgeSession = async () => ({ released: false });
+  const { baseUrl, app } = await startTestServer(log, null, gateway);
+  const token = await signInAndSelect(baseUrl, 7001);
+  const { response, payload } = await request(baseUrl, "/api/bots/start", {
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "PILOT_RELEASE_UNVERIFIED");
+  assert.equal(app.locals.bridgeSessions.size, 1);
+});
+
+test("a failed hosted start restores only the released caller's browser owner", async () => {
+  const log = [];
+  const botHost = fakeBotHost(log);
+  botHost.start = async (input) => {
+    await input.beforeStart();
+    return { ok: false, code: "BOT_START_FAILED", message: "Could not start." };
+  };
+  const { baseUrl, app } = await startTestServer(log, botHost);
+  const token = await signInAndSelect(baseUrl, 7001);
+  const original = app.locals.bridgeSessions.get(webAuth.verifySessionToken(token).sessionID);
+  const { response } = await request(baseUrl, "/api/bots/start", {
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+  });
+  assert.equal(response.status, 502);
+  const restored = app.locals.bridgeSessions.get(webAuth.verifySessionToken(token).sessionID);
+  assert.equal(restored.characterID, 7001);
+  assert.notEqual(restored, original, "a fresh gateway selection restored ownership");
+});
+
+test("forged cleanup cannot release another session; signed expired cleanup can", async () => {
+  const log = [];
+  const { baseUrl, app } = await startTestServer(log);
+  const token = webAuth.createSessionToken(FARMER, { ttlMs: 1 });
+  const [encoded, signature] = token.split(".");
+  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  app.locals.bridgeSessions.set(payload.sessionID, {
+    bridgeSessionID: "expired-bridge", accountID: FARMER.accountID, characterID: 7001,
+    boundHandles: new Map(), streamSubscribers: new Set(), stream: null, chat: null,
+  });
+  const altered = { ...payload, accountID: 9999 };
+  const forged = `${Buffer.from(JSON.stringify(altered)).toString("base64url")}.${signature}`;
+  const forgedResult = await request(baseUrl, "/api/logout", { method: "POST", token: forged });
+  assert.equal(forgedResult.response.status, 401);
+  assert.equal(app.locals.bridgeSessions.has(payload.sessionID), true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const { response } = await request(baseUrl, "/api/logout", { method: "POST", token });
+  assert.equal(response.status, 200);
+  assert.equal(app.locals.bridgeSessions.has(payload.sessionID), false);
+  assert.deepEqual(log.filter(([name]) => name === "release"), [["release", "expired-bridge"]]);
+});
+
+test("a signed token cannot confirm logout of a held row owned by another account", async () => {
+  const log = [];
+  const { baseUrl, app } = await startTestServer(log);
+  const token = webAuth.createSessionToken(FARMER);
+  const payload = webAuth.verifySessionToken(token);
+  app.locals.bridgeSessions.set(payload.sessionID, {
+    bridgeSessionID: "other-account-bridge", accountID: 9999, characterID: 7001,
+    boundHandles: new Map(), streamSubscribers: new Set(), stream: null, chat: null,
+  });
+  const { response } = await request(baseUrl, "/api/logout", { method: "POST", token });
+  assert.equal(response.status, 409);
+  assert.equal(app.locals.bridgeSessions.has(payload.sessionID), true);
+  assert.equal(log.some(([name]) => name === "release"), false);
+});
+
+test("an ambiguous logout leaves the signed session held for safe retry", async () => {
+  const log = [];
+  const gateway = fakeGateway(log);
+  gateway.releaseBridgeSession = async () => ({ released: false });
+  const { baseUrl, app } = await startTestServer(log, null, gateway);
+  const token = await signInAndSelect(baseUrl, 7001);
+  const { response, payload } = await request(baseUrl, "/api/logout", { method: "POST", token });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "PILOT_RELEASE_UNVERIFIED");
+  assert.equal(app.locals.bridgeSessions.size, 1);
 });
 
 test("a caller flying a DIFFERENT character keeps their hull", async () => {

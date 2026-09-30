@@ -1924,6 +1924,9 @@ function runProgram(
   let macroMem = mem.macroMem;
   let board = mem.board;
   let blindThisTick = false;
+  // A completed invocation can wrap straight back to the same path in this
+  // scan. Its silence budget belongs to that invocation, not to the path key.
+  let invocationAdvanced = false;
 
   // A loop RE-ENTERING its own body is the only backward edge, and a single one
   // per tick is normal (the last body step finished, so we wrap to the first). A
@@ -1943,6 +1946,7 @@ function runProgram(
       const loop = script.program[position.node] as LoopBlock;
       if (loop.until !== undefined && evaluateCondition(loop.until, obs) === "met") {
         position = startOfNode(script, position.node + 1);
+        invocationAdvanced = true;
         loopPass = 0;
         continue;
       }
@@ -1968,7 +1972,7 @@ function runProgram(
         // one. (The cannot-tell streak is the tighter of the two and normally
         // fires long first; this stays as the backstop it always was.)
         const samePlace = positionKey(position) === positionKey(mem.position);
-        const stepTicks = (samePlace ? mem.stepTicks : 0) + 1;
+        const stepTicks = (samePlace && !invocationAdvanced ? mem.stepTicks : 0) + 1;
         if (stepTicks > MAX_SILENT_STEP_TICKS) {
           return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, branch.id, obs, travelHome);
         }
@@ -1998,6 +2002,7 @@ function runProgram(
         if (loopBodyIndex !== null) {
           const next = advanceLoopBody(script, branchNode, loopBodyIndex, loopPass);
           position = next.position;
+          invocationAdvanced = true;
           loopPass = next.loopPass;
           if (next.wrapped) {
             wraps += 1;
@@ -2007,6 +2012,7 @@ function runProgram(
           }
         } else {
           position = startOfNode(script, branchNode + 1);
+          invocationAdvanced = true;
           loopPass = 0;
         }
         continue;
@@ -2048,6 +2054,7 @@ function runProgram(
       const skipped = mem.skippedSteps ?? [];
       if (skipped.includes(step.id)) {
         position = next.position;
+        invocationAdvanced = true;
         loopPass = next.loopPass;
         if (next.wrapped) {
           wraps += 1;
@@ -2082,6 +2089,7 @@ function runProgram(
       macroMem = omit(macroMem, step.id); // leaving the step — its memory resets
       const next = advance(script, position, loopPass);
       position = next.position;
+      invocationAdvanced = true;
       loopPass = next.loopPass;
       if (next.wrapped) {
         wraps += 1;
@@ -2140,6 +2148,7 @@ function runProgram(
         macroMem = omit(macroMem, step.id); // leaving the step — its memory resets
         const next = advance(script, position, loopPass);
         position = next.position;
+        invocationAdvanced = true;
         loopPass = next.loopPass;
         if (next.wrapped) {
           wraps += 1;
@@ -2161,7 +2170,7 @@ function runProgram(
     // it, and starts again from zero. Leaving the position clears it too, which
     // is what a `done` or a skip does on its way past.
     const samePlace = positionKey(position) === positionKey(mem.position);
-    const stepTicks = isWorldCall(tick.action) ? 0 : (samePlace ? mem.stepTicks : 0) + 1;
+    const stepTicks = isWorldCall(tick.action) ? 0 : (samePlace && !invocationAdvanced ? mem.stepTicks : 0) + 1;
     if (stepTicks > MAX_SILENT_STEP_TICKS) {
       return stopSafely(SAY.stepDidNothing, { ...mem, position, loopPass, macroMem, board }, step.id, obs, travelHome);
     }

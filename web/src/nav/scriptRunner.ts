@@ -115,6 +115,16 @@ function freesHoldSpace(action: ScriptAction): boolean {
     || action.kind === "reprocessOre";
 }
 
+/** Only these successful actions prove that ship capacity was recovered. */
+function recoversHoldSpace(action: ScriptAction): boolean {
+  return action.kind === "unloadOre"
+    || action.kind === "unloadHolds"
+    || action.kind === "unloadMissionCargo"
+    || action.kind === "jettison"
+    || (action.kind === "moveItems" &&
+      (action.from === "cargo" || action.from === "ore") && action.to === "hangar");
+}
+
 /**
  * The world object an action addresses, when it addresses one.
  *
@@ -199,6 +209,10 @@ export interface ScriptRunnerController {
   pause(): void;
   resume(): void;
   stop(): void;
+  /** Stop new decisions and wait for the tick already observing/issuing. */
+  beginGracefulStop(): Promise<void>;
+  /** Resume only the latched home flight after hosted safety settlement. */
+  resumeHeadHome(reason: string): boolean;
   /**
    * End the run DOCKED: latch `reason` exactly as the runner's own faults do
    * (`stopOrHeadHome`), so the decider flies the ship home and the run pauses
@@ -244,6 +258,7 @@ const SETTLE_AFTER_SESSION_CHANGE = 2;
 export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerController {
   let status: ScriptRunnerStatus = "idle";
   let runToken = 0;
+  let activeTick: Promise<void> | null = null;
   let script: BotScript | null = null;
   let memory: ScriptMemory | null = null;
   let settle = 0;
@@ -342,7 +357,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     emit({ ...last, status: "error", why: reason, pauseReason: reason });
   }
 
-  async function tick(): Promise<void> {
+  async function tickBody(): Promise<void> {
     const token = runToken;
     if (status !== "running" || script === null || memory === null) {
       return;
@@ -471,7 +486,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         // early on an unrelated blip much later.
         ledger.clear(key);
         if (freesHoldSpace(result.action)) {
-          ledger.forgetRefused();
+          ledger.forgetRefused(recoversHoldSpace(result.action));
         }
       } catch (error) {
         if (deps.isSessionLost(error)) {
@@ -564,6 +579,14 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     emit(toSnapshot(result, "running", ledger.records()));
+  }
+
+  function tick(): Promise<void> {
+    const pending = tickBody();
+    activeTick = pending;
+    return pending.finally(() => {
+      if (activeTick === pending) activeTick = null;
+    });
   }
 
   /**
@@ -723,6 +746,22 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
+    },
+    beginGracefulStop(): Promise<void> {
+      if (status === "running") {
+        runToken += 1;
+        status = "paused";
+        emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after controlled drones return." });
+      }
+      return activeTick ?? Promise.resolve();
+    },
+    resumeHeadHome(reason: string): boolean {
+      if (status !== "paused" || memory === null || script === null) return false;
+      runToken += 1;
+      if (memory.latched === null) memory = { ...memory, latched: { interruptID: null, reason } };
+      status = "running";
+      emit({ ...last, status: "running", phase: "Heading home", why: reason, pauseReason: null });
+      return true;
     },
     headHome(reason: string): boolean {
       if (status !== "running" || memory === null) {

@@ -685,6 +685,19 @@ test("a step that emits nothing at all trips the silence cap", () => {
   assert.match(stopped.pauseReason ?? "", /did nothing/i);
 });
 
+test("a new invocation at the same loop path gets a fresh silence budget", () => {
+  const s = script([{ id: "L", kind: "loop", repeat: { kind: "forever" }, body: [macroStep("m", "mine-at-belt")] }]);
+  const old = { ...initialMemory(s), stepTicks: MAX_SILENT_STEP_TICKS };
+  let invocations = 0;
+  const reg = { ...registry, "mine-at-belt": () => invocations++ === 0
+    ? tick({ kind: "wait" }, { kind: "done" })
+    : tick({ kind: "wait" }, { kind: "acting" }) };
+  const next = decideScriptAction(s, obs(), old, reg, home);
+  assert.equal(next.status, "running");
+  assert.equal(next.stepPath, "m", "the new invocation has the identical path");
+  assert.equal(next.memory.stepTicks, 1);
+});
+
 test("a step that keeps acting is never stopped for taking a long time", () => {
   // THE REGRESSION. `mine` acts every tick and its `until` is never met — a
   // miner filling a big hold from two ores, which is exactly what the elapsed-

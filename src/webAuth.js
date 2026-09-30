@@ -177,7 +177,7 @@ function createSessionToken(account, options) {
   return `${encodedPayload}.${signature}`;
 }
 
-function verifySessionToken(token) {
+function verifySessionToken(token, { allowExpired = false } = {}) {
   const parts = String(token || "").split(".");
   if (parts.length !== 2) {
     return null;
@@ -197,7 +197,8 @@ function verifySessionToken(token) {
     !payload ||
     typeof payload.sessionID !== "string" ||
     payload.sessionID.length < 32 ||
-    Number(payload.exp || 0) < Date.now()
+    !Number.isFinite(Number(payload.exp)) ||
+    (!allowExpired && Number(payload.exp) < Date.now())
   ) {
     return null;
   }

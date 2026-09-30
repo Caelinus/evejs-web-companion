@@ -15,6 +15,7 @@ import { decodeShipBays } from "../bridge/shipBays.ts";
 import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
+import { confirmControlledDronesHome } from "../nav/controlledDroneStop.ts";
 import { buildSlots, decodeChargeFits, decodeResources, decodeShipAttributes } from "../bridge/fitting.ts";
 import { deriveShipStats } from "../bridge/shipStats.ts";
 import {
@@ -1128,6 +1129,11 @@ export interface AppFlow {
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
   stopCustomBot(): void;
+  /** Hosted manual/deadline Stop: settle issued work and confirm the controlled
+   * flight is empty before the host may dock or release this session. */
+  prepareHostedBotStop(kind: "script" | "companion", deadlineMs: number): Promise<void>;
+  /** Cancel Farmer's deadline home run and settle its last issued action. */
+  cancelHostedHome(kind: "script" | "companion"): Promise<void>;
   /**
    * End it DOCKED: the running script flies home and pauses on arrival with
    * `reason`. False when no script is running to send (see
@@ -1142,7 +1148,7 @@ export interface AppFlow {
    * Manual escape hatch: stop every loop, recall drones, and dock at the nearest
    * station on grid. Always available while a bot runs — the operator's override.
    */
-  panicRecallAndDock(): Promise<void>;
+  panicRecallAndDock(shouldAbort?: () => boolean): Promise<void>;
   /** Pause the autopilot loop (it stops issuing; the ship finishes its last move). */
   pauseRoute(): void;
   /** Resume a paused autopilot loop from where it stopped. */
@@ -5650,7 +5656,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // So nothing here reads the Dock response to decide it worked. The loop's
   // arrival test is `isAtDestination`, which is `docked === true` AND the
   // station id matching, both read back from `flight-status`.
-  async function dockAt(stationID: number): Promise<void> {
+  async function dockAt(stationID: number, shouldAbort: () => boolean = () => false): Promise<void> {
+    if (shouldAbort()) return;
     store.apply({ type: "travel/plan-error", message: null });
     if (!(stationID > 0)) {
       store.apply({ type: "travel/plan-error", message: "That is not a station to dock at." });
@@ -5675,6 +5682,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       });
       return;
     }
+    if (shouldAbort()) return;
 
     if (status.docked && status.stationID === stationID) {
       // Already there. Say so rather than starting a loop that would only
@@ -5696,6 +5704,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     } catch {
       destinationName = null;
     }
+    if (shouldAbort()) return;
 
     // A plan with NO hops: same system, one station to reach. Everything else
     // about the loop is unchanged.
@@ -7159,6 +7168,62 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     scriptRunner?.stop();
     // Custom travel blocks use the same shared autopilot as missions.
     autopilot?.abort();
+  }
+
+  const HOSTED_ISSUE_SETTLE_MS = 10_000;
+  let hostedStopPending: Promise<void> | null = null;
+
+  async function settleHostedIssue(pending: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("An issued bot action has not settled; Stop is paused with pilot control retained.")), HOSTED_ISSUE_SETTLE_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  function cancelHostedHome(kind: "script" | "companion"): Promise<void> {
+    autopilot?.abort();
+    if (kind === "script") {
+      customBotGeneration += 1;
+      return settleHostedIssue(scriptRunner?.beginGracefulStop() ?? Promise.resolve());
+    }
+    liveCompanionRequest = null;
+    return settleHostedIssue(fleetCompanion?.beginGracefulStop() ?? Promise.resolve());
+  }
+
+  function prepareHostedBotStop(kind: "script" | "companion", deadlineMs: number): Promise<void> {
+    if (hostedStopPending !== null) return hostedStopPending;
+    const pending = (async () => {
+      // Prevent a pending start or an active tick from issuing new script work.
+      // The in-flight issue still has to settle before a drone read is trusted.
+      await cancelHostedHome(kind);
+      await confirmControlledDronesHome({
+        read: async () => {
+          const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+          if (flight.docked) return [];
+          if (!flight.inSpace || flight.shipID === null) return null;
+          const raw = await api.getDrones(callOptions);
+          const rows = decodeDronesInSpace(raw.inSpace);
+          if (raw.activeShipID !== flight.shipID || !Array.isArray(raw.inSpace) || rows === null ||
+              rows.length !== raw.inSpace.length || raw.inSpace.some((value) =>
+                value === null || typeof value !== "object" || Array.isArray(value) ||
+                typeof value.controlled !== "boolean")) return null;
+          return rows;
+        },
+        recall: async (ids) => { await api.recallDrones(ids, callOptions); },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        now: () => Date.now(),
+        deadlineMs,
+      });
+    })();
+    hostedStopPending = pending.finally(() => { hostedStopPending = null; });
+    return hostedStopPending;
   }
 
   function stopCompanionController(): void {
@@ -10586,7 +10651,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
    * hand, whatever a bot (or a bug) is doing. Best-effort and bounded — each step
    * is independent, so a failed recall still attempts the dock.
    */
-  async function panicRecallAndDock(): Promise<void> {
+  async function panicRecallAndDock(shouldAbort: () => boolean = () => false): Promise<void> {
+    if (shouldAbort()) return;
     customBotGeneration += 1; // cancel any start still mid-await
     scriptRunner?.stop();
     // The player has ended the bot by hand — clear its readout to idle so it
@@ -10598,6 +10664,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     miningBot?.stop();
     missionBot?.stop();
     await loadSpaceSnapshot().catch(() => {});
+    if (shouldAbort()) return;
     const snapshot = store.space.get().snapshot;
     if (snapshot === null) {
       return;
@@ -10633,19 +10700,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // let the dock (which warps) proceed — warping with drones out abandons them.
     // Bounded (~15s) so it can never hang; after that we leave regardless.
     const out = dronesStillOut();
-    if (out.length > 0) {
+    if (out.length > 0 && !shouldAbort()) {
       await recallDrones(out).catch(() => {});
-      if (best !== null) {
+      if (best !== null && !shouldAbort()) {
         await api.alignTo(best.itemID, callOptions).catch(() => {});
       }
-      for (let i = 0; i < 10 && dronesStillOut().length > 0; i += 1) {
+      for (let i = 0; i < 10 && !shouldAbort() && dronesStillOut().length > 0; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
         await loadSpaceSnapshot().catch(() => {});
       }
     }
 
-    if (best !== null) {
-      await dockAt(best.itemID);
+    if (best !== null && !shouldAbort()) {
+      await dockAt(best.itemID, shouldAbort);
     }
   }
 
@@ -11540,8 +11607,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       stopCustomController();
     },
 
+    prepareHostedBotStop,
+    cancelHostedHome,
+
     headCustomBotHome(reason) {
-      return scriptRunner?.headHome(reason) ?? false;
+      if (!scriptRunner) return false;
+      if (scriptRunner.resumeHeadHome(reason)) {
+        void scriptRunner.run();
+        return true;
+      }
+      return scriptRunner.headHome(reason);
     },
 
     panicRecallAndDock,
@@ -11636,18 +11711,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     async logout() {
       stopLiveStream();
+      let completed = false;
       try {
         await api.logout(callOptions);
+        completed = true;
       } finally {
         // R107 — this flow is fully signed out, so drop its per-session token
         // (in single-session mode `token` is not a key here and api.logout
         // cleared the global instead). releaseSession keeps the token: it only
         // takes the character offline, the web login stays.
-        if (options.perSessionToken) {
+        if (options.perSessionToken && completed) {
           callOptions.token = null;
         }
-        syncedStationID = null;
-        store.apply({ type: "session/logged-out" });
+        if (completed || !options.perSessionToken) {
+          syncedStationID = null;
+          store.apply({ type: "session/logged-out" });
+        }
       }
     },
   };
