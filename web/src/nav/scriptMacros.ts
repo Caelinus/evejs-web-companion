@@ -69,6 +69,7 @@ import {
   type DroneRoster,
 } from "./droneLaunch.ts";
 import { decideDroneBoat } from "./droneBoatLadder.ts";
+import { decideDroneRotation, readRotationMemory } from "./droneRotation.ts";
 import {
   decodeLedger,
   describeVerdict,
@@ -3590,6 +3591,54 @@ function fightRatsLadder(
       true,
       { ...mem, dronesOn: targetID },
     );
+  }
+  // Rotate a hurt drone: the same rung, and the same rule, as the drone boat's
+  // (nav/droneBoatLadder.ts rung 6) — a drone whose shield has started to go is
+  // pulled before the rats finish it, then sent straight back out.
+  //
+  // ⚠ THIS BLOCK IS WHAT THE `fight-back` WATCH BORROWS, which is why it lives
+  // here and not only in `fight-with-drones`. A working bot is mining when the
+  // rats arrive, so the watch fights nearly every real fight; a rotation only
+  // the drone-boat BLOCK could run was a rotation no miner ever got.
+  //
+  // Below the engage rung, so the primary is locked and the flight is on it
+  // before anything is pulled; never STARTED with a single drone out, because
+  // pulling a flight of one leaves the primary unattended — but one already in
+  // flight is always allowed to finish.
+  const rotationMemory = readRotationMemory(mem["rotation"]);
+  if (rotationMemory.active !== null || roster.roleOut.length > 1) {
+    const rotation = decideDroneRotation({
+      dronesInSpace: roster.roleRows,
+      droneIDsInBay: obs.combatDroneBayItemIDs ?? null,
+      memory: mem["rotation"],
+    });
+    // A drone that is back out has no orders: clearing `dronesOn` makes the
+    // engage rung above set the whole flight on the primary again.
+    mem = {
+      ...mem,
+      rotation: rotation.memory,
+      ...(rotation.reason === "complete" ? { dronesOn: null } : {}),
+    };
+    if (rotation.action === "recall" && rotation.itemID !== null) {
+      return tick(
+        { kind: "recallDrones", droneIDs: [rotation.itemID] },
+        "That drone has started losing shield — pulling it before the rats finish it.",
+        "Fighting",
+        ACTING,
+        true,
+        mem,
+      );
+    }
+    if (rotation.action === "relaunch" && rotation.itemID !== null) {
+      return tick(
+        { kind: "launchDrones", droneItemIDs: [rotation.itemID] },
+        "Sending the drone back out.",
+        "Fighting",
+        ACTING,
+        true,
+        mem,
+      );
+    }
   }
   const active = new Set(snapshot.ship?.activeModuleIDs ?? []);
   const idleGun = weapons.find((id) => !active.has(id));
