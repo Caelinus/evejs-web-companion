@@ -32,6 +32,7 @@ const SCRIPTS = [
     updatedAt: "2026-09-02T12:00:00.000Z",
     authorAccountID: 424242,
     authorName: "Test Pilot One",
+    categoryID: null,
   },
 ];
 

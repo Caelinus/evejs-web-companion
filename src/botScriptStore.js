@@ -22,6 +22,8 @@ const STORE_FILENAME = "bot-scripts.json";
 const MAX_SCRIPTS_TOTAL = 200;
 const MAX_DOC_BYTES = 49152; // 48 KB — the same ceiling the browser codec uses
 const MAX_NAME_LEN = 60;
+const MAX_CATEGORIES = 50;
+const MAX_CATEGORY_NAME_LEN = 40;
 
 // ─── Starter bots ────────────────────────────────────────────────────────────
 //
@@ -73,6 +75,17 @@ function createBotScriptStore(options) {
         record.authorName = null;
       }
     }
+    // Categories arrived after the library did: a file without them has none,
+    // and a bot pointing at a category that is gone is simply uncategorized.
+    if (!Array.isArray(data.categories)) {
+      data.categories = [];
+    }
+    const known = new Set(data.categories.map((category) => category.categoryID));
+    for (const record of Object.values(data.scripts)) {
+      if (typeof record.categoryID !== "string" || !known.has(record.categoryID)) {
+        record.categoryID = null;
+      }
+    }
     return data;
   }
 
@@ -82,10 +95,10 @@ function createBotScriptStore(options) {
       if (parsed && typeof parsed.scripts === "object" && parsed.scripts !== null) {
         return normalize(parsed);
       }
-      return { scripts: {} };
+      return { scripts: {}, categories: [] };
     } catch (error) {
       if (error.code === "ENOENT") {
-        return { scripts: {} };
+        return { scripts: {}, categories: [] };
       }
       throw error;
     }
@@ -134,7 +147,43 @@ function createBotScriptStore(options) {
       rev: record.rev,
       updatedAt: record.updatedAt,
       bytes: record.bytes,
+      categoryID: record.categoryID,
     };
+  }
+
+  function categoryNameOf(name) {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (trimmed.length === 0) {
+      throw fail("BOTCATEGORY_INVALID", "Give the category a name.");
+    }
+    return trimmed.slice(0, MAX_CATEGORY_NAME_LEN);
+  }
+
+  function guardUniqueName(all, name, exceptID) {
+    const lower = name.toLowerCase();
+    const clash = all.categories.find(
+      (category) => category.categoryID !== exceptID && category.name.toLowerCase() === lower,
+    );
+    if (clash) {
+      throw fail("BOTCATEGORY_NAME_TAKEN", `There is already a category called "${clash.name}".`);
+    }
+  }
+
+  function findCategory(all, categoryID) {
+    const category = all.categories.find((row) => row.categoryID === String(categoryID));
+    if (!category) {
+      throw fail("BOTCATEGORY_NOT_FOUND", "That category could not be found.");
+    }
+    return category;
+  }
+
+  // `undefined` means "the caller did not say" (keep what is there); `null`
+  // means Uncategorized; anything else must name a category that exists.
+  function resolveCategoryID(all, categoryID) {
+    if (categoryID === undefined || categoryID === null) {
+      return categoryID;
+    }
+    return findCategory(all, categoryID).categoryID;
   }
 
   function guardDoc(doc) {
@@ -161,8 +210,11 @@ function createBotScriptStore(options) {
       return record || null;
     },
 
-    /** Save a new script; returns { scriptID, rev }. Throws on quota or size. */
-    create(authorAccountID, authorName, doc) {
+    /**
+     * Save a new script; returns { scriptID, rev }. Throws on quota or size.
+     * `categoryID` is optional: absent or null files it as Uncategorized.
+     */
+    create(authorAccountID, authorName, doc, categoryID) {
       const author = Number(authorAccountID);
       const bytes = guardDoc(doc);
       const all = readAll();
@@ -170,6 +222,7 @@ function createBotScriptStore(options) {
       if (total >= MAX_SCRIPTS_TOTAL) {
         throw fail("BOTSCRIPT_LIMIT_REACHED", "You have reached the limit of saved bots.");
       }
+      const category = resolveCategoryID(all, categoryID) ?? null;
       const scriptID = uuid();
       const timestamp = now();
       all.scripts[scriptID] = {
@@ -181,14 +234,18 @@ function createBotScriptStore(options) {
         bytes,
         createdAt: timestamp,
         updatedAt: timestamp,
+        categoryID: category,
         doc,
       };
       writeAll(all);
       return { scriptID, rev: 1 };
     },
 
-    /** Update in place with optimistic concurrency; returns { rev }. */
-    update(scriptID, doc, baseRev) {
+    /**
+     * Update in place with optimistic concurrency; returns { rev }.
+     * `categoryID` undefined keeps the bot where it is; null uncategorizes it.
+     */
+    update(scriptID, doc, baseRev, categoryID) {
       const bytes = guardDoc(doc);
       const all = readAll();
       const record = all.scripts[String(scriptID)];
@@ -200,6 +257,10 @@ function createBotScriptStore(options) {
           "SCRIPT_REV_CONFLICT",
           "This script was changed in another tab. Reload it, or save yours as a copy.",
         );
+      }
+      const category = resolveCategoryID(all, categoryID);
+      if (category !== undefined) {
+        record.categoryID = category;
       }
       // authorAccountID / authorName are NOT touched here. The field records
       // who first saved the script, not who last edited it — an editor other
@@ -223,6 +284,96 @@ function createBotScriptStore(options) {
       delete all.scripts[String(scriptID)];
       writeAll(all);
       return true;
+    },
+
+    // ─── Categories ──────────────────────────────────────────────────────────
+    //
+    // A category is a folder: every bot is in exactly one, or in none
+    // (Uncategorized). The list's order IS the display order. Filing a bot is
+    // library bookkeeping, not an edit — it never bumps `rev` or `updatedAt`,
+    // so moving a bot cannot collide with somebody editing it in the Builder.
+
+    /** Every category, in display order. */
+    listCategories() {
+      return readAll().categories.map((category) => ({ ...category }));
+    },
+
+    /** Add a category at the end of the list; returns { categoryID }. */
+    createCategory(name) {
+      const all = readAll();
+      const clean = categoryNameOf(name);
+      guardUniqueName(all, clean, null);
+      if (all.categories.length >= MAX_CATEGORIES) {
+        throw fail("BOTCATEGORY_LIMIT_REACHED", "You have reached the limit of categories.");
+      }
+      const categoryID = uuid();
+      all.categories.push({ categoryID, name: clean });
+      writeAll(all);
+      return { categoryID };
+    },
+
+    /** Rename a category. */
+    renameCategory(categoryID, name) {
+      const all = readAll();
+      const category = findCategory(all, categoryID);
+      const clean = categoryNameOf(name);
+      guardUniqueName(all, clean, category.categoryID);
+      category.name = clean;
+      writeAll(all);
+    },
+
+    /** Move a category to `index` (clamped) in the display order. */
+    moveCategory(categoryID, index) {
+      const all = readAll();
+      const category = findCategory(all, categoryID);
+      const rest = all.categories.filter((row) => row !== category);
+      const at = Math.max(0, Math.min(rest.length, Math.trunc(Number(index)) || 0));
+      rest.splice(at, 0, category);
+      all.categories = rest;
+      writeAll(all);
+    },
+
+    /**
+     * Delete a category. ⚠ ITS BOTS ARE NEVER DELETED: every bot filed in it
+     * becomes Uncategorized. Returns { uncategorized } — how many moved.
+     */
+    removeCategory(categoryID) {
+      const all = readAll();
+      const category = findCategory(all, categoryID);
+      all.categories = all.categories.filter((row) => row !== category);
+      let uncategorized = 0;
+      for (const record of Object.values(all.scripts)) {
+        if (record.categoryID === category.categoryID) {
+          record.categoryID = null;
+          uncategorized += 1;
+        }
+      }
+      writeAll(all);
+      return { uncategorized };
+    },
+
+    /**
+     * File bots in a category (null = Uncategorized). Every id must exist and
+     * so must the category, or nothing moves. Returns { moved }.
+     */
+    setCategory(scriptIDs, categoryID) {
+      const all = readAll();
+      if (!Array.isArray(scriptIDs) || scriptIDs.length === 0) {
+        throw fail("BOTSCRIPT_INVALID", "Choose at least one bot to move.");
+      }
+      const target = resolveCategoryID(all, categoryID === undefined ? null : categoryID);
+      const records = scriptIDs.map((scriptID) => {
+        const record = all.scripts[String(scriptID)];
+        if (!record) {
+          throw fail("BOTSCRIPT_NOT_FOUND", "That bot could not be found.");
+        }
+        return record;
+      });
+      for (const record of records) {
+        record.categoryID = target;
+      }
+      writeAll(all);
+      return { moved: records.length };
     },
 
     /**
@@ -273,6 +424,7 @@ function createBotScriptStore(options) {
           bytes,
           createdAt: timestamp,
           updatedAt: timestamp,
+          categoryID: null,
           doc: starter.doc,
         };
         total += 1;
@@ -292,5 +444,7 @@ module.exports = {
   STARTER_AUTHOR_NAME,
   MAX_DOC_BYTES,
   MAX_NAME_LEN,
+  MAX_CATEGORIES,
+  MAX_CATEGORY_NAME_LEN,
   STORE_FILENAME,
 };

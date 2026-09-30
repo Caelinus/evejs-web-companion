@@ -2,12 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ALL_BOTS,
+  categoryLabel,
+  deleteCategoryPrompt,
   filterLibrary,
   lastSavedPhrase,
   libraryView,
+  liveShelf,
+  onShelf,
   savedByLabel,
+  shelfCounts,
 } from "./libraryView.ts";
-import type { BotScriptSummary } from "../app/api.ts";
+import type { BotCategory, BotScriptSummary } from "../app/api.ts";
 
 function row(over: Partial<BotScriptSummary> = {}): BotScriptSummary {
   return {
@@ -17,6 +23,7 @@ function row(over: Partial<BotScriptSummary> = {}): BotScriptSummary {
     updatedAt: "2026-09-02T12:00:00.000Z",
     authorAccountID: 424242,
     authorName: "Test Pilot One",
+    categoryID: null,
     ...over,
   };
 }
@@ -116,4 +123,75 @@ test("rows come back filtered", () => {
   const view = libraryView(true, null, rows, "ratting");
   assert.equal(view.kind, "rows");
   assert.deepEqual(view.kind === "rows" ? view.rows.map((r) => r.name) : [], ["Ratting night"]);
+});
+
+// ─── categories ──────────────────────────────────────────────────────────────
+
+const MINING: BotCategory = { categoryID: "cat-mining", name: "Mining" };
+const RATTING: BotCategory = { categoryID: "cat-ratting", name: "Ratting" };
+const CATEGORIES = [MINING, RATTING];
+
+function shelfRows(): BotScriptSummary[] {
+  return [
+    row({ scriptID: "a", name: "Belt miner", categoryID: MINING.categoryID }),
+    row({ scriptID: "b", name: "Anomaly miner", categoryID: MINING.categoryID }),
+    row({ scriptID: "c", name: "Night ratter", categoryID: RATTING.categoryID }),
+    row({ scriptID: "d", name: "Move items", categoryID: null }),
+    row({ scriptID: "e", name: "Orphan", categoryID: "cat-deleted" }),
+  ];
+}
+
+test("onShelf: All is everything, a category is its bots, Uncategorized is the rest", () => {
+  const rows = shelfRows();
+  const ids = (shelf: Parameters<typeof onShelf>[2]) => onShelf(rows, CATEGORIES, shelf).map((r) => r.scriptID);
+  assert.deepEqual(ids(ALL_BOTS), ["a", "b", "c", "d", "e"]);
+  assert.deepEqual(ids({ kind: "category", categoryID: MINING.categoryID }), ["a", "b"]);
+  assert.deepEqual(ids({ kind: "uncategorized" }), ["d", "e"], "a bot in a deleted category is Uncategorized");
+});
+
+test("shelfCounts counts every bot exactly once", () => {
+  const counts = shelfCounts(shelfRows(), CATEGORIES);
+  assert.equal(counts.byCategory.get(MINING.categoryID), 2);
+  assert.equal(counts.byCategory.get(RATTING.categoryID), 1);
+  assert.equal(counts.uncategorized, 2);
+  const total = [...counts.byCategory.values()].reduce((sum, n) => sum + n, 0) + counts.uncategorized;
+  assert.equal(total, shelfRows().length);
+});
+
+test("an empty category has a count of zero, not no count", () => {
+  const counts = shelfCounts([], CATEGORIES);
+  assert.equal(counts.byCategory.get(RATTING.categoryID), 0);
+});
+
+test("liveShelf falls back to All when the selected category is gone", () => {
+  const gone = { kind: "category", categoryID: "cat-deleted" } as const;
+  assert.equal(liveShelf(gone, CATEGORIES).kind, "all");
+  const here = { kind: "category", categoryID: MINING.categoryID } as const;
+  assert.equal(liveShelf(here, CATEGORIES), here);
+});
+
+test("an empty category is its own state, not 'no bots saved'", () => {
+  const rows = [row({ categoryID: MINING.categoryID })];
+  assert.equal(libraryView(true, null, rows, "", CATEGORIES, { kind: "category", categoryID: RATTING.categoryID }).kind, "empty-shelf");
+  assert.equal(libraryView(true, null, [], "", CATEGORIES, { kind: "category", categoryID: RATTING.categoryID }).kind, "empty");
+});
+
+test("search runs inside the selected category", () => {
+  const view = libraryView(true, null, shelfRows(), "miner", CATEGORIES, { kind: "category", categoryID: MINING.categoryID });
+  assert.deepEqual(view.kind === "rows" ? view.rows.map((r) => r.scriptID) : [], ["a", "b"]);
+  const none = libraryView(true, null, shelfRows(), "ratter", CATEGORIES, { kind: "category", categoryID: MINING.categoryID });
+  assert.equal(none.kind, "no-matches");
+});
+
+test("the delete-category prompt says the bots are kept", () => {
+  assert.match(deleteCategoryPrompt("Mining", 2), /2 bots move to Uncategorized; no bot is deleted/);
+  assert.match(deleteCategoryPrompt("Mining", 1), /1 bot moves to Uncategorized/);
+  assert.match(deleteCategoryPrompt("Mining", 0), /holds no bots/);
+});
+
+test("a row's category label is its category's name, or Uncategorized", () => {
+  const rows = shelfRows();
+  assert.equal(categoryLabel(rows[0]!, CATEGORIES), "Mining");
+  assert.equal(categoryLabel(rows[3]!, CATEGORIES), "Uncategorized");
+  assert.equal(categoryLabel(rows[4]!, CATEGORIES), "Uncategorized", "a deleted category reads as Uncategorized");
 });

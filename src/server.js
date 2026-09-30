@@ -63,6 +63,10 @@ const BOTSCRIPT_STATUS = {
   BOTSCRIPT_LIMIT_REACHED: 409,
   SCRIPT_REV_CONFLICT: 409,
   BOTSCRIPT_NOT_FOUND: 404,
+  BOTCATEGORY_INVALID: 400,
+  BOTCATEGORY_NAME_TAKEN: 409,
+  BOTCATEGORY_LIMIT_REACHED: 409,
+  BOTCATEGORY_NOT_FOUND: 404,
 };
 // The same for a saved PI plan (src/piPlanStore.js).
 const PI_PLAN_STATUS = {
@@ -20932,6 +20936,7 @@ app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
       rev: record.rev,
       name: record.name,
       updatedAt: record.updatedAt,
+      categoryID: record.categoryID,
       doc: record.doc,
     });
   } catch (error) {
@@ -20940,11 +20945,24 @@ app.get("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
 });
 app.post("/api/botscripts", requireAuth, (req, res, next) => {
   try {
+    const body = req.body || {};
     const result = botScripts.create(
       req.account.accountID,
       req.account.username,
-      req.body ? req.body.doc : undefined,
+      body.doc,
+      body.categoryID,
     );
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    sendBotScriptError(res, error, next);
+  }
+});
+// Filing bots in a category (null = Uncategorized). Declared before
+// "/api/botscripts/:scriptID" so "category" is never read as a script id.
+app.post("/api/botscripts/category", requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const result = botScripts.setCategory(body.scriptIDs, body.categoryID);
     res.json({ ok: true, ...result });
   } catch (error) {
     sendBotScriptError(res, error, next);
@@ -20953,7 +20971,7 @@ app.post("/api/botscripts", requireAuth, (req, res, next) => {
 app.post("/api/botscripts/:scriptID", requireAuth, (req, res, next) => {
   try {
     const body = req.body || {};
-    const result = botScripts.update(req.params.scriptID, body.doc, body.baseRev);
+    const result = botScripts.update(req.params.scriptID, body.doc, body.baseRev, body.categoryID);
     res.json({ ok: true, ...result });
   } catch (error) {
     sendBotScriptError(res, error, next);
@@ -20965,6 +20983,47 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
     res.json({ ok: true, removed });
   } catch (error) {
     next(error);
+  }
+});
+
+// ── Bot library categories ─────────────────────────────────────────────────
+// Folders over the same shared library, kept in the same file. Deleting a
+// category never deletes a bot: its bots become Uncategorized.
+app.get("/api/botcategories", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, categories: botScripts.listCategories() });
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/botcategories", requireAuth, (req, res, next) => {
+  try {
+    const result = botScripts.createCategory((req.body || {}).name);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    sendBotScriptError(res, error, next);
+  }
+});
+app.post("/api/botcategories/:categoryID", requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (body.name !== undefined) {
+      botScripts.renameCategory(req.params.categoryID, body.name);
+    }
+    if (body.index !== undefined) {
+      botScripts.moveCategory(req.params.categoryID, body.index);
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    sendBotScriptError(res, error, next);
+  }
+});
+app.post("/api/botcategories/:categoryID/delete", requireAuth, (req, res, next) => {
+  try {
+    const result = botScripts.removeCategory(req.params.categoryID);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    sendBotScriptError(res, error, next);
   }
 });
 

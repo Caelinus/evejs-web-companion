@@ -58,8 +58,8 @@ function fakeServerBot(over: Record<string, unknown> = {}): unknown {
 }
 
 const SCRIPTS = [
-  { scriptID: "script-1", name: "Sample belt loop", rev: 1, updatedAt: "2026-09-02T12:00:00.000Z", authorAccountID: 424242, authorName: "Test Pilot One" },
-  { scriptID: "script-2", name: "Second sample bot", rev: 3, updatedAt: "2026-09-02T12:00:00.000Z", authorAccountID: 424242, authorName: null },
+  { scriptID: "script-1", name: "Sample belt loop", rev: 1, updatedAt: "2026-09-02T12:00:00.000Z", authorAccountID: 424242, authorName: "Test Pilot One", categoryID: null },
+  { scriptID: "script-2", name: "Second sample bot", rev: 3, updatedAt: "2026-09-02T12:00:00.000Z", authorAccountID: 424242, authorName: null, categoryID: null },
 ];
 
 function renderRow(props: Record<string, unknown>): string {

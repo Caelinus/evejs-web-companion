@@ -203,3 +203,10 @@ test("the inspector has a render point under each region, guarded by kind", () =
   assert.equal(renders, 2, `expected exactly 2 inspector render points, found ${renders}`);
   assert.equal(source.split("<BotInspector").length - 1, 1, "the inspector is instantiated more than once");
 });
+
+test("the bot's Category menu sits beside its name, starting Uncategorized", () => {
+  // Categories are made on the Bot Manager's rail; here a bot is only filed.
+  const body = renderPanel();
+  assert.ok(body.includes('id="bot-category"'), "no category menu rendered");
+  assert.match(body, /<option[^>]*>Uncategorized<\/option>/);
+});
