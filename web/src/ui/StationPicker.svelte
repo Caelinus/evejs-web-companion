@@ -21,7 +21,7 @@
     onPick,
     scope = "station",
   }: {
-    flow: AppFlow;
+    flow: Pick<AppFlow, "searchDestinations">;
     value: WorldRef;
     /** The station the player is docked at, offered as a one-click choice. */
     current: { id: number; name: string } | null;

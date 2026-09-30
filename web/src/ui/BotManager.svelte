@@ -89,16 +89,9 @@
   let {
     onOpen,
     sessions,
-    canOpenBuilder = true,
   }: {
     onOpen?: (tab: TabID, sessionID?: string) => void;
     sessions?: readonly Session[];
-    /**
-     * False when no pilot is in the client. The Bot Builder is a panel on a
-     * pilot's workspace, so with nobody signed in there is nowhere to open it,
-     * and New / Edit say so instead of doing nothing.
-     */
-    canOpenBuilder?: boolean;
   } = $props();
 
   /**
@@ -585,10 +578,11 @@
    * It says "new" out loud for the same reason Edit says which bot: a builder
    * already open on a saved bot would otherwise answer this button by showing
    * that bot, and the player would edit it thinking it was their new one.
+   *
+   * It works with nobody in the client too: App floats the builder over the
+   * hangar then (globalWindow.ts `PILOTLESS_BUILDER`). Both buttons used to be
+   * greyed out there, so a player could list their bots but not write one.
    */
-  /** Why New and Edit are greyed out on the hangar with nobody in the client. */
-  const BUILDER_NEEDS_A_PILOT =
-    "The Bot Builder opens on a pilot's screen. Bring a pilot into the client to write or edit a bot.";
 
   function newBot(): void {
     newInBuilder();
@@ -1033,14 +1027,9 @@
           <button
             type="button"
             class="primary"
-            disabled={!canOpenBuilder}
-            title={canOpenBuilder ? undefined : BUILDER_NEEDS_A_PILOT}
             onclick={newBot}>New bot</button
           >
         </div>
-        {#if !canOpenBuilder}
-          <p class="note">{BUILDER_NEEDS_A_PILOT}</p>
-        {/if}
 
         <!-- One switch over the pure view, so "a failed read is never 'no bots
              saved'" is decided in libraryView.ts and merely rendered here. -->
@@ -1114,7 +1103,7 @@
                         <ActionButton
                           action="edit"
                           primary
-                          disabled={busyID !== null || !canOpenBuilder}
+                          disabled={busyID !== null}
                           onclick={() => edit(script.scriptID)}
                         />
                         <ActionButton

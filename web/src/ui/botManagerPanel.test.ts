@@ -207,6 +207,18 @@ test("the panel offers a way to write a bot that does not exist yet", () => {
   assert.match(text, /New bot/i);
 });
 
+test("New bot works with nobody in the client", () => {
+  // It used to be greyed out on the Pilot Hangar: the builder could only open
+  // on a pilot's desktop. App floats it over the hangar now.
+  const output = render(BotManager as never, {
+    props: { store: createClientStore(), flow: fakeFlow(), sessions: [] },
+  } as never);
+  const button = /<button[^>]*>New bot<\/button/.exec(output.body)?.[0] ?? "";
+  assert.ok(button !== "", "the New bot button is missing");
+  assert.doesNotMatch(button, /disabled/);
+  assert.doesNotMatch(visibleText(output.body), /Bring a pilot into the client/);
+});
+
 test("the Manager is the door onto BOTH panels that left the rail", () => {
   // `botBuilder` and `bots` are both `launchable: false` now, so the rail cannot
   // reach either. This panel is the only way in, and each door answers a
