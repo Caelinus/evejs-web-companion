@@ -1146,12 +1146,26 @@ export function decideScriptAction(
   const rockID = !ice && typeof picked === "number" && obs.lockedTargetIDs?.includes(picked) &&
     obs.snapshot?.entities.some((entity) => entity.itemID === picked && entity.miningYieldTypeID !== null)
     ? picked : null;
-  const leaving = base.settleDrones === true || !mining || base.memory.latched !== null ||
+  const moving = base.settleDrones === true || base.memory.latched !== null ||
     (step !== null && activeMacroID(script, base.memory) !== "mine-at-belt") ||
     ["warp", "warpScan", "warpBookmark", "approach", "orbit", "align", "dock", "undock",
       "startRoute", "startSystemRoute"].includes(base.action.kind);
+  const leaving = moving || !mining;
+  // ⚠ OFF A MINING STEP AND SITTING STILL, THE COMBAT FLIGHT IS NOT THIS
+  // FLIGHT'S. `!mining` alone used to count as leaving, so every controlled
+  // combat drone was recalled the tick after a fight-back watch or a
+  // Fight-the-rats step launched it — launch, recall, launch, every ~7 s
+  // (caught live 2026-09-30 on a loot step under a fight-back watch). Here the
+  // flight still calls home the MINING drones a finished mining step left out,
+  // and before any movement it still calls home everything, combat included,
+  // which is what it exists to protect; in between, combat drones belong to
+  // whoever launched them, and that block or watch recalls them itself.
+  const flightState = state == null || state.out === null || mining || moving ? state : {
+    ...state,
+    out: state.out.filter((drone) => drone.typeID === null || state.roles[drone.typeID] !== "combat"),
+  };
   const flight = decideMiningDroneFlight(
-    obs.snapshot == null || obs.hostileOnGrid === null ? null : state,
+    obs.snapshot == null || obs.hostileOnGrid === null ? null : flightState,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,
   );
   if (flight.action?.kind === "wait" && flight.memory.recallTicks > 90) return {

@@ -1872,6 +1872,101 @@ test("fight-back + mining flight: a watch mid-fight releases once the flight bri
   assert.ok(released, "the fight-back watch released the ship");
 });
 
+// Off a mining step, the drone-flight wrapper read "not mining" as "leaving" and
+// recalled every controlled drone — including the combat flight a fight-back
+// watch (or a Fight-the-rats step) had just launched. Caught live 2026-09-30 on
+// a loot step: launch, recall ~4 s later, seven cycles in a row. Leaving now
+// means MOVING; sitting on grid off a mining step, combat drones belong to
+// whoever launched them.
+
+function droneGrid(over: { ratM?: number | null; combat?: readonly number[]; mining?: readonly number[] } = {}): ScriptObservation {
+  const combat = over.combat ?? [];
+  const miningOut = over.mining ?? [];
+  const rat = over.ratM === null
+    ? []
+    : [entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: over.ratM ?? 10_000, y: 0, z: 0 } })];
+  const ids = [...combat, ...miningOut];
+  const drones = ids.map((itemID) =>
+    entity({ itemID, kind: "drone", typeID: combat.includes(itemID) ? COMBAT_DRONE_TYPE : MINING_DRONE_TYPE, controllerID: 9001, position: { x: 2000, y: 0, z: 0 } }));
+  return obs({
+    hostileOnGrid: rat.length > 0,
+    snapshot: snapshot([...rat, ...drones]),
+    maxTargetRangeM: 30_000,
+    weaponModuleIDs: [],
+    lockedTargetIDs: rat.length > 0 ? [6662] : [],
+    dronesOut: ids.length > 0,
+    combatDroneIDs: [...combat],
+    combatDroneBayItemIDs: [],
+    miningDrones: {
+      bay: [],
+      out: ids.map((itemID) => ({
+        itemID, typeID: combat.includes(itemID) ? COMBAT_DRONE_TYPE : MINING_DRONE_TYPE, name: null,
+        activity: combat.includes(itemID) ? "fighting" : "mining", targetID: combat.includes(itemID) ? 6662 : 40001,
+        shieldRatio: 1, armorRatio: 1, hullRatio: 1, controlled: true,
+      }) as unknown as NonNullable<NonNullable<ScriptObservation["miningDrones"]>["out"]>[number]),
+      maxActive: 5,
+      roles: { [COMBAT_DRONE_TYPE]: "combat", [MINING_DRONE_TYPE]: "mining" },
+    },
+  });
+}
+
+function lootScript(interrupts: BotScript["interrupts"]): BotScript {
+  return {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 1, name: "Home", systemName: null },
+    interrupts,
+    program: [{ id: "n2", kind: "macro", macro: "loot-containers", args: {} }],
+  };
+}
+
+/** The loot block stands in: it either sits (opening a can) or moves (approaching one). */
+function lootRegistry(moving: boolean) {
+  return {
+    ...SCRIPT_MACROS,
+    "loot-containers": (): MacroTick => ({
+      action: moving ? { kind: "approach", targetID: 80001 } : { kind: "wait" },
+      why: "looting", phase: "Looting", armed: true, outcome: { kind: "acting" }, nextMem: {},
+    }),
+  };
+}
+
+const FIGHT_BACK_ROW: BotScript["interrupts"][number] = { id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" };
+
+test("drone flight: a fight-back watch on a loot step keeps the combat drones it launched", () => {
+  const s = lootScript([FIGHT_BACK_ROW]);
+  // The earlier mining step left flight memory behind — the live shape.
+  const mem: ScriptMemory = { ...initialMemory(s), miningFlight: { combat: false, clearTicks: 0, returning: [], recallTicks: 0, orderKey: "", orderAttempts: 0, orderCooldown: 0, blockedLaunchKey: null } };
+  let m = mem;
+  for (let t = 0; t < 4; t += 1) {
+    const r = decideScriptAction(s, droneGrid({ combat: [501, 502, 503] }), m, lootRegistry(false), scriptTravelHome);
+    assert.equal(r.interruptID, "fb", `tick ${t}: the watch has the ship`);
+    assert.notEqual(r.action.kind, "recallDrones", `tick ${t}: the fight keeps its drones`);
+    m = r.memory;
+  }
+});
+
+test("drone flight: a Fight-the-rats STEP keeps its drones out on grid too", () => {
+  const s: BotScript = { ...lootScript([]), program: [{ id: "f", kind: "macro", macro: "fight-the-rats", args: {} }] };
+  const r = decideScriptAction(s, droneGrid({ combat: [501, 502] }), initialMemory(s), SCRIPT_MACROS, scriptTravelHome);
+  assert.notEqual(r.action.kind, "recallDrones");
+  assert.equal(r.stepPath, "f");
+});
+
+test("drone flight: combat drones still come home before the ship MOVES off a mining step", () => {
+  const s = lootScript([]);
+  const r = decideScriptAction(s, droneGrid({ ratM: null, combat: [501, 502] }), initialMemory(s), lootRegistry(true), scriptTravelHome);
+  assert.equal(r.action.kind, "recallDrones", "the flight still protects movement");
+  assert.deepEqual(r.action.kind === "recallDrones" ? [...r.action.droneIDs].sort() : [], [501, 502]);
+});
+
+test("drone flight: mining drones left out by a finished mining step still come home", () => {
+  const s = lootScript([]);
+  const mem: ScriptMemory = { ...initialMemory(s), miningFlight: { combat: false, clearTicks: 0, returning: [], recallTicks: 0, orderKey: "", orderAttempts: 0, orderCooldown: 0, blockedLaunchKey: null } };
+  const r = decideScriptAction(s, droneGrid({ ratM: null, mining: [801, 802] }), mem, lootRegistry(false), scriptTravelHome);
+  assert.equal(r.action.kind, "recallDrones");
+  assert.deepEqual(r.action.kind === "recallDrones" ? [...r.action.droneIDs].sort() : [], [801, 802]);
+});
+
 test("fight: an unreadable targeting range does NOT gate — the bounded lock stays the backstop", () => {
   const fight = SCRIPT_MACROS["fight-the-rats"]!;
   const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
