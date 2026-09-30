@@ -243,6 +243,21 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     }
   }
 
+  if (step.macro === "find-distribution-agent") {
+    const level = step.args["level"];
+    if (level && (level.kind !== "count" || !Number.isSafeInteger(level.value) || level.value < 1 || level.value > 4)) {
+      problems.push(blocking(step.id, "Choose a Distribution agent level from 1 to 4."));
+    }
+    const fallback = step.args["fallback"];
+    if (fallback && (fallback.kind !== "toggle" || typeof fallback.enabled !== "boolean")) {
+      problems.push(blocking(step.id, "Choose a valid lower-level fallback setting."));
+    }
+    const corporation = step.args["corporation"];
+    if (corporation && (corporation.kind !== "corp" || !Number.isSafeInteger(corporation.id) || corporation.id === null || corporation.id <= 0)) {
+      problems.push(blocking(step.id, "Choose the corporation or remove that filter."));
+    }
+  }
+
   if (step.macro === "haul-all" || step.macro === "route-hauler") {
     const returning = step.args["returnCargo"];
     if (!haulingLeg(step) || (returning?.kind === "toggle" && returning.enabled && !haulingLeg(step, true))) {

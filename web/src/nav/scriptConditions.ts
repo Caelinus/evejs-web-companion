@@ -410,7 +410,10 @@ export interface ScriptObservation {
     readonly stationID: number;
     readonly name: string | null;
     readonly stationName: string | null;
+    readonly level?: number;
   } | null;
+  /** Bounded Distribution search exhausted or its authority could not be read. */
+  readonly agentSearchFailure?: string | null;
   /** Jumps from HERE to the offered mission's drop-off (the accept gate). */
   readonly jumpsToDropoff?: number | null;
   /**

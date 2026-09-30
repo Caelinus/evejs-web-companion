@@ -154,7 +154,8 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   station: "Station",
   equipment: "Equipment",
   agent: "Agent",
-  level: "Agent level",
+  level: "Preferred mission level",
+  fallback: "Allow lower-level fallback",
   maxJumps: "Longest trip (jumps)",
   // A bare "Amount" (the generic label for a count) says nothing about what is
   // being counted, and this one is a percentage of a command centre's hold.
@@ -377,10 +378,11 @@ const ARG_KEY_BOUNDS: Readonly<Record<string, NumericBounds>> = {
 
 /**
  * Per-macro overrides of the above, for a key whose sensible range genuinely
- * differs by macro. None does today; an entry here wins over the shared
+ * differs by macro. An entry here wins over the shared
  * bounds above for that one macro's key.
  */
 const MACRO_ARG_BOUNDS: Readonly<Partial<Record<MacroID, Readonly<Record<string, NumericBounds>>>>> = {
+  "find-distribution-agent": { level: { min: 1, max: 4 } },
 };
 
 /**

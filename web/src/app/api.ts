@@ -2031,6 +2031,8 @@ export interface FoundAgent {
   readonly agentID: number;
   readonly name: string;
   readonly level: number | null;
+  readonly divisionID: number | null;
+  readonly agentTypeID: number | null;
   readonly missionKind: string | null;
   readonly missionTypeLabel: string | null;
   readonly corporationID: number | null;
@@ -2063,6 +2065,8 @@ function asFoundAgent(value: JsonValue): FoundAgent {
     agentID: asNumberOrNull(row.agentID) ?? 0,
     name: typeof row.name === "string" ? row.name : `Agent ${asNumberOrNull(row.agentID) ?? 0}`,
     level: asNumberOrNull(row.level),
+    divisionID: asNumberOrNull(row.divisionID),
+    agentTypeID: asNumberOrNull(row.agentTypeID),
     missionKind: typeof row.missionKind === "string" ? row.missionKind : null,
     missionTypeLabel: typeof row.missionTypeLabel === "string" ? row.missionTypeLabel : null,
     corporationID: asNumberOrNull(row.corporationID),

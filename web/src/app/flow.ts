@@ -106,6 +106,7 @@ import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePo
 import type { RequestPriority } from "./transport.ts";
 import type { CorpOfficesResult, FlightStepResult } from "./api.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
+import { classifyDistributionAgentConversation, selectDistributionAgent } from "../nav/distributionAgentSelection.ts";
 import { refusalWords as sayRefusalWords } from "../bridge/refusals.ts";
 import { readDictEntry, type JsonValue } from "../bridge/wire.ts";
 import * as api from "./api.ts";
@@ -9181,6 +9182,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const cargoWatched = watchedKinds.has("cargo-full");
     // One finder result per run: the found agent does not change under the bot.
     let foundAgentCache: NonNullable<ScriptObservation["foundAgent"]> | null = null;
+    let agentSearchFailureCache: string | null = null;
     // The shared belt memory read is gated on the mine-at-belt macro (below),
     // but the runner ticks every ~2s and a belt does not go dry that often —
     // so cache the last read per system name for a short while rather than
@@ -9373,6 +9375,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let haulDivisions: ScriptObservation["haulDivisions"] = null;
         let typeNames: ScriptObservation["typeNames"] = null;
         let foundAgent: ScriptObservation["foundAgent"] = null;
+        let agentSearchFailure: string | null = null;
         let jumpsToDropoff: ScriptObservation["jumpsToDropoff"] = null;
         let anomalies: ScriptObservation["anomalies"] = null;
         let savedFittings: ScriptObservation["savedFittings"] = null;
@@ -9838,19 +9841,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           if ((macro === "find-distribution-agent" || macro === "find-combat-agent") && boardAgentID === null) {
             if (foundAgentCache !== null) {
               foundAgent = foundAgentCache;
+            } else if (macro === "find-distribution-agent" && agentSearchFailureCache !== null) {
+              agentSearchFailure = agentSearchFailureCache;
             } else if (typeof hint.board["findLevel"] === "number") {
               try {
-                // Distribution missions come from COURIER agents — the same static
-                // finder table the Agent Finder page reads. Filter by corp, rank
-                // by jumps from here, honour the player's ceiling.
-                const found = await api.findAgents(
-                  {
-                    kind: typeof hint.board["findKind"] === "string" ? (hint.board["findKind"] as string) : "courier",
-                    level: hint.board["findLevel"] as number,
-                    limit: 200,
-                  },
-                  callOptions,
-                );
                 const corpID =
                   typeof hint.board["findCorpID"] === "number" ? (hint.board["findCorpID"] as number) : null;
                 const maxJumps =
@@ -9858,36 +9852,52 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 const origin = status.solarSystemID;
                 const graph = origin !== null ? await loadRouteGraph() : null;
                 const distances = graph !== null && origin !== null ? distancesFrom(graph, origin) : null;
-                let best: { agent: (typeof found.agents)[number]; jumps: number } | null = null;
-                for (const agent of found.agents) {
-                  if (agent.stationID === null || agent.solarSystemID === null) {
-                    continue; // an agent in space cannot be docked with
+                const kind = typeof hint.board["findKind"] === "string" ? (hint.board["findKind"] as string) : "courier";
+                const preferredLevel = hint.board["findLevel"] as number;
+                if (macro === "find-distribution-agent") {
+                  if (kind !== "courier") throw new Error("Distribution finder kind is invalid.");
+                  const selected = await selectDistributionAgent(
+                    { preferredLevel, fallback: hint.board["findFallback"] === 1,
+                      corporationID: corpID, maxJumps, originSystemID: origin, distances },
+                    (level) => api.findAgents({ kind: "courier", level, limit: 5000 }, callOptions),
+                    async (agentID) => {
+                      try {
+                        return classifyDistributionAgentConversation(
+                          decodeConversation(await api.agentAction(agentID, null, callOptions)));
+                      } catch { return "unavailable"; }
+                    },
+                  );
+                  if (selected.agent !== null && selected.agent.stationID !== null && selected.level !== null) {
+                    foundAgentCache = { agentID: selected.agent.agentID, stationID: selected.agent.stationID,
+                      name: selected.agent.name, stationName: selected.agent.stationName, level: selected.level };
+                    foundAgent = foundAgentCache;
+                  } else {
+                    agentSearchFailureCache = selected.reason;
+                    agentSearchFailure = selected.reason;
                   }
-                  if (corpID !== null && agent.corporationID !== corpID) {
-                    continue;
+                } else {
+                  // Combat finder keeps Farmer's exact-level static selection.
+                  const found = await api.findAgents({ kind, level: preferredLevel, limit: 200 }, callOptions);
+                  let best: { agent: (typeof found.agents)[number]; jumps: number } | null = null;
+                  for (const agent of found.agents) {
+                    if (agent.stationID === null || agent.solarSystemID === null ||
+                        (corpID !== null && agent.corporationID !== corpID)) continue;
+                    const jumps = origin !== null && agent.solarSystemID === origin
+                      ? 0 : (distances?.get(agent.solarSystemID) ?? Number.POSITIVE_INFINITY);
+                    if (maxJumps !== null && jumps > maxJumps) continue;
+                    if (best === null || jumps < best.jumps) best = { agent, jumps };
                   }
-                  const jumps =
-                    origin !== null && agent.solarSystemID === origin
-                      ? 0
-                      : (distances?.get(agent.solarSystemID) ?? Number.POSITIVE_INFINITY);
-                  if (maxJumps !== null && jumps > maxJumps) {
-                    continue;
+                  if (best !== null && best.agent.stationID !== null) {
+                    foundAgentCache = { agentID: best.agent.agentID, stationID: best.agent.stationID,
+                      name: best.agent.name, stationName: best.agent.stationName };
+                    foundAgent = foundAgentCache;
                   }
-                  if (best === null || jumps < best.jumps) {
-                    best = { agent, jumps };
-                  }
-                }
-                if (best !== null && best.agent.stationID !== null) {
-                  foundAgentCache = {
-                    agentID: best.agent.agentID,
-                    stationID: best.agent.stationID,
-                    name: best.agent.name,
-                    stationName: best.agent.stationName,
-                  };
-                  foundAgent = foundAgentCache;
                 }
               } catch {
-                foundAgent = null;
+                if (macro === "find-distribution-agent") {
+                  agentSearchFailureCache = "Distribution agent search or access authority could not be read.";
+                  agentSearchFailure = agentSearchFailureCache;
+                } else foundAgent = null;
               }
             }
           }
@@ -9918,6 +9928,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           typeNames,
           travel,
           foundAgent,
+          agentSearchFailure,
           jumpsToDropoff,
           anomalies,
           scannerOperations,

@@ -588,13 +588,16 @@ function macroPhrase(step: MacroStep): string {
       return "Fight off rats with your combat drones";
     case "find-distribution-agent": {
       const level = step.args["level"];
-      const levelWord = level !== undefined && level.kind === "count" ? ` (level ${level.value})` : "";
+      const levelWord = ` (preferred level ${level !== undefined && level.kind === "count" ? level.value : 1}`;
+      const fallback = step.args["fallback"];
+      const fallbackWord = fallback?.kind === "toggle" && fallback.enabled
+        ? ", fallback to lower levels)" : ", no lower-level fallback)";
       const corp = step.args["corporation"];
       const corpWord =
         corp !== undefined && corp.kind === "corp" && corp.name !== null && corp.name.length > 0
           ? ` working for ${corp.name}`
           : "";
-      return `Find a delivery agent${levelWord}${corpWord}`;
+      return `Find a delivery agent${levelWord}${fallbackWord}${corpWord}`;
     }
     case "request-mission": {
       const agent = step.args["agent"];

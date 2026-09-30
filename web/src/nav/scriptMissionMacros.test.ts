@@ -83,6 +83,25 @@ test("find: first tick publishes the search criteria to the board", () => {
   const t = find(step("find-distribution-agent", { level: { kind: "count", value: 2 } }), obs(), {}, NB);
   assert.equal(t.action.kind, "wait");
   assert.equal(t.boardPatch?.["findLevel"], 2);
+  assert.equal(t.boardPatch?.["findFallback"], 0);
+});
+
+test("find: legacy policy is level 1 without fallback, and explicit fallback is published", () => {
+  const legacy = find(step("find-distribution-agent"), obs(), {}, NB);
+  assert.equal(legacy.boardPatch?.["findLevel"], 1);
+  assert.equal(legacy.boardPatch?.["findFallback"], 0);
+  const newer = find(step("find-distribution-agent", {
+    level: { kind: "count", value: 4 }, fallback: { kind: "toggle", enabled: true },
+  }), obs(), {}, NB);
+  assert.equal(newer.boardPatch?.["findLevel"], 4);
+  assert.equal(newer.boardPatch?.["findFallback"], 1);
+});
+
+test("find: exhausted authoritative search blocks rather than retrying", () => {
+  const reason = "No eligible level 4 Distribution agent is available.";
+  const t = find(step("find-distribution-agent"), obs({ agentSearchFailure: reason }), {}, NB);
+  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(t.outcome.reason, reason);
 });
 
 test("find: a match from the finder lands the agent on the board and finishes", () => {
@@ -155,6 +174,21 @@ test("accept: cargo too big for the ship -> Decline instead", () => {
     ONBOARD,
   );
   assert.ok(t.action.kind === "agentButton" && t.action.actionID === 819, "should press Decline");
+});
+
+test("accept: a selected level 4 agent still declines an oversized offer before acceptance", () => {
+  const t = accept(
+    step("accept-mission"),
+    obs({
+      briefing: briefing({ cargoVolume: 9000 }),
+      conversation: convo([{ actionID: 816, buttonType: 3 }, { actionID: 819, buttonType: 9 }]),
+      cargo: { rows: [], capacity: { capacity: 450, used: 0 } },
+      jumpsToDropoff: 3,
+    }),
+    {},
+    { ...ONBOARD, agentLevel: 4 },
+  );
+  assert.ok(t.action.kind === "agentButton" && t.action.actionID === 819);
 });
 
 test("accept: over the player's jump limit -> Decline", () => {

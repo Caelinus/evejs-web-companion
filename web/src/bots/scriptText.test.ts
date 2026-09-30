@@ -61,6 +61,13 @@ test("every macro has a plain name with no numbers in it", () => {
   }
 });
 
+test("Distribution finder sentence makes default and explicit level policy visible", () => {
+  const base: MacroStep = { id: "find", kind: "macro", macro: "find-distribution-agent", args: {} };
+  assert.match(stepSentence(base), /level 1.*no lower-level fallback/i);
+  assert.match(stepSentence({ ...base, args: { level: { kind: "count", value: 4 },
+    fallback: { kind: "toggle", enabled: true } } }), /level 4.*fallback to lower levels/i);
+});
+
 test("every condition has a non-empty sentence and never renders an id", () => {
   for (const kind of CONDITION_KINDS) {
     const sentence = conditionSentence(sampleCondition(kind));
