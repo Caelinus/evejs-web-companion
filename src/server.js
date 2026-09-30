@@ -12,6 +12,15 @@ const eveStore = require("./eveStore");
 const eveGatewayClient = require("./eveGatewayClient");
 const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
+const { readMinerPilot } = require("./pilotTrainingRead");
+const { createTrainingQueueService } = require("./pilotTrainingQueue");
+const { createFactorySessions } = require("./factorySessions");
+const { createFactorySkills } = require("./factorySkills");
+const { createTrainingOnboarding } = require("./trainingOnboarding");
+const { readTrainingSettingsContext } = require("./trainingSettingsRead");
+const { createTrainingAccounts } = require("./trainingAccounts");
+const { createCharacterCreation } = require("./characterCreation");
+const { createCreationAttemptJournal } = require("./creationAttemptJournal");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const { lazyCompanionDb } = require("./companionDb");
@@ -75,6 +84,14 @@ const store = options.eveStore || eveStore;
 const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
+// Injected EveJS stores (unit fixtures) stay in-memory unless a test supplies
+// an explicit journal. Normal WC keeps the fence across process restarts.
+const creationAttempts = options.creationAttemptJournal || createCreationAttemptJournal({
+  filePath: options.eveStore ? null : path.join(config.dataDir, "pilot-training-creation-attempts.json"),
+});
+const trainingQueues = createTrainingQueueService({ store, gateway, data: staticData });
+const trainingAccounts = createTrainingAccounts({ store, journal: creationAttempts });
+const characterCreation = createCharacterCreation({ call: (...args) => accountLevelCall(...args), attempts: creationAttempts });
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
 // PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
 // is our own JSON file.
@@ -131,6 +148,9 @@ const botHost =
   });
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
+const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost });
+const factorySkills = createFactorySkills({ store, gateway, data: staticData, queues: trainingQueues, sessions: factorySessions });
+const trainingOnboarding = createTrainingOnboarding({ store, gateway, sessions: factorySessions });
 // startServer() seeds the starter bots once the port is open, and all it
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
@@ -273,7 +293,7 @@ function readSessionToken(req, { allowQueryParam = false } = {}) {
 // One implementation, two doors — `requireAuth` for everything, and the
 // query-tolerant variant the SSE route needs. The auth itself is identical;
 // only the accepted carrier set differs.
-function makeRequireAuth({ allowQueryParam = false } = {}) {
+function makeRequireAuth({ allowQueryParam = false, cleanupSession = true } = {}) {
   return async function requireAuthenticatedSession(req, res, next) {
     const payload = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }));
     if (!payload) {
@@ -291,12 +311,12 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
         () => store.getAccount(payload.username),
       );
       if (!account || account.accountID !== Number(payload.accountID)) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(401).json({ ok: false, error: "ACCOUNT_NOT_FOUND" });
         return;
       }
       if (account.banned) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(403).json({ ok: false, error: "ACCOUNT_BANNED" });
         return;
       }
@@ -312,6 +332,9 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
 // Every route. Header or cookie only — a token in the query string is REFUSED
 // here, deliberately; see requireStreamAuth.
 const requireAuth = makeRequireAuth();
+// The standalone training control plane never clears cockpit ownership as a
+// side effect of an account-read failure.
+const requireTrainingAuth = makeRequireAuth({ cleanupSession: false });
 
 // The SSE push channel alone. `EventSource` cannot set request headers — the
 // API has no hook for it — so GET /api/bridge/events accepts the token as the
@@ -360,7 +383,17 @@ app.get("/api/health", async (req, res) => {
 // src/webAuth.js verifyWebPassword/upsertWebPassword, data/web-users.json, and
 // `npm run webpass` stay in place (data-preservation rule) but are deprecated
 // for login.
-app.post("/api/login", async (req, res, next) => {
+// Training account creation is explicit and never installs a cockpit cookie.
+for (const action of ["create", "recover"]) {
+  app.post(`/api/pilot-training/accounts/${action}`, async (req, res, next) => {
+    try { res.json({ ok: true, ...await trainingAccounts[action](req.body || {}) }); }
+    catch (error) { next(error); }
+  });
+}
+app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login"], async (req, res, next) => {
+  // The standalone training door must never auto-create an unknown account or
+  // replace the cookie belonging to an already-running cockpit.
+  const factoryLogin = /^\/api\/(?:goblin-factory|pilot-training)\/login\/?$/i.test(req.path);
   const username = String(req.body && req.body.username || "").trim();
   try {
     // An empty username can never name or create an account; refuse it here
@@ -382,7 +415,7 @@ app.post("/api/login", async (req, res, next) => {
         throw error;
       }
     }
-    if (!account) {
+    if (!account && !factoryLogin) {
       try {
         const outcome = await store.createAccount(username);
         account = outcome && outcome.account || null;
@@ -423,7 +456,7 @@ app.post("/api/login", async (req, res, next) => {
     // sessionStorage so ten tabs can hold ten different accounts. Read the
     // security note above setSessionCookie before copying this anywhere.
     const token = auth.createSessionToken(account);
-    setSessionCookie(res, token);
+    if (!factoryLogin) setSessionCookie(res, token);
     res.json({
       ok: true,
       sessionToken: token,
@@ -6438,6 +6471,13 @@ app.get("/api/bridge/char-creation-info", requireAuth, async (req, res, next) =>
   }
 });
 
+// Account-level, one-dispatch creation guard. A roster reread resolves an
+// ambiguous result without submitting CreateCharacter twice.
+app.get("/api/bridge/character/creation-state", requireAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...(await characterCreation.state(req)) }); }
+  catch (error) { next(error); }
+});
+
 /** A positive int off a JSON body field; 0 when absent or unparseable. */
 function creationBodyID(value) {
   const numeric = Number(value);
@@ -6560,7 +6600,8 @@ app.post("/api/bridge/character/create-with-doll", requireAuth, async (req, res,
     }
 
     const args = [name, bloodline.bloodlineID, genderID, ancestryID, null, null, 0];
-    const outcome = await accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args);
+    const outcome = await characterCreation.create(req, name,
+      () => accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args));
     const characterID = Number(outcome.result) || 0;
     res.json({
       ok: true,
@@ -14405,6 +14446,47 @@ function structureServiceIDsFromList(result) {
   return [...new Set(result.items.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
 }
 
+// Standalone Training searches by an explicitly account-owned character. The
+// read is stateless: it never selects or claims a cockpit. Live travel and
+// writes still recheck access on their actual held pilot.
+async function dockableAccessCall(req, method, args, characterID = 0) {
+  const held = bridgeSessions.get(req.webSessionID);
+  if (!characterID && held) return heldTopLevelCall(held, req.webSessionID, "structureDirectory", method, args, null);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    throw Object.assign(new Error("Choose an authenticated pilot to check structure access."),
+      { code: "STRUCTURE_PILOT_REQUIRED", statusCode: 409 });
+  }
+  const character = await store.getCharacterForAccount(req.account.accountID, characterID);
+  if (!character) throw Object.assign(new Error("The selected pilot is not owned by this account."),
+    { code: "STRUCTURE_PILOT_UNAVAILABLE", statusCode: 403 });
+  return gateway.callMethod("structureDirectory", method, args, null, {
+    userid: req.account.accountID, characterID,
+    corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+    allianceID: character.allianceID || 0,
+  });
+}
+
+async function accessibleStructureMatches(req, query, characterID = 0) {
+  const listed = await dockableAccessCall(req, "GetMyDockableStructures", [0], characterID);
+  const ids = structureIDsFromList(listed.result);
+  if (ids.length > 200) throw Object.assign(new Error("Too many accessible structures to search safely."),
+    { code: "STRUCTURE_SEARCH_LIMIT", statusCode: 409 });
+  const matches = [];
+  for (let offset = 0; offset < ids.length; offset += STRUCTURE_NAME_LOOKUP_CAP) {
+    const batch = ids.slice(offset, offset + STRUCTURE_NAME_LOOKUP_CAP);
+    const { records, failed } = await resolveRuntimeStructureNames(req, batch, { publicWithoutHeld: true });
+    if (failed.size) throw Object.assign(new Error("Accessible structure names could not be read."),
+      { code: "STRUCTURE_SEARCH_UNREADABLE", statusCode: 503 });
+    for (const id of batch) {
+      const record = records.get(id);
+      if (!record?.name || !record.solarSystemID || !record.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())) continue;
+      matches.push({ id, kind: "structure", name: record.name, solarSystemID: record.solarSystemID,
+        solarSystemName: staticData.getSolarSystemName(record.solarSystemID) });
+    }
+  }
+  return matches.sort((a, b) => a.name.localeCompare(b.name)).slice(0, 25);
+}
+
 async function assertStructureDockAccess(held, webSessionID, structureID) {
   const result = await heldTopLevelCall(held, webSessionID, "structureDirectory",
     "CheckMyDockingAccessToStructures", [[structureID]], null);
@@ -18688,6 +18770,151 @@ app.get("/api/roster/training", requireAuth, async (req, res, next) => {
   }
 });
 
+app.get("/api/pilot-training/characters", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const characters = await store.listCharactersForAccount(req.account.accountID);
+    res.json({ ok: true, account: req.account.username, characters: characters.map((character) => ({
+      characterID: character.characterID,
+      name: character.characterName,
+      corporationID: character.corporationID,
+      corporationName: character.corporationName,
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pilot-training/qualification", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const characterID = Number(req.query.characterID);
+    if (!Number.isSafeInteger(characterID) || characterID <= 0) throw Object.assign(new Error("Invalid pilot."), { code: "INVALID_CHARACTER_ID", statusCode: 400 });
+    const raw = String(req.query.configurations || "[]");
+    if (raw.length > 8192) throw Object.assign(new Error("Configuration too large."), { statusCode: 400 });
+    let configurations;
+    try { configurations = JSON.parse(raw); } catch { throw Object.assign(new Error("Invalid configuration."), { statusCode: 400 }); }
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account,
+      characterID, configurations, role: req.query.role, targetStage: req.query.targetConfigurationID || null });
+    res.json({ ok: true, ...read });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_CHARACTER_ID" });
+    return;
+  }
+  try {
+    let selections = {};
+    if (req.query.selections !== undefined) {
+      try {
+        const raw = String(req.query.selections);
+        if (raw.length > 4096) throw new Error("Too large");
+        selections = JSON.parse(raw);
+        if (!selections || typeof selections !== "object" || Array.isArray(selections)) throw new Error("Not an object");
+      } catch (error) {
+        res.status(400).json({ ok: false, error: "INVALID_TRAINING_CONFIGURATION" });
+        return;
+      }
+    }
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account, characterID, selections, targetStage: req.query.targetStage ?? null });
+    res.json({ ok: true, ...read });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// A review is read-only. Apply accepts only its account-bound, one-shot review;
+// browser-supplied queue entries or account IDs are never dispatched.
+app.post("/api/pilot-training/queue/review", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, review: await trainingQueues.review(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+app.post("/api/pilot-training/queue/apply", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, outcome: await trainingQueues.apply(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+// Funding is an independently authenticated account, never inferred from the
+// trainee or a browser-supplied account ID. Credentials are never persisted.
+async function factoryFunding(body) {
+  if (!body.funding) return null;
+  const payload = auth.verifySessionToken(body.funding.token);
+  if (!payload) throw Object.assign(new Error("Funding authority authentication required."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 401 });
+  const account = await store.getAccount(payload.username);
+  if (!account || account.banned || account.accountID !== Number(payload.accountID))
+    throw Object.assign(new Error("Funding authority is unavailable."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 403 });
+  return { account, sessionID: payload.sessionID, characterID: body.funding.characterID };
+}
+for (const action of ["review", "apply"]) {
+  app.post(`/api/pilot-training/onboarding/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const authority = await factoryFunding({ funding: body.authority });
+      res.json({ ok: true, outcome: await trainingOnboarding[action]({ account: req.account, sessionID: req.webSessionID }, body, authority) });
+    } catch (error) { next(error); }
+  });
+}
+app.get("/api/pilot-training/settings-context", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...await readTrainingSettingsContext({ account: req.account, store, gateway }) }); }
+  catch (error) { next(error); }
+});
+app.get("/api/pilot-training/homes", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    const result = staticData.findMapLocations({ q, kind: "station", limit: 25 });
+    let structures = [], structureWarning = null;
+    if (q.length >= 2 && req.query.characterID) {
+      try { structures = await accessibleStructureMatches(req, q, Number(req.query.characterID)); }
+      catch { structureWarning = "Accessible structure search is unavailable; NPC stations remain available."; }
+    }
+    res.json({ ok: true, matches: [...result.matches, ...structures].slice(0, 25),
+      capped: result.capped || result.matches.length + structures.length > 25, structureWarning });
+  } catch (error) { next(error); }
+});
+app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const id = Number(req.query.locationID);
+    if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("Invalid location ID."), { code: "INVALID_LOCATION", statusCode: 400 });
+    const station = staticData.getStation(id);
+    if (station) {
+      res.json({ ok: true, home: { locationID: id, name: station.stationName, systemID: station.solarSystemID || null,
+        kind: "NPC_STATION", relocation: "MANUAL_GM_ONLY", capability: "DOCKABLE_STATION" } });
+      return;
+    }
+    if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "UNSUPPORTED_HOME_LOCATION" }); return; }
+    const checked = await dockableAccessCall(req, "CheckMyDockingAccessToStructures", [[id]], Number(req.query.characterID || 0));
+    if (!structureIDsFromList(checked.result).includes(id)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
+    }
+    const { records, failed } = await resolveRuntimeStructureNames(req, [id], { publicWithoutHeld: true });
+    const structure = records.get(id);
+    if (failed.has(id) || !structure?.name || !structure.solarSystemID) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_UNRESOLVED" }); return;
+    }
+    res.json({ ok: true, home: { locationID: id, name: structure.name, systemID: structure.solarSystemID,
+      kind: "PLAYER_STRUCTURE", relocation: "CONFIG_ONLY", capability: "DOCKABLE_STRUCTURE" } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/pilot-training/ownership", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ownership: await factorySessions.status(req.account, Number(req.query.characterID)) }); }
+  catch (error) { next(error); }
+});
+for (const action of ["review", "acquire"]) {
+  app.post(`/api/pilot-training/skills/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body, await factoryFunding(body));
+      res.json({ ok: true, outcome });
+    } catch (error) {
+      if (error.cleanup?.some((row) => !row.released)) {
+        res.status(409).json({ ok: false, error: "FACTORY_SESSION_RELEASE_FAILED", message: `${error.message} Temporary session release is unconfirmed; refresh ownership before retrying.` });
+      } else next(error);
+    }
+  });
+}
+
 app.get("/api/bridge/skills", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
@@ -19908,7 +20135,7 @@ function readCachedStructureName(structureID, now) {
  * needs a structure's system must read it from here rather than making a second
  * call; GetStructureInfo already carries it.
  */
-async function resolveRuntimeStructureNames(req, structureIDs) {
+async function resolveRuntimeStructureNames(req, structureIDs, options = {}) {
   const records = new Map();
   const failed = new Set();
   const wanted = [...new Set(structureIDs.filter(isPlayerStructureID))];
@@ -19934,7 +20161,7 @@ async function resolveRuntimeStructureNames(req, structureIDs) {
   // up, not a finding that the structure is nameless — the caller must be able
   // to tell those apart, so these go to `failed` and nothing is cached.
   const held = bridgeSessions.get(req.webSessionID) || null;
-  if (!held) {
+  if (!held && !options.publicWithoutHeld) {
     for (const structureID of toFetch) {
       failed.add(structureID);
     }
@@ -19948,14 +20175,10 @@ async function resolveRuntimeStructureNames(req, structureIDs) {
 
   for (const structureID of toFetch.slice(0, STRUCTURE_NAME_LOOKUP_CAP)) {
     try {
-      const outcome = await heldTopLevelCall(
-        held,
-        req.webSessionID,
-        "structureDirectory",
-        "GetStructureInfo",
-        [structureID],
-        null,
-      );
+      const outcome = held
+        ? await heldTopLevelCall(held, req.webSessionID, "structureDirectory", "GetStructureInfo", [structureID], null)
+        : await gateway.callMethod("structureDirectory", "GetStructureInfo", [structureID], null,
+          { userid: req.account.accountID });
       const result = outcome && outcome.result;
       if (result === null || result === undefined) {
         // The definitive "not a player structure" — cacheable.
@@ -21173,6 +21396,7 @@ app.use("/assets", express.static(path.join(webAppDir, "assets"), {
   maxAge: "30d",
 }));
 
+app.get(["/goblin-factory", "/goblin-factory/"], (_req, res) => res.redirect(308, "/pilot-training"));
 app.use(express.static(webAppDir));
 app.get(/.*/, (req, res) => {
   res.sendFile(path.join(webAppDir, "index.html"));

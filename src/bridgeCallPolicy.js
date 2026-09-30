@@ -90,6 +90,9 @@ const EARLIER_WRITE_METHODS = freezeMethodMap({
 const FEATURE_WRITE_METHODS = freezeMethodMap({
   repairSvc: ["RepairItems"],
   officeManager: ["RentOffice"],
+  // Direct acquisition belongs only to the reviewed Factory route. Keep the
+  // generic bridge closed even if a future runtime allowlist grows.
+  skillHandler: ["PurchaseSkills"],
   // ⚠⚠ THE GM CONSOLE. slash.SlashCmd runs any of this world's ~150 chat
   // commands — /giveitem, /gmships, /giveskill, /npc, /suicide. It is a WRITE by
   // any measure, and listing it here is what keeps the generic /api/bridge/call

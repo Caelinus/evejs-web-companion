@@ -1,0 +1,101 @@
+--- a/server/src/_secondary/express/evejsWebGatewayRuntime.js
++++ b/server/src/_secondary/express/evejsWebGatewayRuntime.js
+@@ -6042,6 +6042,7 @@
+     factorySkills = require("./factorySkillAcquisition").createFactorySkillAcquisition({
+       getEntry: (id, user) => getBrowserSessionEntry(normalizeBridgeSessionID(id), user),
+       getCharacter,
++      getCorporationCEOID: (id) => require("../../services/corporation/corporationState").getCorporationRecord(id)?.ceoID,
+       purchaseEnabled: () => config.skillPurchaseEnabled !== false,
+       injected: books.isSkillInjected,
+       wallet: wallet.getCharacterWallet,
+@@ -6383,6 +6384,12 @@
+         const id = Number(call.args[0]);
+         const owned = getCharacter(id);
+         if (!owned || owned.accountID !== call.sessionFields.userid) throw webCallError("CALL_REFUSED", "Character is not owned by this account.");
++        // Pilot Training must never acquire a CEO, including a trainee's source
++        // corporation CEO. This read and SelectCharacterID dispatch are synchronous.
++        const corp = require("../../services/corporation/corporationState").getCorporationRecord(Number(owned.value.corporationID));
++        if (!corp || !Number.isSafeInteger(Number(corp.ceoID)) || Number(corp.ceoID) <= 0)
++          throw webCallError("CALL_REFUSED", "CORPORATION_STATE_UNKNOWN");
++        if (Number(corp.ceoID) === id) throw webCallError("CALL_REFUSED", "CEO_AUTHORITY_NOT_ALLOWED");
+         const control = characterControlRuntime.getCharacterControlSnapshot(id);
+         if (control.controlState !== "offline" || control.online !== false || sessionRegistry.findSessionByCharacterID(id, { includeClosing: true }))
+           throw webCallError("CALL_REFUSED", "PILOT_BUSY: Factory only acquires free pilots.");
+--- a/server/src/_secondary/express/factorySkillAcquisition.js
++++ b/server/src/_secondary/express/factorySkillAcquisition.js
+@@ -25,6 +25,9 @@
+     entry.lastUsedAtMs = now();
+     const corporationID = Number(record.value.corporationID);
+     if (!Number.isSafeInteger(corporationID) || corporationID <= 0 || corporationID !== Number(entry.session.corporationID || entry.session.corpid)) fail("CORPORATION_CHANGED");
++    const ceoID = Number(d.getCorporationCEOID(corporationID));
++    if (!Number.isSafeInteger(ceoID) || ceoID <= 0) fail("CORPORATION_STATE_UNKNOWN");
++    if (ceoID === id) fail("CEO_AUTHORITY_NOT_ALLOWED");
+     return { entry, id, corporationID, userid: ref.userid };
+   }
+   function read(request) {
+@@ -33,6 +36,10 @@
+         request.skillTypeIDs.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(request.skillTypeIDs).size !== request.skillTypeIDs.length) fail("INVALID_SKILL_TARGETS");
+     if (!["CHARACTER_WALLET_ONLY", "CHARACTER_PLUS_CORPORATION_SHORTFALL"].includes(request.policy)) fail("INVALID_FUNDING_POLICY");
+     if (!d.purchaseEnabled()) fail("SkillPurchaseDisabled");
++    const fundingMode = request.fundingMode || "AUTHORITY";
++    if (!["SELF", "AUTHORITY"].includes(fundingMode)) fail("INVALID_FUNDING_AUTHORITY");
++    if (request.policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL" && (!request.trainingWallet ||
++        request.trainingWallet.corporationID !== trainee.corporationID || request.trainingWallet.accountKey !== request.division)) fail("TRAINING_WALLET_UNCONFIGURED");
+     const skills = [];
+     for (const typeID of [...request.skillTypeIDs].sort((a, b) => a - b)) {
+       if (d.injected(trainee.id, typeID)) continue;
+@@ -48,8 +55,8 @@
+     const blockers = [];
+     if (shortfall > 0n && request.policy === "CHARACTER_WALLET_ONLY") blockers.push("INSUFFICIENT_PERSONAL_ISK");
+     if (shortfall > 0n && request.policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL") {
+-      officer = actor(request.officer);
+-      if (officer.id === trainee.id) fail("SEPARATE_FUNDING_AUTHORITY_REQUIRED");
++      officer = fundingMode === "SELF" ? trainee : actor(request.officer);
++      if (fundingMode !== "SELF" && officer.id === trainee.id) fail("SEPARATE_FUNDING_AUTHORITY_REQUIRED");
+       if (officer.corporationID !== trainee.corporationID) fail("CORPORATION_MISMATCH");
+       const key = request.division;
+       if (!Number.isInteger(key) || key < 1000 || key > 1006) fail("INVALID_WALLET_DIVISION");
+@@ -62,7 +69,7 @@
+     }
+     return { trainee, officer, quote: { characterID: trainee.id, accountID: trainee.userid, corporationID: trainee.corporationID,
+       skills, total: isk(total), personalBalance: isk(personal), shortfall: isk(shortfall),
+-      funding: source, policy: request.policy, blockers, canAcquire: skills.length > 0 && blockers.length === 0 } };
++      funding: source, policy: request.policy, fundingMode, trainingWallet: request.trainingWallet || null, blockers, canAcquire: skills.length > 0 && blockers.length === 0 } };
+   }
+   function quote(request) {
+     const { quote: result } = read(request);
+@@ -81,7 +88,7 @@
+     const target = actor(request.trainee);
+     if (target.userid !== review.quote.accountID || target.id !== review.quote.characterID) fail("FACTORY_IDENTITY_MISMATCH");
+     reviews.delete(request.reviewID);
+-    const input = { ...request, skillTypeIDs: review.ids, policy: review.quote.policy, division: review.quote.funding?.division };
++    const input = { ...request, skillTypeIDs: review.ids, policy: review.quote.policy, division: review.quote.trainingWallet?.accountKey, fundingMode: review.quote.fundingMode, trainingWallet: review.quote.trainingWallet };
+     const current = read(input);
+     if (!same(current.quote, review.quote)) fail("REVIEW_REQUIRED", "Prices, skills, balances or funding authority changed; review again.");
+     if (!current.quote.canAcquire) fail("ACQUISITION_BLOCKED");
+@@ -89,14 +96,14 @@
+     const keys = [`pilot:${trainee.id}`, ...(officer ? [`pilot:${officer.id}`, `wallet:${officer.corporationID}:${input.division}`] : [])];
+     if (keys.some((key) => locks.has(key))) fail("FACTORY_BUSY");
+     keys.forEach((key) => locks.add(key));
+-    const entries = [trainee.entry, ...(officer ? [officer.entry] : [])];
++    const entries = [...new Set([trainee.entry, ...(officer ? [officer.entry] : [])])];
+     entries.forEach((entry) => { entry.session._factoryMutationPending = true; });
+     let funded = "0.00", fundingVerified = !officer, purchaseAttempted = false, purchaseReturned = false, errorCode = null;
+     let fundingAttempted = false;
+     const ids = current.quote.skills.map((row) => row.typeID);
+     try {
+       if (officer) {
+-        const reason = `Goblin Factory skill funding ${randomUUID()}`;
++        const reason = `Pilot Training skill funding ${randomUUID()}`;
+         const amount = Number(current.quote.shortfall);
+         fundingAttempted = true;
+         let transferError = null;
+@@ -114,7 +121,7 @@
+         // concurrent credit/debit or membership change never changes our spend.
+         const after = read({ ...input, policy: "CHARACTER_WALLET_ONLY" });
+         const expectedBalance = isk(cents(Number(current.quote.personalBalance)) + cents(amount));
+-        actor(input.officer);
++        actor(input.fundingMode === "SELF" ? input.trainee : input.officer);
+         if (!d.canTake(officer.entry.session, input.division) || !same(after.quote.skills, current.quote.skills) ||
+             after.quote.corporationID !== current.quote.corporationID || after.quote.personalBalance !== expectedBalance ||
+             cents(d.division(officer.corporationID, input.division)?.balance) !== cents(Number(current.quote.funding.balance)) - cents(amount)) fail("REVIEW_REQUIRED");
