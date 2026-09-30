@@ -26,6 +26,17 @@ import {
 export interface RepairQuoteRow {
   /** The item the shop found damage on — the ship hull, or a fitted module. */
   readonly itemID: number;
+  /**
+   * What to hand RepairItems to fix it: each damaged part's OWN item id.
+   *
+   * ⚠ NOT `itemID`. Quoting a hull lists its modules and every drone in its bay
+   * under the HULL's key, one part row each carrying that part's own itemID,
+   * and RepairItems repairs exactly the ids it is given. Repairing by the key
+   * repaired the hull alone: a clean hull with a chewed drone in its bay was
+   * "repaired" for nothing, answered OK, and quoted damaged again, forever.
+   * A part whose id cannot be read falls back to the key.
+   */
+  readonly repairItemIDs: readonly number[];
   /** How many damaged parts the shop listed under it (never zero here). */
   readonly damagedParts: number;
   /** Summed price of those parts, or null when the rows carry no price. */
@@ -70,15 +81,45 @@ export function decodeRepairQuotes(raw: unknown): readonly RepairQuoteRow[] {
       continue;
     }
     let cost: number | null = null;
+    const repairItemIDs: number[] = [];
     for (const part of parts) {
       const price = partCost(part);
       if (price !== null) {
         cost = (cost ?? 0) + price;
       }
+      const partID = partItemID(part) ?? itemID;
+      if (!repairItemIDs.includes(partID)) {
+        repairItemIDs.push(partID);
+      }
     }
-    quotes.push({ itemID, damagedParts: parts.length, cost });
+    quotes.push({ itemID, repairItemIDs, damagedParts: parts.length, cost });
   }
   return quotes;
+}
+
+/** A part row's own item id; null when the row does not carry a usable one. */
+function partItemID(row: unknown): number | null {
+  const raw = readRowField(row, "itemID") ?? readPlainJsonField(row, "itemID");
+  const id = Number(raw);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * Every item id a quote says to repair, once each, in quote order — what
+ * RepairItems is called with. A row without `repairItemIDs` stands for itself.
+ */
+export function repairTargets(
+  quotes: readonly (Pick<RepairQuoteRow, "itemID"> & { readonly repairItemIDs?: readonly number[] })[],
+): readonly number[] {
+  const ids: number[] = [];
+  for (const quote of quotes) {
+    for (const id of quote.repairItemIDs ?? [quote.itemID]) {
+      if (!ids.includes(id)) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
 }
 
 /**

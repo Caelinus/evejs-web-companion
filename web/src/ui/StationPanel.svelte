@@ -82,7 +82,7 @@
     type SortKey,
     type SortOrder,
   } from "./inventoryModel.ts";
-  import { repairQuoteTotal, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
+  import { repairQuoteTotal, repairTargets, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
   import { isSessionLost } from "../app/flow.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
   import { resolvedName, nameKey, type NameKind, type NameRef } from "../store/names.ts";
@@ -1025,7 +1025,7 @@
   }
 
   async function payRepairQuote(rows: readonly RepairQuoteRow[]): Promise<void> {
-    await flow.repairShip(rows.map((row) => row.itemID));
+    await flow.repairShip(repairTargets(rows));
     await askRepairQuote();
   }
 
