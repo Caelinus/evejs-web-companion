@@ -1128,8 +1128,17 @@ export function decideScriptAction(
       !(state.out ?? []).some((drone) => drone.controlled)) return base;
   const step = mining && mem.position.kind !== "done" ? activeStep(script, mem.position) : null;
   const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
+  // ⚠ IN REACH, THE SAME AS THE FIGHT-BACK WATCH AND ITS LADDER. With the whole
+  // grid here, a rat parked beyond targeting range kept the flight in combat
+  // mode with the drones on it, while the ladder — which only counts what is in
+  // reach — called the grid clear and ordered them home. This wrapper swallows
+  // that recall whenever the flight has no order of its own, so the watch never
+  // finished and the mining step starved until the rat died (caught live
+  // 2026-09-30 on nine belt miners). Now the flight stands down too: it recalls
+  // the combat flight and relaunches the miners, and the ladder sees its drones
+  // come home.
   const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
-    hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
+    hostilesInReach(obs, obs.snapshot, origin)[0]?.itemID ?? null;
   const picked = step === null ? null : base.memory.macroMem[step.id]?.["rockID"] ??
     mem.macroMem[step.id]?.["rockID"] ?? null;
   const ice = obs.miningOperation?.currentTarget?.targetType === "ICE" ||

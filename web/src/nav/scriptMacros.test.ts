@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import type { MacroMemory, MacroTick, ScriptBoard } from "./scriptDecide.ts";
+import type { MacroMemory, MacroTick, ScriptBoard, ScriptMemory } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import type { BotScript, MacroStep } from "../bots/botScript.ts";
 import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
@@ -1784,6 +1784,92 @@ test("fight-back watch + the real ladder: a rat beyond targeting range no longer
     assert.equal(r.interruptID, null);
     mem = r.memory;
   }
+});
+
+// Variant B, caught live 2026-09-30 on nine belt miners: combat drones OUT on a
+// rat parked beyond targeting range, the program on mine-at-belt. The mining
+// flight counted the whole grid and kept the drones on the rat; the ladder
+// counted only what was in reach, ordered them home, and the flight wrapper
+// swallowed that recall every tick — so the watch never released and the step
+// starved until the rat died. The flight and the ladder now share one reach.
+const COMBAT_DRONE_TYPE = 2488;
+const MINING_DRONE_TYPE = 10246;
+
+function driftingMiner(combatOut: boolean): ScriptObservation {
+  const far = entity({ itemID: 6662, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 90000, y: 0, z: 0 } });
+  const drones = combatOut
+    ? [501, 502].map((itemID) => entity({ itemID, kind: "drone", typeID: COMBAT_DRONE_TYPE, controllerID: 9001, position: { x: 80000, y: 0, z: 0 } }))
+    : [];
+  return obs({
+    hostileOnGrid: true,
+    snapshot: snapshot([far, ...drones]),
+    maxTargetRangeM: 30_000,
+    weaponModuleIDs: [],
+    dronesOut: combatOut,
+    combatDroneIDs: combatOut ? [501, 502] : [],
+    combatDroneBayItemIDs: combatOut ? [] : [601],
+    miningDrones: {
+      bay: [{ itemID: 701, typeID: MINING_DRONE_TYPE, quantity: 2 }, ...(combatOut ? [] : [{ itemID: 601, typeID: COMBAT_DRONE_TYPE, quantity: 2 }])],
+      out: combatOut
+        ? [501, 502].map((itemID) => ({
+          itemID, typeID: COMBAT_DRONE_TYPE, name: null, activity: "fighting", targetID: 6662,
+          shieldRatio: 1, armorRatio: 1, hullRatio: 1, controlled: true,
+        }) as unknown as NonNullable<NonNullable<ScriptObservation["miningDrones"]>["out"]>[number])
+        : [],
+      maxActive: 2,
+      roles: { [COMBAT_DRONE_TYPE]: "combat", [MINING_DRONE_TYPE]: "mining" },
+    },
+  });
+}
+
+function minerScript(): BotScript {
+  return {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 1, name: "Home", systemName: null },
+    interrupts: [{ id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" }],
+    program: [{ id: "m", kind: "macro", macro: "mine-at-belt", args: {}, until: { kind: "ore-hold-at-least", fraction: 0.9 } }],
+  };
+}
+
+// The mine block itself would need a belt fixture this test is not about, so it
+// stands in; the fight ladder, the watch and the drone-flight wrapper are real.
+const MINER_REGISTRY = {
+  ...SCRIPT_MACROS,
+  "mine-at-belt": (): MacroTick => ({
+    action: { kind: "activate", moduleID: 1, targetID: 2 }, why: "working", phase: "Working", armed: true,
+    outcome: { kind: "acting" }, nextMem: {},
+  }),
+};
+
+test("fight-back + mining flight: combat drones on a rat beyond targeting range come home", () => {
+  const s = minerScript();
+  const r = decideScriptAction(s, driftingMiner(true), initialMemory(s), MINER_REGISTRY, scriptTravelHome);
+  assert.equal(r.interruptID, null, "the watch does not hold the ship for a rat it cannot reach");
+  assert.equal(r.action.kind, "recallDrones", "the flight stands its combat drones down");
+  assert.deepEqual(r.action.kind === "recallDrones" ? [...r.action.droneIDs].sort() : [], [501, 502]);
+});
+
+test("fight-back + mining flight: a watch mid-fight releases once the flight brings the drones home", () => {
+  // The live shape: the watch was fighting (ladder memory present) when the
+  // last rat in reach died, one stayed out of reach, drones still out.
+  const s = minerScript();
+  let mem: ScriptMemory = { ...initialMemory(s), macroMem: { fb: { targetID: 6660 } } };
+  const recalls: number[][] = [];
+  for (let t = 0; t < 6; t += 1) {
+    const r = decideScriptAction(s, driftingMiner(true), mem, MINER_REGISTRY, scriptTravelHome);
+    if (r.action.kind === "recallDrones") recalls.push([...r.action.droneIDs]);
+    mem = r.memory;
+  }
+  assert.ok(recalls.length > 0, "a recall reaches the world instead of being swallowed every tick");
+
+  // Drones aboard: the ladder sees its flight home and the watch lets go.
+  let released = false;
+  for (let t = 0; t < 4 && !released; t += 1) {
+    const r = decideScriptAction(s, driftingMiner(false), mem, MINER_REGISTRY, scriptTravelHome);
+    released = r.interruptID === null && !("fb" in r.memory.macroMem);
+    mem = r.memory;
+  }
+  assert.ok(released, "the fight-back watch released the ship");
 });
 
 test("fight: an unreadable targeting range does NOT gate — the bounded lock stays the backstop", () => {
