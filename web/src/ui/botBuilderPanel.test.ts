@@ -20,6 +20,7 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 const BotBuilder = (await import("./BotBuilder.svelte")).default;
+const GlobalPanel = (await import("./GlobalPanel.svelte")).default;
 
 function fakeFlow(): unknown {
   return new Proxy({}, { get: () => async () => {} });
@@ -202,4 +203,15 @@ test("the inspector has a render point under each region, guarded by kind", () =
   const renders = source.split("{@render inspector(").length - 1;
   assert.equal(renders, 2, `expected exactly 2 inspector render points, found ${renders}`);
   assert.equal(source.split("<BotInspector").length - 1, 1, "the inspector is instantiated more than once");
+});
+
+test("the builder draws over the hangar with nobody in the client", () => {
+  // GlobalPanel's botBuilder branch: an empty store and an account-backed flow
+  // (HangarBotBuilder.svelte) in place of a pilot's.
+  const body = render(GlobalPanel as never, {
+    props: { tab: "botBuilder", sessions: [], onOpen: () => {}, onGoToPilot: () => {} },
+  } as never).body;
+  const text = visibleText(body);
+  assert.match(text, /Bot builder/);
+  assert.match(text, /The plan/);
 });

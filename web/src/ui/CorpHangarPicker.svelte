@@ -34,7 +34,7 @@
     station,
     onPick,
   }: {
-    flow: AppFlow;
+    flow: Pick<AppFlow, "loadCorpOffices">;
     /** The chosen division, or null for the pilot's own hangar. */
     value: { division: number; name: string | null } | null;
     /**

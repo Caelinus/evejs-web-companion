@@ -97,7 +97,7 @@
     onClose,
   }: {
     target: InspectorTarget;
-    flow: AppFlow;
+    flow: Pick<AppFlow, "searchDestinations" | "loadCorpOffices">;
     currentStation?: { id: number; name: string } | null;
     equipment?: readonly { groupID: number; label: string }[];
     items?: readonly { typeID: number; groupID?: number | null; name: string }[];

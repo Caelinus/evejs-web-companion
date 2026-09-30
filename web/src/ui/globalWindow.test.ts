@@ -22,6 +22,7 @@ import {
   isGlobalTab,
   loadGlobalWindows,
   openGlobal,
+  PILOTLESS_BUILDER,
   saveGlobalWindows,
 } from "./globalWindow.ts";
 import { isWindowTab, loadLayout, openWindow, saveLayout, type WinState } from "./desktop.ts";
@@ -188,6 +189,14 @@ test("a tab that is not global is refused rather than placed here", () => {
   assert.deepEqual(openGlobal([], "market"), []);
 });
 
+test("the Bot Builder floats here for a hangar with nobody in the client", () => {
+  // The Bot Manager's New and Edit open it, and with no pilot there is no
+  // desktop to put it on: refusing it here is what greyed both buttons out.
+  const wins = openGlobal([], PILOTLESS_BUILDER);
+  assert.deepEqual(wins.map((w) => w.id), ["botBuilder"]);
+  assert.equal(isGlobalTab(PILOTLESS_BUILDER), false, "it would leave every pilot's desktop");
+});
+
 // ─── persistence ────────────────────────────────────────────────────────────
 
 test("the saved positions round-trip", () => {
@@ -290,4 +299,11 @@ test("a put-away window comes back put away, not on screen", () => {
   installStorage();
   saveGlobalWindows([win("companion", { minimized: true })]);
   assert.equal(at(loadGlobalWindows(), 0).minimized, true);
+});
+
+test("a floating Bot Builder is not reopened by a reload", () => {
+  // It floats only because New or Edit was pressed with nobody in the client.
+  installStorage();
+  saveGlobalWindows([win("botManager"), win(PILOTLESS_BUILDER)]);
+  assert.deepEqual(loadGlobalWindows().map((w) => w.id), ["botManager"]);
 });
