@@ -13,6 +13,11 @@ function part(fields: Record<string, unknown>): unknown {
   return { type: "packedrow", fields };
 }
 
+/** A decoded part, with the fields a test does not set left null. */
+function quoted(itemID: number, fields: Partial<Record<"typeID" | "damage" | "maxHealth" | "cost", number>> = {}): unknown {
+  return { itemID, typeID: null, damage: null, maxHealth: null, cost: null, ...fields };
+}
+
 function quotes(entries: readonly (readonly [number, unknown])[]): unknown {
   return { type: "dict", entries };
 }
@@ -25,7 +30,7 @@ test("only the items the shop lists damage on are quoted", () => {
     ]),
   );
 
-  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 1, cost: 1250 }]);
+  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 1, parts: [quoted(9001, { cost: 1250 })], cost: 1250 }]);
 });
 
 test("the parts of one item sum into that item's cost", () => {
@@ -33,13 +38,19 @@ test("the parts of one item sum into that item's cost", () => {
     quotes([[9001, { type: "list", items: [part({ cost: 1000 }), part({ cost: 250.5 })] }]]),
   );
 
-  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 2, cost: 1250.5 }]);
+  assert.deepEqual(decoded, [{
+    itemID: 9001,
+    repairItemIDs: [9001],
+    damagedParts: 2,
+    parts: [quoted(9001, { cost: 1000 }), quoted(9001, { cost: 250.5 })],
+    cost: 1250.5,
+  }]);
 });
 
 test("a quote with no price reads as no price, never as free", () => {
   const decoded = decodeRepairQuotes(quotes([[9001, { type: "list", items: [part({ damage: 0.4 })] }]]));
 
-  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 1, cost: null }]);
+  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 1, parts: [quoted(9001, { damage: 0.4 })], cost: null }]);
   assert.equal(repairQuoteTotal(decoded), null);
 });
 
@@ -57,7 +68,7 @@ test("a total is withheld unless EVERY quoted item carried a price", () => {
 
 test("a bare-array parts list and a util.KeyVal wrapper decode the same as {type:list}", () => {
   assert.deepEqual(decodeRepairQuotes(quotes([[9001, [part({ cost: 7 })]]])), [
-    { itemID: 9001, repairItemIDs: [9001], damagedParts: 1, cost: 7 },
+    { itemID: 9001, repairItemIDs: [9001], damagedParts: 1, parts: [quoted(9001, { cost: 7 })], cost: 7 },
   ]);
   const keyVal = {
     type: "object",
@@ -65,7 +76,7 @@ test("a bare-array parts list and a util.KeyVal wrapper decode the same as {type
     args: { type: "dict", entries: [["items", { type: "list", items: [part({ cost: 7 })] }]] },
   };
   assert.deepEqual(decodeRepairQuotes(quotes([[9001, keyVal]])), [
-    { itemID: 9001, repairItemIDs: [9001], damagedParts: 1, cost: 7 },
+    { itemID: 9001, repairItemIDs: [9001], damagedParts: 1, parts: [quoted(9001, { cost: 7 })], cost: 7 },
   ]);
 });
 
@@ -87,7 +98,13 @@ test("a hull's quote repairs each damaged PART by its own id, not the hull's", (
     ]),
   );
 
-  assert.deepEqual(decoded, [{ itemID: 9001, repairItemIDs: [7002, 7003], damagedParts: 2, cost: null }]);
+  assert.deepEqual(decoded, [{
+    itemID: 9001,
+    repairItemIDs: [7002, 7003],
+    damagedParts: 2,
+    parts: [quoted(7002, { damage: 120 }), quoted(7003, { damage: 480 })],
+    cost: null,
+  }]);
   assert.deepEqual(repairTargets(decoded), [7002, 7003], "the hull itself is not damaged, so it is not named");
 });
 
@@ -111,6 +128,43 @@ test("repair targets are every part once, in quote order; a row without parts st
     [9001, 7002, 5001, 6001],
   );
   assert.deepEqual(repairTargets([]), []);
+});
+
+// The running server's own row (repairService buildRepairQuoteRow): a util.KeyVal
+// with damage in HP and a PER-HP price, never a total. The retail repair window
+// prices each part as ceil(damage) * costToRepairOneUnitOfDamage; a decoder that
+// only read `cost` showed "—" and "did not quote a price" on every quote.
+function serverRow(fields: readonly (readonly [string, number])[]): unknown {
+  return { type: "object", name: "util.KeyVal", args: { type: "dict", entries: fields } };
+}
+
+test("the server's per-HP row is priced as ceil(damage) * unit cost, as the client does", () => {
+  const drone = serverRow([
+    ["itemID", 7002], ["typeID", 2454], ["damage", 108.65], ["maxHealth", 1000],
+    ["costToRepairOneUnitOfDamage", 12.5],
+  ]);
+  const decoded = decodeRepairQuotes(quotes([[9001, { type: "list", items: [drone] }]]));
+
+  assert.deepEqual(decoded, [{
+    itemID: 9001,
+    repairItemIDs: [7002],
+    damagedParts: 1,
+    parts: [quoted(7002, { typeID: 2454, damage: 108.65, maxHealth: 1000, cost: 109 * 12.5 })],
+    cost: 109 * 12.5,
+  }]);
+  assert.equal(repairQuoteTotal(decoded), 1362.5);
+});
+
+test("a hull quoted clean but with a damaged drone names the DRONE, not the hull", () => {
+  const drone = serverRow([["itemID", 7002], ["typeID", 2454], ["damage", 30], ["costToRepairOneUnitOfDamage", 2]]);
+  const [row] = decodeRepairQuotes(quotes([[9001, { type: "list", items: [drone] }]]));
+
+  assert.deepEqual(row!.parts.map((p) => [p.itemID, p.typeID]), [[7002, 2454]]);
+});
+
+test("a part the client would skip (ceil(damage) is 0) is not quoted", () => {
+  const clean = serverRow([["itemID", 7002], ["damage", 0], ["costToRepairOneUnitOfDamage", 2]]);
+  assert.deepEqual(decodeRepairQuotes(quotes([[9001, { type: "list", items: [clean] }]])), []);
 });
 
 test("a result that is not a dict is no damage, and an empty quote has no total", () => {

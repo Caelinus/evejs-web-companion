@@ -309,7 +309,13 @@ test("quoteShipRepair quotes the hull and its fitted modules, and reports only t
   const asked = requests.find((r) => r.path.startsWith("/api/bridge/station/repair-quotes"));
   assert.ok(asked, "the shop was asked for a quote");
   assert.match(asked!.path, /itemIDs=9001,5001$/, "the hull and the fitted module were quoted");
-  assert.deepEqual(quote, [{ itemID: 9001, repairItemIDs: [9001], damagedParts: 1, cost: 1250 }]);
+  assert.deepEqual(quote, [{
+    itemID: 9001,
+    repairItemIDs: [9001],
+    damagedParts: 1,
+    parts: [{ itemID: 9001, typeID: null, damage: null, maxHealth: null, cost: 1250 }],
+    cost: 1250,
+  }]);
 });
 
 test("quoteShipRepair with no hull to quote asks nothing and answers null", async () => {
