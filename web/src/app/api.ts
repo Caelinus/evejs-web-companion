@@ -3182,6 +3182,11 @@ export interface BotScriptSummary {
    * the library went platform-wide; render those as "—", never as a blank.
    */
   readonly authorName: string | null;
+  /**
+   * The category this bot is filed in, or null for Uncategorized. A bot is in
+   * at most one category (a folder, not a tag).
+   */
+  readonly categoryID: string | null;
 }
 
 function asBotScriptSummary(value: JsonValue): BotScriptSummary {
@@ -3193,6 +3198,7 @@ function asBotScriptSummary(value: JsonValue): BotScriptSummary {
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
     authorAccountID: asNumberOrNull(row.authorAccountID),
     authorName: typeof row.authorName === "string" && row.authorName.length > 0 ? row.authorName : null,
+    categoryID: typeof row.categoryID === "string" && row.categoryID.length > 0 ? row.categoryID : null,
   };
 }
 
@@ -3209,6 +3215,7 @@ export async function getBotScript(
   rev: number;
   authorAccountID: number | null;
   authorName: string | null;
+  categoryID: string | null;
   doc: JsonValue;
 } | null> {
   try {
@@ -3218,6 +3225,7 @@ export async function getBotScript(
       rev: asNumberOrNull(data.rev) ?? 1,
       authorAccountID: asNumberOrNull(data.authorAccountID),
       authorName: typeof data.authorName === "string" && data.authorName.length > 0 ? data.authorName : null,
+      categoryID: typeof data.categoryID === "string" && data.categoryID.length > 0 ? data.categoryID : null,
       doc: data.doc ?? null,
     };
   } catch (error) {
@@ -3228,11 +3236,15 @@ export async function getBotScript(
   }
 }
 
+/**
+ * `categoryID` files the new bot: null or absent saves it Uncategorized.
+ */
 export async function createBotScript(
   doc: unknown,
   options: ApiOptions = {},
+  categoryID: string | null = null,
 ): Promise<{ scriptID: string; rev: number }> {
-  const data = await postJson("/api/botscripts", { doc }, options);
+  const data = await postJson("/api/botscripts", { doc, categoryID }, options);
   return { scriptID: typeof data.scriptID === "string" ? data.scriptID : "", rev: asNumberOrNull(data.rev) ?? 1 };
 }
 
@@ -3241,13 +3253,72 @@ export async function updateBotScript(
   doc: unknown,
   baseRev: number,
   options: ApiOptions = {},
+  categoryID?: string | null,
 ): Promise<{ rev: number }> {
-  const data = await postJson(`/api/botscripts/${encodeURIComponent(scriptID)}`, { doc, baseRev }, options);
+  // `categoryID` undefined leaves the bot where it is filed; null uncategorizes it.
+  const body = categoryID === undefined ? { doc, baseRev } : { doc, baseRev, categoryID };
+  const data = await postJson(`/api/botscripts/${encodeURIComponent(scriptID)}`, body, options);
   return { rev: asNumberOrNull(data.rev) ?? 1 };
 }
 
 export async function deleteBotScript(scriptID: string, options: ApiOptions = {}): Promise<void> {
   await postJson(`/api/botscripts/${encodeURIComponent(scriptID)}/delete`, {}, options);
+}
+
+// ─── Bot library categories (src/botScriptStore.js) ──────────────────────────
+// Folders over the same shared library. Filing a bot is bookkeeping, not an
+// edit: it never bumps the bot's revision. Deleting a category never deletes
+// a bot; its bots become Uncategorized.
+
+export interface BotCategory {
+  readonly categoryID: string;
+  readonly name: string;
+}
+
+/** Every category, in display order. */
+export async function listBotCategories(options: ApiOptions = {}): Promise<BotCategory[]> {
+  const data = await getJson("/api/botcategories", options);
+  if (!Array.isArray(data.categories)) {
+    return [];
+  }
+  return data.categories.flatMap((value) => {
+    const row = (value ?? {}) as Record<string, JsonValue>;
+    return typeof row.categoryID === "string" && typeof row.name === "string"
+      ? [{ categoryID: row.categoryID, name: row.name }]
+      : [];
+  });
+}
+
+export async function createBotCategory(name: string, options: ApiOptions = {}): Promise<{ categoryID: string }> {
+  const data = await postJson("/api/botcategories", { name }, options);
+  return { categoryID: typeof data.categoryID === "string" ? data.categoryID : "" };
+}
+
+export async function renameBotCategory(categoryID: string, name: string, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/botcategories/${encodeURIComponent(categoryID)}`, { name }, options);
+}
+
+/** Move a category to `index` in the display order. */
+export async function moveBotCategory(categoryID: string, index: number, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/botcategories/${encodeURIComponent(categoryID)}`, { index }, options);
+}
+
+/** Delete a category; answers how many bots became Uncategorized. */
+export async function deleteBotCategory(
+  categoryID: string,
+  options: ApiOptions = {},
+): Promise<{ uncategorized: number }> {
+  const data = await postJson(`/api/botcategories/${encodeURIComponent(categoryID)}/delete`, {}, options);
+  return { uncategorized: asNumberOrNull(data.uncategorized) ?? 0 };
+}
+
+/** File bots in a category; null files them as Uncategorized. */
+export async function setBotScriptsCategory(
+  scriptIDs: readonly string[],
+  categoryID: string | null,
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/botscripts/category", { scriptIDs, categoryID }, options);
 }
 
 // ─── Saved PI plans (src/piPlanStore.js) ─────────────────────────────────────

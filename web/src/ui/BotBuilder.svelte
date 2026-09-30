@@ -99,6 +99,8 @@
     createBotScript,
     getBotScript,
     listBotScripts,
+    listBotCategories,
+    type BotCategory,
     updateBotScript,
     type BotScriptSummary,
   } from "../app/api.ts";
@@ -195,6 +197,14 @@
   // them; a second list here with a Load button beside every row is what made
   // the Manager's own Edit button unable to open anything.
   let savedList = $state<BotScriptSummary[]>([]);
+  /**
+   * The library's categories, for the Category menu beside the name. A bot is
+   * filed in one or none; null is Uncategorized. `savedCategoryID` is where
+   * the server has it, so a changed menu reads as an unsaved change.
+   */
+  let categories = $state<BotCategory[]>([]);
+  let categoryID = $state<string | null>(null);
+  let savedCategoryID = $state<string | null>(null);
   let currentSavedId = $state<string | null>(null);
   let currentRev = $state(0);
   let libraryError = $state<string | null>(null);
@@ -248,7 +258,9 @@
   // which also makes a change typed and then undone by hand honestly not a
   // change.
   let baselineText = $state(encodeScriptDoc(buildScript()));
-  const dirty = $derived(encodeScriptDoc(builtDoc) !== baselineText);
+  // The category is saved with the bot, so a changed category is an unsaved
+  // change like any other: Save completes it, and opening another bot waits.
+  const dirty = $derived(encodeScriptDoc(builtDoc) !== baselineText || categoryID !== savedCategoryID);
 
   // The rows of "the plan". A preserved advanced program renders its real
   // structure — loop headers and branch sides — rather than a flattened guess.
@@ -745,6 +757,10 @@
     selection = null;
     menuFor = null;
     saveConflict = null;
+    // Every opener starts Uncategorized; `loadSaved` then puts back where a
+    // saved bot is filed.
+    categoryID = null;
+    savedCategoryID = null;
     // ⚠ THE ONE PLACE THE BASELINE IS SET ON THE WAY IN — every opener (a saved
     // bot, a pasted one, an example, the post-conflict reload) goes through
     // here, so none of them can leave the draft looking changed the moment it
@@ -777,9 +793,16 @@
 
   async function refreshSaved(): Promise<void> {
     try {
-      savedList = await listBotScripts(await botOpts());
+      const options = await botOpts();
+      const [nextList, nextCategories] = await Promise.all([
+        listBotScripts(options),
+        listBotCategories(options),
+      ]);
+      savedList = nextList;
+      categories = nextCategories;
       libraryError = null;
       noticeOpenBotIsGone();
+      followFiling();
     } catch {
       savedList = [];
       libraryError = "Could not reach the saved bots — are you still logged in?";
@@ -807,6 +830,27 @@
     currentRev = 0;
     importNote = `“${name}” was deleted from the library. What is on screen is still here — saving puts it back as a new bot.`;
   }
+  /**
+   * Keep the Category menu honest when the filing changed elsewhere: the Bot
+   * Manager moved the open bot, or deleted its category (its bots become
+   * Uncategorized). Only while the menu here is untouched: a category the
+   * player picked and has not saved yet is theirs to keep until Save.
+   */
+  function followFiling(): void {
+    if (categoryID !== savedCategoryID) {
+      if (categoryID !== null && !categories.some((category) => category.categoryID === categoryID)) {
+        categoryID = null;
+      }
+      return;
+    }
+    const meta = currentSavedId === null ? undefined : savedList.find((row) => row.scriptID === currentSavedId);
+    let filed = meta === undefined ? categoryID : meta.categoryID;
+    if (filed !== null && !categories.some((category) => category.categoryID === filed)) {
+      filed = null;
+    }
+    categoryID = filed;
+    savedCategoryID = filed;
+  }
   async function saveBot(): Promise<void> {
     saveConflict = null;
     // ⚠ WHAT WAS SENT, CAPTURED BEFORE THE AWAIT. The baseline says "this text
@@ -814,18 +858,20 @@
     // flight; taking the text afterwards would count those keystrokes as saved
     // and let a handoff discard them.
     const sent = encodeScriptDoc(builtDoc);
+    const sentCategoryID = categoryID;
     try {
       if (currentSavedId !== null) {
-        const { rev } = await updateBotScript(currentSavedId, builtDoc, currentRev, await botOpts());
+        const { rev } = await updateBotScript(currentSavedId, builtDoc, currentRev, await botOpts(), sentCategoryID);
         currentRev = rev;
         importNote = `Saved changes to "${name}".`;
       } else {
-        const { scriptID, rev } = await createBotScript(builtDoc, await botOpts());
+        const { scriptID, rev } = await createBotScript(builtDoc, await botOpts(), sentCategoryID);
         currentSavedId = scriptID;
         currentRev = rev;
         importNote = `Saved "${name}".`;
       }
       baselineText = sent;
+      savedCategoryID = sentCategoryID;
       // The Bot Manager's library is the list this bot just joined or changed,
       // and it does not poll — see builderTarget.ts.
       noteLibraryChanged();
@@ -878,6 +924,8 @@
       loadFrom(decoded.doc);
       currentSavedId = record.scriptID;
       currentRev = record.rev;
+      categoryID = record.categoryID;
+      savedCategoryID = record.categoryID;
       // It names the bot. The window this opens in is titled "Bot Builder" and
       // may have been showing a different bot a moment ago, so "Loaded a saved
       // bot" left the one question a player actually has — which one? —
@@ -1121,6 +1169,17 @@
       <label>
         Name
         <input id="bot-name" type="text" maxlength={MAX_NAME_LEN} bind:value={name} />
+      </label>
+      <!-- Where the Bot Manager lists it. Saved with the bot; categories are
+           made and renamed on the Manager's rail. -->
+      <label>
+        Category
+        <select id="bot-category" bind:value={categoryID}>
+          <option value={null}>Uncategorized</option>
+          {#each categories as category (category.categoryID)}
+            <option value={category.categoryID}>{category.name}</option>
+          {/each}
+        </select>
       </label>
       <label>
         Notes

@@ -215,3 +215,10 @@ test("the builder draws over the hangar with nobody in the client", () => {
   assert.match(text, /Bot builder/);
   assert.match(text, /The plan/);
 });
+
+test("the bot's Category menu sits beside its name, starting Uncategorized", () => {
+  // Categories are made on the Bot Manager's rail; here a bot is only filed.
+  const body = renderPanel();
+  assert.ok(body.includes('id="bot-category"'), "no category menu rendered");
+  assert.match(body, /<option[^>]*>Uncategorized<\/option>/);
+});

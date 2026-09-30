@@ -16,6 +16,8 @@ const {
   MAX_SCRIPTS_TOTAL,
   MAX_DOC_BYTES,
   MAX_NAME_LEN,
+  MAX_CATEGORIES,
+  MAX_CATEGORY_NAME_LEN,
   STORE_FILENAME,
   STARTER_SEED_VERSION,
   STARTER_AUTHOR_NAME,
@@ -330,4 +332,140 @@ test("seeded starter bots count against the total quota like any other record", 
 
 test("the starterBots.json marker constant matches the store's seed version", () => {
   assert.equal(starterBots.seedVersion, STARTER_SEED_VERSION);
+});
+
+// ─── Categories ──────────────────────────────────────────────────────────────
+
+function categoryOf(store, scriptID) {
+  return store.list().find((row) => row.scriptID === scriptID).categoryID;
+}
+
+test("a new bot is Uncategorized unless it is saved into a category", () => {
+  const { store } = tempStore();
+  const { categoryID } = store.createCategory("Mining");
+  const loose = store.create(ALICE, ALICE_NAME, doc("Loose"));
+  const filed = store.create(ALICE, ALICE_NAME, doc("Filed"), categoryID);
+  assert.equal(categoryOf(store, loose.scriptID), null);
+  assert.equal(categoryOf(store, filed.scriptID), categoryID);
+});
+
+test("creating into a category that does not exist is refused and saves nothing", () => {
+  const { store } = tempStore();
+  assert.throws(() => store.create(ALICE, ALICE_NAME, doc("x"), "nope"), { code: "BOTCATEGORY_NOT_FOUND" });
+  assert.equal(store.list().length, 0);
+});
+
+test("update keeps the category when none is given, and moves it when one is", () => {
+  const { store } = tempStore();
+  const mining = store.createCategory("Mining").categoryID;
+  const ratting = store.createCategory("Ratting").categoryID;
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("Bot"), mining);
+  store.update(scriptID, doc("Bot"), 1);
+  assert.equal(categoryOf(store, scriptID), mining);
+  store.update(scriptID, doc("Bot"), 2, ratting);
+  assert.equal(categoryOf(store, scriptID), ratting);
+  store.update(scriptID, doc("Bot"), 3, null);
+  assert.equal(categoryOf(store, scriptID), null);
+});
+
+test("filing bots never bumps their revision or last-saved time", () => {
+  const { store } = tempStore();
+  const { categoryID } = store.createCategory("Mining");
+  const { scriptID } = store.create(ALICE, ALICE_NAME, doc("Bot"));
+  const before = store.list()[0];
+  assert.deepEqual(store.setCategory([scriptID], categoryID), { moved: 1 });
+  const after = store.list()[0];
+  assert.equal(after.categoryID, categoryID);
+  assert.equal(after.rev, before.rev);
+  assert.equal(after.updatedAt, before.updatedAt);
+});
+
+test("setCategory moves several bots at once, or none when one id is unknown", () => {
+  const { store } = tempStore();
+  const { categoryID } = store.createCategory("Mining");
+  const a = store.create(ALICE, ALICE_NAME, doc("A")).scriptID;
+  const b = store.create(BOB, BOB_NAME, doc("B")).scriptID;
+  assert.throws(() => store.setCategory([a, "missing"], categoryID), { code: "BOTSCRIPT_NOT_FOUND" });
+  assert.equal(categoryOf(store, a), null, "nothing moved on a partial failure");
+  store.setCategory([a, b], categoryID);
+  assert.equal(categoryOf(store, a), categoryID);
+  assert.equal(categoryOf(store, b), categoryID);
+  store.setCategory([a], null);
+  assert.equal(categoryOf(store, a), null);
+});
+
+test("deleting a category NEVER deletes its bots: they become Uncategorized", () => {
+  const { store } = tempStore();
+  const mining = store.createCategory("Mining").categoryID;
+  const ratting = store.createCategory("Ratting").categoryID;
+  const a = store.create(ALICE, ALICE_NAME, doc("A"), mining).scriptID;
+  const b = store.create(ALICE, ALICE_NAME, doc("B"), mining).scriptID;
+  const c = store.create(ALICE, ALICE_NAME, doc("C"), ratting).scriptID;
+  assert.deepEqual(store.removeCategory(mining), { uncategorized: 2 });
+  assert.equal(store.list().length, 3, "every bot is still in the library");
+  assert.equal(categoryOf(store, a), null);
+  assert.equal(categoryOf(store, b), null);
+  assert.equal(categoryOf(store, c), ratting, "other categories are untouched");
+  assert.ok(store.get(a).doc, "the bot itself is intact");
+  assert.deepEqual(store.listCategories().map((row) => row.name), ["Ratting"]);
+});
+
+test("category names are trimmed, required, capped and unique ignoring case", () => {
+  const { store } = tempStore();
+  store.createCategory("  Mining  ");
+  assert.equal(store.listCategories()[0].name, "Mining");
+  assert.throws(() => store.createCategory("   "), { code: "BOTCATEGORY_INVALID" });
+  assert.throws(() => store.createCategory("mining"), { code: "BOTCATEGORY_NAME_TAKEN" });
+  const long = store.createCategory("x".repeat(MAX_CATEGORY_NAME_LEN + 10)).categoryID;
+  assert.equal(store.listCategories().find((row) => row.categoryID === long).name.length, MAX_CATEGORY_NAME_LEN);
+});
+
+test("renaming checks uniqueness against the others but allows a case change of itself", () => {
+  const { store } = tempStore();
+  const mining = store.createCategory("Mining").categoryID;
+  store.createCategory("Ratting");
+  store.renameCategory(mining, "MINING");
+  assert.equal(store.listCategories()[0].name, "MINING");
+  assert.throws(() => store.renameCategory(mining, "ratting"), { code: "BOTCATEGORY_NAME_TAKEN" });
+  assert.throws(() => store.renameCategory("nope", "x"), { code: "BOTCATEGORY_NOT_FOUND" });
+});
+
+test("moveCategory reorders the list, clamping the index", () => {
+  const { store } = tempStore();
+  const a = store.createCategory("A").categoryID;
+  store.createCategory("B");
+  store.createCategory("C");
+  store.moveCategory(a, 2);
+  assert.deepEqual(store.listCategories().map((row) => row.name), ["B", "C", "A"]);
+  store.moveCategory(a, -5);
+  assert.deepEqual(store.listCategories().map((row) => row.name), ["A", "B", "C"]);
+  store.moveCategory(a, 99);
+  assert.deepEqual(store.listCategories().map((row) => row.name), ["B", "C", "A"]);
+});
+
+test("the category limit is enforced", () => {
+  const { store } = tempStore();
+  for (let i = 0; i < MAX_CATEGORIES; i += 1) {
+    store.createCategory(`c${i}`);
+  }
+  assert.throws(() => store.createCategory("one more"), { code: "BOTCATEGORY_LIMIT_REACHED" });
+});
+
+test("a library file from before categories reads as all Uncategorized", () => {
+  const { store, dataDir } = tempStore();
+  fs.writeFileSync(
+    path.join(dataDir, STORE_FILENAME),
+    JSON.stringify({ scripts: { s1: { scriptID: "s1", authorAccountID: ALICE, authorName: null, rev: 1, name: "Old", bytes: 2, updatedAt: "x", doc: {} } } }),
+  );
+  assert.deepEqual(store.listCategories(), []);
+  assert.equal(categoryOf(store, "s1"), null);
+});
+
+test("a bot pointing at a category that is gone reads as Uncategorized", () => {
+  const { store, dataDir } = tempStore();
+  fs.writeFileSync(
+    path.join(dataDir, STORE_FILENAME),
+    JSON.stringify({ categories: [], scripts: { s1: { scriptID: "s1", authorAccountID: ALICE, authorName: null, rev: 1, name: "Old", bytes: 2, updatedAt: "x", categoryID: "gone", doc: {} } } }),
+  );
+  assert.equal(categoryOf(store, "s1"), null);
 });
