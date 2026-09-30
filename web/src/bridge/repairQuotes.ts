@@ -8,11 +8,15 @@
 // said on this wire, so an empty list is dropped here rather than rendered as a
 // zero-cost repair.
 //
-// ⚠ THE COST IS READ, NEVER COMPUTED. Whether a part row carries a price at all
-// is the server's business; when none of them do, `cost` stays null and the UI
-// says the price is unknown instead of inventing 0 ISK next to a button that
-// debits a real wallet. The wallet charge is applied server-side by RepairItems
-// regardless of what we managed to read here.
+// ⚠ THE PRICE IS THE SHOP'S, PRICED THE CLIENT'S WAY. A part row carries no
+// total: it carries `damage` (HP) and `costToRepairOneUnitOfDamage`, and the
+// retail repair window (repairshop/base_repairshop.py DisplayRepairQuote) prices
+// a part as ceil(damage) * that unit cost — the same product the server's
+// RepairItems charges (repairRuntime buildRepairExecutionTargets `fullCost`).
+// A row that carries neither a `cost` nor both of those has no price, `cost`
+// stays null, and the UI says the price is unknown instead of inventing 0 ISK
+// next to a button that debits a real wallet. The client also skips a part
+// whose ceil(damage) is 0; so do we.
 
 import {
   isListValue,
@@ -22,13 +26,40 @@ import {
   readRowField,
 } from "./wire.ts";
 
+/** One damaged part the shop listed: a hull, a fitted module or a bay drone. */
+export interface RepairQuotePart {
+  /** The part's own item id — what RepairItems is handed for it. */
+  readonly itemID: number;
+  /** The part's type, when the row carries one (the name the panel shows). */
+  readonly typeID: number | null;
+  /** HP of damage the shop found, or null when the row does not say. */
+  readonly damage: number | null;
+  /** The part's full HP (shield + armor + structure), or null. */
+  readonly maxHealth: number | null;
+  /** What repairing it costs, or null when the row carries no price. */
+  readonly cost: number | null;
+}
+
 /** One damaged item in the shop's quote: what it is and what it would cost. */
 export interface RepairQuoteRow {
   /** The item the shop found damage on — the ship hull, or a fitted module. */
   readonly itemID: number;
+  /**
+   * What to hand RepairItems to fix it: each damaged part's OWN item id.
+   *
+   * ⚠ NOT `itemID`. Quoting a hull lists its modules and every drone in its bay
+   * under the HULL's key, one part row each carrying that part's own itemID,
+   * and RepairItems repairs exactly the ids it is given. Repairing by the key
+   * repaired the hull alone: a clean hull with a chewed drone in its bay was
+   * "repaired" for nothing, answered OK, and quoted damaged again, forever.
+   * A part whose id cannot be read falls back to the key.
+   */
+  readonly repairItemIDs: readonly number[];
   /** How many damaged parts the shop listed under it (never zero here). */
   readonly damagedParts: number;
-  /** Summed price of those parts, or null when the rows carry no price. */
+  /** Those parts, in wire order. */
+  readonly parts: readonly RepairQuotePart[];
+  /** Summed price of those parts, or null unless every part carried one. */
   readonly cost: number | null;
 }
 
@@ -47,10 +78,26 @@ function quotedParts(value: unknown): readonly unknown[] {
   return isListValue(nested) ? nested.items : [];
 }
 
-/** A part row's price, from whichever row shape the handler chose; null if absent. */
-function partCost(row: unknown): number | null {
-  const raw = readRowField(row, "cost") ?? readPlainJsonField(row, "cost");
+/** A numeric field of a part row, from whichever row shape the handler chose. */
+function partNumber(row: unknown, field: string): number | null {
+  const raw = readRowField(row, field) ?? readPlainJsonField(row, field);
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
+/** A positive integer id field of a part row; null when absent or unusable. */
+function partID(row: unknown, field: string): number | null {
+  const id = Number(readRowField(row, field) ?? readPlainJsonField(row, field));
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** A part's price: a quoted `cost` if the row has one, else ceil(damage) * unit cost. */
+function partCost(row: unknown, damage: number | null): number | null {
+  const quoted = partNumber(row, "cost");
+  if (quoted !== null) {
+    return quoted;
+  }
+  const unitCost = partNumber(row, "costToRepairOneUnitOfDamage");
+  return damage === null || unitCost === null ? null : Math.ceil(damage) * unitCost;
 }
 
 /**
@@ -65,20 +112,53 @@ export function decodeRepairQuotes(raw: unknown): readonly RepairQuoteRow[] {
     if (!Number.isSafeInteger(itemID) || itemID <= 0) {
       continue;
     }
-    const parts = quotedParts(value);
+    const parts: RepairQuotePart[] = [];
+    for (const row of quotedParts(value)) {
+      const damage = partNumber(row, "damage");
+      if (damage !== null && Math.ceil(damage) <= 0) {
+        continue;
+      }
+      parts.push({
+        itemID: partID(row, "itemID") ?? itemID,
+        typeID: partID(row, "typeID"),
+        damage,
+        maxHealth: partNumber(row, "maxHealth"),
+        cost: partCost(row, damage),
+      });
+    }
     if (parts.length === 0) {
       continue;
     }
-    let cost: number | null = null;
+    const repairItemIDs: number[] = [];
     for (const part of parts) {
-      const price = partCost(part);
-      if (price !== null) {
-        cost = (cost ?? 0) + price;
+      if (!repairItemIDs.includes(part.itemID)) {
+        repairItemIDs.push(part.itemID);
       }
     }
-    quotes.push({ itemID, damagedParts: parts.length, cost });
+    const cost = parts.some((part) => part.cost === null)
+      ? null
+      : parts.reduce((sum, part) => sum + (part.cost ?? 0), 0);
+    quotes.push({ itemID, repairItemIDs, damagedParts: parts.length, parts, cost });
   }
   return quotes;
+}
+
+/**
+ * Every item id a quote says to repair, once each, in quote order — what
+ * RepairItems is called with. A row without `repairItemIDs` stands for itself.
+ */
+export function repairTargets(
+  quotes: readonly (Pick<RepairQuoteRow, "itemID"> & { readonly repairItemIDs?: readonly number[] })[],
+): readonly number[] {
+  const ids: number[] = [];
+  for (const quote of quotes) {
+    for (const id of quote.repairItemIDs ?? [quote.itemID]) {
+      if (!ids.includes(id)) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
 }
 
 /**

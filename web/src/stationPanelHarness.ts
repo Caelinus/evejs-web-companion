@@ -27,6 +27,7 @@ import { mount } from "svelte";
 import StationPanel from "./ui/StationPanel.svelte";
 import { createClientStore } from "./store/clientStore.ts";
 import type { AppFlow } from "./app/flow.ts";
+import type { RepairQuoteRow } from "./bridge/repairQuotes.ts";
 import type { InventoryItemRow, InventoryPlace } from "./store/types.ts";
 
 const STATION_ID = 60000004;
@@ -320,9 +321,10 @@ const flow = {
   },
   async boardCorvette(): Promise<void> { log("boardCorvette()"); },
   async leaveShip(): Promise<void> { log("leaveShip()"); },
-  async quoteShipRepair(): Promise<readonly { itemID: number; cost: number | null }[]> {
+  async quoteShipRepair(): Promise<readonly RepairQuoteRow[]> {
     log("quoteShipRepair()");
-    return [{ itemID: PROCURER, cost: 120450.5 }];
+    const part = { itemID: PROCURER, typeID: null, damage: 1204.5, maxHealth: 9000, cost: 120450.5 };
+    return [{ itemID: PROCURER, repairItemIDs: [PROCURER], damagedParts: 1, parts: [part], cost: 120450.5 }];
   },
   async repairShip(): Promise<void> { log("repairShip() — the wallet is charged"); },
   async releaseSession(): Promise<void> { log("releaseSession()"); },

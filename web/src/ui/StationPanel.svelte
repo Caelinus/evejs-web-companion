@@ -82,7 +82,12 @@
     type SortKey,
     type SortOrder,
   } from "./inventoryModel.ts";
-  import { repairQuoteTotal, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
+  import {
+    repairQuoteTotal,
+    repairTargets,
+    type RepairQuotePart,
+    type RepairQuoteRow,
+  } from "../bridge/repairQuotes.ts";
   import { isSessionLost } from "../app/flow.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
   import { resolvedName, nameKey, type NameKind, type NameRef } from "../store/names.ts";
@@ -942,6 +947,11 @@
 
   const repairTotal = $derived(repairQuote === null ? null : repairQuoteTotal(repairQuote));
 
+  // One row per damaged PART. A hull's quote carries its modules and bay drones
+  // under the hull's key, so a row per key read "Retriever" when only a drone
+  // in its bay was chewed.
+  const repairParts = $derived((repairQuote ?? []).flatMap((quote) => quote.parts));
+
   function quotedTypeID(itemID: number): number | null {
     for (const slot of $fitting.slots) {
       if (slot.module !== null && slot.module.itemID === itemID) {
@@ -996,8 +1006,8 @@
   // R7d — a quoted item renders as its type NAME; its item id is never shown.
   $effect(() => {
     const refs: NameRef[] = [];
-    for (const row of repairQuote ?? []) {
-      const typeID = quotedTypeID(row.itemID);
+    for (const part of repairParts) {
+      const typeID = part.typeID ?? quotedTypeID(part.itemID);
       if (typeID !== null) {
         refs.push({ kind: "type", id: typeID });
       }
@@ -1007,9 +1017,18 @@
     }
   });
 
-  function quotedName(itemID: number): string {
-    const typeID = quotedTypeID(itemID);
+  function quotedName(part: RepairQuotePart): string {
+    const typeID = part.typeID ?? quotedTypeID(part.itemID);
     return typeID === null ? "Something on your ship" : nameOnly(typeID, "type");
+  }
+
+  /** "73%" health left, as the client's repair window shows it; "" when unknown. */
+  function quotedHealth(part: RepairQuotePart): string {
+    if (part.damage === null || part.maxHealth === null || !(part.maxHealth > 0)) {
+      return "";
+    }
+    const left = Math.max(0, part.maxHealth - Math.ceil(part.damage)) / part.maxHealth;
+    return `${Math.floor(left * 100)}%`;
   }
 
   async function askRepairQuote(): Promise<void> {
@@ -1025,7 +1044,7 @@
   }
 
   async function payRepairQuote(rows: readonly RepairQuoteRow[]): Promise<void> {
-    await flow.repairShip(rows.map((row) => row.itemID));
+    await flow.repairShip(repairTargets(rows));
     await askRepairQuote();
   }
 
@@ -1252,12 +1271,13 @@
   {#if repairQuote !== null && repairQuote.length > 0}
     <div class="table-wrap overflow-x-auto">
       <table class="reflow">
-        <thead><tr><th>Damaged</th><th>Cost</th></tr></thead>
+        <thead><tr><th>Damaged</th><th>Health</th><th>Cost</th></tr></thead>
         <tbody>
-          {#each repairQuote as quoted (quoted.itemID)}
+          {#each repairParts as part, index (`${part.itemID}:${index}`)}
             <tr>
-              <td data-label="Damaged">{quotedName(quoted.itemID)}</td>
-              <td data-label="Cost">{quoted.cost === null ? "—" : formatIsk(quoted.cost.toFixed(2))}</td>
+              <td data-label="Damaged">{quotedName(part)}</td>
+              <td data-label="Health">{quotedHealth(part) || "—"}</td>
+              <td data-label="Cost">{part.cost === null ? "—" : formatIsk(part.cost.toFixed(2))}</td>
             </tr>
           {/each}
         </tbody>
@@ -1273,7 +1293,7 @@
     <p class="stn-controls">
       <button type="button" class="stn-btn stn-btn-go" disabled={busy}
         onclick={() => run(() => payRepairQuote(repairQuote ?? []))}>
-        Repair {repairQuote.length === 1 ? "it" : `all ${repairQuote.length}`} and pay
+        Repair {repairParts.length === 1 ? "it" : `all ${repairParts.length}`} and pay
       </button>
       <button type="button" class="stn-btn" disabled={busy} onclick={() => { repairQuote = null; repairNote = ""; }}>
         Cancel

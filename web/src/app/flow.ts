@@ -107,7 +107,7 @@ import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
 import { extractorReroute, type ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import { decodeRecipeBook } from "../bridge/piRecipes.ts";
-import { decodeRepairQuotes, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
+import { decodeRepairQuotes, repairTargets, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
 import { createSpacePoller, targetsReadIsDue, type SpacePoller } from "./spacePoll.ts";
 import type { RequestPriority } from "./transport.ts";
 import type { CorpOfficesResult, DronesResult, FlightStepResult } from "./api.ts";
@@ -6290,7 +6290,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         if (liveCompanionRequest !== null && status.docked) {
           try {
             const quotes = await quoteShipRepair();
-            damagedItemIDs = quotes === null ? null : quotes.map((quote) => quote.itemID);
+            damagedItemIDs = quotes === null ? null : repairTargets(quotes);
           } catch {
             damagedItemIDs = null;
           }
@@ -9671,7 +9671,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // station panel's repair button raises. Null (nothing to quote, or
             // the read failed) stays "we cannot say", never "nothing is damaged".
             const quotes = await quoteShipRepair();
-            damagedItemIDs = quotes === null ? null : quotes.map((quote) => quote.itemID);
+            damagedItemIDs = quotes === null ? null : repairTargets(quotes);
           } catch {
             damagedItemIDs = null;
           }
