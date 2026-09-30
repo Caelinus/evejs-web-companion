@@ -132,7 +132,7 @@ function onlineStore(): ReturnType<typeof createClientStore> {
 
 function responder(path: string, body: Record<string, unknown>): { status: number; body: unknown } {
   if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-  if (path === "/api/bridge/space/snapshot") return { status: 200, body: beltSpaceBody() };
+  if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) return { status: 200, body: beltSpaceBody() };
   if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
   if (path === "/api/names") return { status: 200, body: namesBody(body) };
   if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
@@ -161,7 +161,12 @@ test("a mine-at-belt block runs the surveyor, and what it saw reaches the rock r
     }),
   );
   await new Promise((resolve) => setTimeout(resolve, 150));
+  const observationRequests = [...requests];
   flow.stopCustomBot();
+
+  assert.equal(observationRequests.filter((request) => request.path === "/api/bridge/script/observation").length, 1);
+  assert.equal(observationRequests.filter((request) => request.path === "/api/bridge/space/snapshot").length, 0);
+  assert.equal(observationRequests.filter((request) => request.path === "/api/bridge/drones").length, 0);
 
   const scans = requests.filter((request) => request.path === "/api/bridge/mining/scan");
   assert.equal(scans.length, 1, "the block that works a rock pressed the surveyor once");

@@ -86,7 +86,8 @@ function fakeStore() {
 }
 
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; },
+    getTypeDogmaAttribute() { return null; } };
 }
 
 function packedRow(fields) {
@@ -308,6 +309,7 @@ async function startTestServer(options = {}) {
     eveGatewayClient: options.gateway || fakeGateway(),
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
+    bridgeSessionStore: options.sessions,
     errorLogger() {},
   });
   const server = app.listen(0, "127.0.0.1");
@@ -748,4 +750,97 @@ test("⚠ there is NO assist, guard, unanchor or abandon route", async () => {
     });
     assert.notEqual(response.status, 200, `/api/bridge/drones/${route} must not exist`);
   }
+});
+
+test("script observation reads one fresh scene for space and owned drone projection", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  await apiRequest(baseUrl, "/api/bridge/space/snapshot");
+  await apiRequest(baseUrl, "/api/bridge/drones");
+  assert.equal(gateway.calls.snapshot.length, 2, "the previous paired routes acquire twice");
+  gateway.calls.snapshot.length = 0;
+  gateway.state.space.set(81, { ...gateway.droneRow(81), droneActivity: "mining", targetEntityID: ROCK_ID });
+  gateway.state.extraEntities = [
+    { itemID: ROCK_ID, kind: "asteroid", radius: 100, position: { x: 6000, y: 0, z: 0 } },
+    { itemID: 99, kind: "container", radius: 10, position: { x: 1500, y: 0, z: 0 } },
+    { ...gateway.droneRow(82), controllerID: null },
+    { ...gateway.droneRow(83), ownerID: 123, controllerID: 123 },
+  ];
+  const read = gateway.readSpaceSnapshot.bind(gateway);
+  gateway.readSpaceSnapshot = async (...args) => {
+    const outcome = await read(...args);
+    return { space: { ...outcome.space, sampledAtMs: gateway.calls.snapshot.length },
+      notifications: [{ event: "sample", args: [gateway.calls.snapshot.length] }] };
+  };
+  const first = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(first.response.status, 200);
+  assert.equal(gateway.calls.snapshot.length, 1);
+  assert.equal(first.payload.space.sampledAtMs, 1);
+  assert.deepEqual(first.payload.inSpace.map((d) => [d.itemID, d.controlled]), [[81, true], [82, false]]);
+  assert.equal(first.payload.inSpace[0].targetID, ROCK_ID);
+  assert.ok(first.payload.space.entities.some((e) => e.itemID === ROCK_ID));
+  assert.ok(first.payload.space.entities.some((e) => e.itemID === 99));
+  assert.deepEqual(first.payload.notifications, [{ event: "sample", args: [1] }]);
+  assert.equal(first.payload.bay.length, 2);
+  assert.ok(first.payload.shipInfo);
+  const second = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(second.payload.space.sampledAtMs, 2, "no cross-tick cache");
+  assert.equal(gateway.calls.snapshot.length, 2);
+});
+
+test("script observation keeps unreadable drone state unknown and rejects failed scene authority", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  const read = gateway.readSpaceSnapshot.bind(gateway);
+  gateway.readSpaceSnapshot = async (...args) => {
+    const outcome = await read(...args);
+    return { ...outcome, space: { ...outcome.space, entities: null } };
+  };
+  const unreadable = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(unreadable.response.status, 200);
+  assert.equal(unreadable.payload.inSpace, null);
+  gateway.readSpaceSnapshot = read;
+  gateway.state.snapshotFails = true;
+  const failed = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.notEqual(failed.response.status, 200);
+  assert.equal(failed.payload.ok, false);
+  gateway.state.snapshotFails = false;
+  gateway.readSpaceSnapshot = async () => ({ space: null, notifications: [] });
+  const missing = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.notEqual(missing.response.status, 200, "a missing full scene must not decode as empty space");
+});
+
+test("a pilot or scene transition cannot reuse an in-flight script observation", async () => {
+  const sessions = new Map();
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway, sessions });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  const read = gateway.readSpaceSnapshot.bind(gateway);
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let started;
+  const entered = new Promise((resolve) => { started = resolve; });
+  gateway.readSpaceSnapshot = async (...args) => {
+    started();
+    await pending;
+    return read(...args);
+  };
+  const request = apiRequest(baseUrl, "/api/bridge/script/observation");
+  await entered;
+  sessions.get(SESSION_ID).transitionEpoch += 1;
+  release();
+  const result = await request;
+  assert.equal(result.response.status, 409);
+  assert.equal(result.payload.error, "OBSERVATION_SCOPE_CHANGED");
+  assert.equal(gateway.calls.snapshot.length, 1);
+});
+
+test("drone mutation and later confirmation never reuse the script observation", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(gateway.calls.snapshot.length, 1);
+  await apiRequest(baseUrl, "/api/bridge/drones/launch", {
+    method: "POST", body: { drones: [{ itemID: BAY_DRONE_ID }] },
+  });
+  assert.equal(gateway.calls.snapshot.length, 3, "launch retains before/after authority reads");
+  await apiRequest(baseUrl, "/api/bridge/drones");
+  assert.equal(gateway.calls.snapshot.length, 4, "later confirmation reads afresh");
 });

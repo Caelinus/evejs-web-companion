@@ -9226,13 +9226,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     };
     return {
       observe: async (hint) => {
-        const [flightStep, spaceResult, targetsResult, holdsResult, dronesResult] = await Promise.all([
+        const [flightStep, observation, targetsResult, holdsResult] = await Promise.all([
           api.getFlightStatus(callOptions),
-          api.getSpaceSnapshot(callOptions),
+          api.getScriptObservation(callOptions),
           api.getTargets(callOptions),
           api.getMiningHolds(callOptions),
-          api.getDrones(callOptions),
         ]);
+        // The scene and drone-space projection belong to this one observation.
+        const spaceResult = observation;
+        const dronesResult = observation;
         const status = decodeFlightStatus(flightStep.flight);
         void observeFlightStatus(status);
         // The surveyor, for the blocks that work a rock (see SURVEY_MACROS and

@@ -221,7 +221,7 @@ function makeFakeFetch(
 
   function respond(path: string, body: Record<string, unknown>): { status: number; body: unknown } {
     if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody() };
-    if (path === "/api/bridge/space/snapshot") return { status: 200, body: spaceBody(ratios) };
+    if ((path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation")) return { status: 200, body: spaceBody(ratios) };
     if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody(modules) };
     if (path === "/api/names") return { status: 200, body: namesBody(body, modules) };
     if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };

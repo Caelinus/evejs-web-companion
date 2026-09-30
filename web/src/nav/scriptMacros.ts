@@ -23,7 +23,7 @@ import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import { launchFullPercent } from "../bots/macroSpecs.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
+import { beltTravelStep, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import {
@@ -642,9 +642,12 @@ const travelToBelt: MacroDecider = (step, obs) => {
       : "There is no asteroid belt here to fly to.";
     return tick(WAIT, "No asteroid belt in view.", "Nothing to fly to", { kind: "blocked", reason });
   }
-  const beltDist = measurement?.distances.get(belt.itemID) ?? Number.POSITIVE_INFINITY;
-  if (beltDist <= BELT_ARRIVAL_RADIUS_M) {
+  const travel = beltTravelStep(belt, measurement);
+  if (travel === "arrive") {
     return tick(WAIT, "At the belt.", "Arrived", { kind: "done" });
+  }
+  if (travel === "approach") {
+    return tick({ kind: "approach", targetID: belt.itemID }, `Closing on ${rockLabel(belt)} without a short warp.`, "Flying to the belt", ACTING, false, {});
   }
   return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${rockLabel(belt)}.`, "Flying to the belt", ACTING, false, {});
 };
@@ -834,10 +837,13 @@ function mineNoTargetRocks(
         reason: "The belt this step is pinned to is not on this grid.",
       });
     }
-    const beltDist = measurement?.distances.get(belt.itemID) ?? Number.POSITIVE_INFINITY;
-    if (beltDist <= BELT_ARRIVAL_RADIUS_M) {
+    const travel = beltTravelStep(belt, measurement);
+    if (travel === "arrive") {
       const reason = family !== null ? `No ${family.name} left here.` : "This belt has no rocks left to mine.";
       return tick(WAIT, "At the belt, but there is nothing to mine.", "Belt empty", { kind: "blocked", reason });
+    }
+    if (travel === "approach") {
+      return tick({ kind: "approach", targetID: belt.itemID }, `Closing on ${rockLabel(belt)} without a short warp.`, "Flying to the belt", ACTING, false, {});
     }
     return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${rockLabel(belt)}.`, "Flying to the belt", ACTING, false, {});
   }
@@ -877,8 +883,9 @@ function mineNoTargetRocks(
     return tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason });
   }
 
-  const targetDist = target.distance ?? Number.POSITIVE_INFINITY;
-  if (targetDist <= BELT_ARRIVAL_RADIUS_M) {
+  const targetBelt = belts.find((belt) => belt.itemID === target.id);
+  const travel = targetBelt ? beltTravelStep(targetBelt, measurement) : "warp";
+  if (travel === "arrive") {
     // On grid with it, and it has none of what we want — tell the BFF's
     // shared memory (name-keyed) instead of writing a board patch of our own,
     // so every pilot's rotation, not just this one, steers away from it.
@@ -897,6 +904,9 @@ function mineNoTargetRocks(
       "Belt empty",
       ACTING,
     );
+  }
+  if (travel === "approach") {
+    return tick({ kind: "approach", targetID: target.id }, `Closing on ${target.name ?? "the belt"} without a short warp.`, "Flying to the belt", ACTING, false, {});
   }
   return tick(
     { kind: "warp", targetID: target.id },
