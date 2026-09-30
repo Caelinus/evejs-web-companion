@@ -79,7 +79,7 @@ export const MAX_DOC_BYTES = 49152;
 // ─── World references ────────────────────────────────────────────────────────
 
 /** Which kind of world thing a slot points at. */
-export type WorldEntity = "station" | "belt" | "agent" | "system";
+export type WorldEntity = "station" | "structure" | "belt" | "agent" | "system";
 
 /**
  * A reference to a place in the world.

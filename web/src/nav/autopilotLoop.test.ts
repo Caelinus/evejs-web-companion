@@ -491,6 +491,15 @@ const COMPILED = {
   totalJumps: PLAN.hops.length,
 };
 
+test("structure route completes only at the intended structure, never a station or another structure", () => {
+  const structureID = 1_000_000_000_001;
+  const plan = { ...COMPILED, destinationStationID: structureID, destinationKind: "structure" as const };
+  const memory = { warpedInSystem: null, jumpedFromSystem: null, pendingApproachGate: null };
+  assert.equal(decideAutopilotAction(status({ docked: true, solarSystemID: DEST_SYSTEM, stationID: structureID }), plan, memory).kind, "undock");
+  assert.equal(decideAutopilotAction(status({ docked: true, solarSystemID: DEST_SYSTEM, structureID: structureID + 1 }), plan, memory).kind, "undock");
+  assert.equal(decideAutopilotAction(status({ docked: true, solarSystemID: DEST_SYSTEM, structureID }), plan, memory).kind, "arrived");
+});
+
 test("decide: docked away from destination -> undock; docked at destination -> arrived", () => {
   assert.equal(
     decideAutopilotAction(status({ docked: true, solarSystemID: ORIGIN_SYSTEM, stationID: ORIGIN_STATION }), COMPILED, {

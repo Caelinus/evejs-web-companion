@@ -11,6 +11,7 @@ import type { InventoryItemRow, ShipBay } from "../store/types.ts";
 
 const row = (itemID: number, quantity: number, typeID = 34): InventoryItemRow => ({ itemID, typeID, quantity, groupID: 18, categoryID: 4, flagID: null, singleton: false, volume: 1 });
 const station = (id: number) => ({ kind: "station" as const, ref: { entity: "station" as const, id, name: `Station ${id}`, systemName: null } });
+const structure = (id: number) => ({ kind: "station" as const, ref: { entity: "structure" as const, id, name: `Structure ${id}`, systemName: null } });
 const div = (division: number) => ({ kind: "corpDivision" as const, division, name: null });
 const all: MacroStep = { id: "h", kind: "macro", macro: "haul-all", args: {
   pickupStation: station(1), deliveryStation: station(2), pickupCorpDivision: div(1), deliveryCorpDivision: div(2),
@@ -40,10 +41,33 @@ test("corp haul owns only verified quantity, even when it merged into unrelated 
   tick(obs(1,{1:[]},[row(99,50)])); // choose delivery
   assert.equal(tick(obs(1,{1:[]},[row(99,50)])).action.kind,"startRoute");
   const unload=tick(obs(2,{2:[]},[row(99,50)]));
-  assert.deepEqual(unload.action,{kind:"haulTransfer",itemID:99,quantity:20,from:{kind:"cargo"},to:{kind:"corp",division:2},stationID:2,corporationID:98000123,division:2,typeID:34,sourceQuantity:50});
+  assert.deepEqual(unload.action,{kind:"haulTransfer",itemID:99,quantity:20,from:{kind:"cargo"},to:{kind:"corp",division:2},stationID:2,locationKind:"station",corporationID:98000123,division:2,typeID:34,sourceQuantity:50});
   tick(obs(2,{2:[row(1000,20)]},[row(99,30)]));
   tick(obs(2,{2:[row(1000,20)]},[row(99,30)]));
   assert.equal(tick(obs(1,{1:[]},[row(99,30)])).outcome.kind,"done");
+});
+test("strict corporate route keeps structure identity through load and delivery", () => {
+  const a = 1_000_000_000_001, b = 1_000_000_000_002;
+  const step: MacroStep = { ...all, args: { ...all.args, pickupStation: structure(a), deliveryStation: structure(b) } };
+  const saved = decodeScriptValue({ format: "evejs-bot-script", version: 1, name: "Upwell route", notes: "",
+    home: structure(a).ref, interrupts: [], program: [step] });
+  assert.equal(saved.ok, true);
+  assert.equal(haulingLeg(step)?.sourceKind, "structure");
+  assert.equal(haulingLeg(step)?.destinationKind, "structure");
+  const at = (id: number, corp: Record<number, readonly InventoryItemRow[] | null>, cargo: readonly InventoryItemRow[] = []) => {
+    const o = obs(id, corp, cargo);
+    return { ...o, flightStatus: { ...o.flightStatus!, stationID: null, structureID: id } };
+  };
+  const tick = driver(step);
+  const load = tick(at(a, { 1: [row(10, 20)] }));
+  assert.equal(load.action.kind === "haulTransfer" && load.action.locationKind, "structure");
+  tick(at(a, { 1: [] }, [row(99, 20)]));
+  tick(at(a, { 1: [] }, [row(99, 20)]));
+  const trip = tick(at(a, { 1: [] }, [row(99, 20)]));
+  assert.equal(trip.action.kind, "startRoute");
+  const delivery = tick(at(b, { 2: [] }, [row(99, 20)]));
+  assert.equal(delivery.action.kind === "haulTransfer" && delivery.action.stationID, b);
+  assert.equal(delivery.action.kind === "haulTransfer" && delivery.action.locationKind, "structure");
 });
 test("partial movement, lost cargo and a personal-hangar fallback cannot count as delivery", () => {
   for(const amount of [0,5,21]) {

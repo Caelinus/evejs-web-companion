@@ -60,6 +60,10 @@ function defaultResponder(path: string): { status: number; body: unknown } {
   }
   if (path.startsWith("/api/map/resolve/")) {
     const id = Number(path.split("/").pop());
+    if (id === 60000001) {
+      return { status: 200, body: { ok: true, id, kind: "station", stationID: id,
+        stationName: "Alpha Station", solarSystemID: 1, systemName: "Alpha" } };
+    }
     if (id === 60000003) {
       return { status: 200, body: { ok: true, id, kind: "station", stationID: id, stationName: "Charlie Station", solarSystemID: 3, systemName: "Charlie" } };
     }
@@ -70,6 +74,9 @@ function defaultResponder(path: string): { status: number; body: unknown } {
   }
   if (path === "/api/bridge/flight/status") {
     return { status: 200, body: { ok: true, flight: DOCKED_ALPHA, notifications: [] } };
+  }
+  if (path.startsWith("/api/dockable-structures/find?")) {
+    return { status: 200, body: { ok: true, matches: [] } };
   }
   if (path.startsWith("/api/bridge/flight/")) {
     return { status: 200, body: { ok: true, result: null, flight: DOCKED_ALPHA, notifications: [] } };
@@ -99,6 +106,39 @@ test("startRoute solves a multi-hop route and applies travel/planned", async () 
   );
   assert.equal(travel.route[0]?.fromSystemName, "Alpha");
   assert.equal(travel.route[1]?.toSystemName, "Charlie");
+});
+
+test("accessible structure routes through its authoritative system and access loss blocks departure", async () => {
+  const structureID = 1030000000002;
+  const paths: string[] = [];
+  let access = true;
+  const responder = (path: string) => {
+    paths.push(path);
+    if (path === `/api/map/resolve/${structureID}`) {
+      return { status: 200, body: { ok: true, id: structureID, kind: "structure", structureID,
+        solarSystemID: 3, systemName: "Charlie", structureName: "QA Astrahus" } };
+    }
+    if (path === `/api/dockable-structures/${structureID}`) {
+      return access
+        ? { status: 200, body: { ok: true, location: { kind: "structure", id: structureID,
+          name: "QA Astrahus", solarSystemID: 3, solarSystemName: "Charlie" } } }
+        : { status: 409, body: { ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" } };
+    }
+    return defaultResponder(path);
+  };
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch: makeFakeFetch(responder) });
+  const first = await flow.startRoute(structureID);
+  flow.abortRoute();
+  assert.equal(first.started, true);
+  assert.equal(store.travel.get().destinationStationID, structureID);
+  assert.equal(store.travel.get().destinationSystemID, 3);
+  assert.equal(store.travel.get().destinationName, "QA Astrahus");
+  access = false;
+  const second = await flow.startRoute(structureID);
+  assert.equal(second.started, false);
+  assert.match(second.started === false ? second.reason : "", /access/i);
+  assert.equal(paths.filter((path) => path === `/api/dockable-structures/${structureID}`).length, 2);
 });
 
 test("startRoute to a same-system destination plans zero jumps", async () => {

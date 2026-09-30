@@ -237,6 +237,8 @@ export interface RoutePlan {
   readonly destinationSystemID: number;
   /** The final dock target; null travels to the system only (no final dock). */
   readonly destinationStationID: number | null;
+  /** Omitted legacy plans target an NPC station. */
+  readonly destinationKind?: "station" | "structure" | null;
   readonly destinationName: string | null;
   readonly hops: readonly RouteHop[];
 }
@@ -496,7 +498,8 @@ function isAtDestination(status: FlightStatus, plan: CompiledPlan): boolean {
   if (!status.docked || status.solarSystemID !== plan.destinationSystemID) {
     return false;
   }
-  return plan.destinationStationID === null || status.stationID === plan.destinationStationID;
+  return plan.destinationStationID === null ||
+    (plan.destinationKind === "structure" ? status.structureID : status.stationID) === plan.destinationStationID;
 }
 
 /**
@@ -671,6 +674,7 @@ export function decideAutopilotAction(
       return { kind: "arrived" };
     }
     const stationID = plan.destinationStationID;
+    const targetLabel = plan.destinationKind === "structure" ? "structure" : "station";
     // MEASURED path: dock inside 50 km, approach inside 150 km, warp beyond.
     const measured = decideFromDistance(
       stationID,
@@ -678,9 +682,9 @@ export function decideAutopilotAction(
       measurement,
       memory,
       {
-        jumpOrDock: `Dock at station ${stationID}`,
-        approach: `Approach station ${stationID}`,
-        warp: `Warp to station ${stationID}`,
+        jumpOrDock: `Dock at ${targetLabel} ${stationID}`,
+        approach: `Approach ${targetLabel} ${stationID}`,
+        warp: `Warp to ${targetLabel} ${stationID}`,
       },
       null,
     );
@@ -693,13 +697,13 @@ export function decideAutopilotAction(
       return {
         kind: "dock",
         stationID,
-        label: `Dock at station ${stationID}`,
+        label: `Dock at ${targetLabel} ${stationID}`,
       };
     }
     return {
       kind: "warp",
       destinationID: stationID,
-      label: `Warp to station ${stationID}`,
+      label: `Warp to ${targetLabel} ${stationID}`,
     };
   }
 

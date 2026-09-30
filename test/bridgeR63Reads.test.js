@@ -91,7 +91,7 @@ function fakeStore() {
 }
 
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; }, getSolarSystemName() { return "Nonni"; } };
 }
 
 function fakeGateway(overrides = {}) {
@@ -177,6 +177,55 @@ test.afterEach(async () => {
     }));
   }
   await Promise.all(closing);
+});
+
+test("access-scoped all-system search returns named structures but not inaccessible IDs", async () => {
+  const owned = 1_030_000_000_001, foreign = 1_030_000_000_002;
+  const gateway = fakeGateway({
+    async callMethod(service, method, args) {
+      gateway.calls.call.push({ service, method, args });
+      if (method === "GetMyDockableStructures") return { result: { type: "list", items: [owned] } };
+      if (method === "GetStructureInfo") {
+        assert.equal(args[0], owned, "foreign structure name must not be requested");
+        return { result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
+          ["itemName", "WC QA Astrahus"], ["solarSystemID", 30001300], ["typeID", 35832],
+        ] } } };
+      }
+      if (method === "CheckMyDockingAccessToStructures") return { result: { type: "list", items: args[0].filter((id) => id === owned) } };
+      return { result: null };
+    },
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const search = await apiRequest(baseUrl, "/api/dockable-structures/find?q=Astrahus");
+  assert.equal(search.response.status, 200);
+  assert.deepEqual(search.payload.matches.map((row) => row.id), [owned]);
+  assert.deepEqual(callFor(gateway, "GetMyDockableStructures").args, [0]);
+  const denied = await apiRequest(baseUrl, `/api/dockable-structures/${foreign}`);
+  assert.equal(denied.response.status, 409);
+  assert.equal(gateway.calls.call.filter((call) => call.method === "GetStructureInfo").length, 1);
+});
+
+test("service authority is fresh and unreadable state does not grant a capability", async () => {
+  const id = 1_030_000_000_003;
+  let access = true, readable = true;
+  const gateway = fakeGateway({
+    async callMethod(_service, method) {
+      if (method === "CheckMyDockingAccessToStructures") return { result: { type: "list", items: access ? [id] : [] } };
+      if (method === "GetMyAccessibleStructureServices") return { result: readable ? { type: "list", items: [1, 2, 3] } : null };
+      return { result: null };
+    },
+  });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const okay = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
+  assert.deepEqual(okay.payload.serviceIDs, [1, 2, 3]);
+  readable = false;
+  const unknown = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
+  assert.notEqual(unknown.response.status, 200);
+  access = false;
+  const denied = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
+  assert.notEqual(denied.response.status, 200);
 });
 
 // --- always-on reads --------------------------------------------------------

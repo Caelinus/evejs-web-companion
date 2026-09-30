@@ -355,6 +355,37 @@ test("a fitting read with no active ship answers cleanly rather than failing", a
 
 // --- fit / unfit ------------------------------------------------------------
 
+test("manual fit at a structure requires fitting service and uses its real hangar location", async () => {
+  const structureID = 1_030_000_000_031;
+  let fittingOnline = true;
+  const gateway = fakeGateway();
+  const oldSelect = gateway.selectCharacter.bind(gateway);
+  gateway.selectCharacter = async (...args) => {
+    const result = await oldSelect(...args);
+    return { ...result, session: { ...result.session, stationID: null, structureID } };
+  };
+  gateway.readFlightStatus = async () => ({ flight: { docked: true, inSpace: false, stationID: null,
+    structureID, solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] });
+  const oldCall = gateway.callMethod.bind(gateway);
+  gateway.callMethod = async (service, method, ...rest) => {
+    if (method === "CheckMyDockingAccessToStructures") return { result: { type: "list", items: [structureID] }, notifications: [] };
+    if (method === "GetMyAccessibleStructureServices") return { result: { type: "list", items: fittingOnline ? [1, 2] : [1] }, notifications: [] };
+    return oldCall(service, method, ...rest);
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const fit = await apiRequest(baseUrl, "/api/bridge/fitting/fit", { method: "POST",
+    body: { itemID: HANGAR_MODULE_ITEM_ID, source: "hangar", family: "high", index: 1 } });
+  assert.equal(fit.response.status, 200, JSON.stringify(fit.payload));
+  const add = gateway.calls.boundCall.find((call) => call.method === "Add");
+  assert.deepEqual(add.args, [HANGAR_MODULE_ITEM_ID, structureID]);
+  fittingOnline = false;
+  const blocked = await apiRequest(baseUrl, "/api/bridge/fitting/unfit", { method: "POST",
+    body: { itemID: HANGAR_MODULE_ITEM_ID, destination: "hangar" } });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(gateway.calls.boundCall.filter((call) => call.method === "Add").length, 1);
+});
+
 test("fit resolves the browser's (family, index) to a slot flag on the SERVER side", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });

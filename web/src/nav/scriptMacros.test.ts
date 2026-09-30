@@ -3482,6 +3482,16 @@ test("the belt short-warp rule does not turn a nearby scanner ore site into an a
     refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]), hostileOnGrid: false }), issued.nextMem, {});
   assert.equal(refused.outcome.kind, "done", "only the targeted scanner refusal proves already-at-site");
 });
+test("generic travel treats an Upwell as arrived only at its authoritative structureID", () => {
+  const id = 1_000_000_000_001;
+  const step: MacroStep = { id: "u", kind: "macro", macro: "travel-to-station", args: {
+    station: { kind: "station", ref: { entity: "structure", id, name: "QA Astrahus", systemName: "Nonni" } },
+  } };
+  const travel = SCRIPT_MACROS["travel-to-station"]!;
+  assert.equal(travel(step, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }) }), NM, {}).action.kind, "startRoute");
+  assert.equal(travel(step, obs({ flightStatus: flight({ docked: true, inSpace: false, structureID: id }) }), NM, {}).outcome.kind, "done");
+  assert.equal(travel(step, obs({ flightStatus: flight({ docked: true, inSpace: false, structureID: id + 1 }) }), NM, {}).action.kind, "startRoute");
+});
 
 test("warp-to-ore-anomaly: a refusal with the ship INSIDE the site it aimed at is an arrival", () => {
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;

@@ -203,8 +203,8 @@ function fakeGateway(options = {}) {
           userid: 4,
           characterID: 7,
           characterName: "Test Pilot",
-          stationID: STATION_ID,
-          structureID: null,
+          stationID: options.structureID ? null : STATION_ID,
+          structureID: options.structureID ?? null,
           solarSystemID: 30000142,
           corporationID: 98000000,
           shipID: ACTIVE_SHIP_ID,
@@ -219,7 +219,8 @@ function fakeGateway(options = {}) {
         flight: {
           docked: true,
           inSpace: false,
-          stationID: STATION_ID,
+          stationID: options.structureID ? null : STATION_ID,
+          structureID: options.structureID ?? null,
           solarSystemID: 30000142,
           shipID: ACTIVE_SHIP_ID,
         },
@@ -228,6 +229,13 @@ function fakeGateway(options = {}) {
     },
     async callMethod(service, method, args, kwargs, sessionFields, bridgeSessionID) {
       calls.topLevel.push({ service, method, args, kwargs, bridgeSessionID });
+      if (service === "structureDirectory" && method === "CheckMyDockingAccessToStructures") {
+        return { service, method, result: { type: "list", items: options.structureAccess === false ? [] : [options.structureID] }, notifications: [] };
+      }
+      if (service === "structureDirectory" && method === "GetMyAccessibleStructureServices") {
+        return { service, method, result: options.servicesUnreadable ? null :
+          { type: "list", items: options.officeService === false ? [1] : [1, 3] }, notifications: [] };
+      }
       if (service === "officeManager" && method === "GetMyCorporationsOffices") {
         if (options.officeReadFails) {
           throw Object.assign(new Error("office read failed"), { code: "CALL_FAILED" });
@@ -1097,6 +1105,69 @@ test("strict route deposit confirms exact source loss and exact corporation divi
   assert.equal(gateway.world.get(300).quantity, 40);
   assert.equal([...gateway.world.values()].filter((item) => item.locationID === OFFICE_CONTENT_LOCATION_ID &&
     item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 20);
+});
+
+test("strict corporation delivery at a structure binds its office and exact division", async () => {
+  const structureID = 1_030_000_000_021;
+  const gateway = fakeGateway({ structureID, officeRows: [{ officeID: OFFICE_PUBLISHED_ID, stationID: structureID }], items: fixtureItems() });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const contract = { ...haulContract(), stationID: structureID, locationKind: "structure" };
+  const moved = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
+    itemIDs: [300], qty: 20, from: { kind: "cargo" }, to: { kind: "corp", division: 2 }, haulContract: contract,
+  } });
+  assert.equal(moved.response.status, 200, JSON.stringify(moved.payload));
+  assert.equal(moved.payload.transferStatus, "SUCCESS");
+  assert.equal(gateway.world.get(300).quantity, 40);
+  assert.equal([...gateway.world.values()].filter((item) => item.locationID === OFFICE_CONTENT_LOCATION_ID &&
+    item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 20);
+  const wrongKind = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
+    itemIDs: [300], qty: 10, from: { kind: "cargo" }, to: { kind: "corp", division: 2 },
+    haulContract: { ...contract, locationKind: "station", sourceQuantity: 40 },
+  } });
+  assert.equal(wrongKind.response.status, 409, "structureID may not impersonate stationID");
+});
+
+for (const [change, newStructureID] of [["undocks", null], ["docks at another structure", 1_030_000_000_024]]) {
+test(`structure corporation transfer cannot issue Add after the pilot ${change}`, async () => {
+  const structureID = 1_030_000_000_023;
+  const gateway = fakeGateway({ structureID, officeRows: [{ officeID: OFFICE_PUBLISHED_ID, stationID: structureID }],
+    items: fixtureItems() });
+  const read = gateway.readFlightStatus.bind(gateway);
+  let reads = 0;
+  gateway.readFlightStatus = async (...args) => {
+    reads += 1;
+    if (reads < 2) return read(...args);
+    return { flight: { docked: newStructureID !== null, inSpace: newStructureID === null,
+      stationID: null, structureID: newStructureID,
+      solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const moved = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
+    itemIDs: [300], qty: 20, from: { kind: "cargo" }, to: { kind: "corp", division: 2 },
+    haulContract: { ...haulContract(), stationID: structureID, locationKind: "structure" },
+  } });
+  assert.notEqual(moved.response.status, 200);
+  assert.equal(gateway.calls.boundCall.some((call) => call.method === "Add"), false);
+  assert.equal(gateway.world.get(300).quantity, 60);
+});
+}
+
+test("structure office service and current docking access are required before strict transfer", async () => {
+  const structureID = 1_030_000_000_022;
+  for (const option of [{ officeService: false }, { structureAccess: false }, { servicesUnreadable: true }]) {
+    const gateway = fakeGateway({ structureID, officeRows: [{ officeID: OFFICE_PUBLISHED_ID, stationID: structureID }],
+      items: fixtureItems(), ...option });
+    const { baseUrl } = await startTestServer({ gateway });
+    await selectOnServer(baseUrl);
+    const result = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
+      itemIDs: [300], qty: 20, from: { kind: "cargo" }, to: { kind: "corp", division: 2 },
+      haulContract: { ...haulContract(), stationID: structureID, locationKind: "structure" },
+    } });
+    assert.notEqual(result.response.status, 200);
+    assert.equal(gateway.calls.boundCall.some((call) => call.method === "Add"), false);
+  }
 });
 
 for (const [name, options, transferStatus] of [

@@ -37,7 +37,7 @@
      * runtime bindings (the starting station, the mission board slots): they
      * name stations by definition.
      */
-    scope?: "station" | "any" | "system";
+    scope?: "station" | "dockable" | "any" | "system";
   } = $props();
 
   const stationsAllowed = $derived(scope !== "system");
@@ -60,9 +60,11 @@
       if (results.length === 0) {
         error =
           scope === "any"
-            ? "No station or system matched that name."
+            ? "No station, accessible structure or system matched that name."
             : scope === "system"
               ? "No systems matched that name."
+              : scope === "dockable"
+                ? "No station or accessible structure matched that name."
               : "No stations matched that name.";
       }
     } catch {
@@ -77,7 +79,7 @@
     // Keep the entity the match REALLY is: a system destination flies to the
     // system (arrive in space), a station destination docks.
     onPick({
-      entity: match.kind === "system" ? "system" : "station",
+      entity: match.kind,
       id: match.id,
       name: match.name,
       systemName: match.solarSystemName,
@@ -117,20 +119,23 @@
     <button onclick={clearChoice}>Change</button>
   {:else if value.id !== null}
     <span class="picked">
-      {value.name ?? (value.entity === "system" ? "A system" : "A station")}{#if value.systemName && value.systemName !== value.name} · {value.systemName}{/if}
+      {value.name ?? (value.entity === "system" ? "A system" : value.entity === "structure" ? "A structure" : "A station")}{#if value.systemName && value.systemName !== value.name} · {value.systemName}{/if}
       {#if value.entity === "system" && stationsAllowed}<span class="kindtag">system</span>{/if}
+      {#if value.entity === "structure"}<span class="kindtag">Upwell structure</span>{/if}
     </span>
     <button onclick={clearChoice}>Change</button>
   {:else}
-    {#if scope === "station"}
+    {#if scope === "station" || scope === "dockable"}
       <button class="primary" onclick={chooseStarting}>Starting station</button>
     {/if}
     <input
       class="q"
       placeholder={scope === "any"
-        ? "search a station or system by name"
+        ? "search a station, accessible structure or system"
         : scope === "system"
           ? "search a solar system by name"
+          : scope === "dockable"
+            ? "search a station or accessible structure"
           : "…or search a station by name"}
       bind:value={query}
       onkeydown={(e) => {
@@ -156,7 +161,7 @@
             <button class="result" onclick={() => choose(match)}>
               {match.name}{#if match.solarSystemName} · {match.solarSystemName}{/if}{#if match.jumps !== null}
                 ({match.jumps} jump{match.jumps === 1 ? "" : "s"}){/if}{#if scope === "any" && match.kind === "system"}
-                <span class="kindtag">system</span>{/if}
+                <span class="kindtag">system</span>{/if}{#if match.kind === "structure"}<span class="kindtag">Upwell structure</span>{/if}
             </button>
           </li>
         {/each}

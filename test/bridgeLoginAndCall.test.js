@@ -502,6 +502,7 @@ test("the generic bridge route refuses write pairs even when the browser supplie
     ["marketProxy", "PlaceBuyOrder"],
     ["mailMgr", "DeleteMail"],
     ["repairSvc", "RepairItems"],
+    ["officeManager", "RentOffice"],
   ];
 
   for (const [service, method] of writes) {

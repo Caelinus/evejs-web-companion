@@ -252,6 +252,31 @@ test("selectCharacter brings the character online and runs the three docked read
   assert.ok(requests.every((request) => !("bridgeSessionID" in request.body)));
 });
 
+test("a structure selection keeps its real identity and reads accessible services without NPC station calls", async () => {
+  const structureID = 1030000000002;
+  const { fetch, requests } = makeFakeFetch((path, body) => {
+    if (path === "/api/bridge/select") {
+      return { status: 200, body: { ...SELECT_RESPONSE,
+        character: { ...SELECT_RESPONSE.character, stationID: null, structureID }, station: null } };
+    }
+    if (path === `/api/dockable-structures/${structureID}/services`) {
+      return { status: 200, body: { ok: true, structureID, serviceIDs: [1, 2, 3] } };
+    }
+    return bridgeCallResponder(path, body);
+  });
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch });
+  await flow.login("test2", "");
+  await flow.selectCharacter(140000003);
+  const station = store.station.get();
+  assert.equal(station.online?.structureID, structureID);
+  assert.equal(station.online?.stationID, null);
+  assert.deepEqual(station.structureServiceIDs, [1, 2, 3]);
+  assert.equal(station.station, null);
+  assert.equal(requests.filter((request) => request.path === "/api/bridge/call" &&
+    ["GetStationItemBits", "GetGuests", "GetStationInfo"].includes(String(request.body.method))).length, 0);
+});
+
 test("a failed GetStationInfo does not blank the services row or guests", async () => {
   // The cold-start blocker: one heavy read failing must not take down the
   // whole panel or throw invisibly after the view has switched.

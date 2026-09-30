@@ -26,6 +26,7 @@ const SHIP_ID = 9001;
 const GATE_ID = 50001248;
 const DEST_GATE_ID = 50000802;
 const STRUCTURE_GATE_ID = 1030000000001;
+const DOCKABLE_STRUCTURE_ID = 1030000000002;
 
 const ORIGINAL_FETCH = global.fetch;
 const activeServers = new Set();
@@ -778,6 +779,26 @@ test("POST /api/bridge/flight/dock dispatches CmdDock and returns docked", async
   assert.deepEqual(dock.args, [DEST_STATION_ID, SHIP_ID]);
   assert.equal(payload.flight.docked, true);
   assert.equal(payload.flight.stationID, DEST_STATION_ID);
+});
+
+test("structure docking rechecks current access before issuing CmdDock", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  gateway.callMethod = async (service, method, args) => {
+    gateway.calls.call.push({ service, method, args });
+    if (method === "CheckMyDockingAccessToStructures") return { result: { type: "list", items: [] }, notifications: [] };
+    return { result: null, notifications: [] };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const denied = await apiRequest(baseUrl, "/api/bridge/flight/dock", {
+    method: "POST", body: { stationID: DOCKABLE_STRUCTURE_ID },
+  });
+  assert.equal(denied.response.status, 409);
+  assert.equal(gateway.calls.boundCall.some((call) => call.method === "CmdDock"), false);
+  assert.deepEqual(gateway.calls.call.find((call) => call.method === "CheckMyDockingAccessToStructures").args,
+    [[DOCKABLE_STRUCTURE_ID]]);
 });
 
 test("a movement refusal passes through as the handler's own CALL_REFUSED message", async () => {

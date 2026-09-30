@@ -1,0 +1,72 @@
+diff --git a/server/src/services/structure/structureDirectoryService.js b/server/src/services/structure/structureDirectoryService.js
+--- a/server/src/services/structure/structureDirectoryService.js
++++ b/server/src/services/structure/structureDirectoryService.js
+@@ -475,3 +475,25 @@ class StructureDirectoryService extends BaseService {
++  // An access-scoped capability read for docked clients. Return service IDs
++  // only: operational structure state (fuel, timers and vulnerability) must
++  // not leak through a public destination or station-panel request.
++  Handle_GetMyAccessibleStructureServices(args, session) {
++    const structureID = normalizePositiveInt(Array.isArray(args) ? args[0] : null, 0);
++    const structure = structureID > 0 ? structureState.getStructureByID(structureID) : null;
++    if (!structure || !structureState.canCharacterDockAtStructure(session, structure).success) {
++      return buildIDList([]);
++    }
++    const serviceIDs = [
++      STRUCTURE_SERVICE_ID.DOCKING,
++      STRUCTURE_SERVICE_ID.FITTING,
++      STRUCTURE_SERVICE_ID.OFFICES,
++      STRUCTURE_SERVICE_ID.REPROCESSING,
++      STRUCTURE_SERVICE_ID.MARKET,
++      STRUCTURE_SERVICE_ID.REPAIR,
++      STRUCTURE_SERVICE_ID.INDUSTRY,
++    ];
++    return buildIDList(serviceIDs.filter((serviceID) =>
++      characterHasStructureService(session, structure, serviceID)));
++  }
++
+   Handle_GetStructures(args, session, kwargs) {
+     const structures = listRequestedStructures(args);
+     log.debug(`[StructureDirectoryService] GetStructures count=${structures.length}`);
+diff --git a/server/src/_secondary/express/evejsWebGatewayRuntime.js b/server/src/_secondary/express/evejsWebGatewayRuntime.js
+--- a/server/src/_secondary/express/evejsWebGatewayRuntime.js
++++ b/server/src/_secondary/express/evejsWebGatewayRuntime.js
+@@ -172,6 +172,10 @@ const WEB_CALL_ALLOWLIST = Object.freeze([
+   // items' locationID. The bridge therefore takes each row's own locationID
+   // from the List result when it needs a source location.
+   Object.freeze({ service: "officeManager", method: "GetMyCorporationsOffices" }),
++  // Mutating office rental remains bound to the held pilot's docked location
++  // and the runtime's corporation authority checks. WC exposes it only through
++  // a confirmation-gated structure-office route.
++  Object.freeze({ service: "officeManager", method: "RentOffice" }),
+   // corpRegistry.GetCorporation answers the corporation row, which carries the
+   // seven free-text division names (division1..division7). It is listed so the
+   // browser can label a division by its NAME rather than a flag number — the
+@@ -1733,6 +1737,9 @@ const WEB_CALL_ALLOWLIST = Object.freeze([
+   //   SESSION character can dock at (in a given system, defaulting to the current
+   //   one). ids only, session-scoped; a future UI resolves each id (R7d).
+   Object.freeze({ service: "structureDirectory", method: "GetMyDockableStructures" }),
++  // Access-scoped service IDs for one dockable structure. The handler checks
++  // current docking and service access and exposes no owner/operational fields.
++  Object.freeze({ service: "structureDirectory", method: "GetMyAccessibleStructureServices" }),
+   //
+   //   THE PUBLIC-ISH LOCATION READS — name / type / position only, NO operational
+   // fields, so no ownership gate is needed (and none leaks).
+diff --git a/server/contracts/evejs-web-bridge-contract.json b/server/contracts/evejs-web-bridge-contract.json
+--- a/server/contracts/evejs-web-bridge-contract.json
++++ b/server/contracts/evejs-web-bridge-contract.json
+@@ -568,6 +568,7 @@
+       "notificationMgr.MarkAsProcessed",
+       "notificationMgr.MarkGroupAsProcessed",
+       "officeManager.GetMyCorporationsOffices",
++      "officeManager.RentOffice",
+       "onlineStatus.GetInitialState",
+       "onlineStatus.GetOnlineStatus",
+       "onlineStatus.Prime",
+@@ -694,6 +695,7 @@
+       "structureDirectory.CheckMyDockingAccessToStructures",
+       "structureDirectory.GetCorporationStructures",
+       "structureDirectory.GetJumpBridgesWithMyAccess",
++      "structureDirectory.GetMyAccessibleStructureServices",
+       "structureDirectory.GetMyAccessibleOnlineCynoBeaconStructures",
+       "structureDirectory.GetMyCorporationStructures",
+       "structureDirectory.GetMyDockableStructures",

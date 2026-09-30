@@ -132,6 +132,7 @@ export interface InventoryContainerState {
  */
 export interface InventoryState {
   readonly stationID: number | null;
+  readonly structureID?: number | null;
   readonly activeShipID: number | null;
   readonly hangar: InventoryContainerState;
   readonly cargo: InventoryContainerState;
@@ -2420,7 +2421,7 @@ export interface BotsState {
 export interface DestinationMatch {
   readonly id: number;
   readonly name: string;
-  readonly kind: "system" | "station";
+  readonly kind: "system" | "station" | "structure";
   readonly solarSystemID: number | null;
   readonly solarSystemName: string | null;
   /** Jumps from the player's current system; null = unreachable / unknown origin. */

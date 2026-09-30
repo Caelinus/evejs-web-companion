@@ -358,6 +358,7 @@ export interface ScriptObservation {
   readonly startingStationID?: number | null;
   /** The bot document's emergency home, resolved for THIS tick (fixed/start/board slot). */
   readonly homeStationID?: number | null;
+  readonly homeDockableKind?: "station" | "structure";
   // ── Mission reads (the distribution blocks). Read ONLY when the active step is
   //    a mission block (the runner passes an observe hint), so a mining bot never
   //    pays for an agent-conversation read. Same null rule: null = unreadable.
