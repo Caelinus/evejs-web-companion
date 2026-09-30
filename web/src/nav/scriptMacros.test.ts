@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import type { FlightStatus, HoldItem, MiningHold, SpaceEntity, SpaceShipStatus, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import type { MacroMemory, MacroTick, ScriptBoard } from "./scriptDecide.ts";
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
-import type { MacroStep } from "../bots/botScript.ts";
+import type { BotScript, MacroStep } from "../bots/botScript.ts";
+import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
@@ -1792,6 +1793,123 @@ test("fight: salvage drones out, combat drones in the bay -> recall the salvage 
   // Next tick the salvage drone is still coming home: the ladder does NOT wait on it — the guns go on.
   const guns = fight(s, world, { ...recall.nextMem, targetID: 6661, lockIssued: true, waited: 0, dronesOn: null }, {});
   assert.ok(guns.action.kind === "activate" && guns.action.moduleID === 500, `expected the gun, got ${guns.action.kind}`);
+});
+
+// ─── fight: rotating a hurt drone ────────────────────────────────────────────
+//
+// The rats in a null-sec belt shoot drones. A drone whose shield has started to
+// go is pulled into the bay and sent straight back out, one at a time — the
+// drone boat's rotation, now on the ladder the fight-back watch borrows.
+
+const ROT_RAT = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+const ROT_A = entity({ itemID: 111, kind: "drone", controllerID: 9001, position: { x: 200, y: 0, z: 0 } });
+const ROT_B = entity({ itemID: 112, kind: "drone", controllerID: 9001, position: { x: 300, y: 0, z: 0 } });
+const ROT_ENGAGED: MacroMemory = { targetID: 6661, lockIssued: true, waited: 0, dronesOn: 6661 };
+
+function rotationWorld(out: readonly SpaceEntity[], shields: Readonly<Record<number, number>>, bay: readonly number[]): ScriptObservation {
+  return obs({
+    snapshot: snapshot([ROT_RAT, ...out]),
+    dronesOut: out.length > 0,
+    combatDroneIDs: out.map((d) => d.itemID),
+    combatDroneBayItemIDs: [...bay],
+    myDrones: out.map((d) => ({ itemID: d.itemID, shieldRatio: shields[d.itemID] ?? 1, armorRatio: 1, hullRatio: 1 })),
+    lockedTargetIDs: [6661],
+    weaponModuleIDs: [500],
+  });
+}
+
+test("fight: a drone that starts losing shield is recalled, relaunched, and set back on the rat", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+
+  const recall = fight(s, rotationWorld([ROT_A, ROT_B], { 112: 0.9 }, []), ROT_ENGAGED, {});
+  assert.ok(recall.action.kind === "recallDrones", `expected a recall, got ${recall.action.kind}`);
+  assert.deepEqual(recall.action.droneIDs, [112], "only the hurt drone comes home");
+
+  const relaunch = fight(s, rotationWorld([ROT_A], {}, [112]), recall.nextMem, {});
+  assert.ok(relaunch.action.kind === "launchDrones", `expected a relaunch, got ${relaunch.action.kind}`);
+  assert.deepEqual(relaunch.action.droneItemIDs, [112]);
+
+  // Back out: the rotation is over, the guns keep going this tick…
+  const back = fight(s, rotationWorld([ROT_A, ROT_B], {}, []), relaunch.nextMem, {});
+  assert.equal(back.action.kind, "activate");
+  // …and the next tick puts the whole flight back on the rat.
+  const reengage = fight(s, rotationWorld([ROT_A, ROT_B], {}, []), back.nextMem, {});
+  assert.ok(reengage.action.kind === "engageDrones" && reengage.action.targetID === 6661);
+  assert.deepEqual([...reengage.action.droneIDs].sort(), [111, 112]);
+});
+
+test("fight: a flight of ONE is never pulled — the rat would be left unattended", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const t = fight(s, rotationWorld([ROT_A], { 111: 0.4 }, []), ROT_ENGAGED, {});
+  assert.equal(t.action.kind, "activate", "the guns, not a recall");
+});
+
+test("fight: a full-shielded flight is left alone", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const t = fight(s, rotationWorld([ROT_A, ROT_B], {}, []), ROT_ENGAGED, {});
+  assert.equal(t.action.kind, "activate");
+});
+
+test("the fight-back WATCH rotates a hurt drone while the program is mining", () => {
+  const s: BotScript = {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+    interrupts: [{ id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back", targets: ["tackle", "ewar"] }],
+    program: [mineStep],
+  };
+  const world = (shields: Readonly<Record<number, number>>, locked: readonly number[]) => ({
+    ...rotationWorld([ROT_A, ROT_B], shields, []),
+    hostileOnGrid: true,
+    lockedTargetIDs: [...locked],
+  });
+  let mem = initialMemory(s);
+  const lock = decideScriptAction(s, world({}, []), mem, SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(lock.action.kind, "lock");
+  assert.equal(lock.interruptID, "fb");
+  mem = lock.memory;
+  const engage = decideScriptAction(s, world({}, [6661]), mem, SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(engage.action.kind, "engageDrones");
+  mem = engage.memory;
+  const recall = decideScriptAction(s, world({ 111: 0.95 }, [6661]), mem, SCRIPT_MACROS, scriptTravelHome);
+  assert.ok(recall.action.kind === "recallDrones", `expected a recall, got ${recall.action.kind}`);
+  assert.deepEqual(recall.action.droneIDs, [111]);
+  assert.equal(recall.interruptID, "fb", "the watch did it, not a block");
+});
+
+// ⚠ THE CASE THAT MATTERS. While the program is on a mining step, the mining
+// drone flight owns every drone order and turns the watch's own drone orders
+// into waits. So the recall has to come out of THAT flight, or a miner never
+// gets it: this drives the real orchestrator to prove the order reaches the world.
+test("mining under a fight-back watch: the drone flight pulls the drone being shot", () => {
+  const s: BotScript = {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+    interrupts: [{ id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back", targets: ["tackle", "ewar"] }],
+    program: [mineStep],
+  };
+  const rat = entity({ itemID: 500, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const drone = (itemID: number, shieldRatio: number) => ({
+    itemID, typeID: 2454, name: null, activity: "fighting", targetID: 500, controlled: true,
+    shieldRatio, armorRatio: 1, hullRatio: 1,
+  });
+  const onGrid = [22, 23].map((itemID) =>
+    entity({ itemID, kind: "drone", controllerID: 9001, position: { x: 300, y: 0, z: 0 } }));
+  const world = (shield23: number) => obs({
+    snapshot: snapshot([rat, ...onGrid]),
+    hostileOnGrid: true,
+    dronesOut: true,
+    combatDroneIDs: [22, 23],
+    lockedTargetIDs: [500],
+    miningDrones: { bay: [], out: [drone(22, 1), drone(23, shield23)], maxActive: 5, roles: { 2454: "combat" } },
+  });
+  const first = decideScriptAction(s, world(1), initialMemory(s), SCRIPT_MACROS, scriptTravelHome);
+  assert.notEqual(first.action.kind, "recallDrones", "nothing is hurt yet");
+  const hit = decideScriptAction(s, world(0.8), first.memory, SCRIPT_MACROS, scriptTravelHome);
+  assert.ok(hit.action.kind === "recallDrones", `expected the recall to reach the world, got ${hit.action.kind}`);
+  assert.deepEqual(hit.action.droneIDs, [23]);
 });
 
 test("defend: pirate dead and drones home -> done", () => {
