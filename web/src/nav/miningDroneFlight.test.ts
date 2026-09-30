@@ -62,3 +62,56 @@ test("returned EveJS singleton drones remain launchable for mining and defensive
   assert.equal(decideMiningDroneFlight(state([bay(13, 101, -2)], []), freshDroneMemory(), null, 900, false).action,
     null, "an unknown negative quantity is not treated as an EveJS singleton");
 });
+
+// Rats in a belt shoot drones, and a drone's armour and hull never come back in
+// space. The flight pulls the drone that is being shot and sends it back out.
+const fighter = (itemID: number, shieldRatio: number, activity = "fighting") =>
+  ({ ...out(itemID, 102, activity, 500), shieldRatio });
+
+function combatRun() {
+  let mem = freshDroneMemory();
+  return (s: MiningDroneState) => {
+    const decision = decideMiningDroneFlight(s, mem, 500, 900, false);
+    mem = decision.memory;
+    return decision.action;
+  };
+}
+
+test("defending: a drone that starts losing shield is recalled, relaunched and set back on the rat", () => {
+  const step = combatRun();
+  assert.equal(step(state([], [fighter(22, 1), fighter(23, 1)])), null, "a first reading only records shields");
+  assert.deepEqual(step(state([], [fighter(22, 1), fighter(23, 0.8)])), { kind: "recallDrones", droneIDs: [23] });
+  assert.equal(step(state([], [fighter(22, 1), fighter(23, 0.8, "returning")]))?.kind, "wait");
+  assert.deepEqual(step(state([bay(23, 102, -1)], [fighter(22, 1)])), { kind: "launch", droneItemIDs: [23] });
+  // Back out still short of full: the shield it came home with is not new damage.
+  const back = step(state([], [fighter(22, 1), { ...fighter(23, 0.8), activity: "idle", targetID: null }]));
+  assert.deepEqual(back, { kind: "engageDrones", droneIDs: [23], targetID: 500 });
+});
+
+test("defending: a relaunched drone that recharged is only pulled again when it is hit again", () => {
+  const step = combatRun();
+  step(state([], [fighter(22, 1), fighter(23, 1)]));
+  step(state([], [fighter(22, 1), fighter(23, 0.6)]));
+  step(state([bay(23, 102, -1)], [fighter(22, 1)]));
+  assert.equal(step(state([], [fighter(22, 1), fighter(23, 0.7)])), null, "recharging from 0.6 to 0.7 is not a hit");
+  assert.deepEqual(step(state([], [fighter(22, 1), fighter(23, 0.65)])), { kind: "recallDrones", droneIDs: [23] });
+});
+
+test("defending: a flight of ONE is never pulled, the rat would be left alone", () => {
+  const step = combatRun();
+  step(state([], [fighter(22, 1)]));
+  assert.equal(step(state([], [fighter(22, 0.5)])), null);
+});
+
+test("defending: one drone is pulled at most three times in a fight", () => {
+  const step = combatRun();
+  let shield = 1;
+  step(state([], [fighter(22, 1), fighter(23, shield)]));
+  for (let recall = 1; recall <= 3; recall += 1) {
+    shield -= 0.1;
+    assert.equal(step(state([], [fighter(22, 1), fighter(23, shield)]))?.kind, "recallDrones", `recall ${recall}`);
+    step(state([bay(23, 102, -1)], [fighter(22, 1)]));
+    step(state([], [fighter(22, 1), fighter(23, shield)]));
+  }
+  assert.equal(step(state([], [fighter(22, 1), fighter(23, shield - 0.1)])), null, "a fourth recall is not spent");
+});

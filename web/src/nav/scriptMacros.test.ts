@@ -1879,6 +1879,39 @@ test("the fight-back WATCH rotates a hurt drone while the program is mining", ()
   assert.equal(recall.interruptID, "fb", "the watch did it, not a block");
 });
 
+// ⚠ THE CASE THAT MATTERS. While the program is on a mining step, the mining
+// drone flight owns every drone order and turns the watch's own drone orders
+// into waits. So the recall has to come out of THAT flight, or a miner never
+// gets it: this drives the real orchestrator to prove the order reaches the world.
+test("mining under a fight-back watch: the drone flight pulls the drone being shot", () => {
+  const s: BotScript = {
+    format: "evejs-bot-script", version: 1, name: "t", notes: "",
+    home: { entity: "station", id: 60000004, name: "Home", systemName: null },
+    interrupts: [{ id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back", targets: ["tackle", "ewar"] }],
+    program: [mineStep],
+  };
+  const rat = entity({ itemID: 500, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const drone = (itemID: number, shieldRatio: number) => ({
+    itemID, typeID: 2454, name: null, activity: "fighting", targetID: 500, controlled: true,
+    shieldRatio, armorRatio: 1, hullRatio: 1,
+  });
+  const onGrid = [22, 23].map((itemID) =>
+    entity({ itemID, kind: "drone", controllerID: 9001, position: { x: 300, y: 0, z: 0 } }));
+  const world = (shield23: number) => obs({
+    snapshot: snapshot([rat, ...onGrid]),
+    hostileOnGrid: true,
+    dronesOut: true,
+    combatDroneIDs: [22, 23],
+    lockedTargetIDs: [500],
+    miningDrones: { bay: [], out: [drone(22, 1), drone(23, shield23)], maxActive: 5, roles: { 2454: "combat" } },
+  });
+  const first = decideScriptAction(s, world(1), initialMemory(s), SCRIPT_MACROS, scriptTravelHome);
+  assert.notEqual(first.action.kind, "recallDrones", "nothing is hurt yet");
+  const hit = decideScriptAction(s, world(0.8), first.memory, SCRIPT_MACROS, scriptTravelHome);
+  assert.ok(hit.action.kind === "recallDrones", `expected the recall to reach the world, got ${hit.action.kind}`);
+  assert.deepEqual(hit.action.droneIDs, [23]);
+});
+
 test("defend: pirate dead and drones home -> done", () => {
   const t = defend({ id: "d", kind: "macro", macro: "defend-with-drones", args: {} }, obs({ snapshot: snapshot([]), dronesOut: true }), NM, {});
   assert.equal(t.outcome.kind, "done");
