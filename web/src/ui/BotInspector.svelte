@@ -1003,6 +1003,12 @@
           <option value="auto">burn in to close the distance</option>
           <option value="off">never switch it on</option>
         </select>
+      {:else if arg.widget === "toggle-select"}
+        {@const setting = step.args[arg.key]}
+        <select id={fieldId} value={setting?.kind === "toggle" && setting.enabled ? "enabled" : "disabled"} onchange={(e) => onArg(arg.key, { kind: "toggle", enabled: e.currentTarget.value === "enabled" })}>
+          <option value="disabled">No</option>
+          <option value="enabled">Yes</option>
+        </select>
       {:else if arg.widget === "corp-picker"}
         <input
           id={fieldId}

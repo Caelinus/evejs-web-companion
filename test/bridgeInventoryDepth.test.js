@@ -20,6 +20,7 @@ const assert = require("node:assert/strict");
 const { once } = require("events");
 
 const { createApp } = require("../src/server");
+const { createLootMemory } = require("../src/lootMemory");
 
 const COOKIE_TOKEN = "raw-signed-login-cookie";
 const SESSION_ID = "signed-random-session-id";
@@ -269,6 +270,7 @@ function fakeGateway(options = {}) {
         return { service, method, result: null, notifications: [] };
       }
       if (method === "Add") {
+        if (options.beforeAdd) await options.beforeAdd();
         // A dispatch failure with NOTHING applied — the ordinary error case,
         // which must still surface as an error.
         if (options.throwOnAdd === true) {
@@ -304,20 +306,26 @@ function fakeGateway(options = {}) {
           return { service, method, result: null, notifications: [] };
         }
         const qty = kwargs && Number(kwargs.qty) > 0 ? Number(kwargs.qty) : null;
-        if (qty !== null && qty < item.quantity) {
+        const actualQty = options.partialQty && qty ? Math.min(qty, options.partialQty) : qty;
+        const actualDestination = options.wrongClaimDestination && item.locationID === CONTAINER_ID
+          ? STATION_ID : options.personalFallback && flag >= FLAG_DIVISION_1 && flag <= FLAG_DIVISION_2
+            ? STATION_ID : destination;
+        const actualFlag = options.personalFallback && actualDestination === STATION_ID
+          ? FLAG_HANGAR : options.wrongDivision && flag === FLAG_DIVISION_2 ? FLAG_DIVISION_1 : flag;
+        if (actualQty !== null && actualQty < item.quantity) {
           // A SPLIT mints a new stack and shrinks the source.
-          item.quantity -= qty;
+          item.quantity -= actualQty;
           const splitID = (nextSplitItemID += 1);
           world.set(splitID, {
             itemID: splitID,
             typeID: item.typeID,
-            locationID: destination,
-            flagID: flag === null ? FLAG_HANGAR : flag,
-            quantity: qty,
+            locationID: actualDestination,
+            flagID: actualFlag === null ? FLAG_HANGAR : actualFlag,
+            quantity: actualQty,
           });
         } else {
-          item.locationID = destination;
-          item.flagID = flag === null ? FLAG_HANGAR : flag;
+          item.locationID = actualDestination;
+          item.flagID = actualFlag === null ? FLAG_HANGAR : actualFlag;
         }
         return { service, method, result: null, notifications: [] };
       }
@@ -375,6 +383,7 @@ async function startTestServer(options = {}) {
     eveGatewayClient: options.gateway,
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
+    lootMemory: options.lootMemory,
     errorLogger: options.errorLogger || function () {},
   });
   const server = app.listen(0, "127.0.0.1");
@@ -913,6 +922,7 @@ test("GET corp reads the office, the division NAMES, and every division's conten
   const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/corp");
   assert.equal(response.status, 200);
   assert.equal(payload.available, true);
+  assert.equal(payload.stationID, STATION_ID, "the contents are scoped to the docked office");
   assert.equal(payload.divisions.length, 7, "all seven divisions are reported");
 
   // The office lookup and the division-name read are the two new top-level
@@ -939,10 +949,11 @@ test("GET corp reads the office, the division NAMES, and every division's conten
   for (const division of payload.divisions) {
     assert.deepEqual(
       Object.keys(division).sort(),
-      ["division", "error", "list", "name"],
+      ["division", "error", "list", "name", "volumes"],
       "a division descriptor exposes an ordinal and a name — never a flag",
     );
     assert.ok(division.division >= 1 && division.division <= 7);
+    assert.equal(typeof division.volumes, "object");
   }
 
   // Each division was listed with its own flag, on the office binding.
@@ -1065,4 +1076,141 @@ test("a division the character cannot query reads EMPTY without blanking the oth
   assert.equal(payload.divisions[0].list.items.length, 0, "the role-gated division is empty");
   assert.equal(payload.divisions[0].error, null, "an empty read is not an error");
   assert.equal(payload.divisions[1].list.items.length, 1, "and the rest still show");
+});
+
+function haulContract(sourceQuantity = 60) {
+  return { stationID: STATION_ID, corporationID: 98000000, division: 2,
+    typeID: 34, sourceQuantity };
+}
+
+test("strict route deposit confirms exact source loss and exact corporation division gain", async () => {
+  const gateway = fakeGateway({ items: fixtureItems() });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+    method: "POST", body: { itemIDs: [300], qty: 20, from: { kind: "cargo" },
+      to: { kind: "corp", division: 2 }, haulContract: haulContract() },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.applied, true);
+  assert.equal(payload.transferStatus, "SUCCESS");
+  assert.equal(gateway.world.get(300).quantity, 40);
+  assert.equal([...gateway.world.values()].filter((item) => item.locationID === OFFICE_CONTENT_LOCATION_ID &&
+    item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 20);
+});
+
+for (const [name, options, transferStatus] of [
+  ["personal hangar fallback", { personalFallback: true }, "AMBIGUOUS"],
+  ["wrong division", { wrongDivision: true }, "AMBIGUOUS"],
+  ["partial transfer", { partialQty: 5 }, "PARTIAL"],
+  ["silent refusal", { declineAll: true }, "REFUSED"],
+]) {
+  test(`strict route deposit rejects ${name} even when dispatch returns`, async () => {
+    const gateway = fakeGateway({ items: fixtureItems(), ...options });
+    const { baseUrl } = await startTestServer({ gateway });
+    await selectOnServer(baseUrl);
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+      method: "POST", body: { itemIDs: [300], qty: 20, from: { kind: "cargo" },
+        to: { kind: "corp", division: 2 }, haulContract: haulContract() },
+    });
+    assert.equal(response.status, 409);
+    assert.equal(payload.error, "HAUL_TRANSFER_UNCONFIRMED");
+    assert.equal(payload.transferStatus, transferStatus);
+  });
+}
+
+test("strict route refuses changed source or missing office before inventory mutation", async () => {
+  for (const setup of [{ sourceQuantity: 100 }, { officeRows: [] }]) {
+    const gateway = fakeGateway({ items: fixtureItems(), officeRows: setup.officeRows });
+    const { baseUrl } = await startTestServer({ gateway });
+    await selectOnServer(baseUrl);
+    const { response } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+      method: "POST", body: { itemIDs: [300], qty: 20, from: { kind: "cargo" },
+        to: { kind: "corp", division: 2 }, haulContract: haulContract(setup.sourceQuantity ?? 60) },
+    });
+    assert.equal(response.status, 409);
+    assert.equal(gateway.calls.boundCall.some((call) => call.method === "Add"), false);
+  }
+});
+
+test("session cleanup retains a claimed container while its issued transfer is pending", async () => {
+  let startAdd, finishAdd;
+  const entered = new Promise((resolve) => { startAdd = resolve; });
+  const held = new Promise((resolve) => { finishAdd = resolve; });
+  const memory = createLootMemory();
+  const gateway = fakeGateway({ items: fixtureItems(), beforeAdd: async () => { startAdd(); await held; } });
+  const { baseUrl } = await startTestServer({ gateway, lootMemory: memory });
+  await selectOnServer(baseUrl);
+  const system = 30000142;
+  const claimed = await apiRequest(baseUrl, "/api/bots/loot-memory/claim", {
+    method: "POST", body: { runID: "generation-a", system, itemID: CONTAINER_ID },
+  });
+  assert.equal(claimed.payload.claimed, true);
+  const moving = apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+    method: "POST", body: { itemIDs: [200], from: { kind: "container", itemID: CONTAINER_ID },
+      to: { kind: "cargo" }, claimRunID: "generation-a" },
+  });
+  await entered;
+  const logout = await apiRequest(baseUrl, "/api/logout", { method: "POST" });
+  assert.equal(logout.response.status, 200);
+  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false);
+  finishAdd();
+  const settled = await moving;
+  assert.equal(settled.response.status, 200, "the fake gateway returned both authoritative rereads");
+  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), true);
+});
+
+for (const [name, options, expectedStatus] of [
+  ["exact claimed split", {}, "SUCCESS"],
+  ["partial claimed split", { partialQty: 5 }, "PARTIAL"],
+  ["redirected claimed split", { wrongClaimDestination: true }, "AMBIGUOUS"],
+  ["refused claimed split", { declineAll: true }, "REFUSED"],
+]) {
+  test(`${name} requires matching container loss and ship gain`, async () => {
+    const memory = createLootMemory();
+    const gateway = fakeGateway({ items: fixtureItems(), ...options });
+    const { baseUrl } = await startTestServer({ gateway, lootMemory: memory });
+    await selectOnServer(baseUrl);
+    const system = 30000142;
+    const claimed = await apiRequest(baseUrl, "/api/bots/loot-memory/claim", {
+      method: "POST", body: { runID: "run-a", system, itemID: CONTAINER_ID },
+    });
+    assert.equal(claimed.payload.claimed, true);
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+      method: "POST", body: { itemIDs: [200], qty: 20,
+        from: { kind: "container", itemID: CONTAINER_ID }, to: { kind: "cargo" }, claimRunID: "run-a" },
+    });
+    assert.equal(response.status, expectedStatus === "SUCCESS" ? 200 : 409);
+    assert.equal(payload.transferStatus, expectedStatus);
+    if (expectedStatus !== "SUCCESS") {
+      assert.equal(memory.claimContainer("other", "run-b", system, CONTAINER_ID), false,
+        "a failed move does not hand the target to another hauler");
+    }
+  });
+}
+
+test("claim routes bind ownership to the authenticated held session and its system", async () => {
+  const memory = createLootMemory();
+  const gateway = fakeGateway({ items: fixtureItems() });
+  const { baseUrl } = await startTestServer({ gateway, lootMemory: memory });
+  await selectOnServer(baseUrl);
+  const system = 30000142;
+  const wrongSystem = await apiRequest(baseUrl, "/api/bots/loot-memory/claim", {
+    method: "POST", body: { runID: "a", system: 30000144, itemID: CONTAINER_ID },
+  });
+  assert.equal(wrongSystem.response.status, 409);
+  const claim = await apiRequest(baseUrl, "/api/bots/loot-memory/claim", {
+    method: "POST", body: { runID: "a", system, itemID: CONTAINER_ID, sessionID: "forged" },
+  });
+  assert.equal(claim.payload.claimed, true);
+  assert.equal(memory.claimContainer("other", "run", system, CONTAINER_ID), false);
+  const read = await apiRequest(baseUrl, `/api/bots/loot-memory/claims?system=${system}&runID=different`);
+  assert.deepEqual(read.payload.itemIDs, [CONTAINER_ID]);
+  const releaseWrongGeneration = await apiRequest(baseUrl, "/api/bots/loot-memory/release", {
+    method: "POST", body: { runID: "different" },
+  });
+  assert.equal(releaseWrongGeneration.response.status, 200);
+  assert.equal(memory.claimContainer("other", "run", system, CONTAINER_ID), false);
+  await apiRequest(baseUrl, "/api/bots/loot-memory/release", { method: "POST", body: { runID: "a" } });
+  assert.equal(memory.claimContainer("other", "run", system, CONTAINER_ID), true);
 });

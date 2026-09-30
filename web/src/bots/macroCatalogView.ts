@@ -250,6 +250,8 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Takes what you name out of the station hangar and puts each stack where it belongs — command centres into the command centre hold, planetary goods into the planetary hold, ore into the mining hold, everything else into cargo. It loads as much as will fit and leaves the rest for the next trip, so a loop of this, a flight and an unload moves a whole hangar a shipload at a time.",
     "Being docked, with room somewhere aboard",
   ),
+  "haul-all": entry("haul-all", "hauling", "Carries selected corporation cargo to the exact destination division and verifies both inventories.", "Corporation offices at both ends"),
+  "route-hauler": entry("route-hauler", "hauling", "Repeats a corporation route with optional return freight. Only cargo loaded by this run is delivered.", "Corporation offices at both ends"),
   "salvage-wrecks": entry(
     "salvage-wrecks",
     "hauling",

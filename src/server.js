@@ -576,6 +576,10 @@ function forgetBridgeSession(webSessionID) {
   if (!held) {
     return false;
   }
+  // Ordinary claims release with the session. An issued inventory transfer
+  // remains exclusive until its authoritative reread settles (or its bounded
+  // lease expires if settlement cannot be observed).
+  lootMemory.releaseClaims(webSessionID);
   bridgeSessions.delete(webSessionID);
   publishStreamStatus(held, "ended", "session_released");
   closeHeldStream(held);
@@ -2622,6 +2626,8 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     .filter((value) => value > 0);
   const qty = Number(body.qty);
   const hasQty = Number.isSafeInteger(qty) && qty > 0;
+  let pinnedClaim = null;
+  let claimSettled = false;
   if (itemIDs.length === 0) {
     res.status(400).json({ ok: false, error: "INVALID_MOVE", message: "At least one item is required." });
     return;
@@ -2635,15 +2641,38 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     return;
   }
   try {
-    await readHeldFlight(held, req.webSessionID);
+    const flight = await readHeldFlight(held, req.webSessionID);
     const from = await resolvePlace(held, req.webSessionID, body.from);
     const to = await resolvePlace(held, req.webSessionID, body.to);
+    const contract = body.haulContract;
+    if (contract !== undefined) {
+      const sourceKind = body.from?.kind, destinationKind = body.to?.kind;
+      const shipKind = (kind) => kind === "cargo" || kind === "shipBay";
+      if (!flight.flight?.docked || !Number.isSafeInteger(contract?.stationID) ||
+          contract.stationID !== held.stationID || !Number.isSafeInteger(contract.corporationID) ||
+          contract.corporationID <= 0 || contract.corporationID !== held.corporationID ||
+          !isValidDivision(contract.division) || itemIDs.length !== 1 || !hasQty ||
+          !Number.isSafeInteger(contract.typeID) || contract.typeID <= 0 ||
+          !Number.isSafeInteger(contract.sourceQuantity) || contract.sourceQuantity < qty ||
+          !((sourceKind === "corp" && shipKind(destinationKind) && body.from.division === contract.division) ||
+            (shipKind(sourceKind) && destinationKind === "corp" && body.to.division === contract.division))) {
+        res.status(409).json({ ok: false, error: "INVALID_HAUL_CONTRACT" });
+        return;
+      }
+    }
 
     // Read the source FIRST. This is what supplies the source location for a
     // corp division (whose published office id is not the items' location), and
     // the before-quantity a split is judged against.
     const sourceRowsBefore = await listPlace(held, req.webSessionID, from);
     const sourceByID = new Map(sourceRowsBefore.map((row) => [row.itemID, row]));
+    if (contract !== undefined && (sourceByID.get(itemIDs[0])?.typeID !== contract.typeID ||
+        sourceByID.get(itemIDs[0])?.quantity !== contract.sourceQuantity)) {
+      res.status(409).json({ ok: false, error: "HAUL_SOURCE_CHANGED" });
+      return;
+    }
+    const destinationRowsBefore = contract === undefined && body.claimRunID === undefined
+      ? null : await listPlace(held, req.webSessionID, to);
     const missing = itemIDs.filter((itemID) => !sourceByID.has(itemID));
     if (missing.length === itemIDs.length) {
       res.status(409).json({
@@ -2654,6 +2683,10 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
       return;
     }
     const present = itemIDs.filter((itemID) => sourceByID.has(itemID));
+    if (body.claimRunID !== undefined && (body.from?.kind !== "container" || missing.length > 0)) {
+      res.status(409).json({ ok: false, error: "CONTAINER_TRANSFER_SCOPE_CHANGED" });
+      return;
+    }
     // Quote the source location the ITEMS report, never an assumed one.
     const sourceLocationID =
       from.locationID !== null && from.locationID !== undefined
@@ -2661,6 +2694,15 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
         : sourceByID.get(present[0]).locationID;
 
     const kwargs = { flag: to.flag };
+    if (body.from?.kind === "container" && body.claimRunID !== undefined) {
+      const runID = body.claimRunID;
+      const itemID = Number(body.from.itemID);
+      if (typeof runID !== "string" || !runID || !lootMemory.beginTransfer(req.webSessionID, runID, held.solarSystemID, itemID)) {
+        res.status(409).json({ ok: false, error: "CONTAINER_CLAIM_LOST" });
+        return;
+      }
+      pinnedClaim = { runID, systemID: held.solarSystemID, itemID };
+    }
     let outcome;
     // A THROW IS NOT PROOF OF FAILURE, exactly as a 200 is not proof of
     // success. Looting an NPC wreck raises after the item has already moved
@@ -2710,6 +2752,64 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
       listPlace(held, req.webSessionID, to),
       listPlace(held, req.webSessionID, from),
     ]);
+    if (pinnedClaim) {
+      // A source-side `applied` bit is insufficient for a claimed container:
+      // the destination must gain exactly what this run took. Otherwise a
+      // partial or redirected move cannot free exclusivity as a success.
+      const expectedByType = new Map();
+      const changedByType = new Map();
+      let exactItems = true;
+      for (const itemID of present) {
+        const before = sourceByID.get(itemID);
+        const after = sourceRowsAfter.find((row) => row.itemID === itemID);
+        const expected = hasQty ? qty : before.quantity;
+        const changed = before.quantity - (after?.quantity ?? 0);
+        expectedByType.set(before.typeID, (expectedByType.get(before.typeID) || 0) + expected);
+        changedByType.set(before.typeID, (changedByType.get(before.typeID) || 0) + changed);
+        if (changed !== expected || (after && after.typeID !== before.typeID)) exactItems = false;
+      }
+      const sumType = (rows, typeID) => rows.filter((row) => row.typeID === typeID)
+        .reduce((total, row) => total + row.quantity, 0);
+      const changes = [...expectedByType].map(([typeID, expected]) => ({
+        expected,
+        source: sumType(sourceRowsBefore, typeID) - sumType(sourceRowsAfter, typeID),
+        destination: sumType(destinationRows, typeID) - sumType(destinationRowsBefore, typeID),
+        selected: changedByType.get(typeID),
+      }));
+      if (!exactItems || changes.some((change) => change.source !== change.expected ||
+          change.destination !== change.expected || change.selected !== change.expected)) {
+        const refused = changes.every((change) => change.source === 0 && change.destination === 0);
+        const partial = changes.every((change) => change.source > 0 && change.source < change.expected &&
+          change.destination === change.source && change.selected === change.source);
+        const transferStatus = refused ? "REFUSED" : partial ? "PARTIAL" : "AMBIGUOUS";
+        claimSettled = transferStatus !== "AMBIGUOUS";
+        res.status(409).json({ ok: false, error: "CONTAINER_TRANSFER_UNCONFIRMED", transferStatus });
+        return;
+      }
+    }
+    claimSettled = true;
+    if (contract !== undefined) {
+      const sum = (rows) => rows.filter((row) => row.typeID === contract.typeID)
+        .reduce((total, row) => total + row.quantity, 0);
+      const beforeSource = sourceByID.get(itemIDs[0]);
+      const afterSource = sourceRowsAfter.find((row) => row.itemID === itemIDs[0]);
+      const sourceChange = beforeSource.quantity - (afterSource?.quantity ?? 0);
+      const totalSourceChange = sum(sourceRowsBefore) - sum(sourceRowsAfter);
+      const destinationChange = sum(destinationRows) - sum(destinationRowsBefore);
+      if (sourceChange !== qty || totalSourceChange !== qty || destinationChange !== qty) {
+        const transferStatus = sourceChange === 0 && totalSourceChange === 0 && destinationChange === 0
+          ? "REFUSED"
+          : sourceChange > 0 && sourceChange < qty && totalSourceChange === sourceChange &&
+            destinationChange === sourceChange ? "PARTIAL" : "AMBIGUOUS";
+        res.status(409).json({
+          ok: false, error: "HAUL_TRANSFER_UNCONFIRMED",
+          transferStatus,
+          message: "The exact movement into the requested division/hold could not be confirmed. Refresh both inventories before another move.",
+          sourceChange, totalSourceChange, destinationChange,
+        });
+        return;
+      }
+    }
     const destinationIDs = new Set(destinationRows.map((row) => row.itemID));
     const sourceAfterByID = new Map(sourceRowsAfter.map((row) => [row.itemID, row]));
 
@@ -2756,6 +2856,7 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     res.json({
       ok: true,
       applied,
+      ...(contract === undefined && !pinnedClaim ? {} : { transferStatus: "SUCCESS" }),
       moved,
       // Items that left the source but arrived under a NEW id, so the caller
       // knows the move landed even though `moved` cannot name them.
@@ -2772,6 +2873,10 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
       return;
     }
     next(error);
+  } finally {
+    if (pinnedClaim) {
+      lootMemory.endTransfer(req.webSessionID, pinnedClaim.runID, pinnedClaim.systemID, pinnedClaim.itemID, claimSettled);
+    }
   }
 });
 
@@ -2952,6 +3057,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
       res.json({
         ok: true,
         available: false,
+        stationID: held.stationID,
         // Not an error: plenty of characters simply have no corp office here.
         reason:
           officeSettled.status === "rejected"
@@ -2980,6 +3086,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       available: true,
+      stationID: held.stationID,
       divisions: ordinals.map((division, index) => {
         const settled = settledLists[index];
         return {
@@ -2988,6 +3095,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
           // when a corporation never renamed it. A flag number is never shown.
           name: divisionNames[division] || null,
           list: settled.status === "fulfilled" ? settled.value.result : null,
+          volumes: settled.status === "fulfilled" ? readTypeVolumes(settled.value.result) : {},
           error:
             settled.status === "rejected"
               ? String((settled.reason && settled.reason.code) || "READ_FAILED")
@@ -20267,6 +20375,43 @@ app.post("/api/bots/loot-memory", requireAuth, (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// Active exclusivity is separate from the durable "already emptied" memory.
+// The session identity comes from authentication, never the request body.
+app.get("/api/bots/loot-memory/claims", requireAuth, (req, res) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  const system = Number(req.query.system);
+  const runID = typeof req.query.runID === "string" ? req.query.runID : "";
+  if (!Number.isSafeInteger(system) || system <= 0 || held.solarSystemID !== system || !runID) {
+    res.status(409).json({ ok: false, error: "CLAIM_SCOPE_UNKNOWN" });
+    return;
+  }
+  res.json({ ok: true, itemIDs: lootMemory.claimedItemIDs(system, req.webSessionID, runID) });
+});
+
+app.post("/api/bots/loot-memory/claim", requireAuth, (req, res) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  const { runID, renewOnly } = req.body || {};
+  const system = Number(req.body?.system), itemID = Number(req.body?.itemID);
+  if (typeof runID !== "string" || !runID || !Number.isSafeInteger(system) || system <= 0 ||
+      !Number.isSafeInteger(itemID) || itemID <= 0 || system !== held.solarSystemID) {
+    res.status(409).json({ ok: false, error: "CLAIM_SCOPE_UNKNOWN" });
+    return;
+  }
+  res.json({ ok: true, claimed: lootMemory.claimContainer(req.webSessionID, runID, system, itemID, renewOnly === true) });
+});
+
+app.post("/api/bots/loot-memory/release", requireAuth, (req, res) => {
+  const runID = req.body?.runID;
+  if (typeof runID !== "string" || !runID) {
+    res.status(400).json({ ok: false, error: "INVALID_RUN" });
+    return;
+  }
+  lootMemory.releaseClaims(req.webSessionID, runID);
+  res.json({ ok: true });
 });
 
 // ── Shared squad board (goal: coordinate fire) ──────────────────────────────

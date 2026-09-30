@@ -165,6 +165,11 @@ export type ScriptAction =
   | { readonly kind: "lootWreck"; readonly wreckID: number }
   /** Take everything out of ONE container (any container on grid — no ownership check). */
   | { readonly kind: "lootContainer"; readonly containerID: number }
+  | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number;
+      readonly from: import("../store/types.ts").InventoryPlace;
+      readonly to: import("../store/types.ts").InventoryPlace;
+      readonly stationID: number; readonly corporationID: number; readonly division: number;
+      readonly typeID: number; readonly sourceQuantity: number }
   /** Run these hangar stacks through the station refinery (verified server-side). */
   | { readonly kind: "reprocessOre"; readonly itemIDs: readonly number[] }
   /** Warp to a scanned site by its scan-signature label ("QEE-288"). */
@@ -642,6 +647,7 @@ export interface MacroTick {
   readonly nextMem: MacroMemory;
   /** Facts to publish onto the run's board this tick (merged over what's there). */
   readonly boardPatch?: ScriptBoard;
+  readonly containerTargetID?: number;
 }
 
 export type MacroDecider = (
@@ -1000,6 +1006,7 @@ export interface ScriptTickResult {
   readonly status: RunStatus;
   readonly pauseReason: string | null;
   readonly memory: ScriptMemory;
+  readonly containerTargetID?: number;
 }
 
 // ─── Local sentences (R9a) ───────────────────────────────────────────────────
@@ -2181,6 +2188,7 @@ function runProgram(
 
     return {
       action: tick.action,
+      containerTargetID: tick.containerTargetID,
       why: tick.why,
       phase: tick.phase,
       stepPath: step.id,

@@ -241,6 +241,22 @@ test("headHome has nothing to send when no script is running", () => {
   assert.equal(h.runner.headHome("The approved run time ended."), false);
 });
 
+test("an unconfirmed corporate route move pauses before any automatic retry", async () => {
+  const action: ScriptAction = { kind: "haulTransfer", itemID: 10, quantity: 5,
+    from: { kind: "cargo" }, to: { kind: "corp", division: 2 },
+    stationID: 1, corporationID: 98000123, division: 2, typeID: 34, sourceQuantity: 10 };
+  const h = harness({
+    registry: { "haul-all": () => mt(action, { kind: "acting" }) },
+    issueThrows: () => new Error("HAUL_TRANSFER_UNCONFIRMED"),
+  });
+  h.runner.start(script([macroStep("h", "haul-all")]));
+  await h.runner.tick();
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.match(h.progress.at(-1)?.pauseReason ?? "", /reconciliation/i);
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1, "the route cannot blindly retry or auto-reconcile while paused");
+});
+
 test("hosted graceful Stop waits for an issued action, then can resume only the home trip", async () => {
   let issueStarted: () => void = () => {};
   let finishIssue: () => void = () => {};

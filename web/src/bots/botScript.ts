@@ -256,6 +256,7 @@ export const PROP_MODE_ARGS: readonly PropModeArg[] = Object.freeze<PropModeArg[
 export type Arg =
   | { readonly kind: "belt"; readonly belt: BeltArg }
   | { readonly kind: "station"; readonly ref: WorldRef }
+  | { readonly kind: "toggle"; readonly enabled: boolean }
   | { readonly kind: "equipment"; readonly equipment: EquipmentArg }
   /** A specific agent (WorldRef entity "agent"). Optional on mission blocks — left
    * unset, the block uses the agent the find block published on the run's board. */
@@ -799,6 +800,8 @@ export type MacroID =
   // hauler that had only the emptying half could unload a command centre hold
   // it had no way to fill.
   | "load-cargo"
+  | "haul-all"
+  | "route-hauler"
   | "salvage-wrecks"
   | "loot-wrecks"
   | "loot-containers"
@@ -893,6 +896,8 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "wait",
   "unload-cargo",
   "load-cargo",
+  "haul-all",
+  "route-hauler",
   "salvage-wrecks",
   "loot-wrecks",
   "loot-containers",

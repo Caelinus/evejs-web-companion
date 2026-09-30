@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createLootMemory } = require("../src/lootMemory");
+const { createLootMemory, CONTAINER_LEASE_MS } = require("../src/lootMemory");
 
 const SYSTEM = 30000144;
 const OTHER_SYSTEM = 30000142;
@@ -110,4 +110,71 @@ test("a re-marked id is young again, so the cap drops something else", () => {
   memory.markEmptied(SYSTEM, 4);
 
   assert.deepEqual(memory.emptiedItemIDs(SYSTEM), [3, 1, 4]);
+});
+
+test("active claims exclude another run, renew their owner, and expire after five minutes", () => {
+  const clock = fakeClock();
+  const memory = createLootMemory({ now: clock.now });
+  assert.equal(memory.claimContainer("session-a", "run-1", SYSTEM, 9001), true);
+  assert.equal(memory.claimContainer("session-b", "run-2", SYSTEM, 9001), false);
+  assert.deepEqual(memory.claimedItemIDs(SYSTEM, "session-b", "run-2"), [9001]);
+  assert.deepEqual(memory.claimedItemIDs(SYSTEM, "session-a", "run-1"), []);
+  clock.advance(CONTAINER_LEASE_MS - 1);
+  assert.equal(memory.claimContainer("session-a", "run-1", SYSTEM, 9001, true), true);
+  clock.advance(CONTAINER_LEASE_MS - 1);
+  assert.equal(memory.claimContainer("session-b", "run-2", SYSTEM, 9001), false);
+  clock.advance(2);
+  assert.equal(memory.claimContainer("session-b", "run-2", SYSTEM, 9001), true);
+  assert.equal(memory.claimContainer("session-a", "run-1", SYSTEM, 9001, true), false);
+});
+
+test("claim identity includes system and release is scoped to authenticated session and generation", () => {
+  const memory = createLootMemory();
+  assert.equal(memory.claimContainer("a", "old", SYSTEM, 9001), true);
+  assert.equal(memory.claimContainer("b", "run", OTHER_SYSTEM, 9001), true);
+  memory.releaseClaims("a", "new");
+  assert.equal(memory.claimContainer("c", "run", SYSTEM, 9001), false);
+  memory.releaseClaims("a", "old");
+  assert.equal(memory.claimContainer("c", "run", SYSTEM, 9001), true);
+  assert.equal(memory.claimContainer("c", "run", OTHER_SYSTEM, 9001), false);
+});
+
+test("stop or session cleanup cannot release an issued transfer before it settles", () => {
+  const clock = fakeClock();
+  const memory = createLootMemory({ now: clock.now });
+  memory.claimContainer("a", "run", SYSTEM, 9001);
+  assert.equal(memory.beginTransfer("a", "run", SYSTEM, 9001), true);
+  memory.releaseClaims("a");
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), false);
+  memory.endTransfer("a", "run", SYSTEM, 9001, true);
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), true);
+});
+
+test("an unobservable issued transfer retains exclusivity only through bounded lease", () => {
+  const clock = fakeClock();
+  const memory = createLootMemory({ now: clock.now });
+  memory.claimContainer("a", "run", SYSTEM, 9001);
+  memory.beginTransfer("a", "run", SYSTEM, 9001);
+  memory.releaseClaims("a");
+  memory.endTransfer("a", "run", SYSTEM, 9001, false);
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), false);
+  clock.advance(CONTAINER_LEASE_MS);
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), true);
+});
+
+test("renewing a pinned transfer preserves its stop hold and ambiguous outcome", () => {
+  const clock = fakeClock();
+  const memory = createLootMemory({ now: clock.now });
+  assert.equal(memory.claimContainer("a", "run", SYSTEM, 9001), true);
+  assert.equal(memory.beginTransfer("a", "run", SYSTEM, 9001), true);
+  assert.equal(memory.claimContainer("a", "run", SYSTEM, 9001, true), true);
+  memory.releaseClaims("a", "run");
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), false);
+  memory.endTransfer("a", "run", SYSTEM, 9001, false);
+  assert.equal(memory.claimContainer("a", "run", SYSTEM, 9001, true), false,
+    "uncertain transfer cannot be renewed into a releasable claim");
+  memory.releaseClaims("a", "run");
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), false);
+  clock.advance(CONTAINER_LEASE_MS);
+  assert.equal(memory.claimContainer("b", "run", SYSTEM, 9001), true);
 });

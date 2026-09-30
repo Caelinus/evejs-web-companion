@@ -51,6 +51,7 @@ import { MACRO_SPECS, type MacroArgSpec } from "./macroSpecs.ts";
 export type WidgetKind =
   | "belt-picker"
   | "station-picker"
+  | "toggle-select"
   | "equipment-picker"
   | "agent-picker"
   | "count-input"
@@ -79,6 +80,7 @@ export type WidgetKind =
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   belt: "belt-picker",
   station: "station-picker",
+  toggle: "toggle-select",
   equipment: "equipment-picker",
   agent: "agent-picker",
   count: "count-input",
@@ -110,6 +112,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
 export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   belt: "Belt",
   station: "Station",
+  toggle: "Enabled",
   equipment: "Equipment",
   agent: "Agent",
   count: "Amount",
@@ -173,6 +176,20 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   fleetName: "Fleet name",
   pick: "Which rock first",
   into: "Unload into",
+  pickupStation: "Pickup station",
+  deliveryStation: "Delivery station",
+  pickupCorpDivision: "Pickup division",
+  deliveryCorpDivision: "Delivery division",
+  stationA: "Station A",
+  stationB: "Station B",
+  pickupDivisionA: "Pickup at A",
+  deliveryDivisionB: "Deliver at B",
+  pickupDivisionB: "Pickup at B",
+  deliveryDivisionA: "Deliver at A",
+  itemsAToB: "A to B items",
+  itemsBToA: "B to A items",
+  returnCargo: "Carry return freight",
+  transportBay: "Transport hold",
   // ⚠ THE UNIT IS PART OF THE LABEL, NOT A SUFFIX SOMEBODY MIGHT DROP. The
   // number a player types here is kilometres and everything under it is metres;
   // a box labelled just "Hold range" invites the metres, and a drone boat told
@@ -209,6 +226,8 @@ const ITEM_LIST_HINT: Readonly<Record<string, string>> = {
     'Anything listed here stays on the ship. "All like this" keeps every variant, which is usually what you want for crystals or ammunition.',
   items:
     "Anything listed here gets loaded, each into whichever hold your ship keeps it in. \"All like this\" takes every variant — one entry covers every planet's command centre — and \"everything matching\" takes anything whose name contains what you typed.",
+  itemsAToB: "Only matching items are loaded at A. Remove this filter entirely to haul every eligible item.",
+  itemsBToA: "Only matching items are loaded at B. Remove this filter entirely to haul every eligible item.",
 };
 
 /** The hint for one item-list box; the keep-aboard wording for an unknown key. */
