@@ -32,6 +32,8 @@ const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
+const { createMiningSupportAnchorBoard } = require("./miningSupportAnchorBoard");
+const { registerMiningSupportAnchorRoutes } = require("./miningSupportAnchorRoutes");
 const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
@@ -221,6 +223,7 @@ app.locals.miningOperations = miningOperations;
 // browser supplies.
 const squadBoard = options.squadBoard || createSquadBoard();
 app.locals.squadBoard = squadBoard;
+const miningSupportAnchorBoard = options.miningSupportAnchorBoard || createMiningSupportAnchorBoard();
 // Shared, in-process (never persisted — see src/lootMemory.js) memory of the
 // wrecks and cans somebody has already emptied, keyed by solar-system id. A
 // wreck's contents cannot be read from further than 2,500 m and the one field
@@ -17009,6 +17012,14 @@ async function dispatchBoundBeyonceWrite(req, res, next, method, args, kwargs = 
     if (!requireInSpace(res, before.flight)) {
       return;
     }
+    if (method === "CmdGotoPoint" && req.body?.expectedShipID !== undefined
+      && Number(req.body.expectedShipID) !== Number(before.flight.shipID)) {
+      return res.status(409).json({ ok: false, error: "SHIP_CHANGED", message: "The observed movement ship changed." });
+    }
+    if (method === "CmdGotoPoint" && req.body?.expectedSolarSystemID !== undefined
+      && Number(req.body.expectedSolarSystemID) !== Number(before.flight.solarSystemID)) {
+      return res.status(409).json({ ok: false, error: "SYSTEM_CHANGED", message: "The measured movement system changed." });
+    }
     const expected = transition
       ? {
           ...transition.expected,
@@ -17066,9 +17077,11 @@ app.post("/api/bridge/flight/goto-point", requireAuth, async (req, res, next) =>
     return;
   }
   const body = req.body || {};
-  const x = Number(body.x) || 0;
-  const y = Number(body.y) || 0;
-  const z = Number(body.z) || 0;
+  const { x, y, z } = body;
+  if (![x, y, z].every(value => typeof value === "number" && Number.isFinite(value))
+    || [body.expectedShipID, body.expectedSolarSystemID].some(id => id !== undefined && (!Number.isSafeInteger(id) || id <= 0))) {
+    return res.status(400).json({ ok: false, error: "INVALID_MOVEMENT_POINT", message: "Finite measured coordinates and a valid ship are required." });
+  }
   await dispatchBoundBeyonceWrite(req, res, next, "CmdGotoPoint", [x, y, z]);
 });
 
@@ -22039,6 +22052,20 @@ app.get("/api/bots", requireAuth, (req, res, next) => {
   }
 });
 
+// Passive scene diagnostics of an account-owned hosted pilot. The host keeps
+// ownership across both reads; a lost claim never selects or releases a pilot.
+app.get("/api/bots/observation", requireAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    return res.status(400).json({ ok: false, error: "INVALID_CHARACTER" });
+  }
+  try {
+    const observation = await botHost.readOwnedObservation(characterID, req.account.accountID);
+    if (!observation) return res.status(409).json({ ok: false, error: "NO_BOT_SESSION" });
+    res.json({ ok: true, observation });
+  } catch (error) { next(error); }
+});
+
 // ── Shared belt memory (goal: mine-ore-priority) ────────────────────────────
 // In-process only, keyed by solar-system NAME then belt NAME (see
 // src/beltMemory.js for why belt entity ids are not usable). No gateway call
@@ -22177,6 +22204,19 @@ app.post("/api/bots/loot-memory/release", requireAuth, (req, res) => {
   }
   lootMemory.releaseClaims(req.webSessionID, runID);
   res.json({ ok: true });
+});
+
+// Shared support facts use fresh own-fleet/space reads; they never perform game writes.
+registerMiningSupportAnchorRoutes({
+  app, requireAuth, requireHeld: requireHeldBridgeSession,
+  currentSession: sessionID => sessionID === undefined ? bridgeSessions : bridgeSessions.get(sessionID),
+  readFleet: async (held, sessionID) => {
+    invalidateFleetBoundHandles(held);
+    const result = await boundCall(held, sessionID, fleetBindSpec(), "GetInitState", [], null);
+    return result.result;
+  },
+  readSpace: async held => (await gateway.readSpaceSnapshot(held.bridgeSessionID, { userid: held.accountID })).space,
+  board: miningSupportAnchorBoard, sessionLost: forgetBridgeSession,
 });
 
 // ── Shared squad board (goal: coordinate fire) ──────────────────────────────

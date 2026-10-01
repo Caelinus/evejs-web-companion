@@ -69,6 +69,7 @@ export type ScriptAction =
   | { readonly kind: "dock"; readonly stationID: number }
   | { readonly kind: "warp"; readonly targetID: number }
   | { readonly kind: "approach"; readonly targetID: number }
+  | { readonly kind: "gotoPoint"; readonly position: import("../store/types.ts").SpaceVector; readonly shipID: number; readonly solarSystemID: number }
   /**
    * Cut the engines (api.stopShip). The one action here that UNDOES a standing
    * order rather than issuing one, and the only order eve.js does not gate on a

@@ -710,7 +710,7 @@ export interface ScriptObservation {
  * in scriptDecide.ts that decides whether to borrow that ladder at all. One
  * definition is how the two can never drift apart.
  */
-export function hostilesInReach(obs: ScriptObservation, snapshot: SpaceSnapshot, origin: SpaceVector): readonly OverviewRow[] {
+export function hostilesInReach(obs: Pick<ScriptObservation, "maxTargetRangeM">, snapshot: SpaceSnapshot, origin: SpaceVector): readonly OverviewRow[] {
   const rows = hostileRows(snapshot, origin);
   const range = obs.maxTargetRangeM ?? null;
   return range === null ? rows : rows.filter((row) => row.distance <= range);

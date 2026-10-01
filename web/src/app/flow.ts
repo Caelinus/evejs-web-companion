@@ -15,7 +15,7 @@ import { decodeShipBays } from "../bridge/shipBays.ts";
 import { FREIGHT_BAYS, planLootTransfers } from "../bridge/bayRouting.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
-import { confirmControlledDronesHome } from "../nav/controlledDroneStop.ts";
+import { confirmControlledDronesHome, controlledFlightSettled } from "../nav/controlledDroneStop.ts";
 import { runFleetParking, parkingScript, type FleetParkingPolicy } from "../nav/fleetParking.ts";
 import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
 import { fittedTravelPropulsion, travelPropulsionActivation } from "../nav/travelAssist.ts";
@@ -232,6 +232,14 @@ import {
 } from "../nav/scriptCapabilities.ts";
 import { deriveMiningSupportCapabilities, type MiningSupportCapabilities } from "../nav/miningSupportCapabilities.ts";
 import { deriveMiningSupportServices, type MiningSupportServiceSnapshot } from "../nav/miningSupportServices.ts";
+import { observedSupportAnchorServices, supportServiceEnvelope, type MiningSupportAnchor, type MiningSupportAnchorRead,
+  type SupportRequirements } from "../nav/miningSupportAnchor.ts";
+import { decideMiningSupport, observeMiningSupportOrders } from "../nav/miningSupportController.ts";
+import { decideSupportPositioning, freshSupportPositionMemory, type SupportPositionMemory, type SupportPositionPolicy,
+  type SupportPositionFeedback, type SupportPositionResult } from "../nav/miningSupportPositioning.ts";
+import { decideSupportSelfMining, freshSupportSelfMiningMemory, fittedSupportMiningPlan, supportSelfMiningDiagnostic, type SupportSelfMiningMemory, type SupportSelfMiningFeedback,
+  type SupportSelfMiningResult, type SupportSelfMiningDiagnostic } from "../nav/miningSupportSelfMining.ts";
+import { SUPPORT_FLEET_READ_MAX_AGE_MS, decideMiningSupportFleet, freshMiningSupportFleetMemory, miningSupportFleetDiagnostic, type MiningSupportFleetCallDiagnostic, type MiningSupportFleetDiagnostic, type MiningSupportFleetFeedback, type MiningSupportFleetObservation, type MiningSupportFleetResult, type SupportFleetJoinAuthority } from "../nav/miningSupportFleet.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
 import {
   EMPTY_SURVEY_MEMORY,
@@ -447,6 +455,14 @@ export interface LootOutcome {
   readonly moved: number;
 }
 
+export interface SupportSelfMiningRequest {
+  readonly previous: SupportSelfMiningMemory;
+  readonly plan: MiningPlan;
+  readonly enabled: boolean;
+  readonly useFittedMiningModules?: boolean;
+  readonly stopRequested?: boolean;
+  readonly feedback?: SupportSelfMiningFeedback;
+}
 export interface AppFlow {
   readonly droneRecovery: ReadableSignal<DroneRecoveryState>;
   retryDroneRecovery(): Promise<void>;
@@ -520,6 +536,11 @@ export interface AppFlow {
   readMiningSupportCapabilities(): MiningSupportCapabilities;
   /** Enrich capabilities with the latest successful space service observation; no IO or actions. */
   readMiningSupportServices(): MiningSupportServiceSnapshot;
+  publishMiningSupportAnchor(observation: MiningSupportServiceSnapshot): Promise<MiningSupportAnchor>;
+  readMiningSupportFleet(sessionEpoch: string, join?: SupportFleetJoinAuthority): MiningSupportFleetObservation | null;
+  publishReconciledMiningSupportAnchor(fleetResult: MiningSupportFleetResult, observation: MiningSupportServiceSnapshot): Promise<MiningSupportAnchor>;
+  /** Fresh own-fleet BFF read; callers retain receipt times rather than a hidden cache. */
+  readMiningSupportAnchors(): Promise<MiningSupportAnchorRead>;
   /**
    * Move items between two places. A single item with a `qty` is a SPLIT; more
    * than one item is a single batch move. Reports what ACTUALLY applied.
@@ -8223,7 +8244,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const bay = decodeDroneBay(result.bay);
     const out = decodeDronesInSpace(result.inSpace);
     const maxActive = decodeDroneLimits(result.shipInfo).maxActiveDrones;
-    if (out === null) return null;
+    if (out === null || !Array.isArray(result.inSpace) || out.length !== result.inSpace.length) return null;
     const typeIDs = [...new Set([
       ...(bay ?? []).map((stack: DroneBayStack) => stack.typeID),
       ...out.map((drone: DroneInSpace) => drone.typeID).filter((id): id is number => id !== null),
@@ -8903,12 +8924,54 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   function capabilityScope(shipID: number | null): CapabilityScope {
     return { shipID, fittingSignature: fittingCapabilitySignature() };
   }
+
   function readMiningSupportServices(): MiningSupportServiceSnapshot {
     const space = store.space.get();
     return deriveMiningSupportServices(readMiningSupportCapabilities(), space.loaded && space.error === null ? space.snapshot : null,
       typeID => store.names.get().resolved[nameKey("type", typeID)] ?? null);
   }
 
+  function publishMiningSupportAnchor(observation: MiningSupportServiceSnapshot): Promise<MiningSupportAnchor> {
+    const shipID = observation.capabilities.scope.shipID;
+    if (shipID === null || observation.sampledAtMs === null) return Promise.reject(new Error("Mining support observation is unknown."));
+    return api.publishMiningSupportAnchor(shipID, observation.sampledAtMs, callOptions);
+  }
+
+  function readMiningSupportAnchors(): Promise<MiningSupportAnchorRead> {
+    return api.readMiningSupportAnchors(callOptions);
+  }
+
+  function readMiningSupportFleet(sessionEpoch: string, join?: SupportFleetJoinAuthority): MiningSupportFleetObservation | null {
+    const characterID = store.station.get().online?.characterID;
+    const state = store.fleet.get();
+    if (!characterID || !sessionEpoch || !state.loaded || state.loading || state.fleet === null
+      || state.availability === "unknown" || state.refreshedAtMs === null || state.fleet.characterID !== characterID) return null;
+    return { scope: { characterID, sessionEpoch }, snapshot: { availability: state.availability, fleet: state.fleet },
+      receivedAtMs: state.refreshedAtMs, join: join ?? { inviteKnown: state.pendingInvite !== null, invite: state.pendingInvite, ads: null } };
+  }
+
+  function publishReconciledMiningSupportAnchor(fleetResult: MiningSupportFleetResult, observation: MiningSupportServiceSnapshot): Promise<MiningSupportAnchor> {
+    const characterID = store.station.get().online?.characterID;
+    const now = Date.now();
+    const scope = fleetResult.memory.scope;
+    if (fleetResult.role !== "support" || !fleetResult.anchorReady || fleetResult.fleetID === null
+      || !Number.isSafeInteger(fleetResult.fleetID) || fleetResult.fleetID <= 0
+      || !characterID || scope?.characterID !== characterID || !scope.sessionEpoch
+      || fleetResult.observedAtMs === null || !Number.isFinite(fleetResult.observedAtMs)
+      || fleetResult.observedAtMs > now || now - fleetResult.observedAtMs >= SUPPORT_FLEET_READ_MAX_AGE_MS) {
+      return Promise.reject(new Error("Mining support fleet authority is unknown or stale."));
+    }
+    const shipID = observation.capabilities.scope.shipID;
+    const space = store.space.get();
+    if (shipID === null || observation.sampledAtMs === null || !Number.isFinite(observation.sampledAtMs)
+      || !space.loaded || space.error !== null || !space.snapshot?.inSpace
+      || space.snapshot.shipID !== shipID || space.snapshot.ship?.characterID !== characterID
+      || space.snapshot.sampledAtMs !== observation.sampledAtMs) {
+      return Promise.reject(new Error("Mining support service observation is unknown or superseded."));
+    }
+    return api.publishMiningSupportAnchor(shipID, observation.sampledAtMs, callOptions,
+      { expectedCharacterID: characterID, expectedFleetID: fleetResult.fleetID });
+  }
 
   /** Re-read the fit, wait for its group names AND its dogma, then classify every bot module. */
   async function resolveScriptModuleCapabilities(): Promise<ScriptModuleCapabilities> {
@@ -10298,6 +10361,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "approach":
             await api.approach(action.targetID, 0, callOptions);
             return;
+          case "gotoPoint":
+            await api.gotoPoint(action.position, action.shipID, action.solarSystemID, callOptions);
+            return;
           // Straight to `api.stopShip` and NOT through `flow.stopShip()`: that
           // wrapper also aborts the browser autopilot, which is right for an
           // operator saying "stop" and wrong here — this is one rung of a
@@ -11469,6 +11535,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     openShipBays,
     readMiningSupportCapabilities,
     readMiningSupportServices,
+    publishMiningSupportAnchor,
+    readMiningSupportFleet,
+    publishReconciledMiningSupportAnchor,
+    readMiningSupportAnchors,
 
     async lootContainer(containerID) {
       // ⚠ THE SHIP IS ASKED FOR, NOT ASSUMED. Routing needs to know which bays
