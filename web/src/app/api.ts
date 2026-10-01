@@ -3356,6 +3356,49 @@ export async function deletePiPlan(planID: string, options: ApiOptions = {}): Pr
   await postJson(`/api/pi/plans/${encodeURIComponent(planID)}/delete`, {}, options);
 }
 
+// ─── Saved Industry Manager plans (src/industryPlanStore.js) ─────────────────
+// Handed back RAW, as for PI plans: app/industryPlans.ts decodes them.
+
+/** The player's choices for a plan, as the server stores them. */
+export interface IndustryPlanChoices {
+  readonly buy: readonly number[];
+  /** productTypeID -> number of jobs. */
+  readonly jobs: Readonly<Record<string, number>>;
+  /** blueprintTypeID -> assumed efficiencies. */
+  readonly blueprints: Readonly<Record<string, { readonly materialEfficiency: number; readonly timeEfficiency: number }>>;
+}
+
+/** The fields an industry plan may carry on create or update. */
+export interface IndustryPlanFields {
+  readonly productTypeID?: number;
+  readonly runs?: number;
+  readonly choices?: IndustryPlanChoices;
+  readonly note?: string;
+  readonly status?: "active" | "done";
+}
+
+export async function listIndustryPlans(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/industry/plans", options)).plans ?? null;
+}
+
+export async function createIndustryPlan(fields: IndustryPlanFields, options: ApiOptions = {}): Promise<JsonValue> {
+  return (await postJson("/api/industry/plans", fields, options)).plan ?? null;
+}
+
+export async function updateIndustryPlan(
+  planID: string,
+  fields: IndustryPlanFields,
+  baseRev: number,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/industry/plans/${encodeURIComponent(planID)}`, { ...fields, baseRev }, options);
+  return data.plan ?? null;
+}
+
+export async function deleteIndustryPlan(planID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/industry/plans/${encodeURIComponent(planID)}/delete`, {}, options);
+}
+
 // ─── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies on a session of its own, so it keeps running when
 // this tab goes away. These calls are the remote control: start a saved

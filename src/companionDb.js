@@ -37,6 +37,21 @@ const MIGRATIONS = Object.freeze([
      created_at TEXT NOT NULL,
      updated_at TEXT NOT NULL
    )`,
+  // 2 -- saved Industry Manager plans (R109). Intent only, as for PI: what to
+  // build, how many runs, and the player's choices (what to buy instead of
+  // build, job splits, assumed blueprint terms) as canonical JSON. Stock,
+  // shortfalls and verdicts are re-derived on every read.
+  `CREATE TABLE industry_plans (
+     id              TEXT PRIMARY KEY,
+     product_type_id INTEGER NOT NULL CHECK (product_type_id > 0),
+     runs            INTEGER NOT NULL CHECK (runs > 0),
+     choices         TEXT NOT NULL DEFAULT '{}',
+     note            TEXT NOT NULL DEFAULT '',
+     status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done')),
+     rev             INTEGER NOT NULL DEFAULT 1,
+     created_at      TEXT NOT NULL,
+     updated_at      TEXT NOT NULL
+   )`,
 ]);
 
 /** Bring an open database up to the latest schema. Returns the version reached. */

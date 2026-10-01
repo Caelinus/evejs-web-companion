@@ -26,6 +26,7 @@ const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const { lazyCompanionDb } = require("./companionDb");
 const { createPiPlanStore } = require("./piPlanStore");
+const { createIndustryPlanStore } = require("./industryPlanStore");
 const industryRecipes = require("./industryRecipes");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
@@ -76,6 +77,21 @@ const PI_PLAN_STATUS = {
   PI_PLAN_REV_CONFLICT: 409,
   PI_PLAN_NOT_FOUND: 404,
 };
+// The same for a saved Industry Manager plan (src/industryPlanStore.js).
+const INDUSTRY_PLAN_STATUS = {
+  INDUSTRY_PLAN_INVALID: 400,
+  INDUSTRY_PLAN_LIMIT_REACHED: 409,
+  INDUSTRY_PLAN_REV_CONFLICT: 409,
+  INDUSTRY_PLAN_NOT_FOUND: 404,
+};
+function sendIndustryPlanError(res, error, next) {
+  const status = error && INDUSTRY_PLAN_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
 function sendPiPlanError(res, error, next) {
   const status = error && PI_PLAN_STATUS[error.code];
   if (status) {
@@ -117,6 +133,10 @@ const botScripts =
 // opened on the first request that needs it -- never eve.js's gamestore.
 const piPlans =
   options.piPlanStore || createPiPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
+// Saved Industry Manager plans (R109), in the same file. A second lazy handle
+// is a second connection to it, which WAL and the busy timeout are there for.
+const industryPlans =
+  options.industryPlanStore || createIndustryPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
 // Persistent-session handles (goal R2): webSessionID -> the opaque
 // bridgeSessionID the gateway minted, held server-side only. The browser
 // never sees the handle; it just gets its character/station state back.
@@ -20954,6 +20974,37 @@ app.post("/api/industry/recipe-closure", requireAuth, async (req, res, next) => 
     });
   } catch (error) {
     next(error);
+  }
+});
+
+// R109 slice 3 -- saved Industry Manager plans. Same four routes as PI plans.
+app.get("/api/industry/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plans: industryPlans.list() });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plan: industryPlans.create(req.body || {}) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans/:planID", requireAuth, (req, res, next) => {
+  try {
+    const { baseRev, ...fields } = req.body || {};
+    res.json({ ok: true, plan: industryPlans.update(req.params.planID, fields, baseRev) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans/:planID/delete", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, removed: industryPlans.remove(req.params.planID) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
   }
 });
 

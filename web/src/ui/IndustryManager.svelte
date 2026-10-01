@@ -1,24 +1,52 @@
 <script lang="ts">
-  // INDUSTRY MANAGER (R109 slice 2): choose a blueprint, owned by a pilot or
-  // any at all, and see everything it takes to build, down to raw materials.
-  // Option C of the 2026-10-01 mockups: the blueprints are browsed in the left
-  // column, and the right side is only the plan.
+  // INDUSTRY MANAGER (R109 slices 2 and 3): choose a blueprint, owned by a
+  // pilot or any at all, see everything it takes to build, and keep it as a
+  // plan. Option C of the 2026-10-01 mockups: the left column holds your
+  // plans and the blueprints to start one from, as two tabs; the right side is
+  // only the plan.
   //
   // ⚠ A GLOBAL WINDOW WITH NO STORE, like Planetary Industry. A plan spans
   // every signed-in pilot's blueprints, so it reads each pilot's own industry
   // read on that pilot's own session and takes neither store nor flow.
   //
-  // ⚠ NOTHING HERE SELECTS OR SIGNS IN A PILOT. The blueprint list is each
-  // already-online pilot's industry read (the same read their Industry panel
-  // makes); a pilot not online in this tab contributes nothing, and the picker
-  // says so rather than reaching for them.
+  // ⚠ NOTHING HERE SELECTS A PILOT. The blueprint list is each already-online
+  // pilot's industry read. Plans and recipes are asked through an online
+  // pilot's session, or, with nobody online, a throwaway sign-in of a hangar
+  // account (app/industryPlans.ts), exactly as PI's saved plans are.
   //
-  // ⚠ THE ARITHMETIC IS NOT HERE. bridge/industryChain.ts works the plan, once
-  // per type, with the server's own rounding; this file draws it.
+  // ⚠ A PLAN IS INTENT. The server keeps the product, the runs, the note and
+  // the choices; every number on screen is worked again by
+  // bridge/industryChain.ts each time, so a plan reopened next week is never
+  // a week stale.
   import { onMount, untrack } from "svelte";
   import type { Session } from "../app/sessions.ts";
   import type { ApiOptions } from "../app/api.ts";
   import { getIndustryRecipeClosure, searchIndustryBlueprints } from "../app/api.ts";
+  import { loadKnownCharacters } from "../app/knownCharacters.ts";
+  import {
+    askAsAnyone,
+    createIndustryPlan,
+    deleteIndustryPlan,
+    loadIndustryPlans,
+    NO_CHOICES,
+    resolverChoices,
+    updateIndustryPlan,
+    withBuying,
+    withIndustryPlan,
+    withoutIndustryPlan,
+    type IndustryAskers,
+    type IndustryPlanChoices,
+    type IndustryPlanFields,
+    type SavedIndustryPlan,
+  } from "../app/industryPlans.ts";
+  import {
+    loadIndustryPlanView,
+    pruneIndustryPlanView,
+    saveIndustryPlanView,
+    withFolds,
+    withOpenIndustryPlan,
+    type IndustryPlanView,
+  } from "../app/industryPlanView.ts";
   import {
     decodeBlueprintSearch,
     decodeRecipeClosure,
@@ -37,7 +65,6 @@
     ownedBlueprints,
     ownedTerms,
     ownedWords,
-    type OwnedBlueprint,
     type PilotBlueprintRead,
   } from "../bridge/industryOwned.ts";
   import { countWords } from "../bridge/piStock.ts";
@@ -45,15 +72,12 @@
 
   let { sessions = [] }: { sessions?: readonly Session[] } = $props();
 
-  /** What the plan is built from. */
-  interface Target {
-    readonly productTypeID: number;
-    readonly blueprintName: string | null;
-    readonly productName: string | null;
-  }
-
-  // Sessions already asked for their blueprints, so a pilot coming online is
-  // read once and not on every store change after.
+  // The left column's two views (option C, 2026-10-01): your saved plans, or
+  // the blueprints to start one from. The right side is only ever the plan.
+  type LeftTab = "plans" | "blueprints";
+  let leftTab = $state<LeftTab>("plans");
+  // Sessions already asked for their blueprints, so a pilot coming
+  // online is read once and not on every store change after.
   const askedSessions = new Set<string>();
 
   // Bumped whenever a pilot's store moves, so the owned list re-reads.
@@ -69,20 +93,31 @@
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let searchSerial = 0;
 
-  // The chosen target and its recipe book.
-  let target = $state<Target | null>(null);
+  // Saved plans, and the one open. `openPlan === null` with a target set is a
+  // new plan not saved yet.
+  let plans = $state<SavedIndustryPlan[]>([]);
+  let plansLoaded = $state(false);
+  let plansError = $state<string | null>(null);
+  let openPlanID = $state<string | null>(null);
+  let planError = $state<string | null>(null);
+  let planSaving = $state(false);
+  let view = $state<IndustryPlanView>(loadIndustryPlanView());
+
+  // What is on the right: a product, runs, choices and a note. For a saved
+  // plan these mirror it and every change is saved; for a new one they are a
+  // draft until Save.
+  let productTypeID = $state<number | null>(null);
+  let draftName = $state<string | null>(null);
   let runsText = $state("1");
-  let book = $state<IndustryRecipeBook | null>(null);
-  let bookError = $state<string | null>(null);
-  let loadingBook = $state(false);
-  const books = new Map<number, IndustryRecipeBook>();
+  let choices = $state<IndustryPlanChoices>(NO_CHOICES);
+  let noteText = $state("");
 
-  // The player's choices for this plan: buy instead of build, per type.
-  let buying = $state<Set<number>>(new Set());
-  // Which tree nodes are folded or unfolded by hand; the rest follow depth.
-  let treeOverride = $state<Map<string, boolean>>(new Map());
+  // Recipe books, one per product, read once per open window.
+  let books = $state<Map<number, IndustryRecipeBook>>(new Map());
+  let bookErrors = $state<Map<number, string>>(new Map());
+  const booksAsked = new Set<number>();
 
-  /** Pilots online in this tab, each with its own session's request options. */
+  /** Pilots online in this tab, each with its own session. */
   function onlineSessions(): { session: Session; characterID: number; characterName: string }[] {
     const online: { session: Session; characterID: number; characterName: string }[] = [];
     for (const session of sessions) {
@@ -94,14 +129,16 @@
     return online;
   }
 
-  /**
-   * Request options for the static reads. Any online pilot's session will do:
-   * the answer is the same for everyone. With none online, the tab's own
-   * sign-in is used.
-   */
-  function staticOptions(): ApiOptions {
-    const first = onlineSessions()[0];
-    return first ? first.session.flow.requestOptions() : {};
+  /** Who may be asked for plans and recipes: online pilots, then hangar accounts. */
+  function askers(): IndustryAskers {
+    return {
+      online: onlineSessions().map(({ session }) => session.flow.requestOptions()),
+      accounts: loadKnownCharacters().map((pilot) => pilot.accountName),
+    };
+  }
+
+  function ask<T>(call: (options: ApiOptions) => Promise<T>): Promise<T> {
+    return askAsAnyone(askers(), call);
   }
 
   const reads = $derived.by((): PilotBlueprintRead[] => {
@@ -119,6 +156,31 @@
   });
   const owned = $derived(ownedBlueprints(reads));
   const terms = $derived(ownedTerms(owned));
+
+  const openPlan = $derived(plans.find((entry) => entry.planID === openPlanID) ?? null);
+  const activePlans = $derived(plans.filter((entry) => entry.status === "active"));
+  const donePlans = $derived(plans.filter((entry) => entry.status === "done"));
+
+  const runs = $derived.by((): number | null => {
+    const value = Number(runsText.trim());
+    return Number.isSafeInteger(value) && value > 0 && value <= 1_000_000 ? value : null;
+  });
+  const book = $derived(productTypeID === null ? null : books.get(productTypeID) ?? null);
+  const bookError = $derived(productTypeID === null ? null : bookErrors.get(productTypeID) ?? null);
+
+  const chain = $derived.by(() => {
+    if (productTypeID === null || book === null || runs === null) {
+      return null;
+    }
+    return resolveIndustryChain({ book, productTypeID, runs, choices: resolverChoices(choices, terms) });
+  });
+  const toBuy = $derived(chain ? shortLines(chain).filter((line) => line.obtain === "buy") : []);
+  const jobCount = $derived(
+    chain ? [...chain.lines.values()].reduce((sum, line) => sum + line.jobRuns.length, 0) : 0,
+  );
+  const productName = $derived(productTypeID === null ? null : nameFor(productTypeID) ?? draftName);
+  const folds = $derived(openPlanID === null ? {} : view.folds[openPlanID] ?? {});
+  let draftFolds = $state<Record<string, boolean>>({});
   /** One row per owned blueprint, however many copies (bridge/industryOwned.ts). */
   const ownedGroups = $derived(groupOwned(owned));
   /** Those whose name holds the filter text. */
@@ -130,42 +192,13 @@
       ? ownedGroups
       : ownedGroups.filter((group) => (group.blueprintName ?? "").replace(/ Blueprint$/, "").toLowerCase().includes(needle));
   });
-
-  const runs = $derived.by((): number | null => {
-    const value = Number(runsText.trim());
-    return Number.isSafeInteger(value) && value > 0 && value <= 1_000_000 ? value : null;
-  });
-
-  const chain = $derived.by(() => {
-    if (target === null || book === null || runs === null) {
-      return null;
-    }
-    const obtain = new Map<number, "build" | "buy">();
-    for (const typeID of buying) {
-      obtain.set(typeID, "buy");
-    }
-    return resolveIndustryChain({
-      book,
-      productTypeID: target.productTypeID,
-      runs,
-      choices: { obtain, blueprints: terms },
-    });
-  });
-  const toBuy = $derived(chain ? shortLines(chain).filter((line) => line.obtain === "buy") : []);
-  const jobCount = $derived(
-    chain ? [...chain.lines.values()].reduce((sum, line) => sum + line.jobRuns.length, 0) : 0,
-  );
-  const targetName = $derived(
-    (target && book?.types.get(target.productTypeID)?.name) ?? target?.productName ?? target?.blueprintName ?? null,
-  );
-
   /**
    * The plan's terms in one line: which blueprint it is planned with, at what
    * efficiencies, held by whom. The facility is not counted yet, and says so.
    */
   const termsWords = $derived.by((): string | null => {
-    if (!chain || target === null) return null;
-    const top = chain.lines.get(target.productTypeID)?.blueprint;
+    if (!chain || productTypeID === null) return null;
+    const top = chain.lines.get(productTypeID)?.blueprint;
     if (!top) return null;
     const efficiencies = `material ${top.materialEfficiency}%, time ${top.timeEfficiency}%`;
     if (!top.assumed) {
@@ -175,9 +208,24 @@
     return top.invention ? `Invented copy - ${efficiencies}` : `No owned blueprint - assumed ${efficiencies}`;
   });
 
-  function nameOf(line: IndustryLine): string {
+  /** A product's name from whichever recipe book has it. */
+  function nameFor(typeID: number): string | null {
+    for (const candidate of books.values()) {
+      const name = candidate.types.get(typeID)?.name;
+      if (name) return name;
+    }
+    return null;
+  }
+
+  function lineName(line: IndustryLine): string {
     return line.name ?? "An unnamed item";
   }
+
+  function planTitle(entry: SavedIndustryPlan): string {
+    return nameFor(entry.productTypeID) ?? "A plan";
+  }
+
+  // --- reads ------------------------------------------------------------------
 
   async function refreshOwned(): Promise<void> {
     const online = onlineSessions();
@@ -195,58 +243,201 @@
     }
   }
 
-  async function loadBook(productTypeID: number): Promise<void> {
-    const cached = books.get(productTypeID);
-    if (cached) {
-      book = cached;
-      bookError = null;
+  async function loadBook(typeID: number): Promise<void> {
+    if (booksAsked.has(typeID)) {
       return;
     }
-    loadingBook = true;
-    bookError = null;
-    book = null;
+    booksAsked.add(typeID);
     try {
-      const decoded = decodeRecipeClosure(await getIndustryRecipeClosure([productTypeID], staticOptions()));
+      const decoded = decodeRecipeClosure(await ask((options) => getIndustryRecipeClosure([typeID], options)));
       if (!decoded.readable) {
-        bookError = "The recipes could not be read just now.";
-        return;
+        throw new Error("unreadable");
       }
-      books.set(productTypeID, decoded);
-      if (target?.productTypeID === productTypeID) {
-        book = decoded;
-      }
+      books = new Map(books).set(typeID, decoded);
     } catch {
-      bookError = "The recipes could not be read just now.";
-    } finally {
-      loadingBook = false;
+      // Asked again on the next open of this product.
+      booksAsked.delete(typeID);
+      bookErrors = new Map(bookErrors).set(typeID, "The recipes could not be read just now.");
     }
   }
 
-  function choose(next: Target, defaultRuns: number): void {
-    target = next;
+  async function loadPlans(): Promise<void> {
+    plansError = null;
+    try {
+      plans = await loadIndustryPlans(askers());
+      plansLoaded = true;
+      view = pruneIndustryPlanView(view, plans.map((entry) => entry.planID));
+      saveIndustryPlanView(view);
+      for (const entry of plans) {
+        void loadBook(entry.productTypeID);
+      }
+      if (plans.length === 0 && productTypeID === null) leftTab = "blueprints";
+      const remembered = plans.find((entry) => entry.planID === view.openID);
+      if (remembered && openPlanID === null && productTypeID === null) {
+        showPlan(remembered);
+      }
+    } catch (error) {
+      plansError = error instanceof Error ? error.message : "Your saved plans could not be read just now.";
+    }
+  }
+
+  // --- the open plan ---------------------------------------------------------
+
+  function showPlan(entry: SavedIndustryPlan | null): void {
+    planError = null;
+    draftFolds = {};
+    openPlanID = entry?.planID ?? null;
+    view = withOpenIndustryPlan(view, openPlanID);
+    saveIndustryPlanView(view);
+    if (entry === null) {
+      productTypeID = null;
+      draftName = null;
+      runsText = "1";
+      choices = NO_CHOICES;
+      noteText = "";
+      return;
+    }
+    productTypeID = entry.productTypeID;
+    draftName = null;
+    runsText = String(entry.runs);
+    choices = entry.choices;
+    noteText = entry.note;
+    clearBookError(entry.productTypeID);
+    void loadBook(entry.productTypeID);
+  }
+
+  /** Forget a failed read so the product is asked for again. */
+  function clearBookError(typeID: number): void {
+    if (bookErrors.has(typeID)) {
+      const next = new Map(bookErrors);
+      next.delete(typeID);
+      bookErrors = next;
+    }
+  }
+
+  /** Start a new, unsaved plan for a product. */
+  function draft(typeID: number, name: string | null, defaultRuns: number): void {
+    showPlan(null);
+    productTypeID = typeID;
+    draftName = name;
     runsText = String(defaultRuns);
-    buying = new Set();
-    treeOverride = new Map();
-    void loadBook(next.productTypeID);
+    clearBookError(typeID);
+    void loadBook(typeID);
   }
 
   function chooseOwned(itemID: string): void {
     const blueprint = owned.find((candidate) => String(candidate.itemID) === itemID);
-    if (!blueprint) {
-      return;
+    if (blueprint) {
+      draft(blueprint.productTypeID, blueprint.blueprintName, blueprint.runs ?? 1);
     }
-    choose(
-      { productTypeID: blueprint.productTypeID, blueprintName: blueprint.blueprintName, productName: null },
-      blueprint.runs ?? 1,
-    );
   }
 
   function chooseMatch(match: IndustryBlueprintMatch): void {
-    choose(
-      { productTypeID: match.productTypeID, blueprintName: match.blueprintName, productName: match.productName },
-      1,
-    );
+    draft(match.productTypeID, match.productName ?? match.blueprintName, 1);
   }
+
+  // Saves run one after another, each on the newest revision, so quick clicks
+  // never race each other into a conflict.
+  let saveChain: Promise<void> = Promise.resolve();
+
+  function save(fields: IndustryPlanFields): Promise<void> {
+    const planID = openPlanID;
+    if (planID === null) {
+      return Promise.resolve();
+    }
+    saveChain = saveChain.then(async () => {
+      const current = plans.find((entry) => entry.planID === planID);
+      if (!current) return;
+      planSaving = true;
+      try {
+        plans = withIndustryPlan(plans, await updateIndustryPlan(askers(), current, fields));
+        planError = null;
+      } catch (error) {
+        planError = error instanceof Error ? error.message : "That change could not be saved.";
+        // A conflict or a refusal: take the server's copy as it stands.
+        await loadPlans();
+        const fresh = plans.find((entry) => entry.planID === planID);
+        if (fresh && openPlanID === planID) {
+          runsText = String(fresh.runs);
+          choices = fresh.choices;
+          noteText = fresh.note;
+        }
+      } finally {
+        planSaving = false;
+      }
+    });
+    return saveChain;
+  }
+
+  async function saveNew(): Promise<void> {
+    if (productTypeID === null || runs === null) {
+      planError = "Enter a number of runs.";
+      return;
+    }
+    planSaving = true;
+    planError = null;
+    try {
+      const created = await createIndustryPlan(askers(), {
+        productTypeID,
+        runs,
+        choices,
+        note: noteText,
+      });
+      plans = withIndustryPlan(plans, created);
+      const keptFolds = draftFolds;
+      showPlan(created);
+      if (Object.keys(keptFolds).length > 0) {
+        view = withFolds(view, created.planID, keptFolds);
+        saveIndustryPlanView(view);
+      }
+    } catch (error) {
+      planError = error instanceof Error ? error.message : "The plan could not be saved.";
+    } finally {
+      planSaving = false;
+    }
+  }
+
+  function commitRuns(): void {
+    if (runs === null) {
+      planError = "Enter a number of runs.";
+      return;
+    }
+    if (openPlan && openPlan.runs !== runs) {
+      void save({ runs });
+    }
+  }
+
+  function commitNote(): void {
+    if (openPlan && openPlan.note !== noteText.trim()) {
+      void save({ note: noteText });
+    }
+  }
+
+  function setBuying(typeID: number, buy: boolean): void {
+    choices = withBuying(choices, typeID, buy);
+    if (openPlan) {
+      void save({ choices });
+    }
+  }
+
+  async function setStatus(status: "active" | "done"): Promise<void> {
+    await save({ status });
+  }
+
+  async function removePlan(entry: SavedIndustryPlan): Promise<void> {
+    planSaving = true;
+    try {
+      await deleteIndustryPlan(askers(), entry.planID);
+      plans = withoutIndustryPlan(plans, entry.planID);
+      showPlan(null);
+    } catch (error) {
+      planError = error instanceof Error ? error.message : "The plan could not be deleted.";
+    } finally {
+      planSaving = false;
+    }
+  }
+
+  // --- the search -------------------------------------------------------------
 
   function onQuery(): void {
     if (searchTimer !== null) {
@@ -267,7 +458,7 @@
     searching = true;
     searchError = null;
     try {
-      const result = decodeBlueprintSearch(await searchIndustryBlueprints(text, staticOptions()));
+      const result = decodeBlueprintSearch(await ask((options) => searchIndustryBlueprints(text, options)));
       if (serial !== searchSerial) {
         return;
       }
@@ -284,36 +475,28 @@
     }
   }
 
-  function setBuying(typeID: number, buy: boolean): void {
-    const next = new Set(buying);
-    if (buy) {
-      next.add(typeID);
-    } else {
-      next.delete(typeID);
-    }
-    buying = next;
-  }
+  // --- the tree ---------------------------------------------------------------
 
   /** Open by default to two levels below the target; deeper folds. */
   function isOpen(node: IndustryNode): boolean {
-    const forced = treeOverride.get(node.key);
-    return forced ?? node.key.split(">").length <= 2;
+    const hand = openPlanID === null ? draftFolds[node.key] : folds[node.key];
+    return hand ?? node.key.split(">").length <= 2;
   }
 
   function toggle(node: IndustryNode): void {
-    const next = new Map(treeOverride);
-    next.set(node.key, !isOpen(node));
-    treeOverride = next;
-  }
-
-  function obtainWord(line: IndustryLine): string {
-    return line.obtain === "react" ? "react" : line.obtain;
+    const next = { ...(openPlanID === null ? draftFolds : folds), [node.key]: !isOpen(node) };
+    if (openPlanID === null) {
+      draftFolds = next;
+      return;
+    }
+    view = withFolds(view, openPlanID, next);
+    saveIndustryPlanView(view);
   }
 
   /**
-   * Read the blueprints of every online pilot not read yet. Runs when the
-   * window opens and whenever a pilot comes online in this tab: a pilot
-   * signed in after the window opened used to be listed as holding no
+   * Read the blueprints of every online pilot not read yet. Runs
+   * when the window opens and whenever a pilot comes online in this tab: a
+   * pilot signed in after the window opened used to be listed as holding no
    * blueprints, because nothing had read them (seen live, 2026-10-01).
    */
   function readNewcomers(): void {
@@ -354,6 +537,7 @@
   });
 
   onMount(() => {
+    void loadPlans();
     readNewcomers();
     return () => {
       if (searchTimer !== null) {
@@ -367,98 +551,169 @@
   <header class="panel-head">
     <h2 class="panel-title">Industry Manager</h2>
     <span class="controls">
-      <button type="button" disabled={refreshing || onlineCount === 0} onclick={() => void refreshOwned()}>
+      <button
+        type="button"
+        disabled={refreshing}
+        onclick={() => {
+          void refreshOwned();
+          void loadPlans();
+        }}
+      >
         {refreshing ? "Looking..." : "Refresh"}
       </button>
     </span>
   </header>
 
   <div class="im-body">
-    <!-- THE LEFT COLUMN: the blueprints to plan from. -->
-    <aside class="im-side" aria-label="Blueprints">
-      <input
-        type="search"
-        class="im-filter"
-        aria-label="Filter blueprints"
-        placeholder="Filter, or search all"
-        bind:value={query}
-        oninput={onQuery}
-      />
-      {#if onlineCount === 0}
-        <p class="im-note">Sign a pilot in here to list their blueprints.</p>
-      {:else if owned.length === 0}
-        <p class="im-note">{unreadOnline || refreshing ? "Looking at your blueprints..." : "None of your signed-in pilots holds a blueprint."}</p>
-      {:else if ownedShown.length === 0}
-        <p class="im-note">None of your blueprints is called that.</p>
-      {:else}
-        <h4 class="im-section-title">Yours</h4>
-        <ul class="im-list" aria-label="Your blueprints">
-          {#each ownedShown as group (group.blueprintTypeID)}
-            {@const best = group.copies[0]!}
-            <li>
-              <button
-                type="button"
-                class="im-item"
-                class:on={target?.productTypeID === group.productTypeID}
-                onclick={() => chooseOwned(String(best.itemID))}
-              >
-                <TypeIcon typeID={group.productTypeID} name={group.blueprintName ?? "An unnamed blueprint"} size="md" />
-                <span class="im-item-text">
-                  <span class="im-item-name">{(group.blueprintName ?? "An unnamed blueprint").replace(/ Blueprint$/, "")}</span>
-                  <span class="im-item-sub">{groupWords(group, best)}</span>
-                </span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
+    <!-- THE LEFT COLUMN: your plans, or the blueprints to start one from. -->
+    <aside class="im-side" aria-label="Plans and blueprints">
+      <div class="im-tabs" role="tablist" aria-label="Show">
+        <button type="button" role="tab" class="im-tab" class:on={leftTab === "plans"} aria-selected={leftTab === "plans"} onclick={() => (leftTab = "plans")}>
+          Plans{#if activePlans.length > 0}<span class="im-count-badge">{activePlans.length}</span>{/if}
+        </button>
+        <button type="button" role="tab" class="im-tab" class:on={leftTab === "blueprints"} aria-selected={leftTab === "blueprints"} onclick={() => (leftTab = "blueprints")}>
+          Blueprints{#if ownedGroups.length > 0}<span class="im-count-badge">{ownedGroups.length}</span>{/if}
+        </button>
+      </div>
 
-      {#if query.trim().length < 2}
-        <p class="im-note">Type two letters to search every blueprint too.</p>
-      {:else}
-        <h4 class="im-section-title">All blueprints</h4>
-        {#if searchError}
-          <p class="im-error" role="alert">{searchError}</p>
-        {:else if searching && matches.length === 0}
-          <p class="im-note">Looking...</p>
-        {:else if matches.length === 0}
-          <p class="im-note">No blueprint is called that.</p>
+      {#if leftTab === "plans"}
+        {#snippet planCard(entry: SavedIndustryPlan)}
+          <li>
+            <button
+              type="button"
+              class="im-item"
+              class:on={entry.planID === openPlanID}
+              aria-current={entry.planID === openPlanID ? "true" : undefined}
+              onclick={() => showPlan(entry)}
+            >
+              <TypeIcon typeID={entry.productTypeID} name={planTitle(entry)} size="md" />
+              <span class="im-item-text">
+                <span class="im-item-name">{planTitle(entry)}</span>
+                <span class="im-item-sub">
+                  {countWords(entry.runs)} {entry.runs === 1 ? "run" : "runs"}{entry.note ? ` - ${entry.note}` : ""}
+                </span>
+              </span>
+            </button>
+          </li>
+        {/snippet}
+        <button
+          type="button"
+          class="im-new"
+          onclick={() => {
+            showPlan(null);
+            leftTab = "blueprints";
+          }}
+        >+ New plan</button>
+        {#if plansError}
+          <p class="im-error" role="alert">{plansError}</p>
+        {:else if !plansLoaded}
+          <p class="im-note">Reading your saved plans...</p>
+        {:else if activePlans.length === 0}
+          <p class="im-note">{donePlans.length > 0 ? "No active plans." : "No plans yet."}</p>
         {:else}
-          <ul class="im-list" aria-label="All blueprints">
-            {#each matches as match (match.blueprintTypeID)}
+          <ul class="im-list">
+            {#each activePlans as entry (entry.planID)}
+              {@render planCard(entry)}
+            {/each}
+          </ul>
+        {/if}
+        {#if donePlans.length > 0}
+          <h4 class="im-section-title">Done</h4>
+          <ul class="im-list">
+            {#each donePlans as entry (entry.planID)}
+              {@render planCard(entry)}
+            {/each}
+          </ul>
+        {/if}
+      {:else}
+        <input
+          type="search"
+          class="im-filter"
+          aria-label="Filter blueprints"
+          placeholder="Filter, or search all"
+          bind:value={query}
+          oninput={onQuery}
+        />
+        {#if onlineCount === 0}
+          <p class="im-note">Sign a pilot in here to list their blueprints.</p>
+        {:else if owned.length === 0}
+          <p class="im-note">{unreadOnline || refreshing ? "Looking at your blueprints..." : "None of your signed-in pilots holds a blueprint."}</p>
+        {:else if ownedShown.length === 0}
+          <p class="im-note">None of your blueprints is called that.</p>
+        {:else}
+          <h4 class="im-section-title">Yours</h4>
+          <ul class="im-list" aria-label="Your blueprints">
+            {#each ownedShown as group (group.blueprintTypeID)}
+              {@const best = group.copies[0]!}
               <li>
                 <button
                   type="button"
                   class="im-item"
-                  class:on={target?.productTypeID === match.productTypeID}
-                  onclick={() => chooseMatch(match)}
+                  class:on={openPlan === null && productTypeID === group.productTypeID}
+                  onclick={() => chooseOwned(String(best.itemID))}
                 >
-                  <TypeIcon typeID={match.productTypeID} name={match.productName ?? match.blueprintName} size="md" />
+                  <TypeIcon typeID={group.productTypeID} name={group.blueprintName ?? "An unnamed blueprint"} size="md" />
                   <span class="im-item-text">
-                    <span class="im-item-name">{match.blueprintName.replace(/ (Blueprint|Reaction Formula)$/, "")}</span>
-                    <span class="im-item-sub">{match.activity === "reaction" ? "Reaction formula" : "Blueprint"}</span>
+                    <span class="im-item-name">{(group.blueprintName ?? "An unnamed blueprint").replace(/ Blueprint$/, "")}</span>
+                    <span class="im-item-sub">{groupWords(group, best)}</span>
                   </span>
                 </button>
               </li>
             {/each}
           </ul>
-          {#if searchTotal > matches.length}
-            <p class="im-note">Showing {matches.length} of {countWords(searchTotal)}. Type more to narrow it.</p>
+        {/if}
+
+        {#if query.trim().length < 2}
+          <p class="im-note">Type two letters to search every blueprint too.</p>
+        {:else}
+          <h4 class="im-section-title">All blueprints</h4>
+          {#if searchError}
+            <p class="im-error" role="alert">{searchError}</p>
+          {:else if searching && matches.length === 0}
+            <p class="im-note">Looking...</p>
+          {:else if matches.length === 0}
+            <p class="im-note">No blueprint is called that.</p>
+          {:else}
+            <ul class="im-list" aria-label="All blueprints">
+              {#each matches as match (match.blueprintTypeID)}
+                <li>
+                  <button
+                    type="button"
+                    class="im-item"
+                    class:on={openPlan === null && productTypeID === match.productTypeID}
+                    onclick={() => chooseMatch(match)}
+                  >
+                    <TypeIcon typeID={match.productTypeID} name={match.productName ?? match.blueprintName} size="md" />
+                    <span class="im-item-text">
+                      <span class="im-item-name">{match.blueprintName.replace(/ (Blueprint|Reaction Formula)$/, "")}</span>
+                      <span class="im-item-sub">{match.activity === "reaction" ? "Reaction formula" : "Blueprint"}</span>
+                    </span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+            {#if searchTotal > matches.length}
+              <p class="im-note">Showing {matches.length} of {countWords(searchTotal)}. Type more to narrow it.</p>
+            {/if}
           {/if}
         {/if}
       {/if}
     </aside>
 
     <div class="im-plan">
-      {#if target === null}
+      {#if productTypeID === null}
         <p class="im-empty">Choose a blueprint and this will work out everything it takes to build.</p>
       {:else}
         <header class="im-head">
           <span class="im-head-icon">
-            <TypeIcon typeID={target.productTypeID} name={targetName ?? "An unnamed item"} size="lg" />
+            <TypeIcon typeID={productTypeID} name={productName ?? "An unnamed item"} size="lg" />
           </span>
           <div class="im-head-title">
-            <h3><span>{targetName ?? "An unnamed item"}</span></h3>
+            <h3>
+              <span>{productName ?? "An unnamed item"}</span>
+              {#if openPlan?.status === "done"}<span class="im-chip">done</span>{/if}
+              {#if openPlan === null}<span class="im-chip">not saved</span>{/if}
+            </h3>
             {#if termsWords}
               <p class="im-terms">{termsWords} <span class="im-terms-quiet">- no facility bonus counted</span></p>
             {/if}
@@ -466,22 +721,48 @@
           <div class="im-head-actions">
             <label class="im-runs">
               <span>Runs</span>
-              <input inputmode="numeric" bind:value={runsText} aria-invalid={runs === null} />
+              <input
+                inputmode="numeric"
+                bind:value={runsText}
+                aria-invalid={runs === null}
+                oninput={() => (planError = null)}
+                onchange={commitRuns}
+                onkeydown={(event) => event.key === "Enter" && commitRuns()}
+              />
             </label>
+            {#if openPlan === null}
+              <button type="button" class="primary" disabled={planSaving || runs === null} onclick={() => void saveNew()}>Save plan</button>
+            {:else if openPlan.status === "active"}
+              <button type="button" disabled={planSaving} onclick={() => void setStatus("done")}>Mark done</button>
+            {:else}
+              <button type="button" disabled={planSaving} onclick={() => void setStatus("active")}>Reopen</button>
+              <button type="button" class="danger" disabled={planSaving} onclick={() => openPlan && void removePlan(openPlan)}>Delete</button>
+            {/if}
           </div>
         </header>
+        <input
+          class="im-note-input"
+          aria-label="Note"
+          placeholder="Add a note"
+          maxlength="500"
+          bind:value={noteText}
+          onchange={commitNote}
+        />
+        {#if planError}
+          <p class="im-error" role="alert">{planError}</p>
+        {/if}
 
         {#if runs === null}
           <p class="im-error" role="alert">Enter a number of runs.</p>
-        {:else if loadingBook}
-          <p class="im-note">Working out the recipes...</p>
         {:else if bookError}
           <p class="im-error" role="alert">{bookError}</p>
-        {:else if book?.capped}
+        {:else if book === null}
+          <p class="im-note">Working out the recipes...</p>
+        {:else if book.capped}
           <p class="im-error" role="alert">This tree is too large to show in full.</p>
         {:else if chain}
           <p class="im-verdict">
-            {countWords(chain.root.quantity)} {targetName ?? "items"}: {countWords(jobCount)} {jobCount === 1 ? "job" : "jobs"},
+            {countWords(chain.root.quantity)} {productName ?? "items"}: {countWords(jobCount)} {jobCount === 1 ? "job" : "jobs"},
             {countWords(toBuy.length)} {toBuy.length === 1 ? "thing" : "things"} to buy.
           </p>
 
@@ -491,8 +772,8 @@
               {#each toBuy as line (line.typeID)}
                 <li class="im-buy-row">
                   <span class="im-buy-name">
-                    <TypeIcon typeID={line.typeID} name={nameOf(line)} />
-                    {nameOf(line)}
+                    <TypeIcon typeID={line.typeID} name={lineName(line)} />
+                    {lineName(line)}
                     {#if line.planetary}<span class="im-chip">PI</span>{/if}
                   </span>
                   <span class="im-buy-count">{countWords(line.short)}</span>
@@ -511,14 +792,14 @@
                 {#if node.children.length > 0}
                   <button type="button" class="im-node-name" onclick={() => toggle(node)}>
                     <span class="im-chevron" aria-hidden="true">{open ? "v" : ">"}</span>
-                    <TypeIcon typeID={node.typeID} name={nameOf(line)} />
-                    <span>{nameOf(line)}</span>
+                    <TypeIcon typeID={node.typeID} name={lineName(line)} />
+                    <span>{lineName(line)}</span>
                   </button>
                 {:else}
                   <span class="im-node-name">
                     <span class="im-chevron" aria-hidden="true"></span>
-                    <TypeIcon typeID={node.typeID} name={nameOf(line)} />
-                    <span>{nameOf(line)}</span>
+                    <TypeIcon typeID={node.typeID} name={lineName(line)} />
+                    <span>{lineName(line)}</span>
                   </span>
                 {/if}
                 <span class="im-tags">
@@ -552,9 +833,9 @@
                     aria-pressed={line.obtain === "buy"}
                     title={line.obtain === "buy" ? "Build this instead of buying it" : "Buy this instead of building it"}
                     onclick={() => setBuying(node.typeID, line.obtain !== "buy")}
-                  >{obtainWord(line)}</button>
+                  >{line.obtain}</button>
                 {:else}
-                  <span class="im-obtain-fixed">{obtainWord(line)}</span>
+                  <span class="im-obtain-fixed">{line.obtain}</span>
                 {/if}
               </div>
               {#if open}
@@ -597,7 +878,7 @@
     display: grid;
     align-content: start;
     gap: 0.5rem;
-    padding: 0.6rem;
+    padding: 0 0.6rem 0.6rem;
   }
   /* ⚠ ITS OWN CONTAINER. The rows inside fold to their narrow layout by the
    * width of THIS pane, not the window: beside the plan list a 700px window
@@ -611,6 +892,46 @@
     container-type: inline-size;
   }
 
+  /* The left column's two views, as a tab strip across its top. */
+  .im-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    margin: 0 -0.6rem;
+    border-bottom: 1px solid var(--color-line);
+  }
+  /* ⚠ NOT `class:active` — a bare `button.active` is a filled accent control
+   * in the app's component layer. */
+  .im-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 40px;
+    padding: 0 0.6rem;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--color-muted);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .im-tab.on {
+    border-bottom-color: var(--color-accent);
+    color: var(--color-text-bright);
+  }
+  .im-count-badge {
+    min-width: 1.3rem;
+    padding: 0 0.3rem;
+    border: 1px solid var(--color-line-strong);
+    color: var(--color-cell);
+    font-size: 11px;
+    text-align: center;
+  }
+  .im-new {
+    justify-self: start;
+    min-height: 32px;
+    padding: 0 0.7rem;
+  }
   .im-filter {
     width: 100%;
     min-height: 36px;
@@ -749,6 +1070,23 @@
   }
   .im-head-actions button {
     min-height: 34px;
+  }
+  /* The note: a quiet line under the header that reads as text until used. */
+  .im-note-input {
+    width: 100%;
+    min-height: 30px;
+    padding: 0 0.4rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom-color: var(--color-row-line);
+    color: var(--color-muted);
+    font-size: 0.85rem;
+  }
+  .im-note-input:hover,
+  .im-note-input:focus {
+    border-color: var(--color-line-strong);
+    background: var(--color-field);
+    color: var(--color-text);
   }
   .im-runs {
     display: flex;

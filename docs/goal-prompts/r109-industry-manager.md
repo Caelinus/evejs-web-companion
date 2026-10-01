@@ -246,15 +246,21 @@ Done when any published blueprint renders a correct tree, and toggling one node 
 
 ### Slice 3 — saved plans
 
-- Migration: `industry_plans (id, product_type_id, blueprint_type_id, runs, choices_json,
-  note, status, rev, created_at, updated_at)`.
-- `choices_json` holds the per-type build/buy, assumed ME/TE, job splits and facility
-  per node type. It is **intent only**, and nothing computed is stored.
+- Migration 2: `industry_plans (id, product_type_id, runs, choices, note, status, rev,
+  created_at, updated_at)`. The product alone names the recipe (one recipe per product),
+  so no blueprint column is kept.
+- `choices` is canonical JSON: `{ buy: [typeID], jobs: { typeID: n }, blueprints:
+  { blueprintTypeID: { materialEfficiency, timeEfficiency } } }`. That is what to buy instead
+  of build, job splits, and the efficiencies assumed for a blueprint nobody owns. It is
+  **intent only**, and nothing computed is stored. A blueprint a pilot owns is always
+  planned at its live terms, which override a stored assumption.
 - `src/industryPlanStore.js` copies `piPlanStore.js`: limits, `rev` conflict, and the
   shape-only guard. Routes `/api/industry/plans...` go with the error map.
-- Client: `industryPlans.ts` + `industryPlanView.ts` (the open plan and unfolded nodes,
-  in localStorage).
-- Plan list with live standing (covered / N missing / N blocked) and active/done.
+- Client: `industryPlans.ts` + `industryPlanView.ts` (the open plan and hand-made folds,
+  in localStorage). Calls go through an online pilot's own session, or with nobody
+  online through PI's throwaway hangar sign-in.
+- The plan list shows active, then done. A plan's **standing** (covered / N missing)
+  needs stock, so it arrives with slice 4.
 
 Done when a plan survives a reload and a second tab's edit is refused, not lost.
 
