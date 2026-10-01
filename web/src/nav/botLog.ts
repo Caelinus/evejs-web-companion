@@ -110,6 +110,7 @@ export type BotLogDraft = Omit<BotLogEntry, "characterID">;
  */
 export function describeAction(action: ScriptAction): string {
   switch (action.kind) {
+    case "maintainMiningSupport": return action.relocating ? "settle mining support for relocation" : "maintain mining support";
     case "stopMiningSupportOperation": return "request operation Stop after support loss";
     case "wait":
       return "wait";

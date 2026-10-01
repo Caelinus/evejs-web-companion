@@ -4,7 +4,7 @@
 // the ordinary flow/runner performs settlement, travel and freight delivery.
 function createMiningOperationStopper({ operations, botHost }) {
   const pending = new Map();
-  function stop(definition) {
+  function stop(definition, { cause = "manual" } = {}) {
     const id = definition.operationID;
     if (pending.has(id)) return pending.get(id);
     if (operations.runtimeFor(id)?.state === "STOPPED") return Promise.resolve([]);
@@ -13,7 +13,8 @@ function createMiningOperationStopper({ operations, botHost }) {
     operations.beginStop(id);
     const task = (async () => {
       const parking = definition.policies?.parking ?? { mode: "STAY_IN_PLACE" };
-      const returning = parking.mode !== "STAY_IN_PLACE";
+      const deadline = cause === "deadline";
+      const returning = deadline || parking.mode !== "STAY_IN_PLACE";
       const hosted = botHost.listAll().filter(bot => bot.operationID === id && bot.endedAt === null);
       const settled = [];
       const failures = [];
@@ -46,12 +47,14 @@ function createMiningOperationStopper({ operations, botHost }) {
           fail(bot.characterID, { code: "PARKING_PREPARE_FAILED", message: error.message });
         }
       }));
-      if (returning && settled.length === hosted.length) operations.releaseStopTargets(id);
+      if (returning && failures.length === 0 && settled.length === hosted.length) operations.releaseStopTargets(id);
       await Promise.all((returning ? settled : hosted).map(async bot => {
         try {
           if (returning) {
             operations.memberParking(id, bot.characterID, "PARKING");
-            const result = await botHost.parkOperationMember(bot.botID, bot.accountID, id, parking);
+            const result = deadline && parking.mode === "STAY_IN_PLACE"
+              ? await botHost.endOperationDeadline(bot.botID, bot.accountID, id)
+              : await botHost.parkOperationMember(bot.botID, bot.accountID, id, parking, cause);
             if (!result.ok) { fail(bot.characterID, result); return; }
             operations.memberParking(id, bot.characterID, "PARKED");
           } else {

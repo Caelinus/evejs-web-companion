@@ -189,6 +189,12 @@ const botHost =
     // character — is the guard in /api/bridge/select.)
     isCharacterHeld,
     errorLogger,
+    onOperationDeadline: operationID => {
+      const definition = miningOperations.definition(operationID);
+      if (!definition) throw new Error("The expiring operation definition is unavailable.");
+      const policies = normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+      return miningOperationStopper.stop({ ...definition, policies }, { cause: "deadline" });
+    },
   });
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
@@ -21966,6 +21972,14 @@ app.get("/api/mining-operations/support-context", requireAuth, async (req, res, 
       return res.status(409).json({ ok: false, error: "OPERATION_CLAIM_CHANGED" });
     }
     res.json({ ok: true, assignment: miningOperations.assignment(operationID, claim.held.characterID), fleets });
+  } catch (error) { next(error); }
+});
+app.post("/api/mining-operations/support-status", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const applied = miningOperations.observeSupport(claim.association.operationID, claim.held.characterID, req.body);
+    res.status(applied ? 200 : 409).json({ ok: applied, error: applied ? undefined : "SUPPORT_REPORT_REFUSED" });
   } catch (error) { next(error); }
 });
 app.post("/api/mining-operations/support-stop", requireAuth, require("./miningSupportStopRoute").createMiningSupportStopHandler({

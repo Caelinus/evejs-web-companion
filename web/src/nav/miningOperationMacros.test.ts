@@ -330,6 +330,19 @@ test("HAULER_SERVICE depletion forces a below-threshold partial dump before relo
   assert.equal(tick.action.kind, "jettison");
   assert.deepEqual(tick.action.kind === "jettison" ? tick.action.itemIDs : [], [81, 82]);
 });
+test("HAULER_SERVICE partial dump settles real mining cycles before capturing ore custody", () => {
+  const mine = SCRIPT_MACROS["mine-at-belt"];
+  for (const state of ["ACTIVE", "DRAINING"] as const) {
+    const world = observation({ miningOperation: assignment({ currentTarget: target({ state }) }),
+      snapshot: { ...snapshot([entity(1, "Asteroid Belt 1")]), ship: { ...snapshot([]).ship!, activeModuleIDs: [42] } },
+      miningModuleIDs: [42], holds: oreHold([81]) });
+    const memory = { operationEmptyReads: 3 };
+    assert.deepEqual(mine(beltStep, world, memory, {}).action, { kind: "deactivate", moduleID: 42 });
+    assert.deepEqual(mine(beltStep, world, memory, {}).action, { kind: "deactivate", moduleID: 42 }, "pending real cycle remains a gate");
+    const settled = { ...world, snapshot: { ...world.snapshot!, ship: { ...world.snapshot!.ship!, activeModuleIDs: [] } } };
+    assert.equal(mine(beltStep, settled, memory, {}).action.kind, "jettison");
+  }
+});
 
 test("SELF_UNLOAD depletion never jettisons and hands off to the saved delivery path", () => {
   const mine = SCRIPT_MACROS["mine-at-belt"];
