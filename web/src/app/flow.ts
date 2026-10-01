@@ -2646,11 +2646,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return;
     }
     const definitions: Record<number, ReturnType<typeof decodeDefinition>> = {};
+    // What a job would consume and make is shown by NAME too (R7d): the
+    // install preview lists every material, and it read "—" for any the rest
+    // of the app had not happened to resolve (seen live: datacores).
+    const materialRefs: NameRef[] = [];
     for (const typeID of wanted) {
       // A definitive miss is cached as null so it is never refetched.
-      definitions[typeID] = decodeDefinition(raw[String(typeID)]);
+      const definition = decodeDefinition(raw[String(typeID)]);
+      definitions[typeID] = definition;
+      for (const recipe of definition?.recipes ?? []) {
+        for (const material of [...recipe.materials, ...recipe.products]) {
+          materialRefs.push({ kind: "type", id: material.typeID });
+        }
+      }
     }
     store.apply({ type: "industry/definitions", definitions });
+    requestNames(materialRefs);
   }
 
   /**
@@ -11638,6 +11649,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     async loadDecryptors() {
       const terms = decodeInventionTerms(await api.getIndustryInventionTerms(callOptions));
+      // A decryptor is listed in the preview with the other materials, by name.
+      requestNames([...terms.decryptors.keys()].map((id) => ({ kind: "type" as const, id })));
       return [...terms.decryptors.values()];
     },
 

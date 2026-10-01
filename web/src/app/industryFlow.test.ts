@@ -263,6 +263,21 @@ test("loadIndustry asks for the NAMES of every id the panel will render", async 
   assert.ok(asked.includes(`system:${SOLAR_SYSTEM_ID}`));
 });
 
+test("the materials a recipe uses are named too, so the install preview never reads a dash", async () => {
+  const store = createClientStore();
+  const { fetch, requests } = makeFakeFetch(respondOk());
+  const flow = createAppFlow(store, { fetch });
+
+  await flow.loadIndustry();
+  await settle();
+
+  const asked = requests
+    .filter((entry) => entry.path === "/api/names")
+    .flatMap((entry) => (entry.body.items as { kind: string; id: number }[]).map((ref) => `${ref.kind}:${ref.id}`));
+  // Tritanium (38) is only ever a material here: nothing else asks for it.
+  assert.ok(asked.includes("type:38"), JSON.stringify(asked));
+});
+
 test("a failed facility read never blanks the blueprints or the jobs", async () => {
   const store = createClientStore();
   const { fetch } = makeFakeFetch(
