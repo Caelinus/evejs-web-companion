@@ -62,7 +62,7 @@ test("chance: science at 1/30 a level, encryption at 1/40, times the decryptor, 
   assert.equal(inventionChance({ ...SOURCE, probability: 0.9 }, skills, TERMS, PARITY), 1);
 });
 
-test("attempts on average, rounded up, and what they use, decryptor included", () => {
+test("attempts on average, to the nearest whole, and what they use, decryptor included", () => {
   const need = inventionNeed(SOURCE, 3, 0.4, PARITY);
   // 3 copies at 40% = 7.5 attempts -> 8.
   assert.equal(need.attempts, 8);
@@ -70,8 +70,25 @@ test("attempts on average, rounded up, and what they use, decryptor included", (
   // An exact ratio is not pushed up by float error: 2 / 0.5 = 4.
   assert.equal(inventionNeed(SOURCE, 2, 0.5, null).attempts, 4);
   assert.equal(inventionNeed(SOURCE, 0, 0.5, null).attempts, 0);
-  // Always UP, never to the nearest: 1 copy at 45% is 2.2 attempts, so 3.
-  assert.equal(inventionNeed(SOURCE, 1, 0.45, null).attempts, 3);
+  // The average, not a ceiling: 1 copy at 49.6% is 2.02 attempts, so 2 (seen
+  // live as "about 3"); at 45% it is 2.2, also 2.
+  assert.equal(inventionNeed(SOURCE, 1, 0.496, null).attempts, 2);
+  assert.equal(inventionNeed(SOURCE, 1, 0.45, null).attempts, 2);
+  // Never fewer attempts than copies, even at a certain chance.
+  assert.equal(inventionNeed(SOURCE, 3, 1, null).attempts, 3);
+});
+
+test("attempts already running are taken off what is still to start, and so are their datacores", () => {
+  const need = inventionNeed(SOURCE, 3, 0.4, PARITY, 5);
+  assert.equal(need.attempts, 8);
+  assert.equal(need.running, 5);
+  assert.equal(need.toStart, 3);
+  assert.deepEqual([...need.materials], [[DATACORE_A, 3], [DATACORE_B, 3], [34201, 3]]);
+  // More running than needed: nothing left to start, nothing to buy.
+  const covered = inventionNeed(SOURCE, 1, 0.5, PARITY, 4);
+  assert.equal(covered.running, 2);
+  assert.equal(covered.toStart, 0);
+  assert.deepEqual([...covered.materials], [[DATACORE_A, 0], [DATACORE_B, 0]]);
 });
 
 test("the best inventor is whoever's skills give the best chance", () => {
@@ -130,13 +147,18 @@ test("a plan's inventions: the best inventor's chance, the chosen decryptor, and
   assert.ok(row);
   assert.equal(row.inventorName, "Pilot One");
   assert.equal(row.copies, 2);
-  // 0.34 x (1 + 10/30 + 5/40) x 1.5 = 0.7 or so: 2 copies take 3 attempts.
-  assert.equal(row.need.attempts, Math.ceil(2 / (0.34 * (1 + 10 / 30 + 5 / 40) * 1.5)));
+  // 0.34 x (1 + 10/30 + 5/40) x 1.5 = 0.74 or so: 2 copies take 2.7, so 3 attempts.
+  assert.equal(row.need.attempts, 3);
   const short = inventionShortfalls(rows, new Map([[DATACORE_A, 10], [34201, 1]]), (typeID) => (typeID === 34201 ? "Parity Decryptor" : null));
   assert.deepEqual(short.map((entry) => [entry.typeID, entry.held, entry.short]), [
     [DATACORE_B, 0, row.need.attempts],
     [34201, 1, row.need.attempts - 1],
   ]);
+  // An invention job already running for the T2 blueprint counts its runs.
+  const underway = planInventions(chain, (blueprintTypeID) => (blueprintTypeID === 1900 ? PARITY : null),
+    [{ name: "Pilot One", skills: new Map([[SCIENCE_A, 5], [SCIENCE_B, 5], [ENCRYPTION, 5]]) }], TERMS, new Map([[1900, 2], [1901, 9]]));
+  assert.equal(underway[0]?.need.running, 2);
+  assert.equal(underway[0]?.need.toStart, 1);
   // Nobody's skills known: the base chance, and no inventor named.
   const unskilled = planInventions(chain, () => null, [], TERMS);
   assert.equal(unskilled[0]?.inventorName, null);

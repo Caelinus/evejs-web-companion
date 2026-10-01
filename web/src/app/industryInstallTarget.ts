@@ -26,7 +26,7 @@ export interface InstallRequest {
   readonly blueprintItemID: number;
   /** The facility it sits in: the only one the server will install it in. */
   readonly facilityID: number;
-  readonly activity: "manufacturing" | "reaction";
+  readonly activity: "manufacturing" | "reaction" | "invention";
   readonly runs: number;
   /** Rises with every ask, so `served` names which one it served. */
   readonly n: number;

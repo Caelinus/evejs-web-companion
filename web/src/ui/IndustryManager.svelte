@@ -41,7 +41,16 @@
   import { readIndustryStock, type IndustryStock } from "../app/industryStockRead.ts";
   import type { OnlinePilot } from "../app/piCorpRead.ts";
   import { installTarget } from "../app/industryInstallTarget.ts";
-  import { installBlockWords, installCheck, jobSupply, plannedCopies, startNext, type InstallPilot } from "../bridge/industryJobs.ts";
+  import {
+    installBlockWords,
+    installCheck,
+    inventionCheck,
+    jobSupply,
+    plannedCopies,
+    startNext,
+    type InstallCheck,
+    type InstallPilot,
+  } from "../bridge/industryJobs.ts";
   import { buildSystemGraph, distancesFrom, type SystemGraph } from "../nav/routeSolver.ts";
   import type { TabID } from "./tabs.ts";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
@@ -229,7 +238,10 @@
         solarSystemID: online?.solarSystemID ?? null,
         dockedAt: online?.stationID ?? online?.structureID ?? null,
         skills: skills === null ? null : new Map(skills.map((skill) => [skill.typeID, skill.level])),
-        facilities: new Map(session.store.industry.get().facilities.map((facility) => [facility.facilityID, facility.solarSystemID])),
+        facilities: new Map(session.store.industry.get().facilities.map((facility) => [
+          facility.facilityID,
+          { solarSystemID: facility.solarSystemID, activities: new Set<string>(facility.activities) },
+        ])),
         stock: stock?.hangars.get(characterID) ?? null,
       });
     }
@@ -294,6 +306,7 @@
   const book = $derived(productTypeID === null ? null : books.get(productTypeID) ?? null);
   const bookError = $derived(productTypeID === null ? null : bookErrors.get(productTypeID) ?? null);
 
+  const supply = $derived(jobSupply(jobLists, book));
   const chain = $derived.by(() => {
     if (productTypeID === null || book === null || runs === null) {
       return null;
@@ -304,11 +317,11 @@
       runs,
       choices: resolverChoices(choices, terms, inventionTerms.decryptors),
       held,
-      inProduction: jobSupply(jobLists, book).inProduction,
+      inProduction: supply.inProduction,
     });
   });
   const inventions = $derived(
-    chain ? planInventions(chain, (blueprintTypeID) => decryptorOf(choices, blueprintTypeID), inventors, inventionTerms) : [],
+    chain ? planInventions(chain, (blueprintTypeID) => decryptorOf(choices, blueprintTypeID), inventors, inventionTerms, supply.inventing) : [],
   );
   const inventionShort = $derived(inventionShortfalls(inventions, held, nameAnywhere));
   /** Everything to acquire: bought items and invention inputs, for Missing and multibuy. */
@@ -331,18 +344,19 @@
     for (const entry of plans) {
       const entryBook = books.get(entry.productTypeID);
       if (!entryBook) continue;
+      const entrySupply = jobSupply(jobLists, entryBook);
       const entryChain = resolveIndustryChain({
         book: entryBook,
         productTypeID: entry.productTypeID,
         runs: entry.runs,
         choices: resolverChoices(entry.choices, terms, inventionTerms.decryptors),
         held,
-        inProduction: jobSupply(jobLists, entryBook).inProduction,
+        inProduction: entrySupply.inProduction,
       });
       if (!entryChain) continue;
       const base = planStanding(entryChain);
       const short = inventionShortfalls(
-        planInventions(entryChain, (blueprintTypeID) => decryptorOf(entry.choices, blueprintTypeID), inventors, inventionTerms),
+        planInventions(entryChain, (blueprintTypeID) => decryptorOf(entry.choices, blueprintTypeID), inventors, inventionTerms, entrySupply.inventing),
         held,
         nameAnywhere,
       ).length;
@@ -548,12 +562,11 @@
   }
 
   /**
-   * Open the Industry panel of the pilot whose copy passed installCheck, with
-   * the job and its facility filled in. The cost and the confirm stay that
-   * panel's (app/industryInstallTarget.ts).
+   * Open the Industry panel of the pilot whose copy passed installCheck or
+   * inventionCheck, with the job and its facility filled in. The cost and the
+   * confirm stay that panel's (app/industryInstallTarget.ts).
    */
-  function setUp(line: IndustryLine): void {
-    const check = installCheck(line, owned, installPilots, jumpsBetween, plannedFor(line));
+  function setUp(check: InstallCheck): void {
     if (!check.ok) return;
     const from = check.from;
     const session = onlineSessions().find((entry) => entry.characterID === from.characterID);
@@ -562,8 +575,8 @@
       characterID: from.characterID,
       blueprintItemID: from.itemID,
       facilityID: from.facilityID ?? 0,
-      activity: line.obtain === "react" ? "reaction" : "manufacturing",
-      runs: line.jobRuns[0] ?? line.runs,
+      activity: check.activity,
+      runs: check.runs,
     });
     onOpen?.("industry", session.session.id);
   }
@@ -1218,7 +1231,7 @@
                     {#if !step.canStart}
                       <span class="im-pill tone-act">waits for inputs</span>
                     {:else if check.ok}
-                      <button type="button" class="im-setup" title="Opens {check.from.characterName}'s Industry panel with this job filled in" onclick={() => setUp(step.line)}>
+                      <button type="button" class="im-setup" title="Opens {check.from.characterName}'s Industry panel with this job filled in" onclick={() => setUp(check)}>
                         Set up in Industry
                       </button>
                     {:else}
@@ -1250,7 +1263,7 @@
                     {countWords(row.copies)} {row.copies === 1 ? "copy" : "copies"} of {countWords(row.runsPerCopy)} {row.runsPerCopy === 1 ? "run" : "runs"},
                     {chanceWords(row.need.chance)} a try
                     {row.inventorName ? `with ${row.inventorName}'s skills` : "- skills not counted, sign a pilot in here"},
-                    about {countWords(row.need.attempts)} {row.need.attempts === 1 ? "attempt" : "attempts"}
+                    about {countWords(row.need.attempts)} {row.need.attempts === 1 ? "attempt" : "attempts"}{row.need.running > 0 ? `, ${countWords(row.need.running)} running` : ""}
                   </span>
                   {#if inventionTerms.decryptors.size > 0}
                     <label class="im-decryptor">
@@ -1264,6 +1277,21 @@
                     </label>
                   {/if}
                 </li>
+                {#if row.need.toStart === 0}
+                  <li class="im-start-why">Every attempt is running; the copies arrive when the jobs are delivered.</li>
+                {:else}
+                  {@const check = inventionCheck(row, owned, installPilots, jumpsBetween)}
+                  <li class="im-start-why im-invent-setup">
+                    {#if check.ok}
+                      <span>{countWords(check.runs)} {check.runs === 1 ? "attempt" : "attempts"} from {check.from.characterName}'s copy</span>
+                      <button type="button" class="im-setup" title="Opens {check.from.characterName}'s Industry panel with this invention filled in" onclick={() => setUp(check)}>
+                        Set up in Industry
+                      </button>
+                    {:else}
+                      {installBlockWords(check)}
+                    {/if}
+                  </li>
+                {/if}
               {/each}
             </ul>
           {/if}
@@ -1708,6 +1736,12 @@
   .im-decryptor select {
     width: 100%;
     min-height: 34px;
+  }
+  .im-invent-setup {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
   }
   .sr-only {
     position: absolute;

@@ -21,6 +21,7 @@
 import type { IndustryJobRow } from "../store/types.ts";
 import { isActiveJob } from "./industry.ts";
 import type { IndustryChain, IndustryLine } from "./industryChain.ts";
+import type { PlanInvention } from "./industryInvention.ts";
 import type { IndustryRecipeBook } from "./industryRecipes.ts";
 import type { OwnedBlueprint } from "./industryOwned.ts";
 import type { PilotStockStack } from "./piRoster.ts";
@@ -29,6 +30,12 @@ import type { PilotStockStack } from "./piRoster.ts";
 export interface JobSupply {
   readonly inProduction: Map<number, number>;
   readonly ready: Map<number, number>;
+  /**
+   * Invention attempts underway, per T2 blueprint type they invent. One run is
+   * one attempt; it counts until delivered, as the server rolls the outcome at
+   * install but hands the copy over only then.
+   */
+  readonly inventing: Map<number, number>;
 }
 
 /**
@@ -38,12 +45,17 @@ export interface JobSupply {
 export function jobSupply(jobLists: readonly (readonly IndustryJobRow[])[], book: IndustryRecipeBook | null): JobSupply {
   const inProduction = new Map<number, number>();
   const ready = new Map<number, number>();
+  const inventing = new Map<number, number>();
   const seen = new Set<number>();
   for (const jobs of jobLists) {
     for (const job of jobs) {
       if (seen.has(job.jobID)) continue;
       seen.add(job.jobID);
       if (!isActiveJob(job.status)) continue;
+      if (job.activity === "invention" && job.productTypeID > 0 && job.runs > 0) {
+        inventing.set(job.productTypeID, (inventing.get(job.productTypeID) ?? 0) + job.runs);
+        continue;
+      }
       if (job.activity !== "manufacturing" && job.activity !== "reaction") continue;
       if (job.productTypeID <= 0 || job.runs <= 0) continue;
       const perRun = book?.byProduct.get(job.productTypeID)?.quantityPerRun ?? 1;
@@ -54,7 +66,7 @@ export function jobSupply(jobLists: readonly (readonly IndustryJobRow[])[], book
       }
     }
   }
-  return { inProduction, ready };
+  return { inProduction, ready, inventing };
 }
 
 export type StartStage = "reactions" | "components" | "final";
@@ -120,11 +132,23 @@ export function startNext(chain: IndustryChain): StartGroup[] {
 
 /** Jumps of remote reach per level of the range skill (server FACILITY_RANGE_BY_SKILL_LEVEL). */
 export const RANGE_JUMPS_PER_LEVEL = 5;
+
+/** The work a job does, as far as the manager starts any. */
+export type InstallActivity = "manufacturing" | "reaction" | "invention";
+
 /** The range skill per activity (server INDUSTRY_DISTANCE_SKILL_BY_ACTIVITY). */
-export const RANGE_SKILL_BY_ACTIVITY: Readonly<Record<"manufacturing" | "reaction", number>> = {
+export const RANGE_SKILL_BY_ACTIVITY: Readonly<Record<InstallActivity, number>> = {
   manufacturing: 24268, // Supply Chain Management
   reaction: 45750, // Remote Reactions
+  invention: 24270, // Scientific Networking
 };
+
+/** A facility the pilot's own industry read lists. */
+export interface InstallFacility {
+  readonly solarSystemID: number;
+  /** The work it hosts, by the read's activity names. */
+  readonly activities: ReadonlySet<string>;
+}
 
 /** What the check needs to know about one online pilot. */
 export interface InstallPilot {
@@ -134,25 +158,34 @@ export interface InstallPilot {
   readonly dockedAt: number | null;
   /** Trained level per skill type; null when its skills have not been read. */
   readonly skills: ReadonlyMap<number, number> | null;
-  /** Facility -> its system, from the pilot's own industry read. */
-  readonly facilities: ReadonlyMap<number, number>;
+  /** Facility -> where it is and what it hosts, from the pilot's own industry read. */
+  readonly facilities: ReadonlyMap<number, InstallFacility>;
   /** Its own stacks with where they sit, from the stock read; null when unread. */
   readonly stock: readonly PilotStockStack[] | null;
 }
 
 export type InstallBlock =
+  | "needs-decryptor"
   | "no-copy"
   | "not-in-facility"
   | "skills-unknown"
   | "out-of-range"
   | "facility-not-offered"
+  | "work-not-offered"
   | "materials-elsewhere";
 
 export type InstallCheck =
-  | { readonly ok: true; readonly from: OwnedBlueprint }
+  | {
+      readonly ok: true;
+      readonly from: OwnedBlueprint;
+      readonly activity: InstallActivity;
+      /** Runs to fill in: the step's, or for invention what the copy carries. */
+      readonly runs: number;
+    }
   | {
       readonly ok: false;
       readonly block: InstallBlock;
+      readonly activity: InstallActivity;
       /** The copy that got furthest, and the numbers that stopped it. */
       readonly from: OwnedBlueprint | null;
       readonly jumps: number | null;
@@ -160,48 +193,46 @@ export type InstallCheck =
     };
 
 const STAGE: Readonly<Record<InstallBlock, number>> = {
+  "needs-decryptor": 0,
   "no-copy": 0,
   "not-in-facility": 1,
   "skills-unknown": 2,
   "out-of-range": 3,
   "facility-not-offered": 4,
-  "materials-elsewhere": 5,
+  "work-not-offered": 5,
+  "materials-elsewhere": 6,
 };
 
-type Activity = "manufacturing" | "reaction";
 type Blocked = Extract<InstallCheck, { ok: false }>;
 
 /**
  * Where a copy stands before materials: in an industry facility, its pilot's
- * skills read, that facility within the pilot's reach, and listed by the
- * pilot's own Industry panel. Null when all of that holds.
+ * skills read, that facility within the pilot's reach, listed by the pilot's
+ * own Industry panel, and hosting the work. Null when all of that holds.
  */
 function reachBlock(
   copy: OwnedBlueprint,
   pilot: InstallPilot,
-  activity: Activity,
+  activity: InstallActivity,
   jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
 ): Blocked | null {
-  if (copy.facilityID === null) {
-    return { ok: false, block: "not-in-facility", from: copy, jumps: null, range: null };
-  }
-  if (pilot.skills === null || pilot.solarSystemID === null) {
-    return { ok: false, block: "skills-unknown", from: copy, jumps: null, range: null };
-  }
+  const blocked = (block: InstallBlock, jumps: number | null = null, range: number | null = null): Blocked =>
+    ({ ok: false, block, activity, from: copy, jumps, range });
+  if (copy.facilityID === null) return blocked("not-in-facility");
+  if (pilot.skills === null || pilot.solarSystemID === null) return blocked("skills-unknown");
+  const facility = pilot.facilities.get(copy.facilityID);
   // The blueprint's own system, as the server states it on the row; the
   // facility list only covers the pilot's current region, so it cannot be
   // the source of a far copy's whereabouts.
-  const facilitySystem = copy.solarSystemID ?? pilot.facilities.get(copy.facilityID) ?? null;
+  const facilitySystem = copy.solarSystemID ?? facility?.solarSystemID ?? null;
   const range = RANGE_JUMPS_PER_LEVEL * Math.min(Math.max(pilot.skills.get(RANGE_SKILL_BY_ACTIVITY[activity]) ?? 0, 0), 5);
   const jumps = facilitySystem === null ? null : jumpsBetween(pilot.solarSystemID, facilitySystem);
-  if (jumps === null || jumps > range) {
-    return { ok: false, block: "out-of-range", from: copy, jumps, range };
-  }
+  if (jumps === null || jumps > range) return blocked("out-of-range", jumps, range);
   // In reach, but the Industry panel can only start a job in a facility its
-  // own read lists.
-  if (!pilot.facilities.has(copy.facilityID)) {
-    return { ok: false, block: "facility-not-offered", from: copy, jumps, range };
-  }
+  // own read lists, and the server only where the facility hosts the work
+  // (seen live: a factory that offers manufacturing and no invention).
+  if (!facility) return blocked("facility-not-offered", jumps, range);
+  if (!facility.activities.has(activity)) return blocked("work-not-offered", jumps, range);
   return null;
 }
 
@@ -242,7 +273,7 @@ export function plannedCopies(
   const planned = new Map<number, PlannedCopy>();
   for (const blueprint of owned) {
     if (planned.has(blueprint.blueprintTypeID)) continue;
-    const activity: Activity = reactions.has(blueprint.blueprintTypeID) ? "reaction" : "manufacturing";
+    const activity: InstallActivity = reactions.has(blueprint.blueprintTypeID) ? "reaction" : "manufacturing";
     const reachable = candidatesFor(blueprint.blueprintTypeID, owned, pilots)
       .filter((copy) => reachBlock(copy, pilots.get(copy.characterID) as InstallPilot, activity, jumpsBetween) === null);
     // `owned` is best first; the docked copy wins only among equals.
@@ -254,30 +285,28 @@ export function plannedCopies(
   return planned;
 }
 
-/**
- * Whether `line` can be started now, and from which copy. `jumpsBetween` is
- * the fewest stargate jumps between two systems, or null when unknown.
- * Copies are tried where their pilot is docked first, then best first (`owned`
- * is already best-first, bridge/industryOwned.ts). With `planned`, only copies
- * at its material efficiency are tried: the line's materials were worked out
- * at that efficiency, and a job from any other copy would use different
- * amounts. When none passes, the copy that got furthest says why.
- */
-export function installCheck(
-  line: IndustryLine,
+/** One job to check: from which blueprint, doing what, using what per copy. */
+interface InstallSpec {
+  readonly blueprintTypeID: number | null;
+  readonly activity: InstallActivity;
+  /** Copies worth trying; all idle ones when absent. */
+  readonly accept?: (copy: OwnedBlueprint) => boolean;
+  readonly runsFor: (copy: OwnedBlueprint) => number;
+  readonly materialsFor: (copy: OwnedBlueprint) => ReadonlyMap<number, number>;
+}
+
+function checkInstall(
+  spec: InstallSpec,
   owned: readonly OwnedBlueprint[],
   pilots: ReadonlyMap<number, InstallPilot>,
   jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
-  planned: OwnedBlueprint | null = null,
 ): InstallCheck {
-  const blueprintTypeID = line.blueprint?.blueprintTypeID ?? null;
-  const activity: Activity = line.obtain === "react" ? "reaction" : "manufacturing";
-  const candidates = blueprintTypeID === null
+  const { activity } = spec;
+  const candidates = spec.blueprintTypeID === null
     ? []
-    : candidatesFor(blueprintTypeID, owned, pilots)
-      .filter((copy) => planned === null || copy.materialEfficiency === planned.materialEfficiency);
+    : candidatesFor(spec.blueprintTypeID, owned, pilots).filter((copy) => spec.accept?.(copy) ?? true);
 
-  let furthest: Blocked = { ok: false, block: "no-copy", from: null, jumps: null, range: null };
+  let furthest: Blocked = { ok: false, block: "no-copy", activity, from: null, jumps: null, range: null };
   const note = (blocked: Blocked): void => {
     if (STAGE[blocked.block] > STAGE[furthest.block]) furthest = blocked;
   };
@@ -296,34 +325,94 @@ export function installCheck(
           here.set(stack.typeID, (here.get(stack.typeID) ?? 0) + stack.quantity);
         }
       }
-      const short = [...line.materials].some(([typeID, quantity]) => (here.get(typeID) ?? 0) < quantity);
+      const short = [...spec.materialsFor(copy)].some(([typeID, quantity]) => (here.get(typeID) ?? 0) < quantity);
       if (short) {
-        note({ ok: false, block: "materials-elsewhere", from: copy, jumps: null, range: null });
+        note({ ok: false, block: "materials-elsewhere", activity, from: copy, jumps: null, range: null });
         continue;
       }
     }
-    return { ok: true, from: copy };
+    return { ok: true, from: copy, activity, runs: spec.runsFor(copy) };
   }
   return furthest;
+}
+
+/**
+ * Whether `line` can be started now, and from which copy. `jumpsBetween` is
+ * the fewest stargate jumps between two systems, or null when unknown.
+ * Copies are tried where their pilot is docked first, then best first (`owned`
+ * is already best-first, bridge/industryOwned.ts). With `planned`, only copies
+ * at its material efficiency are tried: the line's materials were worked out
+ * at that efficiency, and a job from any other copy would use different
+ * amounts. When none passes, the copy that got furthest says why.
+ */
+export function installCheck(
+  line: IndustryLine,
+  owned: readonly OwnedBlueprint[],
+  pilots: ReadonlyMap<number, InstallPilot>,
+  jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
+  planned: OwnedBlueprint | null = null,
+): InstallCheck {
+  return checkInstall({
+    blueprintTypeID: line.blueprint?.blueprintTypeID ?? null,
+    activity: line.obtain === "react" ? "reaction" : "manufacturing",
+    accept: (copy) => planned === null || copy.materialEfficiency === planned.materialEfficiency,
+    runsFor: () => line.jobRuns[0] ?? line.runs,
+    materialsFor: () => line.materials,
+  }, owned, pilots, jumpsBetween);
+}
+
+/**
+ * Whether the attempts `row` still has to start can be started now, from
+ * which T1 copy, and how many runs (one run is one attempt; at most what the
+ * copy carries, as the server allows no more). An original cannot be invented
+ * from, so only copies are tried. The Industry panel sends no decryptor, so a
+ * plan that chose one cannot be set up there.
+ */
+export function inventionCheck(
+  row: PlanInvention,
+  owned: readonly OwnedBlueprint[],
+  pilots: ReadonlyMap<number, InstallPilot>,
+  jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
+): InstallCheck {
+  if (row.decryptor !== null) {
+    return { ok: false, block: "needs-decryptor", activity: "invention", from: null, jumps: null, range: null };
+  }
+  const runsFor = (copy: OwnedBlueprint): number => Math.max(1, Math.min(row.need.toStart, copy.runs ?? 0));
+  return checkInstall({
+    blueprintTypeID: row.source.blueprintTypeID,
+    activity: "invention",
+    accept: (copy) => !copy.original && (copy.runs ?? 0) > 0,
+    runsFor,
+    materialsFor: (copy) => new Map(row.source.materials.map((material) => [material.typeID, material.quantity * runsFor(copy)])),
+  }, owned, pilots, jumpsBetween);
 }
 
 /** Plain words for why a step cannot be set up yet. */
 export function installBlockWords(check: Extract<InstallCheck, { ok: false }>): string {
   const who = check.from ? check.from.characterName : "Nobody online here";
+  const work = check.activity === "invention" ? "invention" : check.activity === "reaction" ? "reactions" : "manufacturing";
   switch (check.block) {
+    case "needs-decryptor":
+      return "The Industry panel cannot add a decryptor; start this one in the game client, or plan it without.";
     case "no-copy":
-      return "Nobody online here holds an idle copy of its blueprint.";
+      return check.activity === "invention"
+        ? "Nobody online here holds an idle copy of the blueprint it is invented from."
+        : "Nobody online here holds an idle copy of its blueprint.";
     case "not-in-facility":
       return `${who}'s copy is not in a hangar where industry is offered.`;
     case "facility-not-offered":
       return `${who}'s copy is in a facility ${who}'s Industry panel does not list.`;
+    case "work-not-offered":
+      return `${who}'s copy is in a facility that does not offer ${work}.`;
     case "skills-unknown":
       return `${who}'s skills have not been read yet.`;
     case "out-of-range":
       return check.jumps === null
         ? `${who}'s copy is in a facility no route reaches.`
-        : `${who}'s copy is ${check.jumps} ${check.jumps === 1 ? "jump" : "jumps"} away; ${who} can start jobs ${check.range === 0 ? "only in the same system" : `up to ${check.range} jumps away`}.`;
+        : `${who}'s copy is ${check.jumps} ${check.jumps === 1 ? "jump" : "jumps"} away; ${who} can start ${work} jobs ${check.range === 0 ? "only in the same system" : `up to ${check.range} jumps away`}.`;
     case "materials-elsewhere":
-      return `The materials are not all in ${who}'s hangar where the blueprint is.`;
+      return check.activity === "invention"
+        ? `The datacores are not all in ${who}'s hangar where the blueprint is.`
+        : `The materials are not all in ${who}'s hangar where the blueprint is.`;
   }
 }
