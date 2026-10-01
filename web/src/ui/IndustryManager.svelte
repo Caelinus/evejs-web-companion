@@ -31,6 +31,7 @@
   import {
     chanceWords,
     decodeInventionTerms,
+    decryptorEffectWords,
     inventionShortfalls,
     NO_INVENTION_TERMS,
     planInventions,
@@ -417,11 +418,6 @@
     return nameFor(typeID) ?? inventionTerms.decryptors.get(typeID)?.name ?? null;
   }
 
-  function decryptorWords(decryptor: DecryptorTerms): string {
-    const signed = (value: number): string => (value >= 0 ? `+${value}` : String(value));
-    return `${decryptor.name ?? "A decryptor"} (chance x${decryptor.probabilityMultiplier}, runs ${signed(decryptor.maxRuns)}, material ${signed(decryptor.materialEfficiency)}%)`;
-  }
-
   function setDecryptor(blueprintTypeID: number, value: string): void {
     const decryptorTypeID = Number(value);
     choices = withDecryptor(choices, blueprintTypeID, Number.isSafeInteger(decryptorTypeID) && decryptorTypeID > 0 ? decryptorTypeID : null);
@@ -577,6 +573,7 @@
       facilityID: from.facilityID ?? 0,
       activity: check.activity,
       runs: check.runs,
+      ...(check.decryptorTypeID !== null ? { decryptorTypeID: check.decryptorTypeID } : {}),
     });
     onOpen?.("industry", session.session.id);
   }
@@ -1271,7 +1268,7 @@
                       <select value={String(choices.decryptors?.[String(blueprintTypeID)] ?? "")} onchange={(event) => setDecryptor(blueprintTypeID, event.currentTarget.value)}>
                         <option value="">No decryptor</option>
                         {#each [...inventionTerms.decryptors.values()] as decryptor (decryptor.typeID)}
-                          <option value={String(decryptor.typeID)}>{decryptorWords(decryptor)}</option>
+                          <option value={String(decryptor.typeID)}>{decryptorEffectWords(decryptor)}</option>
                         {/each}
                       </select>
                     </label>

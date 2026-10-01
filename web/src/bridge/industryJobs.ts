@@ -165,7 +165,6 @@ export interface InstallPilot {
 }
 
 export type InstallBlock =
-  | "needs-decryptor"
   | "no-copy"
   | "not-in-facility"
   | "skills-unknown"
@@ -181,11 +180,14 @@ export type InstallCheck =
       readonly activity: InstallActivity;
       /** Runs to fill in: the step's, or for invention what the copy carries. */
       readonly runs: number;
+      /** Invention only: the plan's decryptor, used one per run; null without one. */
+      readonly decryptorTypeID: number | null;
     }
   | {
       readonly ok: false;
       readonly block: InstallBlock;
       readonly activity: InstallActivity;
+      readonly decryptorTypeID: number | null;
       /** The copy that got furthest, and the numbers that stopped it. */
       readonly from: OwnedBlueprint | null;
       readonly jumps: number | null;
@@ -193,7 +195,6 @@ export type InstallCheck =
     };
 
 const STAGE: Readonly<Record<InstallBlock, number>> = {
-  "needs-decryptor": 0,
   "no-copy": 0,
   "not-in-facility": 1,
   "skills-unknown": 2,
@@ -217,7 +218,7 @@ function reachBlock(
   jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
 ): Blocked | null {
   const blocked = (block: InstallBlock, jumps: number | null = null, range: number | null = null): Blocked =>
-    ({ ok: false, block, activity, from: copy, jumps, range });
+    ({ ok: false, block, activity, decryptorTypeID: null, from: copy, jumps, range });
   if (copy.facilityID === null) return blocked("not-in-facility");
   if (pilot.skills === null || pilot.solarSystemID === null) return blocked("skills-unknown");
   const facility = pilot.facilities.get(copy.facilityID);
@@ -293,6 +294,8 @@ interface InstallSpec {
   readonly accept?: (copy: OwnedBlueprint) => boolean;
   readonly runsFor: (copy: OwnedBlueprint) => number;
   readonly materialsFor: (copy: OwnedBlueprint) => ReadonlyMap<number, number>;
+  /** Invention only: the decryptor the job adds. */
+  readonly decryptorTypeID?: number | null;
 }
 
 function checkInstall(
@@ -302,13 +305,14 @@ function checkInstall(
   jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
 ): InstallCheck {
   const { activity } = spec;
+  const decryptorTypeID = spec.decryptorTypeID ?? null;
   const candidates = spec.blueprintTypeID === null
     ? []
     : candidatesFor(spec.blueprintTypeID, owned, pilots).filter((copy) => spec.accept?.(copy) ?? true);
 
-  let furthest: Blocked = { ok: false, block: "no-copy", activity, from: null, jumps: null, range: null };
+  let furthest: Blocked = { ok: false, block: "no-copy", activity, decryptorTypeID, from: null, jumps: null, range: null };
   const note = (blocked: Blocked): void => {
-    if (STAGE[blocked.block] > STAGE[furthest.block]) furthest = blocked;
+    if (STAGE[blocked.block] > STAGE[furthest.block]) furthest = { ...blocked, decryptorTypeID };
   };
 
   for (const copy of candidates) {
@@ -327,11 +331,11 @@ function checkInstall(
       }
       const short = [...spec.materialsFor(copy)].some(([typeID, quantity]) => (here.get(typeID) ?? 0) < quantity);
       if (short) {
-        note({ ok: false, block: "materials-elsewhere", activity, from: copy, jumps: null, range: null });
+        note({ ok: false, block: "materials-elsewhere", activity, decryptorTypeID, from: copy, jumps: null, range: null });
         continue;
       }
     }
-    return { ok: true, from: copy, activity, runs: spec.runsFor(copy) };
+    return { ok: true, from: copy, activity, runs: spec.runsFor(copy), decryptorTypeID };
   }
   return furthest;
 }
@@ -365,8 +369,9 @@ export function installCheck(
  * Whether the attempts `row` still has to start can be started now, from
  * which T1 copy, and how many runs (one run is one attempt; at most what the
  * copy carries, as the server allows no more). An original cannot be invented
- * from, so only copies are tried. The Industry panel sends no decryptor, so a
- * plan that chose one cannot be set up there.
+ * from, so only copies are tried. A decryptor the plan chose goes with the
+ * job, one per run like the datacores, and must be in the same hangar; the
+ * Industry panel adds it to the install (src/industryInstall.js says how).
  */
 export function inventionCheck(
   row: PlanInvention,
@@ -374,16 +379,20 @@ export function inventionCheck(
   pilots: ReadonlyMap<number, InstallPilot>,
   jumpsBetween: (fromSystemID: number, toSystemID: number) => number | null,
 ): InstallCheck {
-  if (row.decryptor !== null) {
-    return { ok: false, block: "needs-decryptor", activity: "invention", from: null, jumps: null, range: null };
-  }
   const runsFor = (copy: OwnedBlueprint): number => Math.max(1, Math.min(row.need.toStart, copy.runs ?? 0));
+  const decryptorTypeID = row.decryptor?.typeID ?? null;
   return checkInstall({
     blueprintTypeID: row.source.blueprintTypeID,
     activity: "invention",
     accept: (copy) => !copy.original && (copy.runs ?? 0) > 0,
     runsFor,
-    materialsFor: (copy) => new Map(row.source.materials.map((material) => [material.typeID, material.quantity * runsFor(copy)])),
+    materialsFor: (copy) => {
+      const runs = runsFor(copy);
+      const materials = new Map(row.source.materials.map((material) => [material.typeID, material.quantity * runs]));
+      if (decryptorTypeID !== null) materials.set(decryptorTypeID, (materials.get(decryptorTypeID) ?? 0) + runs);
+      return materials;
+    },
+    decryptorTypeID,
   }, owned, pilots, jumpsBetween);
 }
 
@@ -392,8 +401,6 @@ export function installBlockWords(check: Extract<InstallCheck, { ok: false }>): 
   const who = check.from ? check.from.characterName : "Nobody online here";
   const work = check.activity === "invention" ? "invention" : check.activity === "reaction" ? "reactions" : "manufacturing";
   switch (check.block) {
-    case "needs-decryptor":
-      return "The Industry panel cannot add a decryptor; start this one in the game client, or plan it without.";
     case "no-copy":
       return check.activity === "invention"
         ? "Nobody online here holds an idle copy of the blueprint it is invented from."
@@ -412,7 +419,7 @@ export function installBlockWords(check: Extract<InstallCheck, { ok: false }>): 
         : `${who}'s copy is ${check.jumps} ${check.jumps === 1 ? "jump" : "jumps"} away; ${who} can start ${work} jobs ${check.range === 0 ? "only in the same system" : `up to ${check.range} jumps away`}.`;
     case "materials-elsewhere":
       return check.activity === "invention"
-        ? `The datacores are not all in ${who}'s hangar where the blueprint is.`
+        ? `The datacores${check.decryptorTypeID !== null ? " and the decryptor" : ""} are not all in ${who}'s hangar where the blueprint is.`
         : `The materials are not all in ${who}'s hangar where the blueprint is.`;
   }
 }
