@@ -23,6 +23,7 @@
     secondsUntil,
   } from "../bridge/industry.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
+  import { decryptorEffectWords, type DecryptorTerms } from "../bridge/industryInvention.ts";
   import { isSessionLost } from "../app/flow.ts";
   import type { ClientStore } from "../store/clientStore.ts";
   import type { AppFlow } from "../app/flow.ts";
@@ -174,6 +175,17 @@
   let availableMaterials = $state<Readonly<Record<string, number>> | null>(null);
   /** True once the player has asked to see the cost — the second step. */
   let confirming = $state(false);
+  /**
+   * Invention only: the decryptor to add, one per run. Every decryptor is
+   * offered (static data); whether the hangar holds enough shows in the
+   * preview, the way every other material does.
+   */
+  let chosenDecryptorTypeID = $state<number | null>(null);
+  /** Every decryptor, read once when invention is first chosen; null until then. */
+  let decryptors = $state<readonly DecryptorTerms[] | null>(null);
+  let decryptorsAsked = false;
+  /** The decryptor this job will send, or 0: only an invention carries one. */
+  const decryptorForJob = $derived(chosenActivity === "invention" && chosenDecryptorTypeID !== null ? chosenDecryptorTypeID : 0);
   /** The job awaiting an explicit "yes, cancel it" — never a one-click loss. */
   let cancellingJobID = $state<number | null>(null);
 
@@ -198,11 +210,14 @@
     if (!startingBlueprint) {
       return [];
     }
-    return previewMaterials(
+    const materials = previewMaterials(
       chosenRecipe,
       chosenRuns,
       startingBlueprint.materialEfficiency,
-    ).map((material) => {
+    );
+    // The decryptor is used one per run, as the server takes it.
+    const all = decryptorForJob > 0 ? [...materials, { typeID: decryptorForJob, quantity: chosenRuns }] : materials;
+    return all.map((material) => {
       const have =
         availableMaterials === null ? null : availableMaterials[String(material.typeID)] ?? 0;
       return {
@@ -236,15 +251,34 @@
     const activities = blueprintActivities(blueprint.typeID);
     chosenActivity = activities.length > 0 ? activities[0]! : null;
     chosenFacilityID = null;
+    chosenDecryptorTypeID = null;
   }
 
   function closeStartJob(): void {
     startingBlueprint = null;
     chosenActivity = null;
     chosenFacilityID = null;
+    chosenDecryptorTypeID = null;
     availableMaterials = null;
     confirming = false;
   }
+
+  // The decryptor list, once, the first time invention is the chosen work.
+  $effect(() => {
+    if (chosenActivity !== "invention" || decryptorsAsked) {
+      return;
+    }
+    decryptorsAsked = true;
+    void flow.loadDecryptors().then(
+      (list) => {
+        decryptors = list;
+      },
+      () => {
+        // Without the list the job can still start, without a decryptor.
+        decryptors = [];
+      },
+    );
+  });
 
   /** Step two: ask the SERVER what the player actually has, then confirm. */
   function askToConfirm(): void {
@@ -261,6 +295,7 @@
         activity,
         facilityID,
         runs: chosenRuns,
+        ...(decryptorForJob > 0 ? { decryptorTypeID: decryptorForJob } : {}),
       });
       confirming = true;
     });
@@ -280,6 +315,7 @@
         activity,
         facilityID,
         runs: chosenRuns,
+        ...(decryptorForJob > 0 ? { decryptorTypeID: decryptorForJob } : {}),
       });
       closeStartJob();
     });
@@ -327,6 +363,9 @@
       // installs the job nowhere else.
       if (facilityChoices.some((facility) => facility.facilityID === request.facilityID)) {
         chosenFacilityID = request.facilityID;
+      }
+      if (request.activity === "invention" && request.decryptorTypeID !== undefined) {
+        chosenDecryptorTypeID = request.decryptorTypeID;
       }
     });
   });
@@ -594,6 +633,17 @@
               disabled={busy || confirming}
             />
           </label>
+          {#if chosenActivity === "invention"}
+            <label>
+              Decryptor
+              <select bind:value={chosenDecryptorTypeID} disabled={busy || confirming || decryptors === null}>
+                <option value={null}>{decryptors === null ? "Reading decryptors…" : "No decryptor"}</option>
+                {#each decryptors ?? [] as decryptor (decryptor.typeID)}
+                  <option value={decryptor.typeID}>{decryptorEffectWords(decryptor)}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
         </p>
 
         {#if facilityChoices.length === 0}

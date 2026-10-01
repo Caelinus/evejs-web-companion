@@ -529,3 +529,38 @@ test("a lost session during a mutation unwinds to character select", async () =>
   );
   assert.equal(store.get().station.online, null);
 });
+
+test("an invention install carries its decryptor; the decryptor list is read from static data", async () => {
+  const store = createClientStore();
+  const { fetch, requests } = makeFakeFetch(
+    respondOk((path) =>
+      path === "/api/industry/invention-terms"
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              lowerRateSkillTypeIDs: [],
+              decryptors: [{ typeID: 34204, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3 }],
+            },
+          }
+        : null,
+    ),
+  );
+  const flow = createAppFlow(store, { fetch });
+
+  const decryptors = await flow.loadDecryptors();
+  assert.deepEqual(decryptors.map((decryptor) => [decryptor.typeID, decryptor.maxRuns]), [[34204, 3]]);
+
+  await flow.installIndustryJob({
+    blueprintItemID: BLUEPRINT_ITEM_ID,
+    blueprintTypeID: BLUEPRINT_TYPE_ID,
+    activity: "invention",
+    facilityID: STATION_ID,
+    runs: 2,
+    decryptorTypeID: 34204,
+  });
+  const install = requests.find((entry) => entry.path === "/api/bridge/industry/install");
+  assert.ok(install);
+  assert.equal(install.body.decryptorTypeID, 34204);
+  assert.equal(install.body.confirm, true);
+});

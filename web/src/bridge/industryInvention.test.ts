@@ -13,6 +13,7 @@ import {
   planInventions,
   NO_INVENTION_TERMS,
   type DecryptorTerms,
+  decryptorEffectWords,
 } from "./industryInvention.ts";
 import { decodeRecipeClosure, type IndustryInvention } from "./industryRecipes.ts";
 import { resolveIndustryChain } from "./industryChain.ts";
@@ -163,4 +164,15 @@ test("a plan's inventions: the best inventor's chance, the chosen decryptor, and
   const unskilled = planInventions(chain, () => null, [], TERMS);
   assert.equal(unskilled[0]?.inventorName, null);
   assert.equal(unskilled[0]?.need.chance, 0.34);
+});
+
+test("a decryptor's effect in plain words, signs included", () => {
+  assert.equal(
+    decryptorEffectWords({ typeID: 34204, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3 }),
+    "Parity Decryptor (chance x1.5, runs +3, material +1%, time -2%)",
+  );
+  assert.equal(
+    decryptorEffectWords({ typeID: 1, name: null, probabilityMultiplier: 0.6, materialEfficiency: -2, timeEfficiency: 2, maxRuns: 9 }),
+    "A decryptor (chance x0.6, runs +9, material -2%, time +2%)",
+  );
 });

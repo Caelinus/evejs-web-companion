@@ -1015,6 +1015,8 @@ export interface IndustryJobRequest {
   readonly runs: number;
   readonly licensedRuns?: number;
   readonly productTypeID?: number;
+  /** Invention only: a decryptor, used one per run. */
+  readonly decryptorTypeID?: number;
 }
 
 export interface IndustryPreviewResult {

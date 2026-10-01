@@ -157,6 +157,12 @@ export function bestInventor<P extends { readonly skills: ReadonlyMap<number, nu
   return best;
 }
 
+/** "Parity Decryptor (chance x1.5, runs +3, material +1%, time -2%)": what a decryptor does. */
+export function decryptorEffectWords(decryptor: DecryptorTerms): string {
+  const signed = (value: number): string => (value >= 0 ? `+${value}` : String(value));
+  return `${decryptor.name ?? "A decryptor"} (chance x${decryptor.probabilityMultiplier}, runs ${signed(decryptor.maxRuns)}, material ${signed(decryptor.materialEfficiency)}%, time ${signed(decryptor.timeEfficiency)}%)`;
+}
+
 /** "34%", "4.5%": plain words for a chance. */
 export function chanceWords(chance: number): string {
   const percent = chance * 100;

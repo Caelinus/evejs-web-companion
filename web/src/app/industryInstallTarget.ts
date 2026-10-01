@@ -28,6 +28,8 @@ export interface InstallRequest {
   readonly facilityID: number;
   readonly activity: "manufacturing" | "reaction" | "invention";
   readonly runs: number;
+  /** Invention only: the decryptor to add, one per run. */
+  readonly decryptorTypeID?: number;
   /** Rises with every ask, so `served` names which one it served. */
   readonly n: number;
 }

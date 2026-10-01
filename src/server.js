@@ -28,6 +28,7 @@ const { lazyCompanionDb } = require("./companionDb");
 const { createPiPlanStore } = require("./piPlanStore");
 const { createIndustryPlanStore } = require("./industryPlanStore");
 const industryRecipes = require("./industryRecipes");
+const industryInstall = require("./industryInstall");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
@@ -4077,11 +4078,13 @@ function buildInstallJobPayload(held, request) {
     cost: 0,
     tax: 0,
     time: 0,
-    materials: {},
+    // Empty means "recompute from the blueprint" to the server; only an
+    // invention with a decryptor sends the exact map (src/industryInstall.js).
+    materials: request.materials || {},
     inputLocation: request.inputLocation,
     outputLocation: request.outputLocation,
     productTypeID: request.productTypeID || 0,
-    optionalTypeID: null,
+    optionalTypeID: request.decryptorTypeID || null,
     optionalTypeID2: null,
   };
 }
@@ -4130,6 +4133,29 @@ function normalizeIndustryRequest(req, res) {
     return null;
   }
   const licensedRuns = Number(body.licensedRuns) || 1;
+  // A decryptor is an invention input, and only a decryptor (group 1304) may be
+  // named as one: the server picks it out of the request's materials by group.
+  const decryptorTypeID = body.decryptorTypeID === undefined || body.decryptorTypeID === null
+    ? 0
+    : Number(body.decryptorTypeID) || -1;
+  if (decryptorTypeID !== 0) {
+    const decryptorType = decryptorTypeID > 0 && typeof staticData.getType === "function"
+      ? staticData.getType(decryptorTypeID)
+      : null;
+    if (
+      activity !== "invention" ||
+      !Number.isSafeInteger(decryptorTypeID) ||
+      !decryptorType ||
+      Number(decryptorType.groupID) !== industryInstall.DECRYPTOR_GROUP_ID
+    ) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_DECRYPTOR",
+        message: "Only a decryptor can be added, and only to invention.",
+      });
+      return null;
+    }
+  }
   return {
     blueprintItemID,
     blueprintTypeID: Number(body.blueprintTypeID) || 0,
@@ -4139,6 +4165,38 @@ function normalizeIndustryRequest(req, res) {
     runs,
     licensedRuns: licensedRuns > 0 ? licensedRuns : 1,
     productTypeID: Number(body.productTypeID) || 0,
+    decryptorTypeID,
+  };
+}
+
+/**
+ * For an invention with a decryptor, the exact materials map the server will
+ * compare against, with the facility's own invention material modifiers read
+ * the way the retail client reads them (src/industryInstall.js says why).
+ * Null for every other install, which keeps sending an empty map.
+ */
+async function decryptorInstallFields(held, webSessionID, request) {
+  if (!(request.decryptorTypeID > 0)) {
+    return null;
+  }
+  const definition = typeof staticData.getIndustryBlueprint === "function"
+    ? staticData.getIndustryBlueprint(request.blueprintTypeID)
+    : null;
+  const invention = definition && definition.activities ? definition.activities.invention : null;
+  const productTypeID = industryInstall.inventionProductTypeID(invention, request.productTypeID);
+  const facilities = await heldTopLevelCall(held, webSessionID, "facilityManager", "GetFacilities", [], null);
+  const facilityRow = industryInstall.findFacilityRow(facilities.result, request.facilityID);
+  return {
+    productTypeID,
+    materials: industryInstall.inventionRequestMaterials({
+      invention,
+      runs: request.runs,
+      modifiers: facilityRow
+        ? industryInstall.facilityMaterialModifiers(facilityRow, industryInstall.INVENTION_ACTIVITY_ID)
+        : [],
+      productType: productTypeID > 0 && typeof staticData.getType === "function" ? staticData.getType(productTypeID) : null,
+      decryptorTypeID: request.decryptorTypeID,
+    }),
   };
 }
 
@@ -4252,8 +4310,10 @@ app.post("/api/bridge/industry/install", requireAuth, async (req, res, next) => 
   try {
     await readHeldFlight(held, req.webSessionID);
     const locations = await readIndustryLocations(held, req.webSessionID, request.facilityID);
+    const decryptorFields = await decryptorInstallFields(held, req.webSessionID, request);
     const payload = buildInstallJobPayload(held, {
       ...request,
+      ...(decryptorFields || {}),
       inputLocation: locations.input,
       outputLocation: locations.output,
     });

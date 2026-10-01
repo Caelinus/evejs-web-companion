@@ -32,6 +32,7 @@ import {
   decodeSlotUsage,
   industryRefusalMessage,
 } from "../bridge/industry.ts";
+import { decodeInventionTerms, type DecryptorTerms } from "../bridge/industryInvention.ts";
 import {
   decodeEscrow,
   decodeOrderBook,
@@ -593,6 +594,8 @@ export interface AppFlow {
    * the SERVER. Feeds the confirm step so the decision is informed.
    */
   previewIndustryJob(request: api.IndustryJobRequest): Promise<Readonly<Record<string, number>>>;
+  /** Every decryptor and what it does to an invention (static data). */
+  loadDecryptors(): Promise<readonly DecryptorTerms[]>;
   /**
    * INSTALL a job. Spends materials and charges an installation fee, so the
    * panel confirms before calling it and the BFF confirms again.
@@ -11631,6 +11634,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     async previewIndustryJob(request) {
       const result = await api.previewIndustryJob(request, callOptions);
       return result.available;
+    },
+
+    async loadDecryptors() {
+      const terms = decodeInventionTerms(await api.getIndustryInventionTerms(callOptions));
+      return [...terms.decryptors.values()];
     },
 
     async installIndustryJob(request) {
