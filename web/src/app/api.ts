@@ -95,6 +95,8 @@ export interface ApiOptions {
    * queue behind a poll.
    */
   readonly priority?: RequestPriority;
+  /** Capture the current flow/session before awaiting a response drain. */
+  readonly captureNotificationSink?: () => (notifications: readonly JsonValue[]) => void;
 }
 
 // R42/R107 — THE one place every BFF request in this file picks up its session
@@ -145,6 +147,7 @@ async function requestJson(
   options: ApiOptions,
 ): Promise<Record<string, JsonValue>> {
   const doFetch = options.fetch ?? globalThis.fetch;
+  const notificationSink = options.captureNotificationSink?.();
   let response: Response;
   try {
     // ⚠ THE DEADLINE IS ARMED INSIDE THE LANE, NOT OUTSIDE IT. A request that
@@ -197,7 +200,9 @@ async function requestJson(
       response.status,
     );
   }
-  return data as Record<string, JsonValue>;
+  const body = data as Record<string, JsonValue>;
+  notificationSink?.(readNotifications(body));
+  return body;
 }
 
 async function postJson(
@@ -1297,8 +1302,8 @@ export async function createFleet(options: ApiOptions = {}): Promise<void> {
 }
 
 /** INVITE a character into the session's own fleet (must already be in one). */
-export async function inviteToFleet(inviteeCharID: number, options: ApiOptions = {}): Promise<void> {
-  await postJson("/api/bridge/fleet/invite", { inviteeCharID, confirm: true }, options);
+export async function inviteToFleet(inviteeCharID: number, options: ApiOptions = {}, expectedFleetID?: number): Promise<void> {
+  await postJson("/api/bridge/fleet/invite", { inviteeCharID, confirm: true, ...(expectedFleetID === undefined ? {} : { expectedFleetID }) }, options);
 }
 
 /**

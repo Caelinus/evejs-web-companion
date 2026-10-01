@@ -375,6 +375,8 @@ function makeRequireAuth({ allowQueryParam = false, cleanupSession = true } = {}
       }
       req.account = account;
       req.webSessionID = payload.sessionID;
+      const held = bridgeSessions.get(req.webSessionID);
+      if (held && req.path.startsWith("/api/bridge/")) assertHeldRequestGeneration(req, held);
       next();
     } catch (error) {
       next(error);
@@ -651,7 +653,7 @@ app.post("/api/bridge/call", requireAuth, async (req, res, next) => {
     // takeover, restart): drop the stale handle so the next call is stateless
     // and surface the typed error so the page can return to character select.
     if (heldBridgeSession && error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, heldBridgeSession);
     }
     next(error);
   }
@@ -662,9 +664,9 @@ app.post("/api/bridge/call", requireAuth, async (req, res, next) => {
 // gateway WebSocket for a session the BFF no longer holds can never be useful,
 // and attached browsers are told the channel ended rather than being left on a
 // silent stream.
-function forgetBridgeSession(webSessionID) {
+function forgetBridgeSession(webSessionID, expectedHeld = null) {
   const held = bridgeSessions.get(webSessionID);
-  if (!held) {
+  if (!held || expectedHeld !== null && held !== expectedHeld) {
     return false;
   }
   // Ordinary claims release with the session. An issued inventory transfer
@@ -722,7 +724,7 @@ async function releaseHeldBridgeSession(webSessionID, { confirmed = false } = {}
     if (bridgeSessions.get(webSessionID) === held) forgetBridgeSession(webSessionID);
     return true;
   }
-  forgetBridgeSession(webSessionID);
+  forgetBridgeSession(webSessionID, held);
   try {
     await gateway.releaseBridgeSession(held.bridgeSessionID, {
       userid: Number(held.accountID),
@@ -1071,6 +1073,9 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     // nearby lost-flight check before any automation handoff or movement.
     if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
       bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
+      // Private generation authority, never serialized. A pending request
+      // retaining this held object cannot dispatch after the host retires it.
+      bridgeSessions.get(req.webSessionID).botClaimSecret = req.get(botHostModule.BOT_HEADER);
     }
     res.json({
       ok: true,
@@ -1152,7 +1157,31 @@ function requireHeldBridgeSession(req, res) {
     });
     return null;
   }
+  assertHeldRequestGeneration(req, held);
   return held;
+}
+
+function assertHeldRequestGeneration(req, held) {
+  const secret = req.get(botHostModule.BOT_HEADER);
+  // A cockpit may attach to hosted GET readouts. Writes and requests naming a
+  // hosted generation must belong to the generation that selected this session.
+  const readOnly = req.method === "GET" || req.path === "/api/bridge/call";
+  if (held.botClaimSecret && (!readOnly || secret) &&
+      (secret !== held.botClaimSecret || !botHost.authorizesClaim(held.characterID, secret))) {
+    throw Object.assign(new Error("The requesting hosted controller generation is no longer current."),
+      { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+  }
+}
+
+function assertCurrentHeldSession(held, webSessionID) {
+  if (bridgeSessions.get(webSessionID) !== held) {
+    throw Object.assign(new Error("The pilot session changed before this call."),
+      { code: "NO_LIVE_SESSION", statusCode: 409 });
+  }
+  if (held.botClaimSecret && !botHost.authorizesClaim(held.characterID, held.botClaimSecret)) {
+    throw Object.assign(new Error("The hosted controller generation changed before this call."),
+      { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+  }
 }
 
 // The browser cannot leave the recovery grid while its login check is
@@ -1361,7 +1390,8 @@ function planetBindSpec(planetID) {
 // single bind instead of racing to create duplicate OIDs. A reaped OID
 // (BOUND_HANDLE_NOT_FOUND) rebinds once; a lost persistent session drops the
 // whole held session (as /api/bridge/call).
-async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
+async function boundCall(held, webSessionID, bindSpec, method, args, kwargs, bindNotifications = null) {
+  assertCurrentHeldSession(held, webSessionID);
   if (bindSpec.service === "invbroker" &&
       ["Add", "MultiAdd", "MultiMerge", "StackAll", "TrashItems", "SplitStack"].includes(method)) {
     // A picked structure or earlier service read is not mutation authority.
@@ -1385,6 +1415,7 @@ async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
   }
   const sessionFields = { userid: held.accountID };
   function ensureHandle(forceRebind) {
+    assertCurrentHeldSession(held, webSessionID);
     if (!forceRebind && held.boundHandles.has(bindSpec.key)) {
       return held.boundHandles.get(bindSpec.key);
     }
@@ -1397,7 +1428,10 @@ async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
         sessionFields,
         held.bridgeSessionID,
       )
-      .then((bound) => bound.boundHandle)
+      .then((bound) => {
+        if (bindNotifications && Array.isArray(bound.notifications)) bindNotifications.push(...bound.notifications);
+        return bound.boundHandle;
+      })
       .catch((error) => {
         // Never cache a failed bind.
         if (held.boundHandles.get(bindSpec.key) === bindPromise) {
@@ -1417,32 +1451,29 @@ async function boundCall(held, webSessionID, bindSpec, method, args, kwargs) {
     held.boundHandles.set(bindSpec.key, bindPromise);
     return bindPromise;
   }
-  try {
-    return await gateway.callBoundMethod(
+  async function dispatch(forceRebind) {
+    const handle = await ensureHandle(forceRebind);
+    assertCurrentHeldSession(held, webSessionID);
+    return gateway.callBoundMethod(
       bindSpec.service,
       method,
       args,
       kwargs,
       sessionFields,
       held.bridgeSessionID,
-      await ensureHandle(false),
+      handle,
     );
+  }
+  try {
+    return await dispatch(false);
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(webSessionID);
+      forgetBridgeSession(webSessionID, held);
       throw error;
     }
     if (error && error.code === "BOUND_HANDLE_NOT_FOUND") {
       held.boundHandles.delete(bindSpec.key);
-      return gateway.callBoundMethod(
-        bindSpec.service,
-        method,
-        args,
-        kwargs,
-        sessionFields,
-        held.bridgeSessionID,
-        await ensureHandle(true),
-      );
+      return dispatch(true);
     }
     throw error;
   }
@@ -1579,7 +1610,7 @@ app.get("/api/bridge/gateway-binds", requireAuth, async (req, res, next) => {
     // page returns to character select (matching /api/bridge/inventory).
     for (const settled of [skill, dogma, entityGw, systemScan, fleet]) {
       if (settled.status === "rejected" && settled.reason && settled.reason.code === "SESSION_NOT_FOUND") {
-        forgetBridgeSession(req.webSessionID);
+        forgetBridgeSession(req.webSessionID, held);
         next(settled.reason);
         return;
       }
@@ -1596,7 +1627,7 @@ app.get("/api/bridge/gateway-binds", requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -1677,7 +1708,7 @@ app.get("/api/bridge/bound-skills", requireAuth, async (req, res, next) => {
     res.json({ ok: true, characterID: held.characterID, reads });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -1777,7 +1808,7 @@ app.get("/api/bridge/bound-dogma", requireAuth, async (req, res, next) => {
     res.json({ ok: true, characterID: held.characterID, reads });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -1874,7 +1905,7 @@ app.get("/api/bridge/bound-inventory", requireAuth, async (req, res, next) => {
     res.json({ ok: true, characterID: held.characterID, reads });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -1969,7 +2000,7 @@ app.get("/api/bridge/bound-clones", requireAuth, async (req, res, next) => {
     res.json({ ok: true, characterID: held.characterID, reads });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -2092,7 +2123,7 @@ app.get("/api/bridge/bound-planet", requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -2167,7 +2198,7 @@ app.get("/api/bridge/bound-crimewatch", requireAuth, async (req, res, next) => {
     res.json({ ok: true, characterID: held.characterID, securityStatusOf: characterID, reads });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -2267,7 +2298,7 @@ app.get("/api/bridge/bound-small-services", requireAuth, async (req, res, next) 
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -2327,9 +2358,10 @@ app.get("/api/bridge/bound-fleet", requireAuth, async (req, res, next) => {
     ["GetFleetComposition", []],
   ];
   try {
+    const notifications = [];
     const settled = await Promise.allSettled(
       FLEET_READS.map(([method, args]) =>
-        boundCall(held, req.webSessionID, spec, method, args, null),
+        boundCall(held, req.webSessionID, spec, method, args, null, notifications),
       ),
     );
     // A lost live session cannot be recovered by any read; surface it so the page
@@ -2345,6 +2377,7 @@ app.get("/api/bridge/bound-fleet", requireAuth, async (req, res, next) => {
       const s = settled[index];
       if (s.status === "fulfilled") {
         reads[method] = { result: s.value.result };
+        if (Array.isArray(s.value.notifications)) notifications.push(...s.value.notifications);
       } else {
         const reason = s.reason || {};
         reads[method] = {
@@ -2373,10 +2406,11 @@ app.get("/api/bridge/bound-fleet", requireAuth, async (req, res, next) => {
       characterID: held.characterID,
       fleetID: held.fleetID || null,
       reads,
+      notifications,
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -5923,7 +5957,7 @@ async function accountLevelCall(req, service, method, args, kwargs = null) {
     );
   } catch (error) {
     if (held && error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     throw error;
   }
@@ -7435,7 +7469,7 @@ app.post("/api/bridge/ship/safe-logoff", requireAuth, async (req, res, next) => 
       // EveJS disconnects the character after serializing this successful
       // response. Drop the BFF's capability immediately so the browser cannot
       // keep acting through a stale held-session record.
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     res.json({
       ok: true,
@@ -8272,7 +8306,7 @@ app.post("/api/bridge/fleet/create", requireAuth, async (req, res, next) => {
   } catch (error) {
     invalidateFleetBoundHandles(held);
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -9742,7 +9776,7 @@ async function dispatchBoundDogmaWrite(req, res, next, method, args) {
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10266,7 +10300,7 @@ async function dispatchBoundEntityWrite(req, res, next, method, args, { withDron
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10356,7 +10390,7 @@ async function dispatchBoundInventoryWrite(req, res, next, method, args, kwargs 
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10501,7 +10535,7 @@ async function dispatchBoundPlanetWrite(req, res, next, planetID, method, args, 
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10593,7 +10627,7 @@ async function dispatchBoundScanWrite(req, res, next, method, args, kwargs = nul
     res.json({ ok: true, applied: true, result: outcome.result ?? null, notifications: outcome.notifications });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10799,7 +10833,7 @@ async function runAuthoritativeScannerWrite(req, res, next, kind) {
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10889,7 +10923,7 @@ async function dispatchBoundFleetWrite(req, res, next, method, args, kwargs = nu
     // A rejected response is not proof that the server made no state change.
     invalidateFleetBoundHandles(held);
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -10920,7 +10954,7 @@ async function dispatchFleetIDBoundWrite(req, res, next, fleetID, method, args, 
   } catch (error) {
     invalidateFleetBoundHandles(held);
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -11061,6 +11095,17 @@ app.post("/api/bridge/fleet/invite", requireAuth, async (req, res, next) => {
   const wingID = Number(body.wingID) > 0 ? Number(body.wingID) : null;
   const squadID = Number(body.squadID) > 0 ? Number(body.squadID) : null;
   const role = body.role === undefined ? null : body.role;
+  if (Object.prototype.hasOwnProperty.call(body, "expectedFleetID")) {
+    const expectedFleetID = strictPositiveID(body.expectedFleetID);
+    if (expectedFleetID === null) {
+      sendDedicatedWriteInputError(res, "INVALID_FLEET_ID", "A positive expectedFleetID is required.");
+      return;
+    }
+    // Invite's runtime membership check runs against this exact bound fleet.
+    // A queued recovery invite cannot silently follow a peer into a new one.
+    await dispatchFleetIDBoundWrite(req, res, next, expectedFleetID, "Invite", [inviteeCharID, wingID, squadID, role]);
+    return;
+  }
   await dispatchBoundFleetWrite(req, res, next, "Invite", [inviteeCharID, wingID, squadID, role]);
 });
 
@@ -11653,6 +11698,7 @@ function readIndustryJobStatus(row) {
 // persistent session drops the whole held session (as /api/bridge/call).
 async function heldTopLevelCall(held, webSessionID, service, method, args, kwargs) {
   try {
+    assertCurrentHeldSession(held, webSessionID);
     return await gateway.callMethod(
       service,
       method,
@@ -11663,7 +11709,7 @@ async function heldTopLevelCall(held, webSessionID, service, method, args, kwarg
     );
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(webSessionID);
+      forgetBridgeSession(webSessionID, held);
     }
     throw error;
   }
@@ -15859,9 +15905,11 @@ async function reparkAfterArrival(held, solarSystemID) {
 // character select), as with every held call.
 async function readHeldFlight(held, webSessionID) {
   try {
+    assertCurrentHeldSession(held, webSessionID);
     const outcome = await gateway.readFlightStatus(held.bridgeSessionID, {
       userid: held.accountID,
     });
+    assertCurrentHeldSession(held, webSessionID);
     // Keep the held session's station in sync with the character's LIVE
     // position. held.stationID is otherwise set only at select, so after the
     // ship docks somewhere new (e.g. an autopilot arrival) the station-scoped
@@ -15915,7 +15963,7 @@ async function readHeldFlight(held, webSessionID) {
     };
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(webSessionID);
+      forgetBridgeSession(webSessionID, held);
     }
     throw error;
   }
@@ -15955,7 +16003,7 @@ async function readHeldScanner(held, webSessionID) {
     };
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(webSessionID);
+      forgetBridgeSession(webSessionID, held);
     }
     throw error;
   }
@@ -16623,7 +16671,7 @@ app.post("/api/bridge/flight/jump-through-structure", requireAuth, async (req, r
       }
     }
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -17006,7 +17054,7 @@ async function dispatchBoundBeyonceWrite(req, res, next, method, args, kwargs = 
       }
     }
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -17138,7 +17186,13 @@ function decodeTargetIDList(result) {
 /** The itemIDs the server says are locked RIGHT NOW. The only authority. */
 async function readLockedTargetIDs(held, webSessionID) {
   const outcome = await heldTopLevelCall(held, webSessionID, "dogmaIM", "GetTargets", [], null);
-  return { ids: decodeTargetIDList(outcome.result), notifications: outcome.notifications };
+  const raw = outcome.result;
+  const readable = raw?.type === "list" && Array.isArray(raw.items) && raw.items.every(value => {
+    const id = typeof value === "number" ? value : value?.type === "long" ? value.value : null;
+    return (typeof id === "number" || typeof id === "string" && /^\d+$/.test(id)) &&
+      Number.isSafeInteger(Number(id)) && Number(id) > 0;
+  });
+  return { ids: decodeTargetIDList(raw), readable, notifications: outcome.notifications };
 }
 
 /**
@@ -17218,7 +17272,8 @@ app.get("/api/bridge/targets", requireAuth, async (req, res, next) => {
   }
   try {
     const locked = await readLockedTargetIDs(held, req.webSessionID);
-    res.json({ ok: true, targetIDs: locked.ids, notifications: locked.notifications });
+    // A malformed read cannot prove that the caller has no locked targets.
+    res.json({ ok: true, targetIDs: locked.readable ? locked.ids : null, notifications: locked.notifications });
   } catch (error) {
     next(error);
   }
@@ -18431,7 +18486,7 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     if (error && error.code === "SESSION_NOT_FOUND") {
-      forgetBridgeSession(req.webSessionID);
+      forgetBridgeSession(req.webSessionID, held);
     }
     next(error);
   }
@@ -18543,7 +18598,10 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
     return;
   }
   try {
-    await readHeldFlight(held, req.webSessionID);
+    const flight = await readHeldFlight(held, req.webSessionID);
+    // Any read can drain a session notification, including a fleet invite.
+    // Preserve every successful drain, not just the scene read's response.
+    const notifications = Array.isArray(flight.notifications) ? [...flight.notifications] : [];
     const shipID = held.activeShipID;
     if (!shipID) {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
@@ -18580,6 +18638,7 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
         "ListByFlags",
         [[ITEM_FLAG_DRONE_BAY]],
         null,
+        notifications,
       ),
       heldTopLevelCall(held, req.webSessionID, "dogmaIM", "ShipGetInfo", [], null),
       shipID ? (observation ? readObservation() : readDronesInSpace(held)) : noShip(),
@@ -18590,6 +18649,7 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
         return;
       }
     }
+    for (const settled of [bay, shipInfo, inSpace]) notifications.push(...settledReadNotifications(settled));
     if (observation) {
       if (inSpace.status === "rejected") throw inSpace.reason;
       const space = inSpace.value.space;
@@ -18619,9 +18679,9 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
     res.json({
       ok: true,
       activeShipID: shipID,
+      notifications,
       ...(observation ? {
         space: withOreStaticFields(inSpace.value.space),
-        notifications: inSpace.value.notifications,
       } : {}),
       // null (not []) on a failed read: "we could not look in the bay" is not
       // "the bay is empty", and the panel says which.
@@ -18666,10 +18726,6 @@ app.post("/api/bridge/drone-recovery/ready", requireAuth, async (req, res, next)
           message: "Nearby lost drones have not been confirmed back in the bay." });
         return;
       }
-      const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
-      if (association) miningOperations.observeMemberLocation(
-        association.operationID, held.characterID, space, !held.dockedLocationID, observationStartedAt,
-      );
     }
     if (bridgeSessions.get(req.webSessionID) !== held) {
       res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE" });

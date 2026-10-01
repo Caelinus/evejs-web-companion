@@ -132,13 +132,14 @@ async function startTestServer(options = {}) {
     eveGatewayClient: options.gateway,
     webAuth: fakeAuth(),
     staticData: options.staticData || fakeStaticData(),
+    botHost: options.botHost,
     errorLogger() {},
   });
   const server = app.listen(0, "127.0.0.1");
   activeServers.add(server);
   await once(server, "listening");
   const { port } = server.address();
-  return { baseUrl: `http://127.0.0.1:${port}` };
+  return { baseUrl: `http://127.0.0.1:${port}`, app };
 }
 
 async function apiRequest(baseUrl, path, options = {}) {
@@ -271,4 +272,105 @@ test("R100 write routes refuse without a held bridge session", async () => {
     assert.notEqual(response.status, 200, `${path} must refuse without a held session`);
   }
   assert.equal(gateway.calls.boundCall.length, 0, "no dispatch without a held session");
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test("replaced held session fences a write awaiting its bind", async () => {
+  const gateway = fakeGateway(), entered = deferred(), binding = deferred();
+  gateway.bindObject = async () => { entered.resolve(); return binding.promise; };
+  const { baseUrl, app } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const pending = apiRequest(baseUrl, "/api/bridge/dogma/targets/clear", { method: "POST", body: { confirm: true } });
+  await entered.promise;
+  const previous = app.locals.bridgeSessions.get(SESSION_ID);
+  const replacement = { ...previous, bridgeSessionID: "new-owned-session", boundHandles: new Map() };
+  app.locals.bridgeSessions.set(SESSION_ID, replacement);
+  binding.resolve({ boundHandle: "old-bound-handle" });
+  const result = await pending;
+  assert.equal(result.response.status, 409);
+  assert.equal(result.payload.error, "NO_LIVE_SESSION");
+  assert.equal(gateway.calls.boundCall.length, 0);
+  assert.equal(app.locals.bridgeSessions.get(SESSION_ID), replacement);
+});
+
+test("retired hosted claim fences a write awaiting its bind", async () => {
+  const gateway = fakeGateway(), entered = deferred(), binding = deferred();
+  let claimCurrent = true;
+  const botHost = { claimedBy: () => null, authorizesClaim: (_id, secret) => claimCurrent && secret === "owned-generation" };
+  gateway.bindObject = async () => { entered.resolve(); return binding.promise; };
+  const { baseUrl, app } = await startTestServer({ gateway, botHost });
+  await selectOnServer(baseUrl);
+  app.locals.bridgeSessions.get(SESSION_ID).botClaimSecret = "owned-generation";
+  const pending = apiRequest(baseUrl, "/api/bridge/dogma/targets/clear", { method: "POST",
+    headers: { "x-evejs-bot-claim": "owned-generation" }, body: { confirm: true } });
+  await entered.promise;
+  claimCurrent = false;
+  binding.resolve({ boundHandle: "old-bound-handle" });
+  const result = await pending;
+  assert.equal(result.response.status, 409);
+  assert.equal(result.payload.error, "HOSTED_GENERATION_CHANGED");
+  assert.equal(gateway.calls.boundCall.length, 0);
+});
+
+test("a late old-generation request cannot acquire the replacement held session", async () => {
+  const gateway = fakeGateway();
+  gateway.callMethod = async (service, method) => ({ service, method, result: [], notifications: [] });
+  const botHost = { claimedBy: () => null, authorizesClaim: (_id, secret) => secret === "current-generation" };
+  const { baseUrl, app } = await startTestServer({ gateway, botHost });
+  await selectOnServer(baseUrl);
+  const held = app.locals.bridgeSessions.get(SESSION_ID);
+  app.locals.bridgeSessions.set(SESSION_ID, { ...held, botClaimSecret: "current-generation", boundHandles: new Map() });
+  const attached = await apiRequest(baseUrl, "/api/bridge/call", { method: "POST", body: { service: "dogmaIM", method: "GetAllInfo" } });
+  assert.equal(attached.response.status, 200, "attached policy-read-only POST remains readable");
+  for (const path of ["/api/bridge/dogma/targets/clear", "/api/bridge/release", "/api/bridge/call"]) {
+    const result = await apiRequest(baseUrl, path, { method: "POST",
+      headers: { "x-evejs-bot-claim": "retired-generation" }, body: { confirm: true } });
+    assert.equal(result.response.status, 409);
+    assert.equal(result.payload.error, "HOSTED_GENERATION_CHANGED");
+  }
+  assert.equal(gateway.calls.bind.length, 0);
+  assert.equal(gateway.calls.boundCall.length, 0);
+  assert.ok(app.locals.bridgeSessions.get(SESSION_ID), "an old release cannot drop the new held session");
+});
+
+test("late lost-session result cannot forget its replacement session", async () => {
+  const gateway = fakeGateway(), entered = deferred(), issue = deferred();
+  gateway.callBoundMethod = async () => { entered.resolve(); return issue.promise; };
+  const { baseUrl, app } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const pending = apiRequest(baseUrl, "/api/bridge/dogma/targets/clear", { method: "POST", body: { confirm: true } });
+  await entered.promise;
+  const previous = app.locals.bridgeSessions.get(SESSION_ID);
+  const replacement = { ...previous, bridgeSessionID: "new-owned-session", boundHandles: new Map() };
+  app.locals.bridgeSessions.set(SESSION_ID, replacement);
+  issue.reject(Object.assign(new Error("Old session is gone"), { code: "SESSION_NOT_FOUND", statusCode: 404 }));
+  assert.equal((await pending).response.status, 404);
+  assert.equal(app.locals.bridgeSessions.get(SESSION_ID), replacement);
+});
+
+test("rebind retry fences a write after held session replacement", async () => {
+  const gateway = fakeGateway(), entered = deferred(), binding = deferred();
+  const initialBind = gateway.bindObject; let binds = 0, issues = 0;
+  gateway.bindObject = async (...args) => {
+    if (++binds === 1) return initialBind(...args);
+    entered.resolve(); return binding.promise;
+  };
+  gateway.callBoundMethod = async () => {
+    issues++;
+    throw Object.assign(new Error("Old bind disappeared"), { code: "BOUND_HANDLE_NOT_FOUND" });
+  };
+  const { baseUrl, app } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const pending = apiRequest(baseUrl, "/api/bridge/dogma/targets/clear", { method: "POST", body: { confirm: true } });
+  await entered.promise;
+  const previous = app.locals.bridgeSessions.get(SESSION_ID);
+  app.locals.bridgeSessions.set(SESSION_ID, { ...previous, bridgeSessionID: "replacement", boundHandles: new Map() });
+  binding.resolve({ boundHandle: "stale-rebound" });
+  assert.equal((await pending).payload.error, "NO_LIVE_SESSION");
+  assert.equal(issues, 1, "the stale retry must not dispatch");
 });

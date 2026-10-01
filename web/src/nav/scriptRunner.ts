@@ -424,6 +424,11 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         board: memory.board,
       });
     } catch (error) {
+      // Preserve the failed observation at the same recorder seam as actions.
+      // Retry/give-up copy cannot identify a refused read or a projection bug.
+      record({ t: now(), kind: "result", run: runID, phase: READ_RETRY,
+        says: "observe ship state", ok: false, refusal: deps.refusalReason(error) });
+      if (token !== runToken || status !== "running") return;
       if (deps.isSessionLost(error)) {
         setError(SESSION_LOST);
         return;

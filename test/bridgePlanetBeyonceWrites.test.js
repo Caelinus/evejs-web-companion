@@ -126,6 +126,10 @@ function fakeGateway(options = {}) {
         notifications: [],
       };
     },
+    async readSpaceSnapshot() {
+      return { space: { inSpace: state.inSpace, shipID: SHIP_ID, solarSystemID: state.solarSystemID,
+        ship: { itemID: SHIP_ID, characterID: CHARACTER_ID }, entities: [] }, notifications: [] };
+    },
     async callMethod(service, method) {
       throw new Error(`R103 planet/beyonce writes are BOUND — unexpected top-level ${service}.${method}`);
     },
@@ -170,7 +174,10 @@ async function apiRequest(baseUrl, path, options = {}) {
 }
 
 async function selectOnServer(baseUrl) {
-  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: payload.droneRecoveryCheckID } });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
 }
 
 test.afterEach(async () => {

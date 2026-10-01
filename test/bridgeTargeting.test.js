@@ -314,6 +314,23 @@ test("the targets read is dogmaIM.GetTargets and answers plain itemIDs", async (
 
 // --- Locking ----------------------------------------------------------------
 
+test("target reads preserve malformed authority as unknown and accept an actual empty list", async () => {
+  let result = null;
+  const { baseUrl } = await inSpace({ async callMethod(service, method) {
+    return { service, method, result, notifications: [] };
+  } });
+  for (const raw of [null, {}, { type: "list" }, { type: "list", items: [ROCK_ID, null] },
+    { type: "list", items: [{ value: ROCK_ID }] }, { type: "list", items: [0] },
+    { type: "list", items: [Number.MAX_SAFE_INTEGER + 1] }, { type: "list", items: [{ type: "long", value: "1e3" }] }]) {
+    result = raw;
+    assert.equal((await apiRequest(baseUrl, "/api/bridge/targets")).payload.targetIDs, null);
+  }
+  result = { type: "list", items: [] };
+  assert.deepEqual((await apiRequest(baseUrl, "/api/bridge/targets")).payload.targetIDs, []);
+  result = { type: "list", items: [ROCK_ID, { type: "long", value: String(OTHER_ROCK_ID) }] };
+  assert.deepEqual((await apiRequest(baseUrl, "/api/bridge/targets")).payload.targetIDs, [ROCK_ID, OTHER_ROCK_ID]);
+});
+
 test("lock sends AddTarget(targetID) and RE-READS rather than trusting the 200", async () => {
   const { gateway, baseUrl } = await inSpace();
   // The server accepts the attempt and finishes acquiring it before the re-read.

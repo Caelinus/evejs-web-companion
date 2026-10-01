@@ -308,6 +308,20 @@ test("the charge belongs to the module, with what is loaded and how much", () =>
   });
 });
 
+test("active-ship sublocation charge keeps its tuple identity and never replaces the module", () => {
+  const module = packedRow({ itemID: 301, typeID: 43551, categoryID: 7, groupID: 1770, locationID: 101, flagID: 27 });
+  const charge = (itemID: JsonValue, extra: Record<string, JsonValue> = {}) => packedRow({ itemID, typeID: 42830,
+    categoryID: 8, groupID: 1771, locationID: 101, flagID: 27, quantity: 300, ...extra });
+  const decode = (row: JsonValue) => buildSlots(slotList([module, row]), shipInfo({ 14: 1 }), { type: "list", items: [301] })[0]!.module;
+  assert.deepEqual(decode(charge([101, 27, 42830]))?.charge, { itemID: [101, 27, 42830], typeID: 42830, quantity: 300 });
+  assert.equal(decode(charge([101, 27, 42830]))?.itemID, 301);
+  for (const row of [charge([102, 27, 42830]), charge([101, 28, 42830]), charge([101, 27, 42831]),
+    charge([101, 27]), charge([101, 27, 42830], { categoryID: 7 }), charge([102, 27, 42830], { locationID: 102 })]) {
+    assert.equal(decode(row)?.charge, null);
+    assert.equal(decode(row)?.itemID, 301);
+  }
+});
+
 test("a charge never becomes a slot of its own", () => {
   const slots = buildSlots(
     loadedTurretRows(),

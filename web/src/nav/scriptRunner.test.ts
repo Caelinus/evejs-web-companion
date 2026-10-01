@@ -522,6 +522,34 @@ test("repeated read failures give up with a plain reason", async () => {
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
 });
 
+test("failed observations retain their cause without changing the bounded retry gate", async () => {
+  const entries: BotLogDraft[] = [];
+  const h = harness({ observeThrows: () => { throw new Error("CALL_REFUSED: fitting unavailable"); },
+    log: { write: row => { entries.push(row); } } });
+  h.runner.start(script([macroStep("a", "undock")]));
+  for (let n = 0; n < MAX_READ_FAILURES; n++) await h.runner.tick();
+  const failures = entries.filter(row => row.kind === "result" && row.says === "observe ship state");
+  assert.equal(failures.length, MAX_READ_FAILURES);
+  assert.ok(failures.every(row => row.ok === false && row.refusal === "CALL_REFUSED: fitting unavailable" && row.action === undefined));
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.ok(!h.issued.some(row => row.kind === "undock"));
+});
+
+test("branch-entry observation hints reach the observer before selecting a macro", async () => {
+  const branch: ProgramNode = { id: "hold", kind: "branch", when: { kind: "ore-hold-at-least", fraction: 0.9 },
+    then: [macroStep("delivery", "deliver-ore")], else: [macroStep("depart", "undock")] };
+  for (const program of [[branch], [{ id: "loop", kind: "loop", repeat: { kind: "forever" }, body: [branch] }]] as readonly (readonly ProgramNode[])[]) {
+    const entries: BotLogDraft[] = [];
+    const h = harness({ log: { write: row => { entries.push(row); } } });
+    h.setObs(calm({ inSpace: false, docked: true }));
+    h.runner.start(script(program));
+    for (let n = 0; n < 8; n++) await h.runner.tick();
+    assert.ok(h.issued.some(action => action.kind === "undock"));
+    assert.equal(entries.filter(row => row.says === "observe ship state").length, 0);
+    assert.equal(h.runner.getStatus(), "running");
+  }
+});
+
 test("reads that give up send the ship to the station the bot is configured to dock at", async () => {
   // Blind, nothing can be DECIDED -- but the autopilot runs on its own reads, and
   // the dock station is a SETTING on the script, not something read from the

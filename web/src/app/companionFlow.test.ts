@@ -493,6 +493,7 @@ test("a notification DRAINED onto a bridge response reaches the push dispatch", 
     onopen: null,
   });
 
+  let inviteDrained = false;
   const fakeFetch = (async (input: unknown, init?: { body?: string }) => {
     const path = String(input);
     const body = init?.body ? JSON.parse(init.body) : {};
@@ -503,9 +504,11 @@ test("a notification DRAINED onto a bridge response reaches the push dispatch", 
         if (path === "/api/bridge/flight/status") {
           // The drain rides along with an ordinary read. No extra route, no
           // poll of our own — this response was going to be made anyway.
+          const notifications = inviteDrained ? [] : [inviteNotification()];
+          inviteDrained = true;
           return {
             ...(flightBody(false) as Record<string, unknown>),
-            notifications: [inviteNotification()],
+            notifications,
           };
         }
         if (path === "/api/bridge/space/snapshot") return spaceBody();
@@ -520,6 +523,8 @@ test("a notification DRAINED onto a bridge response reaches the push dispatch", 
 
   const store = createClientStore();
   const flow = createAppFlow(store, { fetch: fakeFetch, eventSource, livePush: false });
+  store.apply({ type: "character/online", character: { characterID: OWN_CHARACTER_ID, characterName: "Companion",
+    stationID: null, structureID: null, solarSystemID: SOLAR_SYSTEM_ID, corporationID: null }, station: null });
 
   assert.equal(store.get().fleet.pendingInvite, null, "nothing has been pushed yet");
   await flow.startFleetCompanion(DEFAULT_FLEET_COMPANION_REQUEST);
