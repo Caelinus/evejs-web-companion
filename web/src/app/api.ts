@@ -4656,8 +4656,37 @@ export async function reconnectScannerProbes(options: ApiOptions = {}): Promise<
 export async function jettisonItems(
   itemIDs: readonly number[],
   options: ApiOptions = {},
-): Promise<void> {
-  await postJson("/api/bridge/ship/jettison", { itemIDs: [...itemIDs], confirm: true }, options);
+  invocation?: { readonly runID: string; readonly invocationID: number; readonly stepPath: string },
+): Promise<HostedJettisonReceipt | null> {
+  const data = await postJson("/api/bridge/ship/jettison", { itemIDs: [...itemIDs], confirm: true, ...(invocation ? { invocation } : {}) }, options);
+  if (!invocation) return null;
+  return hostedJettisonReceipt(data, false);
+}
+
+export type HostedJettisonReceipt = Readonly<Record<string, JsonValue>> & { readonly state: string };
+export class JettisonCustodyError extends BridgeCallError {
+  readonly custody: HostedJettisonReceipt | null;
+  readonly notIssued: boolean;
+  constructor(code: string, custody: HostedJettisonReceipt | null, notIssued = false) {
+    super(code, "Jettison custody requires reconciliation before another mutation.", 409);
+    this.custody = custody;
+    this.notIssued = notIssued;
+  }
+}
+export function recoverableHostedJettison(receipt: HostedJettisonReceipt): boolean {
+  return ["not-issued", "refused-before-dispatch", "confirmed-created", "confirmed-no-ore-mutation"].includes(receipt.state);
+}
+function hostedJettisonReceipt(data: Record<string, JsonValue>, allowNone: boolean): HostedJettisonReceipt | null {
+  const value = data["jettisonCustody"];
+  if (value === null && allowNone && data["accepted"] === true) return null;
+  const object = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, JsonValue> : null;
+  const custody = object && typeof object["state"] === "string" ? object as HostedJettisonReceipt : null;
+  if (!custody || data["accepted"] !== true || !recoverableHostedJettison(custody))
+    throw new JettisonCustodyError(typeof data["error"] === "string" ? data["error"] : "JETTISON_CUSTODY_UNKNOWN", custody, data["notIssued"] === true);
+  return custody;
+}
+export async function reconcileHostedJettison(options: ApiOptions = {}): Promise<HostedJettisonReceipt | null> {
+  return hostedJettisonReceipt(await postJson("/api/bridge/ship/jettison/reconcile", {}, options), true);
 }
 
 /** What one in-space compression attempt answered. */

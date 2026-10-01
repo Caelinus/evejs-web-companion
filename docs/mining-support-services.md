@@ -219,3 +219,26 @@ invite records and the last call's outcome, fixed error code and HTTP status.
 It excludes private session scope and free-text call errors. Each snapshot has
 its own timestamp; neither ACK nor these passive diagnostics prove fresh
 membership, notification delivery or a control/session capability.
+
+The owned-host recovery seam is `POST /api/bots/:botID/reconnect`, account-scoped
+to an active restart-safe operation run. It quiesces the existing runner,
+retires private request authority, and confirms release of that exact owned
+held session before normal reselection. Typed session loss uses the same
+recovery path without inventing a disconnect. Fresh hull/fit, scene/fleet,
+assignment and lost-drone checks precede resumption; original grant expiry and
+bounded lifetime retries remain in force. Unresolved custody blocks recovery
+and release. Generic fleet rejoin and full MCC recovery need separate live
+evidence; no character ID targets an arbitrary runtime session.
+
+After that quiescence and preflight, a fresh readable own target list permits
+retiring an old self-mining lock intent. This rebases session targeting and does
+not assert that an absent pending lock completed or was cancelled. Malformed
+target reads stay unknown. Module actions, self-mining faults, actual drone or
+inventory custody and the host's unresolved issued-write gate still block.
+
+Managed hosted COMMAND reacquisition can request a surviving owned member's
+ordinary invitation. Selection requires fresh exact-ID observations for every
+intended peer and one uniquely surviving fleet. The current peer generation,
+fleet grant and original expiry are checked again at actual HTTP dispatch.
+This reuses the fleet reducer and normal invite transport; COMMAND's own
+acceptance and authoritative roster reread still gate anchor publication.

@@ -61,6 +61,7 @@ function script(program: readonly ProgramNode[]): BotScript {
 }
 
 interface Harness {
+  mutationCustody?: () => boolean;
   observeThrows?: () => never;
   registry?: MacroRegistry;
   /** Throw from `issue` — the refusal path. Return null to let the call pass. */
@@ -97,9 +98,34 @@ function harness(opts: Harness = {}) {
     registry: opts.registry ?? registry,
     travelHome: home,
     log: opts.log,
+    mutationCustody: opts.mutationCustody,
   });
   return { runner, issued, progress, setObs: (o: ScriptObservation) => { obs = o; } };
 }
+
+test("pending jettison owns manual and transport resume and cannot issue twice", async () => {
+  let pending = false;
+  const h = harness({ mutationCustody: () => pending,
+    registry: { "jettison-ore": () => mt({ kind: "jettison", itemIDs: [10] }, { kind: "acting" }) },
+    issueThrows: () => { pending = true; return new Error("ambiguous jettison"); } });
+  const s = script([macroStep("ore", "jettison-ore")]);
+  h.runner.start(s);
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1);
+  assert.equal(h.runner.getStatus(), "paused");
+  h.runner.resume();
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.equal(h.runner.resumeHeadHome("Stop"), false);
+  assert.throws(() => h.runner.start(s), /custody/);
+  await h.runner.suspendTransport();
+  assert.equal(h.runner.transportCustody(), true);
+  assert.throws(() => h.runner.resumeTransport(), /unresolved/);
+  await h.runner.tick();
+  assert.equal(h.issued.length, 1);
+  pending = false;
+  h.runner.resumeTransport();
+  assert.equal(h.runner.getStatus(), "running");
+});
 
 // ── The refusal ledger ──────────────────────────────────────────────────────
 //
@@ -288,6 +314,79 @@ test("hosted graceful Stop waits for an issued action, then can resume only the 
   assert.equal(runner.resumeHeadHome("Deadline reached"), true);
   await runner.tick();
   assert.ok(issued.some((action) => action.kind === "warp"), "Farmer's home trip still runs after safety settlement");
+});
+
+test("transport suspension waits for an issued transfer and retains its claim on session loss", async () => {
+  let entered!: () => void, fail!: (error: Error) => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<void>((_resolve, reject) => { fail = reject; });
+  const released: string[] = [];
+  const runner = createScriptRunner({
+    observe: async () => calm({ flightStatus: { solarSystemID: 30000142 } as FlightStatus }),
+    issue: async () => { entered(); await pending; return null; },
+    claims: { read: async () => [], acquire: async () => true, release: async owner => { released.push(owner); } },
+    registry: { "loot-containers": () => ({ ...mt({ kind: "lootContainer", containerID: 42 }, { kind: "acting" }), containerTargetID: 42 }) },
+    travelHome: home, sleep: async () => {}, onProgress: () => {},
+    isSessionLost: e => e instanceof SessionLost, refusalReason: String,
+  });
+  runner.start(script([macroStep("a", "loot-containers")]));
+  const ticking = runner.tick(); await started;
+  let finished = false;
+  const frozen = runner.suspendTransport().then(() => { finished = true; });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  assert.equal(runner.getStatus(), "paused");
+  fail(new SessionLost()); await ticking; await frozen;
+  assert.equal(runner.getStatus(), "paused", "late session loss cannot terminally unwind the suspended runner");
+  assert.equal(runner.transportCustody(), true);
+  assert.deepEqual(released, [], "transport loss cannot surrender the pending transfer's claim");
+  await runner.tick(); assert.deepEqual(released, []);
+  await runner.beginGracefulStop(); assert.equal(released.length, 1, "ordinary explicit settlement remains available");
+});
+
+test("transport suspension fences an awaited observation without resetting the script", async () => {
+  let entered!: () => void, fail!: (error: Error) => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<ScriptObservation>((_resolve, reject) => { fail = reject; });
+  let first = true;
+  const issued: ScriptAction[] = [];
+  const runner = createScriptRunner({
+    observe: async () => { if (first) { first = false; entered(); return pending; } return calm({ holdEmpty: false }); },
+    issue: async action => { issued.push(action); return null; },
+    registry, travelHome: home, sleep: async () => {}, onProgress: () => {},
+    isSessionLost: e => e instanceof SessionLost, refusalReason: String,
+  });
+  runner.start(script([macroStep("a", "deliver-ore")]));
+  const ticking = runner.tick(); await started;
+  const frozen = runner.suspendTransport(); fail(new SessionLost()); await ticking; await frozen;
+  assert.equal(runner.getStatus(), "paused"); assert.equal(runner.transportCustody(), false);
+  assert.equal(issued.length, 0);
+  runner.resume(); await runner.tick();
+  assert.equal(issued[0]?.kind, "unloadOre", "the original program can continue after fresh authority is verified");
+});
+
+test("late claim acquisition cannot release custody or resurrect a suspended runner", async () => {
+  for (const outcome of ["acquired", "refused", "unreadable"] as const) {
+    let entered!: () => void, finish!: (value: boolean) => void, fail!: (error: Error) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const acquisition = new Promise<boolean>((resolve, reject) => { finish = resolve; fail = reject; });
+    const released: string[] = [];
+    const runner = createScriptRunner({
+      observe: async () => calm({ flightStatus: { solarSystemID: 30000142 } as FlightStatus }),
+      issue: async () => { assert.fail("a superseded acquisition cannot issue"); },
+      claims: { read: async () => [], acquire: async () => { entered(); return acquisition; }, release: async owner => { released.push(owner); } },
+      registry: { "loot-containers": () => ({ ...mt({ kind: "lootContainer", containerID: 42 }, { kind: "acting" }), containerTargetID: 42 }) },
+      travelHome: home, sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+    });
+    runner.start(script([macroStep("a", "loot-containers")]));
+    const ticking = runner.tick(); await started; const frozen = runner.suspendTransport();
+    if (outcome === "unreadable") fail(new Error("claim authority lost")); else finish(outcome === "acquired");
+    await ticking; await frozen;
+    assert.equal(runner.getStatus(), "paused"); assert.deepEqual(released, []);
+    assert.equal(runner.transportCustody(), outcome === "acquired");
+    if (outcome === "acquired") assert.throws(() => runner.resumeTransport(), /unresolved/);
+    else { runner.resumeTransport(); assert.equal(runner.getStatus(), "running"); }
+  }
 });
 
 test("the pause reason survives the decider's cheerful why", async () => {

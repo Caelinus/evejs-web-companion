@@ -237,6 +237,7 @@ import { observedSupportAnchorServices, supportServiceEnvelope, type MiningSuppo
   type SupportRequirements } from "../nav/miningSupportAnchor.ts";
 import { decideMiningSupport, observeMiningSupportOrders } from "../nav/miningSupportController.ts";
 import { settleHostedMiningSupport, settleParkingMiningModules } from "./supportStopFlow.ts";
+import { hostedSupportMotionSettled, retireHostedSelfLock } from "./hostedRecoveryCustody.ts";
 import { latchSupportEmergency, supportHandoff } from "./supportHandoff.ts";
 import { decideSupportPositioning, freshSupportPositionMemory, type SupportPositionMemory, type SupportPositionPolicy,
   type SupportPositionFeedback, type SupportPositionResult } from "../nav/miningSupportPositioning.ts";
@@ -349,6 +350,8 @@ export interface MiningBotRequest {
 }
 
 export interface AppFlowOptions {
+  /** Volatile hosted MCC ore custody; this never changes process restart policy. */
+  readonly hostedOreJettisonRecovery?: boolean;
   readonly baseUrl?: string;
   readonly fetch?: typeof fetch;
   /**
@@ -1223,6 +1226,9 @@ export interface AppFlow {
    * flight is empty before the host may dock or release this session. */
   prepareHostedBotStop(kind: "script" | "companion", deadlineMs: number): Promise<void>;
   prepareCustomBotParking(): Promise<void>;
+  suspendHostedSession(): Promise<void>;
+  verifyHostedSessionRecovery(shipID: number): Promise<void>;
+  resumeHostedSession(): void;
   parkCustomBot(policy: FleetParkingPolicy, deadlineMs: number): Promise<void>;
   /** Cancel Farmer's deadline home run and settle its last issued action. */
   cancelHostedHome(kind: "script" | "companion"): Promise<void>;
@@ -1450,7 +1456,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
   };
 
-  const recoverySignal = createSignal<DroneRecoveryState>({ phase: options.browserPilotRecovery ? "checking" : "ready", reason: null });
+  let pilotRecoveryEnabled = options.browserPilotRecovery === true;
+  const recoverySignal = createSignal<DroneRecoveryState>({ phase: pilotRecoveryEnabled ? "checking" : "ready", reason: null });
   let recoveryGeneration = 0;
   let recoveryTask: Promise<void> | null = null;
   const recoveryIDs = new Set<number>();
@@ -1458,13 +1465,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   let recoveryCheckID: string | null = null;
 
   function requireAutomationReady(): void {
-    if (options.browserPilotRecovery && recoverySignal.get().phase !== "ready") {
+    if (pilotRecoveryEnabled && recoverySignal.get().phase !== "ready") {
       throw new Error(recoverySignal.get().reason ?? "Drone recovery is still checking this pilot. Wait or retry recovery.");
     }
   }
 
   function retryDroneRecovery(): Promise<void> {
-    if (!options.browserPilotRecovery || recoverySignal.get().phase === "ready") return Promise.resolve();
+    if (!pilotRecoveryEnabled || recoverySignal.get().phase === "ready") return Promise.resolve();
     if (recoveryTask !== null) return recoveryTask;
     const generation = recoveryGeneration;
     const current = () => {
@@ -8018,6 +8025,108 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // that gap would leave the FIRST run() loop orphaned and unstoppable — two
   // loops driving one hull. Whoever bumps last wins; a superseded start bails.
   let customBotGeneration = 0;
+  let hostedRecoveryVerified = false;
+  let hostedRecoveryFitting: string | null = null;
+  let hostedTransportSuspended = false;
+  let hostedRecoveryName: string | null = null;
+  let invalidateScriptRecoveryCaches: (() => void) | null = null;
+
+  let hostedJettisonPending = false;
+  function suspendHostedSession(): Promise<void> {
+    hostedRecoveryVerified = false;
+    hostedTransportSuspended = true;
+    hostedRecoveryName = store.customBot.get().name;
+    const priorFit = store.fitting.get();
+    hostedRecoveryFitting = priorFit.loaded && priorFit.slotsError === null ? fittingCapabilitySignature() : null;
+    pilotRecoveryEnabled = true;
+    customBotGeneration += 1;
+    recoveryGeneration += 1;
+    recoverySignal.set({ phase: "checking", reason: null });
+    recoveryTask = null;
+    stopLiveStream();
+    autopilot?.abort();
+    return settleHostedIssue(scriptRunner?.suspendTransport() ?? Promise.resolve());
+  }
+
+  async function verifyHostedSessionRecovery(shipID: number): Promise<void> {
+    const generation = customBotGeneration;
+    const current = () => {
+      if (generation !== customBotGeneration || scriptRunner?.getStatus() !== "paused")
+        throw new Error("The hosted recovery was superseded.");
+    };
+    await retryDroneRecovery(); current(); requireAutomationReady();
+    await loadFlightStatus(); current();
+    const flight = store.flight.get().status;
+    if (!flight || flight.shipID !== shipID || flight.shipIsCapsule === true || (!flight.inSpace && !flight.docked))
+      throw new Error("The original hosted ship is unavailable or changed.");
+    await resolveScriptModuleCapabilities(); current();
+    const fit = store.fitting.get();
+    if (!fit.loaded || fit.activeShipID !== shipID || fit.slotsError !== null || fit.dogmaError !== null ||
+        hostedRecoveryFitting === null || fittingCapabilitySignature() !== hostedRecoveryFitting)
+      throw new Error("The hosted fitting is unreadable or changed during recovery.");
+    const readStarted = Date.now();
+    await loadSpaceSnapshot(); current();
+    const space = store.space.get();
+    if (flight.inSpace && (!space.loaded || space.error !== null || space.snapshot?.inSpace !== true || space.snapshot.shipID !== shipID ||
+        space.snapshot.ship?.characterID !== store.station.get().online?.characterID || space.snapshot.ship?.geometryAvailable !== true ||
+        space.snapshot.sampledAtMs === null || !Number.isFinite(space.snapshot.sampledAtMs) || Date.now() - readStarted >= 10_000))
+      throw new Error("The reacquired hosted scene is unavailable or stale.");
+    await loadFleet(); current();
+    const fleet = readMiningSupportFleet("recovery-preflight");
+    if (!fleet || fleet.receivedAtMs < readStarted || !["ready", "not-in-fleet"].includes(fleet.snapshot.availability) ||
+        fleet.snapshot.availability === "ready" && authoritativeFleetMemberCharacterIDs(fleet.snapshot) === null)
+      throw new Error("The reacquired fleet membership is unavailable.");
+    if (options.miningOperationID) {
+      const assignment = await api.readMiningOperationAssignment(callOptions); current();
+      const target = assignment?.role === "HAULER" ? assignment.logisticsTarget ?? assignment.currentTarget : assignment?.currentTarget;
+      if (assignment?.operationID !== options.miningOperationID || assignment.stopRequested ||
+          !target || target.claimedByOperationID !== assignment.operationID || !["RESERVED", "ACTIVE", "DRAINING"].includes(target.state))
+        throw new Error("The operation target or productive assignment is unavailable.");
+    }
+    if (options.hostedOreJettisonRecovery) {
+      const receipt = await api.reconcileHostedJettison(callOptions); current();
+      if (receipt) hostedJettisonPending = !api.recoverableHostedJettison(receipt);
+    }
+    const frame = supportScript;
+    if (frame?.self.order?.action.kind === "lock" && !frame.self.fault) {
+      const targets = await api.getTargets(callOptions); current();
+      frame.self = retireHostedSelfLock(frame.self, targets.targetIDs);
+    }
+    if (frame && flight.inSpace) {
+      const freshServices = readMiningSupportServices();
+      // Quiescence retires movement intent; only observed physical settlement
+      // permits abandoning it. This does not claim arrival or coverage.
+      const stopped = hostedSupportMotionSettled(space.snapshot, freshServices);
+      frame.position = { ...frame.position, support: { ...frame.position.support,
+        orders: observeMiningSupportOrders(freshServices, frame.position.support) },
+        ...(stopped && !frame.position.fault ? { braking: null, relocation: null } : {}) };
+    }
+    const custody = [scriptRunner?.transportCustody() && "runner claim or Travel Assist", frame?.collection.pending && "collection transfer",
+      frame?.collection.fault && "collection fault", frame?.tractor.claim && "tractor claim", frame?.tractor.order && "tractor order",
+      frame?.tractor.fault && "tractor fault", frame?.self.order && "self-mining order", frame?.self.fault && "self-mining fault",
+      frame && frame.position.support.orders.length > 0 && "support module order", frame?.position.relocation && "support relocation",
+      frame?.position.braking && "support braking", frame?.fleet.order && "fleet membership order"].filter(Boolean);
+    if (frame?.position.fault) custody.push("support movement fault");
+    if (custody.length) throw new Error(`Session recovery retains unresolved work custody (${custody.join(", ")}); reconcile or Stop before resuming.`);
+    if (frame) {
+      const fresh = freshSupportScript();
+      // Confirmed collected provenance stays owned; pending inventory is never
+      // rebased. Other session-scoped movement/module/fleet feedback expires.
+      fresh.collection = { ...frame.collection, scope: frame.collection.scope ? { ...frame.collection.scope, sessionEpoch: fresh.epoch } : null };
+      supportScript = fresh;
+    }
+    invalidateScriptRecoveryCaches?.();
+    hostedRecoveryVerified = true;
+  }
+
+  function resumeHostedSession(): void {
+    if (!hostedRecoveryVerified || scriptRunner?.getStatus() !== "paused") throw new Error("Hosted recovery has not been verified.");
+    requireAutomationReady();
+    hostedRecoveryVerified = false;
+    hostedTransportSuspended = false;
+    scriptRunner.resumeTransport();
+    void scriptRunner.run();
+  }
 
   /**
    * The ship's fitted mining-module item ids, resolved at start and whenever the
@@ -9901,6 +10010,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // The drone bay's stack sizes from the last observation, for `launchDrones`
     // in `issue`: the blocks hand over stack ids only. See wholeStackLaunch.
     let droneStackSizesSeen: ReadonlyMap<number, number> = new Map();
+    invalidateScriptRecoveryCaches = () => {
+      capabilityCache.invalidate(); bayCache = null; droneStackSizesSeen = new Map();
+      beltMemoryCache = null; foundAgentCache = null; agentSearchFailureCache = null;
+      fleetMinerEpoch = crypto.randomUUID();
+    };
     async function activeShipBays(): Promise<readonly ShipBay[]> {
       const shipID = capabilityCache.peek().shipID;
       if (shipID === null) {
@@ -10789,7 +10903,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         acquire: (runID, systemID, itemID, renewOnly) => api.claimContainer(runID, systemID, itemID, renewOnly, callOptions),
         release: (runID) => api.releaseContainerClaims(runID, callOptions),
       },
-      issue: async (action, claimRunID) => {
+      mutationCustody: () => hostedJettisonPending,
+      issue: async (action, claimRunID, invocation) => {
         switch (action.kind) {
           case "maintainMiningSupport":
             await maintainOperationSupport(action.relocating);
@@ -11285,7 +11400,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // is confirm-gated; the block confirms by re-reading the hold, so a
             // refused jettison retries within its bound instead of being believed.
             if (action.itemIDs.length > 0) {
-              await api.jettisonItems(action.itemIDs, callOptions);
+              const owned = options.hostedOreJettisonRecovery;
+              if (owned) hostedJettisonPending = true;
+              try {
+                const receipt = await api.jettisonItems(action.itemIDs, callOptions, owned ? invocation : undefined);
+                if (owned && receipt) hostedJettisonPending = !api.recoverableHostedJettison(receipt);
+              } catch (error) {
+                if (owned && error instanceof api.JettisonCustodyError)
+                  hostedJettisonPending = error.notIssued ? false : error.custody ? !api.recoverableHostedJettison(error.custody) : true;
+                throw error;
+              }
             }
             return;
           case "stackHangar":
@@ -11342,6 +11466,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   async function startCustomBot(input: BotScript, sourceScriptID: string | null = null): Promise<void> {
     requireAutomationReady();
+    hostedTransportSuspended = false;
     // Restarting the SAME controller is the one case createShipClaim deliberately
     // does not stop. Cancel it here, then take the structural claim so mining and
     // mission are stopped exhaustively from the shared registry.
@@ -11905,7 +12030,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       recoveryIDs.clear();
       confirmedRecoveryIDs.clear();
       recoveryCheckID = null;
-      recoverySignal.set({ phase: options.browserPilotRecovery ? "checking" : "ready", reason: null });
+      recoverySignal.set({ phase: pilotRecoveryEnabled ? "checking" : "ready", reason: null });
       store.apply({ type: "character/selected", characterID });
       recoveryCheckID = result.droneRecoveryCheckID;
       store.apply({
@@ -11913,6 +12038,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         character: result.character,
         station: result.station,
       });
+      if (hostedTransportSuspended && scriptRunner?.getStatus() === "paused") {
+        if (hostedRecoveryName) store.apply({ type: "custom-bot/started", name: hostedRecoveryName });
+        const snapshot = scriptRunner.snapshot();
+        store.apply({ type: "custom-bot/progress", status: snapshot.status, phase: snapshot.phase,
+          why: snapshot.why, stepPath: snapshot.stepPath, interruptID: snapshot.interruptID,
+          pauseReason: snapshot.pauseReason, note: snapshot.note, refusals: snapshot.refusals });
+      }
       // Anchor the docked-station sync to where select landed so the first
       // flight read at this station doesn't trigger a redundant relocate; a
       // later dock elsewhere on this session will.
@@ -12519,6 +12651,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     prepareHostedBotStop,
+    suspendHostedSession,
+    verifyHostedSessionRecovery,
+    resumeHostedSession,
     prepareCustomBotParking,
     parkCustomBot,
     cancelHostedHome,
