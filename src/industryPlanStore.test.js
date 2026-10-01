@@ -37,7 +37,7 @@ test("a new plan is intent: product, runs, choices, note, active, revision 1", (
     planID: "plan-1",
     productTypeID: 2456,
     runs: 10,
-    choices: { buy: [], jobs: {}, blueprints: {} },
+    choices: { buy: [], jobs: {}, blueprints: {}, decryptors: {} },
     note: "for the fleet",
     status: "active",
     rev: 1,
@@ -67,6 +67,7 @@ test("choices are stored canonical: sorted, deduplicated, one-job splits dropped
       buy: [10, 30],
       jobs: { 20: 3 },
       blueprints: { 1900: { materialEfficiency: 2, timeEfficiency: 4 } },
+      decryptors: {},
     },
   );
   // Key order in the stored text follows the numbers, so two equal plans
@@ -88,6 +89,8 @@ test("choices out of range or out of shape are refused, not trimmed", () => {
     { blueprints: { 1900: { materialEfficiency: 11, timeEfficiency: 0 } } },
     { blueprints: { 1900: { materialEfficiency: 0, timeEfficiency: 21 } } },
     { blueprints: { 1900: { materialEfficiency: 2 } } },
+    { decryptors: { 1900: 0 } },
+    { decryptors: { x: 34201 } },
     [],
   ];
   for (const choices of bad) {
@@ -127,7 +130,7 @@ test("a damaged choices cell reads as no choices rather than breaking the list",
   const { store, handle } = memoryStore();
   const plan = store.create({ productTypeID: 1, runs: 1, choices: { buy: [5] } });
   handle.get().prepare("UPDATE industry_plans SET choices = 'not json' WHERE id = ?").run(plan.planID);
-  assert.deepEqual(store.get(plan.planID).choices, { buy: [], jobs: {}, blueprints: {} });
+  assert.deepEqual(store.get(plan.planID).choices, { buy: [], jobs: {}, blueprints: {}, decryptors: {} });
 });
 
 test("delete is for good", () => {
@@ -136,4 +139,8 @@ test("delete is for good", () => {
   assert.equal(store.remove(plan.planID), true);
   assert.equal(store.remove(plan.planID), false);
   assert.equal(store.get(plan.planID), null);
+});
+
+test("a decryptor choice is kept per blueprint, canonical", () => {
+  assert.deepEqual(guardChoices({ decryptors: { 2457: 34201, 1900: 34202 } }).decryptors, { 1900: 34202, 2457: 34201 });
 });

@@ -27,6 +27,11 @@ import {
 } from "./api.ts";
 import type { JsonValue } from "../bridge/wire.ts";
 import type { BlueprintTerms, IndustryChoices } from "../bridge/industryChain.ts";
+import {
+  INVENTED_MATERIAL_EFFICIENCY,
+  INVENTED_TIME_EFFICIENCY,
+  type DecryptorTerms,
+} from "../bridge/industryInvention.ts";
 
 export type { IndustryPlanChoices, IndustryPlanFields };
 
@@ -48,6 +53,7 @@ export const NO_CHOICES: IndustryPlanChoices = Object.freeze({
   buy: Object.freeze([]) as readonly number[],
   jobs: Object.freeze({}),
   blueprints: Object.freeze({}),
+  decryptors: Object.freeze({}),
 });
 
 function positiveInteger(value: unknown): value is number {
@@ -83,7 +89,11 @@ export function decodeChoices(value: unknown): IndustryPlanChoices {
       blueprints[key] = { materialEfficiency: terms.materialEfficiency, timeEfficiency: terms.timeEfficiency };
     }
   }
-  return { buy, jobs, blueprints };
+  const decryptors: Record<string, number> = {};
+  for (const [key, decryptorTypeID] of Object.entries(record(o.decryptors) ?? {})) {
+    if (positiveInteger(Number(key)) && positiveInteger(decryptorTypeID)) decryptors[key] = decryptorTypeID;
+  }
+  return { buy, jobs, blueprints, decryptors };
 }
 
 /** One row from the server, or null when it is not a plan. */
@@ -132,17 +142,43 @@ export function withoutIndustryPlan(plans: readonly SavedIndustryPlan[], planID:
 export function resolverChoices(
   choices: IndustryPlanChoices,
   owned: ReadonlyMap<number, BlueprintTerms>,
+  decryptors: ReadonlyMap<number, DecryptorTerms> = new Map(),
 ): IndustryChoices {
   const obtain = new Map<number, "build" | "buy">(choices.buy.map((typeID) => [typeID, "buy"]));
   const jobs = new Map<number, number>(Object.entries(choices.jobs).map(([key, count]) => [Number(key), count]));
   const blueprints = new Map<number, BlueprintTerms>();
+  const inventionRuns = new Map<number, number>();
   for (const [key, terms] of Object.entries(choices.blueprints)) {
     blueprints.set(Number(key), { ...terms, owned: false });
+  }
+  // A chosen decryptor fixes what an invented copy comes out at: the server's
+  // ME 2 / TE 4 plus the decryptor's, and its extra runs (inventionRunsFor).
+  for (const [key, decryptorTypeID] of Object.entries(choices.decryptors ?? {})) {
+    const decryptor = decryptors.get(decryptorTypeID);
+    if (!decryptor) continue;
+    blueprints.set(Number(key), {
+      materialEfficiency: INVENTED_MATERIAL_EFFICIENCY + decryptor.materialEfficiency,
+      timeEfficiency: INVENTED_TIME_EFFICIENCY + decryptor.timeEfficiency,
+      owned: false,
+    });
+    inventionRuns.set(Number(key), decryptor.maxRuns);
   }
   for (const [blueprintTypeID, terms] of owned) {
     blueprints.set(blueprintTypeID, terms);
   }
-  return { obtain, jobs, blueprints };
+  return { obtain, jobs, blueprints, inventionRunsBonus: inventionRuns };
+}
+
+/** The same choices with one T2 blueprint's decryptor set (null clears it). */
+export function withDecryptor(
+  choices: IndustryPlanChoices,
+  blueprintTypeID: number,
+  decryptorTypeID: number | null,
+): IndustryPlanChoices {
+  const next = { ...(choices.decryptors ?? {}) };
+  if (decryptorTypeID === null) delete next[String(blueprintTypeID)];
+  else next[String(blueprintTypeID)] = decryptorTypeID;
+  return { ...choices, decryptors: next };
 }
 
 /** The same choices with one type's buy flag set or cleared. */

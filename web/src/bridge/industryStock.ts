@@ -153,7 +153,9 @@ export function staleWords(holdings: readonly Holding[], browserNowMs: number): 
  * The buy list as the game's multibuy box takes it: one "Name quantity" line
  * per item. A line with no name cannot be pasted and is counted instead.
  */
-export function multibuyText(lines: readonly IndustryLine[]): { readonly text: string; readonly unnamed: number } {
+export function multibuyText(
+  lines: readonly Pick<IndustryLine, "name" | "short">[],
+): { readonly text: string; readonly unnamed: number } {
   const rows: string[] = [];
   let unnamed = 0;
   for (const line of lines) {

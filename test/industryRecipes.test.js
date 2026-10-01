@@ -45,6 +45,7 @@ const ROWS = [
       invention: {
         materials: [{ typeID: 301, quantity: 2 }],
         products: [{ typeID: 1003, quantity: 10, probability: 0.34 }],
+        skills: [{ typeID: 401, level: 1 }, { typeID: 402, level: 1 }, { typeID: 403, level: 1 }],
         time: 7800,
       },
     },
@@ -113,6 +114,7 @@ test("invention is indexed by the blueprint it produces, with runs per copy and 
     probability: 0.34,
     timeSeconds: 7800,
     materials: [{ typeID: 301, quantity: 2 }],
+    skills: [{ typeID: 401, level: 1 }, { typeID: 402, level: 1 }, { typeID: 403, level: 1 }],
   }]);
 });
 
@@ -281,6 +283,19 @@ const TYPES = {
 
 function fakeStaticData() {
   return {
+    getClientTypeList(listID) {
+      return Number(listID) === 799 ? { listID: 799, includedTypeIDs: [403] } : null;
+    },
+    getTypesInGroup(groupID) {
+      return Number(groupID) === 1304
+        ? [{ typeID: 34201, name: "Parity Decryptor", groupID: 1304 }, { typeID: 34202, name: "Accelerant Decryptor", groupID: 1304 }]
+        : [];
+    },
+    getTypeDogmaAttribute(typeID, attributeID, fallback) {
+      const table = { 34201: { 1112: 1.5, 1113: 1, 1114: -2, 1124: 3 }, 34202: { 1112: 1.2, 1113: 2, 1114: 10, 1124: 1 } };
+      const value = (table[Number(typeID)] || {})[Number(attributeID)];
+      return value === undefined ? fallback : value;
+    },
     getAllIndustryBlueprints() {
       return ROWS;
     },
@@ -403,4 +418,27 @@ test("GET /api/industry/blueprints/search answers names, with the product named 
   }]);
   assert.equal(payload.total, 2);
   assert.equal(payload.capped, true);
+});
+
+test("GET /api/industry/invention-terms: the lower-rate skills from list 799, and every decryptor with its four values", async () => {
+  const { baseUrl } = await startTestServer();
+  const { response, payload } = await call(baseUrl, "/api/industry/invention-terms");
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.lowerRateSkillTypeIDs, [403]);
+  assert.deepEqual(payload.decryptors, [
+    { typeID: 34202, name: "Accelerant Decryptor", probabilityMultiplier: 1.2, materialEfficiency: 2, timeEfficiency: 10, maxRuns: 1 },
+    { typeID: 34201, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3 },
+  ]);
+  const anonymous = await call(baseUrl, "/api/industry/invention-terms", { authenticated: false });
+  assert.equal(anonymous.response.status, 401);
+});
+
+test("real table: list 799 and the eight decryptors come from the same tables the server reads", { skip: SKIP_REAL }, () => {
+  const list = staticData.getClientTypeList(799);
+  assert.ok(list && list.includedTypeIDs.length > 0);
+  const decryptors = staticData.getTypesInGroup(1304);
+  assert.equal(decryptors.length, 8);
+  const accelerant = decryptors.find((type) => type.name === "Accelerant Decryptor");
+  assert.ok(accelerant);
+  assert.deepEqual([1112, 1113, 1114, 1124].map((attributeID) => staticData.getTypeDogmaAttribute(accelerant.typeID, attributeID)), [1.2, 2, 10, 1]);
 });

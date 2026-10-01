@@ -43,8 +43,10 @@ export interface IndustryInvention {
   /** 0..1, the table's base chance, or null when it did not say. */
   readonly probability: number | null;
   readonly timeSeconds: number | null;
-  /** Datacores and the like. */
+  /** Datacores and the like, per attempt. */
   readonly materials: readonly IndustryMaterial[];
+  /** Every skill that counts toward the chance, with the level the recipe asks. */
+  readonly skills: readonly { readonly typeID: number; readonly level: number }[];
 }
 
 /** What makes one product, out of what. */
@@ -186,6 +188,12 @@ function decodeInvention(value: JsonValue): IndustryInvention | null {
     probability: probability !== null && probability <= 1 ? probability : null,
     timeSeconds: asCount(row.timeSeconds),
     materials: decodeMaterials(row.materials),
+    skills: asArray(row.skills).flatMap((raw) => {
+      const skill = asRecord(raw);
+      const typeID = asIdentifier(skill.typeID);
+      const level = typeof skill.level === "number" && Number.isSafeInteger(skill.level) && skill.level >= 0 ? skill.level : null;
+      return typeID !== null && level !== null ? [{ typeID, level }] : [];
+    }),
   };
 }
 

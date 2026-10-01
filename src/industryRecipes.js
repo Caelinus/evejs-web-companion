@@ -54,6 +54,22 @@ function cleanMaterials(list) {
   return materials;
 }
 
+/** Skills an activity needs: [{ typeID, level }], level 0 allowed. */
+function cleanSkills(list) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const skills = [];
+  for (const entry of list) {
+    const typeID = positiveInt(entry && entry.typeID);
+    const level = Number(entry && entry.level);
+    if (typeID > 0 && Number.isFinite(level) && level >= 0) {
+      skills.push({ typeID, level: Math.trunc(level) });
+    }
+  }
+  return skills;
+}
+
 function isPublished(row) {
   return Boolean(row) && row.published !== false;
 }
@@ -126,6 +142,9 @@ function buildIndustryRecipeIndex(rows) {
           : null,
         timeSeconds: positiveInt(invention.time) || null,
         materials: cleanMaterials(invention.materials),
+        // Every skill here counts toward the chance (the server sums them all);
+        // which ones count at the lower rate is the invention terms route's.
+        skills: cleanSkills(invention.skills),
       };
       const sources = inventedFrom.get(product.typeID) || [];
       sources.push(source);

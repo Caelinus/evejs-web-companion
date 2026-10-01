@@ -21,7 +21,23 @@
   import { onMount, untrack } from "svelte";
   import type { Session } from "../app/sessions.ts";
   import type { ApiOptions } from "../app/api.ts";
-  import { getIndustryRecipeClosure, listActiveServerBots, loadSystemGraph, searchIndustryBlueprints } from "../app/api.ts";
+  import {
+    getIndustryInventionTerms,
+    getIndustryRecipeClosure,
+    listActiveServerBots,
+    loadSystemGraph,
+    searchIndustryBlueprints,
+  } from "../app/api.ts";
+  import {
+    chanceWords,
+    decodeInventionTerms,
+    inventionShortfalls,
+    NO_INVENTION_TERMS,
+    planInventions,
+    type DecryptorTerms,
+    type Inventor,
+    type InventionTerms,
+  } from "../bridge/industryInvention.ts";
   import { readIndustryStock, type IndustryStock } from "../app/industryStockRead.ts";
   import type { OnlinePilot } from "../app/piCorpRead.ts";
   import { installTarget } from "../app/industryInstallTarget.ts";
@@ -38,6 +54,7 @@
     resolverChoices,
     updateIndustryPlan,
     withBuying,
+    withDecryptor,
     withIndustryPlan,
     withoutIndustryPlan,
     type IndustryAskers,
@@ -98,7 +115,7 @@
   // the blueprints to start one from. The right side is only ever the plan.
   type LeftTab = "plans" | "blueprints";
   let leftTab = $state<LeftTab>("plans");
-  // Sessions already asked for their blueprints, so a pilot coming
+  // Sessions already asked for their blueprints and skills, so a pilot coming
   // online is read once and not on every store change after.
   const askedSessions = new Set<string>();
 
@@ -144,6 +161,9 @@
   let browserNowMs = $state(Date.now());
   let copied = $state<string | null>(null);
   let placesOpen = $state<Set<number>>(new Set());
+
+  // Invention odds (R109 slice 6): static terms, read once per open window.
+  let inventionTerms = $state<InventionTerms>(NO_INVENTION_TERMS);
 
   // Recipe books, one per product, read once per open window.
   let books = $state<Map<number, IndustryRecipeBook>>(new Map());
@@ -250,6 +270,17 @@
     const blueprintTypeID = line.blueprint?.blueprintTypeID;
     return blueprintTypeID === undefined ? null : planned.get(blueprintTypeID)?.copy ?? null;
   }
+  /** Online pilots whose trained skills are known, for invention odds. */
+  const inventors = $derived.by((): Inventor[] => {
+    void storeTick;
+    const list: Inventor[] = [];
+    for (const { session, characterName } of onlineSessions()) {
+      const skills = session.store.skills.get().skills;
+      if (skills === null) continue;
+      list.push({ name: characterName, skills: new Map(skills.map((skill) => [skill.typeID, skill.level])) });
+    }
+    return list;
+  });
   const places = $derived(holdingsByType(stock?.holdings ?? []));
 
   const openPlan = $derived(plans.find((entry) => entry.planID === openPlanID) ?? null);
@@ -271,11 +302,18 @@
       book,
       productTypeID,
       runs,
-      choices: resolverChoices(choices, terms),
+      choices: resolverChoices(choices, terms, inventionTerms.decryptors),
       held,
       inProduction: jobSupply(jobLists, book).inProduction,
     });
   });
+  const inventions = $derived(
+    chain ? planInventions(chain, (blueprintTypeID) => decryptorOf(choices, blueprintTypeID), inventors, inventionTerms) : [],
+  );
+  const inventionShort = $derived(inventionShortfalls(inventions, held, nameAnywhere));
+  /** Everything to acquire: bought items and invention inputs, for Missing and multibuy. */
+  // Lazy: toBuy is declared further down.
+  const missingCount = $derived.by(() => toBuy.length + inventionShort.length);
   const startGroups = $derived(chain ? startNext(chain) : []);
   const allRunning = $derived.by(() => {
     if (!chain || productTypeID === null) return false;
@@ -297,11 +335,26 @@
         book: entryBook,
         productTypeID: entry.productTypeID,
         runs: entry.runs,
-        choices: resolverChoices(entry.choices, terms),
+        choices: resolverChoices(entry.choices, terms, inventionTerms.decryptors),
         held,
         inProduction: jobSupply(jobLists, entryBook).inProduction,
       });
-      if (entryChain) standings.set(entry.planID, planStanding(entryChain));
+      if (!entryChain) continue;
+      const base = planStanding(entryChain);
+      const short = inventionShortfalls(
+        planInventions(entryChain, (blueprintTypeID) => decryptorOf(entry.choices, blueprintTypeID), inventors, inventionTerms),
+        held,
+        nameAnywhere,
+      ).length;
+      const missing = base.missing + short;
+      const buys = base.buys + short;
+      standings.set(entry.planID, missing === base.missing ? base : {
+        missing,
+        buys,
+        share: buys === 0 ? 1 : (buys - missing) / buys,
+        tone: (buys - missing) / buys >= 0.5 ? "act" : "bad",
+        words: `${missing} missing`,
+      });
     }
     return standings;
   });
@@ -338,6 +391,39 @@
     }
     return top.invention ? `Invented copy - ${efficiencies}` : `No owned blueprint - assumed ${efficiencies}`;
   });
+
+  /** The decryptor chosen for a T2 blueprint in these choices, or null. */
+  function decryptorOf(from: IndustryPlanChoices, blueprintTypeID: number): DecryptorTerms | null {
+    const decryptorTypeID = from.decryptors?.[String(blueprintTypeID)];
+    return decryptorTypeID === undefined ? null : inventionTerms.decryptors.get(decryptorTypeID) ?? null;
+  }
+
+  /** Any type's name: a recipe book's, or a decryptor's. */
+  function nameAnywhere(typeID: number): string | null {
+    return nameFor(typeID) ?? inventionTerms.decryptors.get(typeID)?.name ?? null;
+  }
+
+  function decryptorWords(decryptor: DecryptorTerms): string {
+    const signed = (value: number): string => (value >= 0 ? `+${value}` : String(value));
+    return `${decryptor.name ?? "A decryptor"} (chance x${decryptor.probabilityMultiplier}, runs ${signed(decryptor.maxRuns)}, material ${signed(decryptor.materialEfficiency)}%)`;
+  }
+
+  function setDecryptor(blueprintTypeID: number, value: string): void {
+    const decryptorTypeID = Number(value);
+    choices = withDecryptor(choices, blueprintTypeID, Number.isSafeInteger(decryptorTypeID) && decryptorTypeID > 0 ? decryptorTypeID : null);
+    if (openPlan) {
+      void save({ choices });
+    }
+  }
+
+  async function loadInventionTerms(): Promise<void> {
+    try {
+      const decoded = decodeInventionTerms(await ask((options) => getIndustryInventionTerms(options)));
+      if (decoded.readable) inventionTerms = decoded;
+    } catch {
+      // Without them, invented copies are still counted; odds wait for the next open.
+    }
+  }
 
   /** A product's name from whichever recipe book has it. */
   function nameFor(typeID: number): string | null {
@@ -408,6 +494,7 @@
       for (const typeID of entry.types.keys()) types.add(typeID);
       for (const typeID of entry.byProduct.keys()) types.add(typeID);
     }
+    for (const typeID of inventionTerms.decryptors.keys()) types.add(typeID);
     return [...types];
   }
 
@@ -449,7 +536,7 @@
   }
 
   async function copyMultibuy(): Promise<void> {
-    const { text, unnamed } = multibuyText(toBuy);
+    const { text, unnamed } = multibuyText([...toBuy, ...inventionShort]);
     try {
       await navigator.clipboard.writeText(text);
       copied = unnamed > 0
@@ -768,13 +855,17 @@
     };
   });
 
+  // A new book, or the invention terms arriving (decryptors are stock too),
+  // may bring types the last stock read did not ask about.
   $effect(() => {
     void books;
+    void inventionTerms;
     untrack(() => stockWhenNeeded());
   });
 
   onMount(() => {
     void loadPlans();
+    void loadInventionTerms();
     void ask((options) => loadSystemGraph(options))
       .then((data) => {
         systemGraph = buildSystemGraph(data);
@@ -1029,10 +1120,10 @@
             <p class="im-verdict">{stockReading ? "Looking at your hangars..." : "What you hold has not been read yet."}</p>
           {:else if allRunning}
             <p class="im-verdict tone-ok">All of it is in production.{openPlan?.status === "active" ? " Mark it done once it is delivered." : ""}</p>
-          {:else if standing && standing.missing === 0}
+          {:else if standing && standing.missing + inventionShort.length === 0}
             <p class="im-verdict tone-ok">You have everything to build {countWords(chain.root.quantity)} {productName ?? "of these"}.</p>
           {:else if standing}
-            <p class="im-verdict tone-bad">You are short {countWords(standing.missing)} {standing.missing === 1 ? "item" : "items"}.</p>
+            <p class="im-verdict tone-bad">You are short {countWords(standing.missing + inventionShort.length)} {standing.missing + inventionShort.length === 1 ? "item" : "items"}.</p>
           {/if}
           <p class="im-note">
             {countWords(jobCount)} {jobCount === 1 ? "job" : "jobs"} to run.
@@ -1051,7 +1142,7 @@
             </p>
           {/each}
 
-          {#if toBuy.length > 0}
+          {#if missingCount > 0}
             <div class="im-section-head">
               <h4 class="im-section-title">Missing</h4>
               <button type="button" class="im-copy" onclick={() => void copyMultibuy()}>Copy multibuy</button>
@@ -1087,6 +1178,17 @@
                     </ul>
                   </li>
                 {/if}
+              {/each}
+              {#each inventionShort as entry (entry.typeID)}
+                <li class="im-buy-row">
+                  <span class="im-buy-name">
+                    <TypeIcon typeID={entry.typeID} name={entry.name ?? "An unnamed item"} />
+                    {entry.name ?? "An unnamed item"}
+                    <span class="im-chip" title="For invention, on average">invention</span>
+                  </span>
+                  <span class="im-buy-held">{countWords(entry.held)} held of {countWords(entry.needed)}</span>
+                  <span class="im-buy-count">{countWords(entry.short)}</span>
+                </li>
               {/each}
             </ul>
           {/if}
@@ -1129,6 +1231,41 @@
                 {/each}
               </ul>
             {/each}
+          {/if}
+
+          <!-- INVENTION, ON AVERAGE. A T2 blueprint nobody here owns needs copies
+               invented; the odds are the server's formula with the best skills
+               among the pilots online here, and the decryptor is the plan's choice. -->
+          {#if inventions.length > 0}
+            <h4 class="im-section-title">Invention, on average</h4>
+            <ul class="im-start" aria-label="Invention">
+              {#each inventions as row (row.line.typeID)}
+                {@const blueprintTypeID = row.line.blueprint?.blueprintTypeID ?? 0}
+                <li class="im-invent-row">
+                  <span class="im-buy-name">
+                    <TypeIcon typeID={row.line.typeID} name={lineName(row.line)} />
+                    {lineName(row.line)}
+                  </span>
+                  <span class="im-start-runs">
+                    {countWords(row.copies)} {row.copies === 1 ? "copy" : "copies"} of {countWords(row.runsPerCopy)} {row.runsPerCopy === 1 ? "run" : "runs"},
+                    {chanceWords(row.need.chance)} a try
+                    {row.inventorName ? `with ${row.inventorName}'s skills` : "- skills not counted, sign a pilot in here"},
+                    about {countWords(row.need.attempts)} {row.need.attempts === 1 ? "attempt" : "attempts"}
+                  </span>
+                  {#if inventionTerms.decryptors.size > 0}
+                    <label class="im-decryptor">
+                      <span class="sr-only">Decryptor for {lineName(row.line)}</span>
+                      <select value={String(choices.decryptors?.[String(blueprintTypeID)] ?? "")} onchange={(event) => setDecryptor(blueprintTypeID, event.currentTarget.value)}>
+                        <option value="">No decryptor</option>
+                        {#each [...inventionTerms.decryptors.values()] as decryptor (decryptor.typeID)}
+                          <option value={String(decryptor.typeID)}>{decryptorWords(decryptor)}</option>
+                        {/each}
+                      </select>
+                    </label>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
           {/if}
 
           <!-- THE TREE. Each type is worked once for the whole plan; a type
@@ -1558,6 +1695,28 @@
     min-height: 32px;
     padding: 0 0.7rem;
   }
+  .im-invent-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(10rem, 16rem);
+    gap: 0.6rem;
+    align-items: center;
+    min-height: 40px;
+    padding: 0.2rem 0.6rem;
+    border-top: 1px solid var(--color-line);
+    border-left: 3px solid var(--color-warn);
+  }
+  .im-decryptor select {
+    width: 100%;
+    min-height: 34px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
   .im-meter {
     flex: 1 1 auto;
     height: 4px;
@@ -1712,6 +1871,12 @@
     .im-start-row,
     .im-buy-row {
       grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .im-invent-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .im-decryptor select {
+      min-height: 40px;
     }
     .im-start-runs,
     .im-buy-held {

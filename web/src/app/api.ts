@@ -3366,6 +3366,8 @@ export interface IndustryPlanChoices {
   readonly jobs: Readonly<Record<string, number>>;
   /** blueprintTypeID -> assumed efficiencies. */
   readonly blueprints: Readonly<Record<string, { readonly materialEfficiency: number; readonly timeEfficiency: number }>>;
+  /** blueprintTypeID -> the decryptor its copies are invented with (R109 slice 6). */
+  readonly decryptors?: Readonly<Record<string, number>>;
 }
 
 /** The fields an industry plan may carry on create or update. */
@@ -4835,6 +4837,11 @@ export async function getIndustryRecipeClosure(
 ): Promise<JsonValue> {
   const data = await postJson("/api/industry/recipe-closure", { productTypeIDs: [...productTypeIDs] }, options);
   return data as JsonValue;
+}
+
+/** What invention odds are made of: the lower-rate skills and every decryptor (R109 slice 6). Static. */
+export async function getIndustryInventionTerms(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/industry/invention-terms", options)) as JsonValue;
 }
 
 /** Published blueprints and reaction formulas by name (goal R109). Static. */

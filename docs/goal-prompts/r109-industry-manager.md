@@ -1,6 +1,6 @@
 # Goal R109: Industry Manager — a build tree you can save and work through
 
-**Status:** Design spec, awaiting the operator's approval to build. **Client + BFF only; no eve.js change.**
+**Status:** All six slices built and exercised on the running companion (2026-10-01). The layout of section 4 became option C after the first live run: the blueprint browser lives in the left column as a second tab beside the plans, and the right side is only the plan. **Client + BFF only; no eve.js change.**
 
 This is a design document, not a brief to start coding from. It follows R108 (the
 Planetary Industry manager) on purpose: same spine-first shape, same intent-only saved
@@ -324,13 +324,30 @@ and pressing Refresh, with no pilot signed in.
 Done when starting a job from the plan moves that node from *start next* to *in
 production* after the read refreshes.
 
-### Slice 6 — invention *(optional)*
+### Slice 6 — invention odds
 
-An invented-copy node gets the success chance from skills and the decryptor choice, and
-shows the expected attempts and the datacores they consume. Expected value only, no
-variance, labelled *on average*.
-
----
+- **The server's formula**, not a wiki's
+  (`server/src/services/industry/industryRuntimeState.js`, `computeInventionProbability`):
+  chance = base x (1 + sum over the activity's skills of level x rate) x decryptor,
+  capped at 1. The rate is 1/40 for a skill on client type list 799 (the encryption
+  skills) and 1/30 for every other. A success gives a copy at ME 2 / TE 4 plus the
+  decryptor's, with the product's runs plus the decryptor's and never fewer than one.
+- `GET /api/industry/invention-terms` serves the two facts the browser cannot derive. List
+  799 is read from the same `clientTypeLists` table the server matches against. Every
+  decryptor (group 1304) comes with attributes 1112, 1113, 1114 and 1124 from the same
+  `typeDogma` table. The recipe index now keeps each invention's skills.
+- A **decryptor choice per T2 blueprint** is saved with the plan (`choices.decryptors`).
+  It sets the invented copy's efficiencies and runs in the resolver, so fewer copies
+  can be needed and the materials of the T2 step change. A blueprint a pilot owns still
+  wins over any invented assumption.
+- The chance is worked with the best skills among the pilots online here, each read
+  once on its own session as its Skills panel would. With no skills known it is the base
+  chance, and the row says skills were not counted.
+- **Invention, on average** lists each T2 step: copies of N runs, the chance a try,
+  whose skills, and about how many attempts (copies / chance, always rounded up). The
+  datacores and decryptors those attempts use join **Missing** and Copy multibuy, tagged
+  as invention. They count in the verdict and on the plan card. Variance is not
+  modelled, and the words say so.
 
 ## 6. States and copy
 

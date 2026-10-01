@@ -102,7 +102,7 @@ test("create, list, update with choices, and delete a plan", async () => {
   const plan = created.payload.plan;
   assert.equal(plan.productTypeID, 2456);
   assert.equal(plan.runs, 10);
-  assert.deepEqual(plan.choices, { buy: [], jobs: {}, blueprints: {} });
+  assert.deepEqual(plan.choices, { buy: [], jobs: {}, blueprints: {}, decryptors: {} });
   assert.equal(plan.rev, 1);
 
   const updated = await request(baseUrl, `/api/industry/plans/${plan.planID}`, {
@@ -112,7 +112,7 @@ test("create, list, update with choices, and delete a plan", async () => {
   });
   assert.equal(updated.response.status, 200);
   assert.equal(updated.payload.plan.runs, 20);
-  assert.deepEqual(updated.payload.plan.choices, { buy: [11399], jobs: { 11688: 2 }, blueprints: {} });
+  assert.deepEqual(updated.payload.plan.choices, { buy: [11399], jobs: { 11688: 2 }, blueprints: {}, decryptors: {} });
   assert.equal(updated.payload.plan.rev, 2);
 
   const listed = await request(baseUrl, "/api/industry/plans", { token });

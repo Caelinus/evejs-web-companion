@@ -57,10 +57,11 @@ function keyID(key) {
 
 /**
  * The player's choices, checked and made canonical:
- *   { buy: [typeID...], jobs: { typeID: n }, blueprints: { blueprintTypeID: { materialEfficiency, timeEfficiency } } }
+ *   { buy: [typeID...], jobs: { typeID: n }, blueprints: { blueprintTypeID: { materialEfficiency, timeEfficiency } },
+ *     decryptors: { blueprintTypeID: decryptorTypeID } }   (decryptors: R109 slice 6)
  */
 function guardChoices(input) {
-  if (input === undefined || input === null) return { buy: [], jobs: {}, blueprints: {} };
+  if (input === undefined || input === null) return { buy: [], jobs: {}, blueprints: {}, decryptors: {} };
   if (!isPlainObject(input)) throw fail("INDUSTRY_PLAN_INVALID", "A plan's choices are not readable.");
 
   const buy = input.buy === undefined ? [] : input.buy;
@@ -101,7 +102,20 @@ function guardChoices(input) {
     blueprints[String(id)] = { materialEfficiency: terms.materialEfficiency, timeEfficiency: terms.timeEfficiency };
   }
 
-  return { buy: [...new Set(buy)].sort((a, b) => a - b), jobs, blueprints };
+  const decryptorsIn = input.decryptors === undefined ? {} : input.decryptors;
+  if (!isPlainObject(decryptorsIn) || Object.keys(decryptorsIn).length > MAX_CHOICE_ENTRIES) {
+    throw fail("INDUSTRY_PLAN_INVALID", "Decryptor choices are not readable.");
+  }
+  const decryptors = {};
+  for (const key of Object.keys(decryptorsIn).sort((a, b) => Number(a) - Number(b))) {
+    const id = keyID(key);
+    if (id === null || !positiveInteger(decryptorsIn[key])) {
+      throw fail("INDUSTRY_PLAN_INVALID", "A decryptor choice names an item.");
+    }
+    decryptors[String(id)] = decryptorsIn[key];
+  }
+
+  return { buy: [...new Set(buy)].sort((a, b) => a - b), jobs, blueprints, decryptors };
 }
 
 /** Stored text back to choices. A row damaged by hand reads as no choices. */
@@ -109,7 +123,7 @@ function parseChoices(text) {
   try {
     return guardChoices(JSON.parse(text));
   } catch {
-    return { buy: [], jobs: {}, blueprints: {} };
+    return { buy: [], jobs: {}, blueprints: {}, decryptors: {} };
   }
 }
 

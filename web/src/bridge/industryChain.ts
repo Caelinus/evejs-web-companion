@@ -70,6 +70,12 @@ export interface IndustryChoices {
    * read. Absent means 1.0, and the plan should say no bonus was counted.
    */
   readonly materialModifier?: Partial<Record<"manufacturing" | "reaction", number>>;
+  /**
+   * Per T2 BLUEPRINT type: extra runs each invented copy carries, from the
+   * chosen decryptor (slice 6). The server gives a copy its base runs plus
+   * these, and never fewer than one.
+   */
+  readonly inventionRunsBonus?: ReadonlyMap<number, number>;
 }
 
 export interface IndustryChainInput {
@@ -337,10 +343,13 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
 
     const owned = given?.owned === true;
     const firstSource = recipe.inventedFrom[0];
+    const runsPerCopy = firstSource === undefined
+      ? 0
+      : Math.max(1, Math.round(firstSource.runsPerCopy + (choices.inventionRunsBonus?.get(recipe.blueprintTypeID) ?? 0)));
     const invention = !owned && manufacturing && firstSource !== undefined
       ? {
-          copies: Math.ceil(lineRuns / firstSource.runsPerCopy),
-          runsPerCopy: firstSource.runsPerCopy,
+          copies: Math.ceil(lineRuns / runsPerCopy),
+          runsPerCopy,
           sources: recipe.inventedFrom,
         }
       : null;

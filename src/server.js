@@ -21058,6 +21058,50 @@ app.post("/api/industry/recipe-closure", requireAuth, async (req, res, next) => 
   }
 });
 
+/**
+ * R109 slice 6 -- what invention odds are made of, from static data.
+ *
+ * The server works an invention chance as (base) x (1 + sum over the activity's
+ * skills of level x 1/30, or 1/40 for a skill in client type list 799) x (the
+ * decryptor's multiplier), capped at 1
+ * (server/src/services/industry/industryRuntimeState.js computeInventionProbability).
+ * This route hands the browser the two facts it cannot derive: which skills are
+ * on list 799, read from the same table the server matches against, and every
+ * decryptor with the four attributes the server reads off it (1112 chance
+ * multiplier, 1113 material efficiency, 1114 time efficiency, 1124 extra runs).
+ */
+const DECRYPTOR_GROUP_ID = 1304;
+const LOWER_INVENTION_SKILL_TYPE_LIST_ID = 799;
+
+app.get("/api/industry/invention-terms", requireAuth, async (req, res, next) => {
+  try {
+    const list = typeof staticData.getClientTypeList === "function"
+      ? staticData.getClientTypeList(LOWER_INVENTION_SKILL_TYPE_LIST_ID)
+      : null;
+    const lowerRateSkillTypeIDs = Array.isArray(list && list.includedTypeIDs)
+      ? list.includedTypeIDs.map((typeID) => Number(typeID) || 0).filter((typeID) => typeID > 0)
+      : [];
+    const attribute = (typeID, attributeID, fallback) => {
+      const value = Number(staticData.getTypeDogmaAttribute(typeID, attributeID, null));
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const decryptors = (typeof staticData.getTypesInGroup === "function" ? staticData.getTypesInGroup(DECRYPTOR_GROUP_ID) : [])
+      .map((type) => ({
+        typeID: Number(type.typeID) || 0,
+        name: typeof type.name === "string" && type.name.length > 0 ? type.name : null,
+        probabilityMultiplier: attribute(type.typeID, 1112, 1),
+        materialEfficiency: Math.trunc(attribute(type.typeID, 1113, 0)),
+        timeEfficiency: Math.trunc(attribute(type.typeID, 1114, 0)),
+        maxRuns: Math.trunc(attribute(type.typeID, 1124, 0)),
+      }))
+      .filter((decryptor) => decryptor.typeID > 0)
+      .sort((a, b) => (a.name || "").localeCompare(b.name || "") || a.typeID - b.typeID);
+    res.json({ ok: true, source: "static-data", lowerRateSkillTypeIDs, decryptors });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // R109 slice 3 -- saved Industry Manager plans. Same four routes as PI plans.
 app.get("/api/industry/plans", requireAuth, (req, res, next) => {
   try {

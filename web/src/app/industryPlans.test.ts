@@ -13,6 +13,7 @@ import {
   NO_CHOICES,
   resolverChoices,
   withAssumedTerms,
+  withDecryptor,
   withBuying,
   withIndustryPlan,
   withJobs,
@@ -55,7 +56,7 @@ test("a server row decodes into a plan with its choices", () => {
   const decoded = plan();
   assert.equal(decoded.productTypeID, 2456);
   assert.equal(decoded.runs, 10);
-  assert.deepEqual(decoded.choices, ROW.choices);
+  assert.deepEqual(decoded.choices, { ...ROW.choices, decryptors: {} });
 });
 
 test("a row out of shape is dropped from a list, not guessed at", () => {
@@ -75,7 +76,7 @@ test("choices out of range are left out one by one, the rest kept", () => {
       jobs: { 10: 2, 11: 1, x: 3 },
       blueprints: { 20: { materialEfficiency: 2, timeEfficiency: 4 }, 21: { materialEfficiency: 99, timeEfficiency: 0 } },
     }),
-    { buy: [3, 5], jobs: { 10: 2 }, blueprints: { 20: { materialEfficiency: 2, timeEfficiency: 4 } } },
+    { buy: [3, 5], jobs: { 10: 2 }, blueprints: { 20: { materialEfficiency: 2, timeEfficiency: 4 } }, decryptors: {} },
   );
   assert.deepEqual(decodeChoices(null), NO_CHOICES);
 });
@@ -197,4 +198,18 @@ test("pruning drops folds and the open plan of plans the server no longer has", 
   view = withFolds(view, "kept", { b: false });
   assert.deepEqual(pruneIndustryPlanView(view, ["kept"]), { openID: null, folds: { kept: { b: false } } });
   assert.deepEqual(withFolds(view, "kept", {}).folds, { gone: { a: true } }, "an empty fold map forgets the plan");
+});
+
+test("a chosen decryptor fixes the invented copy: ME 2 + its ME, TE 4 + its TE, and its extra runs", () => {
+  const decryptors = new Map([[34201, {
+    typeID: 34201, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3,
+  }]]);
+  const choices = withDecryptor(plan().choices, 2457, 34201);
+  const resolved = resolverChoices(choices, new Map(), decryptors);
+  assert.deepEqual(resolved.blueprints?.get(2457), { materialEfficiency: 3, timeEfficiency: 2, owned: false });
+  assert.equal(resolved.inventionRunsBonus?.get(2457), 3);
+  // Owning the blueprint still wins over any invented assumption.
+  const owned = resolverChoices(choices, new Map([[2457, { materialEfficiency: 10, timeEfficiency: 20, owned: true }]]), decryptors);
+  assert.deepEqual(owned.blueprints?.get(2457), { materialEfficiency: 10, timeEfficiency: 20, owned: true });
+  assert.deepEqual(withDecryptor(choices, 2457, null).decryptors, {});
 });
