@@ -163,6 +163,9 @@ export interface MiningObservation {
   readonly droneBayItemIDs: readonly number[] | null;
   /** Fresh authoritative flight, bay, limits and resolved roles. null is unreadable. */
   readonly drones?: MiningDroneState | null;
+  /** Optional own-scene targeting-reach proof supplied by a scoped caller.
+   * Omitted keeps classic mining policy; it filters drone targets, never health. */
+  readonly reachableHostileIDs?: readonly number[];
 }
 
 /** What the player set the bot to do. */
@@ -608,7 +611,8 @@ export function decideMiningAction(
       !observation.status.inSpace || base.rung === "health-floor") return base;
   const snapshot = observation.snapshot;
   const origin = snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
-  const hostileID = snapshot === null ? null : hostileRows(snapshot, origin)[0]?.itemID ?? null;
+  const hostileID = snapshot === null ? null : hostileRows(snapshot, origin)
+    .find(row => observation.reachableHostileIDs === undefined || observation.reachableHostileIDs.includes(row.itemID))?.itemID ?? null;
   const rock = base.takeRock ?? memory.currentRockID;
   const rockID = rock !== null && observation.lockedTargetIDs?.includes(rock) &&
     snapshot?.entities.some((entity) => entity.itemID === rock && isMineableRock(entity)) ? rock : null;
@@ -760,7 +764,8 @@ function decideMiningWork(
     };
   }
 
-  const nearestHostile = hostiles[0] ?? null;
+  const nearestHostile = hostiles.find(row => observation.reachableHostileIDs === undefined ||
+    observation.reachableHostileIDs.includes(row.itemID)) ?? null;
   if (nearestHostile && plan.useDrones && !memory.launchGaveUp) {
     const shipID = status.shipID ?? snapshot?.shipID ?? null;
     // "Already defended" means drones this ship COMMANDS, not merely ones we own.

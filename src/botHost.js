@@ -1474,6 +1474,28 @@ function createBotHost(options) {
   }
 
   return {
+    // Account-owned passive diagnostics use the same reads as the hosted
+    // runner. Neither its flow nor either session capability leaves the host.
+    async readOwnedObservation(characterID, accountID) {
+      const botID = claims.get(Number(characterID));
+      const record = botID ? records.get(botID) : null;
+      const flow = record?.flow, store = record?.store;
+      const current = () => record && !record.finalized && record.accountID === Number(accountID)
+        && claims.get(record.characterID) === botID && flow && store && record.flow === flow && record.store === store
+        && store.station.get().online?.characterID === record.characterID;
+      if (!current()) return null;
+      // Like the vitals sampler, these reads update the normal observed state
+      // and retain its ordinary session-loss handling. No separate driver.
+      await flow.loadFleet();
+      if (!current()) return null;
+      await flow.loadSpaceSnapshot();
+      if (!current()) return null;
+      const space = store.space.get();
+      return structuredClone({ characterID: record.characterID, readAtMs: Date.now(),
+        space: space.error ? null : space.snapshot, spaceError: space.error ?? null,
+        fleet: flow.readMiningSupportFleet(botID), supportWork: flow.readMiningSupportWork?.() ?? null,
+        fleetWork: flow.readMiningSupportFleetDiagnostic?.() ?? null });
+    },
     start,
     stop,
     extendOperationGrant,

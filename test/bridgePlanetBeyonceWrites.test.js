@@ -317,6 +317,24 @@ test("R103 CmdGotoPoint binds the park (solarSystemID) and forwards [x,y,z] as a
   assert.deepEqual(call.args, [10, -20, 30]);
 });
 
+test("support positioning refuses missing/coerced coordinates and a changed observed ship before movement", async () => {
+  const gateway = fakeGateway({ inSpace: true });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  for (const body of [{ x: 1, y: 2 }, { x: "10", y: 2, z: 3 }, { x: null, y: 2, z: 3 },
+    { x: 1, y: 2, z: 3, expectedShipID: -1 }]) {
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/flight/goto-point", { method: "POST", body: { ...body, confirm: true } });
+    assert.equal(response.status, 400); assert.equal(payload.error, "INVALID_MOVEMENT_POINT");
+  }
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/flight/goto-point", {
+    method: "POST", body: { x: 1, y: 2, z: 3, expectedShipID: SHIP_ID + 1, confirm: true } });
+  assert.equal(response.status, 409); assert.equal(payload.error, "SHIP_CHANGED");
+  const changedSystem = await apiRequest(baseUrl, "/api/bridge/flight/goto-point", {
+    method: "POST", body: { x: 1, y: 2, z: 3, expectedShipID: SHIP_ID, expectedSolarSystemID: SOLAR_SYSTEM_ID + 1, confirm: true } });
+  assert.equal(changedSystem.response.status, 409); assert.equal(changedSystem.payload.error, "SYSTEM_CHANGED");
+  assert.equal(gateway.calls.boundCall.filter(c => c.method === "CmdGotoPoint").length, 0);
+});
+
 test("R103 CmdAbandonLoot forwards [[itemIDs]] as a bound beyonce call once confirmed", async () => {
   const gateway = fakeGateway({ inSpace: true });
   const { baseUrl } = await startTestServer({ gateway });

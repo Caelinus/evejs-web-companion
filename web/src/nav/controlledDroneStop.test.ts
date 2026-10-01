@@ -1,10 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { confirmControlledDronesHome, type ControlledDroneStopRow } from "./controlledDroneStop.ts";
+import { confirmControlledDronesHome, controlledFlightSettled, type ControlledDroneStopRow } from "./controlledDroneStop.ts";
 
 function row(itemID: number, activity: string | null): ControlledDroneStopRow {
   return { itemID, controlled: true, activity };
 }
+test("support settlement ignores confirmed disconnected drones but retains unknown or controlled flight", () => {
+  assert.equal(controlledFlightSettled([]), true);
+  assert.equal(controlledFlightSettled([{ itemID: 8, controlled: false, activity: "idle" }]), true);
+  for (const raw of [null, {}, [row(8, "returning")], [{ itemID: 8 }],
+    [{ itemID: 8, controlled: 0 }], [{ itemID: 0, controlled: false }],
+    [{ itemID: 8, controlled: false }, { itemID: 8, controlled: false }]]) {
+    assert.equal(controlledFlightSettled(raw), false);
+  }
+});
 
 test("an authoritative empty flight stops without recall or waiting", async () => {
   let recalls = 0;

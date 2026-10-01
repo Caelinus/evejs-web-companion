@@ -20,6 +20,20 @@ export const CONTROLLED_DRONE_STOP_CADENCE_MS = 1_500;
 // a defensive count bound even if a test clock or timer is broken.
 export const CONTROLLED_DRONE_STOP_OBSERVATIONS = Math.ceil(3 * 60_000 / CONTROLLED_DRONE_STOP_CADENCE_MS) + 1;
 
+/** Raw authority must distinguish a disconnected drone from unknown control. */
+export function controlledFlightSettled(raw: unknown): boolean {
+  if (!Array.isArray(raw)) return false;
+  const seen = new Set<number>();
+  return raw.every(value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    if (!Number.isSafeInteger(row.itemID) || (row.itemID as number) <= 0 || seen.has(row.itemID as number) ||
+        row.controlled !== false) return false;
+    seen.add(row.itemID as number);
+    return true;
+  });
+}
+
 /** Bounded, fail-closed confirmation. A successful recall order is not a return. */
 export async function confirmControlledDronesHome(deps: ControlledDroneStopDeps): Promise<void> {
   const ordered = new Set<number>();

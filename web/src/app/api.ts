@@ -52,6 +52,8 @@ import type {
   ScannerProbeOperation,
 } from "../scanner/scannerCenter.ts";
 import type { MiningOperationAssignment, MiningOperationTarget, MiningTargetType } from "../nav/scriptConditions.ts";
+import { decodeMiningSupportAnchor, decodeMiningSupportAnchorRead } from "../bridge/miningSupportAnchor.ts";
+import type { MiningSupportAnchor, MiningSupportAnchorRead } from "../nav/miningSupportAnchor.ts";
 
 export interface LoginResult {
   readonly accountID: number;
@@ -1920,6 +1922,19 @@ export interface SquadPrimary {
   readonly calledByCharacterID: number | null;
 }
 
+/** Server derives membership and returns a fresh roster with separate publishers. */
+export async function readMiningSupportAnchors(options: ApiOptions = {}): Promise<MiningSupportAnchorRead> {
+  return decodeMiningSupportAnchorRead(await getJson("/api/bots/mining-support-anchors", options));
+}
+
+/** Only observation guards cross the wire. Identity/services come from BFF reads. */
+export async function publishMiningSupportAnchor(observedShipID: number, observedAtMs: number, options: ApiOptions = {}, guards: { expectedCharacterID?: number; expectedFleetID?: number | string } = {}): Promise<MiningSupportAnchor> {
+  const data = await postJson("/api/bots/mining-support-anchors", { observedShipID, observedAtMs, ...guards }, options);
+  const anchor = decodeMiningSupportAnchor(data.anchor);
+  if (anchor === null) throw new Error("Mining support anchor publication could not be decoded.");
+  return anchor;
+}
+
 /**
  * The primary this character's FLEET has called, or null when nobody has called
  * anything (or the call has gone stale). BFF-local, shared by every pilot in
@@ -2617,6 +2632,13 @@ export async function alignTo(
 /** Cut the engines (beyonce.CmdStop). */
 export async function stopShip(options: ApiOptions = {}): Promise<FlightStepResult> {
   return readFlightStep(await postJson("/api/bridge/flight/stop", {}, options));
+}
+
+/** Existing runtime CmdGotoPoint; ACK is an order, never arrival proof. */
+export async function gotoPoint(position: import("../store/types.ts").SpaceVector, shipID: number, solarSystemID: number,
+  options: ApiOptions = {}): Promise<FlightStepResult> {
+  if (![position.x, position.y, position.z].every(Number.isFinite) || [shipID, solarSystemID].some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error("Unknown movement geometry or scope.");
+  return readFlightStep(await postJson("/api/bridge/flight/goto-point", { ...position, expectedShipID: shipID, expectedSolarSystemID: solarSystemID, confirm: true }, options));
 }
 
 /** Jump through an NPC stargate (beyonce.CmdStargateJump). */
