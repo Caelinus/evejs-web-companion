@@ -12,6 +12,9 @@
 // normalizes — it computes nothing.
 
 import { unwrapLong, type JsonValue } from "./wire.ts";
+import { decodeMiningBurstServices, decodeCompressionService } from "./miningSupportServices.ts";
+import { decodeCoreMobilityFuel } from "./miningSupportCore.ts";
+import { decodeModuleReach } from "./moduleReach.ts";
 import type {
   CompressionFacility,
   SpaceEntity,
@@ -74,6 +77,12 @@ function decodeVector(value: JsonValue | undefined): SpaceVector {
   };
 }
 
+function geometryAvailable(raw: Record<string, JsonValue>): boolean {
+  const position = asObject(raw.position);
+  return [position.x, position.y, position.z, raw.radius].every(value => typeof value === "number" && Number.isFinite(value))
+    && (raw.radius as number) >= 0;
+}
+
 /** One overview row. Returns null for a row with no usable identity. */
 function decodeEntity(value: JsonValue): SpaceEntity | null {
   const raw = asObject(value);
@@ -90,6 +99,9 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     name: stringOrNull(raw.name),
     ownerID: idOrNull(raw.ownerID),
     radius: floatOr(raw.radius, 0),
+    geometryAvailable: geometryAvailable(raw),
+    motionAvailable: [asObject(raw.velocity).x, asObject(raw.velocity).y, asObject(raw.velocity).z]
+      .every(value => typeof value === "number" && Number.isFinite(value)),
     position: decodeVector(raw.position),
     velocity: decodeVector(raw.velocity),
     isSelf: raw.isSelf === true,
@@ -135,6 +147,7 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     // is the safe direction: a bot must not treat a reading it did not get as an
     // invitation to try compressing.
     compressionFacility: decodeCompressionFacility(raw.compressionFacility),
+    compressionService: decodeCompressionService(raw.compressionService),
   };
 }
 
@@ -185,12 +198,15 @@ function decodeShip(value: JsonValue | undefined): SpaceShipStatus | null {
   }
   const raw = asObject(value);
   return {
+    motionAvailable: [asObject(raw.velocity).x, asObject(raw.velocity).y, asObject(raw.velocity).z]
+      .every(value => typeof value === "number" && Number.isFinite(value)),
     itemID: idOrNull(raw.itemID),
     typeID: idOrNull(raw.typeID),
     name: stringOrNull(raw.name),
     mode: stringOrNull(raw.mode),
     maxVelocity: floatOrNull(raw.maxVelocity),
     radius: floatOr(raw.radius, 0),
+    geometryAvailable: geometryAvailable(raw),
     position: decodeVector(raw.position),
     velocity: decodeVector(raw.velocity),
     shieldRatio: ratioOrNull(raw.shieldRatio),
@@ -212,6 +228,12 @@ function decodeShip(value: JsonValue | undefined): SpaceShipStatus | null {
     overloadedModuleIDs: decodeIDList(raw.overloadedModuleIDs),
     moduleDamage: decodeModuleDamage(raw.moduleDamage),
     weaponBanks: decodeWeaponBanks(raw.weaponBanks),
+    miningBurstServices: decodeMiningBurstServices(raw.miningBurstServices),
+    coreMobilityFuel: decodeCoreMobilityFuel(raw.coreMobilityFuel),
+    moduleReach: decodeModuleReach(raw.moduleReach),
+    compressionService: decodeCompressionService(raw.compressionService),
+    characterID: idOrNull(raw.characterID),
+    ownerID: idOrNull(raw.ownerID),
   };
 }
 

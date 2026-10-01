@@ -3,6 +3,9 @@
 // (util.KeyVal rows, {type:"long"} wrappers, ...) live in ../bridge/wire.ts.
 
 import type { BoundDogmaAllInfo } from "../bridge/boundDogma.ts";
+import type { MiningBurstServices, CompressionServiceObservation } from "../bridge/miningSupportServices.ts";
+import type { CoreMobilityFuelObservation } from "../bridge/miningSupportCore.ts";
+import type { ModuleReachObservation } from "../bridge/moduleReach.ts";
 import type { BoundFleet } from "../bridge/boundFleet.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { ActiveJam } from "../bridge/jamNotifications.ts";
@@ -1547,6 +1550,10 @@ export interface SpaceVector {
  * no damageable health (a planet, a stargate).
  */
 export interface SpaceEntity {
+  /** Absent velocity must not become a stopped-object proof. */
+  readonly motionAvailable?: boolean;
+  /** True only when position and radius were supplied as finite measurements. */
+  readonly geometryAvailable?: boolean;
   /** Coarse runtime kind ("ship", "structure", "celestial", …), or null. */
   readonly kind: string | null;
   /** The object's own id — used only as a row key and as a move target. */
@@ -1650,6 +1657,8 @@ export interface SpaceEntity {
    * Read it as `entity.compressionFacility ?? null`.
    */
   readonly compressionFacility?: CompressionFacility | null;
+  /** Exact service projection; absent on older gateways, never inferred from the legacy max range. */
+  readonly compressionService?: CompressionServiceObservation;
 }
 
 /** A live ore-compression facility's reach, and which ore families it handles. */
@@ -1668,6 +1677,18 @@ export interface CompressionFacility {
  * behind each bar (null when unavailable).
  */
 export interface SpaceShipStatus {
+  /** True only when all velocity components are measured finite values. */
+  readonly motionAvailable?: boolean;
+  /** True only when position and radius were supplied as finite measurements. */
+  readonly geometryAvailable?: boolean;
+  /** Own facility identity even when the overview omits the self row. */
+  readonly characterID?: number | null;
+  readonly ownerID?: number | null;
+  /** null/absent means the authoritative active-effect map was unavailable. */
+  readonly miningBurstServices?: MiningBurstServices | null;
+  readonly coreMobilityFuel?: CoreMobilityFuelObservation | null;
+  readonly moduleReach?: ModuleReachObservation | null;
+  readonly compressionService?: CompressionServiceObservation;
   readonly itemID: number | null;
   readonly typeID: number | null;
   readonly name: string | null;
