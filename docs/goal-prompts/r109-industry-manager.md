@@ -131,10 +131,13 @@ Rules the resolver must get right, each mutation-tested:
    (reactions) is built in whole runs. The surplus is shown as **leftover**, never hidden.
 3. **Stock is netted top-down before expanding.** Holding 3 of a component means its
    subtree is expanded for `needed - 3` only. Prefer holding an intermediate over
-   building it.
-4. **Build or buy is a choice per node**, and the default is inherited **per type** (the
-   Ravworks rule). Default: build anything that has a published blueprint *the pilots
-   own*; buy everything else. Raw materials (minerals, moon goo, PI) are always leaves.
+   building it. **The target itself is never netted:** a plan to build ten is not done
+   because ten sit in a hangar. Progress on the target comes from jobs (slice 5).
+4. **Build or buy is a choice per type** (the Ravworks rule). It is applied to every
+   occurrence of that type, because quantities are worked once per type (rule 1 and the
+   resolver header). Default: build anything with a published recipe, since the ask is
+   to *see the whole tree*. Buying is the player's override. Raw materials (minerals,
+   moon goo, PI) are always leaves.
 5. **Recipes are facts; the resolver never simulates the server.** Facility modifiers
    come from the live facility read; with no facility chosen the modifier is 1.0 and the
    node says so.
@@ -324,8 +327,9 @@ All copy is plain ASCII, and no ids appear anywhere (R7d).
   rises with it. That is visible as a job count on the node.
 - Two plans needing the same stock are judged **independently** (as PI does), and the
   plan list says so once. Allocating stock between plans is out of scope.
-- An item both bought and built in one tree (same type under two parents) follows the
-  per-type default unless a node overrides it.
+- The same type under two parents is one line, worked once and rounded once, so it is
+  either built or bought everywhere. A per-node override would mean rounding the type
+  twice, which is the overstatement rule 1 exists to prevent.
 - Very deep capital trees: nodes start folded below depth 2, and the open set is
   remembered per plan.
 

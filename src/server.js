@@ -26,6 +26,7 @@ const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const { lazyCompanionDb } = require("./companionDb");
 const { createPiPlanStore } = require("./piPlanStore");
+const industryRecipes = require("./industryRecipes");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
@@ -20867,6 +20868,112 @@ app.post("/api/industry/blueprints", requireAuth, async (req, res, next) => {
       capped,
       limit: INDUSTRY_DEFINITIONS_MAX,
       definitions,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * R109 BUILD TREE — the recipe book seen from the product side.
+ *
+ * /api/industry/blueprints answers "what does this blueprint do". The Industry
+ * Manager asks the reverse, all the way down: "what makes this, and what makes
+ * each of its materials". Both routes below are static reference data, like the
+ * one above: no gateway call, no session, nothing that varies by player.
+ *
+ * The index is built once per rows array (static data caches its rows, so that
+ * is once per process) and kept off the request path.
+ */
+const INDUSTRY_CLOSURE_PRODUCTS_MAX = 50;
+const industryRecipeIndexes = new WeakMap();
+
+function industryRecipeIndex() {
+  const rows = typeof staticData.getAllIndustryBlueprints === "function"
+    ? staticData.getAllIndustryBlueprints()
+    : [];
+  const key = Array.isArray(rows) ? rows : [];
+  let index = industryRecipeIndexes.get(key);
+  if (!index) {
+    index = industryRecipes.buildIndustryRecipeIndex(key);
+    industryRecipeIndexes.set(key, index);
+  }
+  return index;
+}
+
+/** Name, group and category for one type, or null when static data has no row. */
+function industryTypeInfo(typeID) {
+  const type = typeof staticData.getType === "function" ? staticData.getType(typeID) : null;
+  if (!type) {
+    return null;
+  }
+  const name = typeof type.name === "string" && type.name.length > 0 ? type.name : null;
+  const groupID = Number(type.groupID) || null;
+  const categoryID = Number(type.categoryID) || null;
+  const categoryName = categoryID && typeof staticData.getCategoryName === "function"
+    ? staticData.getCategoryName(categoryID)
+    : null;
+  return {
+    name,
+    groupID,
+    groupName: typeof type.groupName === "string" && type.groupName.length > 0 ? type.groupName : null,
+    categoryID,
+    categoryName: typeof categoryName === "string" && categoryName.length > 0 ? categoryName : null,
+    volume: Number.isFinite(Number(type.volume)) ? Number(type.volume) : null,
+  };
+}
+
+app.post("/api/industry/recipe-closure", requireAuth, async (req, res, next) => {
+  try {
+    const requested = Array.isArray(req.body && req.body.productTypeIDs)
+      ? req.body.productTypeIDs
+      : [];
+    if (requested.length > INDUSTRY_CLOSURE_PRODUCTS_MAX) {
+      res.status(400).json({
+        ok: false,
+        error: "TOO_MANY_PRODUCTS",
+        message: `Ask about at most ${INDUSTRY_CLOSURE_PRODUCTS_MAX} products at a time.`,
+      });
+      return;
+    }
+    const closure = industryRecipes.recipeClosure(industryRecipeIndex(), requested);
+    const types = {};
+    for (const typeID of closure.typeIDs) {
+      // A definitive null is sent too, so the client can tell "asked, unknown"
+      // from "never asked".
+      types[String(typeID)] = industryTypeInfo(typeID);
+    }
+    res.json({
+      ok: true,
+      source: "static-data",
+      recipes: closure.recipes,
+      types,
+      missing: closure.missing,
+      capped: closure.capped,
+      limit: closure.limit,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/industry/blueprints/search", requireAuth, async (req, res, next) => {
+  try {
+    const result = industryRecipes.searchIndustryBlueprints(
+      industryRecipeIndex(),
+      typeof req.query.q === "string" ? req.query.q : "",
+      req.query.limit,
+    );
+    res.json({
+      ok: true,
+      source: "static-data",
+      matches: result.matches.map((match) => {
+        const product = industryTypeInfo(match.productTypeID);
+        return { ...match, productName: product ? product.name : null };
+      }),
+      total: result.total,
+      capped: result.capped,
+      limit: result.limit,
     });
   } catch (error) {
     next(error);

@@ -1618,6 +1618,26 @@ function getIndustryBlueprint(blueprintTypeID) {
   ).get(Number(blueprintTypeID) || 0) || null;
 }
 
+/**
+ * Every blueprint row, raw — the whole book, for the R109 build tree.
+ * `getIndustryBlueprint` answers "what does THIS blueprint do"; a tree needs the
+ * reverse, "what makes THIS product", which means indexing every row. Built off
+ * the same cached index so the 21 MB table is parsed once, not twice.
+ */
+function getAllIndustryBlueprints() {
+  const cacheKey = "industryBlueprints:all";
+  if (caches.has(cacheKey)) {
+    return caches.get(cacheKey);
+  }
+  const list = [...buildIndex(
+    "industryBlueprints",
+    "blueprintDefinitions",
+    "blueprintTypeID",
+  ).values()];
+  caches.set(cacheKey, list);
+  return list;
+}
+
 function getNpcIndustryFacility(facilityID) {
   return buildIndex(
     "industryFacilities",
@@ -1643,6 +1663,7 @@ module.exports = {
   getFaction,
   getFactionName,
   getIndustryBlueprint,
+  getAllIndustryBlueprints,
   resolveNames,
   getMarketGroup,
   getMarketGroupName,
