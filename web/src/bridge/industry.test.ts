@@ -128,6 +128,13 @@ test("material efficiency and time efficiency are NOT transposed", () => {
   assert.equal(rows[0]!.original, false);
 });
 
+test("R109: a blueprint carries the system it sits in, and 0 reads as unstated", () => {
+  const rows = decodeBlueprints([list([BLUEPRINT_ROW]), dict([])] as unknown as JsonValue);
+  assert.equal(rows[0]!.solarSystemID, 30000142);
+  const nowhere = keyVal({ ...fieldsOf(BLUEPRINT_ROW), solarSystemID: 0 });
+  assert.equal(decodeBlueprints([list([nowhere]), dict([])] as unknown as JsonValue)[0]!.solarSystemID, null);
+});
+
 test("a blueprint locked into a job carries that job; a free one carries null", () => {
   const busy = keyVal({ ...fieldsOf(BLUEPRINT_ROW), jobID: 4_200_001 });
   const rows = decodeBlueprints([list([BLUEPRINT_ROW, busy]), dict([])] as unknown as JsonValue);
@@ -423,4 +430,15 @@ test("an empty or unrecognizable error reports a decline without inventing a cau
   const message = industryRefusalMessage({ message: "" });
   assert.match(message, /gave no reason/i);
   assert.doesNotMatch(message, /material|fee|slot|skill/i);
+});
+
+test("R109: a blueprint in the wrong place is refused in plain words, not the generic sentence", () => {
+  assert.equal(
+    industryRefusalMessage(new Error("IndustryValidationError: INVALID_BLUEPRINT_LOCATION")),
+    "That blueprint is not somewhere a job can start from. Put it in a hangar where industry is offered.",
+  );
+  assert.equal(
+    industryRefusalMessage(new Error("IndustryValidationError: BLUEPRINT_WRONG_FACILITY")),
+    "That blueprint is in a different facility. A job starts where its blueprint is.",
+  );
 });

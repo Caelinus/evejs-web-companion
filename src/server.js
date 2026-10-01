@@ -26,6 +26,8 @@ const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const { lazyCompanionDb } = require("./companionDb");
 const { createPiPlanStore } = require("./piPlanStore");
+const { createIndustryPlanStore } = require("./industryPlanStore");
+const industryRecipes = require("./industryRecipes");
 const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
@@ -75,6 +77,21 @@ const PI_PLAN_STATUS = {
   PI_PLAN_REV_CONFLICT: 409,
   PI_PLAN_NOT_FOUND: 404,
 };
+// The same for a saved Industry Manager plan (src/industryPlanStore.js).
+const INDUSTRY_PLAN_STATUS = {
+  INDUSTRY_PLAN_INVALID: 400,
+  INDUSTRY_PLAN_LIMIT_REACHED: 409,
+  INDUSTRY_PLAN_REV_CONFLICT: 409,
+  INDUSTRY_PLAN_NOT_FOUND: 404,
+};
+function sendIndustryPlanError(res, error, next) {
+  const status = error && INDUSTRY_PLAN_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
 function sendPiPlanError(res, error, next) {
   const status = error && PI_PLAN_STATUS[error.code];
   if (status) {
@@ -116,6 +133,10 @@ const botScripts =
 // opened on the first request that needs it -- never eve.js's gamestore.
 const piPlans =
   options.piPlanStore || createPiPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
+// Saved Industry Manager plans (R109), in the same file. A second lazy handle
+// is a second connection to it, which WAL and the busy timeout are there for.
+const industryPlans =
+  options.industryPlanStore || createIndustryPlanStore({ db: lazyCompanionDb({ dataDir: config.dataDir }) });
 // Persistent-session handles (goal R2): webSessionID -> the opaque
 // bridgeSessionID the gateway minted, held server-side only. The browser
 // never sees the handle; it just gets its character/station state back.
@@ -19668,8 +19689,12 @@ const SHIP_CATEGORY_ID = 6;
  * one type in one holder are summed: the planner needs "how much, where", not
  * item ids. Corporation-owned goods are not here; the snapshot is filtered to
  * the character as owner.
+ *
+ * `wanted` (R109): a Set of type ids to keep INSTEAD of the planetary goods,
+ * for the Industry Manager, which needs the materials of one build tree.
+ * Absent, this is the planetary read exactly as it was.
  */
-function stockFromSnapshot(staticDataSource, snapshot) {
+function stockFromSnapshot(staticDataSource, snapshot, wanted = null) {
   const rawItems = snapshot && snapshot.items;
   const items = Array.isArray(rawItems)
     ? rawItems
@@ -19683,7 +19708,7 @@ function stockFromSnapshot(staticDataSource, snapshot) {
   }
   const stacks = new Map();
   for (const item of items) {
-    if (!item || !PLANETARY_CATEGORY_IDS.has(Number(item.categoryID))) {
+    if (!item || !(wanted ? wanted.has(Number(item.typeID)) : PLANETARY_CATEGORY_IDS.has(Number(item.categoryID)))) {
       continue;
     }
     const typeID = Number(item.typeID) || 0;
@@ -19851,6 +19876,83 @@ app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
       serverNowMs: Date.now(),
       pilots: pilots.filter((pilot) => pilot !== null),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * R109 slice 4 -- what the roster pilots hold of ONE build tree's materials.
+ *
+ * The roster planets read above, with its stock walk pointed at a list of type
+ * ids instead of the planetary goods. The same rules hold: the gateway
+ * snapshot answers for any pilot the signed-in account owns, with NO session
+ * and nobody brought online; a pilot that is not ours, or that the gateway
+ * cannot read, is left out of the answer rather than reported as empty; every
+ * pilot carries its own read instant.
+ *
+ * POST, because a capital's tree names a few hundred types.
+ */
+const ROSTER_STOCK_MAX_TYPES = 2000;
+
+app.post("/api/roster/stock", requireAuth, async (req, res, next) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const characterIDs = rosterCharacterIDs(Array.isArray(body.characterIDs) ? body.characterIDs.join(",") : "");
+  const typeIDs = new Set();
+  for (const value of Array.isArray(body.typeIDs) ? body.typeIDs : []) {
+    const typeID = Number(value) || 0;
+    if (Number.isSafeInteger(typeID) && typeID > 0) {
+      typeIDs.add(typeID);
+    }
+  }
+  if (characterIDs.length > ROSTER_PLANETS_MAX_IDS) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_CHARACTERS",
+      message: `Ask about at most ${ROSTER_PLANETS_MAX_IDS} pilots at a time.`,
+    });
+    return;
+  }
+  if (typeIDs.size > ROSTER_STOCK_MAX_TYPES) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_TYPES",
+      message: `Ask about at most ${ROSTER_STOCK_MAX_TYPES} kinds of item at a time.`,
+    });
+    return;
+  }
+  if (characterIDs.length === 0 || typeIDs.size === 0) {
+    res.json({ ok: true, serverNowMs: Date.now(), pilots: [] });
+    return;
+  }
+  try {
+    const pilots = await Promise.all(
+      characterIDs.map(async (characterID) => {
+        let snapshot = null;
+        try {
+          snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
+        } catch (error) {
+          // Not ours, not there, or the gateway stumbled: say nothing about it.
+          void error;
+          return null;
+        }
+        const readAtMs = Date.now();
+        if (!snapshot) {
+          return null;
+        }
+        const character = snapshot.characters && typeof snapshot.characters === "object"
+          ? snapshot.characters[String(characterID)]
+          : null;
+        const corporationID = Number(character && character.corporationID) || 0;
+        return {
+          characterID,
+          readAtMs,
+          corporationID: corporationID > 0 ? corporationID : null,
+          stock: stockFromSnapshot(staticData, snapshot, typeIDs),
+        };
+      }),
+    );
+    res.json({ ok: true, serverNowMs: Date.now(), pilots: pilots.filter((pilot) => pilot !== null) });
   } catch (error) {
     next(error);
   }
@@ -20867,6 +20969,187 @@ app.post("/api/industry/blueprints", requireAuth, async (req, res, next) => {
       capped,
       limit: INDUSTRY_DEFINITIONS_MAX,
       definitions,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * R109 BUILD TREE — the recipe book seen from the product side.
+ *
+ * /api/industry/blueprints answers "what does this blueprint do". The Industry
+ * Manager asks the reverse, all the way down: "what makes this, and what makes
+ * each of its materials". Both routes below are static reference data, like the
+ * one above: no gateway call, no session, nothing that varies by player.
+ *
+ * The index is built once per rows array (static data caches its rows, so that
+ * is once per process) and kept off the request path.
+ */
+const INDUSTRY_CLOSURE_PRODUCTS_MAX = 50;
+const industryRecipeIndexes = new WeakMap();
+
+function industryRecipeIndex() {
+  const rows = typeof staticData.getAllIndustryBlueprints === "function"
+    ? staticData.getAllIndustryBlueprints()
+    : [];
+  const key = Array.isArray(rows) ? rows : [];
+  let index = industryRecipeIndexes.get(key);
+  if (!index) {
+    index = industryRecipes.buildIndustryRecipeIndex(key);
+    industryRecipeIndexes.set(key, index);
+  }
+  return index;
+}
+
+/** Name, group and category for one type, or null when static data has no row. */
+function industryTypeInfo(typeID) {
+  const type = typeof staticData.getType === "function" ? staticData.getType(typeID) : null;
+  if (!type) {
+    return null;
+  }
+  const name = typeof type.name === "string" && type.name.length > 0 ? type.name : null;
+  const groupID = Number(type.groupID) || null;
+  const categoryID = Number(type.categoryID) || null;
+  const categoryName = categoryID && typeof staticData.getCategoryName === "function"
+    ? staticData.getCategoryName(categoryID)
+    : null;
+  return {
+    name,
+    groupID,
+    groupName: typeof type.groupName === "string" && type.groupName.length > 0 ? type.groupName : null,
+    categoryID,
+    categoryName: typeof categoryName === "string" && categoryName.length > 0 ? categoryName : null,
+    volume: Number.isFinite(Number(type.volume)) ? Number(type.volume) : null,
+  };
+}
+
+app.post("/api/industry/recipe-closure", requireAuth, async (req, res, next) => {
+  try {
+    const requested = Array.isArray(req.body && req.body.productTypeIDs)
+      ? req.body.productTypeIDs
+      : [];
+    if (requested.length > INDUSTRY_CLOSURE_PRODUCTS_MAX) {
+      res.status(400).json({
+        ok: false,
+        error: "TOO_MANY_PRODUCTS",
+        message: `Ask about at most ${INDUSTRY_CLOSURE_PRODUCTS_MAX} products at a time.`,
+      });
+      return;
+    }
+    const closure = industryRecipes.recipeClosure(industryRecipeIndex(), requested);
+    const types = {};
+    for (const typeID of closure.typeIDs) {
+      // A definitive null is sent too, so the client can tell "asked, unknown"
+      // from "never asked".
+      types[String(typeID)] = industryTypeInfo(typeID);
+    }
+    res.json({
+      ok: true,
+      source: "static-data",
+      recipes: closure.recipes,
+      types,
+      missing: closure.missing,
+      capped: closure.capped,
+      limit: closure.limit,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * R109 slice 6 -- what invention odds are made of, from static data.
+ *
+ * The server works an invention chance as (base) x (1 + sum over the activity's
+ * skills of level x 1/30, or 1/40 for a skill in client type list 799) x (the
+ * decryptor's multiplier), capped at 1
+ * (server/src/services/industry/industryRuntimeState.js computeInventionProbability).
+ * This route hands the browser the two facts it cannot derive: which skills are
+ * on list 799, read from the same table the server matches against, and every
+ * decryptor with the four attributes the server reads off it (1112 chance
+ * multiplier, 1113 material efficiency, 1114 time efficiency, 1124 extra runs).
+ */
+const DECRYPTOR_GROUP_ID = 1304;
+const LOWER_INVENTION_SKILL_TYPE_LIST_ID = 799;
+
+app.get("/api/industry/invention-terms", requireAuth, async (req, res, next) => {
+  try {
+    const list = typeof staticData.getClientTypeList === "function"
+      ? staticData.getClientTypeList(LOWER_INVENTION_SKILL_TYPE_LIST_ID)
+      : null;
+    const lowerRateSkillTypeIDs = Array.isArray(list && list.includedTypeIDs)
+      ? list.includedTypeIDs.map((typeID) => Number(typeID) || 0).filter((typeID) => typeID > 0)
+      : [];
+    const attribute = (typeID, attributeID, fallback) => {
+      const value = Number(staticData.getTypeDogmaAttribute(typeID, attributeID, null));
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const decryptors = (typeof staticData.getTypesInGroup === "function" ? staticData.getTypesInGroup(DECRYPTOR_GROUP_ID) : [])
+      .map((type) => ({
+        typeID: Number(type.typeID) || 0,
+        name: typeof type.name === "string" && type.name.length > 0 ? type.name : null,
+        probabilityMultiplier: attribute(type.typeID, 1112, 1),
+        materialEfficiency: Math.trunc(attribute(type.typeID, 1113, 0)),
+        timeEfficiency: Math.trunc(attribute(type.typeID, 1114, 0)),
+        maxRuns: Math.trunc(attribute(type.typeID, 1124, 0)),
+      }))
+      .filter((decryptor) => decryptor.typeID > 0)
+      .sort((a, b) => (a.name || "").localeCompare(b.name || "") || a.typeID - b.typeID);
+    res.json({ ok: true, source: "static-data", lowerRateSkillTypeIDs, decryptors });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// R109 slice 3 -- saved Industry Manager plans. Same four routes as PI plans.
+app.get("/api/industry/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plans: industryPlans.list() });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, plan: industryPlans.create(req.body || {}) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans/:planID", requireAuth, (req, res, next) => {
+  try {
+    const { baseRev, ...fields } = req.body || {};
+    res.json({ ok: true, plan: industryPlans.update(req.params.planID, fields, baseRev) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+app.post("/api/industry/plans/:planID/delete", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, removed: industryPlans.remove(req.params.planID) });
+  } catch (error) {
+    sendIndustryPlanError(res, error, next);
+  }
+});
+
+app.get("/api/industry/blueprints/search", requireAuth, async (req, res, next) => {
+  try {
+    const result = industryRecipes.searchIndustryBlueprints(
+      industryRecipeIndex(),
+      typeof req.query.q === "string" ? req.query.q : "",
+      req.query.limit,
+    );
+    res.json({
+      ok: true,
+      source: "static-data",
+      matches: result.matches.map((match) => {
+        const product = industryTypeInfo(match.productTypeID);
+        return { ...match, productName: product ? product.name : null };
+      }),
+      total: result.total,
+      capped: result.capped,
+      limit: result.limit,
     });
   } catch (error) {
     next(error);

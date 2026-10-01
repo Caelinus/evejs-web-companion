@@ -407,3 +407,83 @@ test("⚠ a planet with no resource record is null — unknown, not 'carries not
   const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${FARMER_ID}`);
   assert.equal(payload.pilots[0].colonies[0].resources, null);
 });
+
+// --- R109 slice 4: POST /api/roster/stock -----------------------------------
+//
+// The same snapshot walk, pointed at one build tree's types instead of the
+// planetary goods. Same rules: no session, the caller's account, a pilot not
+// answered left out.
+
+async function post(baseUrl, path, body, { authenticated = true } = {}) {
+  const headers = { "content-type": "application/json" };
+  if (authenticated) {
+    headers.cookie = `evejs_web_poc=${COOKIE_TOKEN}`;
+  }
+  const response = await fetch(`${baseUrl}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  return { response, payload: await response.json() };
+}
+
+test("roster stock keeps exactly the asked types, planetary or not, with where each unit sits", async () => {
+  const gateway = fakeGateway();
+  const baseUrl = await startTestServer(gateway);
+  const { response, payload } = await post(baseUrl, "/api/roster/stock", {
+    characterIDs: [STOCK_ID],
+    typeIDs: [34, WATER_TYPE_ID],
+  });
+  assert.equal(response.status, 200);
+  const [pilot] = payload.pilots;
+  assert.equal(pilot.characterID, STOCK_ID);
+  assert.equal(pilot.corporationID, 98000001);
+  assert.equal(typeof pilot.readAtMs, "number");
+  // The mineral the planetary read refuses is here; the raw resource that was
+  // not asked for is not.
+  assert.deepEqual(pilot.stock.map((stack) => [stack.typeID, stack.quantity, stack.holder]), [
+    [34, 9, "hangar"],
+    [WATER_TYPE_ID, 400, "hangar"],
+  ]);
+  assert.deepEqual(gateway.asked, [{ accountID: ACCOUNT.accountID, characterID: STOCK_ID }]);
+});
+
+test("roster stock leaves out a pilot it could not read, rather than calling it empty", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await post(baseUrl, "/api/roster/stock", {
+    characterIDs: [STOCK_ID, NOT_OURS_ID, UNREADABLE_ID, MISSING_ID],
+    typeIDs: [34],
+  });
+  assert.deepEqual(payload.pilots.map((pilot) => pilot.characterID), [STOCK_ID]);
+});
+
+test("roster stock with no types or no pilots asks the gateway nothing", async () => {
+  const gateway = fakeGateway();
+  const baseUrl = await startTestServer(gateway);
+  const none = await post(baseUrl, "/api/roster/stock", { characterIDs: [STOCK_ID], typeIDs: [] });
+  assert.deepEqual(none.payload.pilots, []);
+  const nobody = await post(baseUrl, "/api/roster/stock", { characterIDs: [], typeIDs: [34] });
+  assert.deepEqual(nobody.payload.pilots, []);
+  assert.equal(gateway.asked.length, 0);
+});
+
+test("roster stock is bounded and signed-in only", async () => {
+  const gateway = fakeGateway();
+  const baseUrl = await startTestServer(gateway);
+  const tooMany = await post(baseUrl, "/api/roster/stock", {
+    characterIDs: Array.from({ length: 13 }, (_, index) => 90000100 + index),
+    typeIDs: [34],
+  });
+  assert.equal(tooMany.response.status, 400);
+  assert.equal(tooMany.payload.error, "TOO_MANY_CHARACTERS");
+  const tooManyTypes = await post(baseUrl, "/api/roster/stock", {
+    characterIDs: [STOCK_ID],
+    typeIDs: Array.from({ length: 2001 }, (_, index) => index + 1),
+  });
+  assert.equal(tooManyTypes.payload.error, "TOO_MANY_TYPES");
+  const anonymous = await post(baseUrl, "/api/roster/stock", { characterIDs: [STOCK_ID], typeIDs: [34] }, { authenticated: false });
+  assert.equal(anonymous.response.status, 401);
+  assert.equal(gateway.asked.length, 0);
+});
+
+test("the planetary read is unchanged by the type filter's arrival: a mineral is still never PI stock", async () => {
+  const baseUrl = await startTestServer(fakeGateway());
+  const { payload } = await get(baseUrl, `/api/roster/planets?characterIDs=${STOCK_ID}`);
+  assert.equal(payload.pilots[0].stock.some((stack) => stack.typeID === 34), false);
+});

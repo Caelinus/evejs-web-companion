@@ -62,7 +62,7 @@ export interface PilotStockStack {
 
 const HOLDERS: readonly StockHolder[] = ["hangar", "ship", "container"];
 
-function decodeStockStack(value: JsonValue): PilotStockStack | null {
+export function decodeStockStack(value: JsonValue): PilotStockStack | null {
   const record = asRecord(value);
   const typeID = Number(record.typeID);
   const quantity = Number(record.quantity);

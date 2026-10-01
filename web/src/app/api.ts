@@ -3356,6 +3356,51 @@ export async function deletePiPlan(planID: string, options: ApiOptions = {}): Pr
   await postJson(`/api/pi/plans/${encodeURIComponent(planID)}/delete`, {}, options);
 }
 
+// ─── Saved Industry Manager plans (src/industryPlanStore.js) ─────────────────
+// Handed back RAW, as for PI plans: app/industryPlans.ts decodes them.
+
+/** The player's choices for a plan, as the server stores them. */
+export interface IndustryPlanChoices {
+  readonly buy: readonly number[];
+  /** productTypeID -> number of jobs. */
+  readonly jobs: Readonly<Record<string, number>>;
+  /** blueprintTypeID -> assumed efficiencies. */
+  readonly blueprints: Readonly<Record<string, { readonly materialEfficiency: number; readonly timeEfficiency: number }>>;
+  /** blueprintTypeID -> the decryptor its copies are invented with (R109 slice 6). */
+  readonly decryptors?: Readonly<Record<string, number>>;
+}
+
+/** The fields an industry plan may carry on create or update. */
+export interface IndustryPlanFields {
+  readonly productTypeID?: number;
+  readonly runs?: number;
+  readonly choices?: IndustryPlanChoices;
+  readonly note?: string;
+  readonly status?: "active" | "done";
+}
+
+export async function listIndustryPlans(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/industry/plans", options)).plans ?? null;
+}
+
+export async function createIndustryPlan(fields: IndustryPlanFields, options: ApiOptions = {}): Promise<JsonValue> {
+  return (await postJson("/api/industry/plans", fields, options)).plan ?? null;
+}
+
+export async function updateIndustryPlan(
+  planID: string,
+  fields: IndustryPlanFields,
+  baseRev: number,
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson(`/api/industry/plans/${encodeURIComponent(planID)}`, { ...fields, baseRev }, options);
+  return data.plan ?? null;
+}
+
+export async function deleteIndustryPlan(planID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson(`/api/industry/plans/${encodeURIComponent(planID)}/delete`, {}, options);
+}
+
 // ─── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies on a session of its own, so it keeps running when
 // this tab goes away. These calls are the remote control: start a saved
@@ -3733,6 +3778,24 @@ export async function loadRosterPlanets(
     `/api/roster/planets?characterIDs=${encodeURIComponent(ids.join(","))}`,
     options,
   );
+}
+
+/**
+ * What these pilots hold of these types (R109 slice 4): the roster planets
+ * read's stock walk, pointed at one build tree. No session; at most
+ * ROSTER_PLANETS_MAX_IDS pilots per call.
+ */
+export async function loadRosterStock(
+  characterIDs: readonly number[],
+  typeIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const ids = characterIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  const types = typeIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (ids.length === 0 || types.length === 0) {
+    return { ok: true, pilots: [] };
+  }
+  return postJson("/api/roster/stock", { characterIDs: ids, typeIDs: types }, options);
 }
 
 // --- R108 slice 5: a corporation's hangars, read through a held session -----
@@ -4759,6 +4822,32 @@ export interface PiSchematicsResult {
 export async function getPiSchematics(options: ApiOptions = {}): Promise<PiSchematicsResult> {
   const data = await getJson("/api/pi/schematics", options);
   return { recipes: data as JsonValue };
+}
+
+/**
+ * Every recipe reachable from these products, for the Industry Manager's build
+ * tree (goal R109). Decoded by bridge/industryRecipes.ts.
+ *
+ * NOT A BRIDGE CALL: static reference data, the same for everyone, answered
+ * without a gateway round trip or a held session.
+ */
+export async function getIndustryRecipeClosure(
+  productTypeIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson("/api/industry/recipe-closure", { productTypeIDs: [...productTypeIDs] }, options);
+  return data as JsonValue;
+}
+
+/** What invention odds are made of: the lower-rate skills and every decryptor (R109 slice 6). Static. */
+export async function getIndustryInventionTerms(options: ApiOptions = {}): Promise<JsonValue> {
+  return (await getJson("/api/industry/invention-terms", options)) as JsonValue;
+}
+
+/** Published blueprints and reaction formulas by name (goal R109). Static. */
+export async function searchIndustryBlueprints(query: string, options: ApiOptions = {}): Promise<JsonValue> {
+  const data = await getJson(`/api/industry/blueprints/search?q=${encodeURIComponent(query)}&limit=25`, options);
+  return data as JsonValue;
 }
 
 // --- Pilot Training: account-owned read-only qualification -------------------

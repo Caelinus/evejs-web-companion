@@ -98,6 +98,14 @@ interface Reader {
 // the roster read applies to a pilot's own items in src/server.js).
 const PLANETARY_CATEGORY_IDS = new Set([42, 43]);
 
+/**
+ * Which corp stacks a read keeps. Planetary goods by default; the Industry
+ * Manager (R109) passes the types of one build tree instead.
+ */
+export type CorpItemFilter = (item: { readonly typeID: number; readonly categoryID: number }) => boolean;
+
+export const PLANETARY_CORP_ITEMS: CorpItemFilter = (item) => PLANETARY_CATEGORY_IDS.has(item.categoryID);
+
 function refusalWords(error: unknown): string {
   const message = error instanceof Error && error.message.length > 0 ? error.message : null;
   return message ?? "the read failed";
@@ -110,11 +118,12 @@ function errorCode(body: Record<string, JsonValue>, field: string): string | nul
   return typeof code === "string" && code.length > 0 ? code : null;
 }
 
-/** Every planetary stack in the corp's offices, through one pilot. Throws when refused. */
+/** Every stack `keep` wants in the corp's offices, through one pilot. Throws when refused. */
 async function readThrough(
   reader: Reader,
   corporationID: number,
   deps: PiCorpReadDeps,
+  keep: CorpItemFilter,
 ): Promise<{ items: CorpStockItem[]; name: string | null }> {
   const options = await reader.options();
   const first = await reader.load(null, options);
@@ -131,7 +140,7 @@ async function readThrough(
       throw new Error(`the server refused to list an office (${code})`);
     }
     for (const item of decodeCorpAssetItems(body.locationInventory ?? null)) {
-      if (!PLANETARY_CATEGORY_IDS.has(item.categoryID) || item.units <= 0) continue;
+      if (!keep(item) || item.units <= 0) continue;
       raw.push({
         locationID: location.locationID,
         typeID: item.typeID,
@@ -182,6 +191,7 @@ export async function readCorpStock(
   online: readonly OnlinePilot[],
   bots: readonly BotPilot[] = [],
   deps: PiCorpReadDeps = LIVE_DEPS,
+  keep: CorpItemFilter = PLANETARY_CORP_ITEMS,
 ): Promise<CorpStockRead[]> {
   // One throwaway sign-in per account, made the first time one of its bots is
   // tried, and every one of them signed out when the read ends.
@@ -238,7 +248,7 @@ export async function readCorpStock(
       let done: CorpStockRead | null = null;
       for (const reader of candidates) {
         try {
-          const { items, name } = await readThrough(reader, corporationID, deps);
+          const { items, name } = await readThrough(reader, corporationID, deps, keep);
           done = {
             corporationID,
             corporationName: name,

@@ -1618,6 +1618,51 @@ function getIndustryBlueprint(blueprintTypeID) {
   ).get(Number(blueprintTypeID) || 0) || null;
 }
 
+/**
+ * Every blueprint row, raw — the whole book, for the R109 build tree.
+ * `getIndustryBlueprint` answers "what does THIS blueprint do"; a tree needs the
+ * reverse, "what makes THIS product", which means indexing every row. Built off
+ * the same cached index so the 21 MB table is parsed once, not twice.
+ */
+function getAllIndustryBlueprints() {
+  const cacheKey = "industryBlueprints:all";
+  if (caches.has(cacheKey)) {
+    return caches.get(cacheKey);
+  }
+  const list = [...buildIndex(
+    "industryBlueprints",
+    "blueprintDefinitions",
+    "blueprintTypeID",
+  ).values()];
+  caches.set(cacheKey, list);
+  return list;
+}
+
+/**
+ * Every published type in one group, by the group the type row states (R109:
+ * the decryptors, group 1304, as the server's own isDecryptorType reads it).
+ */
+function getTypesInGroup(groupID) {
+  const numericGroupID = Number(groupID) || 0;
+  const cacheKey = `itemTypes:group:${numericGroupID}`;
+  if (caches.has(cacheKey)) {
+    return caches.get(cacheKey);
+  }
+  const list = [...buildIndex("itemTypes", "types", "typeID").values()]
+    .filter((type) => Number(type && type.groupID) === numericGroupID && type.published !== false);
+  caches.set(cacheKey, list);
+  return list;
+}
+
+/**
+ * One client type list as the gameStore holds it ({ includedTypeIDs, ... }), or
+ * null. The server matches lists through this same table
+ * (server/src/services/inventory/typeListAuthority.js).
+ */
+function getClientTypeList(listID) {
+  return buildIndex("clientTypeLists", "typeLists", "listID").get(Number(listID) || 0) || null;
+}
+
 function getNpcIndustryFacility(facilityID) {
   return buildIndex(
     "industryFacilities",
@@ -1643,6 +1688,9 @@ module.exports = {
   getFaction,
   getFactionName,
   getIndustryBlueprint,
+  getAllIndustryBlueprints,
+  getTypesInGroup,
+  getClientTypeList,
   resolveNames,
   getMarketGroup,
   getMarketGroupName,
