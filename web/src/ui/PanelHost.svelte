@@ -29,6 +29,7 @@
   import BotManager from "./BotManager.svelte";
   import FleetCompanions from "./FleetCompanions.svelte";
   import PiManager from "./PiManager.svelte";
+  import IndustryManager from "./IndustryManager.svelte";
   import Chat from "./Chat.svelte";
   import Wallet from "./Wallet.svelte";
   import CorpWallet from "./CorpWallet.svelte";
@@ -154,6 +155,10 @@
        this pilot's store nor its flow. It is given the tab's sessions only to
        read corp hangars through a pilot of that corp already online. -->
   <PiManager {sessions} />
+{:else if tab === "industryManager"}
+  <!-- ⚠ NOT THE MOUNTED PILOT'S either: a plan spans every signed-in pilot's
+       blueprints, read on each pilot's own session. -->
+  <IndustryManager {sessions} />
 {:else if tab === "wallet"}
   <Wallet {store} {flow} />
 {:else if tab === "corpWallet"}

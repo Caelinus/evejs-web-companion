@@ -4761,6 +4761,27 @@ export async function getPiSchematics(options: ApiOptions = {}): Promise<PiSchem
   return { recipes: data as JsonValue };
 }
 
+/**
+ * Every recipe reachable from these products, for the Industry Manager's build
+ * tree (goal R109). Decoded by bridge/industryRecipes.ts.
+ *
+ * NOT A BRIDGE CALL: static reference data, the same for everyone, answered
+ * without a gateway round trip or a held session.
+ */
+export async function getIndustryRecipeClosure(
+  productTypeIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<JsonValue> {
+  const data = await postJson("/api/industry/recipe-closure", { productTypeIDs: [...productTypeIDs] }, options);
+  return data as JsonValue;
+}
+
+/** Published blueprints and reaction formulas by name (goal R109). Static. */
+export async function searchIndustryBlueprints(query: string, options: ApiOptions = {}): Promise<JsonValue> {
+  const data = await getJson(`/api/industry/blueprints/search?q=${encodeURIComponent(query)}&limit=25`, options);
+  return data as JsonValue;
+}
+
 // --- Pilot Training: account-owned read-only qualification -------------------
 
 /** Existing accounts only; no cookie/global-token change and no pilot selection. */

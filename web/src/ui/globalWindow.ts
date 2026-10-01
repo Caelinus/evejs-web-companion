@@ -60,7 +60,7 @@ import type { TabID } from "./tabs.ts";
  * exactly why it is a set here rather than a comparison spelled out four times
  * and kept in step by hand.
  */
-export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion", "piManager", "miningOperations"]);
+export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion", "piManager", "industryManager", "miningOperations"]);
 
 /** One door onto a global window, as the brand strip draws it. */
 export interface GlobalLauncher {
@@ -93,6 +93,12 @@ export const GLOBAL_LAUNCHERS: readonly GlobalLauncher[] = [
     label: "PI",
     title: "Planetary Industry",
     hint: "Planetary Industry — every pilot's colonies on one board",
+  },
+  {
+    id: "industryManager",
+    label: "Build",
+    title: "Industry Manager",
+    hint: "Industry Manager — a blueprint's whole build tree, down to raw materials",
   },
   {
     id: "companion",
