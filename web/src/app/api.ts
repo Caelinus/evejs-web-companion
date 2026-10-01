@@ -3778,6 +3778,24 @@ export async function loadRosterPlanets(
   );
 }
 
+/**
+ * What these pilots hold of these types (R109 slice 4): the roster planets
+ * read's stock walk, pointed at one build tree. No session; at most
+ * ROSTER_PLANETS_MAX_IDS pilots per call.
+ */
+export async function loadRosterStock(
+  characterIDs: readonly number[],
+  typeIDs: readonly number[],
+  options: ApiOptions = {},
+): Promise<Record<string, JsonValue>> {
+  const ids = characterIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  const types = typeIDs.filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (ids.length === 0 || types.length === 0) {
+    return { ok: true, pilots: [] };
+  }
+  return postJson("/api/roster/stock", { characterIDs: ids, typeIDs: types }, options);
+}
+
 // --- R108 slice 5: a corporation's hangars, read through a held session -----
 // GET /api/bridge/corp-assets (the R61 corpmgr reads). Without a locationID it
 // answers where the corp has offices (`inventory`); with one it also answers

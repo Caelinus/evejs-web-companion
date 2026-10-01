@@ -21,7 +21,9 @@
   import { onMount, untrack } from "svelte";
   import type { Session } from "../app/sessions.ts";
   import type { ApiOptions } from "../app/api.ts";
-  import { getIndustryRecipeClosure, searchIndustryBlueprints } from "../app/api.ts";
+  import { getIndustryRecipeClosure, listActiveServerBots, searchIndustryBlueprints } from "../app/api.ts";
+  import { readIndustryStock, type IndustryStock } from "../app/industryStockRead.ts";
+  import type { OnlinePilot } from "../app/piCorpRead.ts";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
   import {
     askAsAnyone,
@@ -67,7 +69,15 @@
     ownedWords,
     type PilotBlueprintRead,
   } from "../bridge/industryOwned.ts";
-  import { countWords } from "../bridge/piStock.ts";
+  import { countWords, type Holding } from "../bridge/piStock.ts";
+  import {
+    heldByType,
+    holdingsByType,
+    multibuyText,
+    planStanding,
+    staleWords,
+    type PlanStanding,
+  } from "../bridge/industryStock.ts";
   import TypeIcon from "./TypeIcon.svelte";
 
   let { sessions = [] }: { sessions?: readonly Session[] } = $props();
@@ -111,6 +121,17 @@
   let runsText = $state("1");
   let choices = $state<IndustryPlanChoices>(NO_CHOICES);
   let noteText = $state("");
+
+  // What the pilots and their corporations hold of every type any open book
+  // names (R109 slice 4). Read when the window opens, when a new book brings
+  // types the last read did not ask about, and on Refresh; never on a timer.
+  let stock = $state<IndustryStock | null>(null);
+  let stockReading = $state(false);
+  let stockAsked = new Set<number>();
+  let stockTimer: ReturnType<typeof setTimeout> | null = null;
+  let browserNowMs = $state(Date.now());
+  let copied = $state<string | null>(null);
+  let placesOpen = $state<Set<number>>(new Set());
 
   // Recipe books, one per product, read once per open window.
   let books = $state<Map<number, IndustryRecipeBook>>(new Map());
@@ -156,6 +177,8 @@
   });
   const owned = $derived(ownedBlueprints(reads));
   const terms = $derived(ownedTerms(owned));
+  const held = $derived(heldByType(stock?.holdings ?? []));
+  const places = $derived(holdingsByType(stock?.holdings ?? []));
 
   const openPlan = $derived(plans.find((entry) => entry.planID === openPlanID) ?? null);
   const activePlans = $derived(plans.filter((entry) => entry.status === "active"));
@@ -172,7 +195,29 @@
     if (productTypeID === null || book === null || runs === null) {
       return null;
     }
-    return resolveIndustryChain({ book, productTypeID, runs, choices: resolverChoices(choices, terms) });
+    return resolveIndustryChain({ book, productTypeID, runs, choices: resolverChoices(choices, terms), held });
+  });
+  const standing = $derived(chain ? planStanding(chain) : null);
+  const stale = $derived(stock ? staleWords(stock.holdings, browserNowMs) : null);
+  const pilotProblems = $derived(stock ? stock.pilots.filter((pilot) => pilot.state !== "read") : []);
+  const corpProblems = $derived(stock ? stock.corps.filter((corp) => corp.state !== "read") : []);
+  /** Each saved plan's standing, for its card. Null until its book and the stock are in. */
+  const cardStandings = $derived.by(() => {
+    const standings = new Map<string, PlanStanding>();
+    if (stock === null) return standings;
+    for (const entry of plans) {
+      const entryBook = books.get(entry.productTypeID);
+      if (!entryBook) continue;
+      const entryChain = resolveIndustryChain({
+        book: entryBook,
+        productTypeID: entry.productTypeID,
+        runs: entry.runs,
+        choices: resolverChoices(entry.choices, terms),
+        held,
+      });
+      if (entryChain) standings.set(entry.planID, planStanding(entryChain));
+    }
+    return standings;
   });
   const toBuy = $derived(chain ? shortLines(chain).filter((line) => line.obtain === "buy") : []);
   const jobCount = $derived(
@@ -259,6 +304,81 @@
       booksAsked.delete(typeID);
       bookErrors = new Map(bookErrors).set(typeID, "The recipes could not be read just now.");
     }
+  }
+
+  /** Pilots online in this tab, as the corp read needs them. */
+  function onlinePilots(): OnlinePilot[] {
+    return onlineSessions().map(({ session, characterID }) => ({
+      characterID,
+      corporationID: session.store.station.get().online?.corporationID ?? null,
+      options: session.flow.requestOptions(),
+    }));
+  }
+
+  /** Every type any recipe book open in this window names. */
+  function bookTypes(): number[] {
+    const types = new Set<number>();
+    for (const entry of books.values()) {
+      for (const typeID of entry.types.keys()) types.add(typeID);
+      for (const typeID of entry.byProduct.keys()) types.add(typeID);
+    }
+    return [...types];
+  }
+
+  async function readStock(): Promise<void> {
+    const types = bookTypes();
+    if (types.length === 0 || stockReading) return;
+    stockReading = true;
+    try {
+      let botCharacterIDs = new Set<number>();
+      try {
+        botCharacterIDs = new Set((await listActiveServerBots()).map((bot) => bot.characterID));
+      } catch {
+        // Without the list, a corp with nobody online here says so; it is not guessed.
+      }
+      stock = await readIndustryStock({
+        pilots: loadKnownCharacters().map((pilot) => ({
+          characterID: pilot.characterID,
+          characterName: pilot.characterName,
+          accountName: pilot.accountName,
+        })),
+        typeIDs: types,
+        online: onlinePilots(),
+        botCharacterIDs,
+      });
+      stockAsked = new Set(types);
+      browserNowMs = Date.now();
+    } finally {
+      stockReading = false;
+    }
+  }
+
+  /** Read again only when a book brought types the last read did not ask about. */
+  function stockWhenNeeded(): void {
+    if (stockTimer !== null) clearTimeout(stockTimer);
+    stockTimer = setTimeout(() => {
+      stockTimer = null;
+      if (bookTypes().some((typeID) => !stockAsked.has(typeID))) void readStock();
+    }, 400);
+  }
+
+  async function copyMultibuy(): Promise<void> {
+    const { text, unnamed } = multibuyText(toBuy);
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = unnamed > 0
+        ? `Copied. ${unnamed} unnamed ${unnamed === 1 ? "item was" : "items were"} left out.`
+        : "Copied.";
+    } catch {
+      copied = "Your browser would not copy the list.";
+    }
+  }
+
+  function togglePlaces(typeID: number): void {
+    const next = new Set(placesOpen);
+    if (next.has(typeID)) next.delete(typeID);
+    else next.add(typeID);
+    placesOpen = next;
   }
 
   async function loadPlans(): Promise<void> {
@@ -536,10 +656,21 @@
     };
   });
 
+  $effect(() => {
+    void books;
+    untrack(() => stockWhenNeeded());
+  });
+
   onMount(() => {
     void loadPlans();
     readNewcomers();
+    // Moves the read-at ages on; touches no network.
+    const tick = setInterval(() => (browserNowMs = Date.now()), 30_000);
     return () => {
+      clearInterval(tick);
+      if (stockTimer !== null) {
+        clearTimeout(stockTimer);
+      }
       if (searchTimer !== null) {
         clearTimeout(searchTimer);
       }
@@ -553,13 +684,14 @@
     <span class="controls">
       <button
         type="button"
-        disabled={refreshing}
+        disabled={refreshing || stockReading}
         onclick={() => {
           void refreshOwned();
           void loadPlans();
+          void readStock();
         }}
       >
-        {refreshing ? "Looking..." : "Refresh"}
+        {refreshing || stockReading ? "Looking..." : "Refresh"}
       </button>
     </span>
   </header>
@@ -578,6 +710,7 @@
 
       {#if leftTab === "plans"}
         {#snippet planCard(entry: SavedIndustryPlan)}
+          {@const cardStanding = cardStandings.get(entry.planID)}
           <li>
             <button
               type="button"
@@ -592,6 +725,14 @@
                 <span class="im-item-sub">
                   {countWords(entry.runs)} {entry.runs === 1 ? "run" : "runs"}{entry.note ? ` - ${entry.note}` : ""}
                 </span>
+                {#if cardStanding}
+                  <span class="im-item-foot">
+                    <span class="im-meter" aria-hidden="true">
+                      <span class="im-meter-fill tone-{cardStanding.tone}" style:width={`${Math.round(cardStanding.share * 100)}%`}></span>
+                    </span>
+                    <span class="im-pill tone-{cardStanding.tone}">{cardStanding.words}</span>
+                  </span>
+                {/if}
               </span>
             </button>
           </li>
@@ -761,23 +902,67 @@
         {:else if book.capped}
           <p class="im-error" role="alert">This tree is too large to show in full.</p>
         {:else if chain}
-          <p class="im-verdict">
-            {countWords(chain.root.quantity)} {productName ?? "items"}: {countWords(jobCount)} {jobCount === 1 ? "job" : "jobs"},
-            {countWords(toBuy.length)} {toBuy.length === 1 ? "thing" : "things"} to buy.
+          <!-- THE VERDICT FIRST, so a screen reader reaches the answer before the tree. -->
+          {#if stock === null}
+            <p class="im-verdict">{stockReading ? "Looking at your hangars..." : "What you hold has not been read yet."}</p>
+          {:else if standing && standing.missing === 0}
+            <p class="im-verdict tone-ok">You have everything to build {countWords(chain.root.quantity)} {productName ?? "of these"}.</p>
+          {:else if standing}
+            <p class="im-verdict tone-bad">You are short {countWords(standing.missing)} {standing.missing === 1 ? "item" : "items"}.</p>
+          {/if}
+          <p class="im-note">
+            {countWords(jobCount)} {jobCount === 1 ? "job" : "jobs"} to run.
+            {#if stale}{stale}{/if}
           </p>
+          {#each pilotProblems as pilot (pilot.characterID)}
+            <p class="im-note">
+              {pilot.state === "no-sign-in" ? `${pilot.characterName}'s account could not be signed in to read their hangars.` : `${pilot.characterName}'s hangars could not be read just now.`}
+            </p>
+          {/each}
+          {#each corpProblems as corp (corp.corporationID)}
+            <p class="im-note">
+              {corp.state === "unreachable"
+                ? `${corp.corporationName ?? "A corporation"}'s hangars need one of its pilots online here, or flown by a bot.`
+                : `${corp.corporationName ?? "A corporation"}'s hangars could not be read just now.`}
+            </p>
+          {/each}
 
           {#if toBuy.length > 0}
-            <h4 class="im-section-title">To buy</h4>
-            <ul class="im-buy" aria-label="To buy">
+            <div class="im-section-head">
+              <h4 class="im-section-title">Missing</h4>
+              <button type="button" class="im-copy" onclick={() => void copyMultibuy()}>Copy multibuy</button>
+            </div>
+            {#if copied}<p class="im-note" role="status">{copied}</p>{/if}
+            <ul class="im-buy" aria-label="Missing">
               {#each toBuy as line (line.typeID)}
+                {@const where = places.get(line.typeID) ?? []}
                 <li class="im-buy-row">
                   <span class="im-buy-name">
                     <TypeIcon typeID={line.typeID} name={lineName(line)} />
                     {lineName(line)}
                     {#if line.planetary}<span class="im-chip">PI</span>{/if}
                   </span>
+                  <span class="im-buy-held">
+                    {#if where.length > 0}
+                      <button type="button" class="im-held" aria-expanded={placesOpen.has(line.typeID)} title="Where it is" onclick={() => togglePlaces(line.typeID)}>
+                        {countWords(line.held)} held
+                      </button>
+                    {:else}
+                      {countWords(line.held)} held
+                    {/if}
+                    of {countWords(line.needed)}
+                  </span>
                   <span class="im-buy-count">{countWords(line.short)}</span>
                 </li>
+                {#if placesOpen.has(line.typeID)}
+                  <li>
+                    <ul class="im-places">
+                      {#each where as place, index (index)}
+                        <li><span class="im-source-tag">{place.source === "corp" ? "corp" : "hangar"}</span>{countWords(place.quantity)} - {place.placeWords} - {place.ownerWords}</li>
+                      {/each}
+                    </ul>
+                  </li>
+                {/if}
               {/each}
             </ul>
           {/if}
@@ -807,6 +992,9 @@
                     <span class="im-tag" title="Drawn in full above">above</span>
                   {/if}
                   {#if line.planetary}<span class="im-tag">PI</span>{/if}
+                  {#if line.held > 0 && !node.repeat}
+                    <span class="im-tag ok" title="Used from what you hold">{countWords(line.held)} held</span>
+                  {/if}
                   {#if line.obtain !== "buy" && line.runs > 0}
                     <span class="im-tag">{countWords(line.runs)} {line.runs === 1 ? "run" : "runs"}</span>
                   {/if}
@@ -982,6 +1170,7 @@
   }
   .im-item-text {
     display: grid;
+    flex: 1 1 auto;
     min-width: 0;
   }
   .im-item-name {
@@ -996,6 +1185,12 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+  }
+  .im-item-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
   }
   .im-note,
   .im-empty {
@@ -1019,6 +1214,10 @@
   .im-tag.act {
     border-color: var(--color-warn);
     color: var(--color-warn);
+  }
+  .im-tag.ok {
+    border-color: var(--color-good);
+    color: var(--color-good);
   }
   .im-tag.bad {
     border-color: var(--color-danger);
@@ -1103,9 +1302,93 @@
     margin: 0;
     color: var(--color-text);
   }
+  .im-verdict.tone-ok {
+    color: var(--color-good);
+  }
+  .im-verdict.tone-bad {
+    color: var(--color-danger);
+  }
+  .im-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .im-copy {
+    min-height: 32px;
+    padding: 0 0.7rem;
+  }
+  .im-buy-held {
+    color: var(--color-muted);
+    font-size: 0.85rem;
+    text-align: right;
+  }
+  .im-held {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--color-text-bright);
+    font: inherit;
+    text-decoration: underline dotted;
+    cursor: pointer;
+  }
+  .im-places {
+    list-style: none;
+    margin: 0 0 0.3rem 2.2rem;
+    padding: 0;
+    font-size: 0.85rem;
+  }
+  .im-places li {
+    padding: 0.1rem 0;
+  }
+  .im-source-tag {
+    display: inline-block;
+    min-width: 3.5rem;
+    margin-right: 0.4rem;
+    color: var(--color-muted);
+    font-size: 11px;
+  }
+  .im-meter {
+    flex: 1 1 auto;
+    height: 4px;
+    background: var(--color-line);
+    overflow: hidden;
+  }
+  .im-meter-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-good);
+  }
+  .im-meter-fill.tone-act {
+    background: var(--color-warn);
+  }
+  .im-meter-fill.tone-bad {
+    background: var(--color-danger);
+  }
+  .im-pill {
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--color-line-strong);
+    border-radius: var(--radius-control);
+    color: var(--color-cell);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .im-pill.tone-ok {
+    border-color: var(--color-good);
+    color: var(--color-good);
+  }
+  .im-pill.tone-act {
+    border-color: var(--color-warn);
+    color: var(--color-warn);
+  }
+  .im-pill.tone-bad {
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+  }
   .im-buy-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 7rem;
+    grid-template-columns: minmax(0, 1fr) minmax(6rem, auto) 7rem;
     gap: 0.6rem;
     align-items: center;
     min-height: 36px;

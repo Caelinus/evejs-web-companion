@@ -19689,8 +19689,12 @@ const SHIP_CATEGORY_ID = 6;
  * one type in one holder are summed: the planner needs "how much, where", not
  * item ids. Corporation-owned goods are not here; the snapshot is filtered to
  * the character as owner.
+ *
+ * `wanted` (R109): a Set of type ids to keep INSTEAD of the planetary goods,
+ * for the Industry Manager, which needs the materials of one build tree.
+ * Absent, this is the planetary read exactly as it was.
  */
-function stockFromSnapshot(staticDataSource, snapshot) {
+function stockFromSnapshot(staticDataSource, snapshot, wanted = null) {
   const rawItems = snapshot && snapshot.items;
   const items = Array.isArray(rawItems)
     ? rawItems
@@ -19704,7 +19708,7 @@ function stockFromSnapshot(staticDataSource, snapshot) {
   }
   const stacks = new Map();
   for (const item of items) {
-    if (!item || !PLANETARY_CATEGORY_IDS.has(Number(item.categoryID))) {
+    if (!item || !(wanted ? wanted.has(Number(item.typeID)) : PLANETARY_CATEGORY_IDS.has(Number(item.categoryID)))) {
       continue;
     }
     const typeID = Number(item.typeID) || 0;
@@ -19872,6 +19876,83 @@ app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
       serverNowMs: Date.now(),
       pilots: pilots.filter((pilot) => pilot !== null),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * R109 slice 4 -- what the roster pilots hold of ONE build tree's materials.
+ *
+ * The roster planets read above, with its stock walk pointed at a list of type
+ * ids instead of the planetary goods. The same rules hold: the gateway
+ * snapshot answers for any pilot the signed-in account owns, with NO session
+ * and nobody brought online; a pilot that is not ours, or that the gateway
+ * cannot read, is left out of the answer rather than reported as empty; every
+ * pilot carries its own read instant.
+ *
+ * POST, because a capital's tree names a few hundred types.
+ */
+const ROSTER_STOCK_MAX_TYPES = 2000;
+
+app.post("/api/roster/stock", requireAuth, async (req, res, next) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const characterIDs = rosterCharacterIDs(Array.isArray(body.characterIDs) ? body.characterIDs.join(",") : "");
+  const typeIDs = new Set();
+  for (const value of Array.isArray(body.typeIDs) ? body.typeIDs : []) {
+    const typeID = Number(value) || 0;
+    if (Number.isSafeInteger(typeID) && typeID > 0) {
+      typeIDs.add(typeID);
+    }
+  }
+  if (characterIDs.length > ROSTER_PLANETS_MAX_IDS) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_CHARACTERS",
+      message: `Ask about at most ${ROSTER_PLANETS_MAX_IDS} pilots at a time.`,
+    });
+    return;
+  }
+  if (typeIDs.size > ROSTER_STOCK_MAX_TYPES) {
+    res.status(400).json({
+      ok: false,
+      error: "TOO_MANY_TYPES",
+      message: `Ask about at most ${ROSTER_STOCK_MAX_TYPES} kinds of item at a time.`,
+    });
+    return;
+  }
+  if (characterIDs.length === 0 || typeIDs.size === 0) {
+    res.json({ ok: true, serverNowMs: Date.now(), pilots: [] });
+    return;
+  }
+  try {
+    const pilots = await Promise.all(
+      characterIDs.map(async (characterID) => {
+        let snapshot = null;
+        try {
+          snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
+        } catch (error) {
+          // Not ours, not there, or the gateway stumbled: say nothing about it.
+          void error;
+          return null;
+        }
+        const readAtMs = Date.now();
+        if (!snapshot) {
+          return null;
+        }
+        const character = snapshot.characters && typeof snapshot.characters === "object"
+          ? snapshot.characters[String(characterID)]
+          : null;
+        const corporationID = Number(character && character.corporationID) || 0;
+        return {
+          characterID,
+          readAtMs,
+          corporationID: corporationID > 0 ? corporationID : null,
+          stock: stockFromSnapshot(staticData, snapshot, typeIDs),
+        };
+      }),
+    );
+    res.json({ ok: true, serverNowMs: Date.now(), pilots: pilots.filter((pilot) => pilot !== null) });
   } catch (error) {
     next(error);
   }

@@ -132,6 +132,13 @@ test("a corp's planetary goods are read through its online pilot, office by offi
   ]);
 });
 
+test("R109: a caller may keep other types instead, and the planetary rule is then not applied", async () => {
+  const { value } = deps(answersEverything);
+  const keepTritanium = (entry: { readonly typeID: number }) => entry.typeID === 34;
+  const read = (await readCorpStock([CORP], [pilot(PILOT_A, CORP)], [], value, keepTritanium))[0]!;
+  assert.deepEqual(read.items.map((entry) => [entry.typeID, entry.quantity, entry.division]), [[34, 9000, 1]]);
+});
+
 test("⚠ a corp with none of its pilots online here is 'unreachable', and nothing is asked", async () => {
   const { value, calls } = deps(answersEverything);
   const reads = await readCorpStock([CORP], [pilot(PILOT_B, OTHER_CORP)], [], value);

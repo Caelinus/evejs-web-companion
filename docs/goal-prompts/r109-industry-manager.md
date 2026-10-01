@@ -266,20 +266,32 @@ Done when a plan survives a reload and a second tab's edit is refused, not lost.
 
 ### Slice 4 — stock and missing items
 
-- BFF: `GET /api/roster/stock?characterIDs=&typeIDs=`. This is the `stockFromSnapshot`
-  walk with a **typeID filter** in place of the planetary-category filter, so it needs no
-  sign-in. The planetary path stays exactly as it is.
-- Corp hangars through the existing corp read. Per the standing rule, corp stock
-  always counts, with no opt-out, and every unit says where it sits.
-- Holdings reuse `Holding` from `piStock.ts`. If the display helpers need generalising,
-  that is a separate refactor commit inside this branch, and PI's tests stay green
-  unchanged.
-- The resolver nets stock top-down (rule 3). The missing list is grouped by
-  *buy* / *build* / *invent*, and each row says how much is missing and where the held
-  part sits.
-- **Copy multibuy** puts `Name Qty` lines on the clipboard.
-- Every holding carries its read-at. A merge read at different times says
-  `Read at different times — the oldest is {age} old.`
+- BFF: `POST /api/roster/stock {characterIDs, typeIDs}`. It runs `stockFromSnapshot`, which
+  now takes an optional set of type ids in place of the planetary-category filter, so it
+  needs no select. With no set it is the planetary read unchanged, and a test pins that. It
+  is POST because a capital's tree names a few hundred types.
+- Every hangar pilot counts, read one account at a time on a throwaway sign-in, as the
+  PI roster read does (`app/industryStockRead.ts`).
+- Corp hangars come through `readCorpStock`, which now takes an item filter (planetary
+  by default). A corp is read through a pilot of it online here, or one a server bot
+  flies, once that pilot's own stock read has said which corp it is in. Per the standing
+  rule, corp stock always counts, with no opt-out, and every unit says where it sits.
+- Holdings reuse PI's `Holding`. Only two PI helpers changed, both just to be exported:
+  `decodeStockStack` and `stationWords`.
+- The resolver nets the per-type sum top-down (rule 3). The verdict leads:
+  `You have everything to build {n} {name}.` or `You are short {k} items.`
+- **Missing** lists each bought item that is still short, with what is held of what is
+  needed. Opening one shows every place it sits, personal hangars first, then corp.
+- **Copy multibuy** puts `Name quantity` lines on the clipboard. An unnamed item is
+  counted, not pasted.
+- Read at different moments, more than two minutes apart, it says
+  `Read at different times - the oldest is {age} old.` A pilot or corp that could not be
+  read says so on its own line, never board-wide.
+- Plan cards gain their standing: `covered`, or `N missing`, with a meter of what share
+  of the bought items is held in full. Building is work, not a gap: a component whose
+  inputs are all held is not missing.
+- The stock is read when the window opens, when a newly opened plan brings types the
+  last read did not ask about, and on Refresh. It is never read on a timer.
 
 Done when a plan's missing list changes after moving items into a roster pilot's hangar
 and pressing Refresh, with no pilot signed in.

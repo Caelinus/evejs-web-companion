@@ -159,7 +159,7 @@ function colonyHoldings(
   return [...merged.values()];
 }
 
-function stationWords(stack: PilotStockStack): string {
+export function stationWords(stack: PilotStockStack): string {
   const place = stack.locationName ?? "a place this map does not name";
   if (stack.holder === "ship") {
     return stack.holderName ? `${place}, in ${stack.holderName}'s cargo` : `${place}, in a ship's cargo`;
