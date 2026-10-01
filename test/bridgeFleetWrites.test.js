@@ -454,6 +454,24 @@ test("own-fleet reads rebind current membership on every refresh while sharing o
   );
 });
 
+test("own-fleet envelopes retain a bind invitation and successful read drains even when another read is refused", async () => {
+  const invite = { method: "OnFleetInvite", args: [700, MEMBER_ID, "AskJoinFleet", {}] };
+  const joined = { method: "OnFleetJoin", args: [MEMBER_ID] };
+  const gateway = { ...fakeGateway(),
+    async bindObject(service, method) { return { boundHandle: "fleet-handle", service, method, notifications: [invite] }; },
+    async callBoundMethod(service, method) {
+      if (method === "GetWings") throw Object.assign(new Error("Refused"), { code: "CALL_REFUSED" });
+      return { service, method, result: true, notifications: method === "GetInitState" ? [joined] : [] };
+    },
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/bound-fleet");
+  assert.equal(response.status, 200);
+  assert.equal(payload.reads.GetWings.error, "CALL_REFUSED");
+  assert.deepEqual(payload.notifications, [invite, joined]);
+});
+
 test("creating a fleet invalidates a previously fleetless handle before the next bound write", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });
@@ -529,4 +547,35 @@ test("accepting through an invitation-scoped fleet handle never caches that fore
   );
   assert.equal(inviteBinds.length, 2);
   assert.deepEqual(inviteBinds.map((call) => call.args), [[[123456]], [[123456]]]);
+});
+
+test("recovery invitation binds the expected surviving fleet and never follows changed membership", async () => {
+  for (const membershipAfterBind of [TARGET_FLEET_ID, null, TARGET_FLEET_ID + 1]) {
+    const gateway = fakeGateway(); let boundFleetID, invited = 0;
+    const bind = gateway.bindObject, call = gateway.callBoundMethod;
+    gateway.bindObject = async (...args) => { boundFleetID = args[2][0][0]; return bind(...args); };
+    gateway.callBoundMethod = async (...args) => {
+      // Model the runtime's synchronous exact-bound-fleet membership gate,
+      // including a member changing fleets after the BFF started binding.
+      if (boundFleetID !== membershipAfterBind) throw Object.assign(new Error("FleetNotInFleet"), { code: "CALL_REFUSED", statusCode: 409 });
+      invited++; return call(...args);
+    };
+    const { baseUrl } = await startTestServer({ gateway }); await selectOnServer(baseUrl);
+    const result = await apiRequest(baseUrl, "/api/bridge/fleet/invite", { method: "POST",
+      body: { inviteeCharID: MEMBER_ID, expectedFleetID: TARGET_FLEET_ID, confirm: true } });
+    assert.equal(result.response.status, membershipAfterBind === TARGET_FLEET_ID ? 200 : 409);
+    assert.equal(invited, membershipAfterBind === TARGET_FLEET_ID ? 1 : 0);
+    assert.deepEqual(gateway.calls.bind.map(row => row.args), [[[TARGET_FLEET_ID]]]);
+    assert.equal(gateway.calls.bind.some(row => row.method === "CreateFleet"), false);
+  }
+});
+
+test("malformed expected fleet identity refuses before any recovery invitation dispatch", async () => {
+  const gateway = fakeGateway(); const { baseUrl } = await startTestServer({ gateway }); await selectOnServer(baseUrl);
+  for (const expectedFleetID of [null, 0, -1, 1.5, "not-an-id"]) {
+    const result = await apiRequest(baseUrl, "/api/bridge/fleet/invite", { method: "POST",
+      body: { inviteeCharID: MEMBER_ID, expectedFleetID, confirm: true } });
+    assert.equal(result.response.status, 400);
+  }
+  assert.equal(gateway.calls.bind.length, 0); assert.equal(gateway.calls.boundCall.length, 0);
 });

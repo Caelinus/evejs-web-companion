@@ -206,12 +206,8 @@ function sameSecret(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// The flow opens a live-event channel after select; a headless bot does not
-// need push (every bridge response still carries its notification drain), so
-// it gets a channel that is never live.
-function stubEventSource() {
-  return { close() {}, addEventListener() {}, removeEventListener() {} };
-}
+// Headless pilots need the same push-only fleet invitation authority as tabs.
+const { createHostedEventSource } = require("./hostedEventSource");
 
 function createBotHost(options) {
   const auth = options.webAuth;
@@ -1040,7 +1036,7 @@ function createBotHost(options) {
         fetch: botFetch,
         perSessionToken: true,
         initialSessionToken: token,
-        eventSource: stubEventSource,
+        eventSource: url => createHostedEventSource(url, { fetch: botFetch }),
         miningOperationID: record.operationID,
       });
       record.flow = flow;

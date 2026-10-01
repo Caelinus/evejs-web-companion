@@ -283,7 +283,8 @@ export type SlotFamily = "high" | "mid" | "low" | "rig" | "subsystem";
 /** A module sitting in a slot. Named in the UI by typeID via the name cache. */
 /** What is loaded in a module right now — a round of ammunition, a crystal. */
 export interface LoadedCharge {
-  readonly itemID: number;
+  /** Active-ship ListByFlags may identify loaded ammo by its ship/slot/type. */
+  readonly itemID: number | readonly [number, number, number];
   readonly typeID: number;
   /** How many are loaded. */
   readonly quantity: number;

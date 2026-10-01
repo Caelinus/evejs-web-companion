@@ -310,6 +310,7 @@ async function startTestServer(options = {}) {
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
     bridgeSessionStore: options.sessions,
+    ...(options.botHost ? { botHost: options.botHost } : {}),
     errorLogger() {},
   });
   const server = app.listen(0, "127.0.0.1");
@@ -378,6 +379,19 @@ test("a pending recovery can reopen the same held pilot after a tab reload witho
   });
   assert.equal(ready.response.status, 200);
   assert.equal(ready.payload.ok, true);
+});
+test("operation-owned drone recovery acknowledges an empty flight without an unrelated location sample", async () => {
+  const { baseUrl } = await startTestServer({ botHost: {
+    operationForClaim: () => ({ operationID: "owned-operation", operationRole: "MINER" }),
+    claimedBy: () => null, authorizesClaim: () => true, listAll: () => [],
+    activeCharacterIDs: () => [], sampleAllVitals: async () => {}, stopAll: async () => {},
+  } });
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  assert.equal(selected.response.status, 200);
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: selected.payload.droneRecoveryCheckID }, headers: { "x-evejs-bot-claim": "owned-claim" },
+  });
+  assert.equal(ready.response.status, 200); assert.equal(ready.payload.ok, true);
 });
 
 test("pending recovery still refuses another pilot and unreadable same-pilot reentry", async () => {
@@ -899,4 +913,46 @@ test("drone mutation and later confirmation never reuse the script observation",
   assert.equal(gateway.calls.snapshot.length, 3, "launch retains before/after authority reads");
   await apiRequest(baseUrl, "/api/bridge/drones");
   assert.equal(gateway.calls.snapshot.length, 4, "later confirmation reads afresh");
+});
+
+test("drone and script observations retain an invitation drained by any constituent read", async () => {
+  const invitation = { method: "OnFleetInvite", args: [654500150000, 140000044, "FleetInvitation", {}] };
+  const sources = ["readFlightStatus", "bindObject", "callBoundMethod", "callMethod", "readSpaceSnapshot"];
+  for (const route of ["/api/bridge/drones", "/api/bridge/script/observation"]) {
+    for (const source of sources) {
+      const { gateway, baseUrl } = await inSpace();
+      const read = gateway[source].bind(gateway);
+      let drained = false;
+      gateway[source] = async (...args) => {
+        const outcome = await read(...args);
+        if (drained) return outcome;
+        drained = true;
+        return { ...outcome, notifications: [invitation] };
+      };
+      const result = await apiRequest(baseUrl, route);
+      assert.equal(result.response.status, 200, `${route}: ${source}`);
+      assert.deepEqual(result.payload.notifications, [invitation], `${route}: ${source} is forwarded once`);
+      const next = await apiRequest(baseUrl, route);
+      assert.deepEqual(next.payload.notifications, [], "a drained invitation is not replayed by the BFF");
+    }
+  }
+});
+
+test("partial drone reads preserve other successful notification drains", async () => {
+  const invitation = { method: "OnFleetInvite", args: [654500150000, 140000044, "FleetInvitation", {}] };
+  for (const route of ["/api/bridge/drones", "/api/bridge/script/observation"]) {
+    for (const failed of ["bay", "shipInfo"]) {
+      const { gateway, baseUrl } = await inSpace();
+      const bind = gateway.bindObject.bind(gateway);
+      gateway.bindObject = async (...args) => ({ ...await bind(...args), notifications: [invitation] });
+      gateway[failed === "bay" ? "callBoundMethod" : "callMethod"] = async () => {
+        throw Object.assign(new Error("Unreadable component"), { code: "CALL_REFUSED", statusCode: 409 });
+      };
+      const result = await apiRequest(baseUrl, route);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.payload[failed], null, `${failed} remains unknown`);
+      assert.equal(result.payload.errors[failed], "CALL_REFUSED");
+      assert.deepEqual(result.payload.notifications, [invitation], "the successful bind drain survives a component refusal");
+    }
+  }
 });

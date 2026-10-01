@@ -663,7 +663,7 @@ export interface AppFlow {
   /** Form a fleet, then re-read membership before settling. */
   formFleet(): Promise<void>;
   /** Invite one character by ID, then re-read the authoritative fleet. */
-  inviteFleetMember(characterID: number): Promise<void>;
+  inviteFleetMember(characterID: number, assertCurrent?: () => void, expectedFleetID?: number): Promise<void>;
   /**
    * Accept a fleet invitation, then re-read membership before settling.
    *
@@ -1362,11 +1362,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     eventSource?: (url: string) => api.EventSourceLike;
     token?: string | null;
     priority?: RequestPriority;
+    captureNotificationSink?: api.ApiOptions["captureNotificationSink"];
   } = {
     ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
     ...(options.eventSource !== undefined ? { eventSource: options.eventSource } : {}),
     ...(options.perSessionToken ? { token: options.initialSessionToken ?? null } : {}),
+    captureNotificationSink: () => {
+      const characterID = store.station.get().online?.characterID ?? null;
+      const token = callOptions.token, pilotGeneration = recoveryGeneration, runnerGeneration = customBotGeneration;
+      return notifications => {
+        if (characterID !== null && store.station.get().online?.characterID === characterID && token === callOptions.token &&
+            pilotGeneration === recoveryGeneration && runnerGeneration === customBotGeneration)
+          applyDrainedNotifications(notifications);
+      };
+    },
   };
 
   const recoverySignal = createSignal<DroneRecoveryState>({ phase: options.browserPilotRecovery ? "checking" : "ready", reason: null });
@@ -1563,36 +1573,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "OnSystemScanDone",
   ]);
 
-  /**
-   * Feed the notifications a bridge RESPONSE carried into the same dispatch the
-   * live channel uses.
-   *
-   * ⚠ WITHOUT THIS, A HEADLESS BOT RECEIVES NO PUSHED NOTIFICATION AT ALL, and
-   * that is not a degradation — it is total. `applyPushedNotification` has
-   * exactly one other caller, the SSE `notification` branch, and `src/botHost.js`
-   * hands every headless bot `stubEventSource()`: a channel that is never live,
-   * by design. So on the BFF's bot host the push dispatch simply never runs.
-   *
-   * The BFF already anticipated this and holds up its end — "every request
-   * route still drains notifications onto its response, so a stream that never
-   * opens or drops mid-flight degrades to the old poll-based behaviour rather
-   * than losing data" (`src/server.js`, above `STREAM_RETRY_MS`). Nothing on
-   * this side ever consumed that drain, so only half the fallback existed.
-   *
-   * ⚠ WHY IT WENT UNNOTICED FOR SO LONG, and why a fleet broadcast is the thing
-   * that finally forced it: almost every push consumer here is an INVALIDATION
-   * that schedules a re-read (`scheduleFleetRefresh`, `scheduleHoldRefresh`),
-   * so missing the push costs a little freshness and nothing else. A broadcast
-   * has no re-read to fall back on — there is no "what is the current
-   * broadcast" route anywhere — so a push that never arrives is an order lost
-   * for good.
-   *
-   * Double delivery is safe and does not need a dedupe scheme. The drain is
-   * destructive, so the gateway hands each notification to exactly one of the
-   * two paths; and were that ever to change, the dispatch is idempotent anyway
-   * — the refresh schedulers coalesce on a microtask, and every payload
-   * consumer is last-write-wins.
-   */
+  /** Trusted response drains and the live stream share one dispatcher.
+   * api.ts captures pilot/session ownership before the request; its sink
+   * discards late drains from a retired generation. The gateway drain is
+   * destructive, so HTTP fallback cannot rely on a later stream replay. */
   function applyDrainedNotifications(notifications: readonly JsonValue[]): void {
     if (notifications.length === 0) {
       return;
@@ -3237,7 +3221,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     await runFleetAction("form", () => api.createFleet(callOptions), "ready");
   }
 
-  async function inviteFleetMember(characterID: number): Promise<void> {
+  async function inviteFleetMember(characterID: number, assertCurrent?: () => void, expectedFleetID?: number): Promise<void> {
     if (!Number.isSafeInteger(characterID) || characterID <= 0) {
       store.apply({ type: "fleet/action-started", action: "invite" });
       store.apply({
@@ -3248,7 +3232,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
     await runFleetAction(
       "invite",
-      () => api.inviteToFleet(characterID, callOptions),
+      () => api.inviteToFleet(characterID, assertCurrent ? { ...callOptions, fetch: (input, init) => {
+        // The shared transport lane may queue this action. Fence the actual
+        // dispatch, before a hosted fetch can capture a newer generation.
+        assertCurrent(); return (callOptions.fetch ?? globalThis.fetch)(input, init);
+      } } : callOptions, expectedFleetID),
       "ready",
     );
   }
@@ -6248,27 +6236,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // decoded the same way.
           api.loadBoundFleet(callOptions).catch(() => null),
         ]);
-        // ⚠ BEFORE ANYTHING IS DECODED. These reads are the companion's only
-        // regular traffic, so on the bot host they are the ONLY chance a pushed
-        // notification gets to be seen at all — the live channel there is a
-        // stub. Draining them here is what makes a fleet broadcast reach a
-        // headless companion; see `applyDrainedNotifications`.
-        //
-        // The other loops do not do this yet, and that is a real gap rather
-        // than a decision — they simply have no push-only input to miss today.
-        // A loop that grows one must drain here too.
-        applyDrainedNotifications([
-          ...statusStep.notifications,
-          ...spaceResult.notifications,
-          ...targetsResult.notifications,
-          // ⚠ THE ROSTER'S DRAIN WAS BEING THROWN AWAY, and it is the read most
-          // likely to be carrying a fleet push: the backlog is destructive, so
-          // whichever response happens to collect an `OnFleetBroadcast` is the
-          // only one that will ever have it. Until this read joined the batch
-          // it resolved AFTER this line and its notifications had nowhere to
-          // go; now it resolves with the rest and is drained with them.
-          ...(Array.isArray(fleetRaw?.notifications) ? fleetRaw.notifications : []),
-        ]);
+        // api.ts delivers trusted response drains through the current flow/session sink.
         // The same authority the Targeting panel reads, kept live while the
         // companion flies so the panel never shows a stale lock list.
         const lockedTargetIDs = decodeTargetIDs(targetsResult.targetIDs);

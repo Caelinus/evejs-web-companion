@@ -121,7 +121,8 @@ function unwrapRowList(result: JsonValue): JsonValue {
 
 /** One fitted module as it comes off a ListByFlags row (before slotting). */
 interface RawFittedRow {
-  readonly itemID: number;
+  readonly itemID: number | readonly [number, number, number];
+  readonly locationID: number;
   readonly typeID: number;
   readonly groupID: number | null;
   readonly flagID: number;
@@ -140,16 +141,10 @@ const CATEGORY_CHARGE = 8;
 /**
  * Split the ListByFlags rows into the MODULES and the CHARGES loaded in them.
  *
- * ⚠ A LOADED CHARGE SHARES ITS MODULE'S SLOT FLAG. This was previously believed
- * to arrive as a tuple itemID that `toNumber` would zero away, so charges were
- * assumed to be dropped and the rows were indexed by flag alone. They are not:
- * a charge is an ordinary row with a plain itemID, the module's flagID, and a
- * stack quantity. Indexing by flag therefore let the CHARGE OVERWRITE THE
- * MODULE, and the panel drew the ammunition where the gun should be — measured
- * live on a Rifter whose 150mm Light AutoCannon I decoded as Phased Plasma S,
- * which also meant the module rack offered to "activate" the ammo.
- *
- * categoryID is what tells them apart: 7 is Module, 8 is Charge.
+ * A loaded charge shares its module's slot flag. Active-ship ListByFlags may
+ * replace its numeric inventory ID with (shipID, flagID, chargeTypeID).
+ * Preserve that identity after checking every component against the row;
+ * category 8 keeps either representation out of the fitted-module map.
  */
 function decodeFittedRows(result: JsonValue): RawFittedRow[] {
   const listValue = unwrapRowList(result);
@@ -168,17 +163,22 @@ function decodeFittedRows(result: JsonValue): RawFittedRow[] {
       candidate.fields !== null
         ? (candidate.fields as Record<string, JsonValue>)
         : (item as Record<string, JsonValue>);
-    const itemID = toNumber(fields.itemID);
+    const numericID = toNumber(fields.itemID);
     const flagID = toNumber(fields.flagID);
-    if (itemID > 0 && flagID > 0) {
+    const typeID = toNumber(fields.typeID), locationID = toNumber(fields.locationID);
+    const categoryID = toNumberOrNull(fields.categoryID);
+    const tuple = Array.isArray(fields.itemID) && fields.itemID.length === 3 ? fields.itemID.map(toNumber) : null;
+    const sublocation = categoryID === CATEGORY_CHARGE && tuple !== null && tuple.every(value => Number.isSafeInteger(value) && value > 0)
+      && tuple[0] === locationID && tuple[1] === flagID && tuple[2] === typeID ? tuple as [number, number, number] : null;
+    const itemID = sublocation ?? numericID;
+    if ((sublocation !== null || Number.isSafeInteger(numericID) && numericID > 0) && flagID > 0) {
       rows.push({
-        itemID,
-        typeID: toNumber(fields.typeID),
+        itemID, locationID, typeID,
         groupID: toNumberOrNull(fields.groupID),
         flagID,
         // categoryID rides only as far as buildSlots, which uses it to tell a
         // module from the charge sharing its flag; it never reaches the panel.
-        categoryID: toNumberOrNull(fields.categoryID),
+        categoryID,
         quantity: toNumber(fields.quantity),
       });
     }
@@ -313,7 +313,7 @@ export function buildSlots(
   for (const row of rows) {
     if (row.categoryID === CATEGORY_CHARGE) {
       chargeByFlag.set(row.flagID, row);
-    } else {
+    } else if (typeof row.itemID === "number") {
       byFlag.set(row.flagID, row);
     }
   }
@@ -338,7 +338,7 @@ export function buildSlots(
     for (let index = 0; index < count; index += 1) {
       const row = byFlag.get(flags[index]!) ?? null;
       const charge = chargeByFlag.get(flags[index]!) ?? null;
-      const module: FittedModule | null = row
+      const module: FittedModule | null = row && typeof row.itemID === "number"
         ? {
             itemID: row.itemID,
             typeID: row.typeID,
@@ -348,7 +348,7 @@ export function buildSlots(
             // A charge with no module in its slot is dropped rather than shown
             // as a phantom: the server would not have put it there, and drawing
             // ammunition as a fitted item is the very bug this separates out.
-            charge: charge
+            charge: charge && (typeof charge.itemID === "number" || charge.itemID[0] === row.locationID)
               ? { itemID: charge.itemID, typeID: charge.typeID, quantity: charge.quantity }
               : null,
           }

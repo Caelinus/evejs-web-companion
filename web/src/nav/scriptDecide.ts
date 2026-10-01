@@ -997,7 +997,8 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
  * names at all (see `ScriptObservation.typeNames`).
  */
 export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): boolean {
-  if (mem.position.kind === "done" || mem.latched !== null) {
+  if (mem.position.kind === "done" || mem.position.kind === "branch-enter" ||
+      mem.position.kind === "loop-branch-enter" || mem.latched !== null) {
     return false;
   }
   const step = activeStep(script, mem.position);
