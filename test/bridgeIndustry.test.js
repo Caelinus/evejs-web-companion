@@ -39,6 +39,15 @@ const BLUEPRINT_TYPE_ID = 681;
 const PRODUCT_TYPE_ID = 165;
 const MATERIAL_TYPE_ID = 38;
 const JOB_ID = 4_200_001;
+// Invention from the same blueprint: a datacore per attempt and a decryptor.
+const DATACORE_TYPE_ID = 20418;
+const INVENTED_TYPE_ID = 1900;
+const DECRYPTOR_TYPE_ID = 34204;
+const TYPES = {
+  [DATACORE_TYPE_ID]: { typeID: DATACORE_TYPE_ID, groupID: 333, categoryID: 17 },
+  [INVENTED_TYPE_ID]: { typeID: INVENTED_TYPE_ID, groupID: 176, categoryID: 9 },
+  [DECRYPTOR_TYPE_ID]: { typeID: DECRYPTOR_TYPE_ID, groupID: 1304, categoryID: 35 },
+};
 
 // Activity + status codes. These appear in FIXTURES (the server's own view) and
 // nowhere else — the decoded panel state speaks in names.
@@ -112,8 +121,16 @@ function fakeStaticData() {
             time: 600,
           },
           copying: { time: 480 },
+          invention: {
+            materials: [{ typeID: DATACORE_TYPE_ID, quantity: 2 }],
+            products: [{ typeID: INVENTED_TYPE_ID, quantity: 10 }],
+            time: 7800,
+          },
         },
       };
+    },
+    getType(typeID) {
+      return TYPES[Number(typeID)] || null;
     },
     resolveNames() {
       return { names: {}, capped: false, limit: 500 };
@@ -1083,4 +1100,63 @@ test("deliver and cancel reject a missing job before calling anything", async ()
     assert.equal(payload.error, "INVALID_JOB", path);
   }
   assert.equal(gateway.calls.topLevel.length, 0);
+});
+
+// --- invention with a decryptor ---------------------------------------------
+//
+// The server takes a decryptor from the request's materials only, and then
+// compares that map EXACTLY with its own (src/industryInstall.js). Every other
+// install keeps sending an empty map, which the server recomputes.
+
+test("an invention with a decryptor sends the exact materials map and names the decryptor", async () => {
+  const gateway = fakeIndustryGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { response } = await apiRequest(baseUrl, "/api/bridge/industry/install", {
+    method: "POST",
+    body: installBody({ activity: "invention", runs: 3, decryptorTypeID: DECRYPTOR_TYPE_ID }),
+  });
+  assert.equal(response.status, 200);
+  const install = gateway.calls.topLevel.find((call) => call.method === "InstallJob");
+  assert.ok(install);
+  const payload = install.args[0];
+  assert.equal(payload.activityID, 8);
+  assert.deepEqual(payload.materials, { [DATACORE_TYPE_ID]: 6, [DECRYPTOR_TYPE_ID]: 3 });
+  assert.equal(payload.optionalTypeID, DECRYPTOR_TYPE_ID);
+  assert.equal(payload.productTypeID, INVENTED_TYPE_ID, "the invented blueprint, as the server resolves it");
+  // The facility's modifiers are read for it, the way the retail client does.
+  assert.ok(gateway.calls.topLevel.some((call) => call.method === "GetFacilities"));
+});
+
+test("without a decryptor, install keeps sending an empty materials map and reads no facility", async () => {
+  const gateway = fakeIndustryGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  await apiRequest(baseUrl, "/api/bridge/industry/install", {
+    method: "POST",
+    body: installBody({ activity: "invention", runs: 3 }),
+  });
+  const install = gateway.calls.topLevel.find((call) => call.method === "InstallJob");
+  assert.deepEqual(install.args[0].materials, {});
+  assert.equal(install.args[0].optionalTypeID, null);
+  assert.equal(gateway.calls.topLevel.some((call) => call.method === "GetFacilities"), false);
+});
+
+test("a decryptor is refused on anything but invention, and anything but a decryptor is refused as one", async () => {
+  for (const body of [
+    installBody({ activity: "manufacturing", decryptorTypeID: DECRYPTOR_TYPE_ID }),
+    installBody({ activity: "invention", decryptorTypeID: DATACORE_TYPE_ID }),
+    installBody({ activity: "invention", decryptorTypeID: 999999 }),
+    installBody({ activity: "invention", decryptorTypeID: "parity" }),
+  ]) {
+    const gateway = fakeIndustryGateway();
+    const { baseUrl } = await startTestServer({ gateway });
+    await selectOnServer(baseUrl);
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/industry/install", { method: "POST", body });
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal(payload.error, "INVALID_DECRYPTOR");
+    assert.equal(gateway.calls.topLevel.some((call) => call.method === "InstallJob"), false);
+  }
 });

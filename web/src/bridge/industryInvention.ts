@@ -17,8 +17,12 @@
 //
 // ---------------------------------------------------------------------------
 // ON AVERAGE, AND SAID SO. An attempt either succeeds or does not; a plan can
-// only say how many attempts it takes on average (copies / chance, rounded up)
-// and what they use. Variance is not modelled, and the words say "on average".
+// only say how many attempts it takes on average (copies / chance, to the
+// nearest whole attempt, never fewer than the copies) and what they use.
+// Rounding up would plan a third attempt at 49.6% (1 / 0.496 = 2.02), which
+// is not the average. Variance is not modelled, and the words say "on average".
+// Attempts already running (jobSupply's `inventing`) are taken off what is
+// still to start, and their datacores are already spent.
 
 import type { JsonValue } from "./wire.ts";
 import type { IndustryInvention } from "./industryRecipes.ts";
@@ -108,9 +112,13 @@ export function inventionChance(
 /** What the attempts for `copies` successes use, on average. */
 export interface InventionNeed {
   readonly chance: number;
-  /** Attempts on average, rounded up: copies / chance. */
+  /** Attempts on average: copies / chance, to the nearest whole, at least `copies`. */
   readonly attempts: number;
-  /** Datacores and the like, then the decryptor, per type, for all attempts. */
+  /** Of those, how many are running already. */
+  readonly running: number;
+  /** attempts - running, never below 0. */
+  readonly toStart: number;
+  /** Datacores and the like, then the decryptor, per type, for the attempts still to start. */
   readonly materials: ReadonlyMap<number, number>;
 }
 
@@ -119,16 +127,19 @@ export function inventionNeed(
   copies: number,
   chance: number,
   decryptor: DecryptorTerms | null,
+  running = 0,
 ): InventionNeed {
-  const attempts = copies <= 0 || chance <= 0 ? 0 : Math.ceil(copies / chance - 1e-9);
+  const attempts = copies <= 0 || chance <= 0 ? 0 : Math.max(copies, Math.round(copies / chance));
+  const underway = Math.min(Math.max(running, 0), attempts);
+  const toStart = attempts - underway;
   const materials = new Map<number, number>();
   for (const material of source.materials) {
-    materials.set(material.typeID, (materials.get(material.typeID) ?? 0) + material.quantity * attempts);
+    materials.set(material.typeID, (materials.get(material.typeID) ?? 0) + material.quantity * toStart);
   }
-  if (decryptor !== null && attempts > 0) {
-    materials.set(decryptor.typeID, (materials.get(decryptor.typeID) ?? 0) + attempts);
+  if (decryptor !== null && toStart > 0) {
+    materials.set(decryptor.typeID, (materials.get(decryptor.typeID) ?? 0) + toStart);
   }
-  return { chance, attempts, materials };
+  return { chance, attempts, running: underway, toStart, materials };
 }
 
 /** The pilot whose skills give the best chance, among those whose skills are known. */
@@ -144,6 +155,12 @@ export function bestInventor<P extends { readonly skills: ReadonlyMap<number, nu
     if (best === null || chance > best.chance) best = { pilot, chance };
   }
   return best;
+}
+
+/** "Parity Decryptor (chance x1.5, runs +3, material +1%, time -2%)": what a decryptor does. */
+export function decryptorEffectWords(decryptor: DecryptorTerms): string {
+  const signed = (value: number): string => (value >= 0 ? `+${value}` : String(value));
+  return `${decryptor.name ?? "A decryptor"} (chance x${decryptor.probabilityMultiplier}, runs ${signed(decryptor.maxRuns)}, material ${signed(decryptor.materialEfficiency)}%, time ${signed(decryptor.timeEfficiency)}%)`;
 }
 
 /** "34%", "4.5%": plain words for a chance. */
@@ -175,13 +192,15 @@ export interface Inventor {
 /**
  * Every invention the plan needs, each worked with the best inventor's skills
  * and the decryptor chosen for that blueprint. With no skills known the chance
- * is the base one, and `inventorName` says so by being null.
+ * is the base one, and `inventorName` says so by being null. `running` is
+ * jobSupply's `inventing`: attempts underway per T2 blueprint type.
  */
 export function planInventions(
   chain: IndustryChain,
   decryptorFor: (blueprintTypeID: number) => DecryptorTerms | null,
   inventors: readonly Inventor[],
   terms: InventionTerms,
+  running: ReadonlyMap<number, number> = new Map(),
 ): PlanInvention[] {
   const rows: PlanInvention[] = [];
   for (const typeID of [...chain.order].reverse()) {
@@ -199,7 +218,7 @@ export function planInventions(
       runsPerCopy: invention.runsPerCopy,
       decryptor,
       inventorName: best?.pilot.name ?? null,
-      need: inventionNeed(source, invention.copies, chance, decryptor),
+      need: inventionNeed(source, invention.copies, chance, decryptor, running.get(line.blueprint?.blueprintTypeID ?? 0) ?? 0),
     });
   }
   return rows;

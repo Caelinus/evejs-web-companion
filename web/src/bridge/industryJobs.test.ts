@@ -3,7 +3,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { installBlockWords, installCheck, jobSupply, plannedCopies, startNext, type InstallPilot } from "./industryJobs.ts";
+import { installBlockWords, installCheck, inventionCheck, jobSupply, plannedCopies, startNext, type InstallPilot } from "./industryJobs.ts";
+import { inventionNeed, type PlanInvention } from "./industryInvention.ts";
 import { decodeRecipeClosure } from "./industryRecipes.ts";
 import { resolveIndustryChain } from "./industryChain.ts";
 import type { IndustryJobRow } from "../store/types.ts";
@@ -47,6 +48,18 @@ test("active jobs count as units of their product, once each, ready ones noted",
   ], BOOK);
   assert.deepEqual([...supply.inProduction], [[101, 2], [102, 200]]);
   assert.deepEqual([...supply.ready], [[102, 200]]);
+  assert.deepEqual([...supply.inventing], []);
+});
+
+test("invention jobs count as attempts underway for the T2 blueprint they invent, until delivered", () => {
+  const supply = jobSupply([[
+    job({ jobID: 1, activity: "invention", blueprintTypeID: 1101, productTypeID: 1900, runs: 2 }),
+    job({ jobID: 2, activity: "invention", blueprintTypeID: 1101, productTypeID: 1900, runs: 1, status: "ready" }),
+    job({ jobID: 3, activity: "invention", blueprintTypeID: 1101, productTypeID: 1900, runs: 5, status: "delivered" }),
+  ]], BOOK);
+  assert.deepEqual([...supply.inventing], [[1900, 3]]);
+  // Not units of anything: an attempt is no blueprint until it succeeds.
+  assert.deepEqual([...supply.inProduction], []);
 });
 
 test("start next: stages in build order, and a step can start only with every input in hand", () => {
@@ -95,13 +108,19 @@ function hangarStack(locationID: number, holder: "hangar" | "ship" = "hangar") {
   return { typeID: 34, typeName: null, quantity: 100, locationID, locationName: null, holder, holderName: holder === "ship" ? "Hauler" : null };
 }
 
+const ALL_WORK = ["manufacturing", "reaction", "invention"];
+
+function offering(solarSystemID: number, activities: readonly string[] = ALL_WORK) {
+  return { solarSystemID, activities: new Set(activities) };
+}
+
 function pilot(overrides: Partial<InstallPilot> = {}): InstallPilot {
   return {
     characterName: "Pilot",
     solarSystemID: SYSTEM_A,
     dockedAt: STATION_A,
     skills: new Map([[SCM, 0]]),
-    facilities: new Map([[STATION_A, SYSTEM_A], [STATION_B, SYSTEM_B]]),
+    facilities: new Map([[STATION_A, offering(SYSTEM_A)], [STATION_B, offering(SYSTEM_B)]]),
     stock: [hangarStack(STATION_A)],
     ...overrides,
   };
@@ -236,4 +255,81 @@ test("installCheck: with a planned copy, only copies at its material efficiency 
   const twin = at(10, 0, copy(1, 3, STATION_A));
   const same = installCheck(widgetLine(), [planned, twin], new Map([[1, pilot()]]), ONE_JUMP, planned);
   assert.equal(same.ok && same.from.itemID, 3);
+});
+
+test("installCheck: a facility that does not host the work is no place to start it", () => {
+  const inventionOnly = pilot({ facilities: new Map([[STATION_A, offering(SYSTEM_A, ["invention"])]]) });
+  const check = installCheck(widgetLine(), [copy(1, 1, STATION_A)], new Map([[1, inventionOnly]]), ONE_JUMP);
+  assert.equal(!check.ok && check.block, "work-not-offered");
+  assert.match(installBlockWords(check as Extract<typeof check, { ok: false }>), /does not offer manufacturing/);
+  // And the planned copy follows: a copy there is not in reach for manufacturing.
+  assert.equal(plannedCopies([copy(1, 1, STATION_A)], new Map([[1, inventionOnly]]), ONE_JUMP).get(1101)?.inReach, false);
+});
+
+// --- setting up invention -------------------------------------------------------
+
+const DATACORE = 20418;
+const SCIENTIFIC_NETWORKING = 24270;
+
+/** Widget II invented from the Widget blueprint (1101), 1 datacore an attempt. */
+function inventionRow(toStart: number, decryptor: PlanInvention["decryptor"] = null): PlanInvention {
+  const source = { blueprintTypeID: 1101, blueprintName: "Widget Blueprint", runsPerCopy: 10, probability: 0.5, timeSeconds: 100,
+    materials: [{ typeID: DATACORE, quantity: 1 }], skills: [] };
+  // toStart copies at a certain chance: toStart attempts, none running.
+  const need = inventionNeed(source, toStart, 1, decryptor);
+  return { line: widgetLine(), source, copies: toStart, runsPerCopy: 10, decryptor, inventorName: "Pilot", need };
+}
+
+function t1Copy(itemID: number, runs: number | null, facilityID: number | null = STATION_A): OwnedBlueprint {
+  return { ...copy(1, itemID, facilityID), original: runs === null, runs };
+}
+
+function datacores(quantity: number, locationID = STATION_A) {
+  return { ...hangarStack(locationID), typeID: DATACORE, quantity };
+}
+
+test("inventionCheck: from a copy where invention is offered, with its datacores there, as many runs as attempts", () => {
+  const check = inventionCheck(inventionRow(2), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(2)] })]]), ONE_JUMP);
+  assert.equal(check.ok, true);
+  assert.equal(check.ok && check.activity, "invention");
+  assert.equal(check.ok && check.runs, 2);
+  assert.equal(check.ok && check.from.itemID, 1);
+});
+
+test("inventionCheck: never from an original, and no more runs than the copy carries", () => {
+  const original = inventionCheck(inventionRow(2), [t1Copy(1, null)], new Map([[1, pilot({ stock: [datacores(9)] })]]), ONE_JUMP);
+  assert.equal(!original.ok && original.block, "no-copy");
+  assert.match(installBlockWords(original as Extract<typeof original, { ok: false }>), /invented from/);
+  const short = inventionCheck(inventionRow(4), [t1Copy(1, null), t1Copy(2, 3)], new Map([[1, pilot({ stock: [datacores(9)] })]]), ONE_JUMP);
+  assert.equal(short.ok && short.from.itemID, 2);
+  assert.equal(short.ok && short.runs, 3);
+});
+
+test("inventionCheck: the datacores for every run must be in the hangar where the copy is", () => {
+  const fewer = inventionCheck(inventionRow(3), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(2)] })]]), ONE_JUMP);
+  assert.equal(!fewer.ok && fewer.block, "materials-elsewhere");
+  assert.match(installBlockWords(fewer as Extract<typeof fewer, { ok: false }>), /datacores/);
+  const elsewhere = inventionCheck(inventionRow(1), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5, STATION_B)] })]]), ONE_JUMP);
+  assert.equal(!elsewhere.ok && elsewhere.block, "materials-elsewhere");
+});
+
+test("inventionCheck: a factory with no invention is refused, and reach is Scientific Networking's", () => {
+  const factory = pilot({ facilities: new Map([[STATION_A, offering(SYSTEM_A, ["manufacturing"])]]), stock: [datacores(5)] });
+  const there = inventionCheck(inventionRow(1), [t1Copy(1, 5)], new Map([[1, factory]]), ONE_JUMP);
+  assert.equal(!there.ok && there.block, "work-not-offered");
+  assert.match(installBlockWords(there as Extract<typeof there, { ok: false }>), /does not offer invention/);
+  // One jump away: Supply Chain Management does not reach it, Scientific Networking does.
+  const atB = { stock: [datacores(5, STATION_B)] };
+  const scm = inventionCheck(inventionRow(1), [t1Copy(1, 5, STATION_B)], new Map([[1, pilot({ ...atB, skills: new Map([[SCM, 5]]) })]]), ONE_JUMP);
+  assert.equal(!scm.ok && scm.block, "out-of-range");
+  assert.match(installBlockWords(scm as Extract<typeof scm, { ok: false }>), /start invention jobs only in the same system/);
+  const sn = inventionCheck(inventionRow(1), [t1Copy(1, 5, STATION_B)], new Map([[1, pilot({ ...atB, skills: new Map([[SCIENTIFIC_NETWORKING, 1]]) })]]), ONE_JUMP);
+  assert.equal(sn.ok, true);
+});
+
+test("inventionCheck: a plan with a decryptor cannot be set up, as the Industry panel sends none", () => {
+  const parity = { typeID: 34204, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3 };
+  const check = inventionCheck(inventionRow(1, parity), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5), { ...datacores(5), typeID: 34204 }] })]]), ONE_JUMP);
+  assert.equal(!check.ok && check.block, "needs-decryptor");
+  assert.match(installBlockWords(check as Extract<typeof check, { ok: false }>), /decryptor/);
 });
