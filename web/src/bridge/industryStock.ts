@@ -22,7 +22,7 @@
 import type { JsonValue } from "./wire.ts";
 import type { IndustryChain, IndustryLine } from "./industryChain.ts";
 import { compareHoldings, stationWords, type Holding } from "./piStock.ts";
-import { decodeStockStack } from "./piRoster.ts";
+import { decodeStockStack, type PilotStockStack } from "./piRoster.ts";
 
 /** One pilot's answer to a stock read. */
 export interface PilotStockAnswer {
@@ -30,6 +30,8 @@ export interface PilotStockAnswer {
   readonly corporationID: number | null;
   /** On the server's clock. */
   readonly readAtMs: number;
+  /** Every stack, with its station and holder: where a job could draw it from. */
+  readonly stock: readonly PilotStockStack[];
 }
 
 function asRecord(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -60,15 +62,18 @@ export function decodeRosterStock(
       continue;
     }
     const corporationID = Number(entry.corporationID);
+    const stacks: PilotStockStack[] = [];
     pilots.push({
       characterID,
       corporationID: Number.isSafeInteger(corporationID) && corporationID > 0 ? corporationID : null,
       readAtMs,
+      stock: stacks,
     });
     const ownerWords = names.get(characterID) ?? "A pilot no longer in the hangar";
     for (const value of Array.isArray(entry.stock) ? entry.stock : []) {
       const stack = decodeStockStack(value);
       if (stack === null) continue;
+      stacks.push(stack);
       holdings.push({
         typeID: stack.typeID,
         // Named from the recipe book on screen; the wire name may be a fallback.

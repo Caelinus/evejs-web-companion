@@ -467,6 +467,8 @@ export interface IndustryBlueprintRow {
   readonly original: boolean;
   readonly locationID: number;
   readonly facilityID: number | null;
+  /** The system it sits in, as the server states it; null when unstated (0). */
+  readonly solarSystemID: number | null;
   /** Non-null when this blueprint is busy in a job right now. */
   readonly jobID: number | null;
 }

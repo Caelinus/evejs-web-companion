@@ -50,7 +50,14 @@ test("a stock answer becomes one holding per stack, each with its owner, place a
       ],
     }],
   } as unknown as JsonValue, 1_800_000_000_000, new Map([[PILOT, "Pilot One"]]));
-  assert.deepEqual(pilots, [{ characterID: PILOT, corporationID: 98000001, readAtMs: 1_800_000_004_000 }]);
+  assert.deepEqual(pilots.map(({ characterID, corporationID, readAtMs }) => ({ characterID, corporationID, readAtMs })), [
+    { characterID: PILOT, corporationID: 98000001, readAtMs: 1_800_000_004_000 },
+  ]);
+  // Every stack is kept with where it sits, for where a job can start.
+  assert.deepEqual(pilots[0]?.stock.map((stack) => [stack.typeID, stack.locationID, stack.holder]), [
+    [34, STATION, "hangar"],
+    [35, STATION, "ship"],
+  ]);
   assert.deepEqual(holdings.map((entry) => [entry.typeID, entry.quantity, entry.placeWords, entry.ownerWords, entry.clockOffsetMs]), [
     [34, 500, "Alpha I - Moon 1 - Station hangar", "Pilot One", 5000],
     [35, 20, "Alpha I - Moon 1 - Station, in Hauler One's cargo", "Pilot One", 5000],

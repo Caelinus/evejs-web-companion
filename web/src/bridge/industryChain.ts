@@ -81,6 +81,13 @@ export interface IndustryChainInput {
   readonly choices?: IndustryChoices;
   /** Units held, per type, already merged across places by the caller. */
   readonly held?: ReadonlyMap<number, number>;
+  /**
+   * Units already being made, per product type: running, paused or ready jobs
+   * (slice 5). They cover a type like stock does, and for the TARGET they are
+   * the one thing that does: runs already installed are runs not to start again,
+   * and their materials are already spent.
+   */
+  readonly inProduction?: ReadonlyMap<number, number>;
 }
 
 export interface IndustryBlueprintUse {
@@ -115,6 +122,8 @@ export interface IndustryLine {
   readonly needed: number;
   /** Units of `needed` covered from stock. Always 0 for the target. */
   readonly held: number;
+  /** Units of `needed` covered by jobs already running, after stock. */
+  readonly inProduction: number;
   /** needed - held: what has to be built or bought. */
   readonly short: number;
   /** For a build: runs in total, and per job. Empty for a buy. */
@@ -199,6 +208,7 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
   }
   const choices = input.choices ?? {};
   const held = input.held ?? new Map<number, number>();
+  const making = input.inProduction ?? new Map<number, number>();
 
   // 1. Which types are built, and the edges between them. A type on a cycle is
   //    forced to a buy and the walk is redone, until there is none left.
@@ -277,7 +287,9 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
     const target = isTarget && recipe !== null ? runs * recipe.quantityPerRun : 0;
     const needed = isTarget ? target : demand.get(typeID) ?? 0;
     const have = isTarget ? 0 : Math.min(Math.max(held.get(typeID) ?? 0, 0), needed);
-    const short = needed - have;
+    // Jobs count only toward what is built here; a bought line has no job.
+    const running = recipe === null ? 0 : Math.min(Math.max(making.get(typeID) ?? 0, 0), needed - have);
+    const short = needed - have - running;
     const name = book.types.get(typeID)?.name ?? null;
     const planetary = isPlanetaryType(book, typeID);
     const canBuild = book.byProduct.has(typeID);
@@ -290,6 +302,7 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
         typeID, name, obtain: "buy", buyReason, canBuild, planetary,
         needed: isTarget ? runs : needed,
         held: have,
+        inProduction: 0,
         short: isTarget ? runs : short,
         runs: 0, jobRuns: [], made: 0, leftover: 0,
         materials: new Map(), recipe: book.byProduct.get(typeID) ?? null, blueprint: null,
@@ -297,7 +310,7 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
       continue;
     }
 
-    const lineRuns = isTarget ? runs : Math.ceil(short / recipe.quantityPerRun);
+    const lineRuns = Math.ceil(short / recipe.quantityPerRun);
     const jobRuns = splitRuns(lineRuns, choices.jobs?.get(typeID) ?? 1);
     const given = choices.blueprints?.get(recipe.blueprintTypeID);
     const terms = given ?? assumedTerms(recipe);
@@ -313,7 +326,10 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
       for (const jobRunCount of jobRuns) {
         total += materialQuantity(material.quantity, jobRunCount, modifier);
       }
-      materials.set(material.typeID, (materials.get(material.typeID) ?? 0) + total);
+      // No runs left to start means nothing to consume: not a zero line.
+      if (total > 0) {
+        materials.set(material.typeID, (materials.get(material.typeID) ?? 0) + total);
+      }
     }
     for (const [childTypeID, quantity] of materials) {
       demand.set(childTypeID, (demand.get(childTypeID) ?? 0) + quantity);
@@ -333,7 +349,7 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
       typeID, name,
       obtain: manufacturing ? "build" : "react",
       buyReason: null, canBuild, planetary,
-      needed, held: have, short,
+      needed, held: have, inProduction: running, short,
       runs: lineRuns, jobRuns, made,
       leftover: made - short,
       materials, recipe,
@@ -346,6 +362,15 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
       },
     });
   }
+
+  // A type the graph reaches but nothing ends up consuming (everything above
+  // it held or already running) has no place in the plan: no line, no order.
+  for (const typeID of [...lines.keys()]) {
+    if (typeID !== productTypeID && (lines.get(typeID) as IndustryLine).needed === 0) {
+      lines.delete(typeID);
+    }
+  }
+  const kept = order.filter((typeID) => lines.has(typeID));
 
   // 4. The tree, drawn from the lines. A type's first appearance (depth first,
   //    in recipe order) carries its children; later ones are marked repeat.
@@ -363,9 +388,10 @@ export function resolveIndustryChain(input: IndustryChainInput): IndustryChain |
     return { key: path, typeID, quantity, line, children, repeat };
   };
   const rootLine = lines.get(productTypeID) as IndustryLine;
-  const root = draw(productTypeID, rootLine.obtain === "buy" ? runs : rootLine.made, String(productTypeID));
+  // The root says what the plan makes, whether or not some of it is running.
+  const root = draw(productTypeID, rootLine.needed, String(productTypeID));
 
-  return { root, lines, order };
+  return { root, lines, order: kept };
 }
 
 /** Lines still missing something, deepest first: the shopping and job list. */

@@ -20,6 +20,7 @@ import type { JsonValue } from "../bridge/wire.ts";
 import { readCorpStock, type BotPilot, type OnlinePilot } from "./piCorpRead.ts";
 import { holdingsFromCorpReads, type CorpStockRead, type Holding } from "../bridge/piStock.ts";
 import { decodeRosterStock } from "../bridge/industryStock.ts";
+import type { PilotStockStack } from "../bridge/piRoster.ts";
 
 /** A hangar pilot whose stock counts. */
 export interface StockPilot {
@@ -42,6 +43,8 @@ export interface IndustryStock {
   readonly holdings: readonly Holding[];
   readonly pilots: readonly PilotStockOutcome[];
   readonly corps: readonly CorpStockRead[];
+  /** Each read pilot's own stacks, with where they sit (for where a job can start). */
+  readonly hangars: ReadonlyMap<number, readonly PilotStockStack[]>;
 }
 
 export interface IndustryStockDeps {
@@ -101,6 +104,7 @@ export async function readIndustryStock(
   const holdings: Holding[] = [];
   const outcomes: PilotStockOutcome[] = [];
   const corpOf = new Map<number, number>();
+  const hangars = new Map<number, readonly PilotStockStack[]>();
   const corporations = new Set<number>(
     request.online.map((pilot) => pilot.corporationID).filter((id): id is number => id !== null),
   );
@@ -125,6 +129,7 @@ export async function readIndustryStock(
             holdings.push(...decoded.holdings);
             for (const pilot of decoded.pilots) {
               answered.add(pilot.characterID);
+              hangars.set(pilot.characterID, pilot.stock);
               if (pilot.corporationID !== null) {
                 corporations.add(pilot.corporationID);
                 corpOf.set(pilot.characterID, pilot.corporationID);
@@ -164,5 +169,5 @@ export async function readIndustryStock(
     }
   }
   holdings.push(...holdingsFromCorpReads(corps, null));
-  return { holdings, pilots: outcomes, corps };
+  return { holdings, pilots: outcomes, corps, hangars };
 }

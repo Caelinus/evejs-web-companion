@@ -46,7 +46,7 @@
 {:else if tab === "piManager"}
   <PiManager {sessions} />
 {:else if tab === "industryManager"}
-  <IndustryManager {sessions} />
+  <IndustryManager {sessions} {onOpen} />
 {:else if tab === "miningOperations"}
   <MiningOperations reconnectVersion={0} onAuthExpired={() => {}} />
 {/if}

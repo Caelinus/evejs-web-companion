@@ -17,6 +17,7 @@ function row(overrides: Partial<IndustryBlueprintRow>): IndustryBlueprintRow {
     original: true,
     locationID: 60003760,
     facilityID: null,
+    solarSystemID: null,
     jobID: null,
     ...overrides,
   };

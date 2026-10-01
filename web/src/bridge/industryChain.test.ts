@@ -385,3 +385,69 @@ test("real table: Hobgoblin II, ten runs, reaches reactions and fuel blocks with
     assert.ok(entry.made >= entry.short, `${entry.typeID} makes enough`);
   }
 });
+
+// --- slice 5: units already in production ------------------------------------
+
+test("a running job covers its type after stock, and the subtree shrinks to what is left", () => {
+  const chain = resolveIndustryChain({
+    book: BOOK, productTypeID: 900, runs: 10,
+    held: new Map([[101, 4]]),
+    inProduction: new Map([[101, 3]]),
+  });
+  const widget = line(chain, 101);
+  assert.equal(widget.held, 4);
+  assert.equal(widget.inProduction, 3);
+  assert.equal(widget.short, 3);
+  assert.equal(widget.runs, 3);
+  // Only the three still to build ask for Gizmos: 3 x 2.
+  assert.equal(line(chain, 102).needed, 6);
+});
+
+test("runs of the target already installed are not started again, and their materials are spent", () => {
+  const chain = resolveIndustryChain({
+    book: BOOK, productTypeID: 900, runs: 10,
+    inProduction: new Map([[900, 4]]),
+  });
+  const top = line(chain, 900);
+  assert.equal(top.needed, 10);
+  assert.equal(top.inProduction, 4);
+  assert.equal(top.runs, 6);
+  assert.equal(line(chain, 101).needed, 6);
+  assert.ok(chain);
+  assert.equal(chain.root.quantity, 10, "the root still says what the plan makes");
+  const all = resolveIndustryChain({ book: BOOK, productTypeID: 900, runs: 10, inProduction: new Map([[900, 10]]) });
+  assert.equal(line(all, 900).short, 0);
+  assert.equal(line(all, 900).runs, 0);
+  assert.equal(line(all, 900).materials.size, 0);
+});
+
+test("a job for something the plan buys does not count: buying is not building", () => {
+  const chain = resolveIndustryChain({
+    book: BOOK, productTypeID: 900, runs: 10,
+    choices: { obtain: new Map([[101, "buy" as const]]) },
+    inProduction: new Map([[101, 5]]),
+  });
+  assert.equal(line(chain, 101).inProduction, 0);
+  assert.equal(line(chain, 101).short, 10);
+});
+
+test("an intermediate held in full asks for nothing below it: no zero lines in the tree", () => {
+  const chain = resolveIndustryChain({ book: BOOK, productTypeID: 900, runs: 10, held: new Map([[101, 10]]) });
+  assert.ok(chain);
+  assert.equal(line(chain, 101).runs, 0);
+  assert.equal(chain.lines.has(102), false, "nothing asks for Gizmos");
+  const widgetNode = chain.root.children.find((child) => child.typeID === 101);
+  assert.deepEqual(widgetNode?.children, []);
+});
+
+test("stock is used before jobs, and the two together never make a shortfall negative", () => {
+  const chain = resolveIndustryChain({
+    book: BOOK, productTypeID: 900, runs: 10,
+    held: new Map([[101, 8]]),
+    inProduction: new Map([[101, 5]]),
+  });
+  const widget = line(chain, 101);
+  assert.equal(widget.held, 8);
+  assert.equal(widget.inProduction, 2);
+  assert.equal(widget.short, 0);
+});

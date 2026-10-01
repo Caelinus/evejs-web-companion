@@ -298,16 +298,28 @@ and pressing Refresh, with no pilot signed in.
 
 ### Slice 5 — jobs: in production, and start next
 
-- Running and ready jobs of every pilot with a session count toward their product's node
-  as *in production* (and *ready to deliver*). Per pilot, through the existing industry
-  read.
-- **Start next** lists the nodes whose inputs are all held, grouped by stage (buy,
-  reactions, components, final), deepest first. Batch leftovers are shown on the row. Each has a
-  **Set up in Industry** action that opens the `Industry` panel's install flow with the
-  blueprint, runs and activity prefilled. Its confirm-gated install stays the only way a
-  job starts.
-- A plan whose every node is held or delivered reads as complete, and offers **Mark
-  done**.
+- Running, paused and ready manufacturing and reaction jobs of every online pilot count
+  as **in production**: runs times what one run makes, each job once however many
+  sessions read it (`bridge/industryJobs.ts`). The resolver takes them as a second
+  supply after stock. For an intermediate they shrink what is still short. For the
+  target they are the only thing that counts: runs already installed are not started
+  again, and their materials are already spent. Jobs never count toward an item the
+  plan buys.
+- A type nothing still consumes (everything above it held or running) leaves the plan
+  entirely: no zero rows in the tree, the lists or the counts.
+- **Start next** lists the steps with runs still to start, grouped by stage (reactions,
+  components, final), deepest first, after one line pointing at Missing for the
+  buying. A step can start when every input is held or in production.
+- **Set up in Industry** opens the Industry panel of the pilot who holds the best idle
+  copy of that blueprint and is online here (`onOpen("industry", sessionID)`, as the
+  Bot Manager opens the builder). The job itself travels on its own signal,
+  `app/industryInstallTarget.ts`, modelled on `bots/builderTarget.ts`: addressed to a
+  pilot, consumed when served. The Industry panel fills in only step one: the
+  blueprint, the work and the runs, served once its recipe has arrived. Choosing the
+  facility, previewing the cost and confirming stay its own, so its confirm-gated
+  install is still the only way a job starts.
+- When every run of the target is in production, the verdict says so and suggests
+  marking the plan done once it is delivered.
 
 Done when starting a job from the plan moves that node from *start next* to *in
 production* after the read refreshes.

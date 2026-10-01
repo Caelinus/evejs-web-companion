@@ -9,7 +9,8 @@
   // activityID, a status code, a blueprint typeID or a facilityID (R7d), and
   // nothing here computes a job outcome — the status a job shows, including
   // whether it is ready, is the one the SERVER returned.
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
+  import { installTarget } from "../app/industryInstallTarget.ts";
   import {
     ACTIVITY_LABELS,
     ACTIVITY_ORDER,
@@ -42,6 +43,9 @@
   const industry = store.industry;
   // svelte-ignore state_referenced_locally
   const names = store.names;
+  // svelte-ignore state_referenced_locally
+  const station = store.station;
+  const installRequest = installTarget.pending;
 
   let busy = $state(false);
   let error = $state("");
@@ -289,6 +293,43 @@
     cancellingJobID = null;
     void run(() => flow.cancelIndustryJob(jobID));
   }
+
+  // R109 slice 5 — the Industry Manager's "Set up in Industry". It only fills
+  // in step one of the flow above (the blueprint, the work, the runs); choosing
+  // the facility, seeing the cost and confirming stay the player's. Served by
+  // this pilot's panel alone, once its blueprints are read, and dropped when
+  // served so a remount does not set the same job up again.
+  $effect(() => {
+    const request = $installRequest;
+    const me = $station.online?.characterID ?? null;
+    const loaded = $industry.loaded;
+    if (request === null || me === null || request.characterID !== me || !loaded) {
+      return;
+    }
+    const blueprint = $industry.blueprints.find((row) => row.itemID === request.blueprintItemID);
+    // Its recipe arrives after the list; wait for it, or the work cannot be chosen.
+    if (blueprint && !(blueprint.typeID in $industry.definitions)) {
+      return;
+    }
+    untrack(() => {
+      installTarget.served(request.n);
+      if (!blueprint) {
+        error = "That blueprint is not in this pilot's list any more.";
+        return;
+      }
+      startJobFor(blueprint);
+      if (blueprintActivities(blueprint.typeID).includes(request.activity)) {
+        chosenActivity = request.activity;
+      }
+      const most = blueprint.original ? 1000 : Math.max(1, blueprint.runs);
+      chosenRuns = Math.min(Math.max(1, request.runs), most);
+      // The blueprint's own facility, when this panel offers it: the server
+      // installs the job nowhere else.
+      if (facilityChoices.some((facility) => facility.facilityID === request.facilityID)) {
+        chosenFacilityID = request.facilityID;
+      }
+    });
+  });
 
   onMount(() => {
     void run(() => flow.loadIndustry());
