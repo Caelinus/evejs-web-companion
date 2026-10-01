@@ -21,12 +21,12 @@ import type {
 import type { DryBelt, ScriptObservation } from "./scriptConditions.ts";
 import { createCorporateHauler } from "./corporateHauling.ts";
 import type { RatThreat } from "./ratThreat.ts";
-import { pickAdvertisedFleet } from "./scriptConditions.ts";
+import { hostilesInReach, pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import { dockedAt, type DockableKind } from "./dockableLocation.ts";
 import { launchFullPercent } from "../bots/macroSpecs.ts";
-import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
+import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import { beltTravelStep, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
@@ -3222,26 +3222,8 @@ function ledgerPatch(before: SiteLedger, after: SiteLedger): ScriptBoard | null 
 }
 
 // ── fight-the-rats ───────────────────────────────────────────────────────────
-/**
- * The hostiles this ship can actually shoot at: nearest first, and — when the
- * hull's targeting range is readable — nothing beyond it.
- *
- * ⚠ THE GATE IS WHAT STOPS THE LADDER SPINNING. Without it, one rat parked 300 km
- * out is still "the nearest hostile", so the ladder locks it, waits out
- * `MAX_LOCK_WAIT_TICKS`, gives up, picks the same rat again, and repeats forever
- * — harmless as a block a player watched start, fatal as an always-watching
- * response, which would own the ship and starve the step under it. Out of range
- * reads as an empty grid, which the callers already know how to finish on.
- *
- * Range unreadable (the usual case — see `maxTargetRangeM`) means NO gate, and
- * the bounded lock stays the only backstop. That is a weaker guarantee, not none:
- * it gives up on each target in turn rather than never.
- */
-function hostilesInReach(obs: ScriptObservation, snapshot: SpaceSnapshot, origin: SpaceVector): readonly OverviewRow[] {
-  const rows = hostileRows(snapshot, origin);
-  const range = obs.maxTargetRangeM ?? null;
-  return range === null ? rows : rows.filter((row) => row.distance <= range);
-}
+// `hostilesInReach` (the targeting-range gate every rung below reads) lives in
+// scriptConditions.ts, shared with the fight-back watch that borrows this ladder.
 
 // The full combat loop: nearest pirate first — lock it (bounded), set the drones
 // on it, run every idle gun on it; when it dies the list shrinks and the next

@@ -55,6 +55,7 @@ import {
   cannotTellStreakExhausted,
   evaluateCondition,
   firstArmedInterrupt,
+  hostilesInReach,
   releaseSpentAlerts,
   resolveInterrupt,
   type ScriptObservation,
@@ -1127,8 +1128,17 @@ export function decideScriptAction(
       !(state.out ?? []).some((drone) => drone.controlled)) return base;
   const step = mining && mem.position.kind !== "done" ? activeStep(script, mem.position) : null;
   const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
+  // ⚠ IN REACH, THE SAME AS THE FIGHT-BACK WATCH AND ITS LADDER. With the whole
+  // grid here, a rat parked beyond targeting range kept the flight in combat
+  // mode with the drones on it, while the ladder — which only counts what is in
+  // reach — called the grid clear and ordered them home. This wrapper swallows
+  // that recall whenever the flight has no order of its own, so the watch never
+  // finished and the mining step starved until the rat died (caught live
+  // 2026-09-30 on nine belt miners). Now the flight stands down too: it recalls
+  // the combat flight and relaunches the miners, and the ladder sees its drones
+  // come home.
   const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
-    hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
+    hostilesInReach(obs, obs.snapshot, origin)[0]?.itemID ?? null;
   const picked = step === null ? null : base.memory.macroMem[step.id]?.["rockID"] ??
     mem.macroMem[step.id]?.["rockID"] ?? null;
   const ice = obs.miningOperation?.currentTarget?.targetType === "ICE" ||
@@ -1136,12 +1146,26 @@ export function decideScriptAction(
   const rockID = !ice && typeof picked === "number" && obs.lockedTargetIDs?.includes(picked) &&
     obs.snapshot?.entities.some((entity) => entity.itemID === picked && entity.miningYieldTypeID !== null)
     ? picked : null;
-  const leaving = base.settleDrones === true || !mining || base.memory.latched !== null ||
+  const moving = base.settleDrones === true || base.memory.latched !== null ||
     (step !== null && activeMacroID(script, base.memory) !== "mine-at-belt") ||
     ["warp", "warpScan", "warpBookmark", "approach", "orbit", "align", "dock", "undock",
       "startRoute", "startSystemRoute"].includes(base.action.kind);
+  const leaving = moving || !mining;
+  // ⚠ OFF A MINING STEP AND SITTING STILL, THE COMBAT FLIGHT IS NOT THIS
+  // FLIGHT'S. `!mining` alone used to count as leaving, so every controlled
+  // combat drone was recalled the tick after a fight-back watch or a
+  // Fight-the-rats step launched it — launch, recall, launch, every ~7 s
+  // (caught live 2026-09-30 on a loot step under a fight-back watch). Here the
+  // flight still calls home the MINING drones a finished mining step left out,
+  // and before any movement it still calls home everything, combat included,
+  // which is what it exists to protect; in between, combat drones belong to
+  // whoever launched them, and that block or watch recalls them itself.
+  const flightState = state == null || state.out === null || mining || moving ? state : {
+    ...state,
+    out: state.out.filter((drone) => drone.typeID === null || state.roles[drone.typeID] !== "combat"),
+  };
   const flight = decideMiningDroneFlight(
-    obs.snapshot == null || obs.hostileOnGrid === null ? null : state,
+    obs.snapshot == null || obs.hostileOnGrid === null ? null : flightState,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,
   );
   if (flight.action?.kind === "wait" && flight.memory.recallTicks > 90) return {
@@ -1433,6 +1457,26 @@ function releaseRecoverTrips(script: BotScript, obs: ScriptObservation, mem: Scr
 }
 
 /**
+ * Does the grid show hostiles, all of them beyond what the Fight-the-rats ladder
+ * would reach? `hostilesInReach` is the ladder's own gate, shared so the two
+ * cannot disagree about what "in reach" means.
+ *
+ * ⚠ ONLY A POSITIVE ANSWER STANDS THE WATCH ASIDE. No snapshot, an unreadable
+ * targeting range (no gate at all, so everything counts as in reach) and a grid
+ * with no hostile rows all read false and hand the tick to the ladder as before
+ * — the last one on purpose: an empty grid is the ladder's call to make, with
+ * its confirm reads, never this shortcut's.
+ */
+function outOfReachOnly(obs: ScriptObservation): boolean {
+  const snapshot = obs.snapshot ?? null;
+  if (snapshot === null || (obs.maxTargetRangeM ?? null) === null) {
+    return false;
+  }
+  const origin = snapshot.ship?.position ?? { x: 0, y: 0, z: 0 };
+  return hostileRows(snapshot, origin).length > 0 && hostilesInReach(obs, snapshot, origin).length === 0;
+}
+
+/**
  * The next fitted hardener a fight-back watch should light, or null when there
  * is nothing to do.
  *
@@ -1693,6 +1737,24 @@ function fireInterrupt(
             },
           },
         };
+      }
+      // ⚠ A PIRATE THE LADDER CANNOT REACH DOES NOT GET THE SHIP. The condition
+      // counts the whole grid; the ladder counts only what is inside targeting
+      // range. Borrowing the ladder for a rat parked out of reach made it spend
+      // its three empty-grid confirm reads, report done, release for ONE tick,
+      // and get borrowed again on the next — so the step under the watch ran one
+      // tick in four until the rat closed or left (caught live 2026-09-30: loot,
+      // salvage and travel steps crawling under a `hostile-on-grid` watch).
+      //
+      // Those confirm reads guard against a grid that has not ARRIVED after a
+      // warp (2026-09-14), and this gate leaves them alone: it stands aside only
+      // when the grid HAS arrived — it shows a hostile — and every hostile it
+      // shows is beyond the range the ladder would gate them out by. A watch
+      // mid-fight (ladder memory present: the last rat in reach just died) still
+      // hands the tick to the ladder, so the fleet call is stood down and the
+      // drones are recalled exactly as they always were before it releases.
+      if (!(row.id in mem.macroMem) && outOfReachOnly(obs)) {
+        return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }
       // The ladder's memory (which target is primary, whether the lock was
       // issued, which target the drones are already on) is keyed by the WATCH
