@@ -938,6 +938,20 @@ test("compression without confirm changes nothing", async () => {
   );
 });
 
+test("scoped collection/compression refuse a changed ship/system before any inventory mutation", async () => {
+  const { gateway, baseUrl } = await docked(); gateway.state.docked = false;
+  for (const expectedScope of [{ shipID: SHIP_ID + 1, solarSystemID: ORIGIN_SYSTEM_ID },
+    { shipID: SHIP_ID, solarSystemID: ORIGIN_SYSTEM_ID + 1 }, { shipID: "9001", solarSystemID: ORIGIN_SYSTEM_ID }]) {
+    for (const [route, body] of [["/api/bridge/mining/compress", { itemID: ORE_STACK_ID, facilityID: SHIP_ID, confirm: true }],
+      ["/api/bridge/inventory/transfer", { itemIDs: [ORE_STACK_ID], from: { kind: "container", itemID: 555 }, to: { kind: "shipBay", bay: "ore" }, qty: 20, claimRunID: "run" }]]) {
+      const { response, payload } = await apiRequest(baseUrl, route, { method: "POST", body: { ...body, expectedScope } });
+      assert.equal(response.status, 409); assert.equal(payload.error, "OWN_SHIP_SCOPE_CHANGED");
+    }
+  }
+  assert.equal(gateway.calls.call.filter(call => call.method === "CompressItemInSpace").length, 0);
+  assert.equal(gateway.calls.boundCall.filter(call => ["Add", "MultiAdd"].includes(call.method)).length, 0);
+});
+
 test("compression refuses while docked, and refuses a missing item or facility", async () => {
   const { gateway, baseUrl } = await docked();
 

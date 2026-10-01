@@ -578,6 +578,7 @@ export async function transferItems(
   options: ApiOptions = {},
   authority?: {
     readonly claimRunID?: string;
+    readonly expectedScope?: { readonly shipID: number; readonly solarSystemID: number };
     readonly haulContract?: {
       readonly stationID: number; readonly locationKind?: "station" | "structure";
       readonly corporationID: number; readonly division: number;
@@ -594,6 +595,7 @@ export async function transferItems(
     body.qty = qty;
   }
   if (authority?.claimRunID) body.claimRunID = authority.claimRunID;
+  if (authority?.expectedScope) body.expectedScope = authority.expectedScope as unknown as JsonValue;
   if (authority?.haulContract) body.haulContract = authority.haulContract as unknown as JsonValue;
   const data = await postJson("/api/bridge/inventory/transfer", body, options);
   return {
@@ -4671,6 +4673,22 @@ export interface CompressionAttempt {
   readonly result: JsonValue | null;
 }
 
+export interface CompressionCompatibility {
+  readonly typeID: number; readonly compressedTypeID: number | null;
+  readonly matchingTypeListIDs: readonly number[] | null; readonly availability: "available" | "unknown";
+}
+export async function getMiningCompressionCompatibility(typeIDs: readonly number[], typeListIDs: readonly number[], options: ApiOptions = {}): Promise<readonly CompressionCompatibility[] | null> {
+  if (!typeIDs.length || typeIDs.length > 32 || !typeListIDs.length || typeListIDs.length > 16 ||
+    [...typeIDs, ...typeListIDs].some(id => !Number.isSafeInteger(id) || id <= 0)) return null;
+  const data = await getJson(`/api/mining/compression-compatibility?typeIDs=${typeIDs.join(",")}&typeListIDs=${typeListIDs.join(",")}`, options);
+  if (!Array.isArray(data.compatibility)) return null;
+  const rows = data.compatibility as unknown as readonly CompressionCompatibility[];
+  return rows.length === new Set(typeIDs).size && new Set(rows.map(row => row?.typeID)).size === rows.length && rows.every(row =>
+    row && typeIDs.includes(row.typeID) && (row.availability === "unknown" || row.availability === "available" &&
+      (row.compressedTypeID === null || Number.isSafeInteger(row.compressedTypeID) && row.compressedTypeID > 0) &&
+      Array.isArray(row.matchingTypeListIDs) && row.matchingTypeListIDs.every(id => typeListIDs.includes(id)))) ? rows : null;
+}
+
 /**
  * Compress ONE ore stack in the ship's hold, using a mining support ship on grid
  * as the facility (its own hull, or a fleet-mate's, running an Industrial Core
@@ -4680,10 +4698,11 @@ export async function compressOreInSpace(
   itemID: number,
   facilityID: number,
   options: ApiOptions = {},
+  expectedScope?: { readonly shipID: number; readonly solarSystemID: number },
 ): Promise<CompressionAttempt> {
   const data = await postJson(
     "/api/bridge/mining/compress",
-    { itemID, facilityID, confirm: true },
+    { itemID, facilityID, confirm: true, ...(expectedScope ? { expectedScope: expectedScope as unknown as JsonValue } : {}) },
     options,
   );
   return {
@@ -4999,6 +5018,21 @@ export async function readMiningOperationAssignment(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as unknown as MiningOperationAssignment)
     : null;
+}
+
+export async function readMiningOperationSupportContext(options: ApiOptions = {}): Promise<{
+  assignment: MiningOperationAssignment | null; fleets: readonly import("../nav/miningSupportFleet.ts").MiningSupportFleetObservation[];
+}> {
+  const data = await getJson("/api/mining-operations/support-context", options);
+  if (!Array.isArray(data.fleets)) throw new Error("Operation fleet observations are unreadable.");
+  return { assignment: data.assignment as unknown as MiningOperationAssignment | null,
+    fleets: data.fleets as unknown as import("../nav/miningSupportFleet.ts").MiningSupportFleetObservation[] };
+}
+export async function stopMiningOperationForSupport(options: ApiOptions = {}, reason?: "emergency-health-floor"): Promise<void> {
+  await postJson("/api/mining-operations/support-stop", reason ? { reason } : {}, options);
+}
+export async function releaseMiningSupportAnchor(options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bots/mining-support-anchors/release", {}, options);
 }
 
 export interface MiningTargetCandidate {

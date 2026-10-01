@@ -1243,6 +1243,12 @@ function listMiningResources() {
   return rows;
 }
 
+function getMiningCompressionCompatibility(typeIDs, typeListIDs) {
+  const { compressionCompatibility } = require("./miningCompressionCompatibility");
+  return compressionCompatibility(typeIDs.map(typeID => getType(typeID) || { typeID }), typeListIDs,
+    readStaticTable("clientTypeLists").typeLists, readStaticTable("reprocessingStatic").compressedTypeBySourceTypeID);
+}
+
 function listOreFamilies() {
   const namesByGroupID = new Map();
   for (const entry of buildIndex("itemTypes", "types", "typeID").values()) {
@@ -1703,6 +1709,7 @@ module.exports = {
   findMarketTypes,
   listOreFamilies,
   listMiningResources,
+  getMiningCompressionCompatibility,
   getMarketGroupChildren,
   getMarketGroupTypes,
   getNpcIndustryFacility,

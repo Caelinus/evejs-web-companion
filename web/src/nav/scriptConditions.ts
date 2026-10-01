@@ -38,6 +38,8 @@ import type { RatThreat } from "./ratThreat.ts";
 import type { PropulsionModule } from "./propulsion.ts";
 import type { MiningDroneState } from "./miningDroneFlight.ts";
 import { hostileRows, type OverviewRow } from "../space/overview.ts";
+import type { FleetMinerInput } from "./fleetMiner.ts";
+import type { MiningSupportFleetObservation } from "./miningSupportFleet.ts";
 
 // ─── The observation ─────────────────────────────────────────────────────────
 
@@ -79,7 +81,14 @@ export interface DryBelt {
   readonly families: readonly number[];
 }
 
-export type MiningOperationRole = "MINER" | "HAULER" | "DEFENDER";
+export type MiningOperationRole = "MINER" | "HAULER" | "DEFENDER" | "COMMAND";
+export interface MiningSupportOptions {
+  readonly version: 1; readonly characterID: number; readonly fleetPolicy: "EXISTING_ONLY" | "MANAGED";
+  readonly maintainBursts: boolean; readonly useIndustrialCore: boolean; readonly coreRequirement: "continueWithoutCore" | "requireCore";
+  readonly enableCompression: boolean; readonly selfMining: boolean; readonly tractor: boolean;
+  readonly collection: "TRACTOR_ONLY" | "TRACTOR_AND_COLLECT"; readonly compressCollectedOre: boolean;
+  readonly supportLoss: "CONTINUE_UNSUPPORTED" | "PAUSE" | "STOP";
+}
 export type MiningTargetType = "BELT" | "ORE_ANOMALY" | "ICE" | "GAS";
 export interface MiningOperationTarget {
   readonly siteIdentity?: string;
@@ -95,6 +104,9 @@ export interface MiningOperationTarget {
   readonly claimedByOperationID: string | null;
 }
 export interface MiningOperationAssignment {
+  readonly support?: MiningSupportOptions;
+  readonly supportPolicy?: { readonly mode: "NORMAL" | "FALLBACK" | "PAUSE" | "STOP"; readonly reason: string | null };
+  readonly intendedFleetCharacterIDs?: readonly number[];
   readonly resourcePolicy?: import("./resourcePriority.ts").ResourcePolicy | null;
   readonly travelAssist?: "DISABLED" | "AUTO";
   readonly stopRequested?: boolean;
@@ -150,6 +162,7 @@ export interface FleetApplication {
   readonly fleetID: number;
   /** "unknown" means try the accept anyway -- see FleetApplyOutcome. */
   readonly outcome: "needs-approval" | "invited" | "unknown";
+  readonly supportOrder?: { readonly scope: import("./miningSupportFleet.ts").SupportFleetScope; readonly actionID: number };
 }
 
 /**
@@ -189,6 +202,12 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  /** Fresh normal-flow reads. No saved runtime fleet identity or base-range fallback. */
+  readonly fleetMining?: Pick<FleetMinerInput, "anchors" | "modules" | "sceneReceivedAtMs" | "nowMs" | "requirements"> & {
+    readonly fleet: MiningSupportFleetObservation | null;
+    readonly supportFleet?: MiningSupportFleetObservation | null;
+  };
+  readonly miningSupportWork?: { readonly readyForRelocation: boolean; readonly reason: string | null; readonly phase: string };
   /** Finite MCC Parking may perform an exact corporation deposit after target authority is released. */
   readonly strictCorpDelivery?: boolean;
   readonly miningSiteBookmarks?: Readonly<Record<string, number>>;
