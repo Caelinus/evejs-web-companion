@@ -345,3 +345,11 @@ export function analyzeBotRunPolicy(script: BotScript): BotRunPolicy {
     containsSubBots,
   });
 }
+
+/** Same-process MCC transport reacquisition only; never a process replay grant. */
+export function supportsHostedOreJettisonRecovery(script: BotScript): boolean {
+  const derived = analyzeBotRunPolicy(script);
+  return !derived.containsSubBots && derived.restartBlockers.length === 1 &&
+    derived.restartBlockers[0] === "jettison-ore" &&
+    script.interrupts.every(row => INTERRUPT_RUN_POLICY[row.respond].restartSafe);
+}

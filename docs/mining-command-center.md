@@ -100,6 +100,54 @@ cleanup does not extend the productive run grant.
 
 ## Travel Assist and limits
 
+An owned, restart-safe operation run can recover a positively lost session
+without renewing its grant. `POST /api/bots/:botID/reconnect` also requests a
+controlled reconnect for the owning account. The host freezes its existing
+runner, fences the retired request generation, waits for issued work, and
+reselects through the normal owned session path. Lost-drone recovery, the same
+hull and fit, fresh scene/fleet and current operation target must be proved
+before productive work resumes. Recovery has three lifetime select attempts,
+a 30-second retry interval for positively lost sessions, and a three-minute
+bound capped by the original expiry. Stop and expiry supersede resumption.
+
+Other scripts containing non-restart-safe actions refuse this reconnect path.
+The generated Hauler Service miner has a narrow same-process ore-jettison custody
+exception while its static `restartSafe:false` remains unchanged. Exact fresh
+source/can provenance must prove a recoverable outcome; pending or ambiguous
+mutations retain control and cannot be blindly retried. See
+[jettison-custody.md](jettison-custody.md). A restart-safe hauler or COMMAND run
+remains eligible only while its original ownership is current.
+Trusted HTTP notification drains use the same dispatcher as the live stream;
+an invitation carried by a roster, scene or script read is retained only for
+the pilot/session generation that issued that read.
+Script and drone observation responses preserve successful flight, bind, bay,
+ship-info and scene drains together, including partial bay/ship-info failures.
+Recovery `READY` requires the role's recovery preflight. A support-bound HAULER
+must freshly prove membership in its surviving selected support fleet before its
+long-lived loot step resumes. COMMAND's normal reconciliation still gates anchor
+and support readiness; an acknowledged invite supplies no membership proof.
+
+Pending inventory, container custody, module or movement orders block automatic
+resumption with control retained. A lost issued write remains unresolved even
+if its response arrives after recovery started; Stop/Parking cannot release
+that custody as success. An interrupted recovery roster requires review after
+process restart. Session-scoped intent is re-derived after safe reacquisition;
+runtime fleet IDs and anchors are never durable recovery authority.
+Fresh exact module states can settle completed orders while the runner is
+quiesced. Superseded movement intent can be retired only after observed STOP,
+settled speed and unrestricted movement/warp; this does not claim arrival.
+Unresolved transfers, claims and other pending work still retain control.
+
+For managed COMMAND recovery, a fresh uniquely surviving fleet can supply an
+invitation through one currently owned operation member with a fleet grant.
+The existing support fleet reducer chooses the ordinary invite; COMMAND then
+accepts it and proves membership through its normal reconciliation loop.
+Unknown intended-member authority, conflicting surviving fleets, or retired
+peer ownership blocks the invitation. Recovery never creates a replacement
+fleet while members positively survive.
+The invitation is bound to that exact fleet; the runtime's membership gate
+refuses it if the inviter leaves or changes fleets before dispatch.
+
 Optional Travel Assist controls only an AB or MWD it activated for the current
 approach. It keeps that module cycling during the approach, switches it off
 near the target or when authority changes, and leaves externally activated

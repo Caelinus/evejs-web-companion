@@ -35,6 +35,8 @@ const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
 const { createMiningSupportAnchorBoard } = require("./miningSupportAnchorBoard");
 const { registerMiningSupportAnchorRoutes } = require("./miningSupportAnchorRoutes");
+const jettisonCustody = require("./jettisonCustody");
+const { createJettisonCustodyHandler } = require("./jettisonCustodyRoutes");
 const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
@@ -189,6 +191,22 @@ const botHost =
     // live web session is flying. (Direction 2 — a tab may not take a bot's
     // character — is the guard in /api/bridge/select.)
     isCharacterHeld,
+    disconnectOwnedSession: async ({ webSessionID, characterID, accountID, claimSecret, previousSecret }) => {
+      const held = bridgeSessions.get(webSessionID);
+      if (!held || held.characterID !== characterID || Number(held.accountID) !== accountID ||
+          held.botClaimSecret !== previousSecret || !botHost.authorizesClaim(characterID, claimSecret) ||
+          sessionOperations.has(webSessionID) || characterOperations.has(characterID))
+        throw new Error("The host does not own this current pilot session for reconnect.");
+      const reservation = Symbol("hosted-reconnect");
+      sessionOperations.set(webSessionID, reservation); characterOperations.set(characterID, reservation);
+      try {
+        await releaseHeldBridgeSession(webSessionID, { confirmed: true });
+        if (bridgeSessions.has(webSessionID)) throw new Error("The released hosted session was replaced; reconnect is paused.");
+      } finally {
+        if (sessionOperations.get(webSessionID) === reservation) sessionOperations.delete(webSessionID);
+        if (characterOperations.get(characterID) === reservation) characterOperations.delete(characterID);
+      }
+    },
     errorLogger,
     onOperationDeadline: operationID => {
       const definition = miningOperations.definition(operationID);
@@ -7440,6 +7458,76 @@ app.post("/api/bridge/ship/scoop-to-depot-hold", requireAuth, async (req, res, n
   await dispatchBridgeWrite(req, res, next, "ship", "ScoopToMobileDepotHold", [objectID]);
 });
 
+const hostedJettison = createJettisonCustodyHandler({
+  now: () => Date.now(),
+  readScope: async (req, owner, notifications) => {
+    owner.current(false);
+    const held = bridgeSessions.get(req.webSessionID);
+    if (!held) throw Object.assign(new Error("Hosted session is unavailable."), { code: "JETTISON_SCOPE_CHANGED" });
+    const flight = await readHeldFlight(held, req.webSessionID);
+    if (Array.isArray(flight.notifications)) notifications.push(...flight.notifications);
+    owner.current(false); assertCurrentHeldSession(held, req.webSessionID);
+    const assignment = miningOperations.assignment(owner.scope.operationID, owner.scope.pilotID);
+    const target = assignment?.currentTarget;
+    if (assignment?.role !== "MINER" || assignment.unloadPolicy !== "HAULER_SERVICE" || assignment.stopRequested ||
+        !target || target.claimedByOperationID !== owner.scope.operationID || flight.flight?.inSpace !== true ||
+        flight.flight.shipID !== held.activeShipID || flight.flight.solarSystemID !== target.systemID)
+      throw Object.assign(new Error("The captured ore logistics assignment is unavailable."), { code: "JETTISON_SCOPE_CHANGED" });
+    return { ...owner.scope, shipID: held.activeShipID, systemID: target.systemID,
+      targetKey: target.targetKey, targetClaimedAt: target.claimedAt };
+  },
+  readEvidence: async (req, owner, custody, notifications) => {
+    owner.current(false);
+    const held = bridgeSessions.get(req.webSessionID);
+    assertCurrentHeldSession(held, req.webSessionID);
+    const space = await gateway.readSpaceSnapshot(held.bridgeSessionID, { userid: held.accountID });
+    if (Array.isArray(space.notifications)) notifications.push(...space.notifications);
+    owner.current(false); assertCurrentHeldSession(held, req.webSessionID);
+    const listed = await boundCall(held, req.webSessionID, cargoBindSpec(held, held.activeShipID),
+      "ListByFlags", [[...jettisonCustody.SOURCE_FLAGS]], null, notifications);
+    if (Array.isArray(listed.notifications)) notifications.push(...listed.notifications);
+    owner.current(false); assertCurrentHeldSession(held, req.webSessionID);
+    const rows = jettisonCustody.inventoryRows(listed.result);
+    const context = jettisonCustody.sceneContext(space.space, owner.scope.pilotID);
+    const containers = [];
+    if (custody && jettisonCustody.unresolved(custody) && context) {
+      const candidates = context.ownedContainerIDs.filter(id => !custody.existingContainerIDs.includes(id));
+      if (candidates.length <= 8) for (const itemID of candidates) {
+        let items = null;
+        try {
+          const read = await boundCall(held, req.webSessionID, containerBindSpec(itemID), "List", [], null, notifications);
+          if (Array.isArray(read.notifications)) notifications.push(...read.notifications);
+          items = jettisonCustody.inventoryRows(read.result);
+        } catch { /* Unreadable contents remain unknown, never an empty can. */ }
+        owner.current(false); assertCurrentHeldSession(held, req.webSessionID);
+        containers.push({ itemID, ownerID: owner.scope.pilotID, items });
+      }
+    }
+    return { scene: space.space, rows, containers };
+  },
+  assertDispatch: async (req, owner, custody) => {
+    owner.current(true);
+    const held = bridgeSessions.get(req.webSessionID);
+    assertCurrentHeldSession(held, req.webSessionID);
+    const target = miningOperations.assignment(owner.scope.operationID, owner.scope.pilotID)?.currentTarget;
+    if (held.activeShipID !== custody.scope.shipID || target?.targetKey !== custody.scope.targetKey ||
+        target.claimedAt !== custody.scope.targetClaimedAt || target.systemID !== custody.scope.systemID)
+      throw Object.assign(new Error("Jettison scope changed before dispatch."), { code: "JETTISON_SCOPE_CHANGED" });
+  },
+  dispatch: (req, custody) => heldTopLevelCall(bridgeSessions.get(req.webSessionID), req.webSessionID,
+    "ship", "Jettison", [custody.items.map(row => row.itemID)], null),
+  register: custody => miningOperations.registerContainer(custody.scope.operationID, custody.scope.pilotID,
+    custody.containerID, custody.scope.systemID, custody.scope.targetKey, custody.scope.targetClaimedAt),
+});
+
+app.post("/api/bridge/ship/jettison/reconcile", requireAuth, async (req, res) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  const owner = botHost.jettisonOwnerForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+  if (!owner) return res.status(409).json({ ok: false, error: "JETTISON_CUSTODY_UNAVAILABLE" });
+  await hostedJettison(req, res, owner, true);
+});
+
 // ⚠ EXTRA-CARE (dumps cargo to space — items can be lost). Jettison(itemIDs).
 app.post("/api/bridge/ship/jettison", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This JETTISONS the selected items into space, where anyone can take them. This must be confirmed explicitly.")) {
@@ -7447,6 +7535,8 @@ app.post("/api/bridge/ship/jettison", requireAuth, async (req, res, next) => {
   }
   const held = requireHeldBridgeSession(req, res);
   if (!held) return;
+  const owner = botHost.jettisonOwnerForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+  if (owner) { await hostedJettison(req, res, owner); return; }
   const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
   if (!association) {
     await dispatchBridgeWrite(req, res, next, "ship", "Jettison", [bridgeIDList((req.body || {}).itemIDs)]);
@@ -22639,6 +22729,14 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.post("/api/bots/:botID/reconnect", requireAuth, (req, res, next) => {
+  try {
+    const outcome = botHost.reconnect(req.params.botID, req.account.accountID);
+    res.status(outcome.ok ? 202 : 409).json(outcome.ok ? { ok: true, bot: outcome.bot }
+      : { ok: false, error: outcome.code, message: outcome.message });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/bots/:botID/stop", requireAuth, async (req, res, next) => {

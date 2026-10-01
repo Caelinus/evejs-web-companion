@@ -46,6 +46,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const jettison = require("./jettisonCustody");
 const { pathToFileURL } = require("url");
 
 // An unguessable per-run claim capability. The public botID is deliberately NOT
@@ -146,7 +147,7 @@ function defaultLoadStack() {
       // the role labels that named a roster row. Roles are gone, the row is a
       // fixed label now (COMPANION_SCRIPT_NAME), and every other word in that
       // module is written for a browser panel this host does not render.
-      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy] =
+      const [sessionToken, clientStore, flow, codec, runPolicy, companionRunPolicy, supportFleet] =
         await Promise.all([
           import(webUrl("app/sessionToken.ts")),
           import(webUrl("store/clientStore.ts")),
@@ -154,6 +155,7 @@ function defaultLoadStack() {
           import(webUrl("bots/scriptCodec.ts")),
           import(webUrl("bots/runPolicy.ts")),
           import(webUrl("bots/companionRunPolicy.ts")),
+          import(webUrl("nav/miningSupportFleet.ts")),
         ]);
       // The server has no sessionStorage; force the in-memory fallback. Bots
       // never use the global token anyway (perSessionToken), but the module
@@ -164,7 +166,9 @@ function defaultLoadStack() {
         createAppFlow: flow.createAppFlow,
         decodeScriptValue: codec.decodeScriptValue,
         analyzeBotRunPolicy: runPolicy.analyzeBotRunPolicy,
+        supportsHostedOreJettisonRecovery: runPolicy.supportsHostedOreJettisonRecovery,
         validateBotLaunchGrant: runPolicy.validateBotLaunchGrant,
+        supportFleet,
         // The companion's own risk-derivation and codec door — same BotRunPolicy
         // shape, same validateBotLaunchGrant, per companionRunPolicy.ts's header.
         analyzeCompanionRunPolicy: companionRunPolicy.analyzeCompanionRunPolicy,
@@ -272,7 +276,8 @@ function createBotHost(options) {
             stopBlocked: record.stopBlocked === true,
             ...(record.operationID ? { operationID: record.operationID, operationRole: record.operationRole,
               operationControllerAccountID: record.operationControllerAccountID,
-              operationStopRequested: record.operationStopRequested === true } : {}),
+              operationStopRequested: record.operationStopRequested === true,
+              recoveryAttempts: record.recoveryAttempts || 0, recoveryBlocked: record.recovering === true } : {}),
           };
           if (record.kind === "companion") {
             // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
@@ -337,7 +342,9 @@ function createBotHost(options) {
       operationID: record.operationID,
       operationRole: record.operationRole,
       parking: record.parking,
+      recovery: record.recovery ? { ...record.recovery } : null,
       restartSafe: record.restartSafe,
+      jettisonCustody: jettison.copy(record.jettisonCustody),
       riskClasses: record.riskClasses,
       maxRuntimeMinutes: record.maxRuntimeMinutes,
       expiresAt: record.expiresAt,
@@ -506,6 +513,11 @@ function createBotHost(options) {
   }
 
   async function finalizeBody(record) {
+    if (record.recoveryWriteUnresolved || record.jettisonWriteUnresolved || jettison.unresolved(record.jettisonCustody)) {
+      record.status = "paused"; record.phase = "Unresolved write custody";
+      record.why = "The issued write needs reconciliation before pilot control can be released.";
+      record.stopBlocked = true; persistRoster(); return false;
+    }
     // Keep the stopped row durable through logout. If the process dies in
     // teardown, resume sees stopRequested and will not restart bot work.
     record.windingDown = true;
@@ -709,6 +721,7 @@ function createBotHost(options) {
     persistRoster(); // a process restart must not replay a requested Stop
     const pending = (async () => {
       try {
+        if (record.recoveryWriteUnresolved || record.jettisonWriteUnresolved || jettison.unresolved(record.jettisonCustody)) throw new Error("An issued write still needs reconciliation; Stop retains pilot control.");
         if (!record.droneSafetyConfirmed && (!record.flow || typeof record.flow.prepareHostedBotStop !== "function")) {
           if (record.flow) {
             if (record.kind === "companion") record.flow.stopFleetCompanion();
@@ -781,6 +794,7 @@ function createBotHost(options) {
     operationID = null,
     operationRole = null,
     operationControllerAccountID = null,
+    recoveryAttempts = 0,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -949,6 +963,9 @@ function createBotHost(options) {
       prepareParkingPromise: null,
       parkingPromise: null,
       restartSafe: runPolicy.restartSafe === true,
+      hostedOreJettisonRecovery: operationRole === "MINER" && !!operationID && recordScriptID.startsWith("mcc.") &&
+        stack.supportsHostedOreJettisonRecovery?.(decodedDoc) === true,
+      jettisonCustody: null,
       riskClasses: [...runPolicy.riskClasses],
       maxRuntimeMinutes: grantVerdict.grant.maxRuntimeMinutes,
       expiresAt,
@@ -986,6 +1003,12 @@ function createBotHost(options) {
       // Set once the deadline has fired and endRunDocked is bringing the ship
       // in; the store subscription then leaves finalizing to it.
       windingDown: false,
+      recovering: false,
+      recoveryEnabled: false,
+      recoveryAttempts: Number.isSafeInteger(recoveryAttempts) && recoveryAttempts >= 0 ? recoveryAttempts : 0,
+      recovery: null,
+      recoveryPromise: null,
+      recoverSession: null,
       // The roster row's authority for a companion (see persistRoster's
       // comment) — null for a script, which is authored by the library instead.
       companionRequest: isCompanion ? decodedRequest : null,
@@ -1028,10 +1051,48 @@ function createBotHost(options) {
       const store = stack.createClientStore();
       // Same fetch the server itself trusts, plus the bot's name on every
       // request so the select guard can tell the bot's own select from a tab's.
+      const pendingRequests = new Set();
       const botFetch = (input, init) => {
+        const secret = record.claimSecret;
+        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url, baseUrl);
+        const method = String(init?.method || "GET").toUpperCase();
+        const writes = method !== "GET" && method !== "HEAD" && url.pathname !== "/api/bridge/call";
+        const fleetAcceptance = record.recoveryFleetAcceptance;
+        let exactFleetAcceptance = false;
+        if (url.pathname === "/api/bridge/fleet/invite/accept" && fleetAcceptance?.secret === secret && record.riskClasses.includes("fleet")) {
+          try { fleetAcceptance.assertCurrent(); } catch (error) { return Promise.reject(error); }
+          try { exactFleetAcceptance = JSON.parse(String(init?.body)).fleetID === fleetAcceptance.fleetID; } catch { /* Unknown intent stays blocked. */ }
+        }
+        const recoveryWrite = exactFleetAcceptance || ["/api/bridge/select", "/api/bridge/entity/drones/reconnect", "/api/bridge/drones/recall",
+          "/api/bridge/drone-recovery/ready", "/api/bridge/flight/stop", "/api/bridge/ship/jettison/reconcile"].includes(url.pathname);
+        if (record.recovering && !record.windingDown && writes && !recoveryWrite) {
+          return Promise.reject(Object.assign(new Error("The hosted session is recovering; productive writes are paused."),
+            { code: "HOSTED_RECOVERY_PENDING" }));
+        }
         const headers = new Headers(init && init.headers);
-        headers.set(BOT_HEADER, record.claimSecret);
-        return globalThis.fetch(input, { ...init, headers });
+        headers.set(BOT_HEADER, secret);
+        const pending = (async () => {
+          const response = await globalThis.fetch(input, { ...init, headers });
+          if (!response.ok && record.recoveryEnabled) {
+            const body = await response.clone().json().catch(() => null);
+            if (["SESSION_NOT_FOUND", "NO_LIVE_SESSION"].includes(body?.error)) {
+              // A lost write may have reached the world. Preserve that ambiguity
+              // independently of the runner/frame that was still awaiting it.
+              if (writes) {
+                if (url.pathname === "/api/bridge/ship/jettison" && record.hostedOreJettisonRecovery) record.jettisonWriteUnresolved = true;
+                else record.recoveryWriteUnresolved = true;
+              }
+              if (!record.recovering && secret === record.claimSecret) void record.recoverSession(false).catch(logError);
+            }
+          }
+          return response;
+        })().catch(error => {
+          if (writes && url.pathname === "/api/bridge/ship/jettison" && record.hostedOreJettisonRecovery)
+            record.jettisonWriteUnresolved = true;
+          throw error;
+        }).finally(() => pendingRequests.delete(pending));
+        pendingRequests.add(pending);
+        return pending;
       };
       const flow = stack.createAppFlow(store, {
         baseUrl,
@@ -1040,9 +1101,202 @@ function createBotHost(options) {
         initialSessionToken: token,
         eventSource: url => createHostedEventSource(url, { fetch: botFetch }),
         miningOperationID: record.operationID,
+        hostedOreJettisonRecovery: record.hostedOreJettisonRecovery,
       });
       record.flow = flow;
       record.store = store;
+      record.recoverSession = (disconnect = false) => {
+        if (record.recoveryPromise) return record.recoveryPromise;
+        if (!record.recoveryEnabled || record.kind !== "script" || !record.operationID || record.windingDown ||
+            record.operationStopRequested || record.manualStopRequested || record.deadlineRequested || record.finalized)
+          return Promise.reject(new Error("This hosted run cannot recover its session."));
+        const observedShipID = store.flight.get().status?.shipID ?? store.space.get().snapshot?.shipID ?? store.station.get().online?.shipID;
+        const previousSecret = record.claimSecret;
+        record.recovering = true;
+        record.claimSecret = createClaimSecret();
+        record.status = "paused"; record.phase = "Session recovery";
+        record.recovery = { state: "RECOVERY", attempts: record.recoveryAttempts, reason: null };
+        const suspended = flow.suspendHostedSession();
+        const until = Math.min(Date.parse(record.expiresAt), now() + 180_000);
+        const current = () => {
+          if (record.finalized || record.flow !== flow || claims.get(characterID) !== botID || record.windingDown ||
+              record.operationStopRequested || record.manualStopRequested || record.deadlineRequested || now() >= until)
+            throw new Error("Session recovery was superseded or its original grant ended.");
+        };
+        const bounded = async pending => {
+          let timer;
+          try {
+            const result = await Promise.race([pending, new Promise((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error("Session recovery exceeded its observation bound.")), Math.max(1, until - now()));
+            })]);
+            current();
+            return result;
+          } finally { clearTimeout(timer); }
+        };
+        const recover = (async () => {
+          try {
+            await bounded(suspended);
+            await bounded(Promise.all([...pendingRequests]));
+            if (!Number.isSafeInteger(observedShipID) || observedShipID <= 0) throw new Error("The original hosted hull was not positively observed.");
+            const liveAccount = await bounded(loadAccount(record.username));
+            if (!liveAccount || liveAccount.banned || Number(liveAccount.accountID) !== record.accountID) throw new Error("The hosted account is unavailable.");
+            const saved = await bounded(Promise.resolve(loadScript(record.scriptID, record)));
+            const decoded = saved && stack.decodeScriptValue(saved.doc);
+            const policy = decoded?.ok ? stack.analyzeBotRunPolicy(decoded.doc) : null;
+            if (!decoded?.ok || Number(saved.rev) !== record.scriptRev || hashScript(decoded.doc) !== record.scriptHash ||
+                !(policy?.restartSafe || record.hostedOreJettisonRecovery && stack.supportsHostedOreJettisonRecovery?.(decoded.doc)) || policy.containsSubBots || !stack.validateBotLaunchGrant({ scriptRev: record.scriptRev,
+                  riskClasses: record.riskClasses, maxRuntimeMinutes: record.maxRuntimeMinutes }, record.scriptRev, policy).ok)
+              throw new Error("The pinned script or granted permissions changed.");
+            if (disconnect) {
+              if (typeof options.disconnectOwnedSession !== "function") throw new Error("Owned session disconnect is unavailable.");
+              await bounded(options.disconnectOwnedSession({ webSessionID: record.webSessionID, characterID, accountID: record.accountID,
+                claimSecret: record.claimSecret, previousSecret }));
+            }
+            if (record.recoveryAttempts >= 3) throw new Error("Session recovery retry budget is exhausted.");
+            while (record.recoveryAttempts < 3) {
+              current(); record.recoveryAttempts += 1;
+              record.recovery.attempts = record.recoveryAttempts; persistRoster();
+              try { await bounded(flow.selectCharacter(characterID)); break; }
+              catch (error) {
+                // Only positive session disappearance permits another select.
+                // Timeouts/release uncertainty keep the claim and never replay.
+                if (!["SESSION_NOT_FOUND", "NO_LIVE_SESSION"].includes(error?.code) || record.recoveryAttempts >= 3) throw error;
+                await bounded(sleep(30_000));
+              }
+            }
+            if (record.recoveryWriteUnresolved) throw new Error("A write outcome is unresolved; work custody is retained for reconciliation.");
+            await bounded(flow.verifyHostedSessionRecovery(observedShipID));
+            current();
+            if (record.jettisonWriteUnresolved || jettison.unresolved(record.jettisonCustody))
+              throw new Error("Jettison outcome is ambiguous; exact mutation custody and pilot control are retained.");
+            if (record.recoveryWriteUnresolved) throw new Error("A late write outcome remains unresolved; control is retained.");
+            if (record.operationRole === "HAULER") {
+              const assignment = await bounded(flow.readMiningOperationAssignment());
+              if (assignment?.support) {
+                const supportID = assignment.support.characterID;
+                const peer = [...records.values()].find(row => row.operationID === record.operationID && row.operationRole === "COMMAND" && row.characterID === supportID);
+                const peerFlow = peer?.flow, peerSecret = peer?.claimSecret;
+                const assertMember = () => {
+                  current();
+                  if (assignment.operationID !== record.operationID || assignment.role !== "HAULER" || assignment.stopRequested ||
+                      !record.riskClasses.includes("fleet") || !peer || peer.finalized || peer.recovering || peer.windingDown ||
+                      peer.operationStopRequested || peer.manualStopRequested || peer.deadlineRequested || !peer.riskClasses.includes("fleet") ||
+                      peer.flow !== peerFlow || peer.claimSecret !== peerSecret || claims.get(supportID) !== peer.botID || Date.parse(peer.expiresAt) <= now() ||
+                      peer.store?.station.get().online?.characterID !== supportID || store.station.get().online?.characterID !== characterID)
+                    throw new Error("The hauler's surviving support fleet authority changed.");
+                };
+                let memberMemory = stack.supportFleet.freshMiningSupportFleetMemory(), leaderMemory = stack.supportFleet.freshMiningSupportFleetMemory();
+                let memberFeedback, leaderFeedback, ready = false;
+                // A hauler can suspend inside a long-lived loot step. Confirm
+                // membership before resuming that step, using the ordinary
+                // invite/accept deciders with at most one action per read tick.
+                for (let tick = 0; tick < 30; tick++) {
+                  assertMember();
+                  const latest = await bounded(flow.readMiningOperationAssignment());
+                  if (latest?.operationID !== assignment.operationID || latest.role !== "HAULER" || latest.stopRequested ||
+                      latest.support?.characterID !== supportID || latest.support.fleetPolicy !== assignment.support.fleetPolicy)
+                    throw new Error("The hauler support assignment changed during recovery.");
+                  await bounded(peerFlow.loadFleet()); assertMember();
+                  await bounded(flow.loadFleet()); assertMember();
+                  const own = flow.readMiningSupportFleet(`${botID}:${record.recoveryAttempts}`);
+                  const support = peerFlow.readMiningSupportFleet(`${peer.botID}:${peer.recoveryAttempts}`);
+                  const member = stack.supportFleet.decideMiningSupportFleetMember({ own, support, supportCharacterID: supportID,
+                    policy: { mode: latest.support.fleetPolicy }, nowMs: now(), feedback: memberFeedback }, memberMemory);
+                  memberMemory = member.memory; memberFeedback = undefined;
+                  if (member.state === "ready") { ready = true; break; }
+                  if (member.state === "blocked" || latest.support.fleetPolicy !== "MANAGED") throw new Error("The hauler is outside its selected support fleet.");
+                  if (member.action) {
+                    if (member.action.kind !== "acceptFleetInvite") throw new Error("Hauler recovery requires an ordinary support invitation.");
+                    record.recoveryFleetAcceptance = { secret: record.claimSecret, fleetID: member.action.fleetID, assertCurrent: assertMember };
+                    try { await bounded(flow.acceptFleetInvite(member.action.fleetID)); }
+                    finally { record.recoveryFleetAcceptance = null; }
+                    assertMember();
+                    if (store.fleet.get().actionError) throw new Error("The hauler's fleet acceptance was not confirmed.");
+                    memberFeedback = { scope: own.scope, actionID: member.actionID, outcome: "acknowledged" };
+                  } else {
+                    const leader = stack.supportFleet.decideMiningSupportFleet({ own: support, intendedCharacterIDs: [characterID],
+                      memberObservations: [own], policy: { mode: "MANAGED" }, nowMs: now(), feedback: leaderFeedback }, leaderMemory);
+                    leaderMemory = leader.memory; leaderFeedback = undefined;
+                    if (["blocked", "recovery-required"].includes(leader.state)) throw new Error("The surviving support invitation is blocked.");
+                    if (leader.action) {
+                      if (leader.action.kind !== "inviteToFleet" || leader.action.charID !== characterID || !leader.fleetID) throw new Error("Hauler recovery cannot create or switch fleets.");
+                      await bounded(peerFlow.inviteFleetMember(characterID, assertMember, leader.fleetID)); assertMember();
+                      if (peer.store.fleet.get().actionError) throw new Error("The support invitation was not confirmed.");
+                      leaderFeedback = { scope: support.scope, actionID: leader.actionID, outcome: "acknowledged" };
+                    }
+                  }
+                  await bounded(sleep(2000));
+                }
+                if (!ready) throw new Error("The hauler's selected fleet membership remains unconfirmed.");
+              }
+            }
+            if (record.operationRole === "COMMAND") {
+              const assignment = await bounded(flow.readMiningOperationAssignment());
+              const managed = value => value?.operationID === record.operationID && value.role === "COMMAND" &&
+                value.support?.characterID === characterID && value.support.fleetPolicy === "MANAGED" && !value.stopRequested;
+              if (managed(assignment)) {
+                const peers = [...records.values()].filter(peer => peer !== record && peer.operationID === record.operationID);
+                const captured = peers.map(peer => ({ peer, flow: peer.flow, secret: peer.claimSecret }));
+                const livePeer = item => !item.peer.finalized && !item.peer.recovering && !item.peer.windingDown &&
+                  !item.peer.operationStopRequested && !item.peer.manualStopRequested && !item.peer.deadlineRequested &&
+                  item.peer.flow === item.flow && item.peer.claimSecret === item.secret && claims.get(item.peer.characterID) === item.peer.botID &&
+                  Date.parse(item.peer.expiresAt) > now() && item.flow && item.peer.store?.station.get().online?.characterID === item.peer.characterID;
+                const observations = [];
+                for (const item of captured) {
+                  if (!livePeer(item)) continue;
+                  await bounded(item.flow.loadFleet());
+                  if (!livePeer(item)) continue;
+                  const observed = item.flow.readMiningSupportFleet(`${item.peer.botID}:${item.peer.recoveryAttempts}`);
+                  if (observed) observations.push(observed);
+                }
+                await bounded(flow.loadFleet());
+                const own = flow.readMiningSupportFleet(`${botID}:${record.recoveryAttempts}`);
+                const latest = await bounded(flow.readMiningOperationAssignment());
+                if (!managed(latest) || JSON.stringify(latest.intendedFleetCharacterIDs) !== JSON.stringify(assignment.intendedFleetCharacterIDs))
+                  throw new Error("The managed support assignment changed during recovery.");
+                const selected = stack.supportFleet.miningSupportRecoveryInviter({ own,
+                  intendedCharacterIDs: latest.intendedFleetCharacterIDs ?? [], memberObservations: observations, nowMs: now() });
+                if (["unknown", "conflict"].includes(selected.state)) throw new Error("Surviving fleet authority is unavailable or conflicting.");
+                if (selected.state === "ready") {
+                  const inviter = captured.find(item => item.peer.characterID === selected.characterID);
+                  const assertInvite = () => { current(); if (!inviter || !livePeer(inviter) || !inviter.peer.riskClasses.includes("fleet"))
+                    throw new Error("The surviving member's fleet grant or ownership changed."); };
+                  assertInvite();
+                  const scope = observations.find(row => row.scope.characterID === selected.characterID);
+                  const prior = record.recoveryFleetInvite;
+                  const same = prior?.inviterSecret === inviter.secret && prior.targetSecret === record.claimSecret;
+                  const decision = stack.supportFleet.decideMiningSupportFleet({ own: scope, intendedCharacterIDs: [characterID],
+                    memberObservations: [own], policy: { mode: "MANAGED" }, nowMs: now(), feedback: same ? prior.feedback : undefined },
+                    same ? prior.memory : stack.supportFleet.freshMiningSupportFleetMemory());
+                  record.recoveryFleetInvite = { inviterSecret: inviter.secret, targetSecret: record.claimSecret, memory: decision.memory, feedback: undefined };
+                  if (decision.action) {
+                    if (decision.action.kind !== "inviteToFleet" || decision.action.charID !== characterID) throw new Error("Recovery requires an ordinary member invitation.");
+                    await bounded(inviter.flow.inviteFleetMember(characterID, assertInvite, selected.fleetID));
+                    assertInvite();
+                    if (inviter.peer.store.fleet?.get().actionError) throw new Error("The surviving member invitation could not be confirmed.");
+                    record.recoveryFleetInvite.feedback = { scope: scope.scope, actionID: decision.actionID, outcome: "acknowledged" };
+                  } else if (decision.state === "blocked") throw new Error("The surviving member invitation is blocked.");
+                }
+              }
+            }
+            current();
+            if (record.recoveryWriteUnresolved) throw new Error("A late write outcome remains unresolved; control is retained.");
+            flow.resumeHostedSession();
+            record.recovering = false; record.recovery = { state: "READY", attempts: record.recoveryAttempts, reason: null };
+            applySnapshot(record, store.customBot.get()); persistRoster();
+          } catch (error) {
+            if (!record.finalized && !record.windingDown) {
+              record.status = "paused"; record.phase = "Session recovery blocked"; record.why = error?.message || "Session authority could not be re-established.";
+              record.recovery = { state: "BLOCKED", attempts: record.recoveryAttempts, reason: record.why };
+              persistRoster();
+            }
+            throw error;
+          }
+        })();
+        record.recoveryPromise = recover.finally(() => { record.recoveryPromise = null; });
+        persistRoster();
+        return record.recoveryPromise;
+      };
 
       if (beforeStart) await beforeStart();
       await flow.selectCharacter(characterID);
@@ -1054,6 +1308,7 @@ function createBotHost(options) {
       // letting go of the ship as the end of the bot.
       let sawRunning = false;
       record.unsubscribe = store.subscribe((state) => {
+        if (record.recovering && !record.windingDown) return;
         const snapshot = isCompanion ? state.companion : state.customBot;
         applySnapshot(record, snapshot);
         if (snapshot.status === "running" || snapshot.status === "paused") {
@@ -1077,6 +1332,7 @@ function createBotHost(options) {
         await finalize(record);
         return { ok: false, code: "BOT_START_FAILED", message: record.startError };
       }
+      record.recoveryEnabled = !!record.operationID && !isCompanion && (record.restartSafe || record.hostedOreJettisonRecovery) && typeof flow.suspendHostedSession === "function";
       const remainingMs = Math.max(1, Date.parse(record.expiresAt) - now());
       record.deadlineTimer = setDeadlineTimeout(() => {
         record.deadlineTimer = null;
@@ -1148,6 +1404,7 @@ function createBotHost(options) {
     persistRoster();
     const pending = (async () => {
       try {
+        if (record.recoveryWriteUnresolved || record.jettisonWriteUnresolved || jettison.unresolved(record.jettisonCustody)) throw new Error("An issued write still needs reconciliation; Parking retains pilot control.");
         await record.flow.prepareCustomBotParking();
         record.droneSafetyConfirmed = true;
         record.parking = { state: "READY", reason: null };
@@ -1222,6 +1479,50 @@ function createBotHost(options) {
     if (!authorizesClaim(characterID, secret)) return null;
     const record = records.get(claims.get(Number(characterID)));
     return record?.operationID ? { operationID: record.operationID, operationRole: record.operationRole } : null;
+  }
+
+  function jettisonOwnerForClaim(characterID, secret) {
+    if (!authorizesClaim(characterID, secret)) return null;
+    const record = records.get(claims.get(Number(characterID)));
+    if (!record?.hostedOreJettisonRecovery || record.operationRole !== "MINER") return null;
+    const current = productive => {
+      if (record.finalized || claims.get(record.characterID) !== record.botID ||
+          !sameSecret(record.claimSecret, secret) || Date.parse(record.expiresAt) <= now() ||
+          productive && (record.recovering || record.windingDown || record.operationStopRequested || record.manualStopRequested))
+        throw Object.assign(new Error("Hosted jettison generation or grant changed."), { code: "JETTISON_SCOPE_CHANGED" });
+    };
+    return {
+      scope: { botID: record.botID, runGeneration: record.hostStartedAt || record.startedAt,
+        pilotID: record.characterID, operationID: record.operationID },
+      current,
+      read: () => jettison.copy(record.jettisonCustody),
+      begin: value => {
+        current(true);
+        const previous = record.jettisonCustody;
+        if (previous?.state === "not-issued" || jettison.unresolved(previous) || previous && (previous.scope.runID !== value.scope.runID ||
+            value.scope.invocationID <= previous.scope.invocationID))
+          throw Object.assign(new Error("Prior jettison custody is still owned."), { code: "JETTISON_PENDING" });
+        record.jettisonCustody = jettison.copy(value);
+      },
+      markIssued: value => {
+        current(true);
+        const previous = record.jettisonCustody;
+        if (previous?.state !== "not-issued" || previous.scope.runID !== value.scope.runID || previous.scope.invocationID !== value.scope.invocationID)
+          throw Object.assign(new Error("Jettison invocation changed before issue."), { code: "JETTISON_PENDING" });
+        record.jettisonCustody = jettison.copy(value);
+      },
+      settle: value => {
+        // A late reply can only add facts to its exact invocation. It cannot
+        // replace a newer invocation, renew authority, or resume the runner.
+        const previous = record.jettisonCustody;
+        if (!record.finalized && previous?.scope.runID === value.scope.runID && previous.scope.invocationID === value.scope.invocationID) {
+          if (previous.issuedAtMs !== null && (value.state === "not-issued" || value.state === "refused-before-dispatch")) return;
+          if (["confirmed-created", "confirmed-no-ore-mutation"].includes(previous.state) && value.state === "issued-pending") return;
+          record.jettisonCustody = jettison.copy(value);
+          if (!jettison.unresolved(value)) record.jettisonWriteUnresolved = false;
+        }
+      },
+    };
   }
 
   function list(accountID) {
@@ -1436,7 +1737,7 @@ function createBotHost(options) {
           recordResumeFailure(row, "it can repeat a consequential action. Review and start it again manually.");
           continue;
         }
-        if (row.stopRequested === true || row.stopBlocked === true || row.operationStopRequested === true) {
+        if (row.stopRequested === true || row.stopBlocked === true || row.operationStopRequested === true || row.recoveryBlocked === true) {
           recordResumeFailure(row, "a graceful Stop was blocked before restart. Review this pilot manually.");
           continue;
         }
@@ -1486,6 +1787,7 @@ function createBotHost(options) {
                 operationID: row.operationID ?? null,
                 operationRole: row.operationRole ?? null,
                 operationControllerAccountID: row.operationControllerAccountID ?? null,
+                recoveryAttempts: row.recoveryAttempts || 0,
               });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
@@ -1544,6 +1846,15 @@ function createBotHost(options) {
       return result;
     },
     start,
+    reconnect(botID, accountID) {
+      const record = records.get(botID);
+      if (!record || record.finalized || record.accountID !== Number(accountID) || !record.recoveryEnabled || record.recovering ||
+          record.recoveryAttempts >= 3 || record.windingDown || record.operationStopRequested || Date.parse(record.expiresAt) <= now())
+        return { ok: false, code: "BOT_RECOVERY_UNAVAILABLE", message: "This account has no recoverable active operation run." };
+      record.recoveryPromise = null;
+      void record.recoverSession(true).catch(logError);
+      return { ok: true, bot: publicBot(record) };
+    },
     stop,
     extendOperationGrant,
     prepareOperationStop,
@@ -1551,6 +1862,7 @@ function createBotHost(options) {
     endOperationDeadline,
     listAll,
     operationForClaim,
+    jettisonOwnerForClaim,
     list,
     claimedBy,
     authorizesClaim,

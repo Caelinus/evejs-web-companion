@@ -185,7 +185,8 @@ export interface ScriptRunnerDeps {
    * which is what every performer did before this existed and what nearly all
    * still do, means "exactly as asked".
    */
-  issue(action: ScriptAction, claimRunID?: string): Promise<void | string | null>;
+  issue(action: ScriptAction, claimRunID?: string, invocation?: { readonly runID: string; readonly invocationID: number; readonly stepPath: string }): Promise<void | string | null>;
+  readonly mutationCustody?: () => boolean;
   /** Optional for pure tests; a live loot-containers step requires it. */
   readonly claims?: {
     read(runID: string, systemID: number): Promise<readonly number[]>;
@@ -221,6 +222,10 @@ export interface ScriptRunnerController {
   stop(): void;
   /** Stop new decisions and wait for the tick already observing/issuing. */
   beginGracefulStop(): Promise<void>;
+  /** Freeze transport without issuing cleanup or surrendering custody. */
+  suspendTransport(): Promise<void>;
+  transportCustody(): boolean;
+  resumeTransport(): void;
   /** Resume only the latched home flight after hosted safety settlement. */
   resumeHeadHome(reason: string): boolean;
   /**
@@ -291,7 +296,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   let lastObs: ScriptObservation | null = null;
   /** This run's id, minted by `start` — what groups a log's lines. */
   let runID = "";
+  let actionInvocation = 0;
   let claim: { runID: string; systemID: number; itemID: number } | null = null;
+  let transportSuspended = false;
   const travelAssist = deps.travelAssist ? createTravelAssist({ ...deps.travelAssist,
     log: why => record({ t: now(), kind: "decide", run: runID, says: "travel assist", why }),
   }) : null;
@@ -471,7 +478,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         return;
       }
       if (token !== runToken || status !== "running") {
-        await releaseClaim();
+        if (!transportSuspended) await releaseClaim();
         return;
       }
     }
@@ -549,17 +556,22 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       const owner = claim?.runID ?? claimOwner();
       try {
         const acquired = await deps.claims.acquire(owner, systemID, selected, claim !== null);
+        if (acquired) claim = { runID: owner, systemID, itemID: selected };
+        if (token !== runToken || status !== "running") {
+          if (acquired && !transportSuspended) await releaseClaim();
+          return;
+        }
         if (!acquired) {
           emit({ ...last, status: "running", phase: "Looting", why: "Another hauler has claimed this container." });
           return;
         }
-        claim = { runID: owner, systemID, itemID: selected };
       } catch {
+        if (token !== runToken || status !== "running") return;
         pauseWith("Container claim authority is unreadable.", result);
         return;
       }
       if (token !== runToken || status !== "running") {
-        await releaseClaim();
+        if (!transportSuspended) await releaseClaim();
         return;
       }
     }
@@ -590,7 +602,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
       });
       try {
-        const note = await deps.issue(result.action, result.action.kind === "lootContainer" ? claim?.runID : undefined);
+        const note = await deps.issue(result.action, result.action.kind === "lootContainer" ? claim?.runID : undefined,
+          { runID, invocationID: ++actionInvocation, stepPath: result.stepPath ?? "" });
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
         record({
@@ -604,8 +617,13 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         if (freesHoldSpace(result.action)) {
           ledger.forgetRefused(recoversHoldSpace(result.action));
         }
-        if (result.action.kind === "lootContainer") await releaseClaim();
+        if (result.action.kind === "lootContainer" && !transportSuspended) await releaseClaim();
       } catch (error) {
+        if (token !== runToken || status !== "running") return;
+        if (result.action.kind === "jettison" && deps.mutationCustody?.()) {
+          pauseWith("Jettison needs reconciliation; mutation custody is retained and no duplicate will be issued.", result);
+          return;
+        }
         if (deps.isSessionLost(error)) {
           setError(SESSION_LOST);
           return;
@@ -841,6 +859,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
   return {
     start(next: BotScript): void {
+      if (deps.mutationCustody?.()) throw new Error("Jettison mutation custody still owns unresolved work.");
+      transportSuspended = false;
       releaseAfterIssue();
       runToken += 1;
       script = next;
@@ -849,6 +869,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       // starting with its own header — is grouped under it. The header is also
       // what tells a store to rotate the previous run's log out.
       runID = newRunID(Date.now());
+      actionInvocation = 0;
       loggedDecision = "";
       loggedEnd = false;
       record({ t: now(), kind: "start", run: runID, script: next.name, status: "running" });
@@ -872,7 +893,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
     },
     resume(): void {
+      if (deps.mutationCustody?.()) return;
       if (status === "paused") {
+        transportSuspended = false;
         runToken += 1;
         status = "running";
         emit({ ...last, status: "running" });
@@ -895,8 +918,28 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         await releaseClaim();
       });
     },
+    suspendTransport(): Promise<void> {
+      transportSuspended = true;
+      runToken += 1;
+      status = "paused";
+      emit({ ...last, status: "paused", phase: "Session recovery", why: "Waiting for current pilot authority." });
+      return activeTick ?? Promise.resolve();
+    },
+    transportCustody(): boolean {
+      return claim !== null || travelAssist?.pending() === true || deps.mutationCustody?.() === true;
+    },
+    resumeTransport(): void {
+      if (!transportSuspended || status !== "paused" || claim || travelAssist?.pending() || deps.mutationCustody?.())
+        throw new Error("Transport recovery still owns unresolved work.");
+      // Keep program position and run identity; re-derive macro movement,
+      // target and drone decisions from the reacquired session's observations.
+      if (memory) memory = { ...memory, macroMem: {}, miningFlight: undefined, terminalDroneTicks: undefined };
+      lastObs = null; settle = 0; readFailures = 0;
+      transportSuspended = false; runToken += 1; status = "running";
+      emit({ ...last, status: "running", phase: "Session recovered", why: null, pauseReason: null });
+    },
     resumeHeadHome(reason: string): boolean {
-      if (status !== "paused" || memory === null || script === null) return false;
+      if (status !== "paused" || memory === null || script === null || deps.mutationCustody?.()) return false;
       runToken += 1;
       if (memory.latched === null) memory = { ...memory, latched: { interruptID: null, reason } };
       status = "running";
