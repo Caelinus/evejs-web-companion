@@ -261,6 +261,17 @@ test("a stored id that is no longer global is dropped rather than drawn", () => 
   assert.deepEqual(loadGlobalWindows(), []);
 });
 
+test("standalone MCC does not reopen its old floating window or discard other global windows", () => {
+  installStorage();
+  localStorage.setItem(
+    "evejs-web-global-windows:v2",
+    JSON.stringify([win("miningOperations"), win("botManager"), win("industryManager")]),
+  );
+  assert.equal(isGlobalTab("miningOperations"), false);
+  assert.deepEqual(openGlobal([], "miningOperations"), []);
+  assert.deepEqual(loadGlobalWindows().map(w => w.id), ["botManager", "industryManager"]);
+});
+
 test("one window per tab, enforced on the way IN as well as by the reducers", () => {
   // A duplicate id makes App's keyed `{#each … (win.id)}` throw on every render
   // from then on, permanently, because the bad list is written straight back.

@@ -1,6 +1,8 @@
 # Mining Command Center
 
-Open **Mining Operations** from the global window list. An operation coordinates
+Open **MCC** from the WC header or visit `/mining-command-center` directly. The
+Command Center opens as a separate page with its own sign-in form, without a
+pilot workspace. An operation coordinates
 server-hosted pilots around one current resource target. Each pilot still uses
 Farmer's ordinary script runner and EveJS authority; the Command Center owns
 the target reservation, membership, logistics and Stop policy.

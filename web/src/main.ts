@@ -10,7 +10,7 @@
 import "./styles.css";
 import { mount } from "svelte";
 import App from "./ui/App.svelte";
-import { isGoblinFactoryPath, isPilotTrainingPath } from "./app/pageRoute.ts";
+import { isGoblinFactoryPath, isMiningCommandCenterPath, isPilotTrainingPath } from "./app/pageRoute.ts";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -27,6 +27,8 @@ if (target && !isGoblinFactoryPath(window.location.pathname)) {
   if (isPilotTrainingPath(window.location.pathname)) {
     // Standalone: no cockpit restore, active bot or space polling is mounted.
     void import("./ui/GoblinFactory.svelte").then(({ default: Training }) => mount(Training, { target }));
+  } else if (isMiningCommandCenterPath(window.location.pathname)) {
+    void import("./ui/MiningCommandCenter.svelte").then(({ default: CommandCenter }) => mount(CommandCenter, { target }));
   } else {
     mount(App, { target });
   }
