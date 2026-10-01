@@ -1,3 +1,12 @@
+import type { FittingSlot } from "../store/types.ts";
+
+/** Shared fit identity used by script caching and read-only capability snapshots. */
+export function describeFitting(shipID: number | null, slots: readonly FittingSlot[]): string {
+  return [String(shipID ?? "none"), ...slots.map(slot => slot.module === null
+    ? `${slot.family}:${slot.index}:empty`
+    : [slot.family, slot.index, slot.module.itemID, slot.module.typeID, slot.module.online ? 1 : 0].join(":"))].join("|");
+}
+
 /** The two facts that make fitted-module capabilities safe to reuse. */
 export interface CapabilityScope {
   /** The authoritative active hull observed this tick. */

@@ -1,0 +1,32 @@
+{
+  "evejsVersion": "0.12.9",
+  "scope": "Cumulative Mining Support observations and authoritative item-scoped mining/tractor reach; shared existing runtime calculations, no target probes or gameplay mutations; applies directly to clean 0.12.9",
+  "installFiles": [
+    {
+      "file": "miningSupportProjection.js",
+      "destination": "server/src/_secondary/express/miningSupportProjection.js",
+      "sha256": "2BF0D6F7984F7B3A5510FC555A2AFD01E268D098B811C7F83919274655BD302F"
+    },
+    {
+      "file": "miningRangeProjection.js",
+      "destination": "server/src/_secondary/express/miningRangeProjection.js",
+      "sha256": "9644259143D55B17E49AB61CA680C79EACE4054FD6BEFD9090DB946B5224D513"
+    }
+  ],
+  "applyInOrder": [
+    {
+      "file": "mining-support-services.patch",
+      "sha256": "B6667BB16AF6BCF4ABC41C010BAC86B2F5A521DC5714BEBFCEDFB6178EA9AD1E"
+    }
+  ],
+  "cleanReferenceFiles": {
+    "server/src/_secondary/express/evejsWebGatewayRuntime.js": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
+    "server/src/space/runtime/moduleAttributes.js": "AC81309D6112F57A0C09DF21927DAA516F093DE148CE38673A60F90C23F7BE05",
+    "server/src/space/runtime/shipModuleFuel.js": "82D0AF727547403A75A2EFB0F282B925E5CB74C681BCF0145520472B18635A9C",
+    "server/src/space/runtime/scene/modules.js": "A9399E5E2D895AD27B47331247824940B351C1358EF75EB55FE187A97672C080",
+    "server/src/space/modules/sharedFuelRuntime.js": "767330CC90322EB240519B77DC7DFB5CE8FA5E5A4B726022DA51734D89337490",
+    "server/src/services/inventory/fuelBayInventory.js": "3711AA12EB1A3C1036A99C559AECDB8905C8EE7FE69C6209E0C2441EFAB2EDEB",
+    "server/src/services/mining/miningRuntime.js": "5144A44918D889E6BE77F1AA61D14D2A25FDB1875D24050B650556C25AB637F5",
+    "server/src/space/modules/tractorBeamRuntime.js": "8D1BC6009913A08EDA23B0C74C549477B64142CF22CD20DB9264207DFA693373"
+  }
+}

@@ -1,0 +1,168 @@
+diff --git a/server/src/_secondary/express/evejsWebGatewayRuntime.js b/server/src/_secondary/express/evejsWebGatewayRuntime.js
+--- a/server/src/_secondary/express/evejsWebGatewayRuntime.js
++++ b/server/src/_secondary/express/evejsWebGatewayRuntime.js
+@@ -4,6 +4,9 @@ const {
+   cloneValue,
+ } = require("../../common/clone");
+ 
++const { projectMiningBurstServices, projectCompressionService, readCoreMobilityFuel } = require("./miningSupportProjection");
++const { readModuleReach } = require("./miningRangeProjection");
++
+ const crypto = require("node:crypto");
+ const path = require("path");
+ 
+@@ -4684,6 +4687,9 @@ function projectSpaceEntity(entity, egoItemID = 0, mineableStateFor = null) {
+     // caller can tell WHICH families a facility handles. Null (field absent) means
+     // "not a facility", never "range unknown" — a caller must not read a missing
+     // reading as an open door.
++    // Exact typelist/range pairs for read-only support observations. The legacy
++    // maximum below remains only for compatibility with existing consumers.
++    row.compressionService = projectCompressionService(entity);
+     const compressionTypelists = Array.isArray(entity.compressionFacilityTypelists)
+       ? entity.compressionFacilityTypelists
+       : null;
+@@ -4887,7 +4893,7 @@ function projectWeaponBanks(entity) {
+   }
+ }
+ 
+-function projectActiveShipStatus(entity) {
++function projectActiveShipStatus(entity, nowMs = null) {
+   if (!entity || typeof entity !== "object") {
+     return null;
+   }
+@@ -4959,6 +4965,13 @@ function projectActiveShipStatus(entity) {
+     // {masterID: [slaveID, …]} — see projectWeaponBanks. {} means nothing is
+     // banked; null means the banks could not be read.
+     weaponBanks: projectWeaponBanks(entity),
++    miningBurstServices: projectMiningBurstServices(entity),
++    compressionService: projectCompressionService(entity),
++    // Includes item-scoped, read-only inactive Core startup fuel quotes.
++    coreMobilityFuel: readCoreMobilityFuel(entity, nowMs),
++    moduleReach: readModuleReach(entity, nowMs),
++    characterID: spaceNumber(entity.characterID, 0) || null,
++    ownerID: spaceNumber(entity.ownerID, 0) || null,
+   };
+ }
+ 
+@@ -6785,10 +6798,11 @@ function createEvejsWebGatewayRuntime({
+             // bag; the gateway must CALL the space runtime and never modify it,
+             // so we use the handles that exist and tolerate their absence.
+             refreshSpacePresentationFields(spaceRuntime, egoEntity, visible);
+-            snapshot.sampledAtMs =
++            const sampledSimTimeMs =
+               typeof scene.getCurrentSimTimeMs === "function"
+-                ? Number(scene.getCurrentSimTimeMs()) || snapshot.sampledAtMs
+-                : snapshot.sampledAtMs;
++                ? scene.getCurrentSimTimeMs()
++                : null;
++            if (Number.isFinite(sampledSimTimeMs)) snapshot.sampledAtMs = sampledSimTimeMs;
+             const egoItemID = Number(egoEntity && egoEntity.itemID) || 0;
+             // R23: rocks carry how much ore is left, which lives in the scene's
+             // mining state rather than on the ball. Built once per snapshot.
+@@ -6796,7 +6810,10 @@ function createEvejsWebGatewayRuntime({
+             snapshot.entities = (Array.isArray(visible) ? visible : [])
+               .map((entity) => projectSpaceEntity(entity, egoItemID, mineableStateFor))
+               .filter((row) => row !== null);
+-            snapshot.ship = projectActiveShipStatus(egoEntity);
++            snapshot.ship = projectActiveShipStatus(
++              egoEntity,
++              Number.isFinite(sampledSimTimeMs) ? sampledSimTimeMs : null,
++            );
+             if (egoItemID > 0) {
+               snapshot.shipID = egoItemID;
+             }
+diff --git a/server/src/services/mining/miningRuntime.js b/server/src/services/mining/miningRuntime.js
+--- a/server/src/services/mining/miningRuntime.js
++++ b/server/src/services/mining/miningRuntime.js
+@@ -454,6 +454,22 @@ function buildEntityMiningSnapshot(entity, moduleItem, effectRecord, options = {
+   });
+ }
+ 
++// Read-only reach from the SAME fitted/charge/skill/effect/implant/burst/system
++// snapshot as activation. No target probe, resource mutation or grace distance.
++function readEntityMiningReach(entity, moduleItem, nowMs) {
++  const characterID = resolveEntityCharacterID(entity);
++  const shipItem = characterID > 0 ? getActiveShipRecord(characterID) : null;
++  if (!shipItem || shipItem.itemID !== entity.itemID || !moduleItem || moduleItem.locationID !== entity.itemID
++    || moduleItem.ownerID !== characterID || !Number.isFinite(nowMs)) return null;
++  const fitted = resolveEntityModuleItem(entity, moduleItem.itemID);
++  if (!fitted || fitted.typeID !== moduleItem.typeID) return null;
++  const effectRecord = findMiningEffectRecordForModule(fitted);
++  if (!effectRecord) return { matched: false };
++  const snapshot = buildEntityMiningSnapshot(entity, fitted, effectRecord, { nowMs });
++  if (!snapshot || !Number.isFinite(snapshot.maxRangeMeters) || snapshot.maxRangeMeters < 0) return { matched: true, availability: "unknown" };
++  return { matched: true, availability: "available", maxRangeMeters: snapshot.maxRangeMeters, resourceFamily: snapshot.family };
++}
++
+ function prepareMiningCycleBoundary(entity, effectState, cycleBoundaryMs) {
+   if (!entity || !effectState) {
+     return { success: false, stopReason: "module" };
+@@ -1363,6 +1379,7 @@ function tickScene(scene, now) {
+ }
+ 
+ module.exports = {
++  readEntityMiningReach,
+   handleSceneCreated,
+   handleSceneDisposed,
+   tickScene,
+diff --git a/server/src/space/modules/tractorBeamRuntime.js b/server/src/space/modules/tractorBeamRuntime.js
+--- a/server/src/space/modules/tractorBeamRuntime.js
++++ b/server/src/space/modules/tractorBeamRuntime.js
+@@ -208,6 +208,18 @@ function resolveTractorFollowRangeMeters(effectState) {
+   );
+ }
+ 
++// Target-independent read shared by activation and observation. The caller
++// supplies the same live fitting/charge/skill/active-module context.
++function readTractorBeamModuleSnapshot({ shipItem, moduleItem, chargeItem = null,
++  skillMap = null, fittedItems = null, activeModuleContexts = null } = {}) {
++  if (!shipItem || !moduleItem) return null;
++  const moduleAttributes = buildLiveModuleAttributeMap(shipItem, moduleItem, chargeItem,
++    skillMap, fittedItems, activeModuleContexts);
++  if (!moduleAttributes) return null;
++  return { moduleAttributes, maxRangeMeters: Math.max(0,
++    roundNumber(toFiniteNumber(moduleAttributes[ATTRIBUTE_MAX_RANGE], 0), 3)) };
++}
++
+ function resolveTractorBeamActivation({
+   scene,
+   entity,
+@@ -262,15 +274,9 @@ function resolveTractorBeamActivation({
+     };
+   }
+ 
+-  const moduleAttributes = buildLiveModuleAttributeMap(
+-    shipItem,
+-    moduleItem,
+-    chargeItem,
+-    skillMap,
+-    fittedItems,
+-    activeModuleContexts,
+-  );
+-  if (!moduleAttributes) {
++  const snapshot = readTractorBeamModuleSnapshot({ shipItem, moduleItem, chargeItem,
++    skillMap, fittedItems, activeModuleContexts });
++  if (!snapshot) {
+     return {
+       matched: true,
+       success: false,
+@@ -278,10 +284,7 @@ function resolveTractorBeamActivation({
+     };
+   }
+ 
+-  const maxRangeMeters = Math.max(
+-    0,
+-    roundNumber(toFiniteNumber(moduleAttributes[ATTRIBUTE_MAX_RANGE], 0), 3),
+-  );
++  const { moduleAttributes, maxRangeMeters } = snapshot;
+   const surfaceDistance = resolveTractorSurfaceDistanceMeters(
+     entity,
+     targetEntity,
+@@ -799,6 +802,7 @@ function tickScene(scene, nowMs, options = {}) {
+ }
+ 
+ module.exports = {
++  readTractorBeamModuleSnapshot,
+   TRACTOR_FOLLOW_RANGE_METERS,
+   resolveTractorBeamActivation,
+   executeTractorBeamCycle,

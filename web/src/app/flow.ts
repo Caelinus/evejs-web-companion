@@ -227,8 +227,11 @@ import {
 } from "../nav/scriptRunner.ts";
 import {
   createCapabilityCache,
+  describeFitting,
   type CapabilityScope,
 } from "../nav/scriptCapabilities.ts";
+import { deriveMiningSupportCapabilities, type MiningSupportCapabilities } from "../nav/miningSupportCapabilities.ts";
+import { deriveMiningSupportServices, type MiningSupportServiceSnapshot } from "../nav/miningSupportServices.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
 import {
   EMPTY_SURVEY_MEMORY,
@@ -513,6 +516,10 @@ export interface AppFlow {
   openContainer(containerID: number | null): Promise<void>;
   /** Goal R40 — expand a ship in the Ships card and read its bays; null closes it. */
   openShipBays(shipID: number | null): Promise<void>;
+  /** Project the latest loaded fit/dogma/bay observations; performs no IO or actions. */
+  readMiningSupportCapabilities(): MiningSupportCapabilities;
+  /** Enrich capabilities with the latest successful space service observation; no IO or actions. */
+  readMiningSupportServices(): MiningSupportServiceSnapshot;
   /**
    * Move items between two places. A single item with a `qty` is a SPLIT; more
    * than one item is a single batch move. Reports what ACTUALLY applied.
@@ -8874,25 +8881,34 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   /** A stable fit identity: active hull + every module fact used by classifiers. */
   function fittingCapabilitySignature(): string {
     const fit = store.fitting.get();
-    return [
-      String(fit.activeShipID ?? "none"),
-      ...fit.slots.map((slot) =>
-        slot.module === null
-          ? `${slot.family}:${slot.index}:empty`
-          : [
-              slot.family,
-              slot.index,
-              slot.module.itemID,
-              slot.module.typeID,
-              slot.module.online ? 1 : 0,
-            ].join(":"),
-      ),
-    ].join("|");
+    return describeFitting(fit.activeShipID, fit.slots);
+  }
+
+  function readMiningSupportCapabilities(): MiningSupportCapabilities {
+    const fit = store.fitting.get();
+    const inventory = store.inventory.get();
+    const shipID = inventory.loaded ? inventory.activeShipID : fit.activeShipID;
+    const fitCurrent = fit.loaded && fit.slotsError === null && fit.activeShipID === shipID;
+    const openShip = inventory.openShip;
+    return deriveMiningSupportCapabilities({
+      scope: { shipID, fittingSignature: describeFitting(shipID, fitCurrent ? fit.slots : []) },
+      slots: fitCurrent ? fit.slots : null,
+      dogma: fitCurrent && fit.dogmaError === null ? fit.dogma : null,
+      bays: openShip?.loaded && openShip.error === null ? { shipID: openShip.itemID, rows: openShip.bays } : null,
+      groupOf: typeID => store.names.get().resolved[nameKey("typeGroup", typeID)] ?? null,
+      typeNameOf: typeID => store.names.get().resolved[nameKey("type", typeID)] ?? null,
+    });
   }
 
   function capabilityScope(shipID: number | null): CapabilityScope {
     return { shipID, fittingSignature: fittingCapabilitySignature() };
   }
+  function readMiningSupportServices(): MiningSupportServiceSnapshot {
+    const space = store.space.get();
+    return deriveMiningSupportServices(readMiningSupportCapabilities(), space.loaded && space.error === null ? space.snapshot : null,
+      typeID => store.names.get().resolved[nameKey("type", typeID)] ?? null);
+  }
+
 
   /** Re-read the fit, wait for its group names AND its dogma, then classify every bot module. */
   async function resolveScriptModuleCapabilities(): Promise<ScriptModuleCapabilities> {
@@ -11451,6 +11467,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     openContainer,
     openShipBays,
+    readMiningSupportCapabilities,
+    readMiningSupportServices,
 
     async lootContainer(containerID) {
       // ⚠ THE SHIP IS ASKED FOR, NOT ASSUMED. Routing needs to know which bays
