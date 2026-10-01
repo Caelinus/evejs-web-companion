@@ -1,5 +1,6 @@
 "use strict";
 const { positionValid, keyOf, rankMiningCandidates } = require("./miningLocality");
+const { supportPolicy } = require("./miningOperationSupport");
 
 const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT", "ORE_ANOMALY", "ICE"]);
 const DEFERRED_TARGET_CLASSES = Object.freeze(["GAS"]);
@@ -32,12 +33,12 @@ function auditMiningScript(doc) {
   }
   visit(doc?.program);
   const names = new Set(macros.map((row) => row.macro));
-  const mineSteps = macros.filter((row) => row.macro === "mine-at-belt");
+  const mineSteps = macros.filter((row) => ["mine-at-belt", "fleet-mine"].includes(row.macro));
   const hasOrePreference = mineSteps.some((row) => {
     const arg = row.args?.ores;
     return arg && arg.kind === "oreList" && Array.isArray(arg.ores) && arg.ores.length > 0;
   });
-  const resourceSteps = macros.filter(row => ["mine-at-belt", "travel-to-belt"].includes(row.macro));
+  const resourceSteps = macros.filter(row => ["mine-at-belt", "fleet-mine", "travel-to-belt"].includes(row.macro));
   const families = [...new Set(resourceSteps.map(row => row.args?.belt?.belt?.mode === "site" ? "ORE_ANOMALY" : row.args?.belt?.belt?.mode === "ice-site" ? "ICE" : "BELT"))];
   const siteMine = mineSteps.some((row) => row.args?.belt?.belt?.mode === "site");
   return {
@@ -50,10 +51,10 @@ function auditMiningScript(doc) {
     macros: [...names],
     unsupportedNodes,
     pinnedResourceTarget: macros.some((row) =>
-      (row.macro === "mine-at-belt" || row.macro === "travel-to-belt") &&
+      (["mine-at-belt", "fleet-mine", "travel-to-belt"].includes(row.macro)) &&
       row.args?.belt?.belt?.mode === "chosen"),
     invalidResourceMode: macros.some((row) => {
-      if (row.macro !== "mine-at-belt" && row.macro !== "travel-to-belt") return false;
+      if (!["mine-at-belt", "fleet-mine", "travel-to-belt"].includes(row.macro)) return false;
       const mode = row.args?.belt?.belt?.mode;
       return !["nearest", "site", "ice-site", "chosen"].includes(mode);
     }),
@@ -65,13 +66,16 @@ function auditMiningScript(doc) {
 // resource destination at all. Unknown/composed nodes fail closed: a sub-bot
 // could hide an independent target selector from a superficial macro scan.
 const OPERATION_MACROS = Object.freeze({
-  MINER: new Set(["undock", "mine-at-belt", "warp-to-ore-anomaly", "jettison-ore", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "defend-with-drones", "hardeners-on", "wait", "repair-ship", "refine-ore", "compress-ore"]),
-  HAULER: new Set(["undock", "travel-to-belt", "loot-containers", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "hardeners-on", "wait", "repair-ship"]),
+  MINER: new Set(["undock", "mine-at-belt", "fleet-mine", "warp-to-ore-anomaly", "jettison-ore", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "defend-with-drones", "hardeners-on", "wait", "repair-ship", "refine-ore", "compress-ore"]),
+  COMMAND: new Set(["undock", "mining-support"]),
+  HAULER: new Set(["join-support-fleet", "undock", "travel-to-belt", "loot-containers", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "hardeners-on", "wait", "repair-ship"]),
 });
 
 function operationRoutineCompatibility(definition, role, audit, executionClasses) {
   if (role === "DEFENDER") return "DEFENDER execution is not supported yet.";
   if (!audit) return "The referenced routine no longer exists.";
+  if (role === "COMMAND") return definition.support && audit.unsupportedNodes.length === 0 &&
+    audit.macros.includes("mining-support") && audit.macros.every(name => OPERATION_MACROS.COMMAND.has(name)) ? null : "COMMAND requires the Standard Mining Support profile.";
   if (audit.unsupportedNodes.length > 0) return `Unsupported program node: ${audit.unsupportedNodes[0]}.`;
   if (audit.pinnedResourceTarget) return "A pinned belt/site competes with operation.currentTarget; use nearest belt or site mode.";
   if (audit.invalidResourceMode) return "The routine has an unsupported resource target mode; use nearest belt or ore site mode.";
@@ -80,9 +84,11 @@ function operationRoutineCompatibility(definition, role, audit, executionClasses
   const competing = audit.macros.find((macro) => !allowed?.has(macro));
   if (competing) return `The ${competing} block is not operation-target-aware and may select a competing destination.`;
   if (role === "HAULER") {
+    if (definition.support && !audit.macros.includes("join-support-fleet")) return "Support-bound HAULER requires Join support fleet.";
     if (!audit.targetClasses.some(kind => executionClasses.includes(kind))) return "This HAULER routine cannot execute the operation's selected target family.";
     return audit.hauler ? null : "A HAULER routine needs Travel to belt, Loot containers, and Deliver ore blocks.";
   }
+  if (definition.support && (!audit.macros.includes("fleet-mine") || audit.macros.includes("mine-at-belt"))) return "Support-bound MINER requires Fleet Miner; legacy mining remains available with support disabled.";
   if (!audit.miner) return "A MINER routine needs a Mine at a belt or ore site block.";
   if (audit.hasOrePreference) return "An operation routine cannot own an independent ore preference list. Use a Standard profile and the operation resource policy.";
   if (!audit.targetClasses.some((kind) => executionClasses.includes(kind))) {
@@ -136,6 +142,7 @@ function createMiningOperations(options) {
       tailClaimLoss: false,
       recoveryAmbiguous: false,
       completedTargetInRun: false,
+      supportStatus: null, supportLostSinceMs: null,
     };
   }
 
@@ -197,6 +204,7 @@ function createMiningOperations(options) {
     runtime.tailClaimLoss = false;
     runtime.recoveryAmbiguous = false;
     runtime.completedTargetInRun = false;
+    runtime.supportStatus = null; runtime.supportLostSinceMs = null;
     runtime.lastSelectionKey = null;
     for (const member of def.members) {
       runtime.members.set(member.characterID, {
@@ -561,6 +569,8 @@ function createMiningOperations(options) {
     const memberDef = def?.members.find((row) => row.characterID === Number(characterID));
     const member = runtime?.members.get(Number(characterID));
     if (!def || !runtime || !memberDef || !member) return null;
+    const policy = supportPolicy(def.support, runtime.supportStatus, runtime.supportLostSinceMs, now());
+    runtime.supportLostSinceMs = policy.lostSinceMs;
     const stopping = STOP_STATES.includes(runtime.state);
     if (runtime.currentTarget?.claimedByOperationID === operationID) {
       const key = runtime.currentTarget.targetKey;
@@ -578,6 +588,8 @@ function createMiningOperations(options) {
     return {
       operationID,
       operationName: def.name,
+      ...(def.support ? { support: def.support, supportPolicy: policy,
+        intendedFleetCharacterIDs: def.members.filter(row => row.role !== "DEFENDER").map(row => row.characterID) } : {}),
       role: memberDef.role,
       unloadPolicy: def.unloadPolicy,
       travelAssist: def.policies?.travelAssist?.mode ?? "DISABLED",
@@ -601,12 +613,14 @@ function createMiningOperations(options) {
     };
   }
 
-  function registerContainer(operationID, characterID, containerID, systemID) {
+  function registerContainer(operationID, characterID, containerID, systemID, expectedTargetKey = null, expectedClaimedAt = null) {
     const runtime = runtimeFor(operationID);
     const def = definition(operationID);
     const target = runtime?.currentTarget;
     if (!runtime || !def?.members.some(row => row.characterID === Number(characterID) && row.role === "MINER") ||
         !target || target.claimedByOperationID !== operationID || target.systemID !== Number(systemID) ||
+        expectedTargetKey !== null && target.targetKey !== expectedTargetKey ||
+        expectedClaimedAt !== null && target.claimedAt !== expectedClaimedAt ||
         !Number.isSafeInteger(containerID) || containerID <= 0 || STOP_STATES.includes(runtime.state)) return false;
     const ids = runtime.ownedContainers.get(target.targetKey) ?? new Set();
     ids.add(containerID);
@@ -725,6 +739,7 @@ function createMiningOperations(options) {
 
   function deriveState(def, runtime) {
     if (["DRAFT", "ASSEMBLING", ...STOP_STATES].includes(runtime.state)) return runtime.state;
+    if (def.support && (supportPolicy(def.support, runtime.supportStatus, runtime.supportLostSinceMs, now()).mode !== "NORMAL" || runtime.supportStatus?.state !== "READY")) return "DEGRADED";
     const members = def.members.map((member) => runtime.members.get(member.characterID));
     if (runtime.authorityLoss || runtime.tailClaimLoss || runtime.recoveryAmbiguous ||
         members.some((row) => !row || row.runtimeState === "FAILED" ||
@@ -754,12 +769,14 @@ function createMiningOperations(options) {
       ? "A target claim was lost; target-dependent work is gated until a new claim is reserved."
       : runtime.tailClaimLoss ? "A logistics-tail claim was lost; its cleanup cannot be assumed complete."
       : runtime.recoveryAmbiguous ? "Hosted members recovered without a trusted current target."
+      : def.support ? runtime.supportStatus?.reason || "Support observation is unavailable."
       : unhealthy ? `${unhealthy.characterName}: ${unhealthy.reason || unhealthy.phase || "required member unavailable"}`
       : "A required operation member is unavailable.";
     return {
       operationID: def.operationID,
       state: runtime.state,
       statusReason,
+      ...(def.support ? { supportStatus: runtime.supportStatus, supportPolicy: supportPolicy(def.support, runtime.supportStatus, runtime.supportLostSinceMs, now()) } : {}),
       observedAt: stamp(now),
       recoveryRequired: runtime.recoveryAmbiguous && !["DRAFT", "STOPPED"].includes(runtime.state),
       currentTarget: runtime.currentTarget,
@@ -801,6 +818,16 @@ function createMiningOperations(options) {
   }
 
   return {
+    observeSupport(operationID, characterID, value) {
+      const def = definition(operationID), runtime = runtimeFor(operationID);
+      if (!def?.support || def.support.characterID !== characterID || !runtime || STOP_STATES.includes(runtime.state)) return false;
+      if (!value || !["READY", "DEGRADED", "RECOVERY", "BLOCKED"].includes(value.state) || !["active", "inactive", "unknown"].includes(value.core)) return false;
+      const previous = runtime.supportStatus;
+      runtime.supportStatus = { state: value.state, core: value.core, collection: typeof value.collection === "string" ? value.collection.slice(0, 40) : null,
+        reason: typeof value.reason === "string" ? value.reason.slice(0, 240) : null, observedAtMs: now() };
+      if (previous?.state !== value.state || previous?.reason !== runtime.supportStatus.reason) history(runtime, "SUPPORT_STATE", null, runtime.supportStatus);
+      return true;
+    },
     store,
     targetBoard,
     list,

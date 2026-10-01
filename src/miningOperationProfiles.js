@@ -39,7 +39,7 @@ function buildSiteProfile(definition, member, mode) {
   if (!result) return null;
   result.doc.notes = `MCC standard ${definition.area.targetClasses[0]} profile. Operation target authority only.`;
   const body = result.doc.program[0].body;
-  const step = member.role === "MINER" ? body[1] : body[0].else[1];
+  const step = member.role === "MINER" ? body.find(row => row.id === "mine") : body.find(row => row.id === "hold-check").else.find(row => row.id === "travel");
   step.args.belt.belt.mode = mode;
   return result;
 }
@@ -49,11 +49,31 @@ function standardProfileFor(definition, member) {
       definition?.area?.targetClasses?.length !== 1) return null;
   const family = PROFILE_FAMILIES[definition.area.targetClasses[0]];
   if (!family?.executable) return null;
+  if (member.role === "COMMAND") return definition.support?.characterID === member.characterID
+    ? { scriptID: "mcc.command.mining-support", name: "Mining Command / Support", rev: 1 } : null;
+  if (member.role === "HAULER" && definition.support) {
+    const base = family.profiles.HAULER;
+    return definition.unloadPolicy === "HAULER_SERVICE" ? { ...base, scriptID: `${base.scriptID}.support-bound`, name: `${base.name} / Support Fleet`, rev: 1 } : null;
+  }
+  if (member.role === "MINER" && definition.support) {
+    const base = definition.unloadPolicy === "SELF_UNLOAD" ? family.selfUnload : family.profiles.MINER;
+    return { ...base, scriptID: `${base.scriptID}.support-bound`, name: `${base.name} / Fleet Miner`, rev: 1 };
+  }
   if (definition.unloadPolicy === "SELF_UNLOAD") return member.role === "MINER" ? family.selfUnload : null;
   return definition.unloadPolicy === "HAULER_SERVICE" ? family.profiles[member.role] || null : null;
 }
 
 function buildStandardProfile(definition, member) {
+  if (member.role === "COMMAND") {
+    const profile = standardProfileFor(definition, member), destination = definition.unloadDestination;
+    if (!profile || !destination) return null;
+    const home = destination.kind === "structure" ? { entity: "structure", id: destination.id, name: destination.name, systemName: destination.solarSystemName }
+      : { entity: "station", id: destination.stationID, name: destination.stationName, systemName: destination.systemName };
+    return { ...profile, doc: { format: "evejs-bot-script", version: 1, name: profile.name,
+      notes: `MCC Mining Support v1: ${JSON.stringify(definition.support)}`, home, interrupts: [], program: [
+        { id: "undock", kind: "macro", macro: "undock", args: {} }, { id: "support", kind: "macro", macro: "mining-support", args: {} },
+      ] } };
+  }
   const family = PROFILE_FAMILIES[definition?.area?.targetClasses?.[0]];
   return family?.executable ? family.build(definition, member) : null;
 }
@@ -91,7 +111,9 @@ function buildMiningServiceDocument(definition, member) {
         { id: "undock", kind: "macro", macro: "undock", args: {} },
         // Current Farmer/Batch 6 controller selects drones from ship capability;
         // the old per-step toggle is not part of the current script format.
-        { id: "mine", kind: "macro", macro: "mine-at-belt", args: { belt }, until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+        { id: "mine", kind: "macro", macro: definition.support ? "fleet-mine" : "mine-at-belt", args: { belt,
+          ...(definition.support ? { support: { kind: "character", charID: definition.support.characterID,
+            name: definition.members.find(row => row.characterID === definition.support.characterID)?.characterName ?? null } } : {}) }, until: { kind: "ore-hold-at-least", fraction: 0.9 } },
         definition.unloadPolicy === "SELF_UNLOAD" ? delivery : { id: "jettison", kind: "macro", macro: "jettison-ore", args: {} },
       ],
     }] : [{
@@ -108,6 +130,9 @@ function buildMiningServiceDocument(definition, member) {
       ],
     }],
   };
+  if (definition.support && member.role === "HAULER") doc.program[0].body.unshift({ id: "join-support", kind: "macro", macro: "join-support-fleet",
+    args: { support: { kind: "character", charID: definition.support.characterID,
+      name: definition.members.find(row => row.characterID === definition.support.characterID)?.characterName ?? null } } });
   return { ...profile, doc };
 }
 

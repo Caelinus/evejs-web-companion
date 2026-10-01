@@ -66,6 +66,7 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     ],
     untilRequired: true,
   },
+  "mining-support": { args: [], untilRequired: false },
   "join-support-fleet": { args: [{ key: "support", kind: "character", required: true }], untilRequired: false },
   "deliver-ore": {
     args: [

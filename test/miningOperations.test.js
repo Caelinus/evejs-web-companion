@@ -176,6 +176,17 @@ test("operation can provenance records only current miners on a claimed target a
   assert.equal(h.operations.runtimeFor("cans").ownedContainers.size, 0);
 });
 
+test("recovered proven can registration cannot attach to another target or reservation generation", () => {
+  const h = harness([definition("custody", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
+  startAll(h, "custody"); h.operations.reserveCandidate("custody", 1, belt());
+  const target = h.operations.assignment("custody", 1).currentTarget;
+  assert.equal(h.operations.registerContainer("custody", 1, 500, 30000142, "another", target.claimedAt), false);
+  assert.equal(h.operations.registerContainer("custody", 1, 500, 30000142, target.targetKey, target.claimedAt + 1), false);
+  assert.equal(h.operations.registerContainer("custody", 1, 500, 30000142, target.targetKey, target.claimedAt), true);
+  assert.equal(h.operations.registerContainer("custody", 1, 500, 30000142, target.targetKey, target.claimedAt), true);
+  assert.deepEqual(h.operations.assignment("custody", 2).ownedContainerIDs, [500]);
+});
+
 test("a surviving hosted miner renews a degraded operation's claim despite failed fleet members", () => {
   const h = harness([definition("partial", [member(1, "MINER"), member(2, "MINER")])], { leaseMs: 100 });
   h.operations.begin("partial", ["BELT"]);

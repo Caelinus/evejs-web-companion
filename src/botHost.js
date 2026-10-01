@@ -665,6 +665,8 @@ function createBotHost(options) {
     // await — no store push can overwrite these between here and there.
     record.status = "stopped";
     record.why = docked ? DEADLINE_WHY_DOCKED : DEADLINE_WHY_UNDOCKED;
+    if (record.operationStopRequested) record.parking = { state: docked ? "PARKED" : "PARKING_FAILED",
+      reason: docked ? null : DEADLINE_WHY_UNDOCKED };
     return finalize(record);
   }
 
@@ -715,7 +717,7 @@ function createBotHost(options) {
           throw new Error("The controlled-drone safety read is unavailable.");
         }
         if (!record.droneSafetyConfirmed) {
-          await record.flow.prepareHostedBotStop(record.kind, now() + CONTROLLED_DRONE_CLEANUP_MS);
+          await record.flow.prepareHostedBotStop(record.kind, now() + CONTROLLED_DRONE_CLEANUP_MS * (record.operationRole === "COMMAND" ? 2 : 1));
           record.droneSafetyConfirmed = true;
         }
       } catch (error) {
@@ -940,7 +942,7 @@ function createBotHost(options) {
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
       operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
-      operationRole: ["MINER", "HAULER"].includes(operationRole) ? operationRole : null,
+      operationRole: ["MINER", "HAULER", "COMMAND"].includes(operationRole) ? operationRole : null,
       operationControllerAccountID: Number.isSafeInteger(Number(operationControllerAccountID)) && Number(operationControllerAccountID) > 0 ? Number(operationControllerAccountID) : null,
       operationStopRequested: false,
       parking: null,
@@ -1018,7 +1020,7 @@ function createBotHost(options) {
       // A resumed bot asks for the time its ORIGINAL grant has left, because
       // `expiresAt` is the persisted deadline, not a fresh one.
       const token = auth.createSessionToken(account, {
-        ttlMs: deadlineMs - now() + CONTROLLED_DRONE_CLEANUP_MS + DEADLINE_DOCK_GRACE_MS + SESSION_TEARDOWN_MARGIN_MS,
+        ttlMs: deadlineMs - now() + CONTROLLED_DRONE_CLEANUP_MS * (record.operationRole === "COMMAND" ? 2 : 1) + DEADLINE_DOCK_GRACE_MS + SESSION_TEARDOWN_MARGIN_MS,
       });
       const tokenPayload =
         typeof auth.verifySessionToken === "function" ? auth.verifySessionToken(token) : null;
@@ -1081,7 +1083,25 @@ function createBotHost(options) {
         if (record.finalized || record.windingDown) {
           return;
         }
-        void requestGracefulStop(record, true).catch(logError);
+        if (record.operationID) {
+          // MCC must enter Stop while every pilot is still owned. Independent
+          // deadline finalization would strand the operation and its leases.
+          void Promise.resolve().then(() => {
+            if (typeof options.onOperationDeadline !== "function") throw new Error("Operation deadline coordination is unavailable.");
+            return options.onOperationDeadline(record.operationID);
+          }).catch(async error => {
+            if (!record.finalized) {
+              await prepareOperationStop(record.botID, record.accountID, record.operationID);
+              if (record.finalized || claims.get(record.characterID) !== record.botID) return;
+              record.status = "paused";
+              record.phase = "Operation deadline blocked";
+              record.why = error?.message || "Operation deadline coordination failed.";
+              record.stopBlocked = true;
+              persistRoster();
+            }
+            logError(error);
+          });
+        } else void requestGracefulStop(record, true).catch(logError);
       }, remainingMs);
       if (typeof record.deadlineTimer.unref === "function") {
         record.deadlineTimer.unref();
@@ -1148,7 +1168,7 @@ function createBotHost(options) {
     try { return await pending; } finally { record.prepareParkingPromise = null; }
   }
 
-  async function parkOperationMember(botID, accountID, operationID, policy) {
+  async function parkOperationMember(botID, accountID, operationID, policy, cause = "manual") {
     const record = operationRecord(botID, accountID, operationID);
     if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
     if (record.parkingPromise) return record.parkingPromise;
@@ -1161,7 +1181,9 @@ function createBotHost(options) {
         record.parking = { state: "PARKED", reason: null };
         persistRoster();
         // The existing graceful Stop remains the sole release authority.
-        return await requestGracefulStop(record, false);
+        const result = await requestGracefulStop(record, cause === "deadline");
+        return cause !== "deadline" || result.ok && record.parking?.state === "PARKED" ? result : {
+          ok: false, code: "PARKING_FAILED", message: record.parking?.reason || result.message || "Deadline docking was not confirmed." };
       } catch (error) {
         const reason = error?.message || "Parking could not be confirmed.";
         record.status = "paused";
@@ -1175,6 +1197,16 @@ function createBotHost(options) {
     })();
     record.parkingPromise = pending;
     try { return await pending; } finally { record.parkingPromise = null; }
+  }
+
+  async function endOperationDeadline(botID, accountID, operationID) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.parking?.state !== "READY") return { ok: false, code: "PARKING_NOT_SETTLED", message: "Settle this member before deadline docking." };
+    record.parking = { state: "PARKING", reason: null };
+    const result = await requestGracefulStop(record, true);
+    return result.ok && record.parking?.state === "PARKED" ? result : { ok: false,
+      code: "PARKING_FAILED", message: record.parking?.reason || result.message || "Deadline docking was not confirmed." };
   }
 
   async function extendOperationGrant() {
@@ -1516,6 +1548,7 @@ function createBotHost(options) {
     extendOperationGrant,
     prepareOperationStop,
     parkOperationMember,
+    endOperationDeadline,
     listAll,
     operationForClaim,
     list,

@@ -702,8 +702,8 @@ function operationSiteTravel(obs: ScriptObservation, inputMem: MacroMemory, fami
  */
 function operationTravelToBelt(obs: ScriptObservation, mem: MacroMemory): MacroTick | null {
   const operation = obs.miningOperation ?? null;
-  if (operation === null || operation.role !== "HAULER") return null;
-  const target = operation.logisticsTarget ?? operation.currentTarget;
+  if (operation === null || !["HAULER", "COMMAND"].includes(operation.role)) return null;
+  const target = operation.role === "HAULER" ? operation.logisticsTarget ?? operation.currentTarget : operation.currentTarget;
   if (target === null) {
     return tick(WAIT, "Waiting for the operation to choose its next target.", "Waiting for target", ACTING, false, mem);
   }
@@ -712,6 +712,17 @@ function operationTravelToBelt(obs: ScriptObservation, mem: MacroMemory): MacroT
       kind: "blocked",
       reason: "Ore-anomaly hauling needs an operation-aware scanner travel block; v0.1 only launches HAULER_SERVICE on belts.",
     });
+  }
+  // Arrival is not a departure. In particular, a support ship's productive
+  // flight must not make this helper request relocation on the next tick.
+  // Only a positive same-system exact-belt observation bypasses settlement.
+  const current = obs.snapshot;
+  if (obs.inSpace === true && obs.inWarp === false && obs.flightStatus?.solarSystemID === target.systemID &&
+      current?.solarSystemID === target.systemID && current.ship?.geometryAvailable === true &&
+      current.shipID === current.ship.itemID && obs.flightStatus.shipID === current.shipID) {
+    const arrivedBelt = current.entities.find(entity => /belt/i.test(entity.name ?? "") && entity.name === target.targetName);
+    if (arrivedBelt?.geometryAvailable === true && beltTravelStep(arrivedBelt, measureSpace(current)) === "arrive")
+      return tick(WAIT, operation.logisticsTarget === null ? "Caught up with the fleet." : "At the draining target.", "Arrived", { kind: "done" });
   }
   const recall = recallBeforeLeaving(obs, mem, "Following the mining operation", null);
   if (recall !== null) return recall;
@@ -1202,6 +1213,19 @@ function fleetMineWithResources(step: MacroStep, obs: ScriptObservation, mem: Ma
   return { ...result, nextMem: { ...next, ...result.nextMem, fleetMoveTargetID: null, fleetMoveAttempts: 0 } };
 }
 
+const miningSupport: MacroDecider = (_step, obs, mem) => {
+  const operation = obs.miningOperation;
+  if (operation?.role !== "COMMAND" || !operation.support) return tick(WAIT, "A Standard COMMAND support assignment is required.", "Support unavailable", { kind: "blocked", reason: "COMMAND_SUPPORT_ASSIGNMENT_REQUIRED" });
+  const target = operation.currentTarget;
+  if (!target) return tick({ kind: "maintainMiningSupport", relocating: true }, "Assembling the support fleet while miners select the shared target.", "Support assembly", ACTING, false, mem);
+  const arrival = target.targetType === "BELT" ? operationTravelToBelt(obs, mem) : operationSiteTravel(obs, mem, target.targetType as SiteFamily);
+  if (arrival?.outcome.kind === "done") return tick({ kind: "maintainMiningSupport", relocating: false }, "Maintaining support at the operation's owned target.", "Mining support", ACTING, false, {});
+  const mobility = obs.snapshot?.ship?.coreMobilityFuel?.mobility;
+  if (obs.miningSupportWork?.readyForRelocation !== true || mobility?.movement.verdict !== "unrestricted" || mobility.warp.verdict !== "unrestricted")
+    return tick({ kind: "maintainMiningSupport", relocating: true }, "Settling support before following the owned target.", "Support relocation settlement", ACTING, false, mem);
+  // Positive support cleanup precedes the existing exact-target travel path.
+  return arrival ?? tick(WAIT, "The owned target cannot be resolved.", "Support target unavailable", ACTING, false, mem);
+};
 
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const operationTick = operationMineAtTarget(step, obs, mem);
@@ -6234,6 +6258,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "mine-at-belt": mineAtBelt,
   "fleet-mine": fleetMine,
   "join-support-fleet": joinSupportFleet,
+  "mining-support": miningSupport,
   "deliver-ore": deliverOre,
   "travel-to-station": travelToStation,
   "defend-with-drones": defendWithDrones,

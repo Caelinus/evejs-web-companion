@@ -113,6 +113,63 @@ test("fresh covered empty-belt evidence still depletes, and classic mining keeps
     }
   }
 });
+test("MCC PAUSE settles miners; explicit FALLBACK uses ordinary mining; STOP uses the operation path", () => {
+  const base = observation(), op = assignment();
+  const obs = { ...base, flightStatus: decodeFlightStatus({ inSpace: true, docked: false, shipID: 1002, solarSystemID: 30000142 }),
+    snapshot: { ...base.snapshot!, entities: [...base.snapshot!.entities, { ...base.snapshot!.entities[0]!, characterID: null, kind: "celestial" as const, itemID: 999,
+      name: "Owned belt", position: origin }] } };
+  const paused = { ...obs, miningOperation: { ...op, supportPolicy: { mode: "PAUSE" as const, reason: "recovery" } },
+    snapshot: { ...obs.snapshot!, ship: { ...obs.snapshot!.ship!, activeModuleIDs: [42] } } };
+  assert.equal(mine(paused).action.kind, "deactivate");
+  assert.equal(mine({ ...obs, miningOperation: { ...op, supportPolicy: { mode: "FALLBACK", reason: "loss" } } }).nextMem["supportFallback"], true);
+  const stop = decideScriptAction(script, { ...obs, miningOperation: { ...op, supportPolicy: { mode: "STOP", reason: "loss" } } }, initialMemory(script), SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(stop.action.kind, "stopMiningSupportOperation");
+});
+test("COMMAND target travel requires settlement AND fresh movement/warp permission", () => {
+  const obs = observation(), op = assignment("COMMAND");
+  const belt = { ...obs.snapshot!.entities[0]!, kind: "celestial" as const, characterID: null, itemID: 999, name: "Owned belt", position: { x: 500000, y: 0, z: 0 } };
+  const commandStep: MacroStep = { id: "support", kind: "macro", macro: "mining-support", args: {} };
+  const decide = (value: ScriptObservation) => SCRIPT_MACROS["mining-support"](commandStep, value, {}, {});
+  const travelling = { ...obs, flightStatus: decodeFlightStatus({ inSpace: true, docked: false, shipID: 1002, solarSystemID: 30000142 }),
+    miningOperation: op, snapshot: { ...obs.snapshot!, entities: [...obs.snapshot!.entities, belt] } };
+  assert.equal(decide(travelling).action.kind, "maintainMiningSupport");
+  const settled = { ...travelling, miningSupportWork: { readyForRelocation: true, phase: "settled", reason: null } };
+  assert.equal(decide(settled).action.kind, "warp");
+  const restricted = { ...settled, snapshot: { ...settled.snapshot!, ship: { ...settled.snapshot!.ship!, coreMobilityFuel: null } } };
+  assert.equal(decide(restricted).action.kind, "maintainMiningSupport");
+});
+
+test("COMMAND already at its owned belt keeps mining drones while a changed target settles them", () => {
+  const base = observation();
+  const belt = { ...base.snapshot!.entities[0]!, kind: "celestial" as const, characterID: null,
+    itemID: 999, name: "Owned belt", position: origin };
+  const drone = { itemID: 201, typeID: 10250, name: null, activity: "mining", targetID: 2001,
+    controlled: true, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const droneEntity = { ...base.snapshot!.entities[0]!, itemID: 201, typeID: 10250,
+    kind: "drone" as const, controllerID: 1002, position: origin };
+  const obs: ScriptObservation = { ...base, dronesOut: true, miningOperation: assignment("COMMAND"),
+    flightStatus: decodeFlightStatus({ inSpace: true, docked: false, shipID: 1002, solarSystemID: 30000142 }),
+    miningDrones: { bay: [], out: [drone], maxActive: 5, roles: { 10250: "mining" } },
+    snapshot: { ...base.snapshot!, entities: [...base.snapshot!.entities, belt, droneEntity],
+      ship: { ...base.snapshot!.ship!, coreMobilityFuel: null } } };
+  const command: MacroStep = { id: "support", kind: "macro", macro: "mining-support", args: {} };
+  const decide = (value: ScriptObservation, memory: MacroMemory = {}) => SCRIPT_MACROS["mining-support"](command, value, memory, {});
+  let memory: MacroMemory = {};
+  for (let i = 0; i < 3; i++) {
+    const result = decide(obs, memory);
+    assert.deepEqual(result.action, { kind: "maintainMiningSupport", relocating: false });
+    memory = result.nextMem;
+  }
+  for (const changed of [
+    { ...obs, snapshot: { ...obs.snapshot!, entities: [...base.snapshot!.entities, droneEntity, { ...belt, position: { x: 500000, y: 0, z: 0 } }] } },
+    { ...obs, flightStatus: decodeFlightStatus({ inSpace: true, docked: false, shipID: 1002, solarSystemID: 30000143 }) },
+    { ...obs, snapshot: { ...obs.snapshot!, ship: { ...obs.snapshot!.ship!, geometryAvailable: false } } },
+    { ...obs, snapshot: { ...obs.snapshot!, entities: [...base.snapshot!.entities, droneEntity, { ...belt, geometryAvailable: false }] } },
+    { ...obs, flightStatus: decodeFlightStatus({ inSpace: true, docked: false, shipID: 1003, solarSystemID: 30000142 }) },
+    { ...obs, snapshot: null },
+  ]) assert.deepEqual(decide(changed).action, { kind: "maintainMiningSupport", relocating: true });
+});
+
 test("Fleet Miner is an additive valid script; selected support and until are required", () => {
   assert.equal(decodeScriptText(JSON.stringify(script)).ok, true);
   for (const invalid of [{ ...step, args: {} }, { ...step, until: undefined }]) assert.equal(decodeScriptText(JSON.stringify({ ...script, program: [invalid] })).ok, false);

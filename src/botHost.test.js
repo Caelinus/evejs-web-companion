@@ -316,6 +316,83 @@ test("the approved runtime deadline stops, logs out, and releases the character 
   assert.ok(log.some(([name]) => name === "logout"));
 });
 
+test("operation expiry delegates before individual wind-down or ownership release", async () => {
+  const log = [], deadlines = [], calls = [];
+  const host = makeHost({ log, onOperationDeadline: async id => { calls.push(id); },
+    setDeadlineTimeout(callback) { deadlines.push(callback); return { unref() {} }; }, clearDeadlineTimeout() {} });
+  const started = await host.start({ ...START, operationID: "operation", operationRole: "COMMAND" });
+  deadlines[0](); await settle();
+  assert.deepEqual(calls, ["operation"]);
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout" || name === "prepareHostedBotStop"), false);
+  await host.stop(started.bot.botID, ACCOUNT.accountID);
+});
+
+test("operation expiry coordination failure settles the loop and retains pilot control", async () => {
+  const log = [], deadlines = [];
+  const host = makeHost({ log, loadStack: makeFakeStack(log, flow => ({ ...flow,
+    async prepareCustomBotParking() { this.stopCustomBot(); } })),
+    onOperationDeadline: async () => { throw new Error("definition unavailable"); },
+    setDeadlineTimeout(callback) { deadlines.push(callback); return { unref() {} }; }, clearDeadlineTimeout() {} });
+  const started = await host.start({ ...START, operationID: "operation", operationRole: "COMMAND" });
+  deadlines[0](); await settle();
+  const bot = host.list(ACCOUNT.accountID)[0];
+  assert.equal(bot.phase, "Operation deadline blocked");
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  assert.ok(log.some(([name]) => name === "stopCustomBot"));
+  await host.stop(started.bot.botID, ACCOUNT.accountID);
+});
+
+test("settled operation deadline docks through the existing host owner and records Parking", async () => {
+  const log = [];
+  const host = makeHost({ log, loadStack: makeFakeStack(log, (flow, store) => ({ ...flow,
+    async prepareCustomBotParking() { this.stopCustomBot(); },
+    async loadFlightStatus() { store._set({ flight: { status: { docked: true } } }); }
+  })) });
+  const started = await host.start({ ...START, operationID: "operation", operationRole: "COMMAND" });
+  assert.equal((await host.endOperationDeadline(started.bot.botID, ACCOUNT.accountID, "operation")).ok, false);
+  assert.equal((await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "operation")).ok, true);
+  assert.equal((await host.endOperationDeadline(started.bot.botID, ACCOUNT.accountID, "operation")).ok, true);
+  const bot = host.list(ACCOUNT.accountID)[0];
+  assert.equal(bot.parking.state, "PARKED");
+  assert.match(bot.why, /approved run time ended/);
+  assert.equal(host.claimedBy(START.characterID), null);
+});
+
+test("configured deadline Parking cannot turn unconfirmed final docking into success", async () => {
+  const log = [];
+  const host = makeHost({ log, loadStack: makeFakeStack(log, flow => ({ ...flow,
+    async prepareCustomBotParking() { this.stopCustomBot(); },
+    async parkCustomBot() { /* final flight read still proves undocked */ }
+  })) });
+  const started = await host.start({ ...START, operationID: "operation", operationRole: "COMMAND" });
+  await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "operation");
+  const result = await host.parkOperationMember(started.bot.botID, ACCOUNT.accountID, "operation",
+    { mode: "RETURN_HOME_DOCK" }, "deadline");
+  assert.equal(result.ok, false);
+  assert.equal(host.list(ACCOUNT.accountID)[0].parking.state, "PARKING_FAILED");
+});
+
+test("callback failure cannot overwrite a concurrent manual finalization", async () => {
+  const log = [], deadlines = [];
+  let finishPrepare, entered;
+  const gate = new Promise(resolve => { finishPrepare = resolve; });
+  const preparing = new Promise(resolve => { entered = resolve; });
+  const host = makeHost({ log, loadStack: makeFakeStack(log, flow => ({ ...flow,
+    async prepareCustomBotParking() { this.stopCustomBot(); entered(); await gate; }
+  })), onOperationDeadline: async () => { throw new Error("definition unavailable"); },
+    setDeadlineTimeout(callback) { deadlines.push(callback); return { unref() {} }; }, clearDeadlineTimeout() {} });
+  const started = await host.start({ ...START, operationID: "operation", operationRole: "COMMAND" });
+  deadlines[0](); await preparing;
+  await host.stop(started.bot.botID, ACCOUNT.accountID);
+  finishPrepare(); await settle();
+  const bot = host.list(ACCOUNT.accountID)[0];
+  assert.equal(bot.status, "stopped");
+  assert.notEqual(bot.phase, "Operation deadline blocked");
+  assert.equal(host.claimedBy(START.characterID), null);
+});
+
 // ── The deadline docks before it logs off ───────────────────────────────────
 // A bot whose run time ran out used to go offline wherever it was. These pin
 // the wind-down: fly in, dock, THEN release the pilot, bounded by a grace.

@@ -64,6 +64,7 @@ import {
 // ─── The one action a tick emits ─────────────────────────────────────────────
 
 export type ScriptAction =
+  | { readonly kind: "maintainMiningSupport"; readonly relocating: boolean }
   | { readonly kind: "stopMiningSupportOperation" }
   | { readonly kind: "wait" }
   | { readonly kind: "undock" }
@@ -1071,6 +1072,8 @@ export function decideScriptAction(
       status: "running", pauseReason: null,
       phase: "Stopping operation", why: "Operation Stop is settling this pilot; new work is disabled." };
   }
+  if (obs.miningOperation?.supportPolicy?.mode === "STOP") return { action: { kind: "stopMiningSupportOperation" }, memory: mem, stepPath: null, interruptID: null,
+    status: "running", pauseReason: null, phase: "Stopping for support loss", why: obs.miningOperation.supportPolicy.reason ?? "Applying the configured support-loss policy." };
   const base = decideScriptCore(script, obs, mem, registry, travelHome);
   const operationHeld = obs.miningOperationRequired === true &&
     (obs.miningOperation == null ||
@@ -1123,6 +1126,11 @@ export function decideScriptAction(
   }
   if (obs.inWarp === true) return base;
   const activeMacro = activeMacroID(script, mem);
+  // This action delegates both work and relocation settlement to the reusable
+  // support controller. The outer flight lacks its target/order memory and
+  // must not recall a flight the inner owner just launched. Terminal/paused
+  // cleanup above, latched watches and actual travel still retain this gate.
+  if (activeMacro === "mining-support" && base.action.kind === "maintainMiningSupport" && base.memory.latched === null) return base;
   const mining = ["mine-at-belt", "fleet-mine"].includes(activeMacro ?? "");
   const state = obs.miningDrones;
   const compatible = (state?.bay ?? []).some((stack) => state?.roles[stack.typeID] === "mining") ||

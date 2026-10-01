@@ -13,6 +13,27 @@ const definition = {
 const miner = { role: "MINER", routineMode: "STANDARD", automationID: "" };
 const hauler = { role: "HAULER", routineMode: "STANDARD", automationID: "" };
 
+test("support-bound hauler profiles reconcile the selected fleet with explicit fleet permission", () => {
+  for (const [family, mode] of [["BELT", "nearest"], ["ORE_ANOMALY", "site"], ["ICE", "ice-site"]]) {
+    const def = { ...definition, area: { targetClasses: [family] }, support: { characterID: 17, fleetPolicy: "MANAGED" },
+      members: [{ characterID: 17, characterName: "Support" }] };
+    const profile = buildStandardProfile(def, hauler);
+    assert.match(profile.scriptID, /\.support-bound$/);
+    const decoded = decodeScriptValue(profile.doc);
+    assert.ok(decoded.ok, JSON.stringify(decoded));
+    assert.ok(analyzeBotRunPolicy(decoded.doc).riskClasses.includes("fleet"));
+    const body = profile.doc.program[0].body;
+    assert.equal(body[0].macro, "join-support-fleet");
+    assert.equal(body[0].args.support.charID, 17);
+    assert.equal(body.find((row: { id: string }) => row.id === "hold-check").else.find((row: { id: string }) => row.id === "travel").args.belt.belt.mode, mode);
+    const legacy = buildStandardProfile({ ...def, support: undefined }, hauler);
+    assert.equal(legacy.doc.program[0].body[0].kind, "branch");
+    const legacyDecoded = decodeScriptValue(legacy.doc);
+    assert.ok(legacyDecoded.ok);
+    assert.ok(!analyzeBotRunPolicy(legacyDecoded.doc).riskClasses.includes("fleet"));
+  }
+});
+
 test("versioned standard BELT profiles are valid runner docs, independent of saved bots", () => {
   const mining = buildStandardProfile(definition, miner);
   const hauling = buildStandardProfile(definition, hauler);

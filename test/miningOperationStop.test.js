@@ -35,10 +35,55 @@ function harness(mode = "RETURN_HOME_DOCK") {
       return { ok: true };
     },
     async stop(id) { events.push(["gracefulStop", id]); rows.find(row => row.botID === id).endedAt = "now"; return { ok: true }; },
+    async endOperationDeadline(id) { events.push(["deadlineDock", id]); rows.find(row => row.botID === id).endedAt = "now"; return { ok: true }; },
   };
   return { defs, board, operations, rows, events, prepareFailures, parkFailures, botHost, stopper: createMiningOperationStopper({ operations, botHost }) };
 }
 const turn = () => new Promise(resolve => setImmediate(resolve));
+
+test("first deadline and concurrent manual Stop share operation settlement before release", async () => {
+  const h = harness("STAY_IN_PLACE");
+  const target = h.operations.runtimeFor("A").currentTarget;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const prepare = h.botHost.prepareOperationStop;
+  h.botHost.prepareOperationStop = async id => { await gate; return prepare(id); };
+  const expired = h.stopper.stop(h.defs[0], { cause: "deadline" });
+  assert.equal(h.stopper.stop(h.defs[0], { cause: "deadline" }), expired);
+  assert.equal(h.stopper.stop(h.defs[0]), expired);
+  assert.equal(h.operations.assignment("A", 1).stopRequested, true);
+  await turn();
+  assert.ok(h.rows.slice(0, 3).every(row => row.endedAt === null));
+  assert.equal(h.board.get(target.targetKey).claimedByOperationID, "A");
+  release(); await expired;
+  assert.deepEqual(h.events.filter(row => row[0] === "deadlineDock"), [1, 2, 3].map(n => ["deadlineDock", `bot-${n}`]));
+  assert.equal(h.operations.runtimeFor("A").state, "STOPPED");
+  assert.equal(h.board.get(target.targetKey).state, "AVAILABLE");
+  assert.ok(h.rows.slice(3).every(row => row.endedAt === null));
+});
+
+test("deadline keeps configured Parking and passes expiry through the host release owner", async () => {
+  const h = harness("RETURN_HOME_UNLOAD_DOCK");
+  const park = h.botHost.parkOperationMember;
+  h.botHost.parkOperationMember = async (...args) => {
+    assert.equal(args[4], "deadline");
+    return park(...args);
+  };
+  await h.stopper.stop(h.defs[0], { cause: "deadline" });
+  assert.equal(h.operations.runtimeFor("A").state, "STOPPED");
+  assert.equal(h.events.filter(row => row[0] === "park").length, 3);
+});
+
+test("blocked deadline member retains ownership and target lease until confirmed settlement", async () => {
+  const h = harness("STAY_IN_PLACE");
+  h.prepareFailures.add("bot-1");
+  const key = h.operations.runtimeFor("A").currentTarget.targetKey;
+  await h.stopper.stop(h.defs[0], { cause: "deadline" });
+  assert.equal(h.operations.runtimeFor("A").state, "PARKING_FAILED");
+  assert.equal(h.rows[0].endedAt, null);
+  assert.equal(h.board.get(key).claimedByOperationID, "A");
+  assert.equal(h.events.filter(row => row[0] === "deadlineDock").length, 2);
+});
 
 test("Stay preserves scoped graceful Stop and repeated Stop is idempotent", async () => {
   const h = harness("STAY_IN_PLACE");

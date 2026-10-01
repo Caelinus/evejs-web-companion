@@ -5,9 +5,10 @@ const fs = require("fs");
 const path = require("path");
 const staticData = require("./staticData");
 const { normalizePolicies } = require("./miningOperationPolicies");
+const { normalizeSupport } = require("./miningOperationSupport");
 
 const STORE_FILENAME = "mining-operations.json";
-const ROLES = new Set(["MINER", "HAULER", "DEFENDER"]);
+const ROLES = new Set(["MINER", "HAULER", "DEFENDER", "COMMAND"]);
 const REACH = new Set(["CURRENT_SYSTEM", "CURRENT_AND_ADJACENT"]);
 const TARGET_CLASSES = new Set(["BELT", "ORE_ANOMALY", "ICE", "GAS"]);
 const UNLOAD = new Set(["HAULER_SERVICE", "SELF_UNLOAD"]);
@@ -123,6 +124,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     throw fail("MINING_OPERATION_INVALID", "Self unload does not use HAULER members.");
   }
   const stamp = now();
+  const support = normalizeSupport(value.support, members);
   return {
     operationID: existing?.operationID || cleanText(value.operationID, 160) || uuid(),
     name,
@@ -136,6 +138,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     unloadPolicy,
     unloadDestination,
     policies: normalizePolicies(value.policies, resolveStation, resolveSystem),
+    ...(support ? { support } : {}),
     members,
     createdAt: existing?.createdAt || stamp,
     updatedAt: stamp,

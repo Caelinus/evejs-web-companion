@@ -5030,6 +5030,10 @@ export async function readMiningOperationSupportContext(options: ApiOptions = {}
   return { assignment: data.assignment as unknown as MiningOperationAssignment | null,
     fleets: data.fleets as unknown as import("../nav/miningSupportFleet.ts").MiningSupportFleetObservation[] };
 }
+export async function reportMiningOperationSupport(value: { state: "READY" | "DEGRADED" | "RECOVERY" | "BLOCKED";
+  core: "active" | "inactive" | "unknown"; reason: string | null; collection: string | null }, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/support-status", value, options);
+}
 export async function stopMiningOperationForSupport(options: ApiOptions = {}, reason?: "emergency-health-floor"): Promise<void> {
   await postJson("/api/mining-operations/support-stop", reason ? { reason } : {}, options);
 }
@@ -5085,12 +5089,13 @@ export interface MiningOperationMemberDefinition {
   readonly characterID: number;
   readonly characterName: string;
   readonly accountName: string;
-  readonly role: "MINER" | "HAULER" | "DEFENDER";
+  readonly role: "MINER" | "HAULER" | "DEFENDER" | "COMMAND";
   readonly routineMode?: "STANDARD" | "CUSTOM";
   readonly automationID: string;
 }
 
 export interface MiningOperationDefinition {
+  readonly support?: import("../nav/scriptConditions.ts").MiningSupportOptions;
   readonly policies?: {
     readonly version: 1;
     readonly parking: {

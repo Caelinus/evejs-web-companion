@@ -94,6 +94,11 @@
   const parkingSystemName = (destination: NonNullable<Parking["destination"]>) => "kind" in destination && destination.kind === "structure" ? destination.solarSystemName : (destination as { systemName: string }).systemName;
   const stopLabels: Record<Parking["mode"], string> = { STAY_IN_PLACE: "Stay in place", RETURN_HOME_DOCK: "Return home and dock", RETURN_HOME_UNLOAD_DOCK: "Return home, unload and dock" };
   let members = $state<DraftMember[]>([]);
+  const defaultSupport = () => ({ fleetPolicy: "EXISTING_ONLY", maintainBursts: true, useIndustrialCore: false,
+    coreRequirement: "continueWithoutCore", enableCompression: false, selfMining: false, tractor: false,
+    collection: "TRACTOR_ONLY", compressCollectedOre: false, supportLoss: "PAUSE" } as Omit<NonNullable<MiningOperationDefinition["support"]>, "version" | "characterID">);
+  let support = $state(defaultSupport());
+  const commands = $derived(members.filter(member => member.role === "COMMAND"));
   let seedSquadID = $state("");
   let accountLookup = $state("");
   let roster = $state<OperationPilotChoice[]>(loadKnownCharacters().map(({ accountName, characterID, characterName }) => ({ accountName, characterID, characterName })));
@@ -107,6 +112,7 @@
 
   function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
   function profileName(member: DraftMember, family: string = targetFamily, policy: string = unloadPolicy): string {
+    if (member.role === "COMMAND") return "Mining Command / Support · v1";
     if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
     const label = family === "BELT" ? "Belt" : family === "ORE_ANOMALY" ? "Ore Anomaly" : family === "ICE" ? "Ice" : null;
     if (policy === "SELF_UNLOAD") return label && member.role === "MINER" ? `${label} Miner / Self Unload · v1` : "No Standard Self-Unload profile for this role";
@@ -337,6 +343,7 @@
     unloadCorporationID = 0;
     destinationError = null;
     members = [];
+    support = defaultSupport();
     stopMode = "STAY_IN_PLACE";
     parkingStation = null;
     parkingQuery = "";
@@ -370,6 +377,7 @@
     unloadCorporationID = definition.unloadDestination?.corporationID ?? 0;
     destinationError = null;
     members = definition.members.map((member) => ({ ...member, routineMode: modeOf(member) }));
+    support = definition.support ? { ...definition.support } : defaultSupport();
     stopMode = definition.policies?.parking.mode ?? "STAY_IN_PLACE";
     parkingStation = definition.policies?.parking.destination ?? null;
     parkingQuery = parkingStation ? parkingName(parkingStation) : "";
@@ -401,6 +409,7 @@
   }
 
   function patchMember(characterID: number, patch: Partial<DraftMember>): void {
+    if (patch.role === "COMMAND") patch = { ...patch, routineMode: "STANDARD", automationID: "" };
     members = members.map((member) => member.characterID === characterID ? { ...member, ...patch } : member);
   }
 
@@ -411,6 +420,7 @@
   async function save(): Promise<void> {
     if (disconnected) return;
     if (!anchorValid) { error = anchorError ?? "Choose a known solar system."; return; }
+    if (commands.length > 1) { error = "Choose exactly one Command / Support pilot."; return; }
     if (stopMode !== "STAY_IN_PLACE" && (!parkingStation || parkingError)) { error = parkingError || "Choose a parking destination."; return; }
     busy = "save";
     error = null;
@@ -433,6 +443,7 @@
             ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision, corporationID: unloadDivision === null ? null : unloadCorporationID }
             : null,
         members,
+        ...(commands.length === 1 ? { support: { ...support, version: 1, characterID: commands[0]!.characterID } } : {}),
       }, opts());
       editing = false;
       await refresh();
@@ -631,6 +642,22 @@
       </div>
       {#if members.length === 0}<p class="muted">Select at least one miner.</p>{/if}
       {#if members.length > 0}
+        {#if commands.length > 0}
+          <fieldset>
+            <legend>Command / Support</legend>
+            <label>Fleet policy <select bind:value={support.fleetPolicy}><option value="EXISTING_ONLY">Use existing fleet</option><option value="MANAGED">Manage fleet membership</option></select></label>
+            <p>Support-bound miners require an observed mining burst envelope. The Command pilot maintains fitted bursts.</p>
+            <label><input type="checkbox" bind:checked={support.useIndustrialCore} /> Use Industrial Core</label>
+            <label>Core fuel policy <select bind:value={support.coreRequirement}><option value="continueWithoutCore">Continue without Core, show degraded status</option><option value="requireCore">Require active Core</option></select></label>
+            <label><input type="checkbox" bind:checked={support.enableCompression} /> Maintain compression service</label>
+            <label><input type="checkbox" bind:checked={support.selfMining} /> Support self-mining</label>
+            <label><input type="checkbox" bind:checked={support.tractor} /> Tractor operation-owned containers</label>
+            <label>Collection <select bind:value={support.collection}><option value="TRACTOR_ONLY">Tractor only</option><option value="TRACTOR_AND_COLLECT">Tractor and collect ore</option></select></label>
+            <label><input type="checkbox" bind:checked={support.compressCollectedOre} /> Compress collected ore</label>
+            <label>Support loss <select bind:value={support.supportLoss}><option value="PAUSE">Pause productive mining</option><option value="CONTINUE_UNSUPPORTED">Continue ordinary mining</option><option value="STOP">Stop operation through Parking policy</option></select></label>
+            <p>Stale or unavailable support first enters a 30-second recovery interval. Parking uses the operation's selected Stop policy.</p>
+          </fieldset>
+        {/if}
         <table>
           <thead><tr><th>Pilot</th><th>Role</th><th>Routine mode</th><th>Effective profile / routine</th></tr></thead>
           <tbody>
@@ -640,9 +667,10 @@
                 <td><select value={member.role} onchange={(event) => patchMember(member.characterID, { role: event.currentTarget.value as DraftMember["role"], automationID: "" })}>
                   <option value="MINER">Miner</option>
                   <option value="HAULER">Hauler</option>
+                  <option value="COMMAND">Command / Support</option>
                   <option value="DEFENDER">Defender — execution not supported</option>
                 </select></td>
-                <td>{#if member.role === "DEFENDER"}Not yet executable{:else}<select value={modeOf(member)} onchange={(event) => patchMember(member.characterID, { routineMode: event.currentTarget.value as "STANDARD" | "CUSTOM", automationID: "" })}>
+                <td>{#if member.role === "COMMAND"}Standard / Automatic{:else if member.role === "DEFENDER"}Not yet executable{:else}<select value={modeOf(member)} onchange={(event) => patchMember(member.characterID, { routineMode: event.currentTarget.value as "STANDARD" | "CUSTOM", automationID: "" })}>
                   <option value="STANDARD">Standard / Automatic</option>
                   <option value="CUSTOM">Custom / Advanced</option>
                 </select>{/if}</td>

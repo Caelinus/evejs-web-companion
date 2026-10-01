@@ -140,3 +140,82 @@ Collected provenance records exact scope, bay, item, type and quantity. Only a n
 `sourceEmpty` is a strict proof of the whole source being empty. Ore exhaustion in a mixed container never produces that proof or an emptied mark. The caller can pass the proved container ID to the tractor for safe release, or request normal settlement/handoff. There is no automatic unloading, destruction, generic cargo sweep or second logistics engine.
 
 Scene and module-reach authority now share one captured finite numeric simulation timestamp; missing clocks are not coerced to zero. This removes intermittent false incoherence while retaining fail-closed decoder matching.
+
+## Fleet Miner and MCC adapter
+
+`fleet-mine` is an additive normal script behavior. Its deterministic two-ball
+intersection combines the selected support envelope and every online fitted
+miner's observed effective reach. It prefers an already feasible resource,
+settles old mining/drone work before changing targets, and owns point movement
+until fresh geometry and measured STOP confirm arrival. Missing support or no
+intersection returns explicit unavailable/reposition-needed state. Ordinary
+`mine-at-belt` retains its existing behavior.
+
+MCC's Standard COMMAND `mining-support` macro owns one volatile work frame over
+the same normal support tick. The host supplies current owned member fleet
+reads; it adds no pilot registry or persisted fleet identity. Fleet assembly,
+exact operation-target travel, service maintenance and optional work remain
+under the existing runner. Stop requests use observed local settlement even
+after fleet loss, and full collection hands off its exact lease without an
+emptied mark. The tick guards receipt age, pilot, token and owned generation
+again immediately before dispatch. Burst deferred shutdown matches the own
+module/type and `moduleBonusWarfareLinkMining` effect, then requires final
+inactivity; acknowledgement or elapsed wall time cannot supply that proof.
+
+Support-bound Standard HAULER profiles run the public `join-support-fleet`
+block before ordinary logistics. It consumes the same member reconciler;
+outside a configured operation it uses EXISTING_ONLY. Foreign fleets are never
+left automatically. `fleet-mine` requests fleet/combat permission and the join
+block requests fleet permission. Advert application proof is correlated to
+pilot/run/action ID; an unknown response or an old result cannot authorize
+acceptance. Membership completion still requires a fresh roster read.
+
+MCC self-mining explicitly selects online fitted mining capability item IDs
+from each coherent support tick; ordinary callers keep their chosen subsets.
+Unknown capability/reach, changed scope, unsupported resource or failed
+activation remains a wait/settlement boundary. Offline active miners remain
+included in shutdown checks.
+
+The running COMMAND `maintainMiningSupport` action owns its internal drone
+flight, including relocation settlement. The outer script flight gate retains
+terminal, paused, latched-watch and actual travel cleanup. Exact-belt travel
+recognizes positively observed same-system arrival before requesting departure
+recall; a productive flight at that belt cannot itself trigger relocation.
+Unknown geometry or a changed destination still requires settlement.
+
+Farmer's shared `hostilesInReach` governs the fight-back watch, its ladder and
+the scripted mining flight. A positive unreachable-hostile observation does not
+borrow the ladder; a fight already in progress still performs its clear/return
+sequence. Off-step combat drones retain their block/watch owner until actual
+movement or settlement. Both `mine-at-belt` and `fleet-mine` are mining owners.
+Support's verified targeting range supplies an optional reachable-hostile ID
+observation to its inner mining engine, so its flight agrees with the same gate.
+The full scene and health safety are retained, and unrelated classic callers
+that omit this input keep their prior policy. Three clear observations and actual
+combat-drone return still precede mining relaunch.
+
+A locally empty Fleet Miner scene cannot deplete the shared belt while support
+is unavailable or the recipient is outside its required envelope. Even after
+coverage returns, empty-field evidence requires known geometry within 20km of
+the belt centre; surface arrival at a large belt is insufficient. This is a
+conservative observation boundary, not proof of visibility of every resource.
+Confirmed disconnected drone rows do not keep support relocation waiting;
+controlled, malformed or unreadable flight still requires settlement.
+
+The first owned member grant expiry starts the normal shared operation Stop
+before individual hosted ownership is released. Concurrent expiry/manual Stop
+requests share that settlement. Configured Parking runs after settlement; a
+deadline in Stay mode retains the ordinary hosted home/dock fallback. Target
+release waits for all members to settle without failures. Undocked terminal
+cleanup cannot prove PARKED. Unresolved ownership/custody remains blocked.
+
+Account-owned hosted observation additionally exposes a copied, bounded last
+support work diagnostic: position decision, self-mining evaluation/state/target,
+last action/dispatch outcome, drone retry state and up to 32 observed drone rows,
+tractor claim/order and collection state. Drone rows come from the same
+ship-scoped observation used by that decision; unreadable remains null.
+The separate fleet diagnostic retains the last reducer decision, up to 32
+invite records and the last call's outcome, fixed error code and HTTP status.
+It excludes private session scope and free-text call errors. Each snapshot has
+its own timestamp; neither ACK nor these passive diagnostics prove fresh
+membership, notification delivery or a control/session capability.
