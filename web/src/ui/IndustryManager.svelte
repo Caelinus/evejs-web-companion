@@ -577,6 +577,7 @@
       facilityID: from.facilityID ?? 0,
       activity: check.activity,
       runs: check.runs,
+      ...(check.decryptorTypeID !== null ? { decryptorTypeID: check.decryptorTypeID } : {}),
     });
     onOpen?.("industry", session.session.id);
   }

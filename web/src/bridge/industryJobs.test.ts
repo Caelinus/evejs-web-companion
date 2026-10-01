@@ -327,9 +327,18 @@ test("inventionCheck: a factory with no invention is refused, and reach is Scien
   assert.equal(sn.ok, true);
 });
 
-test("inventionCheck: a plan with a decryptor cannot be set up, as the Industry panel sends none", () => {
+test("inventionCheck: a planned decryptor goes with the job, one per run, and must be in the hangar too", () => {
   const parity = { typeID: 34204, name: "Parity Decryptor", probabilityMultiplier: 1.5, materialEfficiency: 1, timeEfficiency: -2, maxRuns: 3 };
-  const check = inventionCheck(inventionRow(1, parity), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5), { ...datacores(5), typeID: 34204 }] })]]), ONE_JUMP);
-  assert.equal(!check.ok && check.block, "needs-decryptor");
-  assert.match(installBlockWords(check as Extract<typeof check, { ok: false }>), /decryptor/);
+  const decryptors = (quantity: number) => ({ ...datacores(quantity), typeID: 34204 });
+  const check = inventionCheck(inventionRow(2, parity), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5), decryptors(2)] })]]), ONE_JUMP);
+  assert.equal(check.ok, true);
+  assert.equal(check.ok && check.decryptorTypeID, 34204);
+  assert.equal(check.ok && check.runs, 2);
+  // One short of a decryptor per run: not here yet.
+  const short = inventionCheck(inventionRow(2, parity), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5), decryptors(1)] })]]), ONE_JUMP);
+  assert.equal(!short.ok && short.block, "materials-elsewhere");
+  assert.match(installBlockWords(short as Extract<typeof short, { ok: false }>), /datacores and the decryptor/);
+  // Without a decryptor none is asked for, and none is named.
+  const plain = inventionCheck(inventionRow(2), [t1Copy(1, 5)], new Map([[1, pilot({ stock: [datacores(5)] })]]), ONE_JUMP);
+  assert.equal(plain.ok && plain.decryptorTypeID, null);
 });
