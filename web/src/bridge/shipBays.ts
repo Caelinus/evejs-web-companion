@@ -145,6 +145,30 @@ export function decodeShipBays(raw: JsonValue | undefined): readonly ShipBay[] {
   return bays;
 }
 
+/** Capacity/contents proof for automation; display's dropped/defaulted fields
+ * cannot establish empty or full. Read only the bays the caller needs. */
+export function decodeShipBaysChecked(raw: JsonValue | undefined): readonly ShipBay[] | null {
+  if (!Array.isArray(raw)) return null;
+  const bays = decodeShipBays(raw);
+  if (bays.length !== raw.length || new Set(bays.map(bay => bay.key)).size !== bays.length) return null;
+  const measurement = (value: JsonValue | undefined): number | null => {
+    if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : null;
+    if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/.test(value)) return null;
+    const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null;
+  };
+  for (let i = 0; i < bays.length; i++) {
+    const bay = bays[i]!, entry = asObject(raw[i]);
+    if (bay.present === null) return null;
+    if (bay.present === false) continue;
+    const capacity = asObject(entry.capacity);
+    if (bay.error !== null || measurement(capacity.capacity) === null || measurement(capacity.used) === null ||
+      !Array.isArray(entry.items) || bay.items === null || bay.items.length !== entry.items.length ||
+      !bay.items.every(row => Number.isSafeInteger(row.itemID) && row.itemID > 0 && Number.isSafeInteger(row.typeID) && row.typeID > 0 &&
+        Number.isSafeInteger(row.quantity) && row.quantity > 0)) return null;
+  }
+  return bays;
+}
+
 /** The bays a hull actually has — the only ones worth drawing a gauge for. */
 export function presentBays(bays: readonly ShipBay[]): readonly ShipBay[] {
   return bays.filter((bay) => bay.present === true);

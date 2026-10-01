@@ -528,7 +528,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       const movementMacro = activeMacroID(script, memory);
       const consumed = await travelAssist.beforeAction({
         enabled: travelAuthority && result.status === "running" && result.memory.latched === null &&
-          ["mine-at-belt", "loot-containers"].includes(movementMacro ?? ""),
+          ["mine-at-belt", "fleet-mine", "loot-containers"].includes(movementMacro ?? ""),
         scope: ownedTarget ? `${ownedTarget.targetKey}:${result.stepPath}` : null,
         action: result.action, snapshot: obs.snapshot ?? null, inWarp: obs.inWarp ?? null,
         docked: obs.docked ?? null, modules: obs.travelPropulsionModules ?? [], scrammed: obs.scrammed ?? null,

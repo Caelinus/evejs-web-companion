@@ -106,6 +106,10 @@ export function macroName(macro: MacroID): string {
       // one the player typed, or the scanner's ore sites — so the palette
       // name can no longer promise just a belt (see `beltPhrase` above).
       return "Mine at a belt or an ore site";
+    case "fleet-mine":
+      return "Fleet Miner";
+    case "join-support-fleet": return "Join the support fleet";
+      return "Mining Support";
     case "deliver-ore":
       return "Haul the ore home";
     case "defend-with-drones":
@@ -532,6 +536,14 @@ function targetPhrase(step: MacroStep): string {
 
 function macroPhrase(step: MacroStep): string {
   switch (step.macro) {
+    case "join-support-fleet": {
+      const support = step.args["support"];
+      return `Join ${support?.kind === "character" ? support.name ?? "the selected pilot's" : "the selected pilot's"} support fleet`;
+    }
+    case "fleet-mine": {
+      const support = step.args["support"];
+      return `Mine within ${support?.kind === "character" ? support.name ?? "the selected pilot's" : "a fleet pilot's"} support`;
+    }
     case "undock":
       return "Leave the station";
     case "mine-at-belt": {

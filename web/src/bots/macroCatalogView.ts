@@ -118,6 +118,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   pick: "Which rock first",
   into: "Unload into",
   ores: "Ore priority",
+  support: "Support pilot",
   // The drone boat's two overrides. Both say their unit or their choice in the
   // label, because both are things a player only reaches for when the block's
   // own answer looked wrong on screen.
@@ -174,6 +175,11 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "mining",
     "Warps to wherever you tell it — the nearest belt, a belt you name, or the scanner's ore sites — locks rocks, and runs your mining equipment. On a belt it moves belt to belt as each one runs dry; sent to the scanner's ore sites it tours those instead and never sits down on a belt at all. Follows an ore priority list when you set one.",
     "Somewhere to mine, and mining equipment fitted",
+  ),
+  "fleet-mine": entry(
+    "fleet-mine", "mining",
+    "Mines visible resources while staying within the selected fleet pilot's mining bursts. Moves only where both mining reach and support coverage are satisfied; waits when support is unavailable.",
+    "A joined fleet, a visible support pilot maintaining mining bursts, and mining equipment fitted",
   ),
   "deliver-ore": entry(
     "deliver-ore",
@@ -417,6 +423,9 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Waits for a fleet invitation and accepts it, so your other pilots can pull this one into their fleet. Finishes once you are in a fleet. The server asks before it goes through.",
     null,
   ),
+  "join-support-fleet": entry("join-support-fleet", "fleet",
+    "Joins the selected support pilot's fleet under the operation's managed policy. Waits for fresh membership and never leaves a different fleet. Outside an operation, checks existing membership without joining.",
+    "A selected support pilot and fresh fleet membership"),
   "join-advertised-fleet": entry(
     "join-advertised-fleet",
     "fleet",

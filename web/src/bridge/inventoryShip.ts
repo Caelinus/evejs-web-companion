@@ -150,6 +150,23 @@ export function decodeInventoryRows(result: JsonValue, volumes?: VolumeMap): Inv
   return rows;
 }
 
+/** Automation proof read: malformed or repeated rows are unknown, never empty. */
+export function decodeInventoryRowsChecked(result: JsonValue, volumes?: VolumeMap): InventoryItemRow[] | null {
+  const list = unwrapRowList(result);
+  if (!isListValue(list)) return null;
+  // The permissive decoder tolerates an absent inner list for display. That
+  // tolerance must not certify that a source container was emptied.
+  if (list !== result && typeof result === "object" && result !== null && !Array.isArray(result)) {
+    const raw = result as Record<string, JsonValue>;
+    if (raw.type === "objectex1" && (!Array.isArray(raw.header) || !Array.isArray(raw.header[1]) || raw.header[1].length !== 1)) return null;
+    if (raw.type === "object" && (!Array.isArray(raw.args) || raw.args.length !== 1)) return null;
+  }
+  const rows = decodeInventoryRows(result, volumes);
+  return rows.length === list.items.length && rows.every(row =>
+    Number.isSafeInteger(row.itemID) && row.itemID > 0 && Number.isSafeInteger(row.typeID) && row.typeID > 0 &&
+    Number.isSafeInteger(row.quantity) && row.quantity > 0) ? rows : null;
+}
+
 /** Decode invbroker.GetCapacity (util.KeyVal {capacity, used}); null if malformed. */
 export function decodeCapacity(result: JsonValue): CapacityInfo | null {
   if (!isKeyValValue(result)) {

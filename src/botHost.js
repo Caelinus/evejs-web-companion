@@ -1496,6 +1496,21 @@ function createBotHost(options) {
         fleet: flow.readMiningSupportFleet(botID), supportWork: flow.readMiningSupportWork?.() ?? null,
         fleetWork: flow.readMiningSupportFleetDiagnostic?.() ?? null });
     },
+    async readOperationFleets(operationID) {
+      const result = [];
+      for (const record of records.values()) {
+        const flow = record.flow, secret = record.claimSecret;
+        const current = () => record.operationID === operationID && !record.finalized && !record.recovering && !record.windingDown &&
+          flow && record.flow === flow && record.claimSecret === secret && claims.get(record.characterID) === record.botID;
+        if (!current()) continue;
+        try {
+          await flow.loadFleet();
+          const observed = flow.readMiningSupportFleet(record.botID);
+          if (current() && observed) result.push(observed);
+        } catch { /* missing authority cannot prove fleet disappearance */ }
+      }
+      return result;
+    },
     start,
     stop,
     extendOperationGrant,

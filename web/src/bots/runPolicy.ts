@@ -91,6 +91,8 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "travel-to-system": SAFE,
   "travel-to-belt": SAFE,
   "mine-at-belt": SAFE,
+  "fleet-mine": policy(["fleet", "combat"]),
+  "join-support-fleet": policy(["fleet"]),
   "deliver-ore": policy(["inventory"]),
   "defend-with-drones": policy(["combat"]),
   "find-distribution-agent": SAFE,

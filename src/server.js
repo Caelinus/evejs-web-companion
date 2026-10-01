@@ -2918,6 +2918,7 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
   }
   try {
     const flight = await readHeldFlight(held, req.webSessionID);
+    if (!requireExpectedInventoryFlight(res, body.expectedScope, flight.flight)) return;
     const expectedStructureID = flight.flight?.docked === true ? held.structureID : null;
     if (flight.flight?.docked === true && held.structureID) {
       await assertStructureService(held, req.webSessionID, held.structureID, 1);
@@ -2997,6 +2998,8 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     let dispatchError = null;
     const writeSpec = expectedStructureID
       ? { ...to.spec, expectedDockedLocationID: expectedStructureID } : to.spec;
+    if (body.expectedScope !== undefined && !requireExpectedInventoryFlight(res, body.expectedScope,
+      (await readHeldFlight(held, req.webSessionID)).flight)) { claimSettled = true; return; }
     try {
       if (present.length === 1 && hasQty) {
         outcome = await boundCall(
@@ -18203,6 +18206,30 @@ app.get("/api/bridge/mining/scan", requireAuth, async (req, res, next) => {
 // failure honest: the handler answers a refusal and a not-compressible item with
 // the SAME null, so a batch could not say which stack was which. The caller
 // re-reads its hold and judges by the stack's type having changed.
+function requireExpectedInventoryFlight(res, expected, flight) {
+  if (expected === undefined) return true;
+  if (!expected || ![expected.shipID, expected.solarSystemID].every(id => Number.isSafeInteger(id) && id > 0) ||
+    flight?.inSpace !== true || flight.shipID !== expected.shipID || flight.solarSystemID !== expected.solarSystemID) {
+    res.status(409).json({ ok: false, error: "OWN_SHIP_SCOPE_CHANGED", message: "Ship or system authority changed; reread before moving inventory." }); return false;
+  }
+  return true;
+}
+
+app.get("/api/mining/compression-compatibility", requireAuth, (req, res, next) => {
+  const ids = value => typeof value === "string" && /^\d+(?:,\d+)*$/.test(value)
+    ? value.split(",").map(Number) : [];
+  const typeIDs = ids(req.query.typeIDs), typeListIDs = ids(req.query.typeListIDs);
+  if (!typeIDs.length || typeIDs.length > 32 || !typeListIDs.length || typeListIDs.length > 16 ||
+    [...typeIDs, ...typeListIDs].some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    res.status(400).json({ ok: false, error: "INVALID_COMPRESSION_QUERY", message: "Bounded type and typelist IDs are required." }); return;
+  }
+  try {
+    const compatibility = typeof staticData.getMiningCompressionCompatibility === "function"
+      ? staticData.getMiningCompressionCompatibility([...new Set(typeIDs)], [...new Set(typeListIDs)]) : null;
+    res.json({ ok: true, compatibility });
+  } catch (error) { next(error); }
+});
+
 app.post("/api/bridge/mining/compress", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
@@ -18227,6 +18254,7 @@ app.post("/api/bridge/mining/compress", requireAuth, async (req, res, next) => {
     if (!requireInSpace(res, before.flight)) {
       return;
     }
+    if (!requireExpectedInventoryFlight(res, body.expectedScope, before.flight)) return;
     const outcome = await heldTopLevelCall(
       held,
       req.webSessionID,
@@ -21983,6 +22011,34 @@ function requireMiningOperationClaim(req, res) {
   }
   return { held, association };
 }
+
+app.get("/api/mining-operations/support-context", requireAuth, async (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const operationID = claim.association.operationID;
+    const assignment = miningOperations.assignment(operationID, claim.held.characterID);
+    if (!assignment?.support) return res.json({ ok: true, assignment, fleets: [] });
+    const fleets = await botHost.readOperationFleets(operationID);
+    const current = requireMiningOperationClaim(req, res);
+    if (!current) return;
+    if (current.held !== claim.held || current.association.operationID !== operationID) {
+      return res.status(409).json({ ok: false, error: "OPERATION_CLAIM_CHANGED" });
+    }
+    res.json({ ok: true, assignment: miningOperations.assignment(operationID, claim.held.characterID), fleets });
+  } catch (error) { next(error); }
+});
+app.post("/api/mining-operations/support-stop", requireAuth, require("./miningSupportStopRoute").createMiningSupportStopHandler({
+  requireClaim: requireMiningOperationClaim,
+  assignment: (operationID, characterID) => miningOperations.assignment(operationID, characterID),
+  readSpace: async held => (await gateway.readSpaceSnapshot(held.bridgeSessionID, { userid: held.accountID })).space,
+  stop: operationID => {
+    const definition = miningOperations.definition(operationID);
+    const policy = normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    // Do not await cleanup from the very runner being stopped.
+    void miningOperationStopper.stop({ ...definition, policies: policy }).catch(errorLogger);
+  },
+}));
 
 app.get("/api/mining-operations/assignment/current", requireAuth, (req, res, next) => {
   try {

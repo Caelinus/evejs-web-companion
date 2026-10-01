@@ -784,6 +784,7 @@ export type MacroID =
   | "travel-to-system"
   | "travel-to-belt"
   | "mine-at-belt"
+  | "fleet-mine"
   | "deliver-ore"
   | "defend-with-drones"
   | "find-distribution-agent"
@@ -861,6 +862,7 @@ export type MacroID =
   | "create-fleet"
   | "invite-to-fleet"
   | "join-fleet"
+  | "join-support-fleet"
   | "join-advertised-fleet"
   // ── Movement extras. Point the autopilot somewhere; run for the nearest dock.
   | "set-destination"
@@ -885,6 +887,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "travel-to-system",
   "travel-to-belt",
   "mine-at-belt",
+  "fleet-mine",
   "deliver-ore",
   "defend-with-drones",
   "find-distribution-agent",
@@ -926,6 +929,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "create-fleet",
   "invite-to-fleet",
   "join-fleet",
+  "join-support-fleet",
   "join-advertised-fleet",
   "set-destination",
   "dock-at-nearest",
