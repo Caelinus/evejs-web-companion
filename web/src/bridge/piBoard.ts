@@ -627,8 +627,17 @@ export function pilotsByAccount(
  * pilot's colonies are ticked; `into` the picked division's words, or null
  * for the pilot's own hangar.
  */
-export function piHaulWords(pilotName: string, ticked: number, into: string | null): { label: string; words: string } {
+export function piHaulWords(
+  pilotName: string,
+  ticked: number,
+  into: string | null,
+  deliverTo: string | null = null,
+): { label: string; words: string } {
   const where = into === null ? "your own hangar" : `the corporation's ${into}`;
+  const station = deliverTo === null
+    ? "flies back"
+    : `flies to ${deliverTo}`;
+  const andBack = deliverTo === null ? "" : "flies back to where it started, ";
   if (ticked === 0) {
     return { label: "Haul", words: "Tick the colonies to haul." };
   }
@@ -637,8 +646,8 @@ export function piHaulWords(pilotName: string, ticked: number, into: string | nu
     label: `Haul ${colonies}`,
     words:
       `This starts a server run for ${pilotName} that launches what the ticked colonies hold, gets into a ship parked ` +
-      `here with a planetary hold, collects the launches, flies back and unloads into ${where}, then gets back into ` +
-      "the ship it started in. The launch is taxed. It runs for two hours at most.",
+      `where the pilot is docked that has a planetary hold, collects the launches, ${station} and unloads into ${where}, ` +
+      `then ${andBack}gets back into the ship it started in. The launch is taxed. It runs for two hours at most.`,
   };
 }
 

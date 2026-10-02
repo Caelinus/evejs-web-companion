@@ -490,3 +490,39 @@ test("a lost session on a bot corp read leaves the bot's handle in place", async
   }
   assert.ok(app.locals.bridgeSessions.has(botSessionID), "the bot must find its lost session itself");
 });
+
+// GET /api/bots/corp-division-names: the Haul picker's division names, read
+// through a RUNNING bot's own session, on the same terms as the corp read.
+test("a bot's division-name read rides the bot's session and answers seven divisions", async () => {
+  const log = [];
+  let botSessionID = null;
+  const asked = [];
+  const { baseUrl, app } = await startTestServer(
+    log,
+    readingHost(log, (characterID, accountID) => {
+      asked.push([characterID, accountID]);
+      return botSessionID;
+    }),
+  );
+  botSessionID = await botHeldSession(baseUrl, app, 7001);
+  const token = await signIn(baseUrl);
+
+  const { response, payload } = await request(baseUrl, "/api/bots/corp-division-names?characterID=7001", { token });
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.divisions.length, 7);
+  assert.deepEqual(payload.divisions[0], { division: 1, name: null });
+  assert.deepEqual(asked, [[7001, FARMER.accountID]]);
+  assert.equal(app.locals.bridgeSessions.get(botSessionID).characterID, 7001);
+  assert.deepEqual(log, []);
+});
+
+test("no bot flying the pilot: the division-name read is a plain 409, never a select", async () => {
+  const log = [];
+  const { baseUrl, app } = await startTestServer(log, readingHost(log, () => null));
+  const token = await signIn(baseUrl);
+  const { response, payload } = await request(baseUrl, "/api/bots/corp-division-names?characterID=7001", { token });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "NO_BOT_SESSION");
+  assert.equal(app.locals.bridgeSessions.size, 0);
+});

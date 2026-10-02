@@ -232,12 +232,12 @@ test("the haul doc with no division unloads into the pilot's own hangar", () => 
 test("haul: saves the bot once, then rewrites it on the next haul and starts that revision", async () => {
   const library: Saved[] = [];
   const first = deps(library);
-  assert.deepEqual(await haulFor("acct", PILOT, COLONIES, null, first), { kind: "started" });
+  assert.deepEqual(await haulFor("acct", PILOT, COLONIES, null, null, first), { kind: "started" });
   assert.deepEqual(first.log, ["signIn:acct", "create", "start:s1", "signOut:tok"]);
   assert.equal(library[0]!.name, PI_HAUL_BOT_NAME);
 
   const second = deps(library);
-  assert.deepEqual(await haulFor("acct", PILOT, COLONIES.slice(2), null, second), { kind: "started" });
+  assert.deepEqual(await haulFor("acct", PILOT, COLONIES.slice(2), null, null, second), { kind: "started" });
   assert.deepEqual(second.log, ["signIn:acct", "update:s1@1", "start:s1", "signOut:tok"]);
   const grant = second.started[0]!.grant;
   assert.equal(grant.scriptRev, 2);
@@ -247,7 +247,27 @@ test("haul: saves the bot once, then rewrites it on the next haul and starts tha
 
 test("haul: nothing ticked is refused before anyone is signed in", async () => {
   const d = deps();
-  const outcome = await haulFor("acct", PILOT, [], null, d);
+  const outcome = await haulFor("acct", PILOT, [], null, null, d);
   assert.equal(outcome.kind, "refused");
   assert.deepEqual(d.log, []);
+});
+
+test("a picked delivery station: unload there, then fly back to where the earlier ship is parked", () => {
+  const station = { entity: "station" as const, id: 60000004, name: "Home Office", systemName: "Alpha" };
+  const doc = piHaulBotDoc(COLONIES.slice(0, 1), null, station);
+  const tail = doc.program.slice(-4).map((step) => (step.kind === "macro" ? step.macro : step.kind));
+  assert.deepEqual(tail, ["travel-to-station", "unload-cargo", "travel-to-station", "board-previous-ship"]);
+  const deliver = doc.program.find((step) => step.id === "deliver")!;
+  assert.ok(deliver.kind === "macro");
+  assert.deepEqual(deliver.args["station"], { kind: "station", ref: station });
+  const home = doc.program.find((step) => step.id === "home")!;
+  assert.ok(home.kind === "macro");
+  assert.deepEqual(home.args["station"], { kind: "station", ref: { entity: "station", id: null, name: null, systemName: null, starting: true } });
+});
+
+test("no station picked, or the starting station picked: one trip back, no second leg", () => {
+  for (const deliverTo of [null, { entity: "station" as const, id: null, name: null, systemName: null, starting: true }]) {
+    const doc = piHaulBotDoc(COLONIES.slice(0, 1), null, deliverTo);
+    assert.equal(doc.program.filter((step) => step.kind === "macro" && step.macro === "travel-to-station").length, 1);
+  }
 });

@@ -46,8 +46,19 @@
     type PilotAttempt,
   } from "../bridge/piBoard.ts";
   import { haulFor, restartExtractorsFor, type PiHaulDivision } from "../app/piDispatch.ts";
+  import {
+    divisionLabel,
+    learnDivisionNames,
+    loadPiHaulPrefs,
+    savePiHaulPrefs,
+    withEntry,
+    type PiHaulPrefs,
+  } from "../app/piHaulPrefs.ts";
   import CorpHangarPicker from "./CorpHangarPicker.svelte";
+  import StationPicker from "./StationPicker.svelte";
   import type { AppFlow } from "../app/flow.ts";
+  import { findMapLocations, loadBotCorpDivisionNames } from "../app/api.ts";
+  import { startingStation, type WorldRef } from "../bots/botScript.ts";
   import { listActiveServerBots } from "../app/api.ts";
   import { commodityName, decodeRecipeBook, madeThings, tierOf, type PiRecipeBook, type PiTier } from "../bridge/piRecipes.ts";
   import {
@@ -113,7 +124,7 @@
   // ticked lives only in this open window; where the goods go is remembered
   // per pilot in this browser, because it is the same answer every haul.
   let haulTicked = $state<Map<number, Set<number>>>(new Map());
-  let haulDivision = $state<Map<number, PiHaulDivision>>(loadHaulDivisions());
+  let haulPrefs = $state<PiHaulPrefs>(loadPiHaulPrefs());
   let haulDispatch = $state<Map<number, PiDispatchState>>(new Map());
 
   // One view at a time, picked from the window's own menu. An empty roster
@@ -179,36 +190,64 @@
     await loadActiveBots();
   }
 
-  const HAUL_DIVISION_KEY = "evejs.piHaulDivision";
-
-  function loadHaulDivisions(): Map<number, PiHaulDivision> {
-    try {
-      const raw = JSON.parse(globalThis.localStorage?.getItem(HAUL_DIVISION_KEY) ?? "{}") as Record<string, unknown>;
-      const out = new Map<number, PiHaulDivision>();
-      for (const [key, value] of Object.entries(raw)) {
-        const characterID = Number(key);
-        const entry = value as { division?: unknown; name?: unknown } | null;
-        if (Number.isSafeInteger(characterID) && entry && typeof entry.division === "number") {
-          out.set(characterID, { division: entry.division, name: typeof entry.name === "string" ? entry.name : null });
-        }
-      }
-      return out;
-    } catch {
-      return new Map();
-    }
+  function keepHaul(next: PiHaulPrefs): void {
+    haulPrefs = next;
+    savePiHaulPrefs(next);
   }
 
   function pickHaulDivision(characterID: number, picked: PiHaulDivision): void {
-    const next = new Map(haulDivision);
-    if (picked === null) next.delete(characterID);
-    else next.set(characterID, picked);
-    haulDivision = next;
-    try {
-      globalThis.localStorage?.setItem(HAUL_DIVISION_KEY, JSON.stringify(Object.fromEntries(next)));
-    } catch {
-      // A private window keeps the choice for this open window only.
-    }
+    keepHaul({ ...haulPrefs, divisions: withEntry(haulPrefs.divisions, characterID, picked) });
   }
+
+  /** "Where the run starts" is the default, so it is stored as nothing. */
+  function pickDeliverTo(characterID: number, ref: WorldRef): void {
+    const picked = ref.starting === true || ref.id === null ? null : ref;
+    keepHaul({ ...haulPrefs, deliverTo: withEntry(haulPrefs.deliverTo, characterID, picked) });
+  }
+
+  /** This pilot's corporation, from its last colony read. */
+  function corporationOf(characterID: number): number | null {
+    return piReadings(roster).get(characterID)?.corporationID ?? null;
+  }
+
+  /**
+   * LEARN THE DIVISION NAMES while somebody of the corporation is in game: a
+   * pilot online in this tab, or one a server bot is flying. Remembered per
+   * corporation, so the picker says the names on a day nobody is online.
+   */
+  async function learnNames(): Promise<void> {
+    let next = haulPrefs;
+    for (const session of sessions) {
+      const online = session.store.station.get().online;
+      if (!online) continue;
+      try {
+        const offices = await session.flow.loadCorpOffices();
+        next = learnDivisionNames(next, online.corporationID, offices.divisions);
+      } catch {
+        // Not this one; the names stay as they were.
+      }
+    }
+    for (const characterID of roster.members) {
+      if (!activeBots.has(characterID)) continue;
+      try {
+        const read = await loadBotCorpDivisionNames(characterID);
+        next = learnDivisionNames(next, read.corporationID ?? corporationOf(characterID) ?? 0, read.divisions);
+      } catch {
+        // No bot session to read through after all.
+      }
+    }
+    if (next !== haulPrefs) keepHaul(next);
+  }
+
+  /** The station search for the Deliver to picker: the static map, no session needed. */
+  const stationSearch: Pick<AppFlow, "searchDestinations"> = {
+    async searchDestinations(query, kind) {
+      const trimmed = query.trim();
+      if (trimmed.length < 2) return [];
+      const result = await findMapLocations(trimmed, kind === "dockable" ? "station" : kind);
+      return result.matches.map((match) => ({ ...match, jumps: null }));
+    },
+  };
 
   function toggleHaul(characterID: number, planetID: number): void {
     const next = new Map(haulTicked);
@@ -230,13 +269,25 @@
         return session.flow;
       }
     }
+    const corporationID = corporationOf(characterID);
+    const known = corporationID === null ? null : haulPrefs.divisionNames.get(corporationID) ?? null;
     return {
       loadCorpOffices: async () => ({
         stationIDs: [],
-        divisions: [1, 2, 3, 4, 5, 6, 7].map((division) => ({ division, name: null })),
+        divisions: [1, 2, 3, 4, 5, 6, 7].map((division) => ({
+          division,
+          name: known?.find((entry) => entry.division === division)?.name ?? null,
+        })),
         error: null,
       }),
     };
+  }
+
+  /** True when this pilot's division names are known (remembered, or online here). */
+  function namesKnown(characterID: number): boolean {
+    if (sessions.some((session) => session.store.station.get().online?.characterID === characterID)) return true;
+    const corporationID = corporationOf(characterID);
+    return corporationID !== null && haulPrefs.divisionNames.has(corporationID);
   }
 
   /** Haul the ticked colonies of this pilot, as a SERVER run (the restart's rules). */
@@ -261,7 +312,13 @@
         solarSystemName: row.solarSystemName,
       }));
     set({ kind: "starting" });
-    set(await haulFor(accountName, characterID, colonies, haulDivision.get(characterID) ?? null));
+    set(await haulFor(
+      accountName,
+      characterID,
+      colonies,
+      haulPrefs.divisions.get(characterID) ?? null,
+      haulPrefs.deliverTo.get(characterID) ?? null,
+    ));
     await loadActiveBots();
   }
 
@@ -670,6 +727,7 @@
       // After the roster, because it names each pilot's corporation.
       await botsRead;
       await refreshCorpStock();
+      await learnNames();
     } finally {
       reading = false;
       browserNowMs = Date.now();
@@ -793,8 +851,10 @@
             {@const pilot = pilotRows.get(group.characterID)}
             {@const ticked = haulTicked.get(group.characterID) ?? new Set()}
             {@const tickedCount = group.rows.filter((row) => ticked.has(row.planetID)).length}
-            {@const division = haulDivision.get(group.characterID) ?? null}
-            {@const haulOffer = piHaulWords(group.pilotName, tickedCount, division === null ? null : (division.name ?? `Division ${division.division}`))}
+            {@const division = haulPrefs.divisions.get(group.characterID) ?? null}
+            {@const deliverTo = haulPrefs.deliverTo.get(group.characterID) ?? null}
+            {@const haulOffer = piHaulWords(group.pilotName, tickedCount, division === null ? null : divisionLabel(division.division, division.name), deliverTo?.name ?? null)}
+            {@const namesHere = namesKnown(group.characterID)}
             {@const haulState = haulDispatch.get(group.characterID) ?? null}
             {@const haulWords = piHaulDispatchWords(haulState)}
             <section class="pi-group" aria-label={`${group.pilotName}'s colonies`}>
@@ -827,13 +887,27 @@
               <div class="pi-group-action pi-haul">
                 <span class="note">{haulOffer.words}</span>
                 <span class="pi-haul-into">
-                  <span class="note">Unload into</span>
-                  <CorpHangarPicker
-                    flow={divisionSource(group.characterID)}
-                    value={division}
-                    station={null}
-                    onPick={(picked) => pickHaulDivision(group.characterID, picked)}
+                  <span class="note">Deliver to</span>
+                  <StationPicker
+                    flow={stationSearch}
+                    value={deliverTo ?? startingStation()}
+                    current={null}
+                    onPick={(ref) => pickDeliverTo(group.characterID, ref)}
                   />
+                </span>
+                <span class="pi-haul-into">
+                  <span class="note">Unload into</span>
+                  {#key `${group.characterID}:${namesHere}`}
+                    <CorpHangarPicker
+                      flow={divisionSource(group.characterID)}
+                      value={division}
+                      station={null}
+                      onPick={(picked) => pickHaulDivision(group.characterID, picked)}
+                    />
+                  {/key}
+                  {#if !namesHere}
+                    <span class="note">Division names show once a pilot of this corporation has been online here.</span>
+                  {/if}
                 </span>
                 <button
                   type="button"

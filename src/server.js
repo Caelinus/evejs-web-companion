@@ -22615,6 +22615,49 @@ app.get("/api/bots/corp-assets", requireAuth, async (req, res, next) => {
   await answerCorpAssets(held, call, req, res, next);
 });
 
+// GET /api/bots/corp-division-names?characterID= -- what the seven corporation
+// hangar divisions are CALLED, read on the game session a running bot of the
+// CALLER's account holds for that pilot. The PI window's Haul picker learns the
+// names this way when no pilot of that corporation is online in the tab.
+//
+// The same rules as /api/bots/corp-assets above: a read beside the bot, never
+// a hand on it, and a lost session is the bot's to find, so the gateway is
+// called directly and never through heldTopLevelCall.
+app.get("/api/bots/corp-division-names", requireAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID || 0);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_CHARACTER", message: "A positive characterID is required." });
+    return;
+  }
+  const webSessionID = botHost.readableSessionOf(characterID, req.account.accountID);
+  const held = webSessionID ? bridgeSessions.get(webSessionID) || null : null;
+  if (!held || Number(held.characterID) !== characterID) {
+    res.status(409).json({
+      ok: false,
+      error: "NO_BOT_SESSION",
+      message: "No server bot of this account is flying this pilot.",
+    });
+    return;
+  }
+  try {
+    const outcome = await gateway.callMethod(
+      "corpRegistry", "GetCorporation", [], null, { userid: held.accountID }, held.bridgeSessionID,
+    );
+    const names = decodeDivisionNames(outcome && outcome.result);
+    const divisions = [];
+    for (let division = 1; division <= CORP_DIVISION_COUNT; division += 1) {
+      divisions.push({ division, name: names[division] || null });
+    }
+    res.json({ ok: true, corporationID: Number(held.corporationID) || null, divisions });
+  } catch (error) {
+    if (error && error.code === "SESSION_NOT_FOUND") {
+      res.status(409).json({ ok: false, error: "NO_BOT_SESSION", message: "The bot's session has ended." });
+      return;
+    }
+    next(error);
+  }
+});
+
 app.post("/api/bots/start", requireAuth, async (req, res, next) => {
   try {
     const body = req.body || {};

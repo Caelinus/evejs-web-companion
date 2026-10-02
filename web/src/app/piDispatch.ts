@@ -38,6 +38,7 @@ import {
   startingStation,
   type BotScript,
   type MacroStep,
+  type WorldRef,
 } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import {
@@ -178,9 +179,12 @@ export async function restartExtractorsFor(
 //
 // The lap: launch what the ticked colonies hold (any amount), board a ship
 // parked here with a planetary hold, fly to each ticked colony's system and
-// collect the launches there, fly back to the station the run started at,
-// unload (into the picked corporation division, else the pilot's own hangar),
-// and get back into the ship the pilot was in.
+// collect the launches there, fly to the delivery station (the station the run
+// started at, unless one is picked), unload there (into the picked corporation
+// division, else the pilot's own hangar), and get back into the ship the pilot
+// was in. With a picked delivery station the hauler first flies back to where
+// it started, because that is where the earlier ship is parked - and where the
+// hauler should be waiting for the next haul.
 
 /** The library name the board's haul bot goes by. */
 export const PI_HAUL_BOT_NAME = "Planetary: haul";
@@ -199,8 +203,18 @@ export interface PiHaulColony {
 /** Where the goods are unloaded: a corporation division, or null for the pilot's own hangar. */
 export type PiHaulDivision = { readonly division: number; readonly name: string | null } | null;
 
+/** A delivery station that is not "where the run starts", or null. */
+function pickedStation(deliverTo: WorldRef | null): WorldRef | null {
+  return deliverTo !== null && deliverTo.starting !== true && deliverTo.id !== null ? deliverTo : null;
+}
+
 /** The haul lap for these colonies, as a saved bot document. */
-export function piHaulBotDoc(colonies: readonly PiHaulColony[], division: PiHaulDivision): BotScript {
+export function piHaulBotDoc(
+  colonies: readonly PiHaulColony[],
+  division: PiHaulDivision,
+  deliverTo: WorldRef | null = null,
+): BotScript {
+  const delivery = pickedStation(deliverTo);
   const systems: { id: number; name: string | null }[] = [];
   for (const colony of colonies) {
     if (!systems.some((system) => system.id === colony.solarSystemID)) {
@@ -236,15 +250,28 @@ export function piHaulBotDoc(colonies: readonly PiHaulColony[], division: PiHaul
     );
   });
   program.push(
-    { id: "home", kind: "macro", macro: "travel-to-station", args: { station: { kind: "station", ref: startingStation() } } },
+    {
+      id: "deliver",
+      kind: "macro",
+      macro: "travel-to-station",
+      args: { station: { kind: "station", ref: delivery ?? startingStation() } },
+    },
     {
       id: "unload",
       kind: "macro",
       macro: "unload-cargo",
       args: division === null ? {} : { into: { kind: "corpDivision", division: division.division, name: division.name } },
     },
-    { id: "board-back", kind: "macro", macro: "board-previous-ship", args: {} },
   );
+  if (delivery !== null) {
+    program.push({
+      id: "home",
+      kind: "macro",
+      macro: "travel-to-station",
+      args: { station: { kind: "station", ref: startingStation() } },
+    });
+  }
+  program.push({ id: "board-back", kind: "macro", macro: "board-previous-ship", args: {} });
   return {
     format: SCRIPT_FORMAT,
     version: SCRIPT_VERSION,
@@ -265,6 +292,7 @@ export async function haulFor(
   characterID: number,
   colonies: readonly PiHaulColony[],
   division: PiHaulDivision,
+  deliverTo: WorldRef | null = null,
   deps: PiDispatchDeps = DEFAULT_PI_DISPATCH_DEPS,
 ): Promise<PiDispatchOutcome> {
   if (colonies.length === 0) {
@@ -277,7 +305,7 @@ export async function haulFor(
     return refused("Could not sign in to this pilot's account just now.");
   }
   try {
-    const doc = piHaulBotDoc(colonies, division);
+    const doc = piHaulBotDoc(colonies, division, deliverTo);
     const named = (await deps.listScripts(token)).find((row) => row.name === PI_HAUL_BOT_NAME) ?? null;
     let saved: { scriptID: string; rev: number };
     if (named === null) {
