@@ -229,6 +229,27 @@ test("fullPercent step arg overrides the default threshold", () => {
   assert.equal(t.action.kind, "launchCommodities");
 });
 
+test("anyAmount launches a positive stack below one percent full, even with a larger threshold", () => {
+  const s = step({ anyAmount: { kind: "toggle", enabled: true }, fullPercent: { kind: "count", value: 90 } });
+  const colonies = [colony({ pins: [commandPin({ usedM3: 1, capacityM3: 500 })] })];
+  const t = launch(s, obs({ colonies } as never), {}, NB);
+  assert.equal(t.action.kind, "launchCommodities");
+});
+
+test("a disabled anyAmount keeps the threshold, and an enabled one still skips empty or cooling centres", () => {
+  const underfilled = colony({ pins: [commandPin({ usedM3: 1, capacityM3: 500 })] });
+  const disabled = step({ anyAmount: { kind: "toggle", enabled: false }, fullPercent: { kind: "count", value: 50 } });
+  assert.equal(launch(disabled, obs({ colonies: [underfilled] } as never), {}, NB).outcome.kind, "done");
+
+  const enabled = step({ anyAmount: { kind: "toggle", enabled: true } });
+  const empty = colony({ pins: [commandPin({ contents: [], usedM3: 0 })] });
+  assert.equal(launch(enabled, obs({ colonies: [empty] } as never), {}, NB).outcome.kind, "done");
+  const cooling = colony({ pins: [commandPin({ usedM3: 1, capacityM3: 500, lastLaunchAtMs: Date.now() - 30_000 })] });
+  const t = launch(enabled, obs({ colonies: [cooling] } as never), {}, NB);
+  assert.equal(t.action.kind, "wait");
+  assert.equal(t.outcome.kind, "acting");
+});
+
 // ── limited to the ticked colonies (the PI window's Haul button) ─────────────
 
 test("a planets list limits the launch to those colonies, and every other colony is left alone", () => {

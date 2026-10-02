@@ -10754,8 +10754,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           }
           // Which parked hulls have a planetary hold, for the block that boards
           // one. One capacity read per ship, asked BY NAME, and only while that
-          // block runs. A ship whose read fails is left out; every read failing
-          // is "could not tell" (null), never "no hauler here".
+          // block runs. A known hauler can be boarded despite other failed
+          // reads; proving none is parked requires every hull's answer.
           if (macro === "board-planetary-hauler" && stationHangar !== null && activeShipID !== null) {
             const shipIDs = [...new Set([
               activeShipID,
@@ -10772,9 +10772,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               }
             }));
             const answered = reads.filter((read): read is { shipID: number; present: boolean } => read !== null);
-            planetaryHaulerShipIDs = answered.length === 0
+            const haulers = answered.filter((read) => read.present).map((read) => read.shipID);
+            planetaryHaulerShipIDs = haulers.length === 0 && reads.some((read) => read === null)
               ? null
-              : answered.filter((read) => read.present).map((read) => read.shipID);
+              : haulers;
           }
           if (macro === "haul-all" || macro === "route-hauler") {
             try {

@@ -125,6 +125,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   holdRangeKm: "Hold this far off (km)",
   propulsion: "Prop mod",
   fullPercent: "Launch once this full (%)",
+  anyAmount: "Launch any amount",
   planets: "Only these colonies",
 };
 

@@ -761,10 +761,14 @@ function macroPhrase(step: MacroStep): string {
       return "Warp to the mission's own site";
     case "restart-extractors":
       return "Restart every expired extractor on your planets";
-    case "launch-commodities":
+    case "launch-commodities": {
       // The SAME clamp the decider fires on, so the sentence cannot promise a
       // threshold the block will not use.
-      return `Launch from the command centre${launchPlanetsPhrase(step)} once it is ${launchFullPercent(step.args["fullPercent"])}% full`;
+      const fullPercent = launchFullPercent(step.args["fullPercent"], step.args["anyAmount"]);
+      return fullPercent === 0
+        ? `Launch whatever the command centre${launchPlanetsPhrase(step)} holds`
+        : `Launch from the command centre${launchPlanetsPhrase(step)} once it is ${fullPercent}% full`;
+    }
     case "collect-launches":
       return "Collect every launch container of yours in this system";
     case "board-previous-ship":

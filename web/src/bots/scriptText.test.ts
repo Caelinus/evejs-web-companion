@@ -138,6 +138,11 @@ test("a launch step promises the threshold the block will actually use", () => {
   assert.match(at({ fullPercent: { kind: "count", value: 500 } }), /once it is 100% full/);
   assert.match(at({ fullPercent: { kind: "count", value: 0 } }), /once it is 1% full/);
   assert.match(at({ fullPercent: { kind: "count", value: -20 } }), /once it is 1% full/);
+
+  assert.match(at({ anyAmount: { kind: "toggle", enabled: true } }), /Launch whatever the command centre holds/);
+  assert.match(at({ anyAmount: { kind: "toggle", enabled: false } }), /once it is 80% full/);
+  assert.match(at({ fullPercent: { kind: "count", value: 50 }, anyAmount: { kind: "toggle", enabled: false } }), /once it is 50% full/);
+  assert.match(at({ fullPercent: { kind: "count", value: 50 }, anyAmount: { kind: "toggle", enabled: true } }), /Launch whatever the command centre holds/);
 });
 
 test("a site-mode mining step never says the word belt", () => {

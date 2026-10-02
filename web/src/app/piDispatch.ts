@@ -227,8 +227,8 @@ export function piHaulBotDoc(
       kind: "macro",
       macro: "launch-commodities",
       args: {
-        // 1%: whatever a ticked colony's command centre holds goes up now.
-        fullPercent: { kind: "count", value: 1 },
+        // Hauls launch whatever is held, including less than one percent full.
+        anyAmount: { kind: "toggle", enabled: true },
         planets: {
           kind: "planetList",
           planets: colonies.map((colony) => ({ planetID: colony.planetID, name: colony.planetName })),
