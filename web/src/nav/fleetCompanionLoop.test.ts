@@ -1215,6 +1215,157 @@ test("an AlignTo broadcast aligns to the item it names", () => {
   assert.ok(!decision.lastOrderHeard?.includes("AlignTo"));
 });
 
+function alignmentObs(source: "broadcast" | "chat", at: number, targetID = LOGI): FleetCompanionObservation {
+  return obs({
+    snapshot: gridWithAnchor(gridWithEntities([LOGI, OTHER])),
+    fleetBroadcast: source === "broadcast" ? { ...fleetBroadcast("AlignTo", targetID), receivedAtMs: at } : null,
+    chatMessages: source === "chat" ? [chatLine(chatCommandText("align", targetID), HUMAN, at)] : [],
+  });
+}
+
+for (const source of ["broadcast", "chat"] as const) {
+  test(`one successful ${source} alignment is dispatched once, and a new same-target order is obeyed`, async () => {
+    let current = alignmentObs(source, 1_000);
+    const { deps, issued } = makeDeps({ observe: async () => current });
+    const companion = createFleetCompanion(deps);
+    companion.start(REQUEST);
+    assert.equal((await companion.tick()).kind, "align");
+    for (let tick = 0; tick < 5; tick += 1) assert.equal((await companion.tick()).kind, "wait");
+    assert.deepEqual(issued, [{ kind: "align", targetID: LOGI }], "standing align must not alternate with follow");
+    current = alignmentObs(source, 2_000);
+    assert.equal((await companion.tick()).kind, "align");
+    assert.equal((await companion.tick()).kind, "wait");
+    current = alignmentObs(source, 3_000, OTHER);
+    assert.equal((await companion.tick()).kind, "align");
+    assert.equal(issued.length, 3);
+  });
+}
+
+test("a definitely refused alignment retries once and stops after success", async () => {
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => alignmentObs("broadcast", 1_000),
+    issue: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error("Align refused"), { code: "CALL_REFUSED" });
+    },
+  }).deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.equal(calls, 2);
+  assert.equal(companion.snapshot().status, "running");
+});
+
+test("repeated definite alignment refusals pause after three writes", async () => {
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => alignmentObs("broadcast", 1_000),
+    issue: async () => {
+      calls += 1;
+      throw Object.assign(new Error("Align refused"), { code: "CALL_REFUSED" });
+    },
+  }).deps);
+  companion.start(REQUEST);
+  for (let tick = 0; tick < 10; tick += 1) await companion.tick();
+  assert.equal(calls, 3);
+  assert.equal(companion.snapshot().status, "paused");
+});
+
+for (const error of [
+  Object.assign(new Error("Alignment response lost"), { code: "BRIDGE_NETWORK_ERROR" }),
+  new Error("Unknown alignment failure"),
+]) {
+  test(`an ambiguous alignment response (${error.message}) pauses and is not replayed after resume`, async () => {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => alignmentObs("broadcast", 1_000),
+      issue: async () => {
+        calls += 1;
+        throw error;
+      },
+    }).deps);
+    companion.start(REQUEST);
+    await companion.tick();
+    assert.equal(companion.snapshot().status, "paused");
+    companion.resume();
+    for (let tick = 0; tick < 3; tick += 1) assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(calls, 1);
+  });
+}
+
+test("a successful alignment is restored once after an observed fleet warp supersedes it", async () => {
+  let current = alignmentObs("broadcast", 1_000);
+  const { deps, issued } = makeDeps({ observe: async () => current });
+  const companion = createFleetCompanion(deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  current = { ...current, inWarp: true, snapshot: null, fleetMemberCharacterIDs: null };
+  await companion.tick();
+  current = alignmentObs("broadcast", 1_000);
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.deepEqual(issued, [{ kind: "align", targetID: LOGI }, { kind: "align", targetID: LOGI }]);
+});
+
+test("formation replacing an expired align lets the same order align again when it returns", async () => {
+  let current = alignmentObs("broadcast", 1_000);
+  const { deps, issued } = makeDeps({ observe: async () => current });
+  const companion = createFleetCompanion(deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  current = { ...current, fleetBroadcast: null };
+  assert.equal((await companion.tick()).kind, "keepAtRange");
+  current = alignmentObs("broadcast", 1_000);
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.deepEqual(issued, [
+    { kind: "align", targetID: LOGI },
+    { kind: "keepAtRange", targetID: FC_SHIP, range: DEFAULT_FOLLOW_M },
+    { kind: "align", targetID: LOGI },
+  ]);
+});
+
+test("a destination trip supersedes alignment and restores it once after route completion", async () => {
+  let current = alignmentObs("broadcast", 1_000);
+  const { deps, issued } = makeDeps({ observe: async () => current });
+  const companion = createFleetCompanion(deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  current = { ...current, chatMessages: [chatLine("destination " + SYSTEM_B, HUMAN, 2_000)] };
+  assert.equal((await companion.tick()).kind, "travelTo");
+  assert.equal((await companion.tick()).kind, "wait");
+  current = { ...current, chatMessages: [], flightStatus: inSystem(SYSTEM_B) };
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.deepEqual(issued, [
+    { kind: "align", targetID: LOGI },
+    { kind: "travelTo", systemID: SYSTEM_B },
+    { kind: "align", targetID: LOGI },
+  ]);
+});
+
+test("a standing alignment allows nearby loot but never approaches a distant can", async () => {
+  let current = alignmentObs("broadcast", 1_000);
+  const { deps, issued } = makeDeps({ observe: async () => current });
+  const companion = createFleetCompanion(deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  const lootWhileAligned = (distance: number): FleetCompanionObservation => ({
+    ...current,
+    snapshot: gridWithAnchor({ ...lootGrid({ containerDistance: distance }),
+      entities: [...lootGrid({ containerDistance: distance }).entities,
+        ...gridWithEntities([LOGI]).entities.filter((entity) => !entity.isSelf)] }),
+    chatMessages: [areaOrder("loot")],
+  });
+  current = lootWhileAligned(40_000);
+  for (let tick = 0; tick < 3; tick += 1) assert.equal((await companion.tick()).kind, "wait");
+  current = lootWhileAligned(500);
+  assert.equal((await companion.tick()).kind, "lootContainer");
+  assert.deepEqual(issued, [{ kind: "align", targetID: LOGI }, { kind: "lootContainer", containerID: CAN }]);
+});
+
 test("an already-locked target is not re-locked, and an EMPTY weaponModuleIDs holds it without firing", () => {
   // ⚠ EMPTY IS A REAL SETTING, NOT A FAULT. `weaponModuleIDs`'s own comment
   // says so: it is the default, and an operator who left it empty by accident

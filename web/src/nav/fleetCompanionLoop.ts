@@ -1270,6 +1270,13 @@ export interface CompanionAbandonment extends CompanionAbandonmentRecord {
 export interface CompanionLadderMemory {
   /** Server chat timestamps plus sender/text identity disambiguate timestamp ties. */
   readonly standingChatCursor: { readonly at: number; readonly keys: readonly string[] } | null;
+  /** One alignment request, confirmed on dispatch success; uncertain writes are never replayed. */
+  readonly alignmentOrder: {
+    readonly key: string;
+    readonly targetID: number;
+    readonly status: "pending" | "issued" | "refused" | "uncertain";
+    readonly refusals: number;
+  } | null;
   /** A bounded lock wait and refused or uncertain repair writes for one call. */
   readonly healOrder: {
     readonly targetID: number;
@@ -1746,6 +1753,7 @@ export interface DroneCycle {
 export function freshLadderMemory(): CompanionLadderMemory {
   return {
     standingChatCursor: null,
+    alignmentOrder: null,
     healOrder: null,
     lastSupervisorIDs: [],
     abandonment: null,
@@ -1862,6 +1870,8 @@ export interface CompanionDecision {
    * wider reading of the same contract -- not only "already obeying".
    */
   readonly standing?: true;
+  /** Lower work may continue, but must not replace this standing movement order. */
+  readonly holdsNavigation?: true;
 }
 
 /**
@@ -2029,24 +2039,25 @@ export function decideCompanionAction(
   nowMs: number = Date.now(),
 ): CompanionDecision {
   const decision = decideCompanionStep(request, obs,
-    obs.inWarp === true || obs.docked === true ? withoutIssuedFollow(memory) : memory, nowMs);
+    obs.inWarp === true || obs.docked === true
+      ? { ...withoutIssuedFollow(memory), alignmentOrder: null } : memory, nowMs);
   // These movements replace keep-at-range. Once requested, a lost response
   // cannot prove the previous formation is still in force. Keep the new
   // movement's own pending latch, but let formation resume when its job ends.
-  switch (decision.action.kind) {
-    case "approach":
-    case "align":
-    case "warp":
-    case "warpToFleetMember":
-    case "travelTo":
-    case "jumpGate":
-    case "dock":
-    case "undock":
-    case "stopShip":
-      return { ...decision, memory: withoutIssuedFollow(decision.memory) };
-    default:
-      return decision;
+  if (decision.action.kind === "align") {
+    return { ...decision, memory: withoutIssuedFollow(decision.memory) };
   }
+  if (changesShipMovement(decision.action)) {
+    const next = { ...decision.memory, alignmentOrder: null };
+    return { ...decision, memory: decision.action.kind === "keepAtRange" ? next : withoutIssuedFollow(next) };
+  }
+  return decision;
+}
+
+function changesShipMovement(action: FleetCompanionAction): boolean {
+  return action.kind === "approach" || action.kind === "align" || action.kind === "warp" ||
+    action.kind === "warpToFleetMember" || action.kind === "travelTo" || action.kind === "jumpGate" ||
+    action.kind === "dock" || action.kind === "undock" || action.kind === "stopShip" || action.kind === "keepAtRange";
 }
 
 function withoutIssuedFollow(memory: CompanionLadderMemory): CompanionLadderMemory {
@@ -2132,6 +2143,7 @@ function decideCompanionStep(
   // collect it. Clear any abandonment, because a human is demonstrably here.
   const supervised: CompanionLadderMemory = {
     standingChatCursor: memory.standingChatCursor,
+    alignmentOrder: memory.alignmentOrder,
     healOrder: memory.healOrder,
     lastSupervisorIDs: [...supervisors],
     abandonment: null,
@@ -2350,12 +2362,12 @@ function decideCompanionStep(
   // than reporting "Standing by" and doing nothing.
   const lowerMemory = obeying?.memory ?? reloading.memory;
   const salvaging = decideSalvaging(request, obs, lowerMemory);
-  if (salvaging !== null) {
+  if (salvaging !== null && !(obeying?.holdsNavigation === true && changesShipMovement(salvaging.action))) {
     return salvaging;
   }
 
   const looting = decideLooting(obs, lowerMemory);
-  if (looting !== null) {
+  if (looting !== null && !(obeying?.holdsNavigation === true && changesShipMovement(looting.action))) {
     return looting;
   }
 
@@ -3554,6 +3566,8 @@ function noteHealFailure(memory: CompanionLadderMemory, action: FleetCompanionAc
 /** The four broadcast names that name a thing to go to or shoot. */
 type NamedOrderName = "Target" | "AlignTo" | "TravelTo" | "JumpTo" | "WarpTo";
 
+const MAX_COMPANION_ALIGN_REFUSALS = 3;
+
 /**
  * One order this pilot is being given, with the source it came from already
  * decided. `why` is the readout sentence's opening clause and `heard` is the
@@ -3565,6 +3579,7 @@ interface NamedOrder {
   readonly name: NamedOrderName;
   readonly itemID: number;
   readonly source: "broadcast" | "chat";
+  readonly key: string;
   readonly heard: string;
   readonly why: string;
 }
@@ -3684,8 +3699,8 @@ function newestChatCommand(
   messages: readonly ChatMessage[],
   allowedSenders: readonly number[],
   wanted: (command: ChatCommand) => boolean,
-): { readonly command: ChatCommand; readonly at: number } | null {
-  let best: { readonly command: ChatCommand; readonly at: number } | null = null;
+): { readonly command: ChatCommand; readonly at: number; readonly key: string } | null {
+  let best: { readonly command: ChatCommand; readonly at: number; readonly key: string } | null = null;
   for (const message of messages) {
     if (!isChatCommandSenderAllowed(message, allowedSenders)) {
       continue;
@@ -3695,7 +3710,7 @@ function newestChatCommand(
       continue;
     }
     if (best === null || message.createdAtMs >= best.at) {
-      best = { command, at: message.createdAtMs };
+      best = { command, at: message.createdAtMs, key: standingChatMessageKey(message) };
     }
   }
   return best;
@@ -3968,11 +3983,11 @@ function isNamedChatCommand(command: ChatCommand): command is NamedChatCommand {
 function newestNamedChatOrder(
   messages: readonly ChatMessage[],
   allowedSenders: readonly number[],
-): { readonly command: NamedChatCommand; readonly at: number } | null {
+): { readonly command: NamedChatCommand; readonly at: number; readonly key: string } | null {
   const found = newestChatCommand(messages, allowedSenders, isNamedChatCommand);
   return found === null || !isNamedChatCommand(found.command)
     ? null
-    : { command: found.command, at: found.at };
+    : { command: found.command, at: found.at, key: found.key };
 }
 
 /**
@@ -4066,6 +4081,7 @@ function resolveNamedOrder(
       name,
       itemID,
       source: "broadcast",
+      key: JSON.stringify(["broadcast", name, itemID, obs.fleetBroadcast?.senderCharID, obs.fleetBroadcast?.receivedAtMs]),
       heard: ORDER_HEARD[name].broadcast,
       why: ORDER_WHY[name].broadcast,
     };
@@ -4087,6 +4103,7 @@ function resolveNamedOrder(
       name: chatName,
       itemID: chat.command.itemID,
       source: "chat",
+      key: "chat:" + chat.key,
       heard: ORDER_HEARD[chatName].chat,
       why: ORDER_WHY[chatName].chat,
     };
@@ -6963,13 +6980,40 @@ function decideFleetOrders(
 
   // d. An `AlignTo` order.
   if (order?.name === "AlignTo") {
-    return {
-      action: { kind: "align", targetID: order.itemID },
+    const previous = memory.alignmentOrder?.key === order.key ? memory.alignmentOrder : null;
+    const base = {
       phase: "Obeying fleet",
-      why: order.why + " Aligning to it.",
-      memory,
       followingOrderFrom: order.source,
       lastOrderHeard: order.heard,
+    };
+    if (previous !== null && previous.status !== "refused") {
+      return {
+        ...base,
+        action: WAIT,
+        why: order.why + (previous.status === "issued"
+          ? " Continuing the alignment order."
+          : " Alignment was requested; its outcome is not confirmed, so it will not be sent again."),
+        memory,
+        standing: true,
+        holdsNavigation: true,
+      };
+    }
+    if ((previous?.refusals ?? 0) >= MAX_COMPANION_ALIGN_REFUSALS) {
+      return {
+        ...base,
+        action: WAIT,
+        why: order.why + " Alignment was refused repeatedly. Pausing for the operator.",
+        memory,
+        pause: "The alignment order was refused three times.",
+      };
+    }
+    return {
+      ...base,
+      action: { kind: "align", targetID: order.itemID },
+      why: order.why + " Aligning to it.",
+      memory: { ...memory, alignmentOrder: {
+        key: order.key, targetID: order.itemID, status: "pending", refusals: previous?.refusals ?? 0,
+      } },
     };
   }
 
@@ -7323,6 +7367,11 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     if (decision.action.kind !== "wait") {
       try {
         await deps.issue(decision.action);
+        const alignment = mem.ladder.alignmentOrder;
+        if (decision.action.kind === "align" && token === runToken && mem.status === "running" &&
+          alignment?.key === decision.memory.alignmentOrder?.key && alignment?.status === "pending") {
+          mem.ladder = { ...mem.ladder, alignmentOrder: { ...alignment, status: "issued" } };
+        }
       } catch (error) {
         // ⚠ A REFUSED CALL IS AN ANSWER, NOT THE END OF THE RUN. This used to
         // propagate: the rejection came out of `tick`, out of `run`, and landed
@@ -7332,13 +7381,10 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // ticking. Reported live 2026-09-11 as a script error the page raised:
         // "TargetNotWithinRangeGeneric", twice, and the page stopped updating.
         //
-        // ⚠ AND IT MUST NOT PAUSE THE RUN EITHER, which is what makes this
-        // different from the observe() failure above. A read that fails leaves
-        // this loop with no idea what is true, so it must not act. A WRITE that
-        // fails leaves the world exactly as it was and the next tick re-reads it
-        // from the server anyway -- a lock refused for range is a lock that will
-        // land once the ship drifts closer, and a pilot that stopped flying over
-        // it would never get there.
+        // A definite refusal and a lost transport response are different: the
+        // latter may follow a committed write. Each action keeps its pending
+        // state and retry budget; alignment pauses when its outcome is unknown.
+        // A refused lock can still land once the ship drifts closer.
         //
         // ⚠ THE SERVER'S OWN WORDS NEVER REACH THE PLAYER. A refusal arrives as
         // its retail error-class name (`TargetNotWithinRangeGeneric`), which is
@@ -7351,14 +7397,25 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         const raw = error instanceof Error ? error.message : String(error);
         mem.failureReason = raw;
         mem.why = `${decision.why} ${refusalWords(raw)}`;
+        const alignment = mem.ladder.alignmentOrder;
+        if (decision.action.kind === "align" && alignment !== null &&
+          alignment.key === decision.memory.alignmentOrder?.key) {
+          const definite = isDefiniteCompanionRefusal(error);
+          mem.ladder = { ...mem.ladder, alignmentOrder: { ...alignment,
+            status: definite ? "refused" : "uncertain", refusals: alignment.refusals + (definite ? 1 : 0),
+          } };
+          if (!definite) {
+            runToken += 1;
+            mem.status = "paused";
+            mem.action = null;
+            mem.why = "Cannot confirm whether the alignment request took effect. Pausing for the operator.";
+          }
+        }
         // ⚠ COUNTED HERE, WHERE THE REFUSAL IS, AND NOWHERE ELSE. The ladder is
         // pure and never learns what happened to a call it chose; this is the
-        // one place that knows. A lock is the only call counted because it is
-        // the only one that re-issues without bound: the authoritative lock list
-        // is consulted rather than believed, by design, so a refusal never reads
-        // as done. The others all latch on the asking -- the weapons work
-        // through their module list and stop, an align, a warp and a route each
-        // stamp their destination -- so none of them can spin.
+        // one place that knows. Lock refusals have their own bound because the
+        // authoritative lock list is consulted rather than believed, so a
+        // refused lock never reads as done.
         if (decision.action.kind === "lock") {
           mem.ladder = noteRefusedLock(mem.ladder, decision.action.targetID);
         }
@@ -7402,6 +7459,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // fleet with the ship still sitting in space.
         mem.ladder = {
           standingChatCursor: null,
+          alignmentOrder: null,
           healOrder: null,
           lastSupervisorIDs: [...resuming.supervisorCharacterIDs],
           abandonment: {
