@@ -17575,6 +17575,12 @@ app.post("/api/bridge/targets/unlock", requireAuth, async (req, res, next) => {
 // `repeat` is the retail cycle flag: -1 keeps cycling until something stops it,
 // 0 runs a single cycle. Default -1, the retail default for a held module.
 //
+// ⚠ A LAUNCHER NEEDS ITS EFFECT NAMED. The server launches probes from a probe
+// launcher only when Activate says "useMissiles"; with an empty effect the
+// launcher cycles and launches nothing. So a caller may send the module's
+// typeID, and for a launcher type the BFF names "useMissiles" from the SDE's own
+// typeDogma, exactly as the retail client does (staticData.getLauncherEffectName).
+//
 // The handler owns every refusal — module not online, no target, target not
 // locked, out of range, not enough capacitor, wrong charge/crystal — and each
 // arrives with its own reason, which is passed through untouched. This BFF
@@ -17590,7 +17596,11 @@ app.post("/api/bridge/modules/activate", requireAuth, async (req, res, next) => 
     res.status(400).json({ ok: false, error: "INVALID_MODULE", message: "A module is required." });
     return;
   }
-  const effect = typeof body.effect === "string" ? body.effect : "";
+  const typeID = Number(body.typeID) || 0;
+  let effect = typeof body.effect === "string" ? body.effect : "";
+  if (!effect && typeID > 0) {
+    effect = staticData.getLauncherEffectName(typeID) || "";
+  }
   const targetID = Number(body.targetID) || 0;
   const repeat = body.repeat === 0 || body.repeat === "0" ? 0 : -1;
   try {
