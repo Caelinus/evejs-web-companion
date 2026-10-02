@@ -63,4 +63,18 @@
       {/if}
     </button>
   {/each}
+  <a
+    class="global-launch"
+    data-launch="miningOperations"
+    href="/mining-command-center"
+    aria-label="Mining Command Center"
+    title="Create and supervise multi-pilot mining operations"
+  >
+    <svg class="global-launch-glyph" viewBox="0 0 24 24" aria-hidden="true">
+      {#each NEOCOM_GLYPHS.miningOperations as d (d)}
+        <path {d} />
+      {/each}
+    </svg>
+    <span class="global-launch-text">MCC</span>
+  </a>
 </div>

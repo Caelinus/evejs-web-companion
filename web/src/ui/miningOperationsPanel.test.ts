@@ -8,6 +8,7 @@ register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const MiningOperations = (await import("./MiningOperations.svelte")).default;
 const MiningCommandCenter = (await import("./MiningCommandCenter.svelte")).default;
+const GlobalLaunchers = (await import("./GlobalLaunchers.svelte")).default;
 
 test("Mining Command Center renders without a selected pilot workspace", () => {
   const output = render(MiningOperations as never, { props: {} } as never);
@@ -17,16 +18,28 @@ test("Mining Command Center renders without a selected pilot workspace", () => {
   assert.match(text, /Global target board/i);
 });
 
-test("Command Center mounts in Farmer's global window without a pilot workspace", () => {
+test("Command Center has a dedicated page entry without mounting a pilot workspace", () => {
   const output = render(MiningCommandCenter as never, { props: {} } as never);
   assert.match(output.body, /Mining Command Center/);
   const globalPanel = readFileSync(new URL("./GlobalPanel.svelte", import.meta.url), "utf8");
-  const globalWindow = readFileSync(new URL("./globalWindow.ts", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
   const shell = readFileSync(new URL("./MiningCommandCenter.svelte", import.meta.url), "utf8");
-  assert.match(globalPanel, /<MiningOperations/);
-  assert.match(globalWindow, /"miningOperations"/);
+  assert.match(main, /isMiningCommandCenterPath\(window\.location\.pathname\)/);
+  assert.match(main, /import\("\.\/ui\/MiningCommandCenter\.svelte"\)/);
+  assert.doesNotMatch(globalPanel, /<MiningOperations/);
   assert.doesNotMatch(shell, /createAppFlow|createSession|readSpaceSnapshot|Overview|Workspace/);
   assert.doesNotMatch(readFileSync(new URL("./PanelHost.svelte", import.meta.url), "utf8"), /<MiningOperations/);
+});
+
+test("the shared WC header opens the standalone MCC URL instead of a floating window", () => {
+  const output = render(GlobalLaunchers as never, {
+    props: { openIds: new Set(), companionCount: 0, onOpen: () => {} },
+  } as never);
+  assert.match(output.body, /<a\b[^>]*data-launch="miningOperations"[^>]*href="\/mining-command-center"/);
+  assert.doesNotMatch(output.body, /<button\b[^>]*data-launch="miningOperations"/);
+  for (const id of ["botManager", "piManager", "industryManager", "companion"]) {
+    assert.match(output.body, new RegExp(`<button\\b[^>]*data-launch="${id}"`));
+  }
 });
 
 test("unsupported target and defender execution are explicit, not false capabilities", () => {
