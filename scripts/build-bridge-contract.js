@@ -44,11 +44,9 @@ function buildContract() {
     "gateway allowlist",
   );
   const writePairs = sortedUnique(policy.BRIDGE_WRITE_PAIR_KEYS, "BFF write policy");
-  const allowed = new Set(allowedPairs);
-  const absentWrites = writePairs.filter((pair) => !allowed.has(pair));
-  if (absentWrites.length > 0) {
-    throw new Error(`BFF write policy names pairs EveJS does not allow: ${absentWrites.join(", ")}`);
-  }
+  // The BFF's defensive write denylist also includes methods the gateway
+  // currently refuses. Keep the two inventories independent: adding a deny
+  // classification must never require expanding the game's allowlist.
   return {
     schemaVersion: 1,
     sources: {

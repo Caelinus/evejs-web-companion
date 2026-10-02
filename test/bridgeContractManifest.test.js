@@ -19,10 +19,7 @@ test("the shared bridge manifest pins the web write boundary", () => {
   assert.deepEqual(manifest.boundary.browserSessionFields, policy.SAFE_BROWSER_SESSION_FIELDS);
 });
 
-test("every web-classified write exists in the pinned EveJS allowlist", () => {
-  const allowed = new Set(manifest.gatewayAllowlist.pairs);
-  const missing = manifest.bffWritePolicy.pairs.filter((pair) => !allowed.has(pair));
-  assert.deepEqual(missing, []);
+test("the pinned EveJS allowlist is independently counted and hashed", () => {
   assert.equal(manifest.gatewayAllowlist.count, manifest.gatewayAllowlist.pairs.length);
   assert.equal(manifest.gatewayAllowlist.sha256, digest(manifest.gatewayAllowlist.pairs));
 });
