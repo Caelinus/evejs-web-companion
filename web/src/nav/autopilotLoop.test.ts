@@ -402,6 +402,89 @@ test("an unnamed warp refusal that never clears pauses on the bound, not the fir
   );
 });
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+for (const boundary of ["status", "snapshot", "write"] as const) {
+  for (const outcome of ["success", "failure"] as const) {
+    test(`a retired ${boundary} ${outcome} cannot drive or mutate a replacement route`, async () => {
+      const pendingStatus = deferred<FlightStatus>();
+      const pendingSnapshot = deferred<SpaceSnapshot>();
+      const pendingWrite = deferred<void>();
+      const entered = deferred<void>();
+      const mock = makeMock();
+      mock.state.system = DEST_SYSTEM;
+      mock.state.docked = false;
+      mock.state.inSpace = true;
+      mock.state.shipMode = "STOP";
+      const observed = await mock.getStatus();
+      const { deps, progress } = makeDeps(mock);
+      let first = true;
+      if (boundary === "status") {
+        deps.getStatus = async () => {
+          if (first) { first = false; entered.resolve(); return pendingStatus.promise; }
+          return mock.getStatus();
+        };
+      } else if (boundary === "snapshot") {
+        deps.getSpaceSnapshot = async () => {
+          if (first) { first = false; entered.resolve(); return pendingSnapshot.promise; }
+          throw new Error("measurement unavailable");
+        };
+      } else {
+        deps.warp = async (id) => {
+          if (first) { first = false; entered.resolve(); return pendingWrite.promise; }
+          await mock.warp(id);
+        };
+      }
+      const controller = createAutopilot(deps);
+      controller.start(PLAN);
+      const retired = controller.tick();
+      await entered.promise;
+      controller.abort();
+      controller.start({ ...PLAN, destinationStationID: DEST_STATION + 1 });
+      assert.equal((await controller.tick()).kind, "warp");
+      const replacement = controller.snapshot();
+      const reported = progress.length;
+      const calls = [...mock.calls];
+      if (outcome === "failure") {
+        const error = refusal("old session disappeared", "SESSION_NOT_FOUND");
+        if (boundary === "status") pendingStatus.reject(error);
+        else if (boundary === "snapshot") pendingSnapshot.reject(error);
+        else pendingWrite.reject(error);
+      } else {
+        if (boundary === "status") pendingStatus.resolve(observed);
+        else if (boundary === "snapshot") pendingSnapshot.resolve(null as unknown as SpaceSnapshot);
+        else pendingWrite.resolve();
+      }
+      await retired;
+      assert.deepEqual(controller.snapshot(), replacement);
+      assert.equal(progress.length, reported, "retired work must not publish progress");
+      assert.deepEqual(mock.calls, calls, "retired work must not issue another move");
+    });
+  }
+}
+
+test("pause and resume invalidate a pending autopilot read", async () => {
+  const pending = deferred<FlightStatus>();
+  const mock = makeMock();
+  const { deps } = makeDeps(mock);
+  deps.getStatus = () => pending.promise;
+  const controller = createAutopilot(deps);
+  controller.start(PLAN);
+  const retired = controller.tick();
+  controller.pause();
+  controller.resume();
+  const replacement = controller.snapshot();
+  pending.resolve(await mock.getStatus());
+  await retired;
+  assert.deepEqual(controller.snapshot(), replacement);
+  assert.deepEqual(mock.calls, []);
+});
+
 test("abort stops the loop and it never calls the bridge afterward", async () => {
   const mock = makeMock();
   const { deps } = makeDeps(mock);

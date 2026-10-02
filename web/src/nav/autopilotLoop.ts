@@ -899,20 +899,26 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
   // call is preceded by a running-state guard so nothing is issued after
   // pause/abort. Refusals are classified: recoverable ones adjust memory and
   // retry; unsafe ones pause with the handler's reason.
-  async function issue(action: AutopilotAction, sys: number): Promise<void> {
-    if (memory.status !== "running") {
+  function isCurrent(token: number): boolean {
+    return token === runToken && memory.status === "running";
+  }
+
+  async function issue(action: AutopilotAction, sys: number, token: number): Promise<void> {
+    if (!isCurrent(token)) {
       return;
     }
     try {
       switch (action.kind) {
         case "undock":
           await deps.undock();
+          if (!isCurrent(token)) return;
           // The BFF resolves only after the undocked location/scene/ego is
           // authoritative. The next tick can decide from that ready state.
           memory.settleTicks = 0;
           break;
         case "warp":
           await deps.warp(action.destinationID);
+          if (!isCurrent(token)) return;
           memory.warpedInSystem = sys;
           memory.pendingApproachGate = null;
           memory.approachingTargetID = null;
@@ -922,6 +928,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
           break;
         case "approach":
           await deps.approach(action.gateID);
+          if (!isCurrent(token)) return;
           // Approached; clear the pending flag so the next decision retries the
           // jump (which will re-request an approach if still short of range).
           memory.pendingApproachGate = null;
@@ -938,6 +945,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
           break;
         case "jump":
           await deps.jump(action.fromGateID, action.toGateID);
+          if (!isCurrent(token)) return;
           memory.jumpedFromSystem = sys;
           memory.pendingApproachGate = null;
           memory.approachingTargetID = null;
@@ -948,6 +956,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
           break;
         case "dock":
           await deps.dock(action.stationID);
+          if (!isCurrent(token)) return;
           memory.approachingTargetID = null;
           // A successful return includes authoritative docked location state.
           memory.settleTicks = 0;
@@ -960,6 +969,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
       memory.actionTransportFailures = 0;
       memory.sessionChangeWaits = 0;
     } catch (error) {
+      if (!isCurrent(token)) return;
       handleActionError(action, error, sys);
     }
   }
@@ -1166,11 +1176,19 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
       return kind;
     }
 
+    const token = runToken;
+    const stopped = (): AutopilotAction =>
+      memory.status === "aborted"
+        ? { kind: "aborted" }
+        : { kind: "wait", reason: "stopped" };
+
     let status: FlightStatus;
     try {
       status = await deps.getStatus();
+      if (!isCurrent(token)) return stopped();
       memory.statusReadFailures = 0;
     } catch (error) {
+      if (!isCurrent(token)) return stopped();
       if (deps.isSessionLost(error)) {
         setError("The live session ended (idle timeout or another client took over).");
         emit();
@@ -1194,10 +1212,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
     }
 
     // Abort/pause may have fired during the status await: never issue after it.
-    if (memory.status !== "running") {
-      emit();
-      return { kind: memory.status === "aborted" ? "aborted" : "wait", reason: "stopped" };
-    }
+    if (!isCurrent(token)) return stopped();
 
     reconcile(status);
 
@@ -1225,10 +1240,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
         measurement = null;
       }
       // Abort/pause may have fired during that await, like the status read.
-      if (memory.status !== "running") {
-        emit();
-        return { kind: memory.status === "aborted" ? "aborted" : "wait", reason: "stopped" };
-      }
+      if (!isCurrent(token)) return stopped();
     }
 
     const action = decideAutopilotAction(status, plan, memory, measurement);
@@ -1341,8 +1353,9 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
     }
 
     emit();
-    await issue(action, status.solarSystemID as number);
-    emit();
+    if (!isCurrent(token)) return stopped();
+    await issue(action, status.solarSystemID as number, token);
+    if (token === runToken) emit();
     return action;
   }
 
@@ -1402,6 +1415,7 @@ export function createAutopilot(deps: AutopilotDeps): AutopilotController {
       try {
         await tick();
       } catch (error) {
+        if (!isCurrent(token)) return;
         // The backstop: tick() handles its own read/decide/issue failures, so
         // reaching here means something truly unexpected threw. Never die
         // silently with the panel still saying "running" — and never leave
