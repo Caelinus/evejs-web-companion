@@ -76,6 +76,7 @@ const ARG_LABEL: Readonly<Record<string, string>> = {
   stationB: "station B",
   pickupDivisionA: "the pickup division at A",
   deliveryDivisionB: "the delivery division at B",
+  support: "a support pilot to work with",
 };
 
 /** Every fixable problem in a draft, in reading order. Empty means ready to start. */

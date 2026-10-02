@@ -43,7 +43,10 @@ const source = (file: string): string => readFileSync(path.join(UI_DIR, file), "
 
 /** No panel may call the flow during a server render — every read no-ops. */
 function fakeFlow(): unknown {
-  return new Proxy({}, { get: () => async () => {} });
+  // Its one store, the drone-recovery gate, reads ready: the flow default
+  // unless the pilot opts in to browser recovery.
+  const droneRecovery = { subscribe: (run: (value: unknown) => void) => (run({ phase: "ready", reason: null }), () => {}) };
+  return new Proxy({}, { get: (_target, key) => key === "droneRecovery" ? droneRecovery : async () => {} });
 }
 
 const STATION_ID = 60003760;

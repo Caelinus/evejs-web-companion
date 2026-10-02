@@ -154,7 +154,10 @@ test("Show Info is NOT launchable from the rail", () => {
 // never quietly become an unreachable panel.
 // The Bot Manager, Planetary Industry and the Industry Manager are out for the
 // same reason: global windows open from the brand strip (GlobalLaunchers.svelte).
-const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots", "companion", "botManager", "piManager", "industryManager"]);
+// The Mining Command Center is out too, and is not a window at all: its door is a
+// link from that strip to the standalone '/mining-command-center' page,
+// pinned by miningOperationsPanel.test.ts.
+const NOT_IN_THE_RAIL = new Set(["showInfo", "botBuilder", "bots", "companion", "botManager", "piManager", "industryManager", "miningOperations"]);
 
 test("every OTHER tab is still launchable", () => {
   // ⚠ `launchable` is absent on every pre-existing tab and absent means yes. A
