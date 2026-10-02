@@ -176,11 +176,22 @@ test("a rack with no flow renders every module disabled (read-only mount)", () =
   }
 });
 
-// A refusal is the only thing the rack itself says now. The winding-down note
-// went to the centre flash — see the reversal at the bottom of this file.
-test("a refusal is an alert, on the control that refused (R30)", () => {
+// The rack says nothing under itself any more. The winding-down note went to the
+// centre flash (see the reversal at the bottom of this file), and a refusal is
+// already a popup through the notice bridge, so a line repeating it said
+// everything twice. Only the fix -- loading an empty gun -- stays on the rack.
+test("a refusal is said once, by the notice bridge, not by a line under the rack", () => {
   const source = readFileSync(path.join(UI_DIR, "ModuleRack.svelte"), "utf8");
-  assert.match(source, /class="rack-error" role="alert"/, "a refusal is an alert");
+  assert.doesNotMatch(source, /class="rack-error"/, "no refusal line under the rack");
+  assert.doesNotMatch(source, /\berror = /, "no refusal text kept to print");
+  assert.match(source, /class="rack-fix"/, "the load offer for an empty gun stays");
+  const rackFix = source.slice(source.indexOf('class="rack-fix"'));
+  assert.doesNotMatch(rackFix.slice(0, rackFix.indexOf("</p>")), /actionError|silentDecline/,
+    "the fix line never prints the refusal itself");
+});
+
+test("a rendered rack with no refusal shows no fix line", () => {
+  assert.doesNotMatch(renderRack(), /rack-fix|rack-error/);
 });
 
 test("R7d — no raw ids reach the player's eyes", () => {

@@ -112,15 +112,11 @@
     if (!flow || pendingItemID !== null) {
       return;
     }
-    error = "";
     try {
+      // A refusal lands in the targeting slots, and the notice bridge says it.
       await flow.setWeaponBanks(linked);
-      const refusal = $targeting.actionError ?? $targeting.silentDecline;
-      if (refusal) {
-        error = refusal;
-      }
     } catch (cause) {
-      error = String(cause);
+      sayRackProblem("Weapon banks", String(cause));
     }
   }
   /** The auto target: first LOCKED (not still-acquiring) target, else none. */
@@ -128,8 +124,22 @@
 
   /** The module a click is in flight for — that one tile shimmers, the rest stay live. */
   let pendingItemID = $state<number | null>(null);
-  /** The server's refusal for the LAST rack click, read from the authority slots. */
-  let error = $state("");
+  /**
+   * Whether the LAST rack click was refused. Only the fact is kept, not the
+   * words.
+   *
+   * ⚠ THE RACK DOES NOT SAY A REFUSAL ITSELF. It used to repeat it in a line
+   * under the HUD, but every refusal it read came out of the targeting and
+   * fitting slots, which the notice bridge already turns into a popup — so the
+   * player was told twice. What stays on the rack is the FIX (the load offer
+   * below), which a popup cannot carry. Anything the slots never hold — a
+   * thrown call, an empty answer, Reload all's tally — goes out through
+   * `sayRackProblem`, so it is said once as well.
+   */
+  let refused = $state(false);
+  function sayRackProblem(title: string, detail: string, kind: "danger" | "warn" = "danger"): void {
+    notify({ kind, title, detail, key: `module-rack:${title}:${detail}` });
+  }
   /**
    * Redraw tick for the cycle sweep. DISPLAY ONLY — every value it feeds comes
    * from the SERVER's own cycle stamp, and nothing here advances past what the
@@ -397,7 +407,7 @@
     closeMenu();
     const first = modules[0]!;
     pendingItemID = first.itemID;
-    error = "";
+    refused = false;
     refusalModuleID = null;
     try {
       const outcome = await flow.loadAmmo(
@@ -405,11 +415,12 @@
         choice.itemIDs,
         "cargo",
       );
-      if (outcome === "refused" || outcome === "unchanged") {
-        error = `${moduleName(first.typeID)}: ${$fitting.actionError ?? "nothing was loaded."}`;
+      // A reason in the fitting slot is the bridge's to say; only silence is ours.
+      if ((outcome === "refused" || outcome === "unchanged") && !$fitting.actionError) {
+        sayRackProblem(moduleName(first.typeID), "Nothing was loaded.");
       }
     } catch (cause) {
-      error = `${moduleName(first.typeID)}: ${String(cause)}`;
+      sayRackProblem(moduleName(first.typeID), String(cause));
     } finally {
       pendingItemID = null;
     }
@@ -424,14 +435,13 @@
     }
     closeMenu();
     pendingItemID = loaded[0]!.itemID;
-    error = "";
     try {
       const outcome = await flow.unloadAmmo(loaded.map((module) => module.itemID), "cargo");
-      if (outcome === "refused" || outcome === "unchanged") {
-        error = `${moduleName(loaded[0]!.typeID)}: ${$fitting.actionError ?? "nothing was unloaded."}`;
+      if ((outcome === "refused" || outcome === "unchanged") && !$fitting.actionError) {
+        sayRackProblem(moduleName(loaded[0]!.typeID), "Nothing was unloaded.");
       }
     } catch (cause) {
-      error = `${moduleName(loaded[0]!.typeID)}: ${String(cause)}`;
+      sayRackProblem(moduleName(loaded[0]!.typeID), String(cause));
     } finally {
       pendingItemID = null;
     }
@@ -461,7 +471,6 @@
           : `${gun}: empty, and nothing in cargo is known to fit - pick a charge from its menu.`,
       );
     }
-    error = "";
     for (const step of plan.steps) {
       pendingItemID = step.moduleIDs[0] ?? null;
       try {
@@ -470,8 +479,9 @@
           // ⚠ NOT CALLED A FAILURE. Reload all sends every gun, full or not,
           // and a group that was already full answers exactly like this.
           problems.push(`${moduleName(step.moduleTypeID)}: nothing loaded - probably already full.`);
-        } else if (outcome === "refused") {
-          problems.push(`${moduleName(step.moduleTypeID)}: ${$fitting.actionError ?? "refused."}`);
+        } else if (outcome === "refused" && !$fitting.actionError) {
+          // A refusal WITH a reason already popped up through the bridge.
+          problems.push(`${moduleName(step.moduleTypeID)}: refused.`);
         }
       } catch (cause) {
         problems.push(`${moduleName(step.moduleTypeID)}: ${String(cause)}`);
@@ -482,18 +492,20 @@
     if (plan.steps.length === 0 && problems.length === 0) {
       problems.push("No weapons to reload.");
     }
-    error = problems.join(" ");
+    if (problems.length > 0) {
+      sayRackProblem("Reload all", problems.join(" "), "warn");
+    }
     void readCargo();
   }
 
   /**
-   * The module the last refusal was about, so the refusal line can offer the
-   * fix when the fix is loading it. Cleared with the error.
+   * The module the last refusal was about, so the rack can offer the fix when
+   * the fix is loading it. Cleared with `refused`.
    */
   let refusalModuleID = $state<number | null>(null);
   /** The empty gun a refusal named, while it is still empty. */
   const refusalModule = $derived.by<RackModule | null>(() => {
-    if (refusalModuleID === null || !error) {
+    if (refusalModuleID === null || !refused) {
       return null;
     }
     const module =
@@ -612,15 +624,11 @@
       return;
     }
     pendingItemID = module.itemID;
-    error = "";
     try {
+      // A refusal lands in the targeting slots, and the notice bridge says it.
       await flow.setModuleOverload(module.itemID, !module.overloaded);
-      const refusal = $targeting.actionError ?? $targeting.silentDecline;
-      if (refusal) {
-        error = `${moduleName(module.typeID)}: ${refusal}`;
-      }
     } catch (cause) {
-      error = `${moduleName(module.typeID)}: ${String(cause)}`;
+      sayRackProblem(moduleName(module.typeID), String(cause));
     } finally {
       pendingItemID = null;
     }
@@ -631,15 +639,10 @@
       return;
     }
     pendingItemID = module.itemID;
-    error = "";
     try {
       await flow.repairModule(module.itemID);
-      const refusal = $targeting.actionError ?? $targeting.silentDecline;
-      if (refusal) {
-        error = `${moduleName(module.typeID)}: ${refusal}`;
-      }
     } catch (cause) {
-      error = `${moduleName(module.typeID)}: ${String(cause)}`;
+      sayRackProblem(moduleName(module.typeID), String(cause));
     } finally {
       pendingItemID = null;
     }
@@ -658,7 +661,7 @@
       return;
     }
     pendingItemID = module.itemID;
-    error = "";
+    refused = false;
     refusalModuleID = module.itemID;
     try {
       if (action === "deactivate") {
@@ -672,10 +675,10 @@
       }
       // Read the AUTHORITY, not the resolved promise: the flow's targeting
       // wrapper swallows refusals into these two slots (Overview reads them the
-      // same way), and a 200 with a silent decline is still not a success.
-      const refusal = $targeting.actionError ?? $targeting.silentDecline;
-      if (refusal) {
-        error = `${moduleName(module.typeID)}: ${refusal}`;
+      // same way), and a 200 with a silent decline is still not a success. The
+      // bridge pops the words up; the rack only remembers that it happened.
+      if ($targeting.actionError ?? $targeting.silentDecline) {
+        refused = true;
       } else if (
         action === "deactivate" &&
         ($space.snapshot?.ship?.activeModuleIDs ?? []).includes(module.itemID)
@@ -702,7 +705,8 @@
         });
       }
     } catch (cause) {
-      error = `${moduleName(module.typeID)}: ${String(cause)}`;
+      refused = true;
+      sayRackProblem(moduleName(module.typeID), String(cause));
     } finally {
       pendingItemID = null;
     }
@@ -1076,23 +1080,18 @@
       </ul>
     </div>
   {/if}
-  {#if error}
-    <!-- ⚠ A REFUSAL STAYS HERE, ON THE CONTROL (R30). Only the winding-down
-         note moved to the centre flash: that is an acknowledgement with a shelf
-         life of one cycle, where this is the reason a button did nothing, and a
-         player needs that while they are still looking at the button. -->
-    <p class="rack-error" role="alert">
-      {error}
-      {#if refusalModule && refusalFix && flow}
-        <!-- The fix, on the line that names the problem: the refusal was
-             about an empty gun, and here is what is in cargo for it. -->
-        <button
-          type="button"
-          class="minor"
-          disabled={pendingItemID !== null}
-          onclick={() => refusalModule && refusalFix && loadChoice([refusalModule], refusalFix)}
-        >Load {moduleName(refusalFix.typeID)} ({refusalFix.quantity.toLocaleString()} in cargo)</button>
-      {/if}
+  {#if refusalModule && refusalFix && flow}
+    <!-- ⚠ ONLY THE FIX, NEVER THE REFUSAL. The words already popped up through
+         the notice bridge, and repeating them here said everything twice. A
+         popup cannot carry a button, though: the refusal was about an empty
+         gun, and here is what is in cargo for it. -->
+    <p class="rack-fix">
+      <button
+        type="button"
+        class="minor"
+        disabled={pendingItemID !== null}
+        onclick={() => refusalModule && refusalFix && loadChoice([refusalModule], refusalFix)}
+      >Load {moduleName(refusalFix.typeID)} into the empty {moduleName(refusalModule.typeID)} ({refusalFix.quantity.toLocaleString()} in cargo)</button>
     </p>
   {/if}
   {#if menu}
