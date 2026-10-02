@@ -38,6 +38,11 @@ const SLOT_FAMILY_FLAGS: Readonly<Record<SlotFamily, readonly number[]>> = {
   subsystem: [125, 126, 127, 128, 129, 130, 131, 132],
 };
 
+/** The inventory flag of one slot, or null past the family's range. */
+export function slotFlagOf(family: SlotFamily, index: number): number | null {
+  return SLOT_FAMILY_FLAGS[family][index] ?? null;
+}
+
 /** Render order: how a fitting window reads top to bottom. */
 export const SLOT_FAMILY_ORDER: readonly SlotFamily[] = [
   "high",

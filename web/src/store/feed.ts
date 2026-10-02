@@ -249,6 +249,19 @@ export type FeedEvent =
   // A fitting action (fit/unfit/online/offline/destroy) failed or was declined;
   // null clears the error after a clean action.
   | { readonly type: "fitting/action-error"; readonly message: string | null }
+  // Round counts the server pushed as guns fired (`OnModuleAttributeChanges`).
+  | {
+      readonly type: "fitting/charge-quantity";
+      readonly changes: readonly import("../bridge/reloadNotifications.ts").ChargeQuantityChange[];
+    }
+  // The server announced a reload (`OnChargeBeingLoadedToModule`).
+  | {
+      readonly type: "fitting/reload-started";
+      readonly moduleIDs: readonly number[];
+      readonly chargeTypeID: number | null;
+      readonly durationMs: number;
+      readonly atMs: number;
+    }
   // Drop the fitting state (character offline / logged out).
   | { readonly type: "fitting/cleared" }
   // R21 slice B — the bound-dogma snapshot (active ship + fitted modules with

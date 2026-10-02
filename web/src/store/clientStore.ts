@@ -40,6 +40,7 @@ import type {
   FittingResources,
   FittingSlot,
   FittingState,
+  ModuleReload,
   DogmaState,
   IndustryBlueprintRow,
   IndustryDefinition,
@@ -102,6 +103,7 @@ import { deriveShipStats } from "../bridge/shipStats.ts";
 import { applyJamEvent, type ActiveJam } from "../bridge/jamNotifications.ts";
 import { EMPTY_RECIPE_BOOK } from "../bridge/piRecipes.ts";
 import { applyTargetEvent } from "../bridge/targetNotifications.ts";
+import { applyChargeQuantityChanges } from "../bridge/reloadNotifications.ts";
 
 // --- Typed state slices ----------------------------------------------------
 
@@ -268,6 +270,7 @@ const INITIAL_FITTING: FittingState = Object.freeze({
   resourcesError: null,
   dogmaError: null,
   actionError: null,
+  reloads: Object.freeze({}),
 });
 
 // R21 slice B — the bound-dogma snapshot. Empty until the Fitting window loads
@@ -1301,8 +1304,37 @@ export function createClientStore(): ClientStore {
           dogmaError: fitting.get().dogmaError,
           // A successful load clears any stale action error.
           actionError: null,
+          // A re-read does not end a reload; only the clock does.
+          reloads: fitting.get().reloads,
         });
         break;
+      case "fitting/charge-quantity": {
+        const current = fitting.get();
+        const slots = applyChargeQuantityChanges(current.slots, current.activeShipID, event.changes);
+        if (slots !== current.slots) {
+          fitting.set({ ...current, slots });
+        }
+        break;
+      }
+      case "fitting/reload-started": {
+        // Finished reloads are dropped here rather than on a timer: this is
+        // the only place the record grows, so it never grows unbounded.
+        const reloads: Record<number, ModuleReload> = {};
+        for (const [key, reload] of Object.entries(fitting.get().reloads)) {
+          if (event.atMs < reload.startedAtMs + reload.durationMs) {
+            reloads[Number(key)] = reload;
+          }
+        }
+        for (const moduleID of event.moduleIDs) {
+          reloads[moduleID] = {
+            chargeTypeID: event.chargeTypeID,
+            startedAtMs: event.atMs,
+            durationMs: event.durationMs,
+          };
+        }
+        fitting.set({ ...fitting.get(), reloads });
+        break;
+      }
       case "dogma/loaded":
         // A companion to the fit, never a gate on it: a failed read records its
         // reason and drops the snapshot, leaving the slots and bars untouched.
