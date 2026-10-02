@@ -5,6 +5,7 @@
 // it stays framework-agnostic and unit-testable under node:test.
 
 import { getCharacterSelectionData } from "../bridge/characterSelection.ts";
+import { setSessionToken } from "./sessionToken.ts";
 import {
   getStationGuests,
   getStationInfoCached,
@@ -12233,19 +12234,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       const generation = sessionCloseGeneration;
       // A cancelled sign-in must still receive its newly minted token so it can
       // clean up that exact login without ever selecting a pilot on it.
-      const result = await api.login(username, password, { ...callOptions, captureRequestGuard: undefined });
+      const result = await api.login(username, password, { ...callOptions,
+        token: callOptions.token ?? null, captureRequestGuard: undefined });
       if (generation !== sessionCloseGeneration || sessionClosing) {
-        if (result.sessionToken !== null)
-          await api.logout({ ...callOptions, token: result.sessionToken, captureRequestGuard: undefined });
+        if (result.sessionToken !== null) {
+          try {
+            await api.logout({ ...callOptions, token: result.sessionToken, captureRequestGuard: undefined });
+          } catch (error) {
+            throw new BridgeCallError("CANCELLED_LOGIN_RELEASE_UNVERIFIED",
+              "Sign-in was cancelled, but the new session could not be confirmed logged out. Retry releasing that session.",
+              error instanceof BridgeCallError ? error.status : 0,
+              error instanceof BridgeCallError ? error.diagnosis : null, result.sessionToken);
+          }
+        }
         throw new Error("This sign-in was cancelled.");
       }
-      // R107 — in per-session mode capture the token onto our own call options
-      // (api.login deliberately did NOT write the global), so every later call
-      // and the SSE stream authenticate as THIS character. In single-session
-      // mode `token` is not a key on callOptions and api.login already wrote the
-      // global, so this assignment is skipped.
+      // Publish only after this sign-in is still current. api.login received an
+      // explicit carrier so even legacy flows cannot publish a cancelled token.
       if (options.perSessionToken) {
         callOptions.token = result.sessionToken;
+      } else if (result.sessionToken !== null) {
+        setSessionToken(result.sessionToken);
       }
       store.apply({
         type: "session/logged-in",

@@ -56,7 +56,8 @@ export interface CallMethodOptions {
 }
 
 /** Client-side (non-server) failure codes, alongside the wire's BridgeErrorCode set. */
-export type BridgeClientErrorCode = "BRIDGE_NETWORK_ERROR" | "BRIDGE_BAD_RESPONSE" | "SESSION_REQUEST_RETIRED";
+export type BridgeClientErrorCode = "BRIDGE_NETWORK_ERROR" | "BRIDGE_BAD_RESPONSE" | "SESSION_REQUEST_RETIRED"
+  | "CANCELLED_LOGIN_RELEASE_UNVERIFIED";
 
 export class BridgeCallError extends Error {
   override readonly name = "BridgeCallError";
@@ -74,17 +75,21 @@ export class BridgeCallError extends Error {
    * the request or the request never got a connection to be sent on.
    */
   readonly diagnosis: string | null;
+  /** Exact unpublished login credential retained for a failed cancellation cleanup. */
+  readonly cancelledSessionToken: string | null;
 
   constructor(
     code: BridgeErrorCode | BridgeClientErrorCode,
     message: string,
     status: number,
     diagnosis: string | null = null,
+    cancelledSessionToken: string | null = null,
   ) {
     super(message);
     this.code = code;
     this.status = status;
     this.diagnosis = diagnosis;
+    this.cancelledSessionToken = cancelledSessionToken;
   }
 }
 

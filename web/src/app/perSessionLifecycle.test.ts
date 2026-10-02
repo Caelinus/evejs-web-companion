@@ -4,6 +4,8 @@ import { createAppFlow } from "./flow.ts";
 import { createClientStore } from "../store/clientStore.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
 import { fittingBody, flightBody, holdsBody, namesBody, spaceBody } from "./botFixtures.ts";
+import { clearSessionToken, getSessionToken, setSessionToken } from "./sessionToken.ts";
+import { logout } from "./api.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -103,6 +105,86 @@ test("cancelling a pending login cleans up only its returned token and never sel
   assert.equal(flow.sessionToken(), null);
   assert.equal(store.session.get().phase, "logged-out");
 });
+
+for (const replacement of [null, "another-current-login"]) {
+  test(`cancelled legacy login preserves the global identity ${replacement ?? "signed out"}`, async () => {
+    clearSessionToken();
+    const login = deferred<Response>();
+    const cleanup: Array<{ auth: string | undefined; credentials: RequestCredentials | undefined }> = [];
+    const store = createClientStore();
+    const flow = createAppFlow(store, { livePush: false, fetch: (async (input, init) => {
+      if (String(input) === "/api/login") {
+        assert.equal(init?.credentials, "omit");
+        return login.promise;
+      }
+      assert.equal(String(input), "/api/logout");
+      cleanup.push({ auth: (init?.headers as Record<string, string>).authorization, credentials: init?.credentials });
+      return response({ ok: true });
+    }) as typeof fetch });
+    const cancelled = assert.rejects(flow.login("pilot", "password"), /cancelled/);
+    await flow.logout();
+    if (replacement) setSessionToken(replacement);
+    login.resolve(response({ ok: true, sessionToken: "cancelled-login", account: { accountID: 4001, username: "pilot" } }));
+    await cancelled;
+    assert.equal(getSessionToken(), replacement);
+    assert.equal(store.session.get().phase, "logged-out");
+    assert.deepEqual(cleanup.at(-1), { auth: "Bearer cancelled-login", credentials: "omit" });
+    clearSessionToken();
+  });
+}
+
+test("a current legacy flow login publishes its returned token for subsequent calls", async () => {
+  clearSessionToken();
+  const store = createClientStore();
+  const flow = createAppFlow(store, { livePush: false, fetch: (async (input, init) => {
+    if (String(input) === "/api/login") return response({ ok: true, sessionToken: "current-login",
+      account: { accountID: 4001, username: "pilot" } });
+    assert.equal((init?.headers as Record<string, string>).authorization, "Bearer current-login");
+    return response({ ok: true, service: "charUnboundMgr", method: "GetCharacterSelectionData",
+      result: [null, null, { type: "list", items: [] }, null] });
+  }) as typeof fetch });
+  await flow.login("pilot", "password");
+  assert.equal(getSessionToken(), "current-login");
+  assert.equal(store.session.get().phase, "logged-in");
+  clearSessionToken();
+});
+
+for (const outcome of ["refused", "ambiguous"] as const) {
+  test(`${outcome} cancelled login cleanup retains its exact credential without replacing a current login`, async () => {
+    clearSessionToken();
+    const login = deferred<Response>();
+    let unverified = true;
+    const cleanupTokens: string[] = [];
+    const flow = createAppFlow(createClientStore(), { livePush: false, fetch: (async (input, init) => {
+      if (String(input) === "/api/login") return login.promise;
+      const auth = (init?.headers as Record<string, string>).authorization;
+      if (!auth) return response({ ok: true }); // Initial local cancellation.
+      cleanupTokens.push(auth);
+      assert.equal(init?.credentials, "omit");
+      if (unverified) {
+        if (outcome === "ambiguous") throw new Error("connection reset");
+        return response({ ok: false, error: "PILOT_RELEASE_UNVERIFIED" }, 409);
+      }
+      return response({ ok: true });
+    }) as typeof fetch });
+    const pending = flow.login("pilot", "password").catch(error => error);
+    await flow.logout();
+    setSessionToken("another-current-login");
+    login.resolve(response({ ok: true, sessionToken: "cleanup-needed", account: { accountID: 4001, username: "pilot" } }));
+    const error = await pending;
+    assert.ok(error instanceof BridgeCallError);
+    assert.equal(error.code, "CANCELLED_LOGIN_RELEASE_UNVERIFIED");
+    assert.equal(error.cancelledSessionToken, "cleanup-needed");
+    assert.match(error.message, /Retry releasing/);
+    assert.equal(error.status, outcome === "refused" ? 409 : 0);
+    assert.equal(getSessionToken(), "another-current-login");
+    unverified = false;
+    await logout({ ...flow.requestOptions(), token: error.cancelledSessionToken });
+    assert.deepEqual(cleanupTokens, ["Bearer cleanup-needed", "Bearer cleanup-needed"]);
+    assert.equal(getSessionToken(), "another-current-login");
+    clearSessionToken();
+  });
+}
 
 test("a replaced pilot's late refusal cannot blank the new pilot's corp panel or mark it offline", async () => {
   const corp = deferred<Response>();
