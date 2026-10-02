@@ -100,6 +100,8 @@ export interface ApiOptions {
   readonly priority?: RequestPriority;
   /** Capture the current flow/session before awaiting a response drain. */
   readonly captureNotificationSink?: () => (notifications: readonly JsonValue[]) => void;
+  /** Reject queued dispatch or late replies after this flow's session retires. */
+  readonly captureRequestGuard?: () => () => void;
 }
 
 // R42/R107 — THE one place every BFF request in this file picks up its session
@@ -151,24 +153,30 @@ async function requestJson(
 ): Promise<Record<string, JsonValue>> {
   const doFetch = options.fetch ?? globalThis.fetch;
   const notificationSink = options.captureNotificationSink?.();
+  const assertCurrent = options.captureRequestGuard?.();
+  const authHeaders = "token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders();
+  const credentials = "token" in options ? "omit" : "same-origin";
   let response: Response;
   try {
     // ⚠ THE DEADLINE IS ARMED INSIDE THE LANE, NOT OUTSIDE IT. A request that
     // waited for a free lane must arrive at the server with its full budget; if
     // the clock started when the call was made, a queued request would time out
     // against a server that answered promptly. See app/transport.ts.
-    response = await bridgeLane.run(options.priority ?? "read", path, () =>
-      doFetch(`${options.baseUrl ?? ""}${path}`, {
-        credentials: "same-origin",
+    response = await bridgeLane.run(options.priority ?? "read", path, () => {
+      assertCurrent?.();
+      return doFetch(`${options.baseUrl ?? ""}${path}`, {
         signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
         ...init,
+        credentials,
         headers: {
-          ...("token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders()),
+          ...authHeaders,
           ...((init.headers as Record<string, string> | undefined) ?? {}),
         },
-      }),
-    );
+      });
+    });
   } catch (cause) {
+    assertCurrent?.();
+    if (cause instanceof BridgeCallError && cause.code === "SESSION_REQUEST_RETIRED") throw cause;
     throw new BridgeCallError(
       "BRIDGE_NETWORK_ERROR",
       transportFailureWords(path, cause),
@@ -182,12 +190,14 @@ async function requestJson(
   try {
     data = await response.json();
   } catch {
+    assertCurrent?.();
     throw new BridgeCallError(
       "BRIDGE_BAD_RESPONSE",
       `${path} returned a non-JSON response (HTTP ${response.status}).`,
       response.status,
     );
   }
+  assertCurrent?.();
   if (
     typeof data !== "object" ||
     data === null ||
@@ -2415,6 +2425,12 @@ export function subscribeBridgeEvents(
   handlers: BridgeEventHandlers,
   options: BridgeEventOptions = {},
 ): BridgeEventSubscription {
+  // Native EventSource still sends same-origin cookies. Without an explicit
+  // token in the URL, a tokenless flow would subscribe as another pilot.
+  if ("token" in options && !options.token) {
+    handlers.onError?.();
+    return { close() {} };
+  }
   // R42/R107 — `EventSource` cannot set request headers, so this is the one URL
   // in the client that carries the session token in its query string. Without it
   // the stream would fall back to the shared cookie and a second character would

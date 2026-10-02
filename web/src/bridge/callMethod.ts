@@ -52,10 +52,11 @@ export interface CallMethodOptions {
   readonly token?: string | null;
   /** R92 — lane priority; defaults to "read". See app/transport.ts. */
   readonly priority?: RequestPriority;
+  readonly captureRequestGuard?: () => () => void;
 }
 
 /** Client-side (non-server) failure codes, alongside the wire's BridgeErrorCode set. */
-export type BridgeClientErrorCode = "BRIDGE_NETWORK_ERROR" | "BRIDGE_BAD_RESPONSE";
+export type BridgeClientErrorCode = "BRIDGE_NETWORK_ERROR" | "BRIDGE_BAD_RESPONSE" | "SESSION_REQUEST_RETIRED";
 
 export class BridgeCallError extends Error {
   override readonly name = "BridgeCallError";
@@ -114,6 +115,9 @@ export async function callMethod<TResult = JsonValue>(
   options: CallMethodOptions = {},
 ): Promise<BridgeCallOutcome<TResult>> {
   const doFetch = options.fetch ?? globalThis.fetch;
+  const assertCurrent = options.captureRequestGuard?.();
+  const authHeaders = "token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders();
+  const credentials = "token" in options ? "omit" : "same-origin";
   const body: BridgeCallRequestBody = {
     service,
     method,
@@ -126,28 +130,31 @@ export async function callMethod<TResult = JsonValue>(
   try {
     // R92 — the SECOND fetch site in the client shares the one request lane, or
     // the cap would only bound half of what the tab does. See app/transport.ts.
-    response = await bridgeLane.run(options.priority ?? "read", "/api/bridge/call", () =>
-      doFetch(`${options.baseUrl ?? ""}/api/bridge/call`, {
-      method: "POST",
-      // R42/R107 — the session's own token, alongside the cookie. This route is
-      // the second fetch site in the client (api.ts's requestJson is the other),
-      // so it needs the header too or character selection and the station panel
-      // would silently run as whoever last wrote the cookie. Per-session (token
-      // key present) uses this flow's token; otherwise the per-tab global.
-      headers: {
-        ...("token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders()),
-        "content-type": "application/json",
-      },
-      credentials: "same-origin",
-      body: JSON.stringify(body),
-      // The same 65 s browser-side deadline as api.ts requestJson (see the
-      // note there): a half-dead socket must abort into BRIDGE_NETWORK_ERROR
-      // rather than freeze the awaiting loop forever. A caller's own signal
-      // still wins.
-      signal: options.signal ?? AbortSignal.timeout(65_000),
-      }),
-    );
+    response = await bridgeLane.run(options.priority ?? "read", "/api/bridge/call", () => {
+      assertCurrent?.();
+      return doFetch(`${options.baseUrl ?? ""}/api/bridge/call`, {
+        method: "POST",
+        // R42/R107 — explicit sessions omit shared cookies. This route is
+        // the second fetch site in the client (api.ts's requestJson is the other),
+        // so it needs the header too or character selection and the station panel
+        // would silently run as whoever last wrote the cookie. Per-session (token
+        // key present) uses this flow's token; otherwise the per-tab global.
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        credentials,
+        body: JSON.stringify(body),
+        // The same 65 s browser-side deadline as api.ts requestJson (see the
+        // note there): a half-dead socket must abort into BRIDGE_NETWORK_ERROR
+        // rather than freeze the awaiting loop forever. A caller's own signal
+        // still wins.
+        signal: options.signal ?? AbortSignal.timeout(65_000),
+      });
+    });
   } catch (cause) {
+    assertCurrent?.();
+    if (cause instanceof BridgeCallError && cause.code === "SESSION_REQUEST_RETIRED") throw cause;
     const diagnosis =
       cause instanceof TransportQueueError ? cause.diagnosis.verdict : bridgeLane.diagnose().verdict;
     throw new BridgeCallError(
@@ -166,6 +173,7 @@ export async function callMethod<TResult = JsonValue>(
   try {
     data = await response.json();
   } catch {
+    assertCurrent?.();
     throw new BridgeCallError(
       "BRIDGE_BAD_RESPONSE",
       `Bridge call ${service}.${method} returned a non-JSON response (HTTP ${response.status}).`,
@@ -173,6 +181,7 @@ export async function callMethod<TResult = JsonValue>(
     );
   }
 
+  assertCurrent?.();
   if (typeof data === "object" && data !== null && (data as { ok?: unknown }).ok === false) {
     const errorBody = data as { error?: unknown; message?: unknown };
     throw new BridgeCallError(

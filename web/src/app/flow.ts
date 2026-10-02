@@ -1338,7 +1338,12 @@ export function isSessionLost(error: unknown): boolean {
  * (R31) — a bare `CALL_FAILED` or `101,UI/Menusvc/MenuHints/...` is jargon, and
  * R9a does not have an exception for error paths.
  */
+function throwIfRequestRetired(error: unknown): void {
+  if (error instanceof BridgeCallError && error.code === "SESSION_REQUEST_RETIRED") throw error;
+}
+
 function readErrorReason(error: unknown): string {
+  throwIfRequestRetired(error);
   if (error instanceof BridgeCallError) {
     return error.code;
   }
@@ -1362,6 +1367,9 @@ function readErrorReason(error: unknown): string {
  * ⚠ STILL NOT PLAYER-FACING. Everything on screen goes through errorWords().
  */
 function readRefusalReason(error: unknown): string {
+  // A previous pilot's completion is cancellation, never a refusal to publish
+  // into the current pilot's panel. Keep it out of all error reducers too.
+  throwIfRequestRetired(error);
   if (error instanceof BridgeCallError) {
     const detail = error.message.trim();
     return detail === "" || detail === error.code ? error.code : `${error.code}: ${detail}`;
@@ -1460,6 +1468,9 @@ const ratThreatByTypeID = new Map<number, RatThreat>();
 const droneRangeBonusByTypeID = new Map<number, number | null>();
 
 export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}): AppFlow {
+  let sessionCloseGeneration = 0;
+  let requestGeneration = 0;
+  let sessionClosing = false;
   // R107 — in per-session mode the `token` key is present (starting null) so
   // every api.ts / callMethod.ts call authenticates with THIS flow's token and
   // never the per-tab global; the login handler fills it in and logout clears
@@ -1473,11 +1484,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     token?: string | null;
     priority?: RequestPriority;
     captureNotificationSink?: api.ApiOptions["captureNotificationSink"];
+    captureRequestGuard?: api.ApiOptions["captureRequestGuard"];
   } = {
     ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
     ...(options.eventSource !== undefined ? { eventSource: options.eventSource } : {}),
     ...(options.perSessionToken ? { token: options.initialSessionToken ?? null } : {}),
+    captureRequestGuard: () => {
+      const generation = requestGeneration;
+      const token = callOptions.token;
+      return () => {
+        if (generation !== requestGeneration || token !== callOptions.token)
+          throw new BridgeCallError("SESSION_REQUEST_RETIRED", "This request belongs to a retired pilot session.", 0);
+      };
+    },
     captureNotificationSink: () => {
       const characterID = store.station.get().online?.characterID ?? null;
       const token = callOptions.token, pilotGeneration = recoveryGeneration, runnerGeneration = customBotGeneration;
@@ -1498,6 +1518,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   let recoveryCheckID: string | null = null;
 
   function requireAutomationReady(): void {
+    if (sessionClosing) throw new Error("This pilot session is being released.");
     if (pilotRecoveryEnabled && recoverySignal.get().phase !== "ready") {
       throw new Error(recoverySignal.get().reason ?? "Drone recovery is still checking this pilot. Wait or retry recovery.");
     }
@@ -2074,6 +2095,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function refreshStationPanel(): Promise<void> {
+    const assertCurrent = callOptions.captureRequestGuard?.();
     const structureID = store.station.get().online?.structureID;
     if (structureID) {
       try {
@@ -2109,6 +2131,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       getStationGuests(callOptions),
       getStationInfoCached(callOptions),
     ]);
+    assertCurrent?.();
 
     if (bits.status === "fulfilled") {
       store.apply({ type: "station/bits", bits: bits.value });
@@ -2845,6 +2868,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       const outcome = await action();
       declined = outcome.applied === false;
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -2969,6 +2993,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       outcome = await action();
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -2997,6 +3022,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // --- Activity Center -----------------------------------------------------
 
   async function loadActivity(): Promise<void> {
+    const assertCurrent = callOptions.captureRequestGuard?.();
     store.apply({ type: "activity/loading" });
 
     const now = new Date();
@@ -3007,6 +3033,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // resolution stay the one source of truth for unread mail.
       loadMail(),
     ] as const);
+    assertCurrent?.();
 
     // A lost live session invalidates every result, even if another arm won
     // the race and answered first. Unwind exactly like all other panel reads.
@@ -3103,6 +3130,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function loadScanner(): Promise<void> {
+    const assertCurrent = callOptions.captureRequestGuard?.();
     const generation = ++scannerLoadGeneration;
     store.apply({ type: "scanner/loading" });
     const [scanResult, formationsResult, operationsResult] = await Promise.allSettled([
@@ -3110,6 +3138,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       api.loadScannerFormations(callOptions),
       api.loadScannerOperations(callOptions),
     ] as const);
+    assertCurrent?.();
 
     for (const result of [scanResult, formationsResult, operationsResult]) {
       if (result.status === "rejected" && isSessionLost(result.reason)) {
@@ -3568,6 +3597,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       result = await api.loadMailBody(messageID, markRead, callOptions);
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -3669,6 +3699,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       raw = await api.loadContractDetail(contractID, callOptions);
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -3705,6 +3736,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       ack = await api.acceptContract(contractID, callOptions);
     } catch (error) {
+      throwIfRequestRetired(error);
       store.apply({ type: "contracts/accepting", contractID: null });
       if (isSessionLost(error)) {
         stopLiveStream();
@@ -3799,6 +3831,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       read = await api.loadAssetStationItems(stationID, callOptions);
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -3853,6 +3886,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     try {
       outcome = await api.sendMail(request, callOptions);
     } catch (error) {
+      throwIfRequestRetired(error);
       if (isSessionLost(error)) {
         stopLiveStream();
         store.apply({ type: "character/offline" });
@@ -4189,6 +4223,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // written for the server's vocabulary. Player-facing text comes from
   // `flightRefusalWords` (R31); the two are deliberately separate.
   function flightErrorReason(error: unknown): string {
+    throwIfRequestRetired(error);
     if (error instanceof BridgeCallError) {
       return error.message && error.message !== error.code
         ? `${error.code}: ${error.message}`
@@ -5796,6 +5831,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startRoute(destinationID: number): Promise<RouteStartOutcome> {
+    const generation = sessionCloseGeneration;
     store.apply({ type: "travel/plan-error", message: null });
 
     // Every plan failure BOTH writes the travel slice (the Travel panel's
@@ -5878,6 +5914,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     const destinationStationID = structure?.id ?? (destination.kind === "station" ? destination.stationID : null);
     const destinationName = structure?.name ?? (destination.kind === "station" ? destination.stationName : destination.systemName);
+    if (generation !== sessionCloseGeneration || sessionClosing)
+      return { started: false, reason: "This pilot session was released while planning the route." };
     const plan: RoutePlan = {
       destinationSystemID: targetSystemID,
       destinationStationID,
@@ -7538,6 +7576,18 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     custom: stopCustomController,
   });
 
+  function beginSessionClose(): void {
+    if (sessionClosing) throw new Error("This pilot session is already being released.");
+    sessionClosing = true;
+    sessionCloseGeneration += 1;
+    // Stop producers before attempting release. A refused or ambiguous release
+    // keeps the token and pilot held, with automation stopped for reconciliation.
+    stopMiningController();
+    stopMissionController();
+    stopCompanionController();
+    stopCustomController();
+  }
+
   /**
    * Resolve names and WAIT for them, unlike the fire-and-forget `requestNames`.
    *
@@ -7660,6 +7710,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   async function startMissionBot(request: MissionBotRequest): Promise<void> {
     requireAutomationReady();
+    const generation = sessionCloseGeneration;
     store.apply({ type: "mission-bot/start-error", message: null });
 
     // ⚠ THE CLAIM COMES FIRST, BEFORE THE PREFLIGHT CAN REFUSE. The player has
@@ -7671,6 +7722,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     claimShip("mission");
 
     const preflight = evaluateRequirements(MISSION_BOT_REQUIREMENTS, await missionBotReads(request));
+    if (generation !== sessionCloseGeneration || sessionClosing) return;
     if (!preflight.canStart) {
       store.apply({ type: "mission-bot/start-error", message: preflight.blockedBy });
       return;
@@ -7701,6 +7753,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   async function startMiningBot(request: MiningBotRequest): Promise<void> {
     requireAutomationReady();
+    const generation = sessionCloseGeneration;
     store.apply({ type: "bot/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -7727,6 +7780,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // before the preflight, for the same reason.
 
     const preflight = evaluateRequirements(MINING_BOT_REQUIREMENTS, await miningBotReads(request));
+    if (generation !== sessionCloseGeneration || sessionClosing) return;
     if (!preflight.canStart) {
       store.apply({ type: "bot/start-error", message: preflight.blockedBy });
       return;
@@ -8037,6 +8091,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     resuming: CompanionAbandonmentRecord | null = null,
   ): Promise<void> {
     requireAutomationReady();
+    const generation = sessionCloseGeneration;
     store.apply({ type: "companion/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -8063,6 +8118,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     companionSharedEmptyReadAtMs = 0;
 
     const preflight = evaluateRequirements(FLEET_COMPANION_REQUIREMENTS, await fleetCompanionReads());
+    if (generation !== sessionCloseGeneration || sessionClosing) return;
     if (!preflight.canStart) {
       store.apply({ type: "companion/start-error", message: preflight.blockedBy });
       return;
@@ -8073,6 +8129,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // first tick can fire immediately, so a loop started before this returned
     // would spend that tick believing the ship carries nothing.
     const fitFacts = await readCompanionFitFacts();
+    if (generation !== sessionCloseGeneration || sessionClosing) return;
     const flownRequest = requestForFit(setup, fitFacts);
     // Advisory, never a refusal: a human loads the missing thing or flies
     // anyway. Judged against the DERIVED request, because its lists are what
@@ -8100,6 +8157,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   function resumeFleetCompanion(): void {
+    requireAutomationReady();
     if (!fleetCompanion) {
       return;
     }
@@ -12171,7 +12229,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async login(username, password) {
-      const result = await api.login(username, password, callOptions);
+      if (sessionClosing) throw new Error("This pilot session is being released.");
+      const generation = sessionCloseGeneration;
+      // A cancelled sign-in must still receive its newly minted token so it can
+      // clean up that exact login without ever selecting a pilot on it.
+      const result = await api.login(username, password, { ...callOptions, captureRequestGuard: undefined });
+      if (generation !== sessionCloseGeneration || sessionClosing) {
+        if (result.sessionToken !== null)
+          await api.logout({ ...callOptions, token: result.sessionToken, captureRequestGuard: undefined });
+        throw new Error("This sign-in was cancelled.");
+      }
       // R107 — in per-session mode capture the token onto our own call options
       // (api.login deliberately did NOT write the global), so every later call
       // and the SSE stream authenticate as THIS character. In single-session
@@ -12207,9 +12274,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async selectCharacter(characterID) {
+      if (sessionClosing) throw new Error("This pilot session is being released.");
       // A refused switch leaves the previous pilot held. Keep its recovery
       // proof and live state until the server actually selects the new one.
       const result = await api.selectCharacter(characterID, callOptions);
+      requestGeneration++;
       recoveryGeneration++;
       recoveryTask = null;
       recoveryIDs.clear();
@@ -12800,6 +12869,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     resumeMiningBot() {
+      requireAutomationReady();
       if (miningBot) {
         miningBot.resume();
         void miningBot.run();
@@ -12817,6 +12887,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     resumeMissionBot() {
+      requireAutomationReady();
       if (missionBot) {
         missionBot.resume();
         void missionBot.run();
@@ -12834,6 +12905,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     resumeCustomBot() {
+      requireAutomationReady();
       if (scriptRunner) {
         scriptRunner.resume();
         void scriptRunner.run();
@@ -12879,6 +12951,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     resumeRoute() {
+      requireAutomationReady();
       if (autopilot) {
         autopilot.resume();
         void autopilot.run();
@@ -12939,34 +13012,48 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     async releaseSession() {
       requireAutomationReady();
-      await api.releaseSession(callOptions);
-      recoveryGeneration++;
-      recoveryTask = null;
-      recoveryIDs.clear();
-      confirmedRecoveryIDs.clear();
-      recoveryCheckID = null;
-      recoverySignal.set({ phase: "checking", reason: null });
-      syncedStationID = null;
-      stopLiveStream();
-      store.apply({ type: "character/offline" });
-      store.apply({ type: "character/selected", characterID: null });
+      beginSessionClose();
+      try {
+        await api.releaseSession(callOptions);
+        requestGeneration++;
+        recoveryGeneration++;
+        recoveryTask = null;
+        recoveryIDs.clear();
+        confirmedRecoveryIDs.clear();
+        recoveryCheckID = null;
+        recoverySignal.set({ phase: "checking", reason: null });
+        syncedStationID = null;
+        stopLiveStream();
+        store.apply({ type: "character/offline" });
+        store.apply({ type: "character/selected", characterID: null });
+      } finally {
+        sessionClosing = false;
+      }
     },
 
     async logout() {
       // The server may refuse logout while recovery is pending. In that case
       // the held pilot, recovery check and push stream must stay usable.
-      await api.logout(callOptions);
-      recoveryGeneration++;
-      recoveryTask = null;
-      recoveryIDs.clear();
-      confirmedRecoveryIDs.clear();
-      recoveryCheckID = null;
-      recoverySignal.set({ phase: "checking", reason: null });
-      stopLiveStream();
-      // R107 — releaseSession keeps its token; a completed logout does not.
-      if (options.perSessionToken) callOptions.token = null;
-      syncedStationID = null;
-      store.apply({ type: "session/logged-out" });
+      beginSessionClose();
+      try {
+        // An unopened onboarding slot has no login to release. In particular it
+        // must never ask the server to clear the cookie belonging to another slot.
+        if (!(options.perSessionToken && callOptions.token === null)) await api.logout(callOptions);
+        requestGeneration++;
+        recoveryGeneration++;
+        recoveryTask = null;
+        recoveryIDs.clear();
+        confirmedRecoveryIDs.clear();
+        recoveryCheckID = null;
+        recoverySignal.set({ phase: "checking", reason: null });
+        stopLiveStream();
+        // R107 — releaseSession keeps its token; a completed logout does not.
+        if (options.perSessionToken) callOptions.token = null;
+        syncedStationID = null;
+        store.apply({ type: "session/logged-out" });
+      } finally {
+        sessionClosing = false;
+      }
     },
   };
 }
