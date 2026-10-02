@@ -53,8 +53,10 @@ import {
   TARGET_CLASS_ARGS,
   SQUAD_ROLE_ARGS,
   type ItemMatchArg,
+  type PlanetPickArg,
   MAX_BAY_LIST,
   MAX_ITEM_LIST,
+  MAX_PLANET_LIST,
   MAX_ITEM_PATTERN_LEN,
   MAX_ORE_LIST,
   MAX_TARGET_LIST,
@@ -854,6 +856,27 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx, d
     }
     return { kind: "itemList", items: items.slice(0, MAX_ITEM_LIST) };
   }
+  if (expected === "planetList") {
+    const arr = asArray(obj["planets"], SAY.badArg(label));
+    const seen = new Set<number>();
+    const planets: PlanetPickArg[] = [];
+    for (const entry of arr) {
+      const planetObj = asObject(entry, SAY.badArg(label));
+      const id = planetObj["planetID"];
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        refuse(SAY.badArg(label));
+      }
+      if (seen.has(id as number)) {
+        continue;
+      }
+      seen.add(id as number);
+      const name = planetObj["name"] === null || planetObj["name"] === undefined
+        ? ""
+        : readText(planetObj["name"], { min: 0, max: MAX_WORLD_NAME_LEN, allowNewline: false }, ctx, SAY.badArg(label));
+      planets.push({ planetID: id as number, name: name.length > 0 ? name : null });
+    }
+    return { kind: "planetList", planets: planets.slice(0, MAX_PLANET_LIST) };
+  }
   if (expected === "bookmark") {
     const id = obj["bookmarkID"];
     if (id !== null && id !== undefined && (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) {
@@ -1448,6 +1471,11 @@ function orderArg(arg: Arg): unknown {
             }
           }
         }),
+      };
+    case "planetList":
+      return {
+        kind: "planetList",
+        planets: arg.planets.map((planet) => ({ planetID: planet.planetID, name: planet.name })),
       };
     default: {
       // ⚠ EXHAUSTIVE ON PURPOSE. Every Arg kind MUST serialise here, or an export

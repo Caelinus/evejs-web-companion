@@ -257,3 +257,47 @@ test("the new blocks read as what they do", () => {
   };
   assert.match(stepSentence(intoCorp), /Empty the ship into the corporation's/);
 });
+
+// ── board-planetary-hauler ───────────────────────────────────────────────────
+
+const boardHauler = SCRIPT_MACROS["board-planetary-hauler"]!;
+const haulerStep: MacroStep = { id: "h", kind: "macro", macro: "board-planetary-hauler", args: {} };
+
+test("board-planetary-hauler: already in a ship with a planetary hold -> done, nothing noted", () => {
+  const t = boardHauler(haulerStep, docked({ stationHangar: hangar, activeShipID: 5002, planetaryHaulerShipIDs: [5002] } as never), {}, NB);
+  assert.equal(t.outcome.kind, "done");
+  assert.equal(t.boardPatch, undefined);
+});
+
+test("board-planetary-hauler: boards the parked hull whose hold says planetary, noting the one it leaves", () => {
+  const t = boardHauler(haulerStep, docked({ stationHangar: hangar, activeShipID: 5001, planetaryHaulerShipIDs: [5002] } as never), {}, NB);
+  assert.deepEqual(t.action, { kind: "boardShip", shipID: 5002 });
+  assert.deepEqual(t.boardPatch, { shipBeforeRefit: 5001 });
+});
+
+test("board-planetary-hauler: no parked hull has a planetary hold -> blocked, saying so", () => {
+  const t = boardHauler(haulerStep, docked({ stationHangar: hangar, activeShipID: 5001, planetaryHaulerShipIDs: [] } as never), {}, NB);
+  assert.ok(t.outcome.kind === "blocked" && /planetary commodities hold/.test(t.outcome.reason));
+});
+
+test("board-planetary-hauler: unreadable holds wait, and only a long blind spell blocks", () => {
+  const t = boardHauler(haulerStep, docked({ stationHangar: hangar, activeShipID: 5001, planetaryHaulerShipIDs: null } as never), {}, NB);
+  assert.equal(t.outcome.kind, "acting");
+  const late = boardHauler(haulerStep, docked({ stationHangar: hangar, activeShipID: 5001, planetaryHaulerShipIDs: null } as never), { blindChecks: 99 }, NB);
+  assert.equal(late.outcome.kind, "blocked");
+});
+
+test("board-planetary-hauler: not docked -> blocked", () => {
+  const t = boardHauler(haulerStep, obs(), {}, NB);
+  assert.equal(t.outcome.kind, "blocked");
+});
+
+test("a planet-limited launch reads with its colonies, never their ids", () => {
+  const s: MacroStep = {
+    id: "l", kind: "macro", macro: "launch-commodities",
+    args: { planets: { kind: "planetList", planets: [{ planetID: 40000001, name: "Alpha II" }, { planetID: 40000002, name: null }] } },
+  };
+  const sentence = stepSentence(s);
+  assert.match(sentence, /of Alpha II and 1 more colony/);
+  assert.doesNotMatch(sentence, /40000002/);
+});

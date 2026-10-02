@@ -74,7 +74,9 @@ export type WidgetKind =
   | "item-list-picker"
   | "distance-input"
   | "prop-mode-select"
-  | "text-input";
+  | "text-input"
+  // Read-only: the colonies a Planetary Industry window step was written for.
+  | "planet-list";
 
 /** Every `Arg["kind"]` mapped to the widget that edits it — exhaustive by type. */
 export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
@@ -106,6 +108,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   distanceKm: "distance-input",
   propMode: "prop-mode-select",
   text: "text-input",
+  planetList: "planet-list",
 };
 
 /** A plain-language name for an argument KIND — used when no per-macro label fits. */
@@ -136,6 +139,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   distanceKm: "Distance (km)",
   propMode: "Prop mod",
   text: "Text",
+  planetList: "Colonies",
 };
 
 /**
@@ -160,6 +164,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   // A bare "Amount" (the generic label for a count) says nothing about what is
   // being counted, and this one is a percentage of a command centre's hold.
   fullPercent: "Launch once this full (%)",
+  planets: "Only these colonies",
   corporation: "Corporation",
   seconds: "Seconds",
   fitting: "Saved fitting",

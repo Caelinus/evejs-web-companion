@@ -4832,8 +4832,17 @@ const launchCommodities: MacroDecider = (step, obs, mem) => {
   const fullPercent = launchFullPercent(step.args["fullPercent"]);
   const doneRaw = mem["launched"];
   const launched = new Set<number>(Array.isArray(doneRaw) ? (doneRaw as number[]) : []);
+  // Limited to the colonies the step names, when it names any (the PI
+  // window's Haul button does); absent, every colony, as it always was.
+  const planetsArg = step.args["planets"];
+  const only = planetsArg !== undefined && planetsArg.kind === "planetList" && planetsArg.planets.length > 0
+    ? new Set(planetsArg.planets.map((planet) => planet.planetID))
+    : null;
   let waitingOnCooldown = 0;
   for (const colony of colonies) {
+    if (only !== null && !only.has(colony.planetID)) {
+      continue;
+    }
     for (const pin of colony.pins) {
       if (pin.kind !== "command") {
         continue; // goods reach orbit ONLY from the command centre - never a launchpad or storage pin
@@ -5047,6 +5056,62 @@ const collectLaunches: MacroDecider = (step, obs, mem) => {
     true,
     { ...memBase, approaching: null },
   );
+};
+
+// ── board-planetary-hauler ───────────────────────────────────────────────────
+// Docked: get into a hull parked here that has a planetary commodities hold.
+// The hold is READ off each hull (obs.planetaryHaulerShipIDs, one capacity
+// read per parked ship while this block runs), never picked by the player -
+// the hull's own bays say what it is for. The hull it leaves is noted on the
+// run's board exactly as refit-ship notes it, so board-previous-ship goes back.
+const boardPlanetaryHauler: MacroDecider = (_step, obs, mem, board) => {
+  const phase = "Changing ships";
+  if (obs.flightStatus?.docked !== true) {
+    return tick(WAIT, "Not docked - ships are changed in a station.", phase, {
+      kind: "blocked",
+      reason: "Dock where your planetary hauler is parked first.",
+    });
+  }
+  const hangar = obs.stationHangar ?? null;
+  const activeShipID = obs.activeShipID ?? null;
+  const haulers = obs.planetaryHaulerShipIDs ?? null;
+  if (hangar === null || activeShipID === null || haulers === null) {
+    const blindChecks = (num(mem, "blindChecks") ?? 0) + 1;
+    if (blindChecks > MAX_BLOCK_ATTEMPTS * 2) {
+      return tick(WAIT, "The parked ships could not be read.", phase, {
+        kind: "blocked",
+        reason: "The ships parked here could not be read, so the bot cannot tell which one has a planetary hold.",
+      });
+    }
+    return tick(WAIT, "Reading the ships parked here.", phase, ACTING, false, { ...mem, blindChecks });
+  }
+  if (haulers.includes(activeShipID)) {
+    return tick(WAIT, "This ship has a planetary hold.", phase, { kind: "done" });
+  }
+  const candidate = hangar.find(
+    (row) => row.categoryID === CATEGORY_SHIP_ROW && row.singleton && row.itemID !== activeShipID && haulers.includes(row.itemID),
+  );
+  if (candidate === undefined) {
+    return tick(WAIT, "No ship with a planetary hold is parked here.", phase, {
+      kind: "blocked",
+      reason: "No ship with a planetary commodities hold (an Epithal) is parked at this station.",
+    });
+  }
+  const boards = (num(mem, "boards") ?? 0) + 1;
+  if (boards > MAX_BLOCK_ATTEMPTS) {
+    return tick(WAIT, "Boarding kept not landing.", phase, {
+      kind: "blocked",
+      reason: "The ship swap kept not taking, so the bot stopped.",
+    });
+  }
+  const boarding = tick({ kind: "boardShip", shipID: candidate.itemID }, "Boarding the planetary hauler.", phase, ACTING, false, {
+    ...mem,
+    boards,
+  });
+  const recorded = board[PREVIOUS_SHIP_BOARD_KEY];
+  return typeof recorded === "number" && recorded > 0
+    ? boarding
+    : withBoardPatch(boarding, { [PREVIOUS_SHIP_BOARD_KEY]: activeShipID });
 };
 
 // ── board-previous-ship ──────────────────────────────────────────────────────
@@ -6498,6 +6563,7 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "warp-to-ore-anomaly": warpToOreAnomaly,
   "refit-ship": refitShip,
   "board-previous-ship": boardPreviousShip,
+  "board-planetary-hauler": boardPlanetaryHauler,
   "move-items": moveItems,
   "warp-to-bookmark": warpToBookmark,
   "find-combat-agent": findCombatAgent,

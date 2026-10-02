@@ -274,6 +274,15 @@
   }
 
   /** The items a step has been told to keep aboard. */
+  function planetListWords(step: MacroStep, key: string): string {
+    const arg = step.args[key];
+    if (arg === undefined || arg.kind !== "planetList" || arg.planets.length === 0) {
+      return "Every colony";
+    }
+    const named = arg.planets.map((planet) => planet.name ?? "a colony with no name");
+    return `${named.join(", ")} (set by the Planetary Industry window)`;
+  }
+
   function itemListValue(step: MacroStep, key: string): readonly ItemMatchArg[] {
     const arg = argOf(step, key);
     return arg !== undefined && arg.kind === "itemList" ? arg.items : [];
@@ -1017,6 +1026,10 @@
           value={corpValue(step, arg.key)}
           oninput={(e) => setCorp(arg.key, e.currentTarget.value)}
         />
+      {:else if arg.widget === "planet-list"}
+        <!-- Written by the Planetary Industry window's Haul button, never typed:
+             shown so the step says what it covers, not offered for editing. -->
+        <span class="inspector-unit">{planetListWords(step, arg.key)}</span>
       {:else if arg.widget === "text-input"}
         <input
           id={fieldId}

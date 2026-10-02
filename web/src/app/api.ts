@@ -3858,6 +3858,29 @@ export async function loadCorpAssets(
 // caller's account holds for `characterID` (GET /api/bots/corp-assets). Only a
 // read beside the bot: the route never selects, releases or stops anything,
 // and answers 409 NO_BOT_SESSION when no bot of this account flies the pilot.
+/**
+ * What a corporation's seven hangar divisions are called, read on the session
+ * a running server bot of the caller's account holds for `characterID`
+ * (GET /api/bots/corp-division-names). A 409 means no bot is flying the pilot.
+ */
+export async function loadBotCorpDivisionNames(
+  characterID: number,
+  options: ApiOptions = {},
+): Promise<{ corporationID: number | null; divisions: readonly { division: number; name: string | null }[] }> {
+  const data = await getJson(`/api/bots/corp-division-names?characterID=${characterID}`, options);
+  const divisions = Array.isArray(data.divisions) ? data.divisions : [];
+  return {
+    corporationID: asNumberOrNull(data.corporationID),
+    divisions: divisions.map((entry) => {
+      const row = (entry ?? {}) as Record<string, JsonValue>;
+      return {
+        division: Number(row.division) || 0,
+        name: typeof row.name === "string" && row.name !== "" ? row.name : null,
+      };
+    }).filter((row) => row.division > 0),
+  };
+}
+
 export async function loadBotCorpAssets(
   characterID: number,
   locationID: number | null,
