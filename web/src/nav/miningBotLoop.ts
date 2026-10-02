@@ -44,6 +44,7 @@ import {
   type SpaceMeasurement,
 } from "./autopilotLoop.ts";
 import { refusalWords } from "../bridge/refusals.ts";
+import { freightReadable } from "./miningLogistics.ts";
 // R44 — the rung NAMES. Instrumentation only: this module decides nothing and
 // is never read by the ladder below, which returns bare identifiers.
 import type { MiningCallerRungID, MiningRungID, MiningStepID } from "./miningLadder.ts";
@@ -390,6 +391,11 @@ export function holdItemIDs(holds: readonly MiningHold[] | null): readonly numbe
   return holds.flatMap((hold) => (hold.items ?? []).map((item) => item.itemID));
 }
 
+/** An unreadable contents list cannot confirm that the ship's holds are empty. */
+export function holdsEmpty(holds: readonly MiningHold[] | null): boolean | null {
+  return freightReadable(holds) ? holdItemIDs(holds).length === 0 : null;
+}
+
 /**
  * Retail's Asteroid category — every ore, ice and harvestable gas type lives in
  * it, so it is exactly "what a mining ship could have mined". The same constant
@@ -678,7 +684,7 @@ function decideMiningWork(
     // The hold is the authority on whether there is anything to unload. Without
     // it we do not undock: heading back out with a full hold would mine nothing
     // and burn the trip.
-    if (holds === null) {
+    if (!freightReadable(holds)) {
       return {
         action: { kind: "wait", reason: "reading holds" },
         why: "Looking in the hold.",
@@ -1910,7 +1916,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     if (
       memory.haulPending &&
       observation.status.docked &&
-      observation.holds !== null &&
+      freightReadable(observation.holds) &&
       freightHoldItemIDs(observation.holds).length === 0
     ) {
       completeHaul();
@@ -2006,7 +2012,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     if (decision.action.kind === "unload") {
       memory.haulPending = true;
       const after = await safely(() => deps.getHolds()).catch(() => null);
-      if (after !== null && freightHoldItemIDs(after).length === 0) {
+      if (freightReadable(after) && freightHoldItemIDs(after).length === 0) {
         completeHaul();
       }
     }

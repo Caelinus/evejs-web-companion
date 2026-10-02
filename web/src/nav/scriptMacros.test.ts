@@ -720,6 +720,18 @@ test("deliver: docked with ore -> unload; docked empty -> done", () => {
   assert.equal(done.outcome.kind, "done");
 });
 
+test("deliver: unreadable freight stays incomplete until an authoritative empty read", () => {
+  const cargo: MiningHold = { key: "cargo", label: "Cargo Hold", items: [], capacity: { capacity: 400, used: 0 }, present: true, error: null };
+  const ore: MiningHold = { key: "ore", label: "Ore Hold", items: null, capacity: { capacity: 5_000, used: 4_900 }, present: true, error: "READ_FAILED" };
+  const atHome = obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: [ore, cargo] });
+  const unread = deliver(haulStep, atHome, NM, {});
+  assert.equal(unread.action.kind, "wait");
+  assert.equal(unread.outcome.kind, "acting");
+  assert.equal(deliver(haulStep, { ...atHome, holds: [{ ...ore, present: false, capacity: null }, cargo] }, NM, {}).outcome.kind, "acting");
+  const read = deliver(haulStep, { ...atHome, holds: [{ ...ore, items: [], error: null }, cargo] }, unread.nextMem, {});
+  assert.equal(read.outcome.kind, "done");
+});
+
 test("deliver: a corporation division is carried on the action; without one the key is ABSENT", () => {
   const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 }], capacity: null, present: true, error: null }];
   const docked = obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre });
@@ -2851,6 +2863,25 @@ test("jettison-ore: an empty ore hold is done; a ship with no ore hold is blocke
   const noHold = jettisonOre(jettisonOreStep, obs({ holds: cargoOnly }), {}, {});
   assert.equal(noHold.outcome.kind, "blocked");
   assert.match(noHold.outcome.kind === "blocked" ? noHold.outcome.reason : "", /no ore hold/i);
+});
+
+test("ore inventory blocks wait on unreadable contents instead of finishing or declaring absence", () => {
+  const ore: MiningHold = { key: "ore", label: "Ore Hold", items: null, capacity: { capacity: 5_000, used: 4_900 }, present: true, error: "READ_FAILED" };
+  const cargo: MiningHold = { key: "cargo", label: "Cargo Hold", items: [], capacity: { capacity: 400, used: 0 }, present: true, error: null };
+  const moveStep: MacroStep = { id: "move", kind: "macro", macro: "move-items", args: {
+    item: { kind: "itemType", typeID: 1230, name: "Veldspar" }, from: { kind: "place", place: "ore-hold" }, to: { kind: "place", place: "hangar" },
+  } };
+  for (const unreadable of [ore, { ...ore, present: false, capacity: null }]) {
+    const world = obs({ snapshot: snapshot([]), holds: [unreadable, cargo] });
+    for (const result of [
+      jettisonOre(jettisonOreStep, world, NM, {}),
+      SCRIPT_MACROS["move-items"]!(moveStep, { ...world, flightStatus: flight({ docked: true, inSpace: false }) }, NM, {}),
+      SCRIPT_MACROS["compress-ore"]!({ id: "compress", kind: "macro", macro: "compress-ore", args: {} }, world, NM, {}),
+    ]) {
+      assert.equal(result.action.kind, "wait");
+      assert.equal(result.outcome.kind, "acting");
+    }
+  }
 });
 
 test("jettison-ore: docked is blocked, since a can needs space to float in", () => {

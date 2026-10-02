@@ -35,6 +35,7 @@ import {
   freightHoldItemIDs,
   HAUL_AT_FRACTION,
   holdItemIDs,
+  holdsEmpty,
   holdShouldHaul,
   holdUnits,
   isMineableRock,
@@ -369,6 +370,16 @@ test("unreadable holds deliver nothing rather than guessing", () => {
   assert.deepEqual([...freightHoldItemIDs([])], []);
 });
 
+test("hold-empty stays unknown when any contents list could not be read", () => {
+  assert.equal(holdsEmpty(null), null);
+  const unreadable = { ...oreHold(4_900), items: null, error: "READ_FAILED" };
+  assert.equal(holdsEmpty([unreadable, cargoHoldWith([])]), null);
+  assert.equal(holdsEmpty([{ ...unreadable, present: false, capacity: null }, cargoHoldWith([])]), null,
+    "a failed capacity read does not establish absence");
+  assert.equal(holdsEmpty([oreHold(0), cargoHoldWith([])]), true);
+  assert.equal(holdsEmpty([oreHold(100, 5_000, [1_000]), cargoHoldWith([])]), false);
+});
+
 test("the destination hold is the hull's specialised one, falling back to cargo", () => {
   const cargo: MiningHold = {
     key: "cargo",
@@ -521,6 +532,22 @@ test("docked with a hold NOBODY COULD READ does not undock — it waits", () => 
   });
   assert.equal(decision.action.kind, "wait");
   assert.match(decision.why, /looking in the hold/i);
+});
+
+test("docked with unreadable freight and readable empty cargo waits instead of undocking", () => {
+  for (const unreadable of [
+    { ...oreHold(4_900), items: null, error: "READ_FAILED" },
+    { ...oreHold(4_900), items: null, error: "READ_FAILED", present: false, capacity: null },
+    { ...cargoHoldWith([]), items: null, error: "READ_FAILED" },
+  ]) {
+    const decision = decide({
+      status: status({ docked: true, inSpace: false, stationID: STATION }),
+      snapshot: null,
+      holds: [unreadable, ...(unreadable.key === "cargo" ? [] : [cargoHoldWith([])])],
+    });
+    assert.equal(decision.action.kind, "wait");
+    assert.equal(decision.rung, "reading-hold");
+  }
 });
 
 test("rung 4: a FULL hold in space heads for the station and docks when in range", () => {
@@ -1599,6 +1626,27 @@ test("a haul whose unload read-back DROPPED still counts — once", async () => 
   await drive(bot, 6);
 
   assert.equal(bot.snapshot().cyclesCompleted, 1, "the lost read-back no longer loses the haul");
+});
+
+test("a haul waits for readable empty freight before counting or undocking", async () => {
+  let unloaded = false;
+  let readable = false;
+  const { deps, rec } = makeDeps({
+    status: () => status({ docked: true, inSpace: false, stationID: STATION }),
+    snapshot: () => null,
+    holds: () => [!unloaded ? oreHold(4_000, 5_000, [40_000]) : readable ? oreHold(0) :
+      { ...oreHold(4_000), items: null, error: "READ_FAILED" }, cargoHoldWith([])],
+    onCall: name => { if (name === "unload") unloaded = true; },
+  });
+  const bot = createMiningBot(deps);
+  bot.start(PLAN);
+  await drive(bot, 6);
+  assert.equal(bot.snapshot().cyclesCompleted, 0, "unreadable unload read-back and later ticks prove nothing");
+  assert.equal(rec.calls.filter(call => call === "undock").length, 0);
+  assert.equal(rec.calls.filter(call => call === "unload").length, 1);
+  readable = true;
+  await drive(bot, 6);
+  assert.equal(bot.snapshot().cyclesCompleted, 1, "a later authoritative empty view completes the haul once");
 });
 
 test("the readout always says WHY, and never shows a numeric id (R7d / R9a)", async () => {

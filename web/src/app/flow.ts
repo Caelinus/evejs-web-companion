@@ -177,7 +177,7 @@ import {
 import {
   createMiningBot,
   destinationHold,
-  holdItemIDs,
+  holdsEmpty,
   holdShouldHaul,
   lowestHealth,
   type MiningBotController,
@@ -10215,7 +10215,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const total = capacity?.capacity ?? null;
         const oreHoldFraction =
           typeof used === "number" && typeof total === "number" && total > 0 ? used / total : null;
-        const holdEmpty = holds === null ? null : holdItemIDs(holds).length === 0;
+        const holdEmpty = holdsEmpty(holds);
         const origin = ship?.position ?? { x: 0, y: 0, z: 0 };
         const hostileOnGrid = snapshot === null ? null : hostileRows(snapshot, origin).length > 0;
         const dronesOut =

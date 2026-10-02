@@ -925,7 +925,7 @@ function operationMineAtTarget(
       if (active == null) return settle(tick(WAIT, "Mining module settlement cannot be confirmed from an unreadable ship state.", "Clearing depleted target", ACTING, false, mem));
       const moduleID = obs.miningModuleIDs?.find(id => active.includes(id));
       if (moduleID !== undefined) return settle(tick({ kind: "deactivate", moduleID }, "Settling mining modules before site clearance.", "Clearing depleted target", ACTING, false, mem));
-      if (obs.holds == null || obs.holds.some(hold => hold.present && (hold.error !== null || hold.items === null))) return settle(tick(WAIT, "Cannot confirm mining freight custody from unreadable holds.", "Clearing depleted target", ACTING, false, mem));
+      if (!freightReadable(obs.holds)) return settle(tick(WAIT, "Cannot confirm mining freight custody from unreadable holds.", "Clearing depleted target", ACTING, false, mem));
     }
     if (operation.unloadPolicy === "SELF_UNLOAD") {
       const recall = recallBeforeLeaving(obs, mem, "Returning to unload", null);
@@ -1057,7 +1057,7 @@ function operationMineAtTarget(
     if (active == null) return settle(tick(WAIT, "Mining module settlement cannot be confirmed from an unreadable ship state.", "Clearing depleted target", ACTING, false, mem));
     const moduleID = obs.miningModuleIDs?.find(id => active.includes(id));
     if (moduleID !== undefined) return settle(tick({ kind: "deactivate", moduleID }, "Settling mining modules before the partial ore dump.", "Clearing depleted target", ACTING, false, mem));
-    if (obs.holds == null || obs.holds.some(hold => hold.present && (hold.error !== null || hold.items === null))) return settle(tick(WAIT, "Cannot confirm mining freight custody from unreadable holds.", "Clearing depleted target", ACTING, false, mem));
+    if (!freightReadable(obs.holds)) return settle(tick(WAIT, "Cannot confirm mining freight custody from unreadable holds.", "Clearing depleted target", ACTING, false, mem));
     const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
       const attempts = num(mem, "operationDumpAttempts") ?? 0;
@@ -1833,6 +1833,9 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
       "The old grid and freight are clear; catching up to the fleet.", "Logistics tail complete", ACTING, false, mem);
   }
   if (dockedAt(obs.flightStatus, { kind: targetKind, id: target })) {
+    if (!freightReadable(obs.holds)) {
+      return tick(WAIT, "Freight holds are unreadable; delivery cannot be confirmed.", "Delivery — hold unavailable", ACTING, false, mem);
+    }
     // The FREIGHT holds, not every hold. On a hull with an ore hold the cargo
     // hold is not where the ore is, and emptying it here put the ship's spare
     // crystals and ammunition ashore every lap — see freightHoldItemIDs.
@@ -4473,11 +4476,11 @@ const movePlaceRows = (obs: ScriptObservation, place: string): readonly { itemID
   }
   // ore-hold: the mining-holds read, its "ore" (first specialty) hold.
   const holds = obs.holds ?? null;
-  if (holds === null) {
+  if (!freightReadable(holds)) {
     return null;
   }
   const ore = holds.find((hold) => hold.key !== "cargo" && hold.present) ?? null;
-  return ore === null ? [] : (ore.items ?? []);
+  return ore === null ? [] : ore.items;
 };
 
 const moveItems: MacroDecider = (step, obs, mem) => {
@@ -6281,7 +6284,7 @@ const jettisonOre: MacroDecider = (step, obs, mem) => {
     return tick(WAIT, "Waiting for the ship to say where it is.", "Jettisoning", ACTING, false, mem);
   }
   const holds = obs.holds ?? null;
-  if (holds === null) {
+  if (!freightReadable(holds)) {
     return tick(WAIT, "Reading the ore hold.", "Jettisoning", ACTING, false, mem);
   }
   // The specialty hold — ore, ice, gas, whichever this hull has — never cargo,
@@ -6296,7 +6299,7 @@ const jettisonOre: MacroDecider = (step, obs, mem) => {
   const item = step.args["item"];
   const wanted =
     item !== undefined && item.kind === "itemType" && item.typeID !== null ? item.typeID : null;
-  const rows = (oreHold.items ?? []).filter((row) => wanted === null || row.typeID === wanted);
+  const rows = oreHold.items.filter((row) => wanted === null || row.typeID === wanted);
   if (rows.length === 0) {
     return tick(WAIT, "Nothing left in the ore hold to jettison.", "Jettisoning", { kind: "done" });
   }
@@ -6393,7 +6396,7 @@ const compressOre: MacroDecider = (_step, obs, mem) => {
   // ⚠ A hold whose read FAILED carries items:null, which is "we could not look",
   // not "it is empty" — so a failed read must not finish the block. Wait for a
   // hold we can actually see rather than declaring the job done.
-  if (holds.some((hold) => hold.present && hold.items === null)) {
+  if (!freightReadable(holds)) {
     return tick(WAIT, "Could not read a hold just now.", "Compressing", ACTING, false, mem);
   }
   // Ore still worth trying: in a hold, and not already given its one attempt.
