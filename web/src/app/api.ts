@@ -31,6 +31,7 @@ import {
   type RequestPriority,
 } from "./transport.ts";
 import type { JsonValue } from "../bridge/wire.ts";
+import { decodeLaunchDetails, type LaunchDetail } from "../bridge/piColonies.ts";
 import type { MinerTrainingRead, StageFittingSelection, TrainingCharacter, QueueReview, QueueApplyOutcome } from "../training/types.ts";
 import type {
   AgentRow,
@@ -4520,6 +4521,34 @@ export async function rerouteExtractorRoutes(
  *
  * `commodities` is typeID -> quantity, as the planetMgr handler wants it.
  */
+/**
+ * The session character's planetary launches (planetMgr.GetMyLaunchesDetails,
+ * through /api/bridge/pi-colonies). Throws when the launch read itself failed,
+ * so a caller never mistakes "could not read" for "no launches".
+ */
+export async function getPiLaunches(options: ApiOptions = {}): Promise<readonly LaunchDetail[]> {
+  const data = await getJson("/api/bridge/pi-colonies", options);
+  const errors = data.errors;
+  const launchError =
+    errors !== null && typeof errors === "object" && !Array.isArray(errors)
+      ? (errors as { readonly [key: string]: JsonValue }).launches
+      : null;
+  if (typeof launchError === "string") {
+    throw new Error(`Your planet launches could not be read (${launchError}).`);
+  }
+  return decodeLaunchDetails(data.launches);
+}
+
+/**
+ * Delete one planetary launch RECORD (planetMgr.DeleteLaunch). Owner-scoped on
+ * the server, and it removes the record only: the container and anything in
+ * it stay in space. The BFF confirm-gates it, so callers send it only once
+ * they have seen that container empty.
+ */
+export async function deleteLaunch(launchID: number, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/planet/launch/delete", { launchID, confirm: true }, options);
+}
+
 export async function launchCommodities(
   planetID: number,
   commandPinID: number,

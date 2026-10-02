@@ -117,6 +117,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [
       { key: "exceptBays", kind: "bayList", required: false },
       { key: "keepItems", kind: "itemList", required: false },
+      // Optional, as on deliver-ore: absent = the station hangar, the shipped
+      // behaviour. Set, the unload is aimed at that corporation division.
+      { key: "into", kind: "corpDivision", required: false },
     ],
     untilRequired: false,
   },
@@ -223,6 +226,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [{ key: "fitting", kind: "fitting", required: true }],
     untilRequired: false,
   },
+  // Docked: board the hull refit-ship swapped out earlier in this run. No
+  // args: the hull is whatever this run was flying, read off the run's board.
+  "board-previous-ship": { args: [], untilRequired: false },
   // Docked: move an item between the hangar and the ship's holds. `amount`
   // absent = move ALL of that item.
   "move-items": {
@@ -261,6 +267,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     args: [{ key: "fullPercent", kind: "count", required: false }],
     untilRequired: false,
   },
+  // In space: empty every launch container of yours in THIS system into the
+  // ship. No args: the server's own launch list says where each one is.
+  "collect-launches": { args: [], untilRequired: false },
   // Docked: quote the active ship + its fitted modules at the repair shop and
   // fix whatever is damaged (the station charges the wallet).
   "repair-ship": { args: [], untilRequired: false },

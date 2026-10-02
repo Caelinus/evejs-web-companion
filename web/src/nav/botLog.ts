@@ -167,7 +167,8 @@ export function describeAction(action: ScriptAction): string {
     case "unloadMissionCargo":
       return `unload mission cargo ${action.itemIDs.join(",")}`;
     case "unloadHolds":
-      return `empty holds ${action.groups.map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}`).join(" ")}`;
+      return `empty holds ${action.groups.map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}`).join(" ")}${
+        action.division === undefined ? "" : ` into corp division ${action.division}`}`;
     case "loadHolds":
       return `load holds ${action.groups
         .map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}${g.qty === null ? "" : `x${g.qty}`}`)
@@ -178,6 +179,8 @@ export function describeAction(action: ScriptAction): string {
       return `loot wreck ${action.wreckID}`;
     case "lootContainer":
       return `loot container ${action.containerID}`;
+    case "collectLaunch":
+      return `collect launch ${action.launchID} from container ${action.containerID}`;
     case "haulTransfer":
       return `move ${action.quantity} of ${action.itemID} into route division ${action.division}`;
     case "reprocessOre":

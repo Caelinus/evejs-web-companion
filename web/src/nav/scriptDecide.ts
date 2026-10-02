@@ -148,6 +148,12 @@ export type ScriptAction =
   | {
       readonly kind: "unloadHolds";
       readonly groups: readonly { readonly bay: string | null; readonly itemIDs: readonly number[] }[];
+      /**
+       * A corporation hangar division (1-7) to unload into instead of the
+       * station hangar. Left OFF, not null, for an ordinary unload, so a block
+       * nobody aimed at a corporation issues the action it always did.
+       */
+      readonly division?: number;
     }
   /**
    * Fill the ship FROM the station hangar — `unloadHolds` run backwards, one
@@ -174,6 +180,18 @@ export type ScriptAction =
   | { readonly kind: "lootWreck"; readonly wreckID: number }
   /** Take everything out of ONE container (any container on grid — no ownership check). */
   | { readonly kind: "lootContainer"; readonly containerID: number }
+  /**
+   * Empty ONE planetary launch container of the pilot's own into the ship,
+   * then delete its launch record once a re-read shows the container empty.
+   *
+   * ⚠ THE DELETE IS WHAT MAKES THE LIST MEAN "STILL TO COLLECT". The server
+   * despawns only an empty JETCAN; an emptied launch container stays in space
+   * and on GetMyLaunchesDetails until it decays five days later, so without
+   * the delete every later lap would fly back to it. DeleteLaunch touches the
+   * record alone (owner-scoped), never an item, and is only sent once the
+   * container is seen empty.
+   */
+  | { readonly kind: "collectLaunch"; readonly containerID: number; readonly launchID: number }
   | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number;
       readonly from: import("../store/types.ts").InventoryPlace;
       readonly to: import("../store/types.ts").InventoryPlace;
@@ -527,6 +545,10 @@ const SETTLE_TICKS_BY_KIND: Partial<Record<ScriptAction["kind"], number>> = {
   // spent out of that specific can's own budget rather than a shared one.
   lootWreck: 1,
   lootContainer: 1,
+  // The same answer for the same reason: the next tick's launch list is what
+  // says the container was emptied (its launch record is gone), and a stale
+  // read re-collecting an empty container costs one more empty open.
+  collectLaunch: 1,
 
   // GUARD (a) IS PRESENT, AND THE ENTRY IS STILL 1 ON PURPOSE. `buy-item` writes
   // `placed: true` in the issuing tick (~2914), so by the letter of the rule

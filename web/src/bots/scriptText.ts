@@ -159,6 +159,8 @@ export function macroName(macro: MacroID): string {
       return "Fly to an ore site";
     case "refit-ship":
       return "Refit from a saved fitting";
+    case "board-previous-ship":
+      return "Back into the earlier ship";
     case "move-items":
       return "Move items";
     case "warp-to-bookmark":
@@ -171,6 +173,8 @@ export function macroName(macro: MacroID): string {
       return "Restart the planet extractors";
     case "launch-commodities":
       return "Launch from the command centre";
+    case "collect-launches":
+      return "Collect your planet launches";
     case "repair-ship":
       return "Repair the ship";
     case "buy-item":
@@ -650,9 +654,14 @@ function macroPhrase(step: MacroStep): string {
           ? except.bays.map((key) => BAY_LABELS[key] ?? key)
           : [];
       const kept = keptItemsPhrase(step);
+      const into = step.args["into"];
+      const hangar =
+        into !== undefined && into.kind === "corpDivision"
+          ? `the corporation's ${corpDivisionPhrase(into.division, into.name)}`
+          : "the hangar";
       return names.length === 0
-        ? `Empty the ship into the hangar${kept}`
-        : `Empty the ship into the hangar, but leave the ${names.join(" and ")} alone${kept}`;
+        ? `Empty the ship into ${hangar}${kept}`
+        : `Empty the ship into ${hangar}, but leave the ${names.join(" and ")} alone${kept}`;
     }
     case "load-cargo": {
       const except = step.args["exceptBays"];
@@ -738,6 +747,10 @@ function macroPhrase(step: MacroStep): string {
       // The SAME clamp the decider fires on, so the sentence cannot promise a
       // threshold the block will not use.
       return `Launch from the command centre once it is ${launchFullPercent(step.args["fullPercent"])}% full`;
+    case "collect-launches":
+      return "Collect every launch container of yours in this system";
+    case "board-previous-ship":
+      return "Get back into the ship this run was flying before the refit";
     case "repair-ship":
       return "Repair the ship at the station";
     case "salvage-wrecks":
