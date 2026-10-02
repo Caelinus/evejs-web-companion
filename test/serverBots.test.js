@@ -60,13 +60,13 @@ function fakeGateway(log) {
       if (lostSessions.has(bridgeSessionID)) {
         throw Object.assign(new Error("Session not found."), { code: "SESSION_NOT_FOUND" });
       }
-      return { docked: true };
+      return { flight: { docked: true, inSpace: false, stationID: 60000004, shipID: 9001 }, notifications: [] };
     },
     async selectCharacter(args) {
       const characterID = Number(args[0]);
       return {
         bridgeSessionID: `bridge-for-${characterID}`,
-        session: { characterID, characterName: "x", stationID: 60000004, solarSystemID: 30000001, corporationID: 1000001 },
+        session: { characterID, characterName: "x", stationID: 60000004, solarSystemID: 30000001, corporationID: 1000001, shipID: 9001 },
         notifications: [],
       };
     },
@@ -171,7 +171,12 @@ async function signInAndSelect(baseUrl, characterID) {
     body: { username: FARMER.username, password: "x" },
   });
   const token = login.payload.sessionToken;
-  await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  const selected = await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  assert.equal(selected.response.status, 200);
+  const ready = await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", token, body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
   return token;
 }
 
@@ -238,6 +243,7 @@ test("forged cleanup cannot release another session; signed expired cleanup can"
   app.locals.bridgeSessions.set(payload.sessionID, {
     bridgeSessionID: "expired-bridge", accountID: FARMER.accountID, characterID: 7001,
     boundHandles: new Map(), streamSubscribers: new Set(), stream: null, chat: null,
+    droneRecoveryReady: true,
   });
   const altered = { ...payload, accountID: 9999 };
   const forged = `${Buffer.from(JSON.stringify(altered)).toString("base64url")}.${signature}`;

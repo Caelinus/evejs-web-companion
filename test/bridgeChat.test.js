@@ -349,7 +349,7 @@ function fakeStaticData() {
 }
 
 function fakeGateway(overrides = {}) {
-  const flight = { solarSystemID: HOME_SYSTEM_ID, docked: false, stationID: 0 };
+  const flight = { solarSystemID: HOME_SYSTEM_ID, docked: false, inSpace: true, stationID: 0, shipID: 9001 };
   const gateway = {
     flight,
     async selectCharacter() {
@@ -376,6 +376,9 @@ function fakeGateway(overrides = {}) {
     },
     async readFlightStatus() {
       return { flight: { ...flight }, notifications: [] };
+    },
+    async readSpaceSnapshot() {
+      return { space: { entities: [] }, notifications: [] };
     },
     createChatSession(options) {
       return createXmppChatSession(options);
@@ -414,7 +417,11 @@ async function apiRequest(baseUrl, path, options = {}) {
 }
 
 async function selectOnServer(baseUrl) {
-  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
 }
 
 /**

@@ -60,6 +60,9 @@ function fakeGateway() {
   const streams = [];
   return {
     streams,
+    async readFlightStatus() {
+      return { flight: { docked: true, inSpace: false, stationID: 60000004, shipID: 9001 }, notifications: [] };
+    },
     async selectCharacter(args, kwargs, session) {
       const characterID = Number(args[0]);
       const row = (CHARACTERS.get(Number(session.userid)) || [])
@@ -320,6 +323,11 @@ test("logout clears both carriers and releases only the calling tab's session", 
 
   const farmerSessionID = webAuth.verifySessionToken(farmer.token).sessionID;
   const secondSessionID = webAuth.verifySessionToken(second.token).sessionID;
+  const ready = await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", bearer: farmer.token,
+    body: { checkID: app.locals.bridgeSessions.get(farmerSessionID).droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200);
 
   const response = await fetch(`${baseUrl}/api/logout`, {
     method: "POST",
