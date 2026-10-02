@@ -96,6 +96,9 @@ function fakeGateway() {
     async releaseBridgeSession() {
       return { released: true, characterID: 7 };
     },
+    async readFlightStatus() {
+      return { flight: { docked: true, inSpace: false, stationID: 60003760, shipID: 9001 }, notifications: [] };
+    },
     openSessionEventStream(options) {
       const stream = {
         options,
@@ -149,10 +152,16 @@ async function apiRequest(baseUrl, path, options = {}) {
 }
 
 async function selectOnServer(baseUrl) {
-  await apiRequest(baseUrl, "/api/bridge/select", {
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", {
     method: "POST",
     body: { characterID: 7 },
   });
+  assert.equal(selected.status, 200);
+  const payload = await selected.json();
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.status, 200);
 }
 
 /** Open the SSE route and decode `data:` payloads as they arrive. */
@@ -412,7 +421,8 @@ test("releasing the session ends the channel and closes the gateway stream", asy
   const client = await openEventStream(baseUrl);
   await client.waitForFrames(1);
 
-  await apiRequest(baseUrl, "/api/bridge/release", { method: "POST", body: {} });
+  const released = await apiRequest(baseUrl, "/api/bridge/release", { method: "POST", body: {} });
+  assert.equal(released.status, 200);
 
   const frames = await client.waitForFrames(2);
   assert.equal(frames.at(-1).state, "ended");

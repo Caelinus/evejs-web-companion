@@ -122,6 +122,10 @@ function fakeGateway(overrides = {}) {
       calls.flightStatus.push({ bridgeSessionID, sessionFields });
       return { flight: flightSnapshot(), notifications: [] };
     },
+    async readSpaceSnapshot() {
+      return { space: { inSpace: state.inSpace, solarSystemID: state.solarSystemID,
+        ship: { itemID: SHIP_ID }, entities: [] }, notifications: [] };
+    },
     async callMethod(service, method, args, kwargs, sessionFields, bridgeSessionID) {
       calls.call.push({ service, method, args, kwargs, sessionFields, bridgeSessionID });
       if (service === "ship" && method === "Undock") {
@@ -196,7 +200,12 @@ async function apiRequest(baseUrl, path, options = {}) {
 }
 
 async function selectOnServer(baseUrl) {
-  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  assert.equal(selected.response.status, 200);
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
 }
 
 test.afterEach(async () => {
