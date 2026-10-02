@@ -1433,6 +1433,8 @@ export interface CompanionLadderMemory {
    * Same shape, and the same reason, as `lastHealModuleIDs` above.
    */
   readonly lastDroneRepairTargetID: number | null;
+  /** The deployed flight that received `lastDroneRepairTargetID`. */
+  readonly lastDroneRepairIDs: readonly number[];
   /**
    * The target this pilot's COMBAT drones were last sent onto.
    *
@@ -1440,9 +1442,11 @@ export interface CompanionLadderMemory {
    * already shooting the right ship need telling nothing, and re-issuing the
    * engage every tick would spend this loop's one call per tick on an order the
    * server has already obeyed. A NEW call from the fleet is a different id and
-   * re-issues by itself, which is the whole of the latch's logic.
+   * re-issues by itself. The latch also belongs to the deployed flight: drones
+   * recalled and relaunched start idle even when their item ids are unchanged.
    */
   readonly lastDroneEngageTargetID: number | null;
+  readonly lastDroneEngageIDs: readonly number[];
   /**
    * The locked wreck the salvage drones were last sent to, and how many drones
    * that order went to.
@@ -1763,7 +1767,9 @@ export function freshLadderMemory(): CompanionLadderMemory {
     droneCycle: null,
     droneCyclesSpent: 0,
     lastDroneRepairTargetID: null,
+    lastDroneRepairIDs: [],
     lastDroneEngageTargetID: null,
+    lastDroneEngageIDs: [],
     lastSalvageOrderedFor: null,
     salvageDronesWreckID: null,
     lootedItemIDs: [],
@@ -2022,6 +2028,9 @@ export function decideCompanionAction(
   memory: CompanionLadderMemory = freshLadderMemory(),
   nowMs: number = Date.now(),
 ): CompanionDecision {
+  // A readable flight change retires its old order even when a higher rung
+  // consumes this tick. An unreadable list says nothing about a recall.
+  memory = withObservedDroneFlights(obs, memory);
   if (obs.inWarp === true) {
     // The one thing a mid-warp tick still RECORDS. Nothing may be issued here,
     // but this reading is the only confirmation the get-safe step ever gets
@@ -2109,7 +2118,9 @@ export function decideCompanionAction(
     lockRefusals: memory.lockRefusals,
     lockGaveUpOn: memory.lockGaveUpOn,
     lastDroneRepairTargetID: memory.lastDroneRepairTargetID,
+    lastDroneRepairIDs: memory.lastDroneRepairIDs,
     lastDroneEngageTargetID: memory.lastDroneEngageTargetID,
+    lastDroneEngageIDs: memory.lastDroneEngageIDs,
     lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
     salvageDronesWreckID: memory.salvageDronesWreckID,
     lootedItemIDs: memory.lootedItemIDs,
@@ -6410,6 +6421,29 @@ function calledCombatTargetID(
   return called === null ? null : called.itemID;
 }
 
+function withObservedDroneFlights(
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+): CompanionLadderMemory {
+  const sameFlight = (observed: readonly number[], ordered: readonly number[]): boolean =>
+    observed.length === ordered.length && observed.every((id) => ordered.includes(id));
+  if (
+    memory.lastDroneEngageTargetID !== null &&
+    obs.combatDroneIDs != null &&
+    !sameFlight(obs.combatDroneIDs, memory.lastDroneEngageIDs)
+  ) {
+    memory = { ...memory, lastDroneEngageTargetID: null, lastDroneEngageIDs: [] };
+  }
+  if (
+    memory.lastDroneRepairTargetID !== null &&
+    obs.logisticDroneIDs != null &&
+    !sameFlight(obs.logisticDroneIDs, memory.lastDroneRepairIDs)
+  ) {
+    memory = { ...memory, lastDroneRepairTargetID: null, lastDroneRepairIDs: [] };
+  }
+  return memory;
+}
+
 function decideDrones(
   request: FleetCompanionRequest,
   obs: FleetCompanionObservation,
@@ -6628,7 +6662,7 @@ function decideDrones(
         action: { kind: "engageDrones", droneIDs: roleOut, targetID: called },
         phase: "Drones",
         why: "Putting the combat drones on the target the fleet called.",
-        memory: { ...memory, lastDroneEngageTargetID: called },
+        memory: { ...memory, lastDroneEngageTargetID: called, lastDroneEngageIDs: [...roleOut] },
       },
       memory,
     };
@@ -6648,7 +6682,7 @@ function decideDrones(
       action: { kind: "engageDrones", droneIDs: roleOut, targetID: healTarget },
       phase: "Drones",
       why: "Sending the repair drones to the ship calling for reps.",
-      memory: { ...memory, lastDroneRepairTargetID: healTarget },
+      memory: { ...memory, lastDroneRepairTargetID: healTarget, lastDroneRepairIDs: [...roleOut] },
     },
     memory,
   };
@@ -7355,7 +7389,9 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           // session drop, and a wreck this run has not emptied is a wreck it
           // must be willing to try.
           lastDroneRepairTargetID: null,
+          lastDroneRepairIDs: [],
           lastDroneEngageTargetID: null,
+          lastDroneEngageIDs: [],
           lastSalvageOrderedFor: null,
           salvageDronesWreckID: null,
           lootedItemIDs: [],

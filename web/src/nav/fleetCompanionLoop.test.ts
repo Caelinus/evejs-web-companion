@@ -4966,6 +4966,87 @@ test("a repair order is issued once, not re-sent every tick", () => {
   assert.notEqual(second.action.kind, "engageDrones");
 });
 
+for (const role of ["combat", "repair"] as const) {
+  test(`${role} drones engage the same target again after a complete hurt-drone cycle`, () => {
+    const targetID = role === "combat" ? TACKLE : LOGI;
+    const droneID = role === "combat" ? DRONE_A : LOGI_DRONE_OUT;
+    const world = (out: boolean, hurt = false) => mixedBayObs({
+      snapshot: gridWithEntities([targetID]),
+      fleetTargetTags: role === "combat" ? new Map([[targetID, "A"]]) : new Map(),
+      fleetBroadcast: role === "repair" ? fleetBroadcast("HealShield", targetID) : null,
+      lockedTargetIDs: [targetID],
+      myDroneIDs: out ? [droneID] : [],
+      combatDroneIDs: role === "combat" && out ? [droneID] : [],
+      logisticDroneIDs: role === "repair" && out ? [droneID] : [],
+      lowestDroneHealth: out ? (hurt ? 0.2 : 0.9) : null,
+    });
+    let nowMs = 1_000_000;
+    const engaged = decideCompanionAction(WITH_DRONES, world(true), undefined, nowMs);
+    assert.equal(engaged.action.kind, "engageDrones");
+    const recalled = decideCompanionAction(WITH_DRONES, world(true, true), engaged.memory, nowMs += 2_000);
+    assert.equal(recalled.action.kind, "recallDrones");
+    const holding = decideCompanionAction(WITH_DRONES, world(false), recalled.memory, nowMs += 2_000);
+    assert.equal(holding.memory.droneCycle?.stage, "holding-off");
+    const launched = decideCompanionAction(
+      WITH_DRONES, world(false), holding.memory,
+      nowMs += WITH_DRONES.droneRedeployHoldOffSeconds * 1_000,
+    );
+    assert.equal(launched.action.kind, "launchDrones");
+    const freshFlight = decideCompanionAction(WITH_DRONES, world(true), launched.memory, nowMs += 2_000);
+    assert.deepEqual(freshFlight.action, { kind: "engageDrones", droneIDs: [droneID], targetID });
+    const continuing = decideCompanionAction(WITH_DRONES, world(true), freshFlight.memory, nowMs += 2_000);
+    assert.notEqual(continuing.action.kind, "engageDrones");
+  });
+}
+
+test("a recalled combat flight observed while supervision is unreadable gets a fresh order on return", () => {
+  const world = (overrides: Partial<FleetCompanionObservation> = {}) => droneObs({
+    myDroneIDs: [DRONE_A],
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+    ...overrides,
+  });
+  const engaged = decideCompanionAction(WITH_DRONES, world());
+  assert.equal(engaged.action.kind, "engageDrones");
+  const gone = decideCompanionAction(WITH_DRONES, world({
+    myDroneIDs: [],
+    fleetMemberCharacterIDs: null,
+  }), engaged.memory);
+  assert.equal(gone.phase, "Checking supervision");
+  const returned = decideCompanionAction(WITH_DRONES, world(), gone.memory);
+  assert.deepEqual(returned.action, { kind: "engageDrones", droneIDs: [DRONE_A], targetID: TACKLE });
+});
+
+test("a changed combat flight receives its standing target once, regardless of ID ordering", () => {
+  const world = (droneIDs: readonly number[]) => droneObs({
+    myDroneIDs: droneIDs,
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+  });
+  const engaged = decideCompanionAction(WITH_DRONES, world([DRONE_A]));
+  const added = decideCompanionAction(WITH_DRONES, world([DRONE_A, DRONE_B]), engaged.memory);
+  assert.deepEqual(added.action, { kind: "engageDrones", droneIDs: [DRONE_A, DRONE_B], targetID: TACKLE });
+  const reordered = decideCompanionAction(WITH_DRONES, world([DRONE_B, DRONE_A]), added.memory);
+  assert.notEqual(reordered.action.kind, "engageDrones");
+});
+
+test("an unreadable combat flight does not retire its standing target order", () => {
+  const world = (overrides: Partial<FleetCompanionObservation> = {}) => droneObs({
+    myDroneIDs: [DRONE_A],
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [TACKLE],
+    ...overrides,
+  });
+  const engaged = decideCompanionAction(WITH_DRONES, world());
+  const unreadable = decideCompanionAction(WITH_DRONES, world({
+    myDroneIDs: undefined,
+    combatDroneIDs: null,
+    combatDroneBayItemIDs: null,
+  }), engaged.memory);
+  const recovered = decideCompanionAction(WITH_DRONES, world(), unreadable.memory);
+  assert.notEqual(recovered.action.kind, "engageDrones");
+});
+
 test("a pilot with no repair drones answers a rep call by fighting on", () => {
   // A hull that cannot do the job is not "the logistic role with nothing to
   // launch" -- it is simply not that pilot, so the branch falls through.
