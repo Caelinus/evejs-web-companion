@@ -1258,6 +1258,122 @@ test("a definitely refused alignment retries once and stops after success", asyn
   assert.equal(companion.snapshot().status, "running");
 });
 
+test("an alignment success settling while paused is retained when the same run resumes", async () => {
+  const began = deferred<void>();
+  const outcome = deferred<void>();
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => alignmentObs("broadcast", 1_000),
+    issue: async () => { calls += 1; began.resolve(); await outcome.promise; },
+  }).deps);
+  companion.start(REQUEST);
+  const first = companion.tick();
+  await began.promise;
+  companion.pause();
+  outcome.resolve();
+  await first;
+  assert.equal(companion.snapshot().status, "paused");
+  companion.resume();
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.match(companion.snapshot().why ?? "", /Continuing the alignment order/);
+  assert.equal(calls, 1);
+});
+
+test("an alignment refusal settling after pause and resume still permits its bounded retry", async () => {
+  const began = deferred<void>();
+  const outcome = deferred<void>();
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => alignmentObs("broadcast", 1_000),
+    issue: async () => {
+      calls += 1;
+      if (calls === 1) { began.resolve(); await outcome.promise; }
+    },
+  }).deps);
+  companion.start(REQUEST);
+  const first = companion.tick();
+  await began.promise;
+  companion.pause();
+  companion.resume();
+  outcome.reject(Object.assign(new Error("Align refused"), { code: "CALL_REFUSED" }));
+  await first;
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal((await companion.tick()).kind, "wait");
+  assert.equal(calls, 2);
+});
+
+test("an ambiguous alignment settling after pause and resume pauses the resumed driver without replay", async () => {
+  const began = deferred<void>();
+  const outcome = deferred<void>();
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => alignmentObs("broadcast", 1_000),
+    issue: async () => { calls += 1; began.resolve(); await outcome.promise; },
+  }).deps);
+  companion.start(REQUEST);
+  const first = companion.tick();
+  await began.promise;
+  companion.pause();
+  companion.resume();
+  outcome.reject(Object.assign(new Error("Align response lost"), { code: "BRIDGE_NETWORK_ERROR" }));
+  await first;
+  await companion.tick();
+  assert.equal(companion.snapshot().status, "paused");
+  assert.equal(calls, 1);
+});
+
+for (const oldOutcome of ["success", "CALL_REFUSED", "BRIDGE_NETWORK_ERROR"]) {
+  test(`an old alignment ${oldOutcome} cannot settle a replacement Start with the same order identity`, async () => {
+    const began = deferred<void>();
+    const outcome = deferred<void>();
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => alignmentObs("broadcast", 1_000),
+      issue: async () => {
+        calls += 1;
+        if (calls === 1) { began.resolve(); await outcome.promise; }
+      },
+    }).deps);
+    companion.start(REQUEST);
+    const first = companion.tick();
+    await began.promise;
+    companion.stop();
+    companion.start(REQUEST);
+    if (oldOutcome === "success") outcome.resolve();
+    else outcome.reject(Object.assign(new Error("Old response failed"), { code: oldOutcome }));
+    await first;
+    assert.equal(companion.snapshot().status, "running");
+    assert.equal((await companion.tick()).kind, "align");
+    assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(calls, 2);
+  });
+}
+
+test("overlapping public ticks share the pending command and do not issue another order", async () => {
+  const began = deferred<void>();
+  const outcome = deferred<void>();
+  let current = alignmentObs("broadcast", 1_000);
+  let calls = 0;
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => current,
+    issue: async () => {
+      calls += 1;
+      if (calls === 1) { began.resolve(); await outcome.promise; }
+    },
+  }).deps);
+  companion.start(REQUEST);
+  const first = companion.tick();
+  await began.promise;
+  current = alignmentObs("broadcast", 2_000, OTHER);
+  const overlapping = companion.tick();
+  assert.equal(overlapping, first);
+  assert.equal(calls, 1);
+  outcome.resolve();
+  await first;
+  assert.equal((await companion.tick()).kind, "align");
+  assert.equal(calls, 2);
+});
+
 test("repeated definite alignment refusals pause after three writes", async () => {
   let calls = 0;
   const companion = createFleetCompanion(makeDeps({

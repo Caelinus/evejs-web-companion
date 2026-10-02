@@ -6986,6 +6986,15 @@ function decideFleetOrders(
       followingOrderFrom: order.source,
       lastOrderHeard: order.heard,
     };
+    if (previous?.status === "uncertain") {
+      return {
+        ...base,
+        action: WAIT,
+        why: order.why + " Its alignment response was lost. Pausing without repeating that request.",
+        memory,
+        pause: "The previous alignment request has an unknown outcome.",
+      };
+    }
     if (previous !== null && previous.status !== "refused") {
       return {
         ...base,
@@ -7298,6 +7307,18 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     };
   }
 
+  function settleAlignment(decision: CompanionDecision, status: "issued" | "refused" | "uncertain"): void {
+    const pending = decision.memory.alignmentOrder;
+    // Pause retires the driver, not its dispatched command. Retain its result
+    // only while this exact pending record survives; a new Start or movement
+    // intent has a different record even when the source identity is the same.
+    if (decision.action.kind !== "align" || pending?.status !== "pending" ||
+      mem.ladder.alignmentOrder !== pending) return;
+    mem.ladder = { ...mem.ladder, alignmentOrder: { ...pending, status,
+      refusals: pending.refusals + (status === "refused" ? 1 : 0),
+    } };
+  }
+
   async function tickBody(): Promise<FleetCompanionAction> {
     if (mem.status !== "running") {
       return { kind: "wait" };
@@ -7367,11 +7388,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     if (decision.action.kind !== "wait") {
       try {
         await deps.issue(decision.action);
-        const alignment = mem.ladder.alignmentOrder;
-        if (decision.action.kind === "align" && token === runToken && mem.status === "running" &&
-          alignment?.key === decision.memory.alignmentOrder?.key && alignment?.status === "pending") {
-          mem.ladder = { ...mem.ladder, alignmentOrder: { ...alignment, status: "issued" } };
-        }
+        settleAlignment(decision, "issued");
       } catch (error) {
         // ⚠ A REFUSED CALL IS AN ANSWER, NOT THE END OF THE RUN. This used to
         // propagate: the rejection came out of `tick`, out of `run`, and landed
@@ -7391,6 +7408,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // raw vocabulary; `refusalWords` says what it means in plain language
         // instead. The raw text is kept on `failureReason`, which is diagnostic
         // rather than prose.
+        settleAlignment(decision, isDefiniteCompanionRefusal(error) ? "refused" : "uncertain");
         if (token !== runToken || mem.status !== "running") {
           return { kind: "wait" };
         }
@@ -7401,9 +7419,6 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         if (decision.action.kind === "align" && alignment !== null &&
           alignment.key === decision.memory.alignmentOrder?.key) {
           const definite = isDefiniteCompanionRefusal(error);
-          mem.ladder = { ...mem.ladder, alignmentOrder: { ...alignment,
-            status: definite ? "refused" : "uncertain", refusals: alignment.refusals + (definite ? 1 : 0),
-          } };
           if (!definite) {
             runToken += 1;
             mem.status = "paused";
@@ -7433,16 +7448,19 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         return { kind: "wait" };
       }
     }
+    if (token !== runToken || mem.status !== "running") return { kind: "wait" };
     report();
     return decision.action;
   }
 
   function tick(): Promise<FleetCompanionAction> {
+    if (activeTick !== null) return activeTick;
     const pending = tickBody();
-    activeTick = pending;
-    return pending.finally(() => {
-      if (activeTick === pending) activeTick = null;
+    const shared = pending.finally(() => {
+      if (activeTick === shared) activeTick = null;
     });
+    activeTick = shared;
+    return shared;
   }
 
   return {
