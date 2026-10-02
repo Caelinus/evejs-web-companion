@@ -6406,6 +6406,98 @@ test("the stopShip goes out ONCE per 'stop' heard, not once per tick it is fresh
   assert.notEqual(second.action.kind, "stopShip");
 });
 
+test("two stop messages in an unchanged backlog do not restart the stop each tick", () => {
+  const observation = obs({ snapshot: fcGrid(), chatMessages:
+    [chatLine("stop", HUMAN, 1_000), chatLine("stop", HUMAN, 2_000)] });
+  let memory = freshLadderMemory();
+  const actions: FleetCompanionAction[] = [];
+  for (let tick = 0; tick < 5; tick += 1) {
+    const result = decideCompanionAction(REQUEST, observation, memory);
+    memory = result.memory;
+    actions.push(result.action);
+  }
+  assert.equal(actions.filter((action) => action.kind === "stopShip").length, 1);
+  assert.equal(memory.followHeld, true);
+});
+
+test("an old stop and newer destination route once across repeated backlog reads", () => {
+  const observation = obs({ snapshot: fcGrid(), flightStatus: inSystem(SYSTEM_C),
+    chatMessages: [chatLine("stop", HUMAN, 1_000), chatLine(`destination ${SYSTEM_B}`, HUMAN, 2_000)] });
+  let memory = freshLadderMemory();
+  const actions: FleetCompanionAction[] = [];
+  for (let tick = 0; tick < 5; tick += 1) {
+    const result = decideCompanionAction(REQUEST, observation, memory);
+    memory = result.memory;
+    actions.push(result.action);
+  }
+  assert.equal(actions.filter((action) => action.kind === "stopShip").length, 1);
+  assert.equal(actions.filter((action) => action.kind === "travelTo").length, 1);
+  assert.equal(memory.destinationSystemID, SYSTEM_B);
+  const arrived = decideCompanionAction(REQUEST, { ...observation, flightStatus: inSystem(SYSTEM_B) }, memory);
+  assert.equal(arrived.memory.destinationSystemID, null);
+  const departed = decideCompanionAction(REQUEST, observation, arrived.memory);
+  assert.equal(departed.memory.destinationSystemID, null, "the already completed command must not restart a trip");
+});
+
+test("new command identities sharing a timestamp are heard once each", () => {
+  const otherCommander = 90000003;
+  const base = obs({ snapshot: fcGrid(), fleetCommanderCharacterIDs: [HUMAN, otherCommander] });
+  const stopped = decideCompanionAction(REQUEST, { ...base, chatMessages: [chatLine("stop", HUMAN, 1_000)] });
+  const followed = decideCompanionAction(REQUEST, { ...base, chatMessages:
+    [chatLine("stop", HUMAN, 1_000), chatLine("follow 5 km", HUMAN, 1_000)] }, stopped.memory);
+  assert.deepEqual(followed.action, { kind: "keepAtRange", targetID: FC_SHIP, range: 5_000 });
+  const stoppedAgain = decideCompanionAction(REQUEST, { ...base, chatMessages:
+    [chatLine("stop", HUMAN, 1_000), chatLine("follow 5 km", HUMAN, 1_000), chatLine("stop", otherCommander, 1_000)] }, followed.memory);
+  assert.deepEqual(stoppedAgain.action, { kind: "stopShip" });
+  const repeated = decideCompanionAction(REQUEST, { ...base, chatMessages:
+    [chatLine("stop", otherCommander, 1_000), chatLine("follow 5 km", HUMAN, 1_000), chatLine("stop", HUMAN, 1_000)] }, stoppedAgain.memory);
+  assert.notEqual(repeated.action.kind, "stopShip");
+  assert.equal(repeated.memory.followHeld, true);
+});
+
+test("an unauthorized newer line does not hide a commander's order", () => {
+  const ignored = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(),
+    chatMessages: [chatLine("stop", UNLISTED_SENDER, 9_000)] }));
+  const authorized = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(),
+    chatMessages: [chatLine("stop", HUMAN, 5_000), chatLine("stop", UNLISTED_SENDER, 9_000)] }), ignored.memory);
+  assert.deepEqual(authorized.action, { kind: "stopShip" });
+});
+
+test("a delayed old command cannot undo a newer standing instruction", () => {
+  const following = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(),
+    chatMessages: [chatLine("follow 5 km", HUMAN, 9_000)] }));
+  const delayed = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(),
+    chatMessages: [chatLine("stop", HUMAN, 5_000), chatLine("follow 5 km", HUMAN, 9_000)] }), following.memory);
+  assert.notEqual(delayed.action.kind, "stopShip");
+  assert.equal(delayed.memory.followHeld, false);
+});
+
+test("fresh props-off history preserves the pending deactivate latch", () => {
+  const module = { itemID: 12500001, typeID: 12500002, kind: "afterburner" as const };
+  const request = { ...REQUEST, propulsionModules: [module] };
+  const snapshot = { ...fcGrid(), ship: { ...fcGrid().ship!, activeModuleIDs: [module.itemID] } };
+  const observation = obs({ snapshot, chatMessages: [chatLine("props off", HUMAN)] });
+  const first = decideCompanionAction(request, observation);
+  assert.equal(first.action.kind, "deactivate");
+  const second = decideCompanionAction(request, observation, first.memory);
+  assert.notEqual(second.action.kind, "deactivate");
+  assert.equal(second.memory.propsStoppingID, module.itemID);
+});
+
+test("a completed area order is not replayed when another wreck appears", () => {
+  const messages = [chatLine("salvage", HUMAN)];
+  const working = decideCompanionAction(REQUEST, obs({ snapshot: gridWithEntities([TACKLE]),
+    chatMessages: messages }));
+  // There are no wrecks to work, so that area job already completed.
+  assert.equal(working.memory.areaJob, null);
+  const snapshot = gridWithEntities([]) as unknown as { entities: unknown[] };
+  snapshot.entities.push({ itemID: 300002, kind: "wreck", isSelf: false,
+    position: { x: 1000, y: 0, z: 0 }, radius: 0 });
+  const later = decideCompanionAction(REQUEST, obs({ snapshot: snapshot as unknown as SpaceSnapshot,
+    chatMessages: messages }), working.memory);
+  assert.equal(later.memory.areaJob, null);
+});
+
 test("a suspended follow stays suspended — nothing but a 'follow' brings it back", () => {
   const stopped = decideCompanionAction(
     REQUEST,

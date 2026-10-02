@@ -1268,6 +1268,8 @@ export interface CompanionAbandonment extends CompanionAbandonmentRecord {
  * same construction the script runner's deciders use.
  */
 export interface CompanionLadderMemory {
+  /** Server chat timestamps plus sender/text identity disambiguate timestamp ties. */
+  readonly standingChatCursor: { readonly at: number; readonly keys: readonly string[] } | null;
   /** A bounded lock wait and refused or uncertain repair writes for one call. */
   readonly healOrder: {
     readonly targetID: number;
@@ -1739,6 +1741,7 @@ export interface DroneCycle {
 
 export function freshLadderMemory(): CompanionLadderMemory {
   return {
+    standingChatCursor: null,
     healOrder: null,
     lastSupervisorIDs: [],
     abandonment: null,
@@ -2086,6 +2089,7 @@ export function decideCompanionAction(
   // becomes the rejoin gate's allowlist, and there is no second chance to
   // collect it. Clear any abandonment, because a human is demonstrably here.
   const supervised: CompanionLadderMemory = {
+    standingChatCursor: memory.standingChatCursor,
     healOrder: memory.healOrder,
     lastSupervisorIDs: [...supervisors],
     abandonment: null,
@@ -3683,9 +3687,10 @@ function newestChatCommand(
  */
 function newestAreaCommand(
   obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
 ): "salvage" | "loot" | "stop" | null {
   const found = newestChatCommand(
-    obs.chatMessages ?? [],
+    (obs.chatMessages ?? []).filter((message) => isNewStandingChatMessage(message, memory)),
     commandersFor(obs),
     (command) =>
       command.kind === "salvage" || command.kind === "loot" || command.kind === "stop",
@@ -3721,7 +3726,7 @@ function withAreaJob(
   obs: FleetCompanionObservation,
   memory: CompanionLadderMemory,
 ): CompanionLadderMemory {
-  const heard = newestAreaCommand(obs);
+  const heard = newestAreaCommand(obs, memory);
   if (heard === null) {
     return memory;
   }
@@ -3771,14 +3776,17 @@ function withAreaJobCleared(
  * stands until it is countermanded; none could survive being read off the
  * backlog the way a target call is.
  *
- * ⚠ THE BACKLOG IS REPLAYED IN TIMESTAMP ORDER RATHER THAN SCANNED PER VERB,
- * which is the only construction that gets `stop` right. `stop` is the one word
+ * New command identities are folded in timestamp order rather than scanned
+ * per verb. The cursor prevents old backlog lines from resetting completed
+ * stops, pending prop changes or a route that is already under way.
+ *
+ * `stop` is the one word
  * that touches two of these latches, so "which is newer, the stop or the follow"
  * has to be answered for each latch separately -- and answering it with
  * independent newest-of-this-kind scans means a different tie rule per verb and
  * one ordering bug waiting to happen. (`props` is the latch `stop` does NOT
  * touch; it rides this fold anyway, because "the last thing said wins" is the
- * same rule and there is no reason for it to have a second implementation.) Folding every order onto the memory oldest
+ * same rule and there is no reason for it to have a second implementation.) Folding new orders onto the memory oldest
  * first gives the plain answer instead: the last thing said wins, per latch,
  * exactly as a reader of the chat would expect.
  *
@@ -3791,9 +3799,9 @@ function withStandingChatOrders(
   memory: CompanionLadderMemory,
 ): CompanionLadderMemory {
   const senders = commandersFor(obs);
-  const heard: { readonly command: ChatCommand; readonly at: number }[] = [];
+  const heard: { readonly command: ChatCommand; readonly at: number; readonly key: string }[] = [];
   for (const message of obs.chatMessages ?? []) {
-    if (!isChatCommandSenderAllowed(message, senders)) {
+    if (!isChatCommandSenderAllowed(message, senders) || !isNewStandingChatMessage(message, memory)) {
       continue;
     }
     const command = parseChatCommand(message);
@@ -3804,9 +3812,11 @@ function withStandingChatOrders(
       command.kind === "follow" ||
       command.kind === "destination" ||
       command.kind === "stop" ||
-      command.kind === "props"
+      command.kind === "props" ||
+      command.kind === "salvage" ||
+      command.kind === "loot"
     ) {
-      heard.push({ command, at: message.createdAtMs });
+      heard.push({ command, at: message.createdAtMs, key: standingChatMessageKey(message) });
     }
   }
   if (heard.length === 0) {
@@ -3815,7 +3825,14 @@ function withStandingChatOrders(
   heard.sort((a, b) => a.at - b.at);
 
   let next = memory;
-  for (const { command, at } of heard) {
+  for (const { command, at, key } of heard) {
+    // Retain identities only at the newest timestamp. Older delayed lines
+    // cannot undo a newer standing order; distinct messages tied in time can
+    // still arrive on a later poll and take effect once.
+    if (next.standingChatCursor?.at === at && next.standingChatCursor.keys.includes(key)) continue;
+    next = { ...next, standingChatCursor: { at,
+      keys: next.standingChatCursor?.at === at ? [...next.standingChatCursor.keys, key] : [key] } };
+    if (command.kind === "salvage" || command.kind === "loot") continue;
     if (command.kind === "follow") {
       // ⚠ A `follow` ALSO UN-SUSPENDS. That is the operator's own resume: there
       // is no separate "start following again" verb, and inventing one would
@@ -3836,22 +3853,28 @@ function withStandingChatOrders(
       next = { ...next, propsHeld: command.on, propsStoppingID: null };
       continue;
     }
-    // ⚠ A `stop` IS RE-READ ON EVERY TICK OF ITS FRESHNESS WINDOW, AND MUST BE
-    // IDEMPOTENT ACROSS THEM. Suspending the follow and clearing the trip are
-    // safe to repeat; issuing `stopShip` is not, so only that half is keyed on
-    // the message's timestamp. An order that stands for thirty seconds must not
-    // become fifteen calls.
-    const answered = next.stopHeardAtMs === at;
+    // This is a new stop identity, so it gets one ship stop even when another
+    // command from a different sender happened to share its timestamp.
     next = {
       ...next,
       followHeld: true,
       destinationSystemID: null,
       destinationRoutedFor: null,
       stopHeardAtMs: at,
-      stopShipIssued: answered ? next.stopShipIssued : false,
+      stopShipIssued: false,
     };
   }
   return next;
+}
+
+function standingChatMessageKey(message: ChatMessage): string {
+  return JSON.stringify([message.characterID, message.createdAtMs, message.message]);
+}
+
+function isNewStandingChatMessage(message: ChatMessage, memory: CompanionLadderMemory): boolean {
+  const cursor = memory.standingChatCursor;
+  return cursor === null || message.createdAtMs > cursor.at ||
+    (message.createdAtMs === cursor.at && !cursor.keys.includes(standingChatMessageKey(message)));
 }
 
 /**
@@ -7311,6 +7334,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // observed, and claiming it had landed would let the next tick drop
         // fleet with the ship still sitting in space.
         mem.ladder = {
+          standingChatCursor: null,
           healOrder: null,
           lastSupervisorIDs: [...resuming.supervisorCharacterIDs],
           abandonment: {
