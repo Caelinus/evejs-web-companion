@@ -174,7 +174,7 @@ function fittingBody(charge: { typeID: number; quantity: number } | null) {
 }
 
 /** A BFF whose fitting read returns a scripted sequence of charge states. */
-function makeAmmoBff(states: (({ typeID: number; quantity: number }) | null)[]) {
+function makeAmmoBff(states: (({ typeID: number; quantity: number }) | null)[], notifications: unknown[] = []) {
   const requests: Recorded[] = [];
   let read = 0;
   const fakeFetch = (async (input: unknown, init?: { body?: unknown }) => {
@@ -184,7 +184,7 @@ function makeAmmoBff(states: (({ typeID: number; quantity: number }) | null)[]) 
     const respond = (payload: unknown) => ({ ok: true, status: 200, async json() { return payload; } });
     if (path.startsWith("/api/bridge/dogma/ammo/")) {
       // The envelope the live server actually sends, refusal or not.
-      return respond({ ok: true, applied: true, result: null, notifications: [] });
+      return respond({ ok: true, applied: true, result: null, notifications });
     }
     if (path.startsWith("/api/bridge/fitting")) {
       const state = states[Math.min(read, states.length - 1)] ?? null;
@@ -256,4 +256,62 @@ test("an unload that emptied the module says nothing", async () => {
   await flow.unloadAmmo([MODULE_ID], "hangar");
 
   assert.equal(store.fitting.get().actionError, null);
+});
+
+// In space the server QUEUES a load for the module's reload time, so the fit
+// read straight after the call still shows the gun empty. Its announcement
+// (`OnChargeBeingLoadedToModule`, drained with the LoadAmmo response) is the
+// proof the load is coming, and must not be reported as a load that did nothing.
+const RELOAD_ANNOUNCED = {
+  method: "OnChargeBeingLoadedToModule",
+  args: [{ type: "list", items: [MODULE_ID] }, 184, 10000],
+};
+
+test("an in-space load the server queued and announced is reloading, not declined", async () => {
+  const store = createClientStore();
+  // A drained notification is only applied for the pilot it was drained for.
+  store.apply({
+    type: "character/online",
+    character: {
+      characterID: 90000001,
+      characterName: "Synthetic Pilot",
+      stationID: null,
+      structureID: null,
+      solarSystemID: 30000142,
+      corporationID: 98000001,
+    },
+    station: null,
+  });
+  const bff = makeAmmoBff([null, null], [RELOAD_ANNOUNCED]);
+  const flow = createAppFlow(store, { fetch: bff.fetch });
+
+  await flow.loadFitting();
+  const outcome = await flow.loadAmmo([MODULE_ID], [CHARGE_ID], "cargo");
+
+  assert.equal(outcome, "reloading");
+  assert.equal(store.fitting.get().actionError, null);
+  const reload = store.fitting.get().reloads[MODULE_ID];
+  assert.equal(reload?.chargeTypeID, 184);
+  assert.equal(reload?.durationMs, 10000);
+});
+
+test("without the announcement an unchanged fit is still a decline", async () => {
+  const store = createClientStore();
+  const bff = makeAmmoBff([null, null]);
+  const flow = createAppFlow(store, { fetch: bff.fetch });
+
+  await flow.loadFitting();
+  const outcome = await flow.loadAmmo([MODULE_ID], [CHARGE_ID], "cargo");
+
+  assert.equal(outcome, "unchanged");
+  assert.match(store.fitting.get().actionError ?? "", /loaded nothing/i);
+});
+
+test("a load the fit shows is changed", async () => {
+  const store = createClientStore();
+  const bff = makeAmmoBff([null, { typeID: 184, quantity: 160 }]);
+  const flow = createAppFlow(store, { fetch: bff.fetch });
+
+  await flow.loadFitting();
+  assert.equal(await flow.loadAmmo([MODULE_ID], [CHARGE_ID], "cargo"), "changed");
 });

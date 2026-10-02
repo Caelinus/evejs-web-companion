@@ -378,6 +378,22 @@ export interface FittingState {
   readonly dogmaError: string | null;
   /** Non-null when the last fitting action failed or was declined. */
   readonly actionError: string | null;
+  /**
+   * Reloads the SERVER announced (`OnChargeBeingLoadedToModule`), by module
+   * itemID. In space a load is queued for the module's reload time, so the fit
+   * read straight after the call still shows the old charge; this is how the
+   * page knows the charges are on their way. An entry outlives its window
+   * harmlessly — readers compare it against the clock.
+   */
+  readonly reloads: Readonly<Record<number, ModuleReload>>;
+}
+
+/** One reload the server announced: what is going in, and when it lands. */
+export interface ModuleReload {
+  readonly chargeTypeID: number | null;
+  /** Local clock, like ModuleCycle — the announcement's arrival time. */
+  readonly startedAtMs: number;
+  readonly durationMs: number;
 }
 
 /**

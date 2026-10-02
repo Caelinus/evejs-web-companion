@@ -5895,6 +5895,108 @@
   .rack-damage-name { font-size: 0.78rem; color: var(--color-cell); }
   .rack-damage-name.burnt { color: var(--color-danger); font-weight: 600; }
 
+  /* Reloading from the rack: the round count on each charge-taking tile, the
+   * reload sweep, the ammo strip, and the menu all three open. */
+  .module-rack-rows > .rack-ammo { grid-column: 1 / -1; }
+  .module-ammo {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    padding: 0 2px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 12px;
+    color: var(--color-text-bright);
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    pointer-events: none;
+  }
+  .module-ammo.empty { color: var(--color-danger); border-color: var(--color-danger); }
+  /* The reload sweep: the cycle sweep's shape in the warning colour, so a gun
+   * that is reloading never reads as one that is firing. */
+  .module-reload {
+    position: absolute;
+    inset: 0;
+    clip-path: circle(18px at 50% 50%);
+    background: conic-gradient(
+      color-mix(in srgb, var(--color-warn) 40%, transparent) var(--sweep, 0%),
+      transparent 0
+    );
+    pointer-events: none;
+  }
+  .rack-ammo {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.3rem;
+  }
+  .rack-ammo-head {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .rack-ammo-group {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-size: 0.78rem;
+    padding: 0.15rem 0.5rem;
+  }
+  .rack-ammo-gun { color: var(--color-muted); }
+  .rack-ammo-what { color: var(--color-text-bright); }
+  .rack-ammo-count { color: var(--color-good); font-variant-numeric: tabular-nums; }
+  .rack-ammo-group.short .rack-ammo-count { color: var(--color-danger); }
+  .rack-menu {
+    /* Fixed, measured from the control that opened it: the rack sits in the
+     * bottom panel, and the menu has to rise out of it over the space view. */
+    position: fixed;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    min-width: 17rem;
+    max-width: calc(100vw - 16px);
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 0.25rem;
+    gap: 0.1rem;
+    border: 1px solid var(--color-line-strong);
+    background: var(--color-panel);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  }
+  .rack-menu-head {
+    padding: 0.3rem 0.5rem 0.2rem;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .rack-menu-note { padding: 0.2rem 0.5rem; font-size: 0.8rem; color: var(--color-muted); }
+  .rack-menu button {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: none;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.82rem;
+  }
+  .rack-menu button:hover,
+  .rack-menu button:focus-visible { background: var(--color-line); outline: none; }
+  .rack-menu button.unlikely .rack-menu-name { color: var(--color-muted); }
+  .rack-menu-tag {
+    margin-left: 0.4rem;
+    font-size: 10px;
+    color: var(--color-accent);
+  }
+  .rack-menu button.unlikely .rack-menu-tag { color: var(--color-muted); }
+  .rack-menu-qty { color: var(--color-muted); font-variant-numeric: tabular-nums; }
+  .rack-menu-rule { border-top: 1px solid var(--color-line); margin: 0.2rem 0; }
+  .rack-error button { margin-left: 0.5rem; }
+
   /* Weapon banking: the racks look identical banked or not, so the state is
    * said in words next to the control that changes it. */
   /* No fill and no border: the dashed ring inside IS the empty slot. A solid box

@@ -33,6 +33,17 @@
     rackSlotTitle,
     OVERLOAD_HOLD_MS,
   } from "./moduleRack.ts";
+  import {
+    ammoChoices,
+    rackChargeBadge,
+    rackReloadPercent,
+    rackReloading,
+    rackSlotAction,
+    rackTakesCharges,
+    reloadAllPlan,
+    weaponGroups,
+  } from "./rackAmmo.ts";
+  import type { AmmoChoice, WeaponGroup } from "./rackAmmo.ts";
   import { notify } from "./notices.ts";
   import { abbreviate } from "./fittingIcons.ts";
   import { resolvedName } from "../store/names.ts";
@@ -57,6 +68,8 @@
   const names = store.names;
   // svelte-ignore state_referenced_locally
   const targeting = store.targeting;
+  // svelte-ignore state_referenced_locally
+  const inventory = store.inventory;
 
   const rows = $derived(
     buildModuleRack(
@@ -139,7 +152,15 @@
   // ship included, and the rack redrew ten times a second forever to draw no
   // change. That is precisely the idle cost the note above warns about.
   const anyCycling = $derived(
-    rows.some((row) => row.slots.some((slot) => slot.module?.active === true)),
+    rows.some((row) =>
+      row.slots.some(
+        (slot) =>
+          slot.module?.active === true ||
+          // A reload sweeps too. Read against the last tick, which is fine:
+          // the fast rate only has to start within one slow tick.
+          (slot.module !== null && rackReloading($fitting.reloads[slot.module.itemID], nowMs)),
+      ),
+    ),
   );
   let nowMs = $state(Date.now());
   $effect(() => {
@@ -176,17 +197,24 @@
     }
     const refs: { kind: "type"; id: number }[] = [];
     const seen = new Set<number>();
-    for (const row of rows) {
-      for (const slot of row.slots) {
-        for (const id of [slot.module?.typeID, slot.module?.charge?.typeID]) {
-          if (typeof id === "number" && id > 0 && !seen.has(id)) {
-            seen.add(id);
-            if (resolvedName($names.resolved, "type", id, "") === "") {
-              refs.push({ kind: "type", id });
-            }
-          }
+    const want = (id: number | undefined) => {
+      if (typeof id === "number" && id > 0 && !seen.has(id)) {
+        seen.add(id);
+        if (resolvedName($names.resolved, "type", id, "") === "") {
+          refs.push({ kind: "type", id });
         }
       }
+    };
+    for (const row of rows) {
+      for (const slot of row.slots) {
+        want(slot.module?.typeID);
+        want(slot.module?.charge?.typeID);
+      }
+    }
+    // The reload menu names what is in cargo, so those names are this
+    // component's to ask for too.
+    for (const choice of ammoChoices(null, $inventory.cargo.rows, {})) {
+      want(choice.typeID);
     }
     if (refs.length > 0) {
       flow.requestNames(refs);
@@ -201,6 +229,290 @@
   function chargeName(module: RackModule): string | null {
     return module.charge ? moduleName(module.charge.typeID) : null;
   }
+
+  // --- reloading -------------------------------------------------------------
+  //
+  // Three ways in, one menu: RIGHT-CLICK a charge-taking slot (or its Menu key /
+  // Shift+F10), TAP an empty gun, or open a weapon group from the ammo strip
+  // under the racks. The strip also carries "Reload all", the retail Ctrl+R.
+  //
+  // ⚠ THE SOURCE IS ALWAYS CARGO. In space that is the only place LoadAmmo can
+  // draw from, and docked, the Fitting window already offers the hangar.
+
+  const chargeFits = $derived($fitting.chargeFits);
+  const groups = $derived(weaponGroups(rows, chargeFits));
+  const cargoRows = $derived($inventory.cargo.rows);
+
+  function takesCharges(module: RackModule): boolean {
+    return rackTakesCharges(module, chargeFits);
+  }
+  function reloadingNow(module: RackModule): boolean {
+    return rackReloading($fitting.reloads[module.itemID], nowMs);
+  }
+  function slotAction(module: RackModule) {
+    return rackSlotAction(module, rackClickAction(module), takesCharges(module), reloadingNow(module));
+  }
+
+  /** The hover line, with what reloading adds to it. */
+  function slotTitle(module: RackModule): string {
+    const nm = moduleName(module.typeID);
+    if (!takesCharges(module)) {
+      return rackSlotTitle(nm, module, chargeName(module));
+    }
+    if (reloadingNow(module)) {
+      return `${rackSlotTitle(nm, module, chargeName(module))} Reloading.`;
+    }
+    if (slotAction(module) === "load") {
+      return `${nm} - no ammunition. Click to load some from cargo.`;
+    }
+    return `${rackSlotTitle(nm, module, chargeName(module))} Right-click to load or reload.`;
+  }
+
+  type MenuTarget =
+    | { readonly kind: "slot"; readonly module: RackModule }
+    | { readonly kind: "group"; readonly group: WeaponGroup };
+  /** The open menu, anchored above the control that opened it. */
+  let menu = $state<{ target: MenuTarget; left: number; bottom: number } | null>(null);
+  /** The control that opened the menu, so Escape can hand focus back. */
+  let menuOpener: HTMLElement | null = null;
+  let menuEl = $state<HTMLElement | null>(null);
+  let cargoReading = $state(false);
+
+  /** Re-read cargo. Counts change with every shot, so a menu always asks. */
+  async function readCargo(): Promise<void> {
+    if (!flow || cargoReading) {
+      return;
+    }
+    cargoReading = true;
+    try {
+      await flow.loadInventory();
+    } catch {
+      // The menu says what it has; a failed read leaves the last rows.
+    } finally {
+      cargoReading = false;
+    }
+  }
+
+  function openMenu(target: MenuTarget, opener: HTMLElement): void {
+    if (!flow) {
+      return;
+    }
+    const rect = opener.getBoundingClientRect();
+    // ⚠ IT OPENS UPWARDS. The rack lives in the bottom panel, so a menu hung
+    // below the slot would fall off the screen.
+    menu = {
+      target,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 300)),
+      bottom: Math.max(8, window.innerHeight - rect.top + 4),
+    };
+    menuOpener = opener;
+    void readCargo();
+  }
+
+  function closeMenu(returnFocus = false): void {
+    menu = null;
+    if (returnFocus) {
+      menuOpener?.focus();
+    }
+    menuOpener = null;
+  }
+
+  // Focus the first item when the menu opens, so the keyboard can drive it.
+  $effect(() => {
+    if (menuEl) {
+      menuEl.querySelector<HTMLElement>("button")?.focus();
+    }
+  });
+
+  // A press anywhere outside the menu closes it, the way any menu does.
+  $effect(() => {
+    if (!menu) {
+      return;
+    }
+    const onDown = (event: PointerEvent) => {
+      if (menuEl && !menuEl.contains(event.target as Node)) {
+        closeMenu();
+      }
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  });
+
+  function onMenuKey(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const items = [...(menuEl?.querySelectorAll<HTMLElement>("button") ?? [])];
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+      items[(next + items.length) % items.length]?.focus();
+    }
+  }
+
+  function slotElement(itemID: number): HTMLElement | null {
+    return document.querySelector<HTMLElement>(`[data-rack-module="${itemID}"]`);
+  }
+
+  /** Which modules a menu acts on, and the module type its choices are judged for. */
+  function menuModules(target: MenuTarget): readonly RackModule[] {
+    const opened = target.kind === "slot" ? [target.module] : target.group.modules;
+    // Resolved against the CURRENT rack: the fit is re-read while a menu is
+    // open (a reload landing, the cargo read), and "Unload" and "loaded" must
+    // describe the guns as they are now, not as they were on opening.
+    const live = new Map<number, RackModule>();
+    for (const row of rows) {
+      for (const slot of row.slots) {
+        if (slot.module) live.set(slot.module.itemID, slot.module);
+      }
+    }
+    return opened.map((module) => live.get(module.itemID)).filter((module): module is RackModule => !!module);
+  }
+  function menuTypeID(target: MenuTarget): number {
+    return target.kind === "slot" ? target.module.typeID : target.group.moduleTypeID;
+  }
+  function menuHead(target: MenuTarget): string {
+    if (target.kind === "group") {
+      return `Load into ${target.group.modules.length}x ${moduleName(target.group.moduleTypeID)}`;
+    }
+    // The server fills a whole bank from one launcher, so the header says so.
+    return target.module.bankSize > 1
+      ? `Load from cargo - ${target.module.bankSize} linked weapons`
+      : "Load from cargo";
+  }
+  /** The charge type currently in every one of these modules, if they agree. */
+  function loadedTypeOf(target: MenuTarget): number | null {
+    const types = new Set(menuModules(target).map((module) => module.charge?.typeID ?? 0));
+    return types.size === 1 ? [...types][0] || null : null;
+  }
+
+  /** Reload the opened modules with one kind of charge. */
+  async function loadChoice(modules: readonly RackModule[], choice: AmmoChoice): Promise<void> {
+    if (!flow || pendingItemID !== null || modules.length === 0) {
+      return;
+    }
+    closeMenu();
+    const first = modules[0]!;
+    pendingItemID = first.itemID;
+    error = "";
+    refusalModuleID = null;
+    try {
+      const outcome = await flow.loadAmmo(
+        modules.map((module) => module.itemID),
+        choice.itemIDs,
+        "cargo",
+      );
+      if (outcome === "refused" || outcome === "unchanged") {
+        error = `${moduleName(first.typeID)}: ${$fitting.actionError ?? "nothing was loaded."}`;
+      }
+    } catch (cause) {
+      error = `${moduleName(first.typeID)}: ${String(cause)}`;
+    } finally {
+      pendingItemID = null;
+    }
+    // The stack the charges came out of shrank.
+    void readCargo();
+  }
+
+  async function unloadModules(modules: readonly RackModule[]): Promise<void> {
+    const loaded = modules.filter((module) => module.charge !== null);
+    if (!flow || pendingItemID !== null || loaded.length === 0) {
+      return;
+    }
+    closeMenu();
+    pendingItemID = loaded[0]!.itemID;
+    error = "";
+    try {
+      const outcome = await flow.unloadAmmo(loaded.map((module) => module.itemID), "cargo");
+      if (outcome === "refused" || outcome === "unchanged") {
+        error = `${moduleName(loaded[0]!.typeID)}: ${$fitting.actionError ?? "nothing was unloaded."}`;
+      }
+    } catch (cause) {
+      error = `${moduleName(loaded[0]!.typeID)}: ${String(cause)}`;
+    } finally {
+      pendingItemID = null;
+    }
+    void readCargo();
+  }
+
+  /**
+   * Reload all — every weapon group topped up with what it already uses.
+   *
+   * ⚠ IT READS CARGO FIRST. The plan is built from the cargo rows, and a plan
+   * made from a list that is several volleys old would name stacks that are
+   * gone. One load per group, one after another: they share the cargo.
+   */
+  async function reloadAll(): Promise<void> {
+    if (!flow || pendingItemID !== null) {
+      return;
+    }
+    closeMenu();
+    await readCargo();
+    const plan = reloadAllPlan(groups, $inventory.cargo.rows, chargeFits);
+    const problems: string[] = [];
+    for (const skip of plan.skipped) {
+      const gun = moduleName(skip.moduleTypeID);
+      problems.push(
+        skip.reason === "out" && skip.chargeTypeID !== null
+          ? `${gun}: no ${moduleName(skip.chargeTypeID)} left in cargo.`
+          : `${gun}: empty, and nothing in cargo is known to fit - pick a charge from its menu.`,
+      );
+    }
+    error = "";
+    for (const step of plan.steps) {
+      pendingItemID = step.moduleIDs[0] ?? null;
+      try {
+        const outcome = await flow.loadAmmo(step.moduleIDs, step.choice.itemIDs, "cargo");
+        if (outcome === "unchanged") {
+          // ⚠ NOT CALLED A FAILURE. Reload all sends every gun, full or not,
+          // and a group that was already full answers exactly like this.
+          problems.push(`${moduleName(step.moduleTypeID)}: nothing loaded - probably already full.`);
+        } else if (outcome === "refused") {
+          problems.push(`${moduleName(step.moduleTypeID)}: ${$fitting.actionError ?? "refused."}`);
+        }
+      } catch (cause) {
+        problems.push(`${moduleName(step.moduleTypeID)}: ${String(cause)}`);
+      } finally {
+        pendingItemID = null;
+      }
+    }
+    if (plan.steps.length === 0 && problems.length === 0) {
+      problems.push("No weapons to reload.");
+    }
+    error = problems.join(" ");
+    void readCargo();
+  }
+
+  /**
+   * The module the last refusal was about, so the refusal line can offer the
+   * fix when the fix is loading it. Cleared with the error.
+   */
+  let refusalModuleID = $state<number | null>(null);
+  /** The empty gun a refusal named, while it is still empty. */
+  const refusalModule = $derived.by<RackModule | null>(() => {
+    if (refusalModuleID === null || !error) {
+      return null;
+    }
+    const module =
+      rows.flatMap((row) => row.slots).find((slot) => slot.module?.itemID === refusalModuleID)
+        ?.module ?? null;
+    return module && module.charge === null && takesCharges(module) ? module : null;
+  });
+  /** What the refusal line offers to load: the best likely fit in cargo. */
+  const refusalFix = $derived(
+    refusalModule
+      ? ammoChoices(refusalModule.typeID, cargoRows, chargeFits).find((choice) => choice.verdict !== false) ??
+          null
+      : null,
+  );
+  $effect(() => {
+    if (refusalModule && !$inventory.loaded) {
+      void readCargo();
+    }
+  });
 
   // --- the press: a tap fires, a HOLD overloads ------------------------------
   //
@@ -334,12 +646,20 @@
   }
 
   async function clickModule(module: RackModule): Promise<void> {
-    const action = rackClickAction(module);
+    const action = slotAction(module);
     if (!flow || !action || pendingItemID !== null) {
+      return;
+    }
+    if (action === "load") {
+      const opener = slotElement(module.itemID);
+      if (opener) {
+        openMenu({ kind: "slot", module }, opener);
+      }
       return;
     }
     pendingItemID = module.itemID;
     error = "";
+    refusalModuleID = module.itemID;
     try {
       if (action === "deactivate") {
         // typeID rides along so the BFF can name a prop mod's effect — an
@@ -506,9 +826,11 @@
           {#each row.slots as slot, i (i)}
             {#if slot.module}
               {@const nm = moduleName(slot.module.typeID)}
-              {@const clickable = flow !== null && rackClickAction(slot.module) !== null}
+              {@const clickable = flow !== null && slotAction(slot.module) !== null}
               {@const wedge = rackDamageWedge(slot.module)}
               {@const band = rackDamageBand(slot.module)}
+              {@const ammo = takesCharges(slot.module)}
+              {@const reloadPct = rackReloadPercent($fitting.reloads[slot.module.itemID], nowMs)}
               <button
                 type="button"
                 class="module-slot filled"
@@ -519,8 +841,19 @@
                 class:holding={holdItemID === slot.module.itemID}
                 disabled={!clickable || pendingItemID !== null}
                 aria-pressed={slot.module.active}
-                title={rackSlotTitle(nm, slot.module, chargeName(slot.module))}
-                aria-label={rackSlotTitle(nm, slot.module, chargeName(slot.module))}
+                aria-haspopup={ammo && flow ? "menu" : undefined}
+                data-rack-module={slot.module.itemID}
+                title={slotTitle(slot.module)}
+                aria-label={slotTitle(slot.module)}
+                oncontextmenu={(event) => {
+                  if (!ammo || !flow || !slot.module) return;
+                  event.preventDefault();
+                  // ⚠ A TOUCH LONG-PRESS ALSO FIRES `contextmenu`, at about
+                  // the time the overload hold is filling. The hold is the
+                  // older promise, so a press already holding keeps it.
+                  if (holdItemID !== null) return;
+                  openMenu({ kind: "slot", module: slot.module }, event.currentTarget as HTMLElement);
+                }}
                 onpointerdown={(event) => {
                   if (event.button === 0 && slot.module) pressStart(slot.module);
                 }}
@@ -528,6 +861,17 @@
                 onpointerleave={pressCancel}
                 onpointercancel={pressCancel}
                 onkeydown={(event) => {
+                  // The keyboard's right-click: the Menu key, or Shift+F10.
+                  // (getModifierState, not the shift flag: a source guard holds
+                  // shift-CLICK out of this file, and this is not a click.)
+                  if (
+                    ammo && flow && slot.module &&
+                    (event.key === "ContextMenu" || (event.key === "F10" && event.getModifierState("Shift")))
+                  ) {
+                    event.preventDefault();
+                    openMenu({ kind: "slot", module: slot.module }, event.currentTarget as HTMLElement);
+                    return;
+                  }
                   if ((event.key === "Enter" || event.key === " ") && !event.repeat && slot.module) {
                     // Suppress the browser's own click for this key: the press
                     // pair below is what fires the module, and both would.
@@ -628,6 +972,18 @@
                 {#if rackModuleBurntOut(slot.module)}
                   <span class="module-burnt" aria-hidden="true"></span>
                 {/if}
+                {#if reloadPct !== null}
+                  <!-- The reload, swept like a cycle but in its own colour, from
+                       the server's own announcement and the reload time it gave. -->
+                  <span class="module-reload" aria-hidden="true" style={`--sweep:${reloadPct}%`}></span>
+                {/if}
+                {#if ammo}
+                  <!-- Rounds held. A red 0 is a gun that cannot fire, visible
+                       before anyone clicks it. -->
+                  <span class="module-ammo" class:empty={slot.module.charge === null} aria-hidden="true"
+                    >{rackChargeBadge(slot.module)}</span
+                  >
+                {/if}
               </button>
             {:else}
               <!--
@@ -650,6 +1006,45 @@
   {/each}
   {#if unknown}
     <p class="rack-hint muted">Modules appear once your ship's fitting has loaded.</p>
+  {/if}
+  {#if groups.length > 0 && flow}
+    <!--
+      THE AMMO STRIP — one line per weapon type in the high rack: what it is
+      loaded with and how many of its guns hold anything, and a menu to change
+      it. A picture tile cannot say "four of six launchers are empty" at a
+      glance; this line can, and it is where "Reload all" lives.
+    -->
+    <div class="rack-ammo">
+      <span class="rack-ammo-head">Ammo</span>
+      {#each groups as group (group.moduleTypeID)}
+        {@const what =
+          group.chargeTypeIDs.length === 0
+            ? "empty"
+            : group.chargeTypeIDs.length > 1
+              ? "mixed"
+              : moduleName(group.chargeTypeIDs[0]!)}
+        <button
+          type="button"
+          class="rack-ammo-group"
+          class:short={group.loaded < group.modules.length}
+          aria-haspopup="menu"
+          disabled={pendingItemID !== null}
+          title={`${group.modules.length}x ${moduleName(group.moduleTypeID)}: ${what}, ${group.loaded} of ${group.modules.length} loaded. Click to load.`}
+          onclick={(event) => openMenu({ kind: "group", group }, event.currentTarget as HTMLElement)}
+        >
+          <span class="rack-ammo-gun">{group.modules.length}x {moduleName(group.moduleTypeID)}</span>
+          <span class="rack-ammo-what">{what}</span>
+          <span class="rack-ammo-count">{group.loaded}/{group.modules.length}</span>
+        </button>
+      {/each}
+      <button
+        type="button"
+        class="minor"
+        disabled={pendingItemID !== null}
+        title="Top up every weapon from cargo with the ammunition it already uses"
+        onclick={() => reloadAll()}
+      >Reload all</button>
+    </div>
   {/if}
   {#if damagedModules.length > 0}
     <!--
@@ -686,6 +1081,64 @@
          note moved to the centre flash: that is an acknowledgement with a shelf
          life of one cycle, where this is the reason a button did nothing, and a
          player needs that while they are still looking at the button. -->
-    <p class="rack-error" role="alert">{error}</p>
+    <p class="rack-error" role="alert">
+      {error}
+      {#if refusalModule && refusalFix && flow}
+        <!-- The fix, on the line that names the problem: the refusal was
+             about an empty gun, and here is what is in cargo for it. -->
+        <button
+          type="button"
+          class="minor"
+          disabled={pendingItemID !== null}
+          onclick={() => refusalModule && refusalFix && loadChoice([refusalModule], refusalFix)}
+        >Load {moduleName(refusalFix.typeID)} ({refusalFix.quantity.toLocaleString()} in cargo)</button>
+      {/if}
+    </p>
+  {/if}
+  {#if menu}
+    {@const target = menu.target}
+    {@const choices = ammoChoices(menuTypeID(target), cargoRows, chargeFits)}
+    {@const held = loadedTypeOf(target)}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="rack-menu"
+      role="menu"
+      tabindex="-1"
+      aria-label={menuHead(target)}
+      style={`left:${menu.left}px;bottom:${menu.bottom}px`}
+      bind:this={menuEl}
+      onkeydown={onMenuKey}
+    >
+      <span class="rack-menu-head">{menuHead(target)}</span>
+      {#if choices.length === 0}
+        <span class="rack-menu-note">
+          {cargoReading ? "Reading cargo..." : "No ammunition in cargo."}
+        </span>
+      {/if}
+      {#each choices as choice (choice.typeID)}
+        <button
+          type="button"
+          role="menuitem"
+          class:unlikely={choice.verdict === false}
+          onclick={() => loadChoice(menuModules(target), choice)}
+        >
+          <span class="rack-menu-name">
+            {moduleName(choice.typeID)}
+            {#if choice.typeID === held}<span class="rack-menu-tag">loaded</span>{/if}
+            {#if choice.verdict === false}<span class="rack-menu-tag">probably will not fit</span>{/if}
+          </span>
+          <span class="rack-menu-qty">{choice.quantity.toLocaleString()}</span>
+        </button>
+      {/each}
+      <span class="rack-menu-rule" aria-hidden="true"></span>
+      {#if groups.length > 0}
+        <button type="button" role="menuitem" onclick={() => reloadAll()}>Reload all weapons</button>
+      {/if}
+      {#if menuModules(target).some((module) => module.charge !== null)}
+        <button type="button" role="menuitem" onclick={() => unloadModules(menuModules(target))}
+          >Unload to cargo</button
+        >
+      {/if}
+    </div>
   {/if}
 </div>

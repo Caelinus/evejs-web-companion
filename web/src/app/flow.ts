@@ -306,6 +306,7 @@ import {
   tacklersHolding,
 } from "../bridge/jamNotifications.ts";
 import { decodeTargetNotification } from "../bridge/targetNotifications.ts";
+import { decodeChargeLoadNotification } from "../bridge/reloadNotifications.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -499,6 +500,14 @@ export interface SupportTractorRequest {
   readonly retainSettledClaim?: boolean; readonly collectedContainerID?: number;
   readonly feedback?: SupportTractorFeedback;
 }
+/**
+ * What an ammunition write turned out to do, judged against the re-read:
+ * `changed` the fit shows it, `reloading` the server queued it (in space) and
+ * announced so, `unchanged` it accepted the call and nothing moved, `refused`
+ * it said no in its own words. The last two also land in `actionError`.
+ */
+export type AmmoOutcome = "changed" | "reloading" | "unchanged" | "refused";
+
 export interface AppFlow {
   readonly droneRecovery: ReadableSignal<DroneRecoveryState>;
   retryDroneRecovery(): Promise<void>;
@@ -652,9 +661,9 @@ export interface AppFlow {
     moduleIDs: readonly number[],
     chargeItemIDs: readonly number[],
     source: api.AmmoPlace,
-  ): Promise<void>;
+  ): Promise<AmmoOutcome>;
   /** Empty modules of their charges into cargo or the station hangar. */
-  unloadAmmo(moduleIDs: readonly number[], destination: api.AmmoPlace): Promise<void>;
+  unloadAmmo(moduleIDs: readonly number[], destination: api.AmmoPlace): Promise<AmmoOutcome>;
   /**
    * DESTROY a fitted rig. Rigs cannot be unfitted, so this is irreversible —
    * the panel confirms before calling it and the BFF confirms again.
@@ -1791,6 +1800,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       applyCycleNotification(args);
       return;
     }
+    const chargeLoad = decodeChargeLoadNotification(method, args);
+    if (chargeLoad !== null) {
+      store.apply({ type: "fitting/reload-started", ...chargeLoad, atMs: receivedAtMs });
+      scheduleReloadRefresh(chargeLoad.durationMs);
+      return;
+    }
     if (method === "OnItemsChanged") {
       // Coalesced: mining grants ore stack by stack, so a busy cycle can push
       // several of these at once and one re-read answers all of them.
@@ -1892,6 +1907,32 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // OnItemsChanged frames back to back. Coalesce them into one re-read.
   const HOLD_REFRESH_COALESCE_MS = 150;
   let holdRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Re-read the fit once a queued reload has landed, so the rack's counts show
+   * what is in the guns rather than what was there before. One timer: a later
+   * announcement only ever pushes it later, and one read answers them all.
+   */
+  let reloadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let reloadRefreshAtMs = 0;
+  function scheduleReloadRefresh(durationMs: number): void {
+    // A beat past the window, so the read lands after the server's own pump.
+    const dueAtMs = Date.now() + durationMs + 750;
+    if (reloadRefreshTimer !== null) {
+      if (dueAtMs <= reloadRefreshAtMs) {
+        return;
+      }
+      clearTimeout(reloadRefreshTimer);
+    }
+    reloadRefreshAtMs = dueAtMs;
+    reloadRefreshTimer = setTimeout(() => {
+      reloadRefreshTimer = null;
+      void loadFitting().catch(() => {});
+    }, dueAtMs - Date.now());
+    if (typeof reloadRefreshTimer === "object" && "unref" in reloadRefreshTimer) {
+      (reloadRefreshTimer as { unref(): void }).unref();
+    }
+  }
+
   function scheduleHoldRefresh(): void {
     if (holdRefreshTimer !== null) {
       return;
@@ -2566,10 +2607,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   async function runAmmoAction(
     moduleIDs: readonly number[],
     action: () => Promise<void>,
-    declined: (before: string, after: string) => boolean,
+    declined: (before: string, after: string, reloadAnnounced: boolean) => boolean,
     declineMessage: string,
-  ): Promise<void> {
+  ): Promise<AmmoOutcome> {
     const before = ammoSignature(moduleIDs);
+    const calledAtMs = Date.now();
     try {
       await action();
     } catch (error) {
@@ -2579,14 +2621,24 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         throw error;
       }
       store.apply({ type: "fitting/action-error", message: errorWords(error) });
-      return;
+      return "refused";
     }
+    // The response's own notifications were applied before `action` resolved,
+    // so a reload the server queued in space is already recorded here. The
+    // server expands a bank to its slaves, so ANY announcement during this
+    // call counts, not only one naming the ids that were sent.
+    const reloadAnnounced = Object.values(store.fitting.get().reloads).some(
+      (reload) => reload.startedAtMs >= calledAtMs,
+    );
     await loadFitting();
+    const after = ammoSignature(moduleIDs);
     // AFTER the reload: loadFitting clears the action error on success, so a
     // decline recorded before it would be wiped by its own refresh.
-    if (declined(before, ammoSignature(moduleIDs))) {
+    if (declined(before, after, reloadAnnounced)) {
       store.apply({ type: "fitting/action-error", message: declineMessage });
+      return "unchanged";
     }
+    return before === after && reloadAnnounced ? "reloading" : "changed";
   }
 
   /**
@@ -12256,18 +12308,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async loadAmmo(moduleIDs, chargeItemIDs, source) {
-      await runAmmoAction(
+      return runAmmoAction(
         moduleIDs,
         () => api.loadAmmo(moduleIDs, chargeItemIDs, source, callOptions),
-        // Nothing about what the module holds changed, so nothing was loaded.
-        (before, after) => before === after,
+        // Nothing about what the module holds changed, so nothing was loaded —
+        // unless the server queued it: in space the charges land after the
+        // module's reload time, and its announcement is the proof.
+        (before, after, reloadAnnounced) => before === after && !reloadAnnounced,
         "The server accepted that and loaded nothing, and gave no reason. " +
           "A module only takes certain kinds of charge.",
       );
     },
 
     async unloadAmmo(moduleIDs, destination) {
-      await runAmmoAction(
+      return runAmmoAction(
         moduleIDs,
         () => api.unloadAmmo(moduleIDs, destination, callOptions),
         // An unload that worked leaves the modules empty.
