@@ -287,8 +287,9 @@ test("a paused companion stops reading the world", async () => {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((release) => { resolve = release; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((release, refuse) => { resolve = release; reject = refuse; });
+  return { promise, resolve, reject };
 }
 
 test("pause and resume retire a companion driver still asleep", async () => {
@@ -391,6 +392,43 @@ test("a read that throws pauses with the reason rather than acting on stale stat
   assert.equal(action.kind, "wait");
   assert.equal(controller.snapshot().status, "error");
   assert.equal(controller.snapshot().failureReason, "space read failed");
+});
+
+test("a retired observation failure cannot stop a replacement companion run", async () => {
+  const oldRead = deferred<FleetCompanionObservation>();
+  let reports = 0;
+  const controller = createFleetCompanion({
+    observe: async () => oldRead.promise,
+    issue: async () => {},
+    sleep: async () => {},
+    onProgress: () => { reports += 1; },
+  });
+  controller.start(REQUEST);
+  const oldTick = controller.tick();
+  controller.stop();
+  controller.start(REQUEST);
+  const replacement = controller.snapshot();
+  const replacementReports = reports;
+  oldRead.reject(new Error("retired session read failed"));
+  assert.deepEqual(await oldTick, { kind: "wait" });
+  assert.deepEqual(controller.snapshot(), replacement);
+  assert.equal(reports, replacementReports, "the old failure must publish no replacement progress");
+});
+
+test("an observation failure after pausing cannot change the paused run", async () => {
+  const oldRead = deferred<FleetCompanionObservation>();
+  const controller = createFleetCompanion({
+    observe: async () => oldRead.promise,
+    issue: async () => {},
+    sleep: async () => {},
+  });
+  controller.start(REQUEST);
+  const oldTick = controller.tick();
+  controller.pause();
+  const paused = controller.snapshot();
+  oldRead.reject(new Error("read failed after pause"));
+  await oldTick;
+  assert.deepEqual(controller.snapshot(), paused);
 });
 
 // --- a refused call ---------------------------------------------------------

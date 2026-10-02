@@ -7060,6 +7060,9 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     try {
       obs = await deps.observe();
     } catch (error) {
+      if (token !== runToken || mem.status !== "running") {
+        return { kind: "wait" };
+      }
       // A read that fails is not a licence to act on the last one. Pause with
       // the reason rather than deciding against stale state.
       mem.status = "error";
