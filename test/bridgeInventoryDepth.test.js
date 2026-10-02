@@ -1204,7 +1204,7 @@ test("strict route refuses changed source or missing office before inventory mut
   }
 });
 
-test("session cleanup retains a claimed container while its issued transfer is pending", async () => {
+test("session cleanup retains a claimed container until its transfer can be confirmed", async () => {
   let startAdd, finishAdd;
   const entered = new Promise((resolve) => { startAdd = resolve; });
   const held = new Promise((resolve) => { finishAdd = resolve; });
@@ -1213,6 +1213,13 @@ test("session cleanup retains a claimed container while its issued transfer is p
   const { baseUrl } = await startTestServer({ gateway, lootMemory: memory });
   await selectOnServer(baseUrl);
   const system = 30000142;
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: 7 },
+  });
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
   const claimed = await apiRequest(baseUrl, "/api/bots/loot-memory/claim", {
     method: "POST", body: { runID: "generation-a", system, itemID: CONTAINER_ID },
   });
@@ -1227,8 +1234,10 @@ test("session cleanup retains a claimed container while its issued transfer is p
   assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false);
   finishAdd();
   const settled = await moving;
-  assert.equal(settled.response.status, 200, "the fake gateway returned both authoritative rereads");
-  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), true);
+  assert.equal(settled.response.status, 409, JSON.stringify(settled.payload));
+  assert.equal(settled.payload.error, "NO_LIVE_SESSION");
+  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false,
+    "logout prevented authoritative rereads, so unresolved custody must not be reassigned");
 });
 
 for (const [name, options, expectedStatus] of [
