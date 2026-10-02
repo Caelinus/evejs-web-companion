@@ -578,6 +578,25 @@ export interface ScriptObservation {
    * null = unreadable, never "none".
    */
   readonly planetaryHaulerShipIDs?: readonly number[] | null;
+  /**
+   * What each customs office in THIS system is holding for the pilot, for the
+   * collect-customs block. Read only while that block is active: one container
+   * read per office in the system.
+   *
+   * ⚠ null = NOBODY LOOKED, never "they are empty". An office is a structure
+   * that neither announces itself as something to collect nor vanishes when
+   * emptied, so this read is the only thing that can say it is done - and
+   * reading "empty" out of an unread list would walk away from a full office.
+   *
+   * `units` is how many units of anything the office lists for this pilot; the
+   * server partitions an office's storage by depositor, so nothing here is
+   * somebody else's.
+   */
+  readonly customsOffices?: readonly {
+    readonly officeID: number;
+    readonly stacks: number;
+    readonly units: number;
+  }[] | null;
   readonly piLaunches?: readonly {
     readonly launchID: number;
     readonly solarSystemID: number;
