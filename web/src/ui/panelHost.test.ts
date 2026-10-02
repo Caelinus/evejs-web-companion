@@ -23,10 +23,16 @@ const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOST = readFileSync(path.join(UI_DIR, "PanelHost.svelte"), "utf8").replace(/\r\n/g, "\n");
 /** Just the render chain, so an id mentioned only in a comment cannot count. */
 const CHAIN = HOST.slice(HOST.indexOf("{#if tab ==="));
+/**
+ * Tabs that never open a window, so PanelHost must NOT route them. The Mining
+ * Command Center is a standalone page linked from the brand strip; its own test
+ * (miningOperationsPanel.test.ts) pins both the link and its absence here.
+ */
+const NOT_A_WINDOW = new Set(["miningOperations"]);
 
 test("⚠ EVERY TAB HAS ITS OWN BRANCH — none falls through to another panel", () => {
   assert.ok(CHAIN.length > 0, "the render chain is not where this test looks");
-  const missing = TABS.filter((tab) => !CHAIN.includes(`tab === "${tab.id}"`)).map((t) => t.id);
+  const missing = TABS.filter((tab) => !NOT_A_WINDOW.has(tab.id) && !CHAIN.includes(`tab === "${tab.id}"`)).map((t) => t.id);
   assert.deepEqual(missing, [], `these tabs open some other panel: ${missing.join(", ")}`);
 });
 

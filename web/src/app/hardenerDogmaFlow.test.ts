@@ -234,6 +234,9 @@ function namesBody(request: Record<string, unknown>, modules: readonly TestModul
 function spaceBody(activeModuleIDs: readonly number[]): unknown {
   return {
     ok: true,
+    // The observation carries the drone bay and drones in space with the scene.
+    inSpace: [],
+    bay: [],
     space: {
       inSpace: true,
       solarSystemID: SOLAR_SYSTEM_ID,

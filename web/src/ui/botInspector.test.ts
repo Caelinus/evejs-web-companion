@@ -108,11 +108,11 @@ const WIDGET_CASES: readonly { macro: string; key: string; expect: RegExp; why: 
   // difference between them is whether it will also match a solar system —
   // which is exactly the bug a shared widget could hide, so it is what these
   // two look for.
-  { macro: "travel-to-station", key: "station", expect: /or search a station by name/, why: "station-picker" },
+  { macro: "travel-to-station", key: "station", expect: /placeholder="search a station or accessible structure"/, why: "station-picker" },
   {
     macro: "set-destination",
     key: "destination",
-    expect: /search a station or system by name/,
+    expect: /placeholder="search a station, accessible structure or system"/,
     why: "destination-picker, which also accepts a system",
   },
   // The corporation hangar picker has to ASK the bridge which stations have an

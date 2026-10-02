@@ -102,7 +102,10 @@ const PANELS = [
  * back as a no-op async function.
  */
 function fakeFlow(): unknown {
-  return new Proxy({}, { get: () => async () => {} });
+  // Its one store, the drone-recovery gate, reads ready: the flow default
+  // unless the pilot opts in to browser recovery.
+  const droneRecovery = { subscribe: (run: (value: unknown) => void) => (run({ phase: "ready", reason: null }), () => {}) };
+  return new Proxy({}, { get: (_target, key) => key === "droneRecovery" ? droneRecovery : async () => {} });
 }
 
 async function loadPanel(name: string): Promise<unknown> {

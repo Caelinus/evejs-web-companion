@@ -20,7 +20,10 @@ const { render } = await import("svelte/server");
 const { createClientStore } = await import("../store/clientStore.ts");
 
 function fakeFlow(): unknown {
-  return new Proxy({}, { get: () => async () => {} });
+  // Its one store, the drone-recovery gate, reads ready: the flow default
+  // unless the pilot opts in to browser recovery.
+  const droneRecovery = { subscribe: (run: (value: unknown) => void) => (run({ phase: "ready", reason: null }), () => {}) };
+  return new Proxy({}, { get: (_target, key) => key === "droneRecovery" ? droneRecovery : async () => {} });
 }
 
 const SHIP = {
