@@ -1267,6 +1267,19 @@ export interface CompanionAbandonment extends CompanionAbandonmentRecord {
  * ladder never mutates it and the controller stores whatever comes back — the
  * same construction the script runner's deciders use.
  */
+interface CompanionDroneEngagement {
+  readonly targetID: number;
+  readonly flightIDs: readonly number[];
+  readonly requestedIDs: readonly number[];
+  readonly acceptedIDs: readonly number[];
+  readonly refusedIDs: readonly number[];
+  readonly uncertainIDs: readonly number[];
+  readonly refusals: Readonly<Record<number, number>>;
+  readonly deferrals: number;
+  readonly deferralWait: boolean;
+  readonly pending: boolean;
+}
+
 export interface CompanionLadderMemory {
   /** Server chat timestamps plus sender/text identity disambiguate timestamp ties. */
   readonly standingChatCursor: { readonly at: number; readonly keys: readonly string[] } | null;
@@ -1454,6 +1467,8 @@ export interface CompanionLadderMemory {
    */
   readonly lastDroneEngageTargetID: number | null;
   readonly lastDroneEngageIDs: readonly number[];
+  readonly combatDroneOrder: CompanionDroneEngagement | null;
+  readonly repairDroneOrder: CompanionDroneEngagement | null;
   /**
    * The locked wreck the salvage drones were last sent to, and how many drones
    * that order went to.
@@ -1618,6 +1633,14 @@ export interface CompanionLadderMemory {
    */
   readonly followAnchorID: number | null;
   readonly followRangeIssuedM: number | null;
+  readonly followOrder: {
+    readonly targetID: number;
+    readonly range: number;
+    readonly status: "pending" | "issued" | "refused" | "deferred" | "uncertain";
+    readonly refusals: number;
+    readonly deferrals: number;
+    readonly deferralWait: boolean;
+  } | null;
   /**
    * The solar system a `destination` order is taking this pilot to, or null.
    *
@@ -1778,6 +1801,8 @@ export function freshLadderMemory(): CompanionLadderMemory {
     lastDroneRepairIDs: [],
     lastDroneEngageTargetID: null,
     lastDroneEngageIDs: [],
+    combatDroneOrder: null,
+    repairDroneOrder: null,
     lastSalvageOrderedFor: null,
     salvageDronesWreckID: null,
     lootedItemIDs: [],
@@ -1800,6 +1825,7 @@ export function freshLadderMemory(): CompanionLadderMemory {
     followHeld: false,
     followAnchorID: null,
     followRangeIssuedM: null,
+    followOrder: null,
     destinationSystemID: null,
     destinationRoutedFor: null,
     stopHeardAtMs: null,
@@ -2061,9 +2087,9 @@ function changesShipMovement(action: FleetCompanionAction): boolean {
 }
 
 function withoutIssuedFollow(memory: CompanionLadderMemory): CompanionLadderMemory {
-  return memory.followAnchorID === null && memory.followRangeIssuedM === null
+  return memory.followAnchorID === null && memory.followRangeIssuedM === null && memory.followOrder === null
     ? memory
-    : { ...memory, followAnchorID: null, followRangeIssuedM: null };
+    : { ...memory, followAnchorID: null, followRangeIssuedM: null, followOrder: null };
 }
 
 function decideCompanionStep(
@@ -2166,6 +2192,8 @@ function decideCompanionStep(
     lastDroneRepairIDs: memory.lastDroneRepairIDs,
     lastDroneEngageTargetID: memory.lastDroneEngageTargetID,
     lastDroneEngageIDs: memory.lastDroneEngageIDs,
+    combatDroneOrder: memory.combatDroneOrder,
+    repairDroneOrder: memory.repairDroneOrder,
     lastSalvageOrderedFor: memory.lastSalvageOrderedFor,
     salvageDronesWreckID: memory.salvageDronesWreckID,
     lootedItemIDs: memory.lootedItemIDs,
@@ -2196,6 +2224,7 @@ function decideCompanionStep(
     followHeld: memory.followHeld,
     followAnchorID: memory.followAnchorID,
     followRangeIssuedM: memory.followRangeIssuedM,
+    followOrder: memory.followOrder,
     destinationSystemID: memory.destinationSystemID,
     destinationRoutedFor: memory.destinationRoutedFor,
     stopHeardAtMs: memory.stopHeardAtMs,
@@ -3535,6 +3564,10 @@ const MAX_COMPANION_HEAL_REFUSALS = 3;
 
 function isDefiniteCompanionRefusal(error: unknown): boolean {
   return error !== null && typeof error === "object" && "code" in error && error.code === "CALL_REFUSED";
+}
+
+function isSessionChangeDeferral(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "SESSION_CHANGE_IN_PROGRESS";
 }
 
 function noteEscapeWarpRefusal(memory: CompanionLadderMemory): CompanionLadderMemory {
@@ -6205,7 +6238,30 @@ function decideFollow(
     return null;
   }
   const range = memory.followRangeM;
-  if (memory.followAnchorID === anchor.itemID && memory.followRangeIssuedM === range) {
+  const previous = memory.followOrder?.targetID === anchor.itemID && memory.followOrder.range === range
+    ? memory.followOrder : null;
+  if ((previous?.deferrals ?? 0) >= MAX_COMPANION_SESSION_DEFERRALS) {
+    return { action: WAIT, phase: "Following", memory,
+      why: "The session change kept blocking formation movement. Pausing for the operator.",
+      pause: "The session change did not become ready for formation movement.",
+    };
+  }
+  if (previous?.deferralWait) {
+    return waiting("Following", "Waiting for the session change to clear before retrying formation movement.", {
+      ...memory, followOrder: { ...previous, deferralWait: false },
+    });
+  }
+  if (previous?.status === "uncertain" || (previous?.refusals ?? 0) >= MAX_COMPANION_FOLLOW_REFUSALS) {
+    return {
+      action: WAIT, phase: "Following", memory,
+      why: previous?.status === "uncertain"
+        ? "The formation request's outcome is unknown. Pausing without repeating it."
+        : "The formation request was refused repeatedly. Pausing for the operator.",
+      pause: "Cannot confirm formation movement.",
+    };
+  }
+  if (memory.followAnchorID === anchor.itemID && memory.followRangeIssuedM === range &&
+    (previous === null || previous.status === "pending" || previous.status === "issued")) {
     // Already holding this station. `keepAtRange` is standing server-side, so
     // there is nothing to send -- but the readout still says what the pilot is
     // doing, because "Standing by" would be false while it flies formation.
@@ -6215,7 +6271,10 @@ function decideFollow(
     action: { kind: "keepAtRange", targetID: anchor.itemID, range },
     phase: "Following",
     why: "Holding station on the fleet commander.",
-    memory: { ...memory, followAnchorID: anchor.itemID, followRangeIssuedM: range },
+    memory: { ...memory, followAnchorID: anchor.itemID, followRangeIssuedM: range,
+      followOrder: { targetID: anchor.itemID, range, status: "pending", refusals: previous?.refusals ?? 0,
+        deferrals: previous?.deferrals ?? 0, deferralWait: false },
+    },
   };
 }
 
@@ -6482,14 +6541,14 @@ function withObservedDroneFlights(
     obs.combatDroneIDs != null &&
     !sameFlight(obs.combatDroneIDs, memory.lastDroneEngageIDs)
   ) {
-    memory = { ...memory, lastDroneEngageTargetID: null, lastDroneEngageIDs: [] };
+    memory = { ...memory, lastDroneEngageTargetID: null, lastDroneEngageIDs: [], combatDroneOrder: null };
   }
   if (
     memory.lastDroneRepairTargetID !== null &&
     obs.logisticDroneIDs != null &&
     !sameFlight(obs.logisticDroneIDs, memory.lastDroneRepairIDs)
   ) {
-    memory = { ...memory, lastDroneRepairTargetID: null, lastDroneRepairIDs: [] };
+    memory = { ...memory, lastDroneRepairTargetID: null, lastDroneRepairIDs: [], repairDroneOrder: null };
   }
   return memory;
 }
@@ -6701,21 +6760,14 @@ function decideDrones(
   // a fact.
   if (role === "combat") {
     const called = calledCombatTargetID(request, obs);
-    if (called === null || memory.lastDroneEngageTargetID === called) {
+    if (called === null) {
       return nothing;
     }
     if (!isAlreadyLocked(called, obs.lockedTargetIDs, memory)) {
       return nothing;
     }
-    return {
-      decision: {
-        action: { kind: "engageDrones", droneIDs: roleOut, targetID: called },
-        phase: "Drones",
-        why: "Putting the combat drones on the target the fleet called.",
-        memory: { ...memory, lastDroneEngageTargetID: called, lastDroneEngageIDs: [...roleOut] },
-      },
-      memory,
-    };
+    return { decision: decideDroneEngagement(memory, "combat", roleOut, called,
+      "Putting the combat drones on the target the fleet called."), memory };
   }
   if (role === "salvage") {
     // Launched, nothing more: the salvage rung locks a wreck and sends these
@@ -6724,17 +6776,60 @@ function decideDrones(
   }
   // Logistic. The ship to repair is whoever the fleet is calling reps for.
   const healTarget = healCallTargetID(obs);
-  if (healTarget === null || memory.lastDroneRepairTargetID === healTarget) {
+  if (healTarget === null) {
     return nothing;
   }
-  return {
-    decision: {
-      action: { kind: "engageDrones", droneIDs: roleOut, targetID: healTarget },
-      phase: "Drones",
-      why: "Sending the repair drones to the ship calling for reps.",
-      memory: { ...memory, lastDroneRepairTargetID: healTarget, lastDroneRepairIDs: [...roleOut] },
-    },
-    memory,
+  return { decision: decideDroneEngagement(memory, "repair", roleOut, healTarget,
+    "Sending the repair drones to the ship calling for reps."), memory };
+}
+
+const MAX_COMPANION_DRONE_ENGAGE_REFUSALS = 3;
+const MAX_COMPANION_FOLLOW_REFUSALS = 3;
+// A separate, generous barrier budget; every deferral gets a read-only tick.
+const MAX_COMPANION_SESSION_DEFERRALS = 30;
+
+function decideDroneEngagement(
+  memory: CompanionLadderMemory, role: "combat" | "repair", flightIDs: readonly number[], targetID: number, why: string,
+): CompanionDecision | null {
+  const field = role === "combat" ? "combatDroneOrder" : "repairDroneOrder";
+  const saved = memory[field];
+  const previous = saved?.targetID === targetID ? saved : null;
+  if (previous?.pending) return null;
+  if ((previous?.deferrals ?? 0) >= MAX_COMPANION_SESSION_DEFERRALS) {
+    return { action: WAIT, phase: "Drones", memory,
+      why: "The session change kept blocking drone engagement. Pausing for the operator.",
+      pause: "The session change did not become ready for drone engagement.",
+    };
+  }
+  if (previous?.deferralWait) {
+    return waiting("Drones", "Waiting for the session change to clear before retrying drone engagement.", {
+      ...memory, [field]: { ...previous, deferralWait: false },
+    });
+  }
+  const requestedIDs = previous === null ? flightIDs : previous.refusedIDs.filter(
+    (id) => (previous.refusals[id] ?? 0) < MAX_COMPANION_DRONE_ENGAGE_REFUSALS,
+  );
+  if (requestedIDs.length === 0) {
+    if (previous !== null && (previous.uncertainIDs.length > 0 || previous.refusedIDs.length > 0)) {
+      return { action: WAIT, phase: "Drones", memory,
+        why: previous.uncertainIDs.length > 0
+          ? "A drone engagement's outcome is unknown. Pausing without repeating it."
+          : "Drone engagement was refused repeatedly. Pausing for the operator.",
+        pause: "Cannot confirm drone engagement.",
+      };
+    }
+    return null;
+  }
+  const pending: CompanionDroneEngagement = {
+    targetID, flightIDs: [...flightIDs], requestedIDs: [...requestedIDs], pending: true,
+    acceptedIDs: previous?.acceptedIDs ?? [], refusedIDs: previous?.refusedIDs ?? [],
+    uncertainIDs: previous?.uncertainIDs ?? [], refusals: previous?.refusals ?? {},
+    deferrals: previous?.deferrals ?? 0, deferralWait: false,
+  };
+  return { action: { kind: "engageDrones", droneIDs: requestedIDs, targetID }, phase: "Drones", why,
+    memory: role === "combat"
+      ? { ...memory, combatDroneOrder: pending, lastDroneEngageTargetID: targetID, lastDroneEngageIDs: [...flightIDs] }
+      : { ...memory, repairDroneOrder: pending, lastDroneRepairTargetID: targetID, lastDroneRepairIDs: [...flightIDs] },
   };
 }
 
@@ -7319,6 +7414,48 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     } };
   }
 
+  function settleFollow(decision: CompanionDecision, succeeded: boolean, error?: unknown): void {
+    const pending = decision.memory.followOrder;
+    if (decision.action.kind !== "keepAtRange" || pending?.status !== "pending" ||
+      mem.ladder.followOrder !== pending) return;
+    const status = succeeded ? "issued" : isSessionChangeDeferral(error) ? "deferred"
+      : isDefiniteCompanionRefusal(error) ? "refused" : "uncertain";
+    mem.ladder = { ...mem.ladder, followOrder: { ...pending, status,
+      refusals: pending.refusals + (status === "refused" ? 1 : 0),
+      deferrals: status === "deferred" ? pending.deferrals + 1 : 0, deferralWait: status === "deferred",
+    } };
+  }
+
+  function settleDroneEngagement(decision: CompanionDecision, succeeded: boolean, error?: unknown): void {
+    if (decision.action.kind !== "engageDrones") return;
+    for (const field of ["combatDroneOrder", "repairDroneOrder"] as const) {
+      const pending = decision.memory[field];
+      if (pending?.pending !== true || mem.ladder[field] !== pending ||
+        pending.targetID !== decision.action.targetID) continue;
+      const requested = pending.requestedIDs;
+      const detail = error !== null && typeof error === "object" ? error as Record<string, unknown> : null;
+      const hasDetails = detail !== null && ("acceptedDroneIDs" in detail || "refusedDroneIDs" in detail || "uncertainDroneIDs" in detail);
+      const reported = (name: string): number[] => Array.isArray(detail?.[name])
+        ? requested.filter((id) => (detail[name] as unknown[]).includes(id)) : [];
+      const deferred = !succeeded && isSessionChangeDeferral(error);
+      const refused = succeeded ? [] : deferred ? requested : hasDetails ? reported("refusedDroneIDs")
+        : isDefiniteCompanionRefusal(error) ? requested : [];
+      const accepted = succeeded ? requested : hasDetails
+        ? reported("acceptedDroneIDs").filter((id) => !refused.includes(id)) : [];
+      const uncertain = requested.filter((id) => !accepted.includes(id) && !refused.includes(id));
+      const merge = (previous: readonly number[], next: readonly number[]): number[] =>
+        [...new Set([...previous.filter((id) => !requested.includes(id)), ...next])];
+      const refusals: Record<number, number> = { ...pending.refusals };
+      if (!deferred) for (const id of refused) refusals[id] = (refusals[id] ?? 0) + 1;
+      mem.ladder = { ...mem.ladder, [field]: { ...pending, pending: false, refusals,
+        deferrals: deferred ? pending.deferrals + 1 : 0, deferralWait: deferred,
+        acceptedIDs: merge(pending.acceptedIDs, accepted), refusedIDs: merge(pending.refusedIDs, refused),
+        uncertainIDs: merge(pending.uncertainIDs, uncertain),
+      } };
+      return;
+    }
+  }
+
   async function tickBody(): Promise<FleetCompanionAction> {
     if (mem.status !== "running") {
       return { kind: "wait" };
@@ -7389,6 +7526,8 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
       try {
         await deps.issue(decision.action);
         settleAlignment(decision, "issued");
+        settleFollow(decision, true);
+        settleDroneEngagement(decision, true);
       } catch (error) {
         // ⚠ A REFUSED CALL IS AN ANSWER, NOT THE END OF THE RUN. This used to
         // propagate: the rejection came out of `tick`, out of `run`, and landed
@@ -7409,12 +7548,27 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // instead. The raw text is kept on `failureReason`, which is diagnostic
         // rather than prose.
         settleAlignment(decision, isDefiniteCompanionRefusal(error) ? "refused" : "uncertain");
+        settleFollow(decision, false, error);
+        settleDroneEngagement(decision, false, error);
         if (token !== runToken || mem.status !== "running") {
           return { kind: "wait" };
         }
         const raw = error instanceof Error ? error.message : String(error);
         mem.failureReason = raw;
         mem.why = `${decision.why} ${refusalWords(raw)}`;
+        const engagementTargetID = decision.action.kind === "engageDrones" ? decision.action.targetID : null;
+        const droneOrder = engagementTargetID !== null
+          ? [mem.ladder.combatDroneOrder, mem.ladder.repairDroneOrder].find((order) =>
+            order !== null && order.targetID === engagementTargetID && order.uncertainIDs.length > 0) : null;
+        const uncertainMovement = decision.action.kind === "keepAtRange" && mem.ladder.followOrder?.status === "uncertain";
+        const uncertainDrones = droneOrder != null && !droneOrder.refusedIDs.some((id) =>
+          (droneOrder.refusals[id] ?? 0) < MAX_COMPANION_DRONE_ENGAGE_REFUSALS);
+        if (uncertainMovement || uncertainDrones) {
+          runToken += 1;
+          mem.status = "paused";
+          mem.action = null;
+          mem.why = "Cannot confirm the command's outcome. Pausing without repeating it.";
+        }
         const alignment = mem.ladder.alignmentOrder;
         if (decision.action.kind === "align" && alignment !== null &&
           alignment.key === decision.memory.alignmentOrder?.key) {
@@ -7501,6 +7655,8 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           lastDroneRepairIDs: [],
           lastDroneEngageTargetID: null,
           lastDroneEngageIDs: [],
+          combatDroneOrder: null,
+          repairDroneOrder: null,
           lastSalvageOrderedFor: null,
           salvageDronesWreckID: null,
           lootedItemIDs: [],
@@ -7560,6 +7716,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
           followHeld: false,
           followAnchorID: null,
           followRangeIssuedM: null,
+          followOrder: null,
           destinationSystemID: null,
           destinationRoutedFor: null,
           stopHeardAtMs: null,

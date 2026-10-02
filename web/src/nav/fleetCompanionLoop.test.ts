@@ -5314,6 +5314,108 @@ test("an unreadable combat flight does not retire its standing target order", ()
   assert.notEqual(recovered.action.kind, "engageDrones");
 });
 
+function engagementObs(role: "combat" | "repair", droneIDs: readonly number[] = [DRONE_A, DRONE_B]): FleetCompanionObservation {
+  return mixedBayObs({
+    snapshot: gridWithEntities([LOGI]),
+    fleetTargetTags: role === "combat" ? new Map([[LOGI, "A"]]) : new Map(),
+    fleetBroadcast: role === "repair" ? fleetBroadcast("HealShield", LOGI) : null,
+    lockedTargetIDs: [LOGI],
+    myDroneIDs: droneIDs,
+    combatDroneIDs: role === "combat" ? droneIDs : [],
+    logisticDroneIDs: role === "repair" ? droneIDs : [],
+  });
+}
+
+for (const role of ["combat", "repair"] as const) {
+  test(`${role} drone engagement retries definite refusals and confirms the successful flight`, async () => {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => engagementObs(role),
+      issue: async () => {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("Engage refused"), { code: "CALL_REFUSED" });
+      },
+    }).deps);
+    companion.start(REQUEST);
+    await companion.tick();
+    assert.equal((await companion.tick()).kind, "engageDrones");
+    assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(calls, 2);
+  });
+
+  test(`${role} drone engagement waits through session changes without spending ordinary refusal budget`, async () => {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => engagementObs(role),
+      issue: async () => {
+        calls += 1;
+        if (calls <= 5) throw Object.assign(new Error("Session is changing"), { code: "SESSION_CHANGE_IN_PROGRESS" });
+      },
+    }).deps);
+    companion.start(REQUEST);
+    for (let tick = 0; tick < 12; tick += 1) await companion.tick();
+    assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(calls, 6);
+    assert.equal(companion.snapshot().status, "running");
+  });
+}
+
+test("partial drone refusals retry only refused IDs and preserve accepted drones", async () => {
+  const issued: FleetCompanionAction[] = [];
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => engagementObs("combat"),
+    issue: async (action) => {
+      issued.push(action);
+      if (issued.length === 1) throw Object.assign(new Error("One drone refused"), {
+        code: "CALL_REFUSED", acceptedDroneIDs: [DRONE_A], refusedDroneIDs: [DRONE_B], uncertainDroneIDs: [],
+      });
+    },
+  }).deps);
+  companion.start(REQUEST);
+  await companion.tick();
+  await companion.tick();
+  await companion.tick();
+  assert.deepEqual(issued, [
+    { kind: "engageDrones", droneIDs: [DRONE_A, DRONE_B], targetID: LOGI },
+    { kind: "engageDrones", droneIDs: [DRONE_B], targetID: LOGI },
+  ]);
+});
+
+test("mixed drone results retry known refusals without replaying accepted or uncertain drones", async () => {
+  const unknownDrone = 700099;
+  const issued: FleetCompanionAction[] = [];
+  const companion = createFleetCompanion(makeDeps({
+    observe: async () => engagementObs("repair", [DRONE_A, DRONE_B, unknownDrone]),
+    issue: async (action) => {
+      issued.push(action);
+      if (issued.length === 1) throw Object.assign(new Error("Some drone outcomes are unknown"), {
+        code: "BRIDGE_BAD_RESPONSE", acceptedDroneIDs: [DRONE_A], refusedDroneIDs: [DRONE_B], uncertainDroneIDs: [unknownDrone],
+      });
+    },
+  }).deps);
+  companion.start(REQUEST);
+  for (let tick = 0; tick < 4; tick += 1) await companion.tick();
+  assert.deepEqual(issued, [
+    { kind: "engageDrones", droneIDs: [DRONE_A, DRONE_B, unknownDrone], targetID: LOGI },
+    { kind: "engageDrones", droneIDs: [DRONE_B], targetID: LOGI },
+  ]);
+  assert.equal(companion.snapshot().status, "paused");
+});
+
+test("drone engagement ordinary refusals are bounded, and transport ambiguity is never replayed", async () => {
+  for (const code of ["CALL_REFUSED", "BRIDGE_NETWORK_ERROR"]) {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => engagementObs("combat"),
+      issue: async () => { calls += 1; throw Object.assign(new Error("Engage failed"), { code }); },
+    }).deps);
+    companion.start(REQUEST);
+    for (let tick = 0; tick < 8; tick += 1) await companion.tick();
+    assert.equal(calls, code === "CALL_REFUSED" ? 3 : 1, code);
+    assert.equal(companion.snapshot().status, "paused", code);
+  }
+});
+
 test("a pilot with no repair drones answers a rep call by fighting on", () => {
   // A hull that cannot do the job is not "the logistic role with nothing to
   // launch" -- it is simply not that pilot, so the branch falls through.
@@ -6443,6 +6545,106 @@ test("the keepAtRange goes out ONCE and is not re-sent on the next tick", () => 
   assert.equal(second.action.kind, "wait");
   assert.equal(second.phase, "Following", "the readout still says what it is doing");
 });
+
+test("formation retries definite refusals but does not spend its budget on session changes", async () => {
+  for (const code of ["CALL_REFUSED", "SESSION_CHANGE_IN_PROGRESS"]) {
+    let calls = 0;
+    const refusedCalls = code === "CALL_REFUSED" ? 1 : 5;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => obs({ snapshot: fcGrid() }),
+      issue: async () => {
+        calls += 1;
+        if (calls <= refusedCalls) throw Object.assign(new Error("Follow refused"), { code });
+      },
+    }).deps);
+    companion.start(REQUEST);
+    const ticks = code === "SESSION_CHANGE_IN_PROGRESS" ? refusedCalls * 2 + 1 : refusedCalls + 1;
+    for (let tick = 0; tick < ticks; tick += 1) await companion.tick();
+    assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(calls, refusedCalls + 1, code);
+  }
+});
+
+test("formation ordinary refusals are bounded and ambiguous responses are never replayed", async () => {
+  for (const code of ["CALL_REFUSED", "BRIDGE_NETWORK_ERROR"]) {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => obs({ snapshot: fcGrid() }),
+      issue: async () => { calls += 1; throw Object.assign(new Error("Follow failed"), { code }); },
+    }).deps);
+    companion.start(REQUEST);
+    for (let tick = 0; tick < 8; tick += 1) await companion.tick();
+    assert.equal(calls, code === "CALL_REFUSED" ? 3 : 1, code);
+    assert.equal(companion.snapshot().status, "paused", code);
+  }
+});
+
+for (const job of ["combat", "repair", "follow"] as const) {
+  test(`${job} session-change deferrals are bounded with read-only ticks between writes`, async () => {
+    let calls = 0;
+    const companion = createFleetCompanion(makeDeps({
+      observe: async () => job === "follow" ? obs({ snapshot: fcGrid() }) : engagementObs(job),
+      issue: async () => { calls += 1; throw Object.assign(new Error("Session never becomes ready"), {
+        code: "SESSION_CHANGE_IN_PROGRESS",
+      }); },
+    }).deps);
+    companion.start(REQUEST);
+    for (let tick = 0; tick < 100; tick += 1) {
+      const before = calls;
+      await companion.tick();
+      if (calls > before && companion.snapshot().status === "running") {
+        await companion.tick();
+        assert.equal(calls, before + 1, "the following read must not write again");
+      }
+    }
+    assert.equal(calls, 30);
+    assert.equal(companion.snapshot().status, "paused");
+  });
+  for (const interruption of ["pause", "restart"] as const) {
+    for (const outcomeKind of ["success", "CALL_REFUSED", "SESSION_CHANGE_IN_PROGRESS", "BRIDGE_NETWORK_ERROR"]) {
+      test(`${job} ${outcomeKind} settles only its own pending record across ${interruption}`, async () => {
+        const began = deferred<void>();
+        const outcome = deferred<void>();
+        let calls = 0;
+        const companion = createFleetCompanion(makeDeps({
+          observe: async () => job === "follow" ? obs({ snapshot: fcGrid() }) : engagementObs(job),
+          issue: async () => {
+            calls += 1;
+            if (calls === 1) { began.resolve(); await outcome.promise; }
+          },
+        }).deps);
+        companion.start(REQUEST);
+        const first = companion.tick();
+        await began.promise;
+        if (interruption === "pause") { companion.pause(); companion.resume(); }
+        else { companion.stop(); companion.start(REQUEST); }
+        if (outcomeKind === "success") outcome.resolve();
+        else outcome.reject(Object.assign(new Error("Deferred command failed"), { code: outcomeKind }));
+        await first;
+        let next = await companion.tick();
+        if (interruption === "pause" && outcomeKind === "SESSION_CHANGE_IN_PROGRESS") {
+          assert.equal(next.kind, "wait", "a deferral gets a fresh read-only tick before retry");
+          assert.equal(calls, 1);
+          next = await companion.tick();
+        }
+        if (interruption === "restart" || outcomeKind === "CALL_REFUSED" || outcomeKind === "SESSION_CHANGE_IN_PROGRESS") {
+          assert.equal(next.kind, job === "follow" ? "keepAtRange" : "engageDrones");
+          assert.equal(calls, 2);
+          assert.equal(companion.snapshot().status, "running");
+          assert.equal((await companion.tick()).kind, "wait");
+        } else if (outcomeKind === "success") {
+          assert.equal(next.kind, "wait");
+          assert.equal(calls, 1);
+          assert.equal(companion.snapshot().status, "running");
+        } else {
+          assert.equal(next.kind, "wait");
+          assert.equal(calls, 1);
+          assert.equal(companion.snapshot().status, "paused");
+        }
+      });
+    }
+  }
+}
 
 test("formation is restored after fleet warp observed while another rung cannot run", () => {
   const following = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
