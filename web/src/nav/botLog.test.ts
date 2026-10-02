@@ -52,6 +52,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "salvageDrones", droneIDs: [11], targetID: 0 },
   { kind: "lootWreck", wreckID: 51 },
   { kind: "lootContainer", containerID: 52 },
+  { kind: "collectLaunch", containerID: 52, launchID: 72 },
   { kind: "haulTransfer", itemID: 53, quantity: 1, from: { kind: "cargo" },
     to: { kind: "corp", division: 1 }, stationID: 60003760, corporationID: 98, division: 1,
     typeID: 34, sourceQuantity: 1 },
