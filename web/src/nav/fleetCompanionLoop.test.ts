@@ -1250,11 +1250,121 @@ function gridWithShipsAndActive(
   } as unknown as SpaceSnapshot;
 }
 
+test("remote repairs lock once and wait for authoritative lock confirmation", () => {
+  const request = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
+  const observation = obs({ snapshot: gridWithShipsAndActive([ALLY]),
+    fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [] });
+  const lock = decideCompanionAction(request, observation);
+  assert.deepEqual(lock.action, { kind: "lock", targetID: ALLY });
+  const pending = decideCompanionAction(request, observation, lock.memory);
+  assert.equal(pending.action.kind, "wait");
+  const unreadable = decideCompanionAction(request, { ...observation, lockedTargetIDs: null }, pending.memory);
+  assert.equal(unreadable.action.kind, "wait", "memory of asking must not stand in for a lock");
+  const ready = decideCompanionAction(request, { ...observation, lockedTargetIDs: [ALLY] }, unreadable.memory);
+  assert.deepEqual(ready.action, { kind: "activate", moduleID: SHIELD_MODULE, targetID: ALLY });
+});
+
+test("an unconfirmed repair lock stops waiting without issuing duplicate locks", () => {
+  const request = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
+  const observation = obs({ snapshot: gridWithShipsAndActive([ALLY]),
+    fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [] });
+  let memory = freshLadderMemory();
+  const actions: FleetCompanionAction[] = [];
+  let why = "";
+  for (let tick = 0; tick < 15; tick += 1) {
+    const result = decideCompanionAction(request, observation, memory);
+    memory = result.memory;
+    actions.push(result.action);
+    why = result.why;
+  }
+  assert.equal(actions.filter((action) => action.kind === "lock").length, 1);
+  assert.equal(actions.filter((action) => action.kind === "activate").length, 0);
+  assert.match(why, /could not be locked.*stopped asking/i);
+});
+
+test("definitely refused repair locks are bounded and never become activations", async () => {
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithShipsAndActive([ALLY]),
+      fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [] }),
+    issue: async (action) => { attempted.push(action); throw Object.assign(new Error("TargetTooFar"), { code: "CALL_REFUSED" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] });
+  for (let tick = 0; tick < 8; tick += 1) await controller.tick();
+  assert.deepEqual(attempted, Array.from({ length: 3 }, () => ({ kind: "lock", targetID: ALLY })));
+});
+
+test("out-of-range repair refusals stop retrying and let an area job continue", async () => {
+  const attempted: FleetCompanionAction[] = [];
+  const snapshot = gridWithShipsAndActive([ALLY]) as unknown as { entities: unknown[] };
+  snapshot.entities.push({ itemID: 300001, kind: "container", isSelf: false,
+    position: { x: 1000, y: 0, z: 0 }, radius: 0 });
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: snapshot as unknown as SpaceSnapshot,
+      fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [ALLY],
+      chatMessages: [chatLine("loot", HUMAN)] }),
+    issue: async (action) => { attempted.push(action);
+      if (action.kind === "activate") throw Object.assign(new Error("TargetNotWithinRangeGeneric"), { code: "CALL_REFUSED" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] });
+  for (let tick = 0; tick < 8; tick += 1) await controller.tick();
+  assert.equal(attempted.filter((action) => action.kind === "activate").length, 3);
+  assert.ok(attempted.some((action) => action.kind === "lootContainer"));
+});
+
+test("an uncertain remote activation is not replayed against an inactive snapshot", async () => {
+  let activations = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithShipsAndActive([ALLY]),
+      fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [ALLY] }),
+    issue: async () => { activations += 1; throw Object.assign(new Error("response lost"), { code: "BRIDGE_NETWORK_ERROR" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] });
+  for (let tick = 0; tick < 8; tick += 1) await controller.tick();
+  assert.equal(activations, 1);
+  assert.match(controller.snapshot().why ?? "", /outcome could not be confirmed/i);
+});
+
+test("a changed heal recipient does not settle an uncertain module activation", async () => {
+  const otherAlly = 200005;
+  let targetID = ALLY;
+  let activations = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithShipsAndActive([ALLY, otherAlly]),
+      fleetBroadcast: fleetBroadcast("HealShield", targetID), lockedTargetIDs: [ALLY, otherAlly] }),
+    issue: async () => { activations += 1; throw Object.assign(new Error("response lost"), { code: "BRIDGE_BAD_RESPONSE" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] });
+  await controller.tick();
+  targetID = otherAlly;
+  await controller.tick();
+  assert.equal(activations, 1);
+  assert.match(controller.snapshot().why ?? "", /outcome could not be confirmed/i);
+});
+
+test("an uncertain repair lock is watched without duplicate dispatch", async () => {
+  let attempts = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithShipsAndActive([ALLY]),
+      fleetBroadcast: fleetBroadcast("HealShield", ALLY), lockedTargetIDs: [] }),
+    issue: async () => { attempts += 1; throw Object.assign(new Error("lock response lost"), { code: "BRIDGE_NETWORK_ERROR" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] });
+  for (let tick = 0; tick < 15; tick += 1) await controller.tick();
+  assert.equal(attempts, 1);
+  assert.match(controller.snapshot().why ?? "", /could not be locked.*stopped asking/i);
+});
+
 test("HealShield activates a fitted remote SHIELD module on the ship the call names", () => {
   const request: FleetCompanionRequest = { ...REQUEST, remoteShieldModuleIDs: [SHIELD_MODULE] };
   const decision = decideCompanionAction(
     request,
-    obs({ snapshot: gridWithShipsAndActive([ALLY]), fleetBroadcast: fleetBroadcast("HealShield", ALLY) }),
+    obs({ snapshot: gridWithShipsAndActive([ALLY]), lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY) }),
   );
   assert.deepEqual(decision.action, { kind: "activate", moduleID: SHIELD_MODULE, targetID: ALLY });
   assert.equal(decision.phase, "Obeying fleet");
@@ -1269,7 +1379,7 @@ test("HealArmor activates the ARMOUR list, never the shield one — families do 
   };
   const decision = decideCompanionAction(
     request,
-    obs({ snapshot: gridWithShipsAndActive([ALLY]), fleetBroadcast: fleetBroadcast("HealArmor", ALLY) }),
+    obs({ snapshot: gridWithShipsAndActive([ALLY]), lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealArmor", ALLY) }),
   );
   assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_MODULE, targetID: ALLY });
 });
@@ -1278,7 +1388,7 @@ test("HealCapacitor activates the CAPACITOR list", () => {
   const request: FleetCompanionRequest = { ...REQUEST, remoteCapacitorModuleIDs: [CAPACITOR_MODULE] };
   const decision = decideCompanionAction(
     request,
-    obs({ snapshot: gridWithShipsAndActive([ALLY]), fleetBroadcast: fleetBroadcast("HealCapacitor", ALLY) }),
+    obs({ snapshot: gridWithShipsAndActive([ALLY]), lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealCapacitor", ALLY) }),
   );
   assert.deepEqual(decision.action, { kind: "activate", moduleID: CAPACITOR_MODULE, targetID: ALLY });
 });
@@ -1289,7 +1399,7 @@ test("HealTarget draws on whichever remote-repair family this pilot has fitted",
   const request: FleetCompanionRequest = { ...REQUEST, remoteArmorModuleIDs: [ARMOR_MODULE] };
   const decision = decideCompanionAction(
     request,
-    obs({ snapshot: gridWithShipsAndActive([ALLY]), fleetBroadcast: fleetBroadcast("HealTarget", ALLY) }),
+    obs({ snapshot: gridWithShipsAndActive([ALLY]), lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealTarget", ALLY) }),
   );
   assert.deepEqual(decision.action, { kind: "activate", moduleID: ARMOR_MODULE, targetID: ALLY });
 });
@@ -1297,7 +1407,7 @@ test("HealTarget draws on whichever remote-repair family this pilot has fitted",
 test("a Heal call with no matching module fitted falls through — a logi-less pilot still flies", () => {
   const decision = decideCompanionAction(
     REQUEST, // no remote modules fitted at all
-    obs({ snapshot: gridWithShipsAndActive([ALLY]), fleetBroadcast: fleetBroadcast("HealShield", ALLY) }),
+    obs({ snapshot: gridWithShipsAndActive([ALLY]), lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY) }),
   );
   assert.notEqual(decision.action.kind, "activate");
   assert.equal(decision.phase, "Standing by");
@@ -1310,7 +1420,7 @@ test("a Heal call for a ship OFF this grid falls through rather than waiting", (
     obs({
       // ALLY, the ship the call names, is not among these entities.
       snapshot: gridWithShipsAndActive([TACKLE]),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
   );
   assert.notEqual(decision.action.kind, "activate");
@@ -1323,7 +1433,7 @@ test("a module the server confirms is already running on this target is not re-a
     request,
     obs({
       snapshot: gridWithShipsAndActive([ALLY], []),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
   );
   assert.deepEqual(first.action, { kind: "activate", moduleID: SHIELD_MODULE, targetID: ALLY });
@@ -1333,7 +1443,7 @@ test("a module the server confirms is already running on this target is not re-a
     request,
     obs({
       snapshot: gridWithShipsAndActive([ALLY], [SHIELD_MODULE]),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
     first.memory,
   );
@@ -1346,7 +1456,7 @@ test("with no authoritative module read, the ladder falls back to its OWN memory
     request,
     obs({
       snapshot: gridWithShipsAndActive([ALLY], null),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
   );
   assert.deepEqual(first.action, { kind: "activate", moduleID: SHIELD_MODULE, targetID: ALLY });
@@ -1354,7 +1464,7 @@ test("with no authoritative module read, the ladder falls back to its OWN memory
     request,
     obs({
       snapshot: gridWithShipsAndActive([ALLY], null),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
     first.memory,
   );
@@ -1368,14 +1478,14 @@ test("the heal call moving to a DIFFERENT ship re-issues the module at the new o
     request,
     obs({
       snapshot: gridWithShipsAndActive([ALLY], [SHIELD_MODULE]),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
   );
   const second = decideCompanionAction(
     request,
     obs({
       snapshot: gridWithShipsAndActive([OTHER_ALLY], [SHIELD_MODULE]),
-      fleetBroadcast: fleetBroadcast("HealShield", OTHER_ALLY),
+      lockedTargetIDs: [OTHER_ALLY], fleetBroadcast: fleetBroadcast("HealShield", OTHER_ALLY),
     }),
     first.memory,
   );
@@ -1389,7 +1499,7 @@ test("a fresh Heal call is answered even while a tag also stands — urgency win
     obs({
       snapshot: gridWithShipsAndActive([TACKLE, ALLY]),
       fleetTargetTags: new Map([[TACKLE, "A"]]),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
   );
   assert.deepEqual(decision.action, { kind: "activate", moduleID: SHIELD_MODULE, targetID: ALLY });
@@ -1407,7 +1517,7 @@ test("once the heal is already running, the SAME tick's tag is obeyed — not mu
     obs({
       snapshot: gridWithShipsAndActive([TACKLE, ALLY], [SHIELD_MODULE]),
       fleetTargetTags: new Map([[TACKLE, "A"]]),
-      fleetBroadcast: fleetBroadcast("HealShield", ALLY),
+      lockedTargetIDs: [ALLY], fleetBroadcast: fleetBroadcast("HealShield", ALLY),
     }),
     memory,
   );

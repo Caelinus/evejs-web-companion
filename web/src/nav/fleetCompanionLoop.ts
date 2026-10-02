@@ -1263,6 +1263,15 @@ export interface CompanionAbandonment extends CompanionAbandonmentRecord {
  * same construction the script runner's deciders use.
  */
 export interface CompanionLadderMemory {
+  /** A bounded lock wait and refused or uncertain repair writes for one call. */
+  readonly healOrder: {
+    readonly targetID: number;
+    readonly name: HealBroadcastName;
+    readonly lockIssued: boolean;
+    readonly lockWaited: number;
+    readonly moduleRefusals: Readonly<Record<number, number>>;
+    readonly uncertainModuleIDs: readonly number[];
+  } | null;
   /** Refreshed on every tick the supervision check passes. */
   readonly lastSupervisorIDs: readonly number[];
   /** Non-null from the tick the check first fails until supervision returns. */
@@ -1725,6 +1734,7 @@ export interface DroneCycle {
 
 export function freshLadderMemory(): CompanionLadderMemory {
   return {
+    healOrder: null,
     lastSupervisorIDs: [],
     abandonment: null,
     closingOn: null,
@@ -2069,6 +2079,7 @@ export function decideCompanionAction(
   // becomes the rejoin gate's allowlist, and there is no second chance to
   // collect it. Clear any abandonment, because a human is demonstrably here.
   const supervised: CompanionLadderMemory = {
+    healOrder: memory.healOrder,
     lastSupervisorIDs: [...supervisors],
     abandonment: null,
     closingOn: memory.closingOn,
@@ -2282,12 +2293,13 @@ export function decideCompanionAction(
   // no consumer since the flee moved above the fleet rung: a pilot whose guns are
   // already running on a called target should go on looting between shots rather
   // than reporting "Standing by" and doing nothing.
-  const salvaging = decideSalvaging(request, obs, reloading.memory);
+  const lowerMemory = obeying?.memory ?? reloading.memory;
+  const salvaging = decideSalvaging(request, obs, lowerMemory);
   if (salvaging !== null) {
     return salvaging;
   }
 
-  const looting = decideLooting(obs, reloading.memory);
+  const looting = decideLooting(obs, lowerMemory);
   if (looting !== null) {
     return looting;
   }
@@ -3365,10 +3377,31 @@ function decideHealOrder(
     return null;
   }
   const activeModuleIDs = obs.snapshot?.ship?.activeModuleIDs ?? null;
-  const moduleID = healModuleCandidates(name, request).find(
-    (id) => !isHealModuleAlreadyRunning(id, targetID, activeModuleIDs, memory),
+  const candidates = healModuleCandidates(name, request);
+  if (candidates.length === 0) return null;
+  const current = memory.healOrder?.targetID === targetID && memory.healOrder.name === name
+    ? memory.healOrder
+    : { targetID, name, lockIssued: false, lockWaited: 0, moduleRefusals: {},
+        // The recipient changing cannot settle a response lost after dispatch.
+        uncertainModuleIDs: memory.healOrder?.uncertainModuleIDs ?? [] };
+  const mem: CompanionLadderMemory = { ...memory, healOrder: current };
+  const standing = (why: string, next = mem): CompanionDecision => ({
+    action: WAIT, standing: true, phase: "Obeying fleet", why,
+    memory: next, followingOrderFrom: "broadcast", lastOrderHeard: healOrderHeard(name),
+  });
+  const moduleID = candidates.find(
+    (id) => !isHealModuleAlreadyRunning(id, targetID, activeModuleIDs, memory) &&
+      (current.moduleRefusals[id] ?? 0) < MAX_COMPANION_HEAL_REFUSALS &&
+      !current.uncertainModuleIDs.includes(id),
   );
   if (moduleID === undefined) {
+    if (candidates.some((id) => current.uncertainModuleIDs.includes(id))) {
+      return standing("The remote repair's outcome could not be confirmed, so this pilot is not asking for it again.");
+    }
+    if (candidates.some((id) => (current.moduleRefusals[id] ?? 0) >= MAX_COMPANION_HEAL_REFUSALS &&
+      !isHealModuleAlreadyRunning(id, targetID, activeModuleIDs, memory))) {
+      return standing("The remote repair kept being refused, so this pilot stopped asking for it.");
+    }
     // Either this pilot has nothing fitted for this call — a dps-role
     // companion is not obligated to grow a repairer it was never given, and
     // A LOGI-LESS PILOT IS STILL A WORKING PILOT: it must fall through to
@@ -3377,12 +3410,35 @@ function decideHealOrder(
     // in which case there is still nothing NEW to start.
     return null;
   }
+  // A requested lock is not a completed one, even when the lock read fails.
+  const locked = obs.lockedTargetIDs ?? null;
+  if (locked === null) {
+    return standing("Waiting to read the target locks before starting remote repairs.");
+  }
+  if (!locked.includes(targetID)) {
+    if (gaveUpOnLocking(memory, targetID) || current.lockWaited >= MAX_COMPANION_HEAL_LOCK_WAIT_TICKS) {
+      return standing("The repair recipient could not be locked, so this pilot stopped asking for it.");
+    }
+    if (current.lockIssued) {
+      return standing("Waiting for the repair recipient's lock before starting remote repairs.", {
+        ...mem, healOrder: { ...current, lockWaited: current.lockWaited + 1 },
+      });
+    }
+    return {
+      action: { kind: "lock", targetID }, phase: "Obeying fleet",
+      why: healOrderWhy(name) + " Locking the repair recipient first.",
+      memory: { ...mem, lastLockIssuedFor: targetID,
+        healOrder: { ...current, lockIssued: true, lockWaited: 0 } },
+      followingOrderFrom: "broadcast", lastOrderHeard: healOrderHeard(name),
+    };
+  }
   return {
     action: { kind: "activate", moduleID, targetID },
     phase: "Obeying fleet",
     why: healOrderWhy(name) + " Activating the fitted remote repairer.",
     memory: {
-      ...memory,
+      ...mem,
+      healOrder: { ...current, lockIssued: false, lockWaited: 0 },
       lastHealTargetID: targetID,
       lastHealModuleIDs:
         memory.lastHealTargetID === targetID ? [...memory.lastHealModuleIDs, moduleID] : [moduleID],
@@ -3390,6 +3446,30 @@ function decideHealOrder(
     followingOrderFrom: "broadcast",
     lastOrderHeard: healOrderHeard(name),
   };
+}
+
+const MAX_COMPANION_HEAL_LOCK_WAIT_TICKS = 10;
+const MAX_COMPANION_HEAL_REFUSALS = 3;
+
+function isDefiniteCompanionRefusal(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "CALL_REFUSED";
+}
+
+function noteHealFailure(memory: CompanionLadderMemory, action: FleetCompanionAction, error: unknown): CompanionLadderMemory {
+  const heal = memory.healOrder;
+  if (heal === null || !(action.kind === "lock" || action.kind === "activate") || action.targetID !== heal.targetID) {
+    return memory;
+  }
+  if (action.kind === "lock") {
+    return isDefiniteCompanionRefusal(error)
+      ? { ...memory, healOrder: { ...heal, lockIssued: false, lockWaited: 0 } }
+      : memory;
+  }
+  return isDefiniteCompanionRefusal(error)
+    ? { ...memory, lastHealModuleIDs: memory.lastHealModuleIDs.filter((id) => id !== action.moduleID),
+        healOrder: { ...heal, moduleRefusals: { ...heal.moduleRefusals,
+          [action.moduleID]: (heal.moduleRefusals[action.moduleID] ?? 0) + 1 } } }
+    : { ...memory, healOrder: { ...heal, uncertainModuleIDs: [...heal.uncertainModuleIDs, action.moduleID] } };
 }
 
 /** The four broadcast names that name a thing to go to or shoot. */
@@ -7151,6 +7231,11 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         if (decision.action.kind === "lock") {
           mem.ladder = noteRefusedLock(mem.ladder, decision.action.targetID);
         }
+        if ((decision.action.kind === "activate" && request.remoteShieldModuleIDs.concat(
+          request.remoteArmorModuleIDs, request.remoteCapacitorModuleIDs,
+        ).includes(decision.action.moduleID)) || decision.action.kind === "lock") {
+          mem.ladder = noteHealFailure(mem.ladder, decision.action, error);
+        }
         report();
         return { kind: "wait" };
       }
@@ -7180,6 +7265,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         // observed, and claiming it had landed would let the next tick drop
         // fleet with the ship still sitting in space.
         mem.ladder = {
+          healOrder: null,
           lastSupervisorIDs: [...resuming.supervisorCharacterIDs],
           abandonment: {
             abandonedAtMs: resuming.abandonedAtMs,
