@@ -137,7 +137,7 @@ export type ScriptAction =
   | { readonly kind: "agentButton"; readonly agentID: number; readonly actionID: number; readonly label: string }
   | { readonly kind: "startRoute"; readonly stationID: number }
   | { readonly kind: "loadMissionCargo"; readonly typeID: number; readonly quantity: number }
-  | { readonly kind: "unloadMissionCargo"; readonly itemIDs: readonly number[] }
+  | { readonly kind: "unloadMissionCargo"; readonly itemIDs: readonly [number]; readonly quantity: number }
   /**
    * Empty the ship's FREIGHT into the station hangar — the cargo hold and every
    * specialised bay carrying cargo — one group per source place, because a move

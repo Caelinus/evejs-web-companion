@@ -2488,6 +2488,16 @@ const travelToDropoff: MacroDecider = (_step, obs, _mem, board) => {
 // ── turn-in-mission ──────────────────────────────────────────────────────────
 // At the drop-off: put the package in the hangar, then tell the agent. Done only
 // when the agent's own answer says the mission completed.
+function missionCargoQuantity(rows: readonly { typeID: number; quantity: number }[], typeID: number): number | null {
+  let total = 0;
+  for (const row of rows.filter(row => row.typeID === typeID)) {
+    if (!Number.isSafeInteger(row.quantity) || row.quantity < 0) return null;
+    total += row.quantity;
+    if (!Number.isSafeInteger(total)) return null;
+  }
+  return total;
+}
+
 const turnInMission: MacroDecider = (_step, obs, mem, board) => {
   const agentID = boardNum(board, "agentID");
   if (agentID === null) {
@@ -2496,8 +2506,12 @@ const turnInMission: MacroDecider = (_step, obs, mem, board) => {
       reason: "This run has no agent to turn the mission in to.",
     });
   }
-  if (missionAccepted(obs.journal ?? null, agentID) === false) {
+  const accepted = missionAccepted(obs.journal ?? null, agentID);
+  if (accepted === false) {
     return tick(WAIT, "The mission is turned in.", "Turning in", { kind: "done" });
+  }
+  if (completed(obs.conversation ?? null)) {
+    return tick(WAIT, "The agent confirmed the job is done.", "Turning in", { kind: "done" });
   }
   const attempts = num(mem, "attempts") ?? 0;
   if (attempts > MAX_BLOCK_ATTEMPTS * 2) {
@@ -2506,32 +2520,72 @@ const turnInMission: MacroDecider = (_step, obs, mem, board) => {
       reason: "The agent kept not completing the mission, so the bot stopped.",
     });
   }
-  // The package goes into the drop-off hangar first.
+  if (accepted === null) return tick(WAIT, "Reading the accepted mission.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
+  // Move only the remaining requirement, including goods already ashore. Each
+  // split is one stack and must appear in BOTH authoritative inventory views
+  // before another split is offered; an acknowledged call can settle late.
   const typeID = boardNum(board, "cargoTypeID");
-  if (typeID !== null && obs.cargo != null) {
-    const aboard = obs.cargo.rows.filter((row) => row.typeID === typeID).map((row) => row.itemID);
-    if (aboard.length > 0) {
+  if (board["cargoTypeID"] !== null) {
+    const quantity = boardNum(board, "cargoQuantity");
+    const dropoff = boardNum(board, "dropoffStationID");
+    if (typeID === null || !Number.isSafeInteger(typeID) || typeID <= 0 ||
+        quantity === null || !Number.isSafeInteger(quantity) || quantity <= 0 ||
+        dropoff === null || !Number.isSafeInteger(dropoff) || dropoff <= 0) {
+      return tick(WAIT, "The courier requirement is unreadable or invalid.", "Turning in", {
+        kind: "blocked", reason: "The bot needs a confirmed cargo type, positive whole quantity, and drop-off station before delivering mission cargo.",
+      }, false, mem);
+    }
+    if (!dockedAt(obs.flightStatus, { kind: "station", id: dropoff })) {
+      return tick(WAIT, "Waiting to dock at the mission drop-off.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
+    }
+    if (obs.cargo == null || obs.stationHangar == null) {
+      return tick(WAIT, "Reading the cargo and destination hangar.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
+    }
+    const aboard = missionCargoQuantity(obs.cargo.rows, typeID);
+    const ashore = missionCargoQuantity(obs.stationHangar, typeID);
+    if (aboard === null || ashore === null) {
+      return tick(WAIT, "The mission inventory quantities are unreadable.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
+    }
+    const pending = num(mem, "deliveryPendingQuantity");
+    if (pending !== null) {
+      if (aboard !== (num(mem, "deliveryCargoBefore") ?? NaN) - pending ||
+          ashore !== (num(mem, "deliveryHangarBefore") ?? NaN) + pending) {
+        const waited = (num(mem, "deliveryWaited") ?? 0) + 1;
+        if (waited > MAX_BLOCK_ATTEMPTS * 2) return tick(WAIT, "The cargo handoff could not be confirmed.", "Turning in", {
+          kind: "blocked", reason: "The cargo and hangar did not confirm the requested mission delivery, so the bot stopped without moving surplus cargo.",
+        }, false, mem);
+        return tick(WAIT, "Waiting for the mission cargo handoff to settle.", "Turning in", ACTING, false, { ...mem, deliveryWaited: waited });
+      }
+      mem = { ...mem, deliveryPendingQuantity: null, deliveryWaited: 0 };
+    }
+    const remaining = Math.max(0, quantity - ashore);
+    if (remaining > aboard) {
+      return tick(WAIT, "There is not enough mission cargo aboard to finish the delivery.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
+    }
+    if (remaining > 0) {
+      const stacks = obs.cargo.rows.filter(row => row.typeID === typeID && row.quantity > 0);
+      const stack = stacks.find(row => row.quantity === remaining) ?? stacks.find(row => row.quantity > remaining) ??
+        [...stacks].sort((a, b) => b.quantity - a.quantity)[0]!;
+      const moved = Math.min(remaining, stack.quantity);
       return tick(
-        { kind: "unloadMissionCargo", itemIDs: aboard },
+        { kind: "unloadMissionCargo", itemIDs: [stack.itemID], quantity: moved },
         "Handing the cargo over.",
         "Turning in",
         ACTING,
         false,
-        { attempts: attempts + 1 },
+        { ...mem, attempts: attempts + 1, deliveryPendingQuantity: moved, deliveryCargoBefore: aboard,
+          deliveryHangarBefore: ashore, deliveryWaited: 0 },
       );
     }
   }
   const conversation = obs.conversation ?? null;
-  if (completed(conversation)) {
-    return tick(WAIT, "The agent confirmed the job is done.", "Turning in", { kind: "done" });
-  }
   if (conversation === null) {
-    return tick(WAIT, "Telling the agent.", "Turning in", ACTING, false, { attempts: attempts + 1 });
+    return tick(WAIT, "Telling the agent.", "Turning in", ACTING, false, { ...mem, attempts: attempts + 1 });
   }
   const completeID = completeActionID(conversation);
   if (completeID === null) {
     return tick(WAIT, "The agent is not offering to complete the job yet.", "Turning in", ACTING, false, {
-      attempts: attempts + 1,
+      ...mem, attempts: attempts + 1,
     });
   }
   return tick(
@@ -2540,7 +2594,7 @@ const turnInMission: MacroDecider = (_step, obs, mem, board) => {
     "Turning in",
     ACTING,
     false,
-    { attempts: attempts + 1 },
+    { ...mem, attempts: attempts + 1 },
   );
 };
 

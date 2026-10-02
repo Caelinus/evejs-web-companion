@@ -165,7 +165,7 @@ export function describeAction(action: ScriptAction): string {
     case "loadMissionCargo":
       return `load ${action.quantity} of type ${action.typeID}`;
     case "unloadMissionCargo":
-      return `unload mission cargo ${action.itemIDs.join(",")}`;
+      return `unload ${action.quantity} mission cargo from ${action.itemIDs.join(",")}`;
     case "unloadHolds":
       return `empty holds ${action.groups.map((g) => `${g.bay ?? "cargo"}:${g.itemIDs.length}`).join(" ")}${
         action.division === undefined ? "" : ` into corp division ${action.division}`}`;

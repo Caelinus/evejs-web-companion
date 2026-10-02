@@ -11423,17 +11423,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             }
             return;
           }
-          case "unloadMissionCargo":
-            if (action.itemIDs.length > 0) {
-              await api.transferItems(
-                [...action.itemIDs],
-                { kind: "cargo" },
-                { kind: "hangar" },
-                null,
-                callOptions,
-              );
+          case "unloadMissionCargo": {
+            if (action.itemIDs.length !== 1 || !Number.isSafeInteger(action.quantity) || action.quantity <= 0) {
+              throw new Error("Mission delivery needs one stack and a positive whole quantity.");
             }
+            await api.transferItems(
+              [...action.itemIDs],
+              { kind: "cargo" },
+              { kind: "hangar" },
+              action.quantity,
+              callOptions,
+            );
             return;
+          }
           case "haulTransfer": {
             const result = await api.transferItems(
               [action.itemID], action.from, action.to, action.quantity, callOptions,

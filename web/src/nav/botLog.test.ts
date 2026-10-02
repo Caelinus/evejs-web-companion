@@ -40,7 +40,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "agentButton", agentID: 3019494, actionID: 4, label: "Accept" },
   { kind: "startRoute", stationID: 60003760 },
   { kind: "loadMissionCargo", typeID: 34, quantity: 5 },
-  { kind: "unloadMissionCargo", itemIDs: [31] },
+  { kind: "unloadMissionCargo", itemIDs: [31], quantity: 10 },
   { kind: "unloadHolds", groups: [{ bay: null, itemIDs: [41] }, { bay: "ore", itemIDs: [42] }] },
   {
     kind: "loadHolds",

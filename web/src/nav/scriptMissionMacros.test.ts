@@ -15,8 +15,9 @@ import type {
 } from "../store/types.ts";
 import type { MacroStep } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
-import type { ScriptBoard } from "./scriptDecide.ts";
-import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import type { MacroMemory, ScriptAction, ScriptBoard } from "./scriptDecide.ts";
+import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
+import { createScriptRunner } from "./scriptRunner.ts";
 
 const AGENT = 3018920;
 const AGENT_STATION = 60000004;
@@ -318,17 +319,17 @@ test("travel: not there -> startRoute to the drop-off; docked there -> done", ()
 test("turn-in: cargo still aboard -> unload it first", () => {
   const t = turnIn(
     step("turn-in-mission"),
-    obs({ journal: acceptedJournal(), flightStatus: flight({ stationID: DROPOFF }), cargo: { rows: [row({ itemID: 44 })], capacity: null } }),
+    obs({ journal: acceptedJournal(), flightStatus: flight({ stationID: DROPOFF }), cargo: { rows: [row({ itemID: 44 })], capacity: null }, stationHangar: [] }),
     {},
     ONBOARD,
   );
-  assert.ok(t.action.kind === "unloadMissionCargo" && t.action.itemIDs.includes(44));
+  assert.deepEqual(t.action, { kind: "unloadMissionCargo", itemIDs: [44], quantity: 10 });
 });
 
 test("turn-in: unloaded, Complete offered -> press it; journal cleared -> done", () => {
   const press = turnIn(
     step("turn-in-mission"),
-    obs({ journal: acceptedJournal(), flightStatus: flight({ stationID: DROPOFF }), cargo: { rows: [], capacity: null }, conversation: convo([{ actionID: 821, buttonType: 7 }]) }),
+    obs({ journal: acceptedJournal(), flightStatus: flight({ stationID: DROPOFF }), cargo: { rows: [], capacity: null }, stationHangar: [row({ itemID: 45 })], conversation: convo([{ actionID: 821, buttonType: 7 }]) }),
     {},
     ONBOARD,
   );
@@ -337,6 +338,113 @@ test("turn-in: unloaded, Complete offered -> press it; journal cleared -> done",
   const done = turnIn(step("turn-in-mission"), obs({ journal: { active: [], offered: [] } }), {}, ONBOARD);
   assert.equal(done.outcome.kind, "done");
 });
+
+function deliveryWorld(cargoRows: readonly InventoryItemRow[], hangarRows: readonly InventoryItemRow[] = []): ScriptObservation {
+  return obs({ journal: acceptedJournal(), flightStatus: flight({ stationID: DROPOFF }),
+    cargo: { rows: cargoRows, capacity: null }, stationHangar: hangarRows,
+    conversation: convo([{ actionID: 821, buttonType: 7 }]),
+  });
+}
+
+for (const quantities of [[10, 1000], [1010], [6, 1004], [6, 4]]) {
+  test(`turn-in: delivers ten required units from matching stacks ${quantities.join("+")} and leaves surplus aboard`, () => {
+    let cargo = quantities.map((quantity, index) => row({ itemID: 44 + index, quantity }));
+    const hangar: InventoryItemRow[] = [];
+    let mem: MacroMemory = {};
+    let moved = 0;
+    for (let i = 0; i < 5; i++) {
+      const decision = turnIn(step("turn-in-mission"), deliveryWorld(cargo, hangar), mem, ONBOARD);
+      mem = decision.nextMem;
+      if (decision.action.kind === "agentButton") break;
+      assert.equal(decision.action.kind, "unloadMissionCargo");
+      if (decision.action.kind !== "unloadMissionCargo") return;
+      const action = decision.action;
+      assert.equal(action.itemIDs.length, 1);
+      moved += action.quantity;
+      assert.ok(moved <= 10, "a later tick never unloads surplus of the same type");
+      const selected = cargo.find(item => item.itemID === action.itemIDs[0])!;
+      assert.ok(action.quantity <= selected.quantity);
+      hangar.push(row({ itemID: 100 + i, quantity: action.quantity }));
+      const itemID = selected.itemID;
+      const movedQuantity = action.quantity;
+      cargo = cargo.map(item => item.itemID === itemID ? { ...item, quantity: item.quantity - movedQuantity } : item).filter(item => item.quantity > 0);
+    }
+    assert.equal(moved, 10);
+    assert.equal(cargo.reduce((sum, item) => sum + item.quantity, 0), quantities.reduce((sum, quantity) => sum + quantity, 0) - 10);
+    assert.equal(turnIn(step("turn-in-mission"), deliveryWorld(cargo, hangar), mem, ONBOARD).action.kind, "agentButton");
+  });
+}
+
+test("turn-in: matching cargo already ashore reduces the required transfer", () => {
+  const initial = deliveryWorld([row({ itemID: 44, quantity: 1000 })], [row({ itemID: 45, quantity: 6 })]);
+  const decision = turnIn(step("turn-in-mission"), initial, {}, ONBOARD);
+  assert.deepEqual(decision.action, { kind: "unloadMissionCargo", itemIDs: [44], quantity: 4 });
+  const enough = deliveryWorld([row({ itemID: 44, quantity: 1000 })], [row({ itemID: 45, quantity: 10 })]);
+  assert.equal(turnIn(step("turn-in-mission"), enough, {}, ONBOARD).action.kind, "agentButton");
+});
+
+test("turn-in: an explicitly cargo-free mission still completes without inventory requirements", () => {
+  const decision = turnIn(step("turn-in-mission"), obs({ journal: acceptedJournal(), conversation: convo([{ actionID: 821, buttonType: 7 }]) }), {},
+    { ...ONBOARD, cargoTypeID: null, cargoQuantity: null, dropoffStationID: null });
+  assert.equal(decision.action.kind, "agentButton");
+});
+
+test("turn-in: a transfer waits for both inventory deltas and never repeats a stale split", () => {
+  const initial = deliveryWorld([row({ itemID: 44, quantity: 1010 })]);
+  const transfer = turnIn(step("turn-in-mission"), initial, {}, ONBOARD);
+  const stale = turnIn(step("turn-in-mission"), initial, transfer.nextMem, ONBOARD);
+  assert.equal(stale.action.kind, "wait");
+  const sourceOnly = deliveryWorld([row({ itemID: 44, quantity: 1000 })]);
+  const halfRead = turnIn(step("turn-in-mission"), sourceOnly, stale.nextMem, ONBOARD);
+  assert.equal(halfRead.action.kind, "wait");
+  const landed = deliveryWorld([row({ itemID: 44, quantity: 1000 })], [row({ itemID: 45, quantity: 10 })]);
+  assert.equal(turnIn(step("turn-in-mission"), landed, halfRead.nextMem, ONBOARD).action.kind, "agentButton");
+  let last = stale;
+  for (let i = 0; i < 12 && last.outcome.kind !== "blocked"; i++) {
+    last = turnIn(step("turn-in-mission"), initial, last.nextMem, ONBOARD);
+    assert.equal(last.action.kind, "wait");
+  }
+  assert.equal(last.outcome.kind, "blocked");
+});
+
+test("turn-in: unreadable or invalid requirements and inventory never transfer cargo", () => {
+  const world = deliveryWorld([row({ itemID: 44, quantity: 1010 })]);
+  const { cargoQuantity: _quantity, ...missingQuantity } = ONBOARD;
+  for (const board of [missingQuantity, ...[null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(cargoQuantity => ({ ...ONBOARD, cargoQuantity }))]) {
+    const decision = turnIn(step("turn-in-mission"), world, {}, board);
+    assert.equal(decision.action.kind, "wait");
+    assert.equal(decision.outcome.kind, "blocked");
+  }
+  for (const unreadable of [
+    { ...world, cargo: null }, { ...world, stationHangar: null }, { ...world, journal: null },
+    { ...world, flightStatus: flight({ stationID: PICKUP }) },
+    deliveryWorld([row({ itemID: 44, quantity: NaN })]),
+    deliveryWorld([row({ itemID: 44, quantity: 1010 })], [row({ itemID: 45, quantity: -1 })]),
+  ]) {
+    assert.equal(turnIn(step("turn-in-mission"), unreadable, {}, ONBOARD).action.kind, "wait");
+  }
+});
+
+for (const code of ["CALL_REFUSED", "EVE_GATEWAY_TIMEOUT"]) {
+  test(`turn-in: ${code} cannot consume or duplicate the required cargo quantity`, async () => {
+    let first = true;
+    const issued: ScriptAction[] = [];
+    const runner = createScriptRunner({
+      observe: async () => deliveryWorld([row({ itemID: 44, quantity: 1010 })]),
+      issue: async action => { issued.push(action); if (first) { first = false; throw Object.assign(new Error(code), { code }); } },
+      sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+      registry: { "turn-in-mission": (s, o, m) => turnIn(s, o, m, ONBOARD) }, travelHome: scriptTravelHome,
+    });
+    runner.start({ format: "evejs-bot-script", version: 1, name: "Delivery", notes: "",
+      home: { entity: "station", id: DROPOFF, name: "Drop-off", systemName: null }, interrupts: [], program: [step("turn-in-mission")] });
+    await runner.tick();
+    runner.resume();
+    for (let i = 0; i < 12; i++) await runner.tick();
+    const expected = { kind: "unloadMissionCargo", itemIDs: [44], quantity: 10 };
+    assert.deepEqual(issued, code === "CALL_REFUSED" ? [expected, expected] : [expected]);
+    if (code === "EVE_GATEWAY_TIMEOUT") assert.equal(runner.getStatus(), "paused");
+  });
+}
 
 test("wait: counts down its seconds in ticks, then finishes", () => {
   const wait = SCRIPT_MACROS["wait"]!;
