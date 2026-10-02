@@ -269,6 +269,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   "launch-commodities": {
     args: [
       { key: "fullPercent", kind: "count", required: false },
+      // Explicitly bypass the fill threshold for an immediate haul. Empty
+      // centres and launch cooldowns still keep their usual guards.
+      { key: "anyAmount", kind: "toggle", required: false },
       // Optional: absent = every colony, the shipped behaviour. The Haul
       // button sets it to the colonies the player ticked.
       { key: "planets", kind: "planetList", required: false },
@@ -395,7 +398,10 @@ export const LAUNCH_FULL_PERCENT_DEFAULT = 80;
  * separate clamps would drift, and the way that shows up is a bot doing
  * something its own description said it would not.
  */
-export function launchFullPercent(arg: Arg | undefined): number {
+export function launchFullPercent(arg: Arg | undefined, anyAmount: Arg | undefined = undefined): number {
+  if (anyAmount?.kind === "toggle" && anyAmount.enabled) {
+    return 0;
+  }
   if (arg === undefined || arg.kind !== "count" || !Number.isFinite(arg.value)) {
     return LAUNCH_FULL_PERCENT_DEFAULT;
   }

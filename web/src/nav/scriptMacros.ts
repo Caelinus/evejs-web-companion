@@ -4829,7 +4829,7 @@ const launchCommodities: MacroDecider = (step, obs, mem) => {
   // description says "once it is N% full", and nothing bounds a count arg, so
   // a second clamp here would eventually drift from the one on screen - and a
   // bot doing something its own description denied is the defect that matters.
-  const fullPercent = launchFullPercent(step.args["fullPercent"]);
+  const fullPercent = launchFullPercent(step.args["fullPercent"], step.args["anyAmount"]);
   const doneRaw = mem["launched"];
   const launched = new Set<number>(Array.isArray(doneRaw) ? (doneRaw as number[]) : []);
   // Limited to the colonies the step names, when it names any (the PI

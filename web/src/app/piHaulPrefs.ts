@@ -105,7 +105,9 @@ export function savePiHaulPrefs(prefs: PiHaulPrefs): void {
       STORAGE_KEY,
       JSON.stringify({
         divisions: Object.fromEntries(prefs.divisions),
-        deliverTo: Object.fromEntries(prefs.deliverTo),
+        // An empty ref is the open picker's search state, not a destination to
+        // remember. Reopening the window uses the starting station again.
+        deliverTo: Object.fromEntries([...prefs.deliverTo].filter(([, ref]) => ref.id !== null)),
         divisionNames: Object.fromEntries(prefs.divisionNames),
       }),
     );
@@ -120,6 +122,14 @@ export function withEntry<T>(map: ReadonlyMap<number, T>, key: number, value: T 
   if (value === null) next.delete(key);
   else next.set(key, value);
   return next;
+}
+
+/** Keep an empty ref while Change opens search; starting station clears the choice. */
+export function withPiHaulDelivery(prefs: PiHaulPrefs, characterID: number, ref: WorldRef): PiHaulPrefs {
+  return {
+    ...prefs,
+    deliverTo: withEntry(prefs.deliverTo, characterID, ref.starting === true ? null : ref),
+  };
 }
 
 /**

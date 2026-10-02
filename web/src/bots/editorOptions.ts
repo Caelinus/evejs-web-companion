@@ -164,6 +164,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   // A bare "Amount" (the generic label for a count) says nothing about what is
   // being counted, and this one is a percentage of a command centre's hold.
   fullPercent: "Launch once this full (%)",
+  anyAmount: "Launch any amount",
   planets: "Only these colonies",
   corporation: "Corporation",
   seconds: "Seconds",
