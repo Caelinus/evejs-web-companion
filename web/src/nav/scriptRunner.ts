@@ -139,7 +139,7 @@ function actionTargetID(action: ScriptAction): number | null {
   if (action.kind === "lootWreck") {
     return action.wreckID;
   }
-  if (action.kind === "lootContainer") {
+  if (action.kind === "lootContainer" || action.kind === "collectLaunch") {
     return action.containerID;
   }
   return null;

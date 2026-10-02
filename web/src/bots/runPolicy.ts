@@ -133,6 +133,7 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   // trip, which is exactly why it should not have been riding the combat one.
   "warp-to-ore-anomaly": SAFE,
   "refit-ship": policy(["inventory"]),
+  "board-previous-ship": policy(["inventory"]),
   "move-items": policy(["inventory"]),
   "warp-to-bookmark": SAFE,
   "find-combat-agent": SAFE,
@@ -143,6 +144,10 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   // a colony, so it carries both risk classes and cannot be replayed blind
   // after a process restart.
   "launch-commodities": policy(["colony", "financial"], false),
+  // Restart-safe: every tick re-reads the launch list and only takes from a
+  // container of the pilot's own. Deleting a launch record happens only after
+  // a re-read shows that container empty, so a replay finds nothing to undo.
+  "collect-launches": policy(["inventory", "colony"]),
   "repair-ship": policy(["financial", "inventory"], false),
   "buy-item": policy(["financial"], false),
   "sell-item": policy(["financial", "inventory"], false),

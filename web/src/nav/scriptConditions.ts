@@ -561,6 +561,26 @@ export interface ScriptObservation {
       readonly lastLaunchAtMs: number | null;
     }[];
   }[] | null;
+  /**
+   * The pilot's planetary launches (planetMgr.GetMyLaunchesDetails), for the
+   * collect-launches block. Read only while that block is active.
+   * null = unreadable, never "no launches".
+   *
+   * `itemID` is the container in space; `x/y/z` is where the server put it,
+   * well off the planet's own grid (2,500 km past the surface, never under
+   * 10,000 km from the centre), which is why the block warps to the container
+   * and not to the planet. `launchedAtMs` is epoch ms, null when unreadable.
+   */
+  readonly piLaunches?: readonly {
+    readonly launchID: number;
+    readonly solarSystemID: number;
+    readonly planetID: number;
+    readonly itemID: number;
+    readonly launchedAtMs: number | null;
+    readonly x: number;
+    readonly y: number;
+    readonly z: number;
+  }[] | null;
   // ── The drone-boat block's reads (docs/drone-boat-block-spec.md §8). Every
   //    one of them is OPTIONAL, because this type is built in two places (the
   //    script runner's `observe` and the fleet companion's) and the pure tests

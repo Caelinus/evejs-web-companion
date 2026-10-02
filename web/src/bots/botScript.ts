@@ -825,6 +825,10 @@ export type MacroID =
   // "fly to a pirate den" and "fly to an ore site" are two different intentions.
   | "warp-to-ore-anomaly"
   | "refit-ship"
+  // The other half of refit-ship's "reship and go": board the hull this run
+  // was flying before refit-ship swapped it out. Nothing to do when no
+  // refit-ship in this run boarded anything.
+  | "board-previous-ship"
   | "move-items"
   | "warp-to-bookmark"
   | "find-combat-agent"
@@ -837,6 +841,10 @@ export type MacroID =
   // container in space beside the planet for a hauler to collect. The server
   // charges planetary export tax for the launch.
   | "launch-commodities"
+  // The hauler's half of launch-commodities: in space, fly to each of your
+  // planetary launch containers in this system and take what is inside,
+  // using the server's own launch list (GetMyLaunchesDetails) to find them.
+  | "collect-launches"
   | "repair-ship"
   // ── The market set. Place orders at the station's market (server confirm-gated).
   | "buy-item"
@@ -914,12 +922,14 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "warp-to-anomaly",
   "warp-to-ore-anomaly",
   "refit-ship",
+  "board-previous-ship",
   "move-items",
   "warp-to-bookmark",
   "find-combat-agent",
   "fly-to-mission-site",
   "restart-extractors",
   "launch-commodities",
+  "collect-launches",
   "repair-ship",
   "buy-item",
   "sell-item",

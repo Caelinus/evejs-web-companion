@@ -248,7 +248,7 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
   "unload-cargo": entry(
     "unload-cargo",
     "hauling",
-    "Moves everything in your ship's cargo hold into the station hangar, and checks the hold really is empty. Handy before accepting a delivery, so the cargo is sure to fit.",
+    "Moves everything in your ship's cargo hold into the station hangar, or into one of your corporation's hangars there when you pick one, and checks the hold really is empty. Handy before accepting a delivery, so the cargo is sure to fit.",
     "Being docked",
   ),
   "load-cargo": entry(
@@ -322,6 +322,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Boards the right hull from your hangar if you are flying something else, then applies the saved fitting you picked — modules pulled from this station's hangar.",
     "Being docked, the saved fitting, and its modules in the hangar",
   ),
+  "board-previous-ship": entry(
+    "board-previous-ship",
+    "ship",
+    "Gets back into the ship you were flying before Refit from a saved fitting swapped it out earlier in this run. Put it at the end of a hauling lap, back at the station where you reshipped. Does nothing if no refit in this run changed ships.",
+    "Being docked where the earlier ship is parked",
+  ),
   "move-items": entry(
     "move-items",
     "hauling",
@@ -357,6 +363,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "planets",
     "Watches the command centre of every colony you own and launches what it is holding once the centre is full enough, dropping a container in space beside the planet for a hauler to collect. The server charges planetary export tax for the launch.",
     "A planet colony whose command centre is holding goods",
+  ),
+  "collect-launches": entry(
+    "collect-launches",
+    "planets",
+    "Flies to each container your command centres launched in this system and takes what is inside, each into the right hold (an Epithal's planetary hold takes planetary goods). It finds them from your launch list, so there is no scanning. Finishes when every launch here is collected, or when the ship is full.",
+    "Being in space in the system of your launches",
   ),
   "repair-ship": entry(
     "repair-ship",

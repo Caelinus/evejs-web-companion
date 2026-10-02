@@ -107,6 +107,7 @@ import {
 } from "../bridge/drones.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
+import { filetimeToUnixMs } from "../bridge/activity.ts";
 import { extractorReroute, type ExtractorReroute } from "../bridge/colonyRoutes.ts";
 import { decodeRecipeBook } from "../bridge/piRecipes.ts";
 import { decodeRepairQuotes, repairTargets, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
@@ -8926,7 +8927,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "fly-to-mission-site",
   ]);
   const CONVO_MACROS = new Set(["request-mission", "accept-mission", "turn-in-mission"]);
-  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo", "haul-all", "route-hauler"]);
+  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "board-previous-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo", "haul-all", "route-hauler"]);
   // Blocks that need the ACTIVE HULL'S BAY LIST, contents included. Kept apart
   // from CARGO_MACROS because the two reads have very different prices: the
   // inventory panel is one call, `/bays` is one capacity call per candidate
@@ -10222,6 +10223,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let anomalies: ScriptObservation["anomalies"] = null;
         let savedFittings: ScriptObservation["savedFittings"] = null;
         let colonies: ScriptObservation["colonies"] = null;
+        let piLaunches: ScriptObservation["piLaunches"] = null;
         let damagedItemIDs: ScriptObservation["damagedItemIDs"] = null;
         let scannerOperations: ScriptObservation["scannerOperations"] = null;
         const systemName = store.flight.get().solarSystemName;
@@ -10314,6 +10316,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             }));
           } catch {
             colonies = null;
+          }
+        }
+        if (macro === "collect-launches") {
+          try {
+            piLaunches = (await api.getPiLaunches(callOptions)).map((launch) => ({
+              launchID: launch.launchID,
+              solarSystemID: launch.solarSystemID,
+              planetID: launch.planetID,
+              itemID: launch.itemID,
+              launchedAtMs: filetimeToUnixMs(launch.launchTime),
+              x: launch.x,
+              y: launch.y,
+              z: launch.z,
+            }));
+          } catch {
+            piLaunches = null;
           }
         }
         let bookmarks: ScriptObservation["bookmarks"] = null;
@@ -10821,6 +10839,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           activeShipID,
           bookmarks,
           colonies,
+          piLaunches,
           damagedItemIDs,
           inSpace: status.inSpace,
           docked: status.docked,
@@ -11147,18 +11166,32 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // not stop the others being landed, exactly as on the loot side.
             let lastError: unknown = null;
             let movedGroups = 0;
+            let fellBack = false;
             for (const group of action.groups) {
               if (group.itemIDs.length === 0) {
                 continue;
               }
+              const from: InventoryPlace = group.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: group.bay };
               try {
-                await api.transferItems(
-                  [...group.itemIDs],
-                  group.bay === null ? { kind: "cargo" } : { kind: "shipBay", bay: group.bay },
-                  { kind: "hangar" },
-                  null,
-                  callOptions,
-                );
+                if (action.division !== undefined) {
+                  // ⚠ THE SAME PROMISE deliver-ore AND THE PICKER MAKE: a division
+                  // that will not take the load (no office here, no role for it)
+                  // lands it in the pilot's own hangar instead, so the lap goes on,
+                  // and the run's log says so. A corp move can decline without
+                  // raising, which is why `applied` is read, not assumed.
+                  const toCorp = await api.transferItems(
+                    [...group.itemIDs], from, { kind: "corp", division: action.division }, null, callOptions,
+                  ).catch((error: unknown) => {
+                    if (isSessionLost(error)) throw error;
+                    return null;
+                  });
+                  if (toCorp !== null && toCorp.applied) {
+                    movedGroups += 1;
+                    continue;
+                  }
+                  fellBack = true;
+                }
+                await api.transferItems([...group.itemIDs], from, { kind: "hangar" }, null, callOptions);
                 movedGroups += 1;
               } catch (error) {
                 if (isSessionLost(error)) {
@@ -11169,6 +11202,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             }
             if (movedGroups === 0 && lastError !== null) {
               throw lastError;
+            }
+            if (fellBack) {
+              return `corp division ${action.division} did not take the cargo; it went into your own hangar`;
             }
             return;
           }
@@ -11343,6 +11379,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // a container, so nothing here needs to either.
             if (!claimRunID) throw new Error("Container ownership was not confirmed.");
             await lootFrom(action.containerID, claimRunID);
+            return;
+          }
+          case "collectLaunch": {
+            // No container claim: a launch container belongs to the pilot who
+            // launched it (the server checks loot rights), so there is no
+            // other hauler to share it with. lootFrom throws when nothing at
+            // all fits, which is what the refusal ledger needs to hear.
+            await lootFrom(action.containerID);
+            // ⚠ THE RECORD GOES ONLY ONCE THE CONTAINER IS SEEN EMPTY. A partial
+            // take (the hold filled) leaves the launch listed for the next lap.
+            const left = await api.openContainer(action.containerID, callOptions);
+            if (decodeInventoryRows(left.list, left.volumes).length > 0) {
+              return "part of the launch did not fit; it stays listed for the next trip";
+            }
+            await api.deleteLaunch(action.launchID, callOptions);
             return;
           }
           case "placeBuyOrder":

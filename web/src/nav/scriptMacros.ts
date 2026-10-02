@@ -2621,9 +2621,13 @@ const unloadCargo: MacroDecider = (step, obs, mem) => {
         reason: "The station kept refusing the cargo, so the bot stopped.",
       });
     }
+    const into = step.args["into"];
+    const division = into !== undefined && into.kind === "corpDivision" ? into.division : null;
     return tick(
-      { kind: "unloadHolds", groups },
-      "Moving what the ship is carrying into the hangar.",
+      division === null ? { kind: "unloadHolds", groups } : { kind: "unloadHolds", groups, division },
+      division === null
+        ? "Moving what the ship is carrying into the hangar."
+        : "Moving what the ship is carrying into the corporation hangar.",
       "Emptying the hold",
       ACTING,
       false,
@@ -4375,8 +4379,12 @@ const warpToOreAnomaly: MacroDecider = (step, obs, mem, board) => {
 // re-read at each stage: boarding by the active ship's type changing, and the
 // apply is issued once (the server pulls modules from this hangar).
 const CATEGORY_SHIP_ROW = 6;
+// The hull refit-ship boarded AWAY from, for board-previous-ship to go back to.
+// Written only when refit-ship actually swaps hulls, and never over a value
+// already there: a run that refits twice goes back to the ship it started in.
+const PREVIOUS_SHIP_BOARD_KEY = "shipBeforeRefit";
 
-const refitShip: MacroDecider = (step, obs, mem) => {
+const refitShip: MacroDecider = (step, obs, mem, board) => {
   if (obs.flightStatus?.docked !== true) {
     return tick(WAIT, "Not docked — refitting happens in a station.", "Refitting", {
       kind: "blocked",
@@ -4429,10 +4437,14 @@ const refitShip: MacroDecider = (step, obs, mem) => {
         reason: "The ship swap kept not taking, so the bot stopped.",
       });
     }
-    return tick({ kind: "boardShip", shipID: candidate.itemID }, "Boarding the right hull.", "Refitting", ACTING, false, {
+    const boarding = tick({ kind: "boardShip", shipID: candidate.itemID }, "Boarding the right hull.", "Refitting", ACTING, false, {
       ...mem,
       boards,
     });
+    const recorded = board[PREVIOUS_SHIP_BOARD_KEY];
+    return typeof recorded === "number" && recorded > 0
+      ? boarding
+      : withBoardPatch(boarding, { [PREVIOUS_SHIP_BOARD_KEY]: activeShipID });
   }
   if (flag(mem, "applied")) {
     return tick(WAIT, "The fitting is applied.", "Refitting", { kind: "done" });
@@ -4878,6 +4890,207 @@ const launchCommodities: MacroDecider = (step, obs, mem) => {
     );
   }
   return tick(WAIT, "Every command centre is empty or below the launch threshold.", "Launching commodities", { kind: "done" });
+};
+
+// ── collect-launches ─────────────────────────────────────────────────────────
+// The hauler's half of launch-commodities. A launch leaves a Planetary Launch
+// Container (type 2263) in space, owned by the launching pilot, for five days.
+// This block takes the pilot's own launch list, keeps the ones in THIS system,
+// and for each one: warps to the container, closes inside loot range, and
+// empties it into the ship (bay routing puts planetary goods in an Epithal's
+// planetary hold). The dispatch then deletes the launch record once a re-read
+// shows the container empty, so the next tick's list no longer carries it.
+//
+// ⚠ THE CONTAINER IS NOT ON THE PLANET'S GRID. The server puts it 2,500 km
+// past the planet's surface (never under 10,000 km from its centre), in a
+// direction hashed from the launch, so "warp to the planet" lands nowhere
+// near it. The block warps to the container ITSELF: the server resolves a
+// warp target system-wide (warpCommands.js warpToEntity), no grid needed.
+//
+// ⚠ A LAUNCH NOT FOUND WHERE IT SHOULD BE IS SET ASIDE, NOT A STOP. A launch
+// that burned up, or a container the server never spawned, must not keep the
+// rest of the system's launches from being collected.
+const PI_LAUNCH_DECAY_MS = 5 * 24 * 60 * 60 * 1000;
+// Retail will not warp to something this close; inside it, fly there.
+const LAUNCH_WARP_MIN_M = 150_000;
+// Ticks to keep looking for a container after landing on it before believing
+// it is not there. Snapshots can trail a landing by a tick or two.
+const LAUNCH_LANDED_SETTLE_TICKS = 10;
+
+const collectLaunches: MacroDecider = (step, obs, mem) => {
+  const phase = "Collecting launches";
+  if (obs.flightStatus?.docked === true) {
+    return tick(WAIT, "Docked - launches are collected in space.", phase, {
+      kind: "blocked",
+      reason: "Undock first - put a Leave-the-station block before this one.",
+    });
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp to a launch.", phase, ACTING, false, { ...mem, sawWarp: true });
+  }
+  if (obs.inSpace !== true || snapshot === null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", phase, ACTING, false, mem);
+  }
+  // A full ship is a finished trip, exactly as on the loot blocks: go unload.
+  const freeM3 = holdsFreeM3(obs.holds ?? null);
+  if (freeM3 !== null && freeM3 <= 0) {
+    return tick(WAIT, "The ship is full, so it is time to unload.", phase, { kind: "done" });
+  }
+  if (shipHasNoRoom(obs.refusals, step.id, "collectLaunch")) {
+    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", phase, { kind: "done" });
+  }
+  const launches = obs.piLaunches ?? null;
+  if (launches === null) {
+    return tick(WAIT, "Reading your planet launches.", phase, ACTING, false, mem);
+  }
+  const here = snapshot.solarSystemID;
+  const now = Date.now();
+  const missingRaw = mem["missing"];
+  const missing = new Set<number>(Array.isArray(missingRaw) ? (missingRaw as number[]) : []);
+  const candidates = launches.filter(
+    (launch) =>
+      launch.solarSystemID === here &&
+      launch.itemID > 0 &&
+      !missing.has(launch.itemID) &&
+      (launch.launchedAtMs === null || now - launch.launchedAtMs < PI_LAUNCH_DECAY_MS) &&
+      !shouldSetAside(obs.refusals, step.id, "collectLaunch", launch.itemID, MAX_BLOCK_ATTEMPTS),
+  );
+  if (candidates.length === 0) {
+    const elsewhere = launches.filter((launch) => launch.solarSystemID !== here).length;
+    return tick(
+      WAIT,
+      elsewhere > 0
+        ? `Every launch in this system is collected (${elsewhere} more in other systems).`
+        : "Every launch in this system is collected.",
+      phase,
+      { kind: "done" },
+    );
+  }
+  // Nearest first, by the server's own coordinates for each container.
+  const origin = snapshot.ship?.position ?? null;
+  const away = (launch: (typeof candidates)[number]): number =>
+    origin === null ? 0 : distanceMeters(origin, { x: launch.x, y: launch.y, z: launch.z });
+  const target = [...candidates].sort((a, b) => away(a) - away(b))[0]!;
+  const measurement = measureSpace(snapshot);
+  const onGrid = snapshot.entities.some((entity) => entity.itemID === target.itemID);
+  const dist = onGrid
+    ? (measurement?.distances.get(target.itemID) ?? away(target))
+    : away(target);
+
+  if (!onGrid || dist > LAUNCH_WARP_MIN_M) {
+    if (num(mem, "warpingTo") === target.itemID && flag(mem, "issued")) {
+      if (warpLanded(obs, mem)) {
+        // Landed on it and still cannot see it: give the snapshot a moment,
+        // then set this launch aside and go on to the next.
+        const landedChecks = (num(mem, "landedChecks") ?? 0) + 1;
+        if (landedChecks > LAUNCH_LANDED_SETTLE_TICKS) {
+          return tick(WAIT, "That launch container is not where the list says - skipping it.", phase, ACTING, false, {
+            missing: [...missing, target.itemID],
+          });
+        }
+        return tick(WAIT, "Looking for the launch container.", phase, ACTING, false, { ...mem, landedChecks });
+      }
+      const waited = (num(mem, "waited") ?? 0) + 1;
+      if (waited > 10) {
+        return tick(WAIT, "The warp to that launch never started - skipping it.", phase, ACTING, false, {
+          missing: [...missing, target.itemID],
+        });
+      }
+      return tick(WAIT, "Waiting for the warp to start.", phase, ACTING, false, { ...mem, waited });
+    }
+    // Never warp off with drones still out.
+    const recall = recallBeforeLeaving(obs, mem, phase, null);
+    if (recall !== null) {
+      return recall;
+    }
+    return tick(
+      { kind: "warp", targetID: target.itemID },
+      "Warping to a launch container.",
+      phase,
+      ACTING,
+      false,
+      { missing: [...missing], warpingTo: target.itemID, ...warpIssuedMem(obs) },
+    );
+  }
+  const memBase: MacroMemory = { missing: [...missing], approaching: num(mem, "approaching") };
+  // The server's range check beats our arithmetic, as on loot-containers.
+  const unreachable = isUnreachable(obs.refusals, step.id, "collectLaunch", target.itemID);
+  if (dist > LOOT_RANGE_M || unreachable) {
+    if (!unreachable && num(mem, "approaching") === target.itemID) {
+      const stall = closeInStall(measurement?.shipMode ?? null, { ...mem, ...memBase });
+      if (stall.step === "reorder") {
+        return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, phase, ACTING, true, stall.mem);
+      }
+      if (stall.step === "unstick") {
+        return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, phase, ACTING, true, stall.mem);
+      }
+      if (stall.step === "stuck") {
+        return tick(WAIT, STALL_STUCK_WHY, phase, { kind: "blocked", reason: STALL_STUCK_REASON });
+      }
+      return tick(WAIT, "Flying to the launch container.", phase, ACTING, true, stall.mem);
+    }
+    return tick(
+      { kind: "approach", targetID: target.itemID },
+      unreachable ? "Too far to reach it, closing in." : "Heading for the launch container.",
+      phase,
+      ACTING,
+      true,
+      clearCloseInStall({ ...memBase, approaching: target.itemID }),
+    );
+  }
+  return tick(
+    { kind: "collectLaunch", containerID: target.itemID, launchID: target.launchID },
+    "Taking the goods out of the launch container.",
+    phase,
+    ACTING,
+    true,
+    { ...memBase, approaching: null },
+  );
+};
+
+// ── board-previous-ship ──────────────────────────────────────────────────────
+// The other half of refit-ship's "reship and go". refit-ship writes the hull
+// it boarded away from onto the run's board (PREVIOUS_SHIP_BOARD_KEY); this
+// block, docked, boards that hull again and clears the key. A run in which no
+// refit changed ships has nothing to go back to, and that is a plain done.
+const boardPreviousShip: MacroDecider = (_step, obs, mem, board) => {
+  const phase = "Changing ships";
+  if (obs.flightStatus?.docked !== true) {
+    return tick(WAIT, "Not docked - ships are changed in a station.", phase, {
+      kind: "blocked",
+      reason: "Dock at the station where the earlier ship is parked first.",
+    });
+  }
+  const previous = board[PREVIOUS_SHIP_BOARD_KEY];
+  if (typeof previous !== "number" || previous <= 0) {
+    return tick(WAIT, "No refit in this run changed ships, so there is nothing to go back to.", phase, { kind: "done" });
+  }
+  const hangar = obs.stationHangar ?? null;
+  const activeShipID = obs.activeShipID ?? null;
+  if (hangar === null || activeShipID === null) {
+    return tick(WAIT, "Reading the hangar.", phase, ACTING, false, mem);
+  }
+  if (activeShipID === previous) {
+    return withBoardPatch(
+      tick(WAIT, "Back in the earlier ship.", phase, { kind: "done" }),
+      { [PREVIOUS_SHIP_BOARD_KEY]: null },
+    );
+  }
+  if (!hangar.some((row) => row.itemID === previous && row.categoryID === CATEGORY_SHIP_ROW)) {
+    return tick(WAIT, "The earlier ship is not in this hangar.", phase, {
+      kind: "blocked",
+      reason: "The ship this run was flying before the refit is not parked here - dock where you reshipped.",
+    });
+  }
+  const boards = (num(mem, "boards") ?? 0) + 1;
+  if (boards > MAX_BLOCK_ATTEMPTS) {
+    return tick(WAIT, "Boarding kept not landing.", phase, {
+      kind: "blocked",
+      reason: "The ship swap kept not taking, so the bot stopped.",
+    });
+  }
+  return tick({ kind: "boardShip", shipID: previous }, "Boarding the earlier ship.", phase, ACTING, false, { ...mem, boards });
 };
 
 // ── repair-ship ──────────────────────────────────────────────────────────────
@@ -6284,12 +6497,14 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   "warp-to-anomaly": warpToAnomaly,
   "warp-to-ore-anomaly": warpToOreAnomaly,
   "refit-ship": refitShip,
+  "board-previous-ship": boardPreviousShip,
   "move-items": moveItems,
   "warp-to-bookmark": warpToBookmark,
   "find-combat-agent": findCombatAgent,
   "fly-to-mission-site": flyToMissionSite,
   "restart-extractors": restartExtractors,
   "launch-commodities": launchCommodities,
+  "collect-launches": collectLaunches,
   "repair-ship": repairShip,
   "buy-item": buyItem,
   "sell-item": sellItem,
