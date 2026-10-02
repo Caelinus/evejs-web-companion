@@ -1,17 +1,22 @@
 # EveJS web client code review and implementation report
 
-**Report date:** October 2, 2026  
-**Repository:** [rrfarmer/evejs-web-companion](https://github.com/rrfarmer/evejs-web-companion)  
-**Implementation branch:** `codex/code-review-fixes-2026-10-02`  
+**Report date:** October 2, 2026
+
+**Repository:** [rrfarmer/evejs-web-companion](https://github.com/rrfarmer/evejs-web-companion)
+
+**Implementation branch:** `codex/code-review-fixes-2026-10-02`
+
+**Integration branch:** `master`
+
 **Validated implementation revision:** `c0102b09a40d76efde91083017a86fc0706184df`
 
-All **15 original findings are fixed in local commits**, with regression coverage for the reported failures. Follow-up review also corrected cancelled-login publication, pending script writes across pause/recovery, late alignment results, and refused drone/follow commands. The detailed original findings are retained below with links to the source revision reviewed.
+All **15 original findings are fixed in focused commits**, with regression coverage for the reported failures. Follow-up review also corrected cancelled-login publication, pending script writes across pause/recovery, late alignment results, and refused drone/follow commands. The detailed original findings are retained below with links to the source revision reviewed.
 
 The main changes protect pilot identity, serialize controller work, and keep requested, refused, uncertain, and confirmed actions distinct. Purchases and quantity-limited transfers no longer complete on refusal. An outcome lost after dispatch pauses work for verification instead of issuing a duplicate. Courier delivery moves only the remaining mission requirement and preserves surplus cargo. Automated drone orders validate per-drone results: the companion retries only refused drones, while scripts pause on a partially accepted flight.
 
 ## Implementation record
 
-| Finding | Implemented behavior | Local commit(s) |
+| Finding | Implemented behavior | Commit(s) |
 |---|---|---|
 | CR01 | Explicit per-pilot credentials suppress cookie fallback, including empty tokens. Closing a flow retires queued requests/controllers. Unverified release retains ownership. Cancelled legacy logins cannot publish their token over a current identity. | `aab0d42`, `bc8907d`, `7fc72ae` |
 | CR02 | Commit action progress after confirmed success. Preserve retryable memory on definite refusal and custody on uncertainty. Serialize ticks, block resume during pending writes, and preserve completed quantities/manifests across transport recovery. | `2fd4a77`, `2a25e3c`, `0e5ce2e` |
@@ -29,7 +34,7 @@ The main changes protect pilot identity, serialize controller work, and keep req
 | CR14 | One dogma event handler updates the dedicated slice and fitting mirror, preserving the last good snapshot on read failure. | `9a0d6ed` |
 | CR15 | Alignment records an order identity and dispatch outcome. Successful orders are not repeated; refusals are bounded and uncertain outcomes pause. Exact pending results survive pause without changing a replacement run. | `fc44efa`, `7eb2411` |
 
-These commits are local. The branch incorporates the latest local `origin/master` integration, including the separately completed PI work; that PI contribution is not one of the review fixes.
+The review commits are integrated into the default branch, `master`. Existing PI contributions were incorporated through upstream integration.
 
 ## Final validation
 
@@ -72,9 +77,12 @@ The chat protocol provides timestamps and sender/text identity, not a unique mes
 
 The rest of this document records the initial read-only review. Its defects, recommendations, and baseline test results describe revision `fecf96ddb7323539acb44c519a0ebc4ba4a833fb`, before the fixes listed above.
 
-**Review date:** October 2, 2026  
-**Repository:** [rrfarmer/evejs-web-companion](https://github.com/rrfarmer/evejs-web-companion)  
-**Reviewed revision:** `fecf96ddb7323539acb44c519a0ebc4ba4a833fb`  
+**Review date:** October 2, 2026
+
+**Repository:** [rrfarmer/evejs-web-companion](https://github.com/rrfarmer/evejs-web-companion)
+
+**Reviewed revision:** `fecf96ddb7323539acb44c519a0ebc4ba4a833fb`
+
 **Scope:** Repository-wide review of the BFF, session handling, frontend state, navigation, bot execution, and relevant tests. The review was read-only; no implementation changes were made.
 
 The review found **15 actionable issues: five P1 and ten P2**. The highest-risk findings concern session isolation, multiple controllers driving one ship, and bot memory treating a requested action as a successful action. Address the P1 findings first, with regression tests that exercise failures and multiple ticks.
