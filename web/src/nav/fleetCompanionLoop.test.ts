@@ -285,6 +285,99 @@ test("a paused companion stops reading the world", async () => {
   assert.equal(observed, 1, "a paused tick must not read");
 });
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((release) => { resolve = release; });
+  return { promise, resolve };
+}
+
+test("pause and resume retire a companion driver still asleep", async () => {
+  const firstSleep = deferred<void>();
+  const secondSleep = deferred<void>();
+  const secondRead = deferred<void>();
+  let reads = 0;
+  let sleeps = 0;
+  const controller = createFleetCompanion({
+    observe: async () => {
+      reads += 1;
+      if (reads === 2) secondRead.resolve();
+      return obs();
+    },
+    issue: async () => {},
+    sleep: async () => {
+      sleeps += 1;
+      await (sleeps === 1 ? firstSleep.promise : secondSleep.promise);
+    },
+  });
+  controller.start(REQUEST);
+  const retired = controller.run();
+  // Await the first tick before resuming, while its cadence sleep is pending.
+  while (sleeps === 0) await Promise.resolve();
+  controller.pause();
+  controller.resume();
+  const current = controller.run();
+  await secondRead.promise;
+  firstSleep.resolve();
+  await retired;
+  assert.equal(reads, 2, "the retired timer must not drive another observation");
+  controller.stop();
+  secondSleep.resolve();
+  await current;
+});
+
+test("resume waits for a retired observation and issues only from the new driver", async () => {
+  const firstRead = deferred<FleetCompanionObservation>();
+  const secondSleep = deferred<void>();
+  const issued = deferred<void>();
+  let reads = 0;
+  const actions: FleetCompanionAction[] = [];
+  const observed = obs({
+    snapshot: gridWithEntities([TACKLE]),
+    fleetTargetTags: new Map([[TACKLE, "A"]]),
+    lockedTargetIDs: [],
+  });
+  const controller = createFleetCompanion({
+    observe: async () => ++reads === 1 ? firstRead.promise : observed,
+    issue: async (action) => { actions.push(action); issued.resolve(); },
+    sleep: async () => secondSleep.promise,
+  });
+  controller.start(REQUEST);
+  const retired = controller.run();
+  controller.pause();
+  controller.resume();
+  const current = controller.run();
+  await Promise.resolve();
+  assert.equal(reads, 1, "the replacement must wait for the pending tick to settle");
+  firstRead.resolve(observed);
+  await issued.promise;
+  await retired;
+  assert.equal(reads, 2);
+  assert.deepEqual(actions, [{ kind: "lock", targetID: TACKLE }]);
+  controller.stop();
+  secondSleep.resolve();
+  await current;
+});
+
+test("calling run twice in the same generation shares one driver", async () => {
+  const sleeping = deferred<void>();
+  const enteredSleep = deferred<void>();
+  let reads = 0;
+  const controller = createFleetCompanion({
+    observe: async () => { reads += 1; return obs(); },
+    issue: async () => {},
+    sleep: async () => { enteredSleep.resolve(); await sleeping.promise; },
+  });
+  controller.start(REQUEST);
+  const first = controller.run();
+  const second = controller.run();
+  assert.equal(first, second);
+  await enteredSleep.promise;
+  assert.equal(reads, 1);
+  controller.stop();
+  sleeping.resolve();
+  await Promise.all([first, second]);
+});
+
 test("a read that throws pauses with the reason rather than acting on stale state", async () => {
   const controller = createFleetCompanion({
     observe: async () => {

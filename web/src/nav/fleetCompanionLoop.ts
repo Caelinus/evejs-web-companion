@@ -7030,6 +7030,7 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
    */
   let runToken = 0;
   let activeTick: Promise<FleetCompanionAction> | null = null;
+  let activeDriver: { token: number; promise: Promise<void> } | null = null;
 
   function report(): void {
     deps.onProgress?.(snapshot());
@@ -7279,6 +7280,9 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     },
     pause(): void {
       if (mem.status === "running") {
+        // A resumed run gets a new driver. Retire a driver that is still
+        // awaiting its observation or cadence timer before status changes.
+        runToken += 1;
         mem.status = "paused";
         report();
       }
@@ -7320,35 +7324,44 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
      * trusted to keep deciding -- but it stops it VISIBLY, in the readout the
      * panel is already watching, instead of in the console.
      */
-    async run(): Promise<void> {
+    run(): Promise<void> {
       const token = runToken;
-      try {
-        while (mem.status === "running" && token === runToken) {
-          const action = await tick();
-          if (mem.status !== "running" || token !== runToken) {
-            break;
-          }
-          // ⚠ THE ONLY PLACE THE TWO BEATS ARE CHOSEN BETWEEN, and the test is
-          // the tick's own answer rather than any state this loop keeps: a tick
-          // that ISSUED something is mid-order and comes back at the burst, a
-          // tick that waited keeps the full cadence. See
-          // `FLEET_COMPANION_BURST_MS` for why that rule, and not "is there a
-          // fight", is what leaves every tick-counted wait in this file
-          // measuring what it always measured.
-          await deps.sleep(
-            action.kind === "wait" ? FLEET_COMPANION_CADENCE_MS : FLEET_COMPANION_BURST_MS,
-          );
-        }
-      } catch (error) {
-        if (token !== runToken) {
-          return;
-        }
-        mem.status = "error";
-        mem.failureReason = error instanceof Error ? error.message : String(error);
-        mem.why = "This pilot stopped: something went wrong in its own decisions.";
-        mem.action = null;
-        report();
+      if (activeDriver?.token === token) {
+        return activeDriver.promise;
       }
+      const previousTick = activeTick;
+      const pending = (async (): Promise<void> => {
+        try {
+          // An already dispatched write cannot be cancelled by pausing.
+          // Let that tick settle before a replacement driver issues anything.
+          if (previousTick !== null) await previousTick;
+          while (mem.status === "running" && token === runToken) {
+            const action = await tick();
+            if (mem.status !== "running" || token !== runToken) {
+              break;
+            }
+            // An issued call takes the burst beat; an idle tick takes the
+            // full cadence, preserving the ladder's tick-counted waits.
+            await deps.sleep(
+              action.kind === "wait" ? FLEET_COMPANION_CADENCE_MS : FLEET_COMPANION_BURST_MS,
+            );
+          }
+        } catch (error) {
+          if (token !== runToken) {
+            return;
+          }
+          mem.status = "error";
+          mem.failureReason = error instanceof Error ? error.message : String(error);
+          mem.why = "This pilot stopped: something went wrong in its own decisions.";
+          mem.action = null;
+          report();
+        }
+      })();
+      const tracked = pending.finally(() => {
+        if (activeDriver?.promise === tracked) activeDriver = null;
+      });
+      activeDriver = { token, promise: tracked };
+      return tracked;
     },
     snapshot,
   };
