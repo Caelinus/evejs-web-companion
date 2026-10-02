@@ -5323,6 +5323,49 @@ const REMOTE_ASSIST_RANGE_M = 5000;
  * failure mode the house rule about bounding every branch exists to prevent.
  */
 const MAX_REMOTE_ASSIST_ATTEMPTS = 3;
+const MAX_REMOTE_ASSIST_STOP_WAIT_TICKS = 15;
+
+/**
+ * The snapshot names active modules, not their recipients. Only an activation
+ * accepted from observed inactivity establishes a recipient for this run.
+ * Settle an old or unknown recipient before reusing that module; a successful
+ * Deactivate response alone is not proof it has stopped.
+ */
+function settleRemoteAssistance(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  moduleIDs: readonly number[],
+  targetID: number | null,
+  prefix: "rep" | "cap",
+  phase: string,
+): MacroTick | null {
+  const active = obs.snapshot?.ship?.activeModuleIDs ?? null;
+  if (active === null) {
+    return tick(WAIT, "Reading the remote modules before changing assistance.", phase, ACTING, false, mem);
+  }
+  const stoppingKey = `${prefix}Stopping`;
+  const waitedKey = `${prefix}StopWaited`;
+  const stopping = num(mem, stoppingKey);
+  if (stopping !== null) {
+    if (active.includes(stopping)) {
+      const waited = (num(mem, waitedKey) ?? 0) + 1;
+      if (waited > MAX_REMOTE_ASSIST_STOP_WAIT_TICKS) {
+        return tick(WAIT, "The remote module did not stop.", phase, {
+          kind: "blocked", reason: "Remote assistance could not be stopped, so the bot will not activate it on another fleet-mate.",
+        }, false, mem);
+      }
+      return tick(WAIT, "Waiting for the previous assistance cycle to stop.", phase, ACTING, true, { ...mem, [waitedKey]: waited });
+    }
+    return tick(WAIT, "The remote module has stopped.", phase, ACTING, true,
+      { ...mem, [stoppingKey]: null, [waitedKey]: 0, [`${prefix}Target:${stopping}`]: null });
+  }
+  const stale = moduleIDs.find(id => active.includes(id) &&
+    (targetID === null || num(mem, `${prefix}Target:${id}`) !== targetID));
+  if (stale === undefined) return null;
+  return tick({ kind: "deactivate", moduleID: stale },
+    "Stopping assistance on the previous or unconfirmed recipient.", phase, ACTING, true,
+    { ...mem, [stoppingKey]: stale, [waitedKey]: 0 });
+}
 
 /**
  * Authoritative fleet-mates on grid. Presence, corporation, and alliance are
@@ -5403,12 +5446,16 @@ function repHurtMate(
     return null;
   }
   const target = mostHurtFriendly(friendlies);
+  const settlement = settleRemoteAssistance(obs, mem, remoteRepIDs(obs), target?.itemID ?? null, "rep", phase);
+  if (settlement !== null) return settlement;
   if (target === null) {
     return null;
   }
+  const changed = num(mem, "repLockOn") !== target.itemID;
+  if (changed) mem = { ...mem, repLockOn: target.itemID, repWaited: 0, repTries: 0, repApproached: null };
   const locked = (obs.lockedTargetIDs ?? []).includes(target.itemID);
   if (!locked) {
-    if (num(mem, "repLockOn") !== target.itemID) {
+    if (changed) {
       // A NEW mate resets everything counted per-target, or the last one's spent
       // budget silently disarms the reps for this one (the bug the PvP ladder
       // had, where a shared counter outlived the target it was counting for).
@@ -5470,7 +5517,7 @@ function repHurtMate(
         phase,
         ACTING,
         true,
-        { ...mem, repTries: repTries + 1 },
+        { ...mem, repTries: repTries + 1, [`repTarget:${idle}`]: target.itemID },
       );
     }
   }
@@ -5525,6 +5572,8 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
   const snapshot = obs.snapshot;
   const friendlies = fleetMatesOnGrid(obs) ?? [];
   if (friendlies.length === 0) {
+    const settlement = repHurtMate(obs, mem, "Boosting", false);
+    if (settlement !== null) return settlement;
     return tick(WAIT, "No fleet-mate on grid to support yet.", "Boosting", ACTING, false, mem);
   }
   const anchor = nearest(friendlies, measureSpace(snapshot));
@@ -6147,12 +6196,16 @@ const remoteCap: MacroDecider = (_step, obs, mem) => {
       worst = cap;
     }
   }
+  const settlement = settleRemoteAssistance(obs, mem, transmitters, target?.itemID ?? null, "cap", "Feeding cap");
+  if (settlement !== null) return settlement;
   if (target === null) {
     return tick(WAIT, "Everyone on grid has capacitor to spare.", "Feeding cap", { kind: "done" });
   }
+  const changed = num(mem, "capLockOn") !== target.itemID;
+  if (changed) mem = { ...mem, capLockOn: target.itemID, capWaited: 0, capTries: 0, capApproached: null };
   const locked = (obs.lockedTargetIDs ?? []).includes(target.itemID);
   if (!locked) {
-    if (num(mem, "capLockOn") !== target.itemID) {
+    if (changed) {
       // A new mate resets what is counted per-target (see repHurtMate).
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the fleet-mate who needs cap.", "Feeding cap", ACTING, true, {
         ...mem,
@@ -6205,7 +6258,7 @@ const remoteCap: MacroDecider = (_step, obs, mem) => {
         "Feeding cap",
         ACTING,
         true,
-        { ...mem, capTries: capTries + 1 },
+        { ...mem, capTries: capTries + 1, [`capTarget:${idle}`]: target.itemID },
       );
     }
   }

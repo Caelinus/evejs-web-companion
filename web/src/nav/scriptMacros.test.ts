@@ -13,6 +13,7 @@ import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
+import { createScriptRunner } from "./scriptRunner.ts";
 import { beltWarpFloorMeters } from "./miningBotLoop.ts";
 import {
   emptyLedger,
@@ -2382,7 +2383,7 @@ test("remote-rep: a rep that IS cycling refills the budget — no mid-fight stal
     fleetMemberCharacterIDs: [5001],
   });
   // Arrive with the budget already spent from an earlier dry spell.
-  let mem: MacroMemory = { repLockOn: 7001, repWaited: 0, repTries: 3 };
+  let mem: MacroMemory = { repLockOn: 7001, repWaited: 0, repTries: 3, "repTarget:600": 7001 };
   let fired = 0;
   for (let i = 0; i < 6; i++) {
     const t = remoteRep(repStep, world, mem, {});
@@ -2760,6 +2761,115 @@ test("remote-cap: a mate out of reach is closed on, and the transfer is bounded"
   }
   assert.equal(fired, 3, `the transmitter is offered exactly MAX_REMOTE_ASSIST_ATTEMPTS times; got ${fired}`);
 });
+
+const assistanceCases: readonly { macro: "remote-rep" | "remote-cap" | "orbit-and-boost"; prefix: "rep" | "cap"; modules: Partial<ScriptObservation> }[] = [
+  { macro: "remote-rep", prefix: "rep", modules: { remoteShieldRepairerIDs: [600] } },
+  { macro: "remote-cap", prefix: "cap", modules: { remoteCapModuleIDs: [600] } },
+  { macro: "orbit-and-boost", prefix: "rep", modules: { remoteShieldRepairerIDs: [600] } },
+];
+function assistanceWorld(modules: Partial<ScriptObservation>, a: number, b: number, active: readonly number[] | null): ScriptObservation {
+  return obs({
+    snapshot: snapshot([
+      entity({ itemID: 7001, kind: "ship", characterID: 5001, shieldRatio: a, armorRatio: 1, hullRatio: 1, capacitorRatio: a, position: { x: 1_000, y: 0, z: 0 } }),
+      entity({ itemID: 7002, kind: "ship", characterID: 5002, shieldRatio: b, armorRatio: 1, hullRatio: 1, capacitorRatio: b, position: { x: 2_000, y: 0, z: 0 } }),
+    ], { activeModuleIDs: active }),
+    lockedTargetIDs: [7001, 7002], fleetMemberCharacterIDs: [5001, 5002], ...modules,
+  });
+}
+for (const scenario of assistanceCases) {
+  const step: MacroStep = { id: "assist", kind: "macro", macro: scenario.macro, args: {} };
+  const decide = SCRIPT_MACROS[scenario.macro]!;
+  test(`${scenario.macro}: stops the old recipient, observes off, then activates the already locked new recipient`, () => {
+    const first = decide(step, assistanceWorld(scenario.modules, 0.2, 0.7, []), { orbiting: 7001 }, {});
+    assert.deepEqual(first.action, { kind: "activate", moduleID: 600, targetID: 7001 });
+    const changed = assistanceWorld(scenario.modules, 0.7, 0.1, [600]);
+    const stop = decide(step, changed, first.nextMem, {});
+    assert.deepEqual(stop.action, { kind: "deactivate", moduleID: 600 });
+    const settling = decide(step, changed, stop.nextMem, {});
+    assert.equal(settling.action.kind, "wait", "a successful stop request alone does not allow retargeting");
+    const off = { ...changed, snapshot: { ...changed.snapshot!, ship: { ...changed.snapshot!.ship!, activeModuleIDs: [] } } };
+    const confirmed = decide(step, off, settling.nextMem, {});
+    assert.equal(confirmed.action.kind, "wait");
+    const next = decide(step, off, confirmed.nextMem, {});
+    assert.deepEqual(next.action, { kind: "activate", moduleID: 600, targetID: 7002 });
+    const running = decide(step, changed, next.nextMem, {});
+    assert.equal(running.action.kind, "wait", "the confirmed recipient is not stopped again");
+    const full = assistanceWorld(scenario.modules, 1, 1, [600]);
+    assert.equal(decide(step, full, running.nextMem, {}).action.kind, "deactivate", "active assistance is settled before completion");
+  });
+  test(`${scenario.macro}: an unreadable active map cannot activate, and an unknown active recipient must settle`, () => {
+    const unreadable = decide(step, assistanceWorld(scenario.modules, 0.2, 0.7, null), { orbiting: 7001 }, {});
+    assert.equal(unreadable.action.kind, "wait");
+    const unknown = decide(step, assistanceWorld(scenario.modules, 0.2, 0.7, [600]), { orbiting: 7001 }, {});
+    assert.deepEqual(unknown.action, { kind: "deactivate", moduleID: 600 });
+    let mem = unknown.nextMem;
+    let last = unknown;
+    for (let i = 0; i < 20 && last.outcome.kind !== "blocked"; i++) {
+      last = decide(step, assistanceWorld(scenario.modules, 0.2, 0.7, [600]), mem, {});
+      assert.equal(last.action.kind, "wait");
+      mem = last.nextMem;
+    }
+    assert.equal(last.outcome.kind, "blocked", "a module that never stops has a finite confirmation bound");
+  });
+  test(`${scenario.macro}: changing to an already locked mate resets that mate's activation budget`, () => {
+    const next = decide(step, assistanceWorld(scenario.modules, 0.7, 0.1, []), {
+      orbiting: 7001, [`${scenario.prefix}LockOn`]: 7001, [`${scenario.prefix}Tries`]: 3,
+    }, {});
+    assert.deepEqual(next.action, { kind: "activate", moduleID: 600, targetID: 7002 });
+  });
+}
+
+test("remote assistance settles each active module before assigning the new recipient", () => {
+  const modules = { remoteShieldRepairerIDs: [600, 601] };
+  const first = remoteRep(repStep, assistanceWorld(modules, 0.2, 0.7, []), {}, {});
+  const second = remoteRep(repStep, assistanceWorld(modules, 0.2, 0.7, [600]), first.nextMem, {});
+  assert.deepEqual(second.action, { kind: "activate", moduleID: 601, targetID: 7001 });
+  const stopFirst = remoteRep(repStep, assistanceWorld(modules, 0.7, 0.1, [600, 601]), second.nextMem, {});
+  assert.deepEqual(stopFirst.action, { kind: "deactivate", moduleID: 600 });
+  const confirmFirst = remoteRep(repStep, assistanceWorld(modules, 0.7, 0.1, [601]), stopFirst.nextMem, {});
+  const stopSecond = remoteRep(repStep, assistanceWorld(modules, 0.7, 0.1, [601]), confirmFirst.nextMem, {});
+  assert.deepEqual(stopSecond.action, { kind: "deactivate", moduleID: 601 }, "starting one rep must not bless the other's old recipient");
+  const confirmed = remoteRep(repStep, assistanceWorld(modules, 0.7, 0.1, []), stopSecond.nextMem, {});
+  const retarget = remoteRep(repStep, assistanceWorld(modules, 0.7, 0.1, []), confirmed.nextMem, {});
+  assert.deepEqual(retarget.action, { kind: "activate", moduleID: 600, targetID: 7002 });
+});
+
+test("remote assistance stops a previously assigned module when its recipient leaves the fleet", () => {
+  const modules = { remoteShieldRepairerIDs: [600] };
+  const first = remoteRep(repStep, assistanceWorld(modules, 0.2, 0.7, []), {}, {});
+  const departed = { ...assistanceWorld(modules, 0.2, 1, [600]), fleetMemberCharacterIDs: [5002] };
+  assert.deepEqual(remoteRep(repStep, departed, first.nextMem, {}).action, { kind: "deactivate", moduleID: 600 });
+});
+
+for (const code of ["CALL_REFUSED", "EVE_GATEWAY_TIMEOUT"]) {
+  test(`remote assistance handles ${code} without assigning an unconfirmed recipient`, async () => {
+    const modules = { remoteShieldRepairerIDs: [600] };
+    let world = assistanceWorld(modules, 0.2, 0.7, []);
+    let fail = true;
+    const issued: string[] = [];
+    const runner = createScriptRunner({
+      observe: async () => world,
+      issue: async action => { issued.push(action.kind); if (fail) throw Object.assign(new Error(code), { code }); },
+      sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+      registry: SCRIPT_MACROS, travelHome: scriptTravelHome,
+    });
+    runner.start({ format: "evejs-bot-script", version: 1, name: "Assistance", notes: "",
+      home: { entity: "station", id: 60000004, name: "Home", systemName: null }, interrupts: [], program: [repStep] });
+    await runner.tick();
+    if (code === "EVE_GATEWAY_TIMEOUT") {
+      assert.equal(runner.getStatus(), "paused");
+      runner.resume();
+      world = assistanceWorld(modules, 0.7, 0.1, [600]);
+      for (let i = 0; i < 10; i++) await runner.tick();
+      assert.deepEqual(issued, ["activate"], "an activation with an ambiguous outcome cannot blindly retarget");
+    } else {
+      fail = false;
+      world = assistanceWorld(modules, 0.7, 0.1, [600]);
+      for (let i = 0; i < 10 && issued.length < 2; i++) await runner.tick();
+      assert.deepEqual(issued, ["activate", "deactivate"], "a refused activation did not establish ownership of the active module");
+    }
+  });
+}
 
 const jettisonStep: MacroStep = { id: "jc", kind: "macro", macro: "jettison-cargo", args: {} };
 
