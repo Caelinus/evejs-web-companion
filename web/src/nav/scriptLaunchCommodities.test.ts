@@ -228,3 +228,21 @@ test("fullPercent step arg overrides the default threshold", () => {
   const t = launch(s, obs({ colonies } as never), {}, NB);
   assert.equal(t.action.kind, "launchCommodities");
 });
+
+// ── limited to the ticked colonies (the PI window's Haul button) ─────────────
+
+test("a planets list limits the launch to those colonies, and every other colony is left alone", () => {
+  const ticked = colony({ planetID: 40000002, planetName: "Matar VI", pins: [commandPin({ pinID: 200 })] });
+  const s = step({ planets: { kind: "planetList", planets: [{ planetID: 40000002, name: "Matar VI" }] } });
+  const t = launch(s, obs({ colonies: [colony(), ticked] } as never), {}, NB);
+  assert.ok(t.action.kind === "launchCommodities" && t.action.planetID === 40000002 && t.action.commandPinID === 200);
+  // Once that one is fired, the untick'd colony is NOT next: the block is done.
+  const after = launch(s, obs({ colonies: [colony(), ticked] } as never), t.nextMem, NB);
+  assert.equal(after.outcome.kind, "done");
+});
+
+test("an empty planets list means every colony, as before", () => {
+  const s = step({ planets: { kind: "planetList", planets: [] } });
+  const t = launch(s, obs({ colonies: [colony()] } as never), {}, NB);
+  assert.equal(t.action.kind, "launchCommodities");
+});

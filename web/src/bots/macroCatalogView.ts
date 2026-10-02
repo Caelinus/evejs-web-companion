@@ -125,6 +125,7 @@ const PARAM_LABEL: Readonly<Record<string, string>> = {
   holdRangeKm: "Hold this far off (km)",
   propulsion: "Prop mod",
   fullPercent: "Launch once this full (%)",
+  planets: "Only these colonies",
 };
 
 function paramView(arg: MacroArgSpec): MacroParamView {
@@ -321,6 +322,12 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "ship",
     "Boards the right hull from your hangar if you are flying something else, then applies the saved fitting you picked — modules pulled from this station's hangar.",
     "Being docked, the saved fitting, and its modules in the hangar",
+  ),
+  "board-planetary-hauler": entry(
+    "board-planetary-hauler",
+    "ship",
+    "Gets into a ship parked here that has a planetary commodities hold, such as an Epithal, as it is fitted. Nothing to pick: it reads each hull's holds. Back into the earlier ship takes you back to the ship you left.",
+    "Being docked where a ship with a planetary hold is parked",
   ),
   "board-previous-ship": entry(
     "board-previous-ship",

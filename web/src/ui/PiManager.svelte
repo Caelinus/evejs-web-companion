@@ -35,8 +35,19 @@
     type PiRosterPrefs,
   } from "../app/piRosterPrefs.ts";
   import { readPiRoster } from "../app/piRosterRead.ts";
-  import { buildPiBoard, pilotsByAccount, type PiAccountGroup, type PiDispatchState, type PilotAttempt } from "../bridge/piBoard.ts";
-  import { restartExtractorsFor } from "../app/piDispatch.ts";
+  import {
+    buildPiBoard,
+    piHaulDispatchWords,
+    piHaulWords,
+    pilotsByAccount,
+    type PiAccountGroup,
+    type PiColonyRow,
+    type PiDispatchState,
+    type PilotAttempt,
+  } from "../bridge/piBoard.ts";
+  import { haulFor, restartExtractorsFor, type PiHaulDivision } from "../app/piDispatch.ts";
+  import CorpHangarPicker from "./CorpHangarPicker.svelte";
+  import type { AppFlow } from "../app/flow.ts";
   import { listActiveServerBots } from "../app/api.ts";
   import { commodityName, decodeRecipeBook, madeThings, tierOf, type PiRecipeBook, type PiTier } from "../bridge/piRecipes.ts";
   import {
@@ -98,6 +109,12 @@
   // never on a timer.
   let activeBots = $state<Set<number>>(new Set());
   let dispatch = $state<Map<number, PiDispatchState>>(new Map());
+  // HAUL (the Colonies view's per-pilot Haul button). Which colonies are
+  // ticked lives only in this open window; where the goods go is remembered
+  // per pilot in this browser, because it is the same answer every haul.
+  let haulTicked = $state<Map<number, Set<number>>>(new Map());
+  let haulDivision = $state<Map<number, PiHaulDivision>>(loadHaulDivisions());
+  let haulDispatch = $state<Map<number, PiDispatchState>>(new Map());
 
   // One view at a time, picked from the window's own menu. An empty roster
   // opens on Pilots, because adding one is the only thing to do there.
@@ -159,6 +176,92 @@
     }
     set({ kind: "starting" });
     set(await restartExtractorsFor(accountName, characterID));
+    await loadActiveBots();
+  }
+
+  const HAUL_DIVISION_KEY = "evejs.piHaulDivision";
+
+  function loadHaulDivisions(): Map<number, PiHaulDivision> {
+    try {
+      const raw = JSON.parse(globalThis.localStorage?.getItem(HAUL_DIVISION_KEY) ?? "{}") as Record<string, unknown>;
+      const out = new Map<number, PiHaulDivision>();
+      for (const [key, value] of Object.entries(raw)) {
+        const characterID = Number(key);
+        const entry = value as { division?: unknown; name?: unknown } | null;
+        if (Number.isSafeInteger(characterID) && entry && typeof entry.division === "number") {
+          out.set(characterID, { division: entry.division, name: typeof entry.name === "string" ? entry.name : null });
+        }
+      }
+      return out;
+    } catch {
+      return new Map();
+    }
+  }
+
+  function pickHaulDivision(characterID: number, picked: PiHaulDivision): void {
+    const next = new Map(haulDivision);
+    if (picked === null) next.delete(characterID);
+    else next.set(characterID, picked);
+    haulDivision = next;
+    try {
+      globalThis.localStorage?.setItem(HAUL_DIVISION_KEY, JSON.stringify(Object.fromEntries(next)));
+    } catch {
+      // A private window keeps the choice for this open window only.
+    }
+  }
+
+  function toggleHaul(characterID: number, planetID: number): void {
+    const next = new Map(haulTicked);
+    const ticked = new Set(next.get(characterID) ?? []);
+    if (ticked.has(planetID)) ticked.delete(planetID);
+    else ticked.add(planetID);
+    next.set(characterID, ticked);
+    haulTicked = next;
+  }
+
+  /**
+   * Where the division picker reads the corporation's division names: this
+   * pilot's own session when it is online in this tab. Otherwise the seven
+   * divisions by number - the run checks the office on arrival either way.
+   */
+  function divisionSource(characterID: number): Pick<AppFlow, "loadCorpOffices"> {
+    for (const session of sessions) {
+      if (session.store.station.get().online?.characterID === characterID) {
+        return session.flow;
+      }
+    }
+    return {
+      loadCorpOffices: async () => ({
+        stationIDs: [],
+        divisions: [1, 2, 3, 4, 5, 6, 7].map((division) => ({ division, name: null })),
+        error: null,
+      }),
+    };
+  }
+
+  /** Haul the ticked colonies of this pilot, as a SERVER run (the restart's rules). */
+  async function haul(characterID: number, rows: readonly PiColonyRow[]): Promise<void> {
+    const accountName = known.find((pilot) => pilot.characterID === characterID)?.accountName;
+    const set = (state: PiDispatchState) => {
+      const next = new Map(haulDispatch);
+      next.set(characterID, state);
+      haulDispatch = next;
+    };
+    if (!accountName) {
+      set({ kind: "refused", sentence: "This pilot is no longer in the hangar, so there is no account to start it with." });
+      return;
+    }
+    const ticked = haulTicked.get(characterID) ?? new Set<number>();
+    const colonies = rows
+      .filter((row) => ticked.has(row.planetID))
+      .map((row) => ({
+        planetID: row.planetID,
+        planetName: row.planetName,
+        solarSystemID: row.solarSystemID,
+        solarSystemName: row.solarSystemName,
+      }));
+    set({ kind: "starting" });
+    set(await haulFor(accountName, characterID, colonies, haulDivision.get(characterID) ?? null));
     await loadActiveBots();
   }
 
@@ -688,6 +791,12 @@
                is no second list to keep in step with this one. -->
           {#each board.groups as group (group.characterID)}
             {@const pilot = pilotRows.get(group.characterID)}
+            {@const ticked = haulTicked.get(group.characterID) ?? new Set()}
+            {@const tickedCount = group.rows.filter((row) => ticked.has(row.planetID)).length}
+            {@const division = haulDivision.get(group.characterID) ?? null}
+            {@const haulOffer = piHaulWords(group.pilotName, tickedCount, division === null ? null : (division.name ?? `Division ${division.division}`))}
+            {@const haulState = haulDispatch.get(group.characterID) ?? null}
+            {@const haulWords = piHaulDispatchWords(haulState)}
             <section class="pi-group" aria-label={`${group.pilotName}'s colonies`}>
               <header class="pi-group-head">
                 <h3>{group.pilotName} <span class="note">- {group.countWords}</span></h3>
@@ -715,10 +824,39 @@
                   {/if}
                 </div>
               {/if}
+              <div class="pi-group-action pi-haul">
+                <span class="note">{haulOffer.words}</span>
+                <span class="pi-haul-into">
+                  <span class="note">Unload into</span>
+                  <CorpHangarPicker
+                    flow={divisionSource(group.characterID)}
+                    value={division}
+                    station={null}
+                    onPick={(picked) => pickHaulDivision(group.characterID, picked)}
+                  />
+                </span>
+                <button
+                  type="button"
+                  disabled={tickedCount === 0 || Boolean(pilot?.botWords) || haulState?.kind === "starting"}
+                  onclick={() => void haul(group.characterID, group.rows)}
+                >
+                  {haulOffer.label}
+                </button>
+                {#if haulWords}
+                  <span class="note pilot-note" role="status">{haulWords}</span>
+                {/if}
+              </div>
               <ul class="pi-colonies">
                 {#each group.rows as row (row.key)}
                   <li class="pi-colony tone-{row.tone}">
                     <span class="pi-colony-place">
+                      <input
+                        type="checkbox"
+                        class="pi-haul-tick"
+                        aria-label={`Haul from ${row.placeWords}`}
+                        checked={ticked.has(row.planetID)}
+                        onchange={() => toggleHaul(group.characterID, row.planetID)}
+                      />
                       <TypeIcon typeID={row.planetTypeID} name={row.kindWords} size="md" />
                       <span>
                         <span class="pi-colony-name">{row.placeWords}</span>
@@ -757,7 +895,7 @@
                flown from this site or by another bot — so that refusal, not a
                promise from this window, is what keeps a ship from being taken. -->
           <p class="note pi-footnote">
-            A restart runs on the server, which will not take a pilot already flown
+            A restart or a haul runs on the server, which will not take a pilot already flown
             from this site or by another bot; if it refuses, its reason is shown
             above that pilot's colonies.
           </p>
@@ -1567,6 +1705,19 @@
   }
   .pi-group-action button {
     min-height: 40px;
+  }
+  .pi-haul {
+    border-left-color: var(--color-row-line);
+  }
+  .pi-haul-into {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .pi-haul-tick {
+    width: 1.1rem;
+    height: 1.1rem;
+    flex: none;
   }
   .pi-footnote {
     margin-top: 1rem;

@@ -571,6 +571,13 @@ export interface ScriptObservation {
    * 10,000 km from the centre), which is why the block warps to the container
    * and not to the planet. `launchedAtMs` is epoch ms, null when unreadable.
    */
+  /**
+   * Ships parked in this station hangar (the active one included) that have a
+   * planetary commodities hold, by item id. Read only while
+   * board-planetary-hauler runs: one capacity read per parked ship.
+   * null = unreadable, never "none".
+   */
+  readonly planetaryHaulerShipIDs?: readonly number[] | null;
   readonly piLaunches?: readonly {
     readonly launchID: number;
     readonly solarSystemID: number;

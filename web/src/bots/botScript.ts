@@ -370,7 +370,20 @@ export type Arg =
    * ore and salvage the trip was for. No bay rule can separate those, because
    * they are all in the same bay.
    */
-  | { readonly kind: "itemList"; readonly items: readonly ItemMatchArg[] };
+  | { readonly kind: "itemList"; readonly items: readonly ItemMatchArg[] }
+  /**
+   * Planet colonies a planetary block is limited to, by planet id. The name is
+   * kept beside each id so the step still reads in words on a machine that has
+   * never read the colony (R7d: the id is never printed). Set by the
+   * Planetary Industry window's Haul button, which writes the step itself.
+   */
+  | { readonly kind: "planetList"; readonly planets: readonly PlanetPickArg[] };
+
+/** One colony a `planetList` names. */
+export interface PlanetPickArg {
+  readonly planetID: number;
+  readonly name: string | null;
+}
 
 /**
  * One thing to leave aboard, matched on the game's own classification and never
@@ -424,6 +437,8 @@ export const MAX_BAY_LIST = 12;
 
 /** Past a dozen kept items a player is describing a loadout, not an exception. */
 export const MAX_ITEM_LIST = 12;
+/** How many colonies one `planetList` may name. EVE caps a pilot at six. */
+export const MAX_PLANET_LIST = 12;
 
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";
@@ -829,6 +844,10 @@ export type MacroID =
   // was flying before refit-ship swapped it out. Nothing to do when no
   // refit-ship in this run boarded anything.
   | "board-previous-ship"
+  // Docked: board whichever ship parked here has a planetary commodities hold
+  // (an Epithal), as it is fitted, noting the hull it leaves for
+  // board-previous-ship. Done at once when the active ship already has one.
+  | "board-planetary-hauler"
   | "move-items"
   | "warp-to-bookmark"
   | "find-combat-agent"
@@ -923,6 +942,7 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "warp-to-ore-anomaly",
   "refit-ship",
   "board-previous-ship",
+  "board-planetary-hauler",
   "move-items",
   "warp-to-bookmark",
   "find-combat-agent",

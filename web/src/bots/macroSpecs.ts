@@ -229,6 +229,9 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   // Docked: board the hull refit-ship swapped out earlier in this run. No
   // args: the hull is whatever this run was flying, read off the run's board.
   "board-previous-ship": { args: [], untilRequired: false },
+  // Docked: board a ship parked here that has a planetary hold, as fitted.
+  // No args: the hold is read off each hull, never picked by the player.
+  "board-planetary-hauler": { args: [], untilRequired: false },
   // Docked: move an item between the hangar and the ship's holds. `amount`
   // absent = move ALL of that item.
   "move-items": {
@@ -264,7 +267,12 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   // OPTIONAL: left unset, the block waits for the centre to reach the shipped
   // default (80) before it launches what it is holding.
   "launch-commodities": {
-    args: [{ key: "fullPercent", kind: "count", required: false }],
+    args: [
+      { key: "fullPercent", kind: "count", required: false },
+      // Optional: absent = every colony, the shipped behaviour. The Haul
+      // button sets it to the colonies the player ticked.
+      { key: "planets", kind: "planetList", required: false },
+    ],
     untilRequired: false,
   },
   // In space: empty every launch container of yours in THIS system into the

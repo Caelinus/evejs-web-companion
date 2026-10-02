@@ -161,6 +161,8 @@ export function macroName(macro: MacroID): string {
       return "Refit from a saved fitting";
     case "board-previous-ship":
       return "Back into the earlier ship";
+    case "board-planetary-hauler":
+      return "Board a planetary hauler";
     case "move-items":
       return "Move items";
     case "warp-to-bookmark":
@@ -255,6 +257,22 @@ const BAY_LABELS: Readonly<Record<string, string>> = {
   fleet: "fleet hangar",
   drone: "drone bay",
 };
+
+/**
+ * " of Planet II and Planet IX", or "" when the step covers every colony. A
+ * colony with no name is counted rather than printed by id (R7d).
+ */
+function launchPlanetsPhrase(step: MacroStep): string {
+  const arg = step.args["planets"];
+  if (arg === undefined || arg.kind !== "planetList" || arg.planets.length === 0) {
+    return "";
+  }
+  const named = arg.planets.map((planet) => planet.name).filter((name): name is string => name !== null);
+  const unnamed = arg.planets.length - named.length;
+  const parts = unnamed > 0 ? [...named, unnamed === 1 ? "1 more colony" : `${unnamed} more colonies`] : named;
+  const list = parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  return ` of ${list}`;
+}
 
 /** "the ore hold and the fuel bay", or "" when nothing is named. */
 function keptItemsPhrase(step: MacroStep): string {
@@ -746,11 +764,13 @@ function macroPhrase(step: MacroStep): string {
     case "launch-commodities":
       // The SAME clamp the decider fires on, so the sentence cannot promise a
       // threshold the block will not use.
-      return `Launch from the command centre once it is ${launchFullPercent(step.args["fullPercent"])}% full`;
+      return `Launch from the command centre${launchPlanetsPhrase(step)} once it is ${launchFullPercent(step.args["fullPercent"])}% full`;
     case "collect-launches":
       return "Collect every launch container of yours in this system";
     case "board-previous-ship":
       return "Get back into the ship this run was flying before the refit";
+    case "board-planetary-hauler":
+      return "Get into a ship parked here that has a planetary hold";
     case "repair-ship":
       return "Repair the ship at the station";
     case "salvage-wrecks":

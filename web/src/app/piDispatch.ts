@@ -24,6 +24,7 @@
 
 import {
   createBotScript as apiCreateBotScript,
+  updateBotScript as apiUpdateBotScript,
   getBotScript as apiGetBotScript,
   listBotScripts as apiListBotScripts,
   login as apiLogin,
@@ -31,7 +32,13 @@ import {
   startServerBot as apiStartServerBot,
 } from "./api.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
-import { SCRIPT_FORMAT, SCRIPT_VERSION, startingStation, type BotScript } from "../bots/botScript.ts";
+import {
+  SCRIPT_FORMAT,
+  SCRIPT_VERSION,
+  startingStation,
+  type BotScript,
+  type MacroStep,
+} from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import {
   analyzeBotRunPolicy,
@@ -85,6 +92,7 @@ export interface PiDispatchDeps {
   listScripts(token: string): Promise<readonly { scriptID: string; name: string; rev: number }[]>;
   getScript(scriptID: string, token: string): Promise<{ scriptID: string; rev: number; doc: unknown } | null>;
   createScript(doc: BotScript, token: string): Promise<{ scriptID: string; rev: number }>;
+  updateScript(scriptID: string, doc: BotScript, baseRev: number, token: string): Promise<{ rev: number }>;
   startServerBot(characterID: number, scriptID: string, grant: BotLaunchGrant, token: string): Promise<void>;
 }
 
@@ -100,6 +108,7 @@ export const DEFAULT_PI_DISPATCH_DEPS: PiDispatchDeps = {
   listScripts: (token) => apiListBotScripts({ token, priority: "user" }),
   getScript: (scriptID, token) => apiGetBotScript(scriptID, { token, priority: "user" }),
   createScript: (doc, token) => apiCreateBotScript(doc, { token, priority: "user" }),
+  updateScript: (scriptID, doc, baseRev, token) => apiUpdateBotScript(scriptID, doc, baseRev, { token, priority: "user" }),
   async startServerBot(characterID, scriptID, grant, token) {
     await apiStartServerBot(characterID, scriptID, grant, { token, priority: "user" });
   },
@@ -151,6 +160,136 @@ export async function restartExtractorsFor(
     return { kind: "started" };
   } catch (error) {
     // The server's own sentence when it answered; ours when it never did.
+    if (error instanceof BridgeCallError && error.status > 0 && error.message) {
+      return refused(error.message);
+    }
+    return refused("The server could not be reached just now.");
+  } finally {
+    await deps.signOut(token).catch(() => {});
+  }
+}
+
+// ── Haul (the PI window's Haul button) ───────────────────────────────────────
+//
+// ⚠ THE BOARD OWNS THIS BOT AND REWRITES IT ON EVERY CLICK. Unlike the restart
+// bot, a haul depends on what the player ticked, so the saved document is the
+// plan for THIS haul: written, then started. It is still an ordinary saved bot,
+// visible in the Bot Manager, so a player can see exactly what ran.
+//
+// The lap: launch what the ticked colonies hold (any amount), board a ship
+// parked here with a planetary hold, fly to each ticked colony's system and
+// collect the launches there, fly back to the station the run started at,
+// unload (into the picked corporation division, else the pilot's own hangar),
+// and get back into the ship the pilot was in.
+
+/** The library name the board's haul bot goes by. */
+export const PI_HAUL_BOT_NAME = "Planetary: haul";
+
+/** A ceiling only: the lap stops by itself once it is back and unloaded. */
+export const PI_HAUL_RUNTIME_MINUTES = 120;
+
+/** One ticked colony, as the board knows it. */
+export interface PiHaulColony {
+  readonly planetID: number;
+  readonly planetName: string | null;
+  readonly solarSystemID: number;
+  readonly solarSystemName: string | null;
+}
+
+/** Where the goods are unloaded: a corporation division, or null for the pilot's own hangar. */
+export type PiHaulDivision = { readonly division: number; readonly name: string | null } | null;
+
+/** The haul lap for these colonies, as a saved bot document. */
+export function piHaulBotDoc(colonies: readonly PiHaulColony[], division: PiHaulDivision): BotScript {
+  const systems: { id: number; name: string | null }[] = [];
+  for (const colony of colonies) {
+    if (!systems.some((system) => system.id === colony.solarSystemID)) {
+      systems.push({ id: colony.solarSystemID, name: colony.solarSystemName });
+    }
+  }
+  const program: MacroStep[] = [
+    {
+      id: "launch",
+      kind: "macro",
+      macro: "launch-commodities",
+      args: {
+        // 1%: whatever a ticked colony's command centre holds goes up now.
+        fullPercent: { kind: "count", value: 1 },
+        planets: {
+          kind: "planetList",
+          planets: colonies.map((colony) => ({ planetID: colony.planetID, name: colony.planetName })),
+        },
+      },
+    },
+    { id: "board-hauler", kind: "macro", macro: "board-planetary-hauler", args: {} },
+    { id: "undock", kind: "macro", macro: "undock", args: {} },
+  ];
+  systems.forEach((system, index) => {
+    program.push(
+      {
+        id: `fly-${index + 1}`,
+        kind: "macro",
+        macro: "travel-to-system",
+        args: { system: { kind: "system", ref: { entity: "system", id: system.id, name: system.name, systemName: system.name } } },
+      },
+      { id: `collect-${index + 1}`, kind: "macro", macro: "collect-launches", args: {} },
+    );
+  });
+  program.push(
+    { id: "home", kind: "macro", macro: "travel-to-station", args: { station: { kind: "station", ref: startingStation() } } },
+    {
+      id: "unload",
+      kind: "macro",
+      macro: "unload-cargo",
+      args: division === null ? {} : { into: { kind: "corpDivision", division: division.division, name: division.name } },
+    },
+    { id: "board-back", kind: "macro", macro: "board-previous-ship", args: {} },
+  );
+  return {
+    format: SCRIPT_FORMAT,
+    version: SCRIPT_VERSION,
+    name: PI_HAUL_BOT_NAME,
+    notes:
+      "Saved by the Planetary Industry window, and rewritten by its Haul button on every haul. Launches what the " +
+      "ticked colonies hold, boards a ship parked at the starting station that has a planetary hold, collects the " +
+      "launches in each colony's system, flies back, unloads and gets back into the earlier ship.",
+    home: startingStation(),
+    interrupts: [],
+    program,
+  };
+}
+
+/** Haul these colonies of this pilot's, as a server run. */
+export async function haulFor(
+  accountName: string,
+  characterID: number,
+  colonies: readonly PiHaulColony[],
+  division: PiHaulDivision,
+  deps: PiDispatchDeps = DEFAULT_PI_DISPATCH_DEPS,
+): Promise<PiDispatchOutcome> {
+  if (colonies.length === 0) {
+    return refused("Tick the colonies to haul first.");
+  }
+  let token: string;
+  try {
+    token = await deps.signIn(accountName);
+  } catch {
+    return refused("Could not sign in to this pilot's account just now.");
+  }
+  try {
+    const doc = piHaulBotDoc(colonies, division);
+    const named = (await deps.listScripts(token)).find((row) => row.name === PI_HAUL_BOT_NAME) ?? null;
+    let saved: { scriptID: string; rev: number };
+    if (named === null) {
+      saved = await deps.createScript(doc, token);
+    } else {
+      const updated = await deps.updateScript(named.scriptID, doc, named.rev, token);
+      saved = { scriptID: named.scriptID, rev: updated.rev };
+    }
+    const grant = createBotLaunchGrant(saved.rev, analyzeBotRunPolicy(doc), PI_HAUL_RUNTIME_MINUTES);
+    await deps.startServerBot(characterID, saved.scriptID, grant, token);
+    return { kind: "started" };
+  } catch (error) {
     if (error instanceof BridgeCallError && error.status > 0 && error.message) {
       return refused(error.message);
     }

@@ -112,6 +112,11 @@ export interface PiColonyRow {
   /** For a keyed each only — never printed. */
   readonly key: string;
   readonly characterID: number;
+  /** The colony's identity, for the Haul button's step - never printed (R7d). */
+  readonly planetID: number;
+  readonly planetName: string | null;
+  readonly solarSystemID: number;
+  readonly solarSystemName: string | null;
   readonly pilotName: string;
   readonly placeWords: string;
   readonly stateWords: string;
@@ -461,6 +466,10 @@ export function buildPiBoard(input: PiBoardInput): PiBoard {
   const colonies = ordered.map((entry): PiColonyRow => ({
     key: `${entry.characterID}:${entry.colony.planetID}`,
     characterID: entry.characterID,
+    planetID: entry.colony.planetID,
+    planetName: entry.colony.planetName,
+    solarSystemID: entry.colony.solarSystemID,
+    solarSystemName: entry.colony.solarSystemName,
     pilotName: entry.pilotName,
     placeWords: colonyPlaceWords(entry.colony),
     stateWords: colonyLineWords(entry.colony, entry.attention?.findings ?? [], entry.nowMs),
@@ -610,4 +619,33 @@ export function pilotsByAccount(
         readAgeWords: ages.size === 1 && onlyAge !== undefined ? onlyAge : null,
       };
     });
+}
+
+/**
+ * The Haul offer on a pilot's line: what the run will do, said BEFORE the
+ * button, the same rule as the restart offer. `ticked` is how many of this
+ * pilot's colonies are ticked; `into` the picked division's words, or null
+ * for the pilot's own hangar.
+ */
+export function piHaulWords(pilotName: string, ticked: number, into: string | null): { label: string; words: string } {
+  const where = into === null ? "your own hangar" : `the corporation's ${into}`;
+  if (ticked === 0) {
+    return { label: "Haul", words: "Tick the colonies to haul." };
+  }
+  const colonies = ticked === 1 ? "1 colony" : `${ticked} colonies`;
+  return {
+    label: `Haul ${colonies}`,
+    words:
+      `This starts a server run for ${pilotName} that launches what the ticked colonies hold, gets into a ship parked ` +
+      `here with a planetary hold, collects the launches, flies back and unloads into ${where}, then gets back into ` +
+      "the ship it started in. The launch is taxed. It runs for two hours at most.",
+  };
+}
+
+/** What a Haul start from this window did, as one sentence. */
+export function piHaulDispatchWords(state: PiDispatchState | null): string | null {
+  if (state === null) return null;
+  if (state.kind === "starting") return "Starting the haul on the server...";
+  if (state.kind === "started") return "The haul has started on the server. Its steps show in the Bot Manager.";
+  return state.sentence;
 }

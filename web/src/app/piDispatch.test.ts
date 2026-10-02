@@ -28,6 +28,10 @@ import {
   isPiRestartBot,
   piRestartBotDoc,
   restartExtractorsFor,
+  haulFor,
+  piHaulBotDoc,
+  PI_HAUL_BOT_NAME,
+  PI_HAUL_RUNTIME_MINUTES,
   type PiDispatchDeps,
 } from "./piDispatch.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
@@ -73,6 +77,13 @@ function deps(
       const row = { scriptID: `s${library.length + 1}`, name: (doc as { name: string }).name, rev: 1, doc };
       library.push(row);
       return { scriptID: row.scriptID, rev: 1 };
+    },
+    async updateScript(scriptID, doc, baseRev) {
+      log.push(`update:${scriptID}@${baseRev}`);
+      const row = library.find((entry) => entry.scriptID === scriptID)!;
+      row.doc = doc;
+      row.rev = baseRev + 1;
+      return { rev: row.rev };
     },
     async startServerBot(characterID, scriptID, grant) {
       log.push(`start:${scriptID}`);
@@ -170,4 +181,73 @@ test("isPiRestartBot knows the board's bot from any other", () => {
 test("the run limit is the hour the board's row promises", () => {
   // bridge/piBoard.ts says "runs for an hour at most" before the button.
   assert.equal(PI_RESTART_RUNTIME_MINUTES, 60);
+});
+
+// ── Haul ─────────────────────────────────────────────────────────────────────
+
+const COLONIES = [
+  { planetID: 40000001, planetName: "Alpha II", solarSystemID: 30000001, solarSystemName: "Alpha" },
+  { planetID: 40000002, planetName: "Alpha IX", solarSystemID: 30000001, solarSystemName: "Alpha" },
+  { planetID: 40000003, planetName: "Beta V", solarSystemID: 30000002, solarSystemName: "Beta" },
+];
+
+test("the haul doc is the whole lap, one trip per system, launching only the ticked colonies", () => {
+  const doc = piHaulBotDoc(COLONIES, { division: 3, name: "Industry" });
+  assert.deepEqual(doc.program.map((step) => (step.kind === "macro" ? `${step.macro}` : step.kind)), [
+    "launch-commodities",
+    "board-planetary-hauler",
+    "undock",
+    "travel-to-system",
+    "collect-launches",
+    "travel-to-system",
+    "collect-launches",
+    "travel-to-station",
+    "unload-cargo",
+    "board-previous-ship",
+  ]);
+  const launch = doc.program[0]!;
+  assert.ok(launch.kind === "macro");
+  assert.deepEqual(launch.args["planets"], {
+    kind: "planetList",
+    planets: [
+      { planetID: 40000001, name: "Alpha II" },
+      { planetID: 40000002, name: "Alpha IX" },
+      { planetID: 40000003, name: "Beta V" },
+    ],
+  });
+  const unload = doc.program[8]!;
+  assert.ok(unload.kind === "macro");
+  assert.deepEqual(unload.args["into"], { kind: "corpDivision", division: 3, name: "Industry" });
+  // It must survive the library's own reader, or the start would refuse it.
+  const decoded = decodeScriptValue(JSON.parse(JSON.stringify(doc)));
+  assert.ok(decoded.ok);
+});
+
+test("the haul doc with no division unloads into the pilot's own hangar", () => {
+  const unload = piHaulBotDoc(COLONIES.slice(0, 1), null).program.find((step) => step.kind === "macro" && step.macro === "unload-cargo");
+  assert.ok(unload !== undefined && unload.kind === "macro");
+  assert.deepEqual(unload.args, {});
+});
+
+test("haul: saves the bot once, then rewrites it on the next haul and starts that revision", async () => {
+  const library: Saved[] = [];
+  const first = deps(library);
+  assert.deepEqual(await haulFor("acct", PILOT, COLONIES, null, first), { kind: "started" });
+  assert.deepEqual(first.log, ["signIn:acct", "create", "start:s1", "signOut:tok"]);
+  assert.equal(library[0]!.name, PI_HAUL_BOT_NAME);
+
+  const second = deps(library);
+  assert.deepEqual(await haulFor("acct", PILOT, COLONIES.slice(2), null, second), { kind: "started" });
+  assert.deepEqual(second.log, ["signIn:acct", "update:s1@1", "start:s1", "signOut:tok"]);
+  const grant = second.started[0]!.grant;
+  assert.equal(grant.scriptRev, 2);
+  assert.equal(grant.maxRuntimeMinutes, PI_HAUL_RUNTIME_MINUTES);
+  assert.ok(validateBotLaunchGrant(grant, 2, analyzeBotRunPolicy(piHaulBotDoc(COLONIES.slice(2), null))).ok);
+});
+
+test("haul: nothing ticked is refused before anyone is signed in", async () => {
+  const d = deps();
+  const outcome = await haulFor("acct", PILOT, [], null, d);
+  assert.equal(outcome.kind, "refused");
+  assert.deepEqual(d.log, []);
 });
