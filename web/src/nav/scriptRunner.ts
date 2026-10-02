@@ -53,7 +53,7 @@ import {
   type RefusalLedger,
   type RefusalRecord,
 } from "./refusalLedger.ts";
-import { isSessionChangeSettling, refusalWords } from "../bridge/refusals.ts";
+import { isSessionChangeSettling, isTransportTransient, isTransitionTimeout, refusalWords } from "../bridge/refusals.ts";
 import { createTravelAssist, type TravelAssistDeps } from "./travelAssist.ts";
 
 /**
@@ -297,6 +297,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   /** This run's id, minted by `start` — what groups a log's lines. */
   let runID = "";
   let actionInvocation = 0;
+  // A dispatched action owns its outcome even if Pause/Stop fires while it is
+  // awaiting the wire. A fresh Start cannot replace that pending transaction.
+  let issuePending = false;
+  let uncertainAction: ScriptAction | null = null;
   let claim: { runID: string; systemID: number; itemID: number } | null = null;
   let transportSuspended = false;
   const travelAssist = deps.travelAssist ? createTravelAssist({ ...deps.travelAssist,
@@ -542,7 +546,6 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       });
       if (consumed || token !== runToken || status !== "running") return;
     }
-    memory = result.memory;
     const selected = result.containerTargetID;
     if (claim && (selected !== claim.itemID || obs.flightStatus?.solarSystemID !== claim.systemID)) {
       await releaseClaim();
@@ -577,10 +580,12 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     if (result.status === "paused") {
+      memory = result.memory;
       pauseWith(result.pauseReason ?? result.why, result);
       return;
     }
     if (result.status === "done") {
+      memory = result.memory;
       runToken += 1;
       status = "stopped";
       emit(toSnapshot(result, "stopped"));
@@ -589,6 +594,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     if (isWorldCall(result.action)) {
+      // A safety watch's home destination is intent, not action completion:
+      // keep that latch even when this first movement request is refused.
+      memory = { ...memory, latched: memory.latched ?? result.memory.latched };
       const targetID = actionTargetID(result.action);
       const key = refusalKey(result.stepPath, result.action.kind, targetID);
       let issuedSuccessfully = false;
@@ -601,9 +609,14 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         t: now(), kind: "issue", run: runID, action: result.action, says: describeAction(result.action),
         stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
       });
+      issuePending = true;
       try {
         const note = await deps.issue(result.action, result.action.kind === "lootContainer" ? claim?.runID : undefined,
           { runID, invocationID: ++actionInvocation, stepPath: result.stepPath ?? "" });
+        issuePending = false;
+        // Completion belongs to the confirmed action, including one that
+        // finished while paused. Preserve a concurrently requested home trip.
+        memory = { ...result.memory, latched: memory?.latched ?? result.memory.latched };
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
         record({
@@ -619,8 +632,25 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         }
         if (result.action.kind === "lootContainer" && !transportSuspended) await releaseClaim();
       } catch (error) {
+        issuePending = false;
+        // A failed response after dispatch cannot prove that the mutation did
+        // not land. Do not commit its completion or let Resume replay it.
+        // Corporate transfers have their own observed-manifest reconciliation.
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (result.action.kind !== "haulTransfer" && !(result.action.kind === "unloadOre" && result.action.strictCorp === true) &&
+            !(result.action.kind === "jettison" && deps.mutationCustody?.()) &&
+            code !== "EDGE_OWNER_OVERLOADED" &&
+            (isTransportTransient(error) || isTransitionTimeout(error) || code === "BRIDGE_BAD_RESPONSE")) {
+          uncertainAction = result.action;
+          const reason = deps.refusalReason(error);
+          record({ t: now(), kind: "result", run: runID, ok: false, refusal: reason,
+            says: describeAction(result.action), stepPath: result.stepPath });
+          pauseWith(`The outcome of ${describeAction(result.action)} could not be confirmed. Verify it in the game, then Stop before starting a new run. ${refusalWords(reason)}`, result);
+          return;
+        }
         if (token !== runToken || status !== "running") return;
         if (result.action.kind === "jettison" && deps.mutationCustody?.()) {
+          memory = result.memory;
           pauseWith("Jettison needs reconciliation; mutation custody is retained and no duplicate will be issued.", result);
           return;
         }
@@ -629,6 +659,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           return;
         }
         if (result.action.kind === "haulTransfer" || (result.action.kind === "unloadOre" && result.action.strictCorp === true)) {
+          memory = result.memory;
           // A transport error can arrive after an inventory mutation. Do not
           // retry or even auto-reconcile a route-owned transfer on the next
           // tick. Keep its pending manifest and require an explicit resume,
@@ -724,6 +755,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       settle = issuedSuccessfully
         ? settleTicksFor(result.action)
         : (backoffTicks ?? DEFAULT_SETTLE_TICKS);
+    } else {
+      memory = result.memory;
     }
 
     emit(toSnapshot(result, "running", ledger.records()));
@@ -859,6 +892,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
   return {
     start(next: BotScript): void {
+      if (issuePending) throw new Error("The previous script action is still awaiting its outcome.");
+      if (uncertainAction) throw new Error("Verify the previous action's outcome, then Stop before starting a new run.");
       if (deps.mutationCustody?.()) throw new Error("Jettison mutation custody still owns unresolved work.");
       transportSuspended = false;
       releaseAfterIssue();
@@ -893,7 +928,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
     },
     resume(): void {
-      if (deps.mutationCustody?.()) return;
+      if (uncertainAction || deps.mutationCustody?.()) return;
       if (status === "paused") {
         transportSuspended = false;
         runToken += 1;
@@ -902,6 +937,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
     },
     stop(): void {
+      uncertainAction = null;
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
@@ -926,10 +962,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return activeTick ?? Promise.resolve();
     },
     transportCustody(): boolean {
-      return claim !== null || travelAssist?.pending() === true || deps.mutationCustody?.() === true;
+      return issuePending || uncertainAction !== null || claim !== null || travelAssist?.pending() === true || deps.mutationCustody?.() === true;
     },
     resumeTransport(): void {
-      if (!transportSuspended || status !== "paused" || claim || travelAssist?.pending() || deps.mutationCustody?.())
+      if (!transportSuspended || status !== "paused" || uncertainAction || claim || travelAssist?.pending() || deps.mutationCustody?.())
         throw new Error("Transport recovery still owns unresolved work.");
       // Keep program position and run identity; re-derive macro movement,
       // target and drone decisions from the reacquired session's observations.
@@ -939,7 +975,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       emit({ ...last, status: "running", phase: "Session recovered", why: null, pauseReason: null });
     },
     resumeHeadHome(reason: string): boolean {
-      if (status !== "paused" || memory === null || script === null || deps.mutationCustody?.()) return false;
+      if (status !== "paused" || memory === null || script === null || uncertainAction || deps.mutationCustody?.()) return false;
       runToken += 1;
       if (memory.latched === null) memory = { ...memory, latched: { interruptID: null, reason } };
       status = "running";

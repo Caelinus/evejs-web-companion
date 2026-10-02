@@ -9,6 +9,7 @@ import type { BotScript, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { FlightStatus } from "../store/types.ts";
 import { MAX_CONSECUTIVE_REFUSALS } from "./refusalLedger.ts";
+import { SCRIPT_MACROS } from "./scriptMacros.ts";
 import type {
   HomeTravelDecider,
   MacroDecider,
@@ -102,6 +103,135 @@ function harness(opts: Harness = {}) {
   });
   return { runner, issued, progress, setObs: (o: ScriptObservation) => { obs = o; } };
 }
+
+const completionCases: readonly { step: MacroStep; observation: ScriptObservation; action: ScriptAction["kind"] }[] = [
+  {
+    step: { id: "buy", kind: "macro", macro: "buy-item", args: {
+      item: { kind: "itemType", typeID: 34, name: "Tritanium" },
+      quantity: { kind: "qty", value: 10 }, price: { kind: "isk", value: 1 },
+    } },
+    observation: calm({ inSpace: false, docked: true, flightStatus: flight({ inSpace: false, docked: true, stationID: 1 }) }),
+    action: "placeBuyOrder",
+  },
+  {
+    step: { id: "refit", kind: "macro", macro: "refit-ship", args: {
+      fitting: { kind: "fitting", fittingID: 5, name: "Vexor" },
+    } },
+    observation: calm({ inSpace: false, docked: true, flightStatus: flight({ inSpace: false, docked: true, stationID: 1 }),
+      activeShipID: 9001,
+      stationHangar: [{ itemID: 9001, typeID: 626, categoryID: 6, groupID: null, flagID: null, quantity: 1, singleton: true }],
+      savedFittings: [{ fittingID: 5, name: "Vexor", description: "", shipTypeID: 626, ownerID: 1, savedDate: null, modules: [] }],
+    }),
+    action: "applyFitting",
+  },
+  {
+    step: { id: "scan", kind: "macro", macro: "analyze-signatures", args: {} },
+    observation: calm({ scannerOperations: { inSpace: true, solarSystemID: 30000001, shipID: 9001, maxActiveProbes: 8, launcher: null,
+      probes: [{ probeID: 7001, typeID: 30013, pos: [0, 0, 0], destination: [0, 0, 0], scanRange: 1, rangeStep: 1, state: 1, expiry: "1" }],
+    } }),
+    action: "scannerAnalyze",
+  },
+  {
+    step: { id: "move", kind: "macro", macro: "move-items", args: {
+      item: { kind: "itemType", typeID: 34, name: "Tritanium" }, from: { kind: "place", place: "hangar" },
+      to: { kind: "place", place: "cargo" }, amount: { kind: "count", value: 30 },
+    } },
+    observation: calm({ inSpace: false, docked: true, flightStatus: flight({ inSpace: false, docked: true, stationID: 1 }),
+      stationHangar: [{ itemID: 101, typeID: 34, categoryID: 4, groupID: 18, flagID: null, quantity: 100, singleton: false }],
+    }),
+    action: "moveItems",
+  },
+];
+
+for (const scenario of completionCases) {
+  for (const refusal of [new Error("CALL_REFUSED: NotEnoughMoney"), settling()]) {
+    test(`${scenario.step.macro} retries an explicit ${refusal.message.split(":")[0]} without committing completion`, async () => {
+      let attempts = 0;
+      const h = harness({ registry: SCRIPT_MACROS, issueThrows: () => attempts++ === 0 ? refusal : null });
+      h.setObs(scenario.observation);
+      h.runner.start(script([scenario.step]));
+      await issueTicks(h, 2);
+      assert.deepEqual(h.issued.map(action => action.kind), [scenario.action, scenario.action]);
+      assert.deepEqual(h.issued[1], h.issued[0], "the refused quantity or one-shot action was not consumed");
+      for (let i = 0; i < 10 && h.runner.getStatus() === "running"; i++) await h.runner.tick();
+      assert.equal(h.runner.getStatus(), "stopped", "only the successful retry completes the step");
+      assert.equal(h.issued.length, 2);
+    });
+  }
+
+  test(`${scenario.step.macro} retains an uncertain dispatched outcome until explicit Stop`, async () => {
+    const h = harness({ registry: SCRIPT_MACROS,
+      issueThrows: () => Object.assign(new Error("EVE_GATEWAY_TIMEOUT"), { code: "EVE_GATEWAY_TIMEOUT" }),
+    });
+    h.setObs(scenario.observation);
+    const doc = script([scenario.step]);
+    h.runner.start(doc);
+    await h.runner.tick();
+    assert.equal(h.runner.getStatus(), "paused");
+    assert.match(h.runner.snapshot().pauseReason ?? "", /outcome.*could not be confirmed/);
+    h.runner.resume();
+    assert.equal(h.runner.getStatus(), "paused");
+    assert.equal(h.runner.resumeHeadHome("run ended"), false);
+    assert.throws(() => h.runner.start(doc), /Verify the previous action/);
+    await h.runner.suspendTransport();
+    assert.equal(h.runner.transportCustody(), true);
+    assert.throws(() => h.runner.resumeTransport(), /unresolved/);
+    await h.runner.tick();
+    assert.equal(h.issued.length, 1, "uncertain work is never replayed or declared complete");
+    h.runner.stop();
+    assert.equal(h.runner.transportCustody(), false, "explicit Stop acknowledges the outcome check");
+  });
+}
+
+test("a one-shot action confirmed while paused completes without a duplicate on Resume", async () => {
+  const scenario = completionCases[0]!;
+  let finish: () => void = () => {};
+  let started: () => void = () => {};
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const pending = new Promise<void>(resolve => { finish = resolve; });
+  const issued: ScriptAction[] = [];
+  const runner = createScriptRunner({ observe: async () => scenario.observation,
+    issue: async action => { issued.push(action); started(); await pending; },
+    sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+    registry: SCRIPT_MACROS, travelHome: home,
+  });
+  const doc = script([scenario.step]);
+  runner.start(doc);
+  const tick = runner.tick();
+  await entered;
+  runner.pause();
+  assert.throws(() => runner.start(doc), /still awaiting its outcome/);
+  finish();
+  await tick;
+  assert.equal(runner.getStatus(), "paused");
+  runner.resume();
+  await runner.tick();
+  assert.equal(runner.getStatus(), "stopped");
+  assert.equal(issued.length, 1);
+});
+
+test("a refused first home movement does not discard the safety watch's destination", async () => {
+  const h = harness({ issueThrows: () => new Error("CALL_REFUSED: FakeItemNotFound") });
+  h.setObs(calm({ health: 0.4 }));
+  h.runner.start(script([macroStep("u", "undock")]));
+  await h.runner.tick();
+  h.setObs(calm({ health: 1 }));
+  await issueTicks(h, 2);
+  assert.deepEqual(h.issued.map(action => action.kind), ["warp", "warp"]);
+  assert.equal(h.runner.getStatus(), "running", "recovered health does not abandon the latched trip");
+});
+
+test("owner overload is a definite non-dispatch and retries a one-shot action", async () => {
+  const scenario = completionCases[0]!;
+  let attempts = 0;
+  const h = harness({ registry: SCRIPT_MACROS, issueThrows: () => attempts++ === 0
+    ? Object.assign(new Error("EDGE_OWNER_OVERLOADED"), { code: "EDGE_OWNER_OVERLOADED" }) : null });
+  h.setObs(scenario.observation);
+  h.runner.start(script([scenario.step]));
+  await issueTicks(h, 2);
+  assert.equal(h.issued.length, 2);
+  assert.equal(h.runner.getStatus(), "running");
+});
 
 test("pending jettison owns manual and transport resume and cannot issue twice", async () => {
   let pending = false;
