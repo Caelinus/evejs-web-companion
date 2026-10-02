@@ -14,9 +14,13 @@ import {
   reloadAllPlan,
   weaponGroups,
 } from "./rackAmmo.ts";
-import { decodeChargeLoadNotification } from "../bridge/reloadNotifications.ts";
+import {
+  applyChargeQuantityChanges,
+  decodeChargeLoadNotification,
+  decodeChargeQuantityChanges,
+} from "../bridge/reloadNotifications.ts";
 import type { RackModule, RackRow } from "./moduleRack.ts";
-import type { InventoryItemRow } from "../store/types.ts";
+import type { FittingSlot, InventoryItemRow } from "../store/types.ts";
 
 const LAUNCHER = 2410;
 const SHIELD_BOOSTER = 10858;
@@ -202,4 +206,80 @@ test("OnChargeBeingLoadedToModule decodes in either list shape", () => {
   assert.equal(decodeChargeLoadNotification("OnChargeBeingLoadedToModule", [[], SCOURGE, 10000]), null);
   assert.equal(decodeChargeLoadNotification("OnChargeBeingLoadedToModule", [[11], SCOURGE, 0]), null);
   assert.equal(decodeChargeLoadNotification("OnTarget", [[11], SCOURGE, 10000]), null);
+});
+
+// --- round counts while firing -------------------------------------------
+
+const SHIP = 1000000001;
+
+/** One OnModuleAttributeChange row, as attributeChangeNotification.js builds it. */
+function quantityChange(flagID: number, chargeTypeID: number, next: number, previous: number) {
+  return ["OnModuleAttributeChange", 90000001, [SHIP, flagID, chargeTypeID], 805, 1, next, previous, 1];
+}
+
+test("OnModuleAttributeChanges yields the charge-tuple quantity changes and nothing else", () => {
+  const changes = decodeChargeQuantityChanges("OnModuleAttributeChanges", [
+    {
+      type: "list",
+      items: [
+        quantityChange(27, INFERNO, 65, 66),
+        // Another attribute on the same charge: not a round count.
+        ["OnModuleAttributeChange", 90000001, [SHIP, 27, INFERNO], 3, 1, 0.1, 0, 1],
+        // A quantity on a real item id: some other stack.
+        ["OnModuleAttributeChange", 90000001, 555, 805, 1, 10, 11, 1],
+      ],
+    },
+  ]);
+  assert.deepEqual(changes, [{ shipID: SHIP, flagID: 27, chargeTypeID: INFERNO, quantity: 65 }]);
+  assert.deepEqual(decodeChargeQuantityChanges("OnGodmaShipEffect", []), []);
+});
+
+function fitSlot(index: number, charge: { typeID: number; quantity: number } | null): FittingSlot {
+  return {
+    family: "high",
+    index,
+    module: {
+      itemID: 100 + index,
+      typeID: LAUNCHER,
+      groupID: null,
+      online: true,
+      charge: charge ? { itemID: [SHIP, 27 + index, charge.typeID], ...charge } : null,
+    },
+  };
+}
+
+test("a shot takes the count down on the slot whose flag it names", () => {
+  const slots = [fitSlot(0, { typeID: INFERNO, quantity: 66 }), fitSlot(1, { typeID: INFERNO, quantity: 66 })];
+  const next = applyChargeQuantityChanges(slots, SHIP, [
+    { shipID: SHIP, flagID: 28, chargeTypeID: INFERNO, quantity: 65 },
+  ]);
+  assert.equal(next[0], slots[0], "the other gun is untouched");
+  assert.equal(next[1]!.module!.charge!.quantity, 65);
+});
+
+test("the last round empties the gun, and a new type going in is recorded as loaded", () => {
+  const slots = [fitSlot(0, { typeID: INFERNO, quantity: 1 })];
+  const empty = applyChargeQuantityChanges(slots, SHIP, [
+    { shipID: SHIP, flagID: 27, chargeTypeID: INFERNO, quantity: 0 },
+  ]);
+  assert.equal(empty[0]!.module!.charge, null);
+  const swapped = applyChargeQuantityChanges(empty, SHIP, [
+    { shipID: SHIP, flagID: 27, chargeTypeID: SCOURGE, quantity: 66 },
+  ]);
+  assert.deepEqual(swapped[0]!.module!.charge, { itemID: [SHIP, 27, SCOURGE], typeID: SCOURGE, quantity: 66 });
+});
+
+test("a swap's old type going to 0 AFTER the new one is in does not empty the gun", () => {
+  const slots = [fitSlot(0, { typeID: SCOURGE, quantity: 66 })];
+  const next = applyChargeQuantityChanges(slots, SHIP, [
+    { shipID: SHIP, flagID: 27, chargeTypeID: INFERNO, quantity: 0 },
+  ]);
+  assert.equal(next, slots);
+});
+
+test("another ship's push, or one that changes nothing, costs no redraw", () => {
+  const slots = [fitSlot(0, { typeID: INFERNO, quantity: 66 })];
+  assert.equal(applyChargeQuantityChanges(slots, SHIP, [{ shipID: 7, flagID: 27, chargeTypeID: INFERNO, quantity: 1 }]), slots);
+  assert.equal(applyChargeQuantityChanges(slots, SHIP, [{ shipID: SHIP, flagID: 27, chargeTypeID: INFERNO, quantity: 66 }]), slots);
+  assert.equal(applyChargeQuantityChanges(slots, null, [{ shipID: SHIP, flagID: 27, chargeTypeID: INFERNO, quantity: 1 }]), slots);
 });

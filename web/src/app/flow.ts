@@ -306,7 +306,10 @@ import {
   tacklersHolding,
 } from "../bridge/jamNotifications.ts";
 import { decodeTargetNotification } from "../bridge/targetNotifications.ts";
-import { decodeChargeLoadNotification } from "../bridge/reloadNotifications.ts";
+import {
+  decodeChargeLoadNotification,
+  decodeChargeQuantityChanges,
+} from "../bridge/reloadNotifications.ts";
 import type { BotScript, WorldRef } from "../bots/botScript.ts";
 import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { expandSubBots, hasSubBots, type BotResolution, type SubBotReference } from "../bots/subBots.ts";
@@ -1798,6 +1801,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
     if (method === "OnGodmaShipEffect") {
       applyCycleNotification(args);
+      // ⚠ THE SAFETY NET UNDER THE ROUND COUNTS. A repeating weapon sends one
+      // start and one stop, not a frame per shot, so the counts ride on the
+      // quantity pushes below. When a gun that holds charges STOPS — it ran
+      // dry, or the pilot switched it off — one re-read squares the rack with
+      // the server, in case a push was dropped. Once per firing stint, not
+      // per shot.
+      const moduleID = Number(args[0]) || 0;
+      if (
+        Number(args[3]) !== 1 &&
+        store.fitting.get().slots.some((slot) => slot.module?.itemID === moduleID && slot.module.charge !== null)
+      ) {
+        scheduleReloadRefresh(0);
+      }
+      return;
+    }
+    if (method === "OnModuleAttributeChanges") {
+      const changes = decodeChargeQuantityChanges(method, args);
+      if (changes.length > 0) {
+        store.apply({ type: "fitting/charge-quantity", changes });
+      }
       return;
     }
     const chargeLoad = decodeChargeLoadNotification(method, args);
@@ -1909,8 +1932,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   let holdRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Re-read the fit once a queued reload has landed, so the rack's counts show
-   * what is in the guns rather than what was there before. One timer: a later
-   * announcement only ever pushes it later, and one read answers them all.
+   * what is in the guns rather than what was there before (and, with 0, once a
+   * gun stops firing). One timer: a later request only ever pushes it later,
+   * and one read answers them all.
    */
   let reloadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let reloadRefreshAtMs = 0;

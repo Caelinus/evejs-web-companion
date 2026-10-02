@@ -103,6 +103,7 @@ import { deriveShipStats } from "../bridge/shipStats.ts";
 import { applyJamEvent, type ActiveJam } from "../bridge/jamNotifications.ts";
 import { EMPTY_RECIPE_BOOK } from "../bridge/piRecipes.ts";
 import { applyTargetEvent } from "../bridge/targetNotifications.ts";
+import { applyChargeQuantityChanges } from "../bridge/reloadNotifications.ts";
 
 // --- Typed state slices ----------------------------------------------------
 
@@ -1307,6 +1308,14 @@ export function createClientStore(): ClientStore {
           reloads: fitting.get().reloads,
         });
         break;
+      case "fitting/charge-quantity": {
+        const current = fitting.get();
+        const slots = applyChargeQuantityChanges(current.slots, current.activeShipID, event.changes);
+        if (slots !== current.slots) {
+          fitting.set({ ...current, slots });
+        }
+        break;
+      }
       case "fitting/reload-started": {
         // Finished reloads are dropped here rather than on a timer: this is
         // the only place the record grows, so it never grows unbounded.

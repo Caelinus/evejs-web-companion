@@ -249,6 +249,11 @@ export type FeedEvent =
   // A fitting action (fit/unfit/online/offline/destroy) failed or was declined;
   // null clears the error after a clean action.
   | { readonly type: "fitting/action-error"; readonly message: string | null }
+  // Round counts the server pushed as guns fired (`OnModuleAttributeChanges`).
+  | {
+      readonly type: "fitting/charge-quantity";
+      readonly changes: readonly import("../bridge/reloadNotifications.ts").ChargeQuantityChange[];
+    }
   // The server announced a reload (`OnChargeBeingLoadedToModule`).
   | {
       readonly type: "fitting/reload-started";
