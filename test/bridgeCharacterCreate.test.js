@@ -172,6 +172,7 @@ function fakeStaticData() {
 
 function fakeGateway() {
   const calls = { callMethod: [] };
+  const created = [];
   return {
     calls,
     async selectCharacter() {
@@ -201,7 +202,20 @@ function fakeGateway() {
       if (method === "GetCharCreationInfo") {
         return { service, method, result: creationInfoResult(), notifications: [] };
       }
+      if (method === "ValidateNameEx") {
+        return { service, method, result: 1, notifications: [] };
+      }
+      if (method === "GetCharacterSelectionData") {
+        return { service, method, result: [
+          { type: "list", items: [keyVal([["userName", ACCOUNT.username], ["characterSlots", 3]])] },
+          null,
+          { type: "list", items: created.map((row) => keyVal([
+            ["characterID", row.characterID], ["characterName", row.name],
+          ])) },
+        ], notifications: [] };
+      }
       if (method === "CreateCharacterWithDoll") {
+        created.push({ characterID: NEW_CHARACTER_ID, name: args[0] });
         return { service, method, result: NEW_CHARACTER_ID, notifications: [] };
       }
       return { service, method, result: null, notifications: [] };
