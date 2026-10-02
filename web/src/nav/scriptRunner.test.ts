@@ -200,6 +200,10 @@ test("a one-shot action confirmed while paused completes without a duplicate on 
   const tick = runner.tick();
   await entered;
   runner.pause();
+  runner.resume();
+  assert.equal(runner.getStatus(), "paused", "Resume waits for the issued write's outcome");
+  assert.equal(runner.resumeHeadHome("Stop"), false);
+  assert.equal(runner.tick(), tick, "concurrent ticks share the outstanding transaction");
   assert.throws(() => runner.start(doc), /still awaiting its outcome/);
   finish();
   await tick;
@@ -208,6 +212,204 @@ test("a one-shot action confirmed while paused completes without a duplicate on 
   await runner.tick();
   assert.equal(runner.getStatus(), "stopped");
   assert.equal(issued.length, 1);
+});
+
+for (const outcome of ["refused", "ambiguous"] as const) {
+  test(`a pending ${outcome} one-shot blocks all resume paths until its outcome settles`, async () => {
+    const scenario = completionCases[0]!;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let fail!: (error: unknown) => void;
+    const pending = new Promise<void>((_resolve, reject) => { fail = reject; });
+    const issued: ScriptAction[] = [];
+    let first = true;
+    const runner = createScriptRunner({ observe: async () => scenario.observation,
+      issue: async action => { issued.push(action); if (first) { first = false; entered(); await pending; } },
+      sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+      registry: SCRIPT_MACROS, travelHome: home,
+    });
+    const doc = script([scenario.step]);
+    runner.start(doc);
+    const tick = runner.tick();
+    await started;
+    runner.pause();
+    runner.resume();
+    assert.equal(runner.getStatus(), "paused");
+    assert.equal(runner.resumeHeadHome("Stop"), false);
+    const suspended = runner.suspendTransport();
+    assert.throws(() => runner.resumeTransport(), /unresolved/);
+    assert.throws(() => runner.start(doc), /still awaiting/);
+    assert.equal(runner.tick(), tick);
+    assert.equal(issued.length, 1);
+    fail(Object.assign(new Error(outcome === "refused" ? "CALL_REFUSED" : "EVE_GATEWAY_TIMEOUT"),
+      { code: outcome === "refused" ? "CALL_REFUSED" : "EVE_GATEWAY_TIMEOUT" }));
+    await tick;
+    await suspended;
+    if (outcome === "refused") {
+      runner.resume();
+      assert.equal(runner.getStatus(), "paused", "ordinary Resume cannot bypass session recovery");
+      runner.resumeTransport();
+      for (let i = 0; i < 8 && runner.getStatus() === "running"; i++) await runner.tick();
+      assert.equal(issued.length, 2, "a definite refusal remains retryable after settlement");
+      assert.equal(runner.getStatus(), "stopped");
+    } else {
+      runner.resume();
+      assert.equal(runner.getStatus(), "paused");
+      assert.equal(runner.resumeHeadHome("Stop"), false);
+      assert.throws(() => runner.resumeTransport(), /unresolved/);
+      assert.throws(() => runner.start(doc), /Verify the previous/);
+      assert.equal(issued.length, 1);
+    }
+    runner.stop();
+  });
+}
+
+test("Stop cannot replace an outstanding action with a fresh driver", async () => {
+  const scenario = completionCases[0]!;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let finish!: () => void;
+  const pending = new Promise<void>(resolve => { finish = resolve; });
+  const runner = createScriptRunner({ observe: async () => scenario.observation,
+    issue: async () => { entered(); await pending; }, sleep: async () => {}, onProgress: () => {},
+    isSessionLost: () => false, refusalReason: String, registry: SCRIPT_MACROS, travelHome: home,
+  });
+  const doc = script([scenario.step]);
+  runner.start(doc);
+  const tick = runner.tick();
+  await started;
+  runner.stop();
+  assert.throws(() => runner.start(doc), /still awaiting/);
+  assert.equal(runner.tick(), tick);
+  finish();
+  await tick;
+  assert.equal(runner.getStatus(), "stopped");
+  assert.doesNotThrow(() => runner.start(doc));
+  runner.stop();
+});
+
+for (const scenario of completionCases) {
+  test(`${scenario.step.macro} keeps completion when a pending success settles during transport suspension`, async () => {
+    let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const issued: ScriptAction[] = [];
+    const runner = createScriptRunner({ observe: async () => scenario.observation,
+      issue: async action => { issued.push(action); entered(); await pending; },
+      sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+      registry: SCRIPT_MACROS, travelHome: home,
+    });
+    runner.start(script([scenario.step]));
+    const ticking = runner.tick();
+    await started;
+    const suspension = runner.suspendTransport();
+    assert.throws(() => runner.resumeTransport(), /unresolved/);
+    finish();
+    await ticking;
+    await suspension;
+    runner.resume();
+    assert.equal(runner.getStatus(), "paused");
+    assert.equal(runner.resumeHeadHome("Stop"), false);
+    runner.resumeTransport();
+    for (let i = 0; i < 8 && runner.getStatus() === "running"; i++) await runner.tick();
+    assert.equal(runner.getStatus(), "stopped");
+    assert.deepEqual(issued.map(action => action.kind), [scenario.action], "confirmed completion survived recovery");
+  });
+}
+
+for (const outcome of ["success", "refused", "ambiguous"] as const) {
+  test(`partial move quantity survives a ${outcome} second write across transport recovery`, async () => {
+    const scenario = completionCases[3]!;
+    const row = (itemID: number, quantity: number) => ({ itemID, quantity, typeID: 34, categoryID: 4, groupID: 18,
+      flagID: null, singleton: false });
+    let observation = { ...scenario.observation, stationHangar: [row(101, 20), row(102, 100)] };
+    let entered!: () => void, finish!: () => void, fail!: (error: unknown) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
+    const issued: ScriptAction[] = [];
+    const runner = createScriptRunner({ observe: async () => observation,
+      issue: async action => { issued.push(action);
+        if (issued.length === 1) observation = { ...observation, stationHangar: [row(102, 100)] };
+        if (issued.length === 2) { entered(); await pending; }
+      },
+      sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+      registry: SCRIPT_MACROS, travelHome: home,
+    });
+    runner.start(script([scenario.step]));
+    await runner.tick();
+    for (let i = 0; i < SETTLE_TICKS; i++) await runner.tick();
+    const ticking = runner.tick();
+    await started;
+    assert.equal(issued[1]?.kind === "moveItems" && issued[1].qty, 10);
+    const suspension = runner.suspendTransport();
+    if (outcome === "success") finish();
+    else fail(Object.assign(new Error(outcome), { code: outcome === "refused" ? "CALL_REFUSED" : "EVE_GATEWAY_TIMEOUT" }));
+    await ticking;
+    await suspension;
+    if (outcome === "ambiguous") {
+      assert.throws(() => runner.resumeTransport(), /unresolved/);
+      runner.resume();
+      assert.equal(runner.resumeHeadHome("Stop"), false);
+      assert.equal(runner.getStatus(), "paused");
+      assert.equal(issued.length, 2, "the unverified final ten units cannot be replayed");
+      runner.stop();
+      return;
+    }
+    runner.resumeTransport();
+    for (let i = 0; i < 8 && runner.getStatus() === "running"; i++) await runner.tick();
+    assert.equal(runner.getStatus(), "stopped");
+    assert.deepEqual(issued.filter(action => action.kind === "moveItems").map(action => action.qty),
+      outcome === "success" ? [null, 10] : [null, 10, 10], "the first twenty units are never forgotten");
+  });
+}
+
+test("unclassified accepted state stays intact and transport paused; previous completed steps do not block a new step", async () => {
+  const state = { aimedAt: 42, accepted: true };
+  let seen: unknown;
+  const h = harness({ registry: {
+    undock: (_step, _obs, mem) => { seen = mem; return mem["accepted"]
+      ? { ...mt({ kind: "wait" }, { kind: "done" }), nextMem: mem }
+      : { ...mt({ kind: "align", targetID: 42 }, { kind: "acting" }), nextMem: state }; },
+    "wait": (_step, _obs, mem) => ({ ...mt({ kind: "wait" }, { kind: "acting" }), nextMem: mem }),
+  } });
+  const doc = script([macroStep("u", "undock"), macroStep("later", "wait")]);
+  h.runner.start(doc);
+  await h.runner.tick();
+  await h.runner.suspendTransport();
+  assert.throws(() => h.runner.resumeTransport(), /cannot be reset safely.*Progress has been preserved/);
+  assert.match(h.runner.snapshot().pauseReason ?? "", /Verify it in the game/);
+  h.runner.resume();
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.equal(h.runner.resumeHeadHome("Stop"), false);
+  assert.throws(() => h.runner.start(doc), /preserved step/);
+  h.runner.stop();
+  h.runner.start(doc);
+  await h.runner.tick();
+  for (let i = 0; i < SETTLE_TICKS + 1; i++) await h.runner.tick();
+  assert.equal(seen, state, "the accepted record is retained in ordinary operation");
+  assert.equal(h.runner.snapshot().stepPath, "later");
+  await h.runner.suspendTransport();
+  assert.doesNotThrow(() => h.runner.resumeTransport(), "the completed earlier step has relinquished its state");
+  h.runner.stop();
+});
+
+test("a confirmed sell retains its step state and requires verification instead of an automatic replay", async () => {
+  const scenario = completionCases[3]!;
+  const step: MacroStep = { id: "sell", kind: "macro", macro: "sell-item", args: {
+    item: { kind: "itemType", typeID: 34, name: "Tritanium" }, price: { kind: "isk", value: 1 },
+  } };
+  const h = harness({ registry: SCRIPT_MACROS });
+  h.setObs(scenario.observation);
+  h.runner.start(script([step]));
+  await h.runner.tick();
+  assert.equal(h.issued[0]?.kind, "placeSellOrder");
+  await h.runner.suspendTransport();
+  assert.throws(() => h.runner.resumeTransport(), /cannot be reset safely/);
+  h.runner.resume();
+  await h.runner.tick();
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.equal(h.issued.length, 1);
+  h.runner.stop();
 });
 
 test("a refused first home movement does not discard the safety watch's destination", async () => {
@@ -413,6 +615,82 @@ test("an unconfirmed corporate route move pauses before any automatic retry", as
   assert.equal(h.issued.length, 1, "the route cannot blindly retry or auto-reconcile while paused");
 });
 
+for (const applied of [true, false]) {
+  test(`a suspended corporate transfer retains its manifest for ${applied ? "applied" : "refused"} reconciliation`, async () => {
+    const row = (itemID: number, quantity: number) => ({ itemID, quantity, typeID: 34, groupID: 18, categoryID: 4,
+      flagID: null, singleton: false, volume: 1 });
+    const station = (id: number) => ({ kind: "station" as const, ref: { entity: "station" as const, id,
+      name: `Station ${id}`, systemName: null } });
+    const step: MacroStep = { id: "haul", kind: "macro", macro: "haul-all", args: {
+      pickupStation: station(1), deliveryStation: station(2),
+      pickupCorpDivision: { kind: "corpDivision", division: 1, name: null },
+      deliveryCorpDivision: { kind: "corpDivision", division: 2, name: null },
+    } };
+    const source = [row(10, 20)];
+    const destination = [row(99, 30)];
+    let observation = calm({ inSpace: false, docked: true,
+      flightStatus: flight({ inSpace: false, docked: true, stationID: 1 }), myCorporationID: 98000123,
+      haulDivisions: { 1: source }, cargo: { rows: destination, capacity: { capacity: 100, used: 30 } }, shipBays: [],
+    });
+    let entered!: () => void, fail!: (error: unknown) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>((_resolve, reject) => { fail = reject; });
+    let received: Parameters<MacroDecider>[2] | null = null;
+    const issued: ScriptAction[] = [];
+    const runner = createScriptRunner({ observe: async () => observation,
+      issue: async action => { issued.push(action); entered(); await pending; },
+      registry: { "haul-all": (s, o, mem, board) => { received = mem; return SCRIPT_MACROS["haul-all"](s, o, mem, board); } },
+      travelHome: home, sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+    });
+    runner.start(script([step]));
+    const ticking = runner.tick();
+    await started;
+    assert.equal(issued[0]?.kind, "haulTransfer");
+    const suspension = runner.suspendTransport();
+    fail(Object.assign(new Error("EVE_GATEWAY_TIMEOUT"), { code: "EVE_GATEWAY_TIMEOUT" }));
+    await ticking;
+    await suspension;
+    if (applied) observation = { ...observation, haulDivisions: { 1: [] },
+      cargo: { rows: [row(99, 50)], capacity: { capacity: 100, used: 50 } } };
+    runner.resumeTransport();
+    await runner.tick();
+    const manifest = (received as Parameters<MacroDecider>[2] | null)?.["haul"] as
+      { pending?: { source: unknown; destination: unknown; quantity: number } } | undefined;
+    assert.equal(manifest?.pending?.source, source, "the exact source baseline is retained");
+    assert.equal(manifest?.pending?.destination, destination, "the exact destination baseline is retained");
+    assert.equal(manifest?.pending?.quantity, 20);
+    assert.equal(issued.length, 1, "reconciliation runs before any new transfer");
+    if (applied) assert.match(runner.snapshot().why ?? "", /route transfer is verified/);
+    else assert.match(runner.snapshot().pauseReason ?? "", /partial, refused or ambiguous/);
+    runner.stop();
+  });
+}
+
+test("a suspended strict corporate unload retains unverified state and cannot bypass recovery", async () => {
+  const manifest = { itemIDs: [10], destination: 2 };
+  let entered!: () => void, fail!: (error: unknown) => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<void>((_resolve, reject) => { fail = reject; });
+  const runner = createScriptRunner({ observe: async () => calm({ holdEmpty: false }),
+    issue: async () => { entered(); await pending; },
+    registry: { "deliver-ore": () => ({ ...mt({ kind: "unloadOre", itemIDs: [10], division: 2, strictCorp: true },
+      { kind: "acting" }), nextMem: { pending: manifest } }) },
+    travelHome: home, sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+  });
+  runner.start(script([macroStep("deliver", "deliver-ore")]));
+  const ticking = runner.tick();
+  await started;
+  const suspension = runner.suspendTransport();
+  fail(Object.assign(new Error("EVE_GATEWAY_TIMEOUT"), { code: "EVE_GATEWAY_TIMEOUT" }));
+  await ticking;
+  await suspension;
+  assert.throws(() => runner.resumeTransport(), /cannot be reset safely/);
+  runner.resume();
+  assert.equal(runner.getStatus(), "paused");
+  assert.equal(runner.resumeHeadHome("Stop"), false);
+  runner.stop();
+});
+
 test("hosted graceful Stop waits for an issued action, then can resume only the home trip", async () => {
   let issueStarted: () => void = () => {};
   let finishIssue: () => void = () => {};
@@ -491,7 +769,7 @@ test("transport suspension fences an awaited observation without resetting the s
   const frozen = runner.suspendTransport(); fail(new SessionLost()); await ticking; await frozen;
   assert.equal(runner.getStatus(), "paused"); assert.equal(runner.transportCustody(), false);
   assert.equal(issued.length, 0);
-  runner.resume(); await runner.tick();
+  runner.resumeTransport(); await runner.tick();
   assert.equal(issued[0]?.kind, "unloadOre", "the original program can continue after fresh authority is verified");
 });
 

@@ -126,6 +126,13 @@ function recoversHoldSpace(action: ScriptAction): boolean {
       (action.from === "cargo" || action.from === "ore") && action.to === "hangar");
 }
 
+/** These contracts retain completion/counts or verify a pending manifest first. */
+function canRecoverConfirmedProgress(action: ScriptAction): boolean {
+  return action.kind === "placeBuyOrder" || action.kind === "applyFitting"
+    || action.kind === "scannerAnalyze" || action.kind === "moveItems"
+    || action.kind === "haulTransfer";
+}
+
 /**
  * The world object an action addresses, when it addresses one.
  *
@@ -301,6 +308,27 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   // awaiting the wire. A fresh Start cannot replace that pending transaction.
   let issuePending = false;
   let uncertainAction: ScriptAction | null = null;
+  // Recovery must not erase an accepted write's completion or quantity. Track
+  // whole records, never private macro keys; an unclassified contract pauses.
+  const retainedProgress = new Map<string, { visit: string; recoverable: boolean; action: ScriptAction }>();
+  let recoveryBlocked = false;
+  const visitKey = (mem: ScriptMemory) => JSON.stringify([mem.position, mem.loopPass]);
+  function retainActionProgress(before: ScriptMemory, next: ScriptMemory, action: ScriptAction): void {
+    const visit = visitKey(next);
+    for (const [key, record] of Object.entries(next.macroMem)) {
+      if (record === before.macroMem[key]) continue;
+      const previous = retainedProgress.get(key);
+      retainedProgress.set(key, { visit,
+        action: previous?.visit === visit && !previous.recoverable ? previous.action : action,
+        recoverable: canRecoverConfirmedProgress(action) && (previous?.visit !== visit || previous.recoverable) });
+    }
+  }
+  function activeProgress(): readonly { recoverable: boolean; action: ScriptAction }[] {
+    for (const [key, progress] of retainedProgress) {
+      if (!memory || !(key in memory.macroMem) || progress.visit !== visitKey(memory)) retainedProgress.delete(key);
+    }
+    return [...retainedProgress.values()];
+  }
   let claim: { runID: string; systemID: number; itemID: number } | null = null;
   let transportSuspended = false;
   const travelAssist = deps.travelAssist ? createTravelAssist({ ...deps.travelAssist,
@@ -594,6 +622,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     if (isWorldCall(result.action)) {
+      const beforeAction = memory;
       // A safety watch's home destination is intent, not action completion:
       // keep that latch even when this first movement request is refused.
       memory = { ...memory, latched: memory.latched ?? result.memory.latched };
@@ -617,6 +646,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         // Completion belongs to the confirmed action, including one that
         // finished while paused. Preserve a concurrently requested home trip.
         memory = { ...result.memory, latched: memory?.latched ?? result.memory.latched };
+        retainActionProgress(beforeAction, memory, result.action);
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
         record({
@@ -647,6 +677,13 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
             says: describeAction(result.action), stepPath: result.stepPath });
           pauseWith(`The outcome of ${describeAction(result.action)} could not be confirmed. Verify it in the game, then Stop before starting a new run. ${refusalWords(reason)}`, result);
           return;
+        }
+        if (result.action.kind === "haulTransfer" || (result.action.kind === "unloadOre" && result.action.strictCorp === true)) {
+          // The result owns the exact pre-transfer manifest even when transport
+          // suspension retired this tick. Its next observation reconciles it.
+          memory = { ...result.memory, latched: memory?.latched ?? result.memory.latched };
+          retainActionProgress(beforeAction, memory, result.action);
+          if (token !== runToken || status !== "running") return;
         }
         if (token !== runToken || status !== "running") return;
         if (result.action.kind === "jettison" && deps.mutationCustody?.()) {
@@ -763,11 +800,13 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   }
 
   function tick(): Promise<void> {
+    if (activeTick !== null) return activeTick;
     const pending = tickBody();
-    activeTick = pending;
-    return pending.finally(() => {
-      if (activeTick === pending) activeTick = null;
+    const owned = pending.finally(() => {
+      if (activeTick === owned) activeTick = null;
     });
+    activeTick = owned;
+    return owned;
   }
 
   /**
@@ -894,12 +933,15 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     start(next: BotScript): void {
       if (issuePending) throw new Error("The previous script action is still awaiting its outcome.");
       if (uncertainAction) throw new Error("Verify the previous action's outcome, then Stop before starting a new run.");
+      if (recoveryBlocked) throw new Error("Verify the preserved step's state, then Stop before starting a new run.");
       if (deps.mutationCustody?.()) throw new Error("Jettison mutation custody still owns unresolved work.");
       transportSuspended = false;
       releaseAfterIssue();
       runToken += 1;
       script = next;
       memory = initialMemory(next);
+      retainedProgress.clear();
+      recoveryBlocked = false;
       // A fresh run id BEFORE the first emit, so every line of this run —
       // starting with its own header — is grouped under it. The header is also
       // what tells a store to rotate the previous run's log out.
@@ -928,7 +970,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
     },
     resume(): void {
-      if (uncertainAction || deps.mutationCustody?.()) return;
+      if (transportSuspended || issuePending || uncertainAction || deps.mutationCustody?.()) return;
       if (status === "paused") {
         transportSuspended = false;
         runToken += 1;
@@ -938,6 +980,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     },
     stop(): void {
       uncertainAction = null;
+      recoveryBlocked = false;
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
@@ -965,17 +1008,25 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return issuePending || uncertainAction !== null || claim !== null || travelAssist?.pending() === true || deps.mutationCustody?.() === true;
     },
     resumeTransport(): void {
-      if (!transportSuspended || status !== "paused" || uncertainAction || claim || travelAssist?.pending() || deps.mutationCustody?.())
+      if (!transportSuspended || status !== "paused" || issuePending || uncertainAction || claim || travelAssist?.pending() || deps.mutationCustody?.())
         throw new Error("Transport recovery still owns unresolved work.");
-      // Keep program position and run identity; re-derive macro movement,
-      // target and drone decisions from the reacquired session's observations.
-      if (memory) memory = { ...memory, macroMem: {}, miningFlight: undefined, terminalDroneTicks: undefined };
+      const progress = activeProgress();
+      const unverified = progress.find(entry => !entry.recoverable);
+      if (unverified) {
+        recoveryBlocked = true;
+        const reason = `Session recovered, but ${describeAction(unverified.action)} left step state that cannot be reset safely. Progress has been preserved. Verify it in the game, then Stop before restarting.`;
+        emit({ ...last, status: "paused", phase: "Recovery needs verification", why: reason, pauseReason: reason });
+        throw new Error(reason);
+      }
+      // Untouched steps can re-derive transient state. Confirmed progress stays
+      // intact: clearing all memory would buy twice or reset a partial quantity.
+      if (memory && progress.length === 0) memory = { ...memory, macroMem: {}, miningFlight: undefined, terminalDroneTicks: undefined };
       lastObs = null; settle = 0; readFailures = 0;
       transportSuspended = false; runToken += 1; status = "running";
       emit({ ...last, status: "running", phase: "Session recovered", why: null, pauseReason: null });
     },
     resumeHeadHome(reason: string): boolean {
-      if (status !== "paused" || memory === null || script === null || uncertainAction || deps.mutationCustody?.()) return false;
+      if (transportSuspended || status !== "paused" || memory === null || script === null || issuePending || uncertainAction || deps.mutationCustody?.()) return false;
       runToken += 1;
       if (memory.latched === null) memory = { ...memory, latched: { interruptID: null, reason } };
       status = "running";
