@@ -20,6 +20,7 @@
     current,
     onPick,
     scope = "station",
+    boardBindings = true,
   }: {
     flow: Pick<AppFlow, "searchDestinations">;
     value: WorldRef;
@@ -38,6 +39,8 @@
      * name stations by definition.
      */
     scope?: "station" | "dockable" | "any" | "system";
+    /** Builder board slots are only offered where the run can bind them. */
+    boardBindings?: boolean;
   } = $props();
 
   const stationsAllowed = $derived(scope !== "system");
@@ -148,7 +151,7 @@
     {/if}
     <!-- Runtime bindings: follow whatever an earlier block found, instead of a
          station pinned now. Station-only, so not offered on a destination slot. -->
-    {#if scope === "station"}
+    {#if scope === "station" && boardBindings}
       {#each BOARD_SLOTS as slot (slot)}
         <button onclick={() => chooseSlot(slot)}>{boardSlotPhrase(slot)}</button>
       {/each}

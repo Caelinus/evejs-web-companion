@@ -52,12 +52,14 @@
     loadPiHaulPrefs,
     savePiHaulPrefs,
     withEntry,
+    withPiHaulDelivery,
     type PiHaulPrefs,
   } from "../app/piHaulPrefs.ts";
   import CorpHangarPicker from "./CorpHangarPicker.svelte";
   import StationPicker from "./StationPicker.svelte";
   import type { AppFlow } from "../app/flow.ts";
-  import { findMapLocations, loadBotCorpDivisionNames } from "../app/api.ts";
+  import { findMapLocations } from "../app/api.ts";
+  import { readBotDivisionNames, type PiDivisionNamesRead } from "../app/piHaulNames.ts";
   import { startingStation, type WorldRef } from "../bots/botScript.ts";
   import { listActiveServerBots } from "../app/api.ts";
   import { commodityName, decodeRecipeBook, madeThings, tierOf, type PiRecipeBook, type PiTier } from "../bridge/piRecipes.ts";
@@ -199,10 +201,9 @@
     keepHaul({ ...haulPrefs, divisions: withEntry(haulPrefs.divisions, characterID, picked) });
   }
 
-  /** "Where the run starts" is the default, so it is stored as nothing. */
+  /** Change keeps an empty ref while searching; starting station is the default. */
   function pickDeliverTo(characterID: number, ref: WorldRef): void {
-    const picked = ref.starting === true || ref.id === null ? null : ref;
-    keepHaul({ ...haulPrefs, deliverTo: withEntry(haulPrefs.deliverTo, characterID, picked) });
+    keepHaul(withPiHaulDelivery(haulPrefs, characterID, ref));
   }
 
   /** This pilot's corporation, from its last colony read. */
@@ -216,25 +217,23 @@
    * corporation, so the picker says the names on a day nobody is online.
    */
   async function learnNames(): Promise<void> {
-    let next = haulPrefs;
+    const reads: PiDivisionNamesRead[] = [];
     for (const session of sessions) {
       const online = session.store.station.get().online;
       if (!online) continue;
       try {
         const offices = await session.flow.loadCorpOffices();
-        next = learnDivisionNames(next, online.corporationID, offices.divisions);
+        reads.push({ characterID: online.characterID, corporationID: online.corporationID, divisions: offices.divisions });
       } catch {
         // Not this one; the names stay as they were.
       }
     }
-    for (const characterID of roster.members) {
-      if (!activeBots.has(characterID)) continue;
-      try {
-        const read = await loadBotCorpDivisionNames(characterID);
-        next = learnDivisionNames(next, read.corporationID ?? corporationOf(characterID) ?? 0, read.divisions);
-      } catch {
-        // No bot session to read through after all.
-      }
+    reads.push(...await readBotDivisionNames(botPilots()));
+    // Choices can change while the reads are in flight. Merge names onto the
+    // current choices, so a refresh never restores an earlier destination.
+    let next = haulPrefs;
+    for (const read of reads) {
+      next = learnDivisionNames(next, read.corporationID ?? corporationOf(read.characterID) ?? 0, read.divisions);
     }
     if (next !== haulPrefs) keepHaul(next);
   }
@@ -892,6 +891,7 @@
                     flow={stationSearch}
                     value={deliverTo ?? startingStation()}
                     current={null}
+                    boardBindings={false}
                     onPick={(ref) => pickDeliverTo(group.characterID, ref)}
                   />
                 </span>

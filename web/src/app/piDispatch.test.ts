@@ -38,6 +38,7 @@ import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import { analyzeBotRunPolicy, validateBotLaunchGrant } from "../bots/runPolicy.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
 import type { BotLaunchGrant } from "../bots/runPolicy.ts";
+import { SCRIPT_MACROS } from "../nav/scriptMacros.ts";
 
 const PILOT = 90000001;
 
@@ -227,6 +228,29 @@ test("the haul doc with no division unloads into the pilot's own hangar", () => 
   const unload = piHaulBotDoc(COLONIES.slice(0, 1), null).program.find((step) => step.kind === "macro" && step.macro === "unload-cargo");
   assert.ok(unload !== undefined && unload.kind === "macro");
   assert.deepEqual(unload.args, {});
+});
+
+test("the saved haul launches nonempty command centres even below one percent full", () => {
+  const decoded = decodeScriptValue(piHaulBotDoc(COLONIES.slice(0, 1), null));
+  assert.ok(decoded.ok);
+  if (!decoded.ok) return;
+  const launch = decoded.doc.program[0]!;
+  assert.ok(launch.kind === "macro");
+  const result = SCRIPT_MACROS["launch-commodities"]!(launch, {
+    colonies: [{
+      planetID: COLONIES[0]!.planetID,
+      planetName: COLONIES[0]!.planetName,
+      pins: [{
+        pinID: 100,
+        kind: "command",
+        usedM3: 1,
+        capacityM3: 500,
+        contents: [{ typeID: 2398, quantity: 1 }],
+        lastLaunchAtMs: null,
+      }],
+    }],
+  } as never, {}, {});
+  assert.equal(result.action.kind, "launchCommodities");
 });
 
 test("haul: saves the bot once, then rewrites it on the next haul and starts that revision", async () => {
