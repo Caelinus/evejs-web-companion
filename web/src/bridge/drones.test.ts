@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   decodeDroneBay,
+  decodeDroneEngageOutcome,
   decodeDroneLimits,
   decodeDroneOrderRefusals,
   decodeDronesInSpace,
@@ -449,4 +450,64 @@ test("a snapshot that lists the same drone twice yields one drone", () => {
     { itemID: 602, typeID: 2456, activity: null },
   ] as unknown as JsonValue);
   assert.deepEqual((drones ?? []).map((drone) => drone.itemID), [601, 602]);
+});
+
+const ENGAGE_TARGET = 300001;
+const engagedDrone = (itemID: number, targetID: number | null = ENGAGE_TARGET) => ({
+  itemID, controlled: true, targetID, activity: "fighting",
+});
+
+test("Engage confirms combat and repair assignments from the authoritative controlled target", () => {
+  for (const activity of ["fighting", "approaching", "chasing", null]) {
+    assert.deepEqual(decodeDroneEngageOutcome({ type: "dict", entries: [] }, [
+      { ...engagedDrone(601), activity },
+    ], [601], ENGAGE_TARGET), {
+      status: "accepted", acceptedDroneIDs: [601], refusedDroneIDs: [], uncertainDroneIDs: [], refusals: [],
+    });
+  }
+});
+
+test("Engage preserves accepted and explicitly refused subsets of one flight", () => {
+  const result = { type: "dict", entries: [droneError(602, "That target is out of drone control range.")] };
+  assert.deepEqual(decodeDroneEngageOutcome(result, [engagedDrone(601), engagedDrone(602)], [601, 602], ENGAGE_TARGET), {
+    status: "refused", acceptedDroneIDs: [601], refusedDroneIDs: [602], uncertainDroneIDs: [],
+    refusals: [{ droneID: 602, errorKey: "CustomNotify", raw: "That target is out of drone control range." }],
+  }, "an existing target assignment does not override this call's explicit refusal");
+});
+
+test("Engage recognizes named UserError tuples and long drone ids without requiring prose", () => {
+  assert.deepEqual(decodeDroneEngageOutcome({ entries: [
+    [{ type: "long", value: "602" }, ["SafetyActivated", { type: "dict", entries: [] }]],
+  ] }, null, [602], ENGAGE_TARGET), {
+    status: "refused", acceptedDroneIDs: [], refusedDroneIDs: [602], uncertainDroneIDs: [],
+    refusals: [{ droneID: 602, errorKey: "SafetyActivated", raw: "SafetyActivated" }],
+  });
+});
+
+test("Engage retains definite refusals while an omitted drone's outcome is unknown", () => {
+  assert.deepEqual(decodeDroneEngageOutcome({ entries: [droneError(602, "Not visible.")] },
+    [engagedDrone(601, null), engagedDrone(602)], [601, 602], ENGAGE_TARGET), {
+    status: "uncertain", acceptedDroneIDs: [], refusedDroneIDs: [602], uncertainDroneIDs: [601],
+    refusals: [{ droneID: 602, errorKey: "CustomNotify", raw: "Not visible." }],
+  });
+});
+
+test("Engage cannot infer acceptance from an empty dict with unreadable or inconsistent post-state", () => {
+  for (const flight of [null, [], [engagedDrone(601, null)], [{ ...engagedDrone(601), controlled: false }],
+    [{ itemID: 601, targetID: ENGAGE_TARGET }], [engagedDrone(601), engagedDrone(601)]]) {
+    assert.deepEqual(decodeDroneEngageOutcome({ entries: [] }, flight, [601], ENGAGE_TARGET), {
+      status: "uncertain", acceptedDroneIDs: [], refusedDroneIDs: [], uncertainDroneIDs: [601], refusals: [],
+    });
+  }
+});
+
+test("Engage cannot infer acceptance or a safe retry from malformed result entries", () => {
+  const malformed: JsonValue[] = [null, {}, { entries: [droneError(999, "Foreign drone.")] },
+    { entries: [[601, null]] }, { entries: [droneError(601, "No."), droneError(601, "No.")] },
+    { entries: [[601, ["CustomNotify", null]]] }];
+  for (const result of malformed) {
+    assert.deepEqual(decodeDroneEngageOutcome(result, [engagedDrone(601)], [601], ENGAGE_TARGET), {
+      status: "uncertain", acceptedDroneIDs: [], refusedDroneIDs: [], uncertainDroneIDs: [601], refusals: [],
+    });
+  }
 });

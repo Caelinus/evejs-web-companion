@@ -6941,12 +6941,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // is why the two action kinds carry differently named fields rather
           // than sharing one.
           //
-          // ⚠ NEITHER RETURN VALUE IS READ, AND api.ts SAYS WHY: the server's
-          // launch handler answers 200 with an empty dict when it REFUSES, and
-          // the entity orders answer an empty dict on success. The wrappers
-          // report what the BFF re-read out of space afterwards, and the rung
-          // does not consult even that -- it watches the grid on the next tick,
-          // which is the only authority either way.
+          // Launch and recall are confirmed from the grid on the next tick.
+          // Engage instead settles each requested drone from the server's
+          // refusal dict and the authoritative post-call target read.
           case "launchDrones":
             // ⚠ THE WHOLE STACK, NOT ONE FROM IT. See wholeStackLaunch.
             await api.launchDrones(
@@ -6962,11 +6959,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           // ⚠ ONE CALL, TWO MEANINGS, AND THE SERVER PICKS. `CmdEngage` aimed at
           // a hostile is an attack; aimed at a friendly ship it is dispatched to
-          // the drone REPAIR path instead. The companion only ever issues it for
-          // the second case -- combat drones are left alone, because the server
-          // already assigns idle ones onto whatever shoots their controller.
+          // the drone REPAIR path instead. Both flights receive an explicit
+          // order; server auto-defense alone does not follow the fleet primary.
           case "engageDrones":
-            await api.engageDrones(action.droneIDs, action.targetID, callOptions);
+            await api.engageDronesConfirmed(action.droneIDs, action.targetID, callOptions);
             return;
           // ⚠ `targetID: 0` IS THE SERVER'S AUTO-PICK, not a missing value.
           case "salvageDrones":
@@ -7235,7 +7231,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         await api.launchDrones(wholeStackLaunch(itemIDs, droneStackSizesSeen), callOptions);
       },
       recallDrones: async (ids) => { await api.recallDrones(ids, callOptions); },
-      engageDrones: async (ids, targetID) => { await api.engageDrones(ids, targetID, callOptions); },
+      engageDrones: async (ids, targetID) => { await api.engageDronesConfirmed(ids, targetID, callOptions); },
       mineDrones: async (ids, targetID) => { await api.mineWithDrones(ids, targetID, callOptions); },
       unloadHolds: async (itemIDs) => {
         await api.unloadMiningHolds(itemIDs, callOptions);
@@ -9570,7 +9566,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             case "launchDrones": await api.launchDrones(wholeStackLaunch(self.action.droneItemIDs, droneStackSizes(droneState?.bay ?? [])), callOptions); break;
             case "recallDrones": await api.recallDrones(self.action.droneIDs, callOptions); break;
             case "mineDrones": await api.mineWithDrones(self.action.droneIDs, self.action.targetID, callOptions); break;
-            case "engageDrones": await api.engageDrones(self.action.droneIDs, self.action.targetID, callOptions); break;
+            case "engageDrones": await api.engageDronesConfirmed(self.action.droneIDs, self.action.targetID, callOptions); break;
           }
         } catch (error) { outcome = "failed"; reason = errorWords(error); }
         return { decision, feedback: null, selfMining: selfResult({ scope, actionID: self.actionID!, outcome, ...(reason ? { reason } : {}) }) };
@@ -11212,7 +11208,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "engageDrones":
             if (action.droneIDs.length > 0) {
-              await api.engageDrones(action.droneIDs, action.targetID, callOptions);
+              await api.engageDronesConfirmed(action.droneIDs, action.targetID, callOptions);
             }
             return;
           case "mineDrones":

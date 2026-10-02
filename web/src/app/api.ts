@@ -12,6 +12,7 @@ import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccou
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
 import { decodeBeyonceWriteAck, type BeyonceWriteAck } from "../bridge/boundBeyonceWrites.ts";
 import { decodeFleetApplyOutcome, type FleetApplyOutcome } from "../bridge/fleetWrites.ts";
+import { decodeDroneEngageOutcome, type DroneEngageOutcome, type DroneEngageRefusal } from "../bridge/drones.ts";
 import { FLEET_BROADCAST_SCOPE_ALL } from "../bridge/fleetBroadcasts.ts";
 import {
   decodeCharCreationTables,
@@ -4247,6 +4248,35 @@ export async function engageDrones(
   return readDroneAction(
     await postJson("/api/bridge/drones/engage", { droneIDs: [...droneIDs], targetID }, options),
   );
+}
+
+/** A per-drone answer, retained even when only part of an order was accepted. */
+export class DroneEngageOutcomeError extends BridgeCallError {
+  readonly acceptedDroneIDs: readonly number[];
+  readonly refusedDroneIDs: readonly number[];
+  readonly uncertainDroneIDs: readonly number[];
+  readonly refusals: readonly DroneEngageRefusal[];
+
+  constructor(outcome: DroneEngageOutcome) {
+    super(outcome.status === "refused" ? "CALL_REFUSED" : "BRIDGE_BAD_RESPONSE",
+      outcome.status === "refused" ? `The server refused drone engagement: ${[...new Set(outcome.refusals.map((refusal) => refusal.raw))].join(" ")}`
+        : "Could not confirm every drone engagement order.", 200);
+    this.acceptedDroneIDs = outcome.acceptedDroneIDs;
+    this.refusedDroneIDs = outcome.refusedDroneIDs;
+    this.uncertainDroneIDs = outcome.uncertainDroneIDs;
+    this.refusals = outcome.refusals;
+  }
+}
+
+/** Automation must settle the individual orders before recording completion. */
+export async function engageDronesConfirmed(
+  droneIDs: readonly number[],
+  targetID: number,
+  options: ApiOptions = {},
+): Promise<void> {
+  const result = await engageDrones(droneIDs, targetID, options);
+  const outcome = decodeDroneEngageOutcome(result.result, result.inSpace, droneIDs, targetID);
+  if (outcome.status !== "accepted") throw new DroneEngageOutcomeError(outcome);
 }
 
 /** Put mining drones on a rock (entity.CmdMineRepeatedly). */

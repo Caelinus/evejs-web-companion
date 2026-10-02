@@ -270,6 +270,98 @@ export function decodeDroneOrderRefusals(
   return refusals;
 }
 
+export interface DroneEngageOutcome {
+  readonly status: "accepted" | "refused" | "uncertain";
+  readonly acceptedDroneIDs: readonly number[];
+  readonly refusedDroneIDs: readonly number[];
+  readonly uncertainDroneIDs: readonly number[];
+  readonly refusals: readonly DroneEngageRefusal[];
+}
+
+export interface DroneEngageRefusal extends DroneOrderRefusal {
+  readonly errorKey: string;
+}
+
+function droneResultEntries(raw: JsonValue | undefined): readonly JsonValue[] | null {
+  const result = asObject(raw);
+  return (result.type === undefined || result.type === "dict") && Array.isArray(result.entries)
+    ? result.entries : null;
+}
+
+/**
+ * CmdEngage returns a dict containing only per-drone UserError tuples. An
+ * omitted drone is confirmed only when the post-call read also shows this
+ * ship controlling it on the requested target. Preserve partial outcomes so
+ * a caller can retry refused drones without replaying accepted or unknown ones.
+ */
+export function decodeDroneEngageOutcome(
+  result: JsonValue | undefined,
+  inSpace: JsonValue | undefined,
+  requestedDroneIDs: readonly number[],
+  targetID: number,
+): DroneEngageOutcome {
+  const requested = new Set(requestedDroneIDs);
+  const entries = droneResultEntries(result);
+  const requestValid = requested.size === requestedDroneIDs.length &&
+    requestedDroneIDs.length > 0 && requestedDroneIDs.every((id) => Number.isSafeInteger(id) && id > 0) &&
+    Number.isSafeInteger(targetID) && targetID > 0;
+  let readable = entries !== null && requestValid;
+  const refused = new Set<number>();
+  const reasons = new Map<number, DroneEngageRefusal>();
+  const seen = new Set<number>();
+  const malformed = new Set<number>();
+  for (const entry of entries ?? []) {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      readable = false;
+      continue;
+    }
+    const droneID = idOrNull(entry[0]);
+    if (droneID === null || !Number.isSafeInteger(droneID) || !requested.has(droneID)) {
+      readable = false;
+      continue;
+    }
+    if (seen.has(droneID)) {
+      readable = false;
+      malformed.add(droneID);
+      continue;
+    }
+    seen.add(droneID);
+    const value = entry[1];
+    const args = Array.isArray(value) ? droneResultEntries(value[1]) : null;
+    if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "string" ||
+        value[0].trim() === "" || args === null ||
+        args.some((arg) => !Array.isArray(arg) || arg.length !== 2)) {
+      readable = false;
+      malformed.add(droneID);
+      continue;
+    }
+    refused.add(droneID);
+    reasons.set(droneID, { droneID, errorKey: value[0], raw: findNotifyText(value) ?? value[0] });
+  }
+  for (const id of malformed) refused.delete(id);
+
+  const observed = decodeDronesInSpace(inSpace);
+  const flightReadable = Array.isArray(inSpace) && observed !== null && observed.length === inSpace.length &&
+    inSpace.every((row) => typeof asObject(row).controlled === "boolean");
+  const acceptedDroneIDs: number[] = [], refusedDroneIDs: number[] = [], uncertainDroneIDs: number[] = [];
+  for (const id of requestedDroneIDs) {
+    if (refused.has(id)) {
+      refusedDroneIDs.push(id);
+    } else if (readable && flightReadable && observed.some((drone) =>
+      drone.itemID === id && drone.controlled && drone.targetID === targetID)) {
+      acceptedDroneIDs.push(id);
+    } else {
+      uncertainDroneIDs.push(id);
+    }
+  }
+  return {
+    status: !requestValid || uncertainDroneIDs.length > 0 ? "uncertain"
+      : refusedDroneIDs.length > 0 ? "refused" : "accepted",
+    acceptedDroneIDs, refusedDroneIDs, uncertainDroneIDs,
+    refusals: [...reasons.values()].filter((reason) => refused.has(reason.droneID)),
+  };
+}
+
 /**
  * What a drone is doing, in the words a player uses (R9a).
  *
