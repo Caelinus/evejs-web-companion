@@ -1335,31 +1335,24 @@ export function createClientStore(): ClientStore {
         fitting.set({ ...fitting.get(), reloads });
         break;
       }
-      case "dogma/loaded":
-        // A companion to the fit, never a gate on it: a failed read records its
-        // reason and drops the snapshot, leaving the slots and bars untouched.
+      case "dogma/loaded": {
+        // The dedicated UI slice and the legacy fitting reader share one
+        // snapshot. A failed refresh keeps the last reading and its new error.
+        const allInfo = event.allInfo ?? dogma.get().allInfo;
+        dogma.set({ allInfo, loaded: true, error: event.error });
         fitting.set({
           ...fitting.get(),
-          dogma: event.allInfo,
+          dogma: allInfo,
           dogmaError: event.error,
         });
         break;
+      }
       case "fitting/action-error":
         fitting.set({ ...fitting.get(), actionError: event.message });
         break;
       case "fitting/cleared":
         fitting.set(INITIAL_FITTING);
         dogma.set(INITIAL_DOGMA);
-        break;
-      // R21 slice B — the bound-dogma snapshot, refreshed alongside the fit. A
-      // failed read carries its error and keeps whatever snapshot we last had,
-      // so a hiccup mid-session never blanks the module stats already on screen.
-      case "dogma/loaded":
-        dogma.set({
-          allInfo: event.allInfo ?? dogma.get().allInfo,
-          loaded: true,
-          error: event.error,
-        });
         break;
       case "dogma/cleared":
         dogma.set(INITIAL_DOGMA);

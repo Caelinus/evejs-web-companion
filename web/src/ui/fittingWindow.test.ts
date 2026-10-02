@@ -10,6 +10,8 @@ import { register } from "node:module";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { compile } from "svelte/compiler";
+import { decodeGetAllInfo } from "../bridge/boundDogma.ts";
 
 register("./svelteSsrHook.ts", import.meta.url);
 
@@ -112,6 +114,54 @@ async function renderFitting(envelope: unknown): Promise<string> {
 function socketCount(body: string): number {
   return (body.match(/class="fit-socket /g) ?? []).length;
 }
+
+test("the module detail renders completed dogma readings and a first-read failure", async () => {
+  // SSR skips onMount, which normally selects list view on a narrow screen.
+  // Initialize only that view in memory so the real module-details template runs.
+  const filename = path.join(UI_DIR, "Fitting.svelte");
+  const source = readFileSync(filename, "utf8");
+  const initialView = 'let view = $state<"radial" | "list">("radial");';
+  assert.ok(source.includes(initialView));
+  const { js } = compile(source.replace(initialView, 'let view = $state<"radial" | "list">("list");'), {
+    filename, generate: "server",
+  });
+  const code = js.code.replace(/from (['"])([^'"]+)\1/g, (_match, _quote, specifier: string) =>
+    `from ${JSON.stringify(import.meta.resolve(specifier))}`);
+  const { default: Panel } = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch: fittingFetch(rawFittingRead(
+    { high: 1, mid: 0, low: 0, rig: 0 }, [{ itemID: 90000011, typeID: 589, flagID: 27 }],
+  )) });
+  await flow.loadFitting();
+  // Finish its companion read before installing the deliberate dogma fixture.
+  await flow.loadDogma();
+  const snapshot = decodeGetAllInfo({ type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
+    ["activeShipID", 9988400029047],
+    ["shipInfo", { type: "dict", entries: [[90000011, {
+      type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
+        ["itemID", 90000011], ["attributes", { type: "dict", entries: [[54, 18500], [73, 4500]] }],
+      ] },
+    }]] }],
+  ] } });
+  store.apply({ type: "dogma/loaded", allInfo: snapshot, error: null });
+  let body = render(Panel, { props: { store, flow } }).body;
+  assert.match(body, /Optimal range/);
+  assert.match(body, /18\.5 km/);
+  assert.match(body, /Activation time/);
+  assert.match(body, /4\.5 s/);
+  assert.doesNotMatch(body, /Reading this module/);
+
+  store.apply({ type: "dogma/loaded", allInfo: null, error: "Read interrupted" });
+  body = render(Panel, { props: { store, flow } }).body;
+  assert.match(body, /18\.5 km/, "a refresh failure retains the last effective stats");
+  store.apply({ type: "fitting/cleared" });
+  await flow.loadFitting();
+  await flow.loadDogma();
+  store.apply({ type: "dogma/loaded", allInfo: null, error: "Read interrupted" });
+  body = render(Panel, { props: { store, flow } }).body;
+  assert.match(body, /effective stats could not be read: Read interrupted/);
+  assert.doesNotMatch(body, /Reading this module/);
+});
 
 test("the ring draws exactly the sockets the server's slot counts imply", async () => {
   // A Rifter: 4 high / 3 mid / 3 low / 3 rig = 13 sockets.

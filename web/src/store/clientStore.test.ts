@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { createClientStore, type ClientState } from "./clientStore.ts";
 import { MemoryFeedAdapter, type FeedAdapter, type FeedSink } from "./feed.ts";
 import type { CharacterSummary } from "./types.ts";
+import { decodeGetAllInfo } from "../bridge/boundDogma.ts";
 
 function summary(characterID: number, characterName: string): CharacterSummary {
   return {
@@ -35,6 +36,36 @@ function summary(characterID: number, characterName: string): CharacterSummary {
     queueEndTime: null,
   };
 }
+
+test("dogma reads update the UI slice and fitting mirror together", () => {
+  const store = createClientStore();
+  const snapshot = decodeGetAllInfo({ type: "object", name: "util.KeyVal", args: {
+    type: "dict", entries: [["activeShipID", 90000010], ["shipInfo", { type: "dict", entries: [] }]],
+  } });
+  assert.ok(snapshot);
+  store.apply({ type: "dogma/loaded", allInfo: snapshot, error: null });
+  assert.deepEqual(store.dogma.get(), { allInfo: snapshot, loaded: true, error: null });
+  assert.equal(store.fitting.get().dogma, snapshot);
+  assert.equal(store.fitting.get().dogmaError, null);
+
+  store.apply({ type: "dogma/loaded", allInfo: null, error: "Dogma read failed" });
+  assert.deepEqual(store.dogma.get(), { allInfo: snapshot, loaded: true, error: "Dogma read failed" });
+  assert.equal(store.fitting.get().dogma, snapshot);
+  assert.equal(store.fitting.get().dogmaError, "Dogma read failed");
+
+  store.apply({ type: "dogma/loaded", allInfo: snapshot, error: null });
+  assert.equal(store.dogma.get().error, null);
+  assert.equal(store.fitting.get().dogmaError, null);
+  store.apply({ type: "fitting/cleared" });
+  assert.deepEqual(store.dogma.get(), { allInfo: null, loaded: false, error: null });
+  assert.equal(store.fitting.get().dogma, null);
+});
+
+test("a first dogma read failure completes the loading state with its error", () => {
+  const store = createClientStore();
+  store.apply({ type: "dogma/loaded", allInfo: null, error: "Dogma read failed" });
+  assert.deepEqual(store.dogma.get(), { allInfo: null, loaded: true, error: "Dogma read failed" });
+});
 
 test("the initial state is logged out with no characters and an idle feed", () => {
   const store = createClientStore();
