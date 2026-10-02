@@ -2028,6 +2028,39 @@ export function decideCompanionAction(
   memory: CompanionLadderMemory = freshLadderMemory(),
   nowMs: number = Date.now(),
 ): CompanionDecision {
+  const decision = decideCompanionStep(request, obs,
+    obs.inWarp === true || obs.docked === true ? withoutIssuedFollow(memory) : memory, nowMs);
+  // These movements replace keep-at-range. Once requested, a lost response
+  // cannot prove the previous formation is still in force. Keep the new
+  // movement's own pending latch, but let formation resume when its job ends.
+  switch (decision.action.kind) {
+    case "approach":
+    case "align":
+    case "warp":
+    case "warpToFleetMember":
+    case "travelTo":
+    case "jumpGate":
+    case "dock":
+    case "undock":
+    case "stopShip":
+      return { ...decision, memory: withoutIssuedFollow(decision.memory) };
+    default:
+      return decision;
+  }
+}
+
+function withoutIssuedFollow(memory: CompanionLadderMemory): CompanionLadderMemory {
+  return memory.followAnchorID === null && memory.followRangeIssuedM === null
+    ? memory
+    : { ...memory, followAnchorID: null, followRangeIssuedM: null };
+}
+
+function decideCompanionStep(
+  request: FleetCompanionRequest,
+  obs: FleetCompanionObservation,
+  memory: CompanionLadderMemory,
+  nowMs: number,
+): CompanionDecision {
   // A readable flight change retires its old order even when a higher rung
   // consumes this tick. An unreadable list says nothing about a recall.
   memory = withObservedDroneFlights(obs, memory);

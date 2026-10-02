@@ -6136,6 +6136,10 @@ function fcGrid(): SpaceSnapshot {
   return gridWithFleetShips([{ itemID: FC_SHIP, characterID: HUMAN }]);
 }
 
+function gridWithAnchor(grid: SpaceSnapshot): SpaceSnapshot {
+  return { ...grid, entities: [...grid.entities, ...fcGrid().entities.filter((entity) => !entity.isSelf)] };
+}
+
 /**
  * The one field `decideDestinationTrip` reads off flight status. Cast the same
  * way every snapshot helper here is: the rung reads one property and the rest
@@ -6172,6 +6176,79 @@ test("the keepAtRange goes out ONCE and is not re-sent on the next tick", () => 
   assert.equal(second.action.kind, "wait");
   assert.equal(second.phase, "Following", "the readout still says what it is doing");
 });
+
+test("formation is restored after fleet warp observed while another rung cannot run", () => {
+  const following = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  const warping = decideCompanionAction(REQUEST, obs({
+    inWarp: true, snapshot: null, fleetMemberCharacterIDs: null,
+  }), following.memory);
+  assert.equal(warping.phase, "In warp");
+  const landedGrid = fcGrid();
+  const landed = decideCompanionAction(REQUEST, obs({
+    snapshot: { ...landedGrid, ship: { ...landedGrid.ship!, mode: "STOP" } },
+  }), warping.memory);
+  assert.deepEqual(landed.action, { kind: "keepAtRange", targetID: FC_SHIP, range: DEFAULT_FOLLOW_M });
+  const held = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }), landed.memory);
+  assert.equal(held.action.kind, "wait");
+});
+
+test("a completed loot approach restores formation without needing a new follow command", () => {
+  const following = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
+  const approach = decideCompanionAction(REQUEST, obs({
+    snapshot: gridWithAnchor(lootGrid({ containerDistance: 40_000 })),
+    chatMessages: [areaOrder("loot")],
+  }), following.memory);
+  assert.deepEqual(approach.action, { kind: "approach", targetID: CAN });
+  const looted = decideCompanionAction(REQUEST, obs({
+    snapshot: gridWithAnchor(lootGrid({ containerDistance: 500 })),
+    chatMessages: [],
+  }), approach.memory);
+  assert.deepEqual(looted.action, { kind: "lootContainer", containerID: CAN });
+  const cleared = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid(), chatMessages: [] }), looted.memory);
+  assert.deepEqual(cleared.action, { kind: "keepAtRange", targetID: FC_SHIP, range: DEFAULT_FOLLOW_M });
+});
+
+test("a completed salvage approach restores formation after the wreck disappears", () => {
+  const following = decideCompanionAction(WITH_SALVAGER, obs({ snapshot: fcGrid() }));
+  const approach = decideCompanionAction(WITH_SALVAGER,
+    salvageObs(gridWithAnchor(salvageGrid(30_000))), following.memory);
+  assert.equal(approach.action.kind, "approach");
+  const locked = decideCompanionAction(WITH_SALVAGER,
+    salvageObs(gridWithAnchor(salvageGrid(1_000)), { chatMessages: [] }), approach.memory);
+  assert.deepEqual(locked.action, { kind: "lock", targetID: WRECK_NEAR });
+  const working = decideCompanionAction(WITH_SALVAGER,
+    salvageObs(gridWithAnchor(salvageGrid(1_000)), { chatMessages: [], lockedTargetIDs: [WRECK_NEAR] }), locked.memory);
+  assert.equal(working.action.kind, "activate");
+  const cleared = decideCompanionAction(WITH_SALVAGER,
+    salvageObs(fcGrid(), { chatMessages: [] }), working.memory);
+  assert.deepEqual(cleared.action, { kind: "keepAtRange", targetID: FC_SHIP, range: DEFAULT_FOLLOW_M });
+});
+
+for (const code of ["CALL_REFUSED", "BRIDGE_NETWORK_ERROR"]) {
+  test(`formation resumes once after a superseding warp ends despite ${code}, without replaying warp`, async () => {
+    let current = obs({ snapshot: gridWithAnchor(gridWithEntities([LOGI])) });
+    const issued: FleetCompanionAction[] = [];
+    const companion = createFleetCompanion({
+      observe: async () => current,
+      issue: async (action) => {
+        issued.push(action);
+        if (action.kind === "warp") throw Object.assign(new Error("Warp response failed"), { code });
+      },
+      now: () => 1_000,
+      sleep: async () => {},
+    });
+    companion.start(REQUEST);
+    assert.equal((await companion.tick()).kind, "keepAtRange");
+    current = { ...current, fleetBroadcast: fleetBroadcast("WarpTo", LOGI) };
+    await companion.tick();
+    await companion.tick();
+    assert.equal(issued.filter((action) => action.kind === "warp").length, 1);
+    current = { ...current, fleetBroadcast: null };
+    assert.equal((await companion.tick()).kind, "keepAtRange");
+    assert.equal((await companion.tick()).kind, "wait");
+    assert.equal(issued.filter((action) => action.kind === "keepAtRange").length, 2);
+  });
+}
 
 test("a NEW anchor re-issues: the fleet changed commander, the companion re-forms", () => {
   const first = decideCompanionAction(REQUEST, obs({ snapshot: fcGrid() }));
