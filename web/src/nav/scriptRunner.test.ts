@@ -412,6 +412,56 @@ test("a confirmed sell retains its step state and requires verification instead 
   h.runner.stop();
 });
 
+for (const partial of [true, false]) {
+  for (const suspended of [true, false]) {
+    test(`${partial ? "partial" : "all-refused"} drone engagement ${suspended ? "during recovery" : "in a running tick"} retains the correct retry ownership`, async () => {
+      const doc = script([macroStep("defend", "defend-with-drones")]);
+      let entered!: () => void, fail!: (error: unknown) => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const pending = new Promise<void>((_resolve, reject) => { fail = reject; });
+      const issued: ScriptAction[] = [];
+      const runner = createScriptRunner({ observe: async () => calm(),
+        issue: async action => { issued.push(action); if (issued.length === 1) { entered(); await pending; } },
+        registry: { "defend-with-drones": (_step, _obs, mem) => mem["engaged"]
+          ? mt({ kind: "wait" }, { kind: "done" })
+          : { ...mt({ kind: "engageDrones", droneIDs: [1, 2], targetID: 42 }, { kind: "acting" }), nextMem: { engaged: true } } },
+        travelHome: home, sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false,
+        refusalReason: error => error instanceof Error ? `${"code" in error ? error.code : ""}: ${error.message}` : String(error),
+      });
+      runner.start(doc);
+      const ticking = runner.tick();
+      await started;
+      const suspension = suspended ? runner.suspendTransport() : null;
+      fail(Object.assign(new Error("TargetNotWithinRangeGeneric"), { code: "CALL_REFUSED",
+        acceptedDroneIDs: partial ? [1] : [], refusedDroneIDs: partial ? [2] : [1, 2], uncertainDroneIDs: [],
+      }));
+      await ticking;
+      await suspension;
+      if (partial) {
+        assert.equal(runner.getStatus(), "paused");
+        assert.match(runner.snapshot().pauseReason ?? "", /Some drones accepted.*Verify.*Stop/);
+        assert.equal(runner.transportCustody(), true);
+        runner.resume();
+        assert.equal(runner.resumeHeadHome("Stop"), false);
+        assert.throws(() => runner.start(doc), /Verify the previous action/);
+        await runner.suspendTransport();
+        assert.throws(() => runner.resumeTransport(), /unresolved/);
+        await runner.tick();
+        assert.equal(issued.length, 1, "accepted drone 1 is never replayed by a full-flight retry");
+        runner.stop();
+        assert.equal(runner.transportCustody(), false, "explicit Stop follows manual outcome verification");
+      } else {
+        assert.equal(runner.transportCustody(), false, "every refused drone is positively known not to have accepted");
+        if (suspended) runner.resumeTransport();
+        for (let i = 0; i < 8 && runner.getStatus() === "running"; i++) await runner.tick();
+        assert.equal(runner.getStatus(), "stopped");
+        assert.equal(issued.length, 2);
+        assert.deepEqual(issued[1], issued[0], "an entirely refused flight may retry unchanged");
+      }
+    });
+  }
+}
+
 test("a refused first home movement does not discard the safety watch's destination", async () => {
   const h = harness({ issueThrows: () => new Error("CALL_REFUSED: FakeItemNotFound") });
   h.setObs(calm({ health: 0.4 }));

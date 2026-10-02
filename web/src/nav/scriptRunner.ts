@@ -667,6 +667,19 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         // not land. Do not commit its completion or let Resume replay it.
         // Corporate transfers have their own observed-manifest reconciliation.
         const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        const acceptedDroneIDs = error && typeof error === "object" && "acceptedDroneIDs" in error
+          ? error.acceptedDroneIDs : null;
+        if (result.action.kind === "engageDrones" && code === "CALL_REFUSED" && Array.isArray(acceptedDroneIDs) && acceptedDroneIDs.length > 0) {
+          // A partial refusal proves some orders landed. Rolling back the full
+          // flight would resend those accepted orders; neither completion nor
+          // a whole-flight retry is valid without observing each recipient.
+          uncertainAction = result.action;
+          const reason = deps.refusalReason(error);
+          record({ t: now(), kind: "result", run: runID, ok: false, refusal: reason,
+            says: describeAction(result.action), stepPath: result.stepPath });
+          pauseWith(`Some drones accepted the engagement order and others refused it. Verify their targets in the game, then Stop before starting a new run. ${refusalWords(reason)}`, result);
+          return;
+        }
         if (result.action.kind !== "haulTransfer" && !(result.action.kind === "unloadOre" && result.action.strictCorp === true) &&
             !(result.action.kind === "jettison" && deps.mutationCustody?.()) &&
             code !== "EDGE_OWNER_OVERLOADED" &&
