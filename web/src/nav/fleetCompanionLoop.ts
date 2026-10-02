@@ -604,6 +604,8 @@ export interface CompanionFlee {
   // ── the `SafetyRun` contract ────────────────────────────────────────
   readonly safeSpotWarpIssued: boolean;
   readonly safeSpotWarpSeen: boolean;
+  readonly safeSpotWarpAttempts: number;
+  readonly safeSpotWarpWaited: number;
   readonly droneRecallWaited: number | null;
 }
 
@@ -1224,16 +1226,19 @@ export interface CompanionAbandonmentRecord {
 
 /** The live abandonment: the persisted record plus this run's get-safe state. */
 export interface CompanionAbandonment extends CompanionAbandonmentRecord {
-  /** Whether the safe-spot warp has been issued. Bounds it to one attempt. */
+  /** Whether an escape warp is pending authoritative movement confirmation. */
   readonly safeSpotWarpIssued: boolean;
+  readonly safeSpotWarpAttempts: number;
+  readonly safeSpotWarpWaited: number;
   /**
    * Whether the ship has since been OBSERVED in warp.
    *
-   * ⚠ THIS IS WHY THERE IS NO TIMER HERE. "Issued the warp" is not "left the
+   * "Issued the warp" is not "left the
    * grid" — the POST returns before `shipMode` flips — and treating it as such
    * would drop fleet while the ship still sat where it was, which is the one
    * ordering mistake decision 5 calls out. Safety is confirmed by a READING,
-   * never by elapsed time.
+   * never by elapsed time. An unconfirmed warp's wait limit pauses the run;
+   * it never authorizes leaving fleet.
    */
   readonly safeSpotWarpSeen: boolean;
   /**
@@ -1808,6 +1813,8 @@ export interface CompanionDecision {
    * pilot is flyable from a tab again. A pause would hold the ship forever.
    */
   readonly stop?: string;
+  /** Retain the ship for the operator when a bounded action cannot be confirmed. */
+  readonly pause?: string;
   /**
    * Which authority this decision came from, for the readout. Omitted (never
    * `null` here — `tick()` supplies the default) by every rung except rung 7;
@@ -2354,6 +2361,8 @@ function decideAbandonment(
     // remembered forward — it cannot be read now.
     supervisorCharacterIDs: [...memory.lastSupervisorIDs],
     safeSpotWarpIssued: false,
+    safeSpotWarpAttempts: 0,
+    safeSpotWarpWaited: 0,
     droneRecallWaited: null,
     safeSpotWarpSeen: false,
   };
@@ -2466,6 +2475,8 @@ function reachedSafety(obs: FleetCompanionObservation, running: SafetyRun): bool
 interface SafetyRun {
   readonly safeSpotWarpIssued: boolean;
   readonly safeSpotWarpSeen: boolean;
+  readonly safeSpotWarpAttempts: number;
+  readonly safeSpotWarpWaited: number;
   readonly droneRecallWaited: number | null;
 }
 
@@ -2497,6 +2508,10 @@ interface SafetyLeg {
  * worth the ship.
  */
 const MAX_GET_SAFE_RECALL_WAIT_TICKS = 8;
+const MAX_GET_SAFE_WARP_ATTEMPTS = 3;
+// At the idle cadence this allows two minutes for a slow-aligning hull.
+// Expiry pauses; elapsed time is never evidence that the ship got safe.
+const MAX_GET_SAFE_WARP_WAIT_TICKS = 60;
 
 /**
  * The recall the get-safe ladder makes before it warps, or null when there is
@@ -2637,17 +2652,24 @@ function runToSafety(
     return null;
   }
   if (!leg.run.safeSpotWarpIssued) {
+    if (leg.run.safeSpotWarpAttempts >= MAX_GET_SAFE_WARP_ATTEMPTS) {
+      return { ...waiting(leg.phase, "The escape warp kept being refused. This pilot needs the operator to take over.", mem),
+        pause: "The escape warp was refused three times." };
+    }
     return {
       action: { kind: "warp", targetID: sun },
       phase: leg.phase,
       why: "No station in view, so this pilot is warping to the sun.",
-      memory: leg.write(mem, { ...leg.run, safeSpotWarpIssued: true }),
+      memory: leg.write(mem, { ...leg.run, safeSpotWarpIssued: true,
+        safeSpotWarpAttempts: leg.run.safeSpotWarpAttempts + 1, safeSpotWarpWaited: 0 }),
     };
   }
-  // Issued, and no warp has been seen. Do NOT re-issue every two seconds, and
-  // do NOT give up: the warp may simply not have started yet, and each caller's
-  // own bound is already the answer to one that never does.
-  return waiting(leg.phase, "Waiting for the warp to the sun to start.", mem);
+  if (leg.run.safeSpotWarpWaited >= MAX_GET_SAFE_WARP_WAIT_TICKS) {
+    return { ...waiting(leg.phase, "The escape warp's outcome could not be confirmed. This pilot needs the operator to check the ship.", mem),
+      pause: "The escape warp could not be confirmed. Check the ship before resuming." };
+  }
+  return waiting(leg.phase, "Waiting for the warp to the sun to start.",
+    leg.write(mem, { ...leg.run, safeSpotWarpWaited: leg.run.safeSpotWarpWaited + 1 }));
 }
 
 /**
@@ -3453,6 +3475,15 @@ const MAX_COMPANION_HEAL_REFUSALS = 3;
 
 function isDefiniteCompanionRefusal(error: unknown): boolean {
   return error !== null && typeof error === "object" && "code" in error && error.code === "CALL_REFUSED";
+}
+
+function noteEscapeWarpRefusal(memory: CompanionLadderMemory): CompanionLadderMemory {
+  const refused = <T extends SafetyRun>(run: T): T => ({ ...run, safeSpotWarpIssued: false, safeSpotWarpWaited: 0 });
+  return { ...memory,
+    abandonment: memory.abandonment?.safeSpotWarpIssued && !memory.abandonment.safeSpotWarpSeen
+      ? refused(memory.abandonment) : memory.abandonment,
+    flee: memory.flee?.safeSpotWarpIssued && !memory.flee.safeSpotWarpSeen
+      ? refused(memory.flee) : memory.flee };
 }
 
 function noteHealFailure(memory: CompanionLadderMemory, action: FleetCompanionAction, error: unknown): CompanionLadderMemory {
@@ -4496,6 +4527,8 @@ function decideFlee(
     onlyTheShieldWasHurt: armorAndHullClearOfTheMark(request, obs),
     arrivedSafe: false,
     safeSpotWarpIssued: false,
+    safeSpotWarpAttempts: 0,
+    safeSpotWarpWaited: 0,
     safeSpotWarpSeen: false,
     droneRecallWaited: null,
   };
@@ -7177,6 +7210,14 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
     // "Standing by" are all the companion's own ladder, not a fleet order.
     mem.followingOrderFrom = decision.followingOrderFrom ?? "own-ladder";
     mem.lastOrderHeard = decision.lastOrderHeard ?? null;
+    if (decision.pause !== undefined) {
+      runToken += 1;
+      mem.status = "paused";
+      mem.action = null;
+      mem.failureReason = decision.pause;
+      report();
+      return { kind: "wait" };
+    }
     if (decision.stop !== undefined) {
       // The ladder has decided the run is over. Not `stop()`: that clears the
       // readout, and the whole value of these two endings is the sentence that
@@ -7231,6 +7272,11 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
         if (decision.action.kind === "lock") {
           mem.ladder = noteRefusedLock(mem.ladder, decision.action.targetID);
         }
+        if (decision.action.kind === "warp" &&
+          (decision.phase === "Getting safe" || decision.phase === "Getting clear") &&
+          isDefiniteCompanionRefusal(error)) {
+          mem.ladder = noteEscapeWarpRefusal(mem.ladder);
+        }
         if ((decision.action.kind === "activate" && request.remoteShieldModuleIDs.concat(
           request.remoteArmorModuleIDs, request.remoteCapacitorModuleIDs,
         ).includes(decision.action.moduleID)) || decision.action.kind === "lock") {
@@ -7271,6 +7317,8 @@ export function createFleetCompanion(deps: FleetCompanionDeps): FleetCompanionCo
             abandonedAtMs: resuming.abandonedAtMs,
             supervisorCharacterIDs: [...resuming.supervisorCharacterIDs],
             safeSpotWarpIssued: false,
+            safeSpotWarpAttempts: 0,
+            safeSpotWarpWaited: 0,
             safeSpotWarpSeen: false,
             // A restart cannot know about a recall the dead process issued, and
             // the server has already abandoned whatever was out when the session

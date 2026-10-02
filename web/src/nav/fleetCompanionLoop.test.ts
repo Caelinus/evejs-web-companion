@@ -473,6 +473,73 @@ test("a refused CALL keeps the run alive - the world is unchanged and the next t
   );
 });
 
+test("an explicitly refused escape warp retries after tackle clears", async () => {
+  let tackled = true;
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithSunOnly(), shieldRatio: 0.1,
+      armorRatio: 1, hullRatio: 1, scrammed: tackled }),
+    issue: async (action) => { attempted.push(action);
+      if (tackled) throw Object.assign(new Error("WarpDisrupted"), { code: "CALL_REFUSED" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, tankLayer: "shield" });
+  await controller.tick();
+  tackled = false;
+  await controller.tick();
+  assert.deepEqual(attempted, [{ kind: "warp", targetID: SUN }, { kind: "warp", targetID: SUN }]);
+  assert.equal(controller.snapshot().status, "running");
+});
+
+test("repeated definite escape refusals pause after a bounded number of attempts", async () => {
+  let attempts = 0;
+  const controller = createFleetCompanion({
+    observe: async () => alone({ snapshot: gridWithSunOnly() }),
+    issue: async () => { attempts += 1; throw Object.assign(new Error("WarpDisrupted"), { code: "CALL_REFUSED" }); },
+    sleep: async () => {},
+  });
+  controller.start(REQUEST);
+  for (let tick = 0; tick < 8; tick += 1) await controller.tick();
+  assert.equal(attempts, 3);
+  assert.equal(controller.snapshot().status, "paused");
+  assert.match(controller.snapshot().why ?? "", /operator.*take over/i);
+});
+
+test("an escape warp with a lost response is reconciled without retrying or leaving fleet early", async () => {
+  let inWarp = false;
+  const attempted: FleetCompanionAction[] = [];
+  const controller = createFleetCompanion({
+    observe: async () => alone({ snapshot: gridWithSunOnly(), inWarp }),
+    issue: async (action) => { attempted.push(action);
+      if (action.kind === "warp") throw Object.assign(new Error("response lost"), { code: "BRIDGE_NETWORK_ERROR" }); },
+    sleep: async () => {},
+  });
+  controller.start(REQUEST);
+  await controller.tick();
+  await controller.tick();
+  assert.deepEqual(attempted, [{ kind: "warp", targetID: SUN }]);
+  inWarp = true;
+  await controller.tick();
+  inWarp = false;
+  await controller.tick();
+  assert.deepEqual(attempted, [{ kind: "warp", targetID: SUN }, { kind: "leaveFleet" }]);
+});
+
+test("an escape warp that never becomes observable pauses instead of polling forever", async () => {
+  let attempts = 0;
+  const controller = createFleetCompanion({
+    observe: async () => obs({ snapshot: gridWithSunOnly(), shieldRatio: 0.1,
+      armorRatio: 1, hullRatio: 1 }),
+    issue: async () => { attempts += 1; throw Object.assign(new Error("response lost"), { code: "BRIDGE_BAD_RESPONSE" }); },
+    sleep: async () => {},
+  });
+  controller.start({ ...REQUEST, tankLayer: "shield" });
+  for (let tick = 0; tick < 70; tick += 1) await controller.tick();
+  assert.equal(attempts, 1);
+  assert.equal(controller.snapshot().status, "paused");
+  assert.match(controller.snapshot().why ?? "", /outcome could not be confirmed/i);
+});
+
 test("a refusal is SAID, in plain words, and never in the server's own vocabulary", async () => {
   const controller = createFleetCompanion({
     observe: async () =>
@@ -3828,6 +3895,8 @@ function fleeing(overrides: Partial<CompanionFlee> = {}): CompanionLadderMemory 
       onlyTheShieldWasHurt: false,
       arrivedSafe: false,
       safeSpotWarpIssued: false,
+      safeSpotWarpAttempts: 0,
+      safeSpotWarpWaited: 0,
       safeSpotWarpSeen: false,
       droneRecallWaited: null,
       ...overrides,
