@@ -2853,15 +2853,22 @@ function readModuleAction(itemID: number, data: Record<string, JsonValue>): Modu
  * own default activation effect. `repeat` is retail's cycle flag — -1 keeps
  * cycling (the default), 0 runs a single cycle. `targetID` is omitted for
  * modules that act on the ship itself.
+ *
+ * Pass `typeID` whenever the caller knows it: a probe launcher only launches
+ * when Activate names "useMissiles", and the BFF resolves that name from the
+ * typeID. Without it the launcher cycles and launches nothing.
  */
 export async function activateModule(
   itemID: number,
-  opts: { effect?: string; targetID?: number | null; repeat?: -1 | 0 } = {},
+  opts: { effect?: string; typeID?: number; targetID?: number | null; repeat?: -1 | 0 } = {},
   options: ApiOptions = {},
 ): Promise<ModuleActionResult> {
   const body: Record<string, JsonValue> = { itemID };
   if (opts.effect) {
     body.effect = opts.effect;
+  }
+  if (opts.typeID) {
+    body.typeID = opts.typeID;
   }
   if (opts.targetID) {
     body.targetID = opts.targetID;

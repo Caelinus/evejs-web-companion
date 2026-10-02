@@ -978,7 +978,7 @@ export interface AppFlow {
   /** R23 — switch a module on. `repeat` is -1 continuous (default) or 0 single-cycle. */
   activateModule(
     itemID: number,
-    opts?: { effect?: string; targetID?: number | null; repeat?: -1 | 0 },
+    opts?: { effect?: string; typeID?: number; targetID?: number | null; repeat?: -1 | 0 },
   ): Promise<void>;
   /** R23 — switch a module off. */
   deactivateModule(itemID: number, opts?: { effect?: string; typeID?: number }): Promise<void>;
@@ -1391,6 +1391,23 @@ const sayRefusal = sayRefusalWords;
  * still win: the space poll passes "poll" whether or not its pilot is on screen,
  * because a poll is background work even for the pilot you are looking at.
  */
+/**
+ * Whether a high-slot module's GROUP name makes it a weapon a bot fires at a
+ * target: "Projectile Weapon", "Hybrid Weapon", "Energy Weapon", "Missile
+ * Launcher …" — the game's own turret/launcher groups.
+ *
+ * Not every launcher is a weapon: the SDE also files "Scan Probe Launcher",
+ * "Survey Probe Launcher", "Interdiction Sphere Launcher" and "Festival
+ * Launcher" under that word. Fired at a rat they launch probes, drop a warp
+ * bubble, or throw snowballs, so they are excluded.
+ */
+export function isWeaponModuleGroup(group: string): boolean {
+  return (
+    /weapon|launcher|turret/i.test(group) &&
+    !/probe launcher|interdiction sphere launcher|festival launcher/i.test(group)
+  );
+}
+
 export function foregroundCallPriority(active: boolean): RequestPriority | undefined {
   return active ? undefined : "poll";
 }
@@ -4716,7 +4733,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   async function activateModule(
     itemID: number,
-    opts: { effect?: string; targetID?: number | null; repeat?: -1 | 0 } = {},
+    opts: { effect?: string; typeID?: number; targetID?: number | null; repeat?: -1 | 0 } = {},
   ): Promise<void> {
     await runTargetingAction(
       "Switch on",
@@ -8421,9 +8438,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                   ? "microwarpdrive"
                   : null,
           });
-        } else if (slot.family === "high" && /weapon|launcher|turret/i.test(group)) {
-          // "Projectile Weapon", "Hybrid Weapon", "Energy Weapon", "Missile
-          // Launcher …" — the game's own turret/launcher groups, high slots only.
+        } else if (slot.family === "high" && isWeaponModuleGroup(group)) {
+          // The game's own turret/launcher groups, high slots only — minus the
+          // launchers that are not weapons (see isWeaponModuleGroup).
           weapons.push(slot.module.itemID);
         }
       }

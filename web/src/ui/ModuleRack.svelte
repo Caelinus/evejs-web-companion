@@ -669,7 +669,10 @@
         // afterburner only stops when Deactivate says which effect to stop.
         await flow.deactivateModule(module.itemID, { typeID: module.typeID });
       } else {
+        // typeID rides along so the BFF can name a launcher's effect — a probe
+        // launcher only launches when Activate says "useMissiles".
         await flow.activateModule(module.itemID, {
+          typeID: module.typeID,
           targetID: autoTargetID > 0 ? autoTargetID : null,
         });
       }

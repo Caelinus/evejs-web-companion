@@ -45,6 +45,7 @@ const ROCK_ID = 50001248;
 const OTHER_ROCK_ID = 50001249;
 const MODULE_ID = 7700001;
 const AFTERBURNER_TYPE_ID = 439;
+const CORE_PROBE_LAUNCHER_TYPE_ID = 17938;
 
 const ORIGINAL_FETCH = global.fetch;
 const activeServers = new Set();
@@ -90,6 +91,11 @@ function fakeStaticData() {
     // browser sends a typeID (the AB/MWD asymmetry — see that route).
     getPropulsionEffectName(typeID) {
       return Number(typeID) === AFTERBURNER_TYPE_ID ? "moduleBonusAfterburner" : null;
+    },
+    // The launcher effect resolver the activate route consults when the browser
+    // sends a typeID (a probe launcher only launches on "useMissiles").
+    getLauncherEffectName(typeID) {
+      return Number(typeID) === CORE_PROBE_LAUNCHER_TYPE_ID ? "useMissiles" : null;
     },
   };
 }
@@ -493,6 +499,37 @@ test("activate passes a named effect, a target and a single-cycle repeat through
     ROCK_ID,
     -1,
   ]);
+});
+
+test("⚠ activating a LAUNCHER by typeID names useMissiles", async () => {
+  const { gateway, baseUrl } = await inSpace();
+
+  await apiRequest(baseUrl, "/api/bridge/modules/activate", {
+    method: "POST",
+    body: { itemID: MODULE_ID, typeID: CORE_PROBE_LAUNCHER_TYPE_ID },
+  });
+  assert.deepEqual(
+    dogmaCallsOf(gateway, "Activate")[0].args,
+    [MODULE_ID, "useMissiles", null, -1],
+    "without the name the server cycles a probe launcher and launches nothing",
+  );
+});
+
+test("activating a NON-launcher by typeID keeps the empty effect, and a named one wins", async () => {
+  const { gateway, baseUrl } = await inSpace();
+
+  await apiRequest(baseUrl, "/api/bridge/modules/activate", {
+    method: "POST",
+    body: { itemID: MODULE_ID, typeID: AFTERBURNER_TYPE_ID },
+  });
+  assert.deepEqual(dogmaCallsOf(gateway, "Activate")[0].args, [MODULE_ID, "", null, -1]);
+
+  gateway.state.active.delete(MODULE_ID);
+  await apiRequest(baseUrl, "/api/bridge/modules/activate", {
+    method: "POST",
+    body: { itemID: MODULE_ID, typeID: CORE_PROBE_LAUNCHER_TYPE_ID, effect: "online" },
+  });
+  assert.deepEqual(dogmaCallsOf(gateway, "Activate")[1].args, [MODULE_ID, "online", null, -1]);
 });
 
 test("activate verifies against the SERVER's cycling list, not its own 200", async () => {

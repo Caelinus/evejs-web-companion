@@ -328,6 +328,7 @@
                       onclick={() =>
                         runFor("module", () =>
                           flow.activateModule(module.itemID, {
+                            typeID: module.typeID,
                             targetID: effectiveTargetID > 0 ? effectiveTargetID : null,
                           }),
                         )}

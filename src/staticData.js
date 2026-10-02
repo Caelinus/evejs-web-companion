@@ -496,6 +496,27 @@ function getPropulsionEffectName(typeID) {
   return null;
 }
 
+// dogmaEffects: 101 useMissiles, the activation effect of every launcher, missile
+// and probe alike. Named because the eve.js Activate handler launches probes
+// from a probe launcher ONLY when the caller says "useMissiles": an empty effect
+// takes the generic path, which cycles the launcher and launches nothing
+// (moduleOperation.js Handle_Activate, isProbeLauncherActivation). The retail
+// client always names it.
+const EFFECT_USE_MISSILES = 101;
+
+/**
+ * "useMissiles" for a launcher type, null for everything else. What the
+ * activate bridge route passes to dogmaIM.Activate when the caller named no
+ * effect (see the constant above).
+ */
+function getLauncherEffectName(typeID) {
+  const dogma = getTypeDogma(typeID);
+  const effects = dogma && Array.isArray(dogma.effects) ? dogma.effects : [];
+  return effects.some((effectID) => Number(effectID) === EFFECT_USE_MISSILES)
+    ? "useMissiles"
+    : null;
+}
+
 // dogma: 128 is the charge SIZE (1 small, 2 medium, 3 large, 4 x-large) and
 // 604/605/606/609 are the charge GROUP ids a module will accept. Both sides of
 // the match come from the same table, so this needs no bridge call and no
@@ -1702,6 +1723,7 @@ module.exports = {
   getMarketGroupName,
   getMarketGroupPath,
   getPropulsionEffectName,
+  getLauncherEffectName,
   getModuleChargeFitment,
   getChargeSize,
   getOreValuePerM3,
