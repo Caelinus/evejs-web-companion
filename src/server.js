@@ -1155,7 +1155,7 @@ app.post("/api/bridge/release", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is changing sessions. Try again shortly." });
       return;
     }
-    const released = await releaseHeldBridgeSession(req.webSessionID);
+    const released = await releaseHeldBridgeSession(req.webSessionID, { confirmed: true });
     res.json({ ok: true, released });
   } catch (error) {
     next(error);

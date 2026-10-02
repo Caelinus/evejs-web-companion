@@ -27,6 +27,7 @@ const CHARACTERS = [
 const BRIDGE_SESSION_ID = "opaque-gateway-minted-bridge-session-id";
 const SELECT_SESSION_ECHO = {
   userid: 4,
+  shipID: 9001,
   characterID: 7,
   characterName: "Test Pilot",
   stationID: 60003760,
@@ -136,10 +137,24 @@ function fakeStaticData() {
   };
 }
 
+async function acknowledgeRecovery(baseUrl) {
+  const selected = await apiRequest(baseUrl, "/api/bridge/select", {
+    method: "POST", body: { characterID: 7 },
+  });
+  assert.equal(selected.response.status, 200);
+  const ready = await apiRequest(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
+}
+
 function fakeGateway(overrides = {}) {
   const calls = { select: [], release: [], call: [] };
   const gateway = {
     calls,
+    async readFlightStatus() {
+      return { flight: { docked: true, inSpace: false, stationID: 60003760, shipID: 9001 }, notifications: [] };
+    },
     async selectCharacter(args, kwargs, sessionFields) {
       calls.select.push({ args, kwargs, sessionFields });
       return {
@@ -260,7 +275,7 @@ test("gateway client releaseBridgeSession posts the handle to /session/release",
     bridgeSessionID: BRIDGE_SESSION_ID,
     session: { userid: 4 },
   });
-  assert.deepEqual(outcome, { released: true, characterID: 7 });
+  assert.deepEqual(outcome, { released: true, offline: false, characterID: 7 });
 });
 
 test("gateway client callMethod forwards a bridgeSessionID only when supplied", async () => {
@@ -355,6 +370,7 @@ test("selecting again releases the previously held bridge session first", async 
     method: "POST",
     body: { characterID: 7 },
   });
+  await acknowledgeRecovery(baseUrl);
   await apiRequest(baseUrl, "/api/bridge/select", {
     method: "POST",
     body: { characterID: 7 },
@@ -375,6 +391,7 @@ test("release ends the held session and later calls go back to stateless", async
     method: "POST",
     body: { characterID: 7 },
   });
+  await acknowledgeRecovery(baseUrl);
   const { payload: releasePayload } = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
@@ -425,11 +442,7 @@ test("SESSION_NOT_FOUND from the gateway drops the stale handle and surfaces the
   assert.deepEqual(releasePayload, { ok: true, released: false });
 });
 
-test("a release the gateway never answered still logs the user out cleanly", async () => {
-  // The handle is forgotten before the gateway is asked, so a timeout on the
-  // release call must be best-effort: the logout succeeds, the character's
-  // live session is the gateway TTL's to retire, and the user never sees
-  // "EveJS gateway timed out." for clicking sign out.
+test("a release the gateway never answered retains the held owner for reconciliation", async () => {
   const gateway = fakeGateway({
     async releaseBridgeSession() {
       throw new gatewayClient.EveGatewayError("EveJS gateway timed out.", {
@@ -443,19 +456,40 @@ test("a release the gateway never answered still logs the user out cleanly", asy
     method: "POST",
     body: { characterID: 7 },
   });
+  await acknowledgeRecovery(baseUrl);
   const { response, payload } = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
   });
-  assert.equal(response.status, 200, JSON.stringify(payload));
-  assert.deepEqual(payload, { ok: true, released: true });
+  assert.equal(response.status, 502, JSON.stringify(payload));
+  assert.equal(payload.error, "EVE_GATEWAY_TIMEOUT");
 
-  // The handle really is gone: a second release reports nothing held.
+  // The handle remains owned: a second unanswered release must not claim it
+  // was already forgotten.
   const again = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
   });
-  assert.deepEqual(again.payload, { ok: true, released: false });
+  assert.equal(again.response.status, 502);
+  assert.equal(again.payload.error, "EVE_GATEWAY_TIMEOUT");
+  await apiRequest(baseUrl, "/api/bridge/call", {
+    method: "POST", body: { service: "map", method: "GetStationInfo" },
+  });
+  assert.equal(gateway.calls.call[0].bridgeSessionID, BRIDGE_SESSION_ID);
+});
+
+test("an unconfirmed release preserves the held session instead of reporting success", async () => {
+  const gateway = fakeGateway({ releaseBridgeSession: async () => ({ released: false }) });
+  const { baseUrl } = await startTestServer({ gateway });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  await acknowledgeRecovery(baseUrl);
+  const refused = await apiRequest(baseUrl, "/api/bridge/release", { method: "POST", body: {} });
+  assert.equal(refused.response.status, 409);
+  assert.equal(refused.payload.error, "PILOT_RELEASE_UNVERIFIED");
+  await apiRequest(baseUrl, "/api/bridge/call", {
+    method: "POST", body: { service: "map", method: "GetStationInfo" },
+  });
+  assert.equal(gateway.calls.call[0].bridgeSessionID, BRIDGE_SESSION_ID);
 });
 
 test("select refusals pass through with the handler's own message", async () => {
@@ -514,6 +548,7 @@ test("logout releases the held bridge session", async () => {
     method: "POST",
     body: { characterID: 7 },
   });
+  await acknowledgeRecovery(baseUrl);
   const { response } = await apiRequest(baseUrl, "/api/logout", {
     method: "POST",
     body: {},
