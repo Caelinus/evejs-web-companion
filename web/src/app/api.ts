@@ -8,6 +8,7 @@
 
 import { BridgeCallError, callMethod } from "../bridge/callMethod.ts";
 import { decodeBoundDogma, type BoundDogma } from "../bridge/boundDogma.ts";
+import { observeDeferredShutdown } from "../bridge/moduleShutdown.ts";
 import { decodeNameValidation, decodeValidRandomName } from "../bridge/charAccount.ts";
 import { decodeAcceptContractAck, type AcceptContractAck } from "../bridge/contractWrites.ts";
 import { decodeBeyonceWriteAck, type BeyonceWriteAck } from "../bridge/boundBeyonceWrites.ts";
@@ -2945,7 +2946,14 @@ export async function deactivateModule(
   if (opts.typeID) {
     body.typeID = opts.typeID;
   }
-  return readModuleAction(itemID, await postJson("/api/bridge/modules/deactivate", body, options));
+  // Capture once, before the mutation: later observation must not recapture a
+  // replacement pilot/controller generation after Stop or reconnect.
+  const current = options.captureRequestGuard?.() ?? (() => {});
+  const scoped = { ...options, captureRequestGuard: () => current };
+  const initial = await postJson("/api/bridge/modules/deactivate", body, scoped);
+  const result = await observeDeferredShutdown(initial, itemID, { current,
+    read: shipID => getJson(`/api/bridge/modules/${itemID}/state?shipID=${shipID}`, scoped) });
+  return readModuleAction(itemID, result);
 }
 
 // --- R23 slice B: the mining loop -------------------------------------------

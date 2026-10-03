@@ -575,6 +575,28 @@ test("a module refusal carries the SERVER's own reason, untouched", async () => 
   assert.equal(payload.message, "You must be targeting something to activate that module.");
 });
 
+test("long-cycle OFF returns effective remaining authority and observation never redispatches", async () => {
+  const queries = [];
+  const { gateway, baseUrl } = await inSpace({ callBoundMethod: async (service, method, args) => {
+    queries.push({ service, method, args });
+    return { result: method === "QueryAttributeValue" ? { type: "real", value: 85680 } : null, notifications: [] };
+  } });
+  gateway.state.active.add(MODULE_ID);
+  gateway.state.inert.add("Deactivate");
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/modules/deactivate", { method: "POST", body: { itemID: MODULE_ID } });
+  assert.equal(payload.stopped, false);
+  assert.equal(payload.cycleMs, 85680);
+  assert.ok(payload.remainingMs > 15000 && payload.remainingMs <= 90680);
+  assert.ok(queries.some(q => q.method === "QueryAttributeValue" && q.args[0] === MODULE_ID && q.args[1] === 73));
+  gateway.state.active.delete(MODULE_ID);
+  const read = await apiRequest(baseUrl, `/api/bridge/modules/${MODULE_ID}/state?shipID=${SHIP_ID}`);
+  assert.equal(read.payload.stopped, true);
+  assert.equal(read.payload.itemID, MODULE_ID);
+  assert.equal(dogmaCallsOf(gateway, "Deactivate").length, 1);
+  const wrong = await apiRequest(baseUrl, `/api/bridge/modules/${MODULE_ID}/state?shipID=${SHIP_ID + 1}`);
+  assert.equal(wrong.response.status, 409);
+});
+
 test("deactivate is the same seam, and verifies the module actually stopped", async () => {
   const { gateway, baseUrl } = await inSpace();
   gateway.state.active.add(MODULE_ID);
