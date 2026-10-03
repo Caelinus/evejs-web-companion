@@ -466,6 +466,9 @@ const requireAuth = makeRequireAuth();
 // The standalone training control plane never clears cockpit ownership as a
 // side effect of an account-read failure.
 const requireTrainingAuth = makeRequireAuth({ cleanupSession: false });
+// Phase 6A account observation never selects a pilot or clears cockpit ownership.
+require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
+  operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment });
 
 // The SSE push channel alone. `EventSource` cannot set request headers — the
 // API has no hook for it — so GET /api/bridge/events accepts the token as the
@@ -536,10 +539,10 @@ for (const action of ["create", "recover"]) {
     catch (error) { next(error); }
   });
 }
-app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login"], async (req, res, next) => {
+app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login", "/api/ship-provisioning/login"], async (req, res, next) => {
   // The standalone training door must never auto-create an unknown account or
   // replace the cookie belonging to an already-running cockpit.
-  const factoryLogin = /^\/api\/(?:goblin-factory|pilot-training)\/login\/?$/i.test(req.path);
+  const factoryLogin = /^\/api\/(?:goblin-factory|pilot-training|ship-provisioning)\/login\/?$/i.test(req.path);
   const username = String(req.body && req.body.username || "").trim();
   try {
     // An empty username can never name or create an account; refuse it here
