@@ -1204,7 +1204,7 @@ test("strict route refuses changed source or missing office before inventory mut
   }
 });
 
-test("session cleanup retains a claimed container until its transfer can be confirmed", async () => {
+test("session cleanup waits for a claimed-container write before releasing pilot custody", async () => {
   let startAdd, finishAdd;
   const entered = new Promise((resolve) => { startAdd = resolve; });
   const held = new Promise((resolve) => { finishAdd = resolve; });
@@ -1229,15 +1229,21 @@ test("session cleanup retains a claimed container until its transfer can be conf
       to: { kind: "cargo" }, claimRunID: "generation-a" },
   });
   await entered;
-  const logout = await apiRequest(baseUrl, "/api/logout", { method: "POST" });
-  assert.equal(logout.response.status, 200);
-  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false);
-  finishAdd();
+  try {
+    const logout = await apiRequest(baseUrl, "/api/logout", { method: "POST" });
+    assert.equal(logout.response.status, 409, JSON.stringify(logout.payload));
+    assert.equal(logout.payload.error, "CHARACTER_IN_USE");
+    assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false);
+  } finally {
+    finishAdd();
+  }
   const settled = await moving;
-  assert.equal(settled.response.status, 409, JSON.stringify(settled.payload));
-  assert.equal(settled.payload.error, "NO_LIVE_SESSION");
+  assert.equal(settled.response.status, 200, JSON.stringify(settled.payload));
   assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), false,
-    "logout prevented authoritative rereads, so unresolved custody must not be reassigned");
+    "confirmed movement retains the run's claim until session cleanup");
+  const logout = await apiRequest(baseUrl, "/api/logout", { method: "POST" });
+  assert.equal(logout.response.status, 200, JSON.stringify(logout.payload));
+  assert.equal(memory.claimContainer("another-session", "generation-b", system, CONTAINER_ID), true);
 });
 
 for (const [name, options, expectedStatus] of [

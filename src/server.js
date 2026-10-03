@@ -532,7 +532,12 @@ const requireStreamAuth = makeRequireAuth({ allowQueryParam: true });
 
 // Dispatch gates below also protect requests that passed middleware before
 // Apply acquired its reservation. No browser-supplied lease is accepted.
-app.use("/api/bridge", requireAuth, (req, res, next) => {
+app.use("/api/bridge", (req, res, next) => {
+  // EventSource carries its per-tab token in the URL. Preserve that carrier
+  // through this shared gate; every other bridge route still requires normal auth.
+  const authenticate = req.method === "GET" && /^\/events\/?$/i.test(req.path) ? requireStreamAuth : requireAuth;
+  return authenticate(req, res, next);
+}, (req, res, next) => {
   try {
     if (req.method === "POST" && !["/call", "/provisioning/review", "/provisioning/ship-review", "/provisioning/provision-ship", "/provisioning/reconcile", "/drone-recovery/ready"].includes(req.path)) {
       const held = bridgeSessions.get(req.webSessionID);
@@ -22205,8 +22210,8 @@ function operationPayload() {
         },
       },
       defender: {
-        executable: false,
-        note: "Modeled; current combat blocks have no operation-target escort authority.",
+        executable: true,
+        note: "Standard Defender only: operation-owned targets and shared combat. Custom defender routines are unsupported.",
       },
       operationOwnedContainers: {
         executable: false,
@@ -22631,8 +22636,8 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
             if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID) &&
-                !(await isCharacterHeld(member.characterID, callerSessionID))) {
-              await selectHeldCharacter(callerSessionID, account, member.characterID);
+                !(await isCharacterHeld(member.characterID, callerSessionID, { accountID: Number(account.accountID) }, reservation))) {
+              await selectHeldCharacter(callerSessionID, account, member.characterID, { freeOnly: true });
             }
           } catch (error) {
             errorLogger(error);

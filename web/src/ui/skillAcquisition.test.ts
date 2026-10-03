@@ -23,7 +23,11 @@ test("Farmer's owned cockpit retains its existing release authority",()=>{
 });
 test("Factory remains standalone: no space polling, queue writes only separate Apply; purchase never on mount",()=>{
   const src=readFileSync(new URL("./GoblinFactory.svelte",import.meta.url),"utf8");
-  assert.doesNotMatch(src,/readSpaceSnapshot|setInterval/);
+  // The only recurring callback updates local evidence age; it performs no read or Apply.
+  const localClock = "const freshnessClock = setInterval(() => observationNow = Date.now(), 1000);";
+  assert.ok(src.includes(localClock));
+  assert.match(src, /return \(\) => clearInterval\(freshnessClock\)/);
+  assert.doesNotMatch(src.replace(localClock, ""),/readSpaceSnapshot|setInterval/);
   assert.doesNotMatch(src.slice(src.indexOf("  onMount(")),/acquireFactorySkills\(/);
   const acquisition=src.slice(src.indexOf("  async function acquireSkills("),src.indexOf("  async function reviewQueue("));
   assert.doesNotMatch(acquisition,/applyTrainingQueue\(/);

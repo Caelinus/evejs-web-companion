@@ -17,8 +17,14 @@ function defenderReadiness(contract, observation, sheet, data, allowReplenishmen
   } catch { return { state: "BLOCKED", reason: "Defender skill prerequisites UNKNOWN." }; }
   const rows = observation.rows;
   const drones = rows.some(r => r.flagID === 87 && r.quantity > 0 && Number(data.getType(r.typeID)?.groupID) === 100);
-  const weapons = rows.filter(r => r.flagID >= 27 && r.flagID <= 34 &&
-    Number(data.getType(r.typeID)?.categoryID) === 7 && data.getTypeDogma(r.typeID)?.effects?.some(e => [12,101].includes(Number(e))));
+  const weapons = rows.filter(r => {
+    const type = data.getType(r.typeID), group = type?.groupName || "";
+    // Match the runner's isWeaponModuleGroup contract. Effect 12 is highPower
+    // and is shared by salvagers, mining lasers and other non-combat modules.
+    return r.flagID >= 27 && r.flagID <= 34 && Number(type?.categoryID) === 7 &&
+      /weapon|launcher|turret/i.test(group) &&
+      !/probe launcher|interdiction sphere launcher|festival launcher/i.test(group);
+  });
   if (!drones && !weapons.length) return { state: "BLOCKED", reason: "Defender needs combat drones or supported turrets/launchers." };
   for (const weapon of weapons) {
     const attrs = data.getTypeDogma(weapon.typeID)?.attributes || {};

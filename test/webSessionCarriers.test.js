@@ -413,12 +413,15 @@ test("a token in the query string authenticates the stream and NOTHING else", as
   await selectCharacter(baseUrl, token, 7001);
 
   // Same token, same query parameter: it opens the stream...
-  const controller = new AbortController();
-  const stream = await fetch(`${baseUrl}/api/bridge/events?${query}`, {
-    signal: controller.signal,
-  });
-  assert.equal(stream.status, 200, "the query carrier must work on the stream");
-  controller.abort();
+  for (const path of ["events", "events/", "Events"]) {
+    const controller = new AbortController();
+    try {
+      const stream = await fetch(`${baseUrl}/api/bridge/${path}?${query}`, {
+        signal: controller.signal,
+      });
+      assert.equal(stream.status, 200, "the query carrier must work on every matched stream route");
+    } finally { controller.abort(); }
+  }
 
   // ...and is ignored everywhere else.
   const call = await fetch(`${baseUrl}/api/bridge/call?${query}`, {

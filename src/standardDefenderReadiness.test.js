@@ -3,7 +3,7 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { defenderReadiness } = require("./standardDefenderReadiness");
 const { createMiningPreparation } = require("./miningPreparation");
 const data = {
-  getType: id => ({ 1:{categoryID:6,groupID:26}, 2:{categoryID:7,groupID:74}, 3:{categoryID:18,groupID:100},
+  getType: id => ({ 1:{categoryID:6,groupID:26}, 2:{categoryID:7,groupID:74,groupName:"Hybrid Weapon"}, 3:{categoryID:18,groupID:100},
     4:{categoryID:8,groupID:85}, 5:{categoryID:8,groupID:85}, 6:{categoryID:8,groupID:83},
     7:{categoryID:7,groupID:379}, 8:{categoryID:7,groupID:60} })[id] || {categoryID:16},
   getTypeDogma: id => ({attributes: id===2 ? {128:1,604:85,182:100,277:2} : id===4 ? {128:1} : id===5 ? {128:2} : id===6 ? {128:1} : {}, effects:id===2 ? [12] : []}),
@@ -23,6 +23,32 @@ test("drone-only and weapon-only fits are supported damage paths", () => {
 });
 test("passive or utility-only fit is NOT_READY", () => {
   assert.match(check({...observation,rows:[row(7,19),row(8,11)]},{...contract,equipment:[[19,7,1],[11,8,1]]}).reason,/needs combat/);
+});
+
+test("a high-slot salvager's fitting effect does not invalidate a combat-drone defender", () => {
+  // Real Salvager I carries highPower (12), as do unrelated high-slot modules.
+  const utilityData = { ...data,
+    getType: id => id === 7 ? { categoryID: 7, groupID: 1122, groupName: "Salvager" } : data.getType(id),
+    getTypeDogma: id => id === 7 ? { attributes: {}, effects: [12, 16, 2757] } : data.getTypeDogma(id),
+  };
+  const result = defenderReadiness({ ...contract, equipment: [[27,7,1],[87,3,5]] },
+    { ...observation, rows: [row(7,27),row(3,87,5)] }, sheet, utilityData);
+  assert.equal(result.state, "VERIFIED");
+  assert.deepEqual(result.damagePaths, ["DRONES"]);
+});
+
+test("a mining laser and compatible crystals cannot become a Defender damage path", () => {
+  // Modulated Strip Miner II uses highPower (12), not a combat activation.
+  const miningData = { ...data,
+    getType: id => id === 9 ? { categoryID: 7, groupID: 483, groupName: "Frequency Mining Laser" }
+      : id === 10 ? { categoryID: 8, groupID: 482, groupName: "Mining Crystal" } : data.getType(id),
+    getTypeDogma: id => id === 9 ? { attributes: {128:1,604:482}, effects: [12,16,67,1212] }
+      : id === 10 ? { attributes: {128:1}, effects: [] } : data.getTypeDogma(id),
+  };
+  const result = defenderReadiness({ ...contract, equipment: [[27,9,1]] },
+    { ...observation, rows: [row(9,27),row(10,5,100)] }, sheet, miningData);
+  assert.equal(result.state, "BLOCKED");
+  assert.match(result.reason, /needs combat/);
 });
 test("weapon without ammunition is blocked even when combat drones exist", () => {
   assert.match(check({...observation,rows:observation.rows.filter(r=>r.typeID!==4)}).reason,/compatible ammunition/);

@@ -7543,6 +7543,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   const HOSTED_ISSUE_SETTLE_MS = 10_000;
   let hostedStopPending: Promise<void> | null = null;
 
+  function requireCustomControllerSettled(): void {
+    if (hostedStopPending) throw new Error("Combat Stop is still settling; pilot custody is retained.");
+    if (scriptRunner?.transportCustody() || scriptRunner?.combatDronesForStop?.() != null)
+      throw new Error("The previous controller owns unresolved work. Finish Stop settlement before replacing it.");
+  }
+
   async function settleHostedIssue(pending: Promise<void>): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
@@ -7755,6 +7761,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMissionBot(request: MissionBotRequest): Promise<void> {
+    requireCustomControllerSettled();
     requireAutomationReady();
     const generation = sessionCloseGeneration;
     store.apply({ type: "mission-bot/start-error", message: null });
@@ -7798,6 +7805,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMiningBot(request: MiningBotRequest): Promise<void> {
+    requireCustomControllerSettled();
     requireAutomationReady();
     const generation = sessionCloseGeneration;
     store.apply({ type: "bot/start-error", message: null });
@@ -8136,6 +8144,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     setup: CompanionSetup,
     resuming: CompanionAbandonmentRecord | null = null,
   ): Promise<void> {
+    requireCustomControllerSettled();
     requireAutomationReady();
     const generation = sessionCloseGeneration;
     store.apply({ type: "companion/start-error", message: null });
@@ -11856,9 +11865,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startCustomBot(input: BotScript, sourceScriptID: string | null = null): Promise<void> {
-    if (hostedStopPending) throw new Error("Combat Stop is still settling; pilot custody is retained.");
-    if (scriptRunner?.transportCustody() || scriptRunner?.combatDronesForStop?.() != null)
-      throw new Error("The previous controller owns unresolved work. Finish Stop settlement before replacing it.");
+    requireCustomControllerSettled();
     requireAutomationReady();
     hostedTransportSuspended = false;
     // Restarting the SAME controller is the one case createShipClaim deliberately
