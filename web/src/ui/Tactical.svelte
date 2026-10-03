@@ -43,6 +43,7 @@
   import { showInfo } from "./showInfo.ts";
   import { overviewTabs } from "../space/overviewTabs.ts";
   import { EMPTY_STATE, tabHiddenMap, tabShows } from "../space/overviewHidden.ts";
+  import { stanceContextFrom } from "../space/stance.ts";
   import { actionsForRow, type RowAction } from "../space/rowActions.ts";
   import { dispatchRowAction, isSingleCallAction } from "../space/rowActionRunner.ts";
   import { gateLinkFor } from "../space/gateLinks.ts";
@@ -61,6 +62,8 @@
   const names = store.names;
   // svelte-ignore state_referenced_locally
   const targeting = store.targeting;
+  // svelte-ignore state_referenced_locally
+  const character = store.character;
   const selected = spaceSelection.selected;
 
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -82,16 +85,27 @@
    */
   const tabSignal = overviewTabs.selected;
   const hiddenMapSignal = tabHiddenMap;
+  /**
+   * Whose is each bracket — the same context the list builds, so the picture
+   * cannot read a side the list did not (see `stance.ts`).
+   */
+  const stanceContext = $derived(
+    stanceContextFrom($character.characters, $character.selectedCharacterID),
+  );
   const measuredEntities = $derived.by(() => {
     // ⚠ THE SAME QUESTION THE LIST ASKS, THROUGH THE SAME ANSWER. `tabShows`
     // is the one resolver both surfaces use — the recipe, the tab's own
-    // hidden and added lists, the hostiles-are-never-hidden rule and All's
-    // absoluteness all come out of it, so the picture and the list cannot
-    // disagree about what a tab shows. Hiding on one tab therefore redraws
-    // only what that tab's picture shares with that tab's list.
+    // hidden and added lists, the stance pre-hidings and the
+    // hostiles-are-never-hidden-by-a-group rule and All's absoluteness all
+    // come out of it, so the picture and the list cannot disagree about what a
+    // tab shows. Hiding on one tab therefore redraws only what that tab's
+    // picture shares with that tab's list.
     const tab = $tabSignal;
     const state = $hiddenMapSignal.get(tab.id) ?? EMPTY_STATE;
-    return (snapshot?.entities ?? []).filter((entity) => tabShows(tab, entity, state));
+    const context = stanceContext;
+    return (snapshot?.entities ?? []).filter((entity) =>
+      tabShows(tab, entity, state, context),
+    );
   });
 
   // --- R91: the picture is exactly what the server last said -----------------

@@ -35,7 +35,9 @@
   } from "../space/overviewRecipes.ts";
   import {
     EMPTY_STATE,
-    presetHides,
+    presetGroupHides,
+    presetStanceHides,
+    stanceEntryFor,
     tabHidden,
     tabHiddenMap,
     tabShows,
@@ -49,6 +51,13 @@
     type OverviewRow,
     type OverviewSort,
   } from "../space/overview.ts";
+  import {
+    stanceContextFrom,
+    stanceOf,
+    stanceRowLabel,
+    type Stance,
+  } from "../space/stance.ts";
+  import { bracketRole } from "../space/tactical.ts";
   import {
     actionsForRow,
     activatableModules,
@@ -105,6 +114,8 @@
   const fitting = store.fitting;
   // svelte-ignore state_referenced_locally
   const mining = store.mining;
+  // svelte-ignore state_referenced_locally
+  const character = store.character;
 
   /**
    * The nearest N rows the list keeps.
@@ -171,6 +182,20 @@
   const activeTabState = $derived($tabHiddenMap.get(activeTabID) ?? EMPTY_STATE);
 
   /**
+   * Whose is each row — the context every stance question in this panel reads
+   * from, built from the character list the client already holds.
+   *
+   * ⚠ THE IDENTITY READ LIVES IN `stance.ts`, NOT HERE. This component never
+   * names a side of its own: it hands the loaded identity to the stance module
+   * and reads three-word answers ("friendly", "neutral", "hostile") back, which
+   * is what the radar does with the very same context. null until the list
+   * loads, and null must read as "nothing friendly", never as a guess.
+   */
+  const stanceContext = $derived(
+    stanceContextFrom($character.characters, $character.selectedCharacterID),
+  );
+
+  /**
    * ⚠ ALL IS ABSOLUTE, AND IT IS THE ONLY TAB THAT IS.
    *
    * The fixed tab shows every object on the grid, including the ones hidden on
@@ -186,7 +211,9 @@
     }
     return {
       ...snapshot,
-      entities: snapshot.entities.filter((entity) => tabShows(activeTab, entity, activeTabState)),
+      entities: snapshot.entities.filter((entity) =>
+        tabShows(activeTab, entity, activeTabState, stanceContext),
+      ),
     };
   });
 
@@ -208,7 +235,7 @@
    * ⚠ NAMES, NOT IDS. The menu shows the same group word the list's Group
    * column shows, and the group id travels only as the list's row key.
    */
-  const presetHiddenRows = $derived.by((): { readonly groupID: number; readonly label: string; readonly preset: boolean }[] => {
+  const presetGroupRows = $derived.by((): { readonly groupID: number; readonly label: string }[] => {
     if (!snapshot || activeTab.fixed) {
       return [];
     }
@@ -216,14 +243,48 @@
     for (const entity of snapshot.entities) {
       if (entity.isSelf) continue;
       if (entity.groupID === null || entity.groupID <= 0) continue;
-      if (!presetHides(activeTab, entity, activeTabState)) continue;
+      if (!presetGroupHides(activeTab, entity, activeTabState, stanceContext)) continue;
       if (!byGroup.has(entity.groupID)) {
         const group = groupName(entity);
         byGroup.set(entity.groupID, group === "—" ? typeName(entity) : group);
       }
     }
     return [...byGroup.entries()]
-      .map(([groupID, label]) => ({ groupID, label, preset: true }))
+      .map(([groupID, label]) => ({ groupID, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  /**
+   * The preset's STANCE pre-hidings still undecided on this tab — the role
+   * and side the recipe named in advance ("the PVP preset hides friendly
+   * ships"), earned as menu rows the same way the group pre-hidings are:
+   * from the grid, one row per pair, owned by no one's list yet.
+   *
+   * ⚠ ONE ROW EARNS ONE WORD. A row the group pre-hides already own keeps the
+   * group's word, so no row appears here — `presetStanceHides` refuses it.
+   * And a pair the tab's own lists already decided is owned by them, not the
+   * preset, so it is refused here too.
+   */
+  const presetStanceRows = $derived.by((): { readonly role: string; readonly stance: Stance; readonly label: string }[] => {
+    if (!snapshot || activeTab.fixed) {
+      return [];
+    }
+    const byPair = new Map<string, string>();
+    for (const entity of snapshot.entities) {
+      if (entity.isSelf) continue;
+      if (!presetStanceHides(activeTab, entity, activeTabState, stanceContext)) continue;
+      const role = bracketRole(entity);
+      const stance = stanceOf(entity, stanceContext);
+      const key = role + ":" + stance;
+      if (!byPair.has(key)) {
+        byPair.set(key, stanceRowLabel(role, stance));
+      }
+    }
+    return [...byPair.entries()]
+      .map(([key, label]) => {
+        const [role, stance] = key.split(":") as [string, Stance];
+        return { role, stance, label };
+      })
       .sort((a, b) => a.label.localeCompare(b.label));
   });
 
@@ -234,9 +295,57 @@
    * whichever list it came from.
    */
   const hiddenMenuRows = $derived.by(() => {
-    const rows: { readonly groupID: number; readonly label: string; readonly preset: boolean }[] =
-      activeTabState.hidden.map((entry) => ({ groupID: entry.groupID, label: entry.label, preset: false }));
-    rows.push(...presetHiddenRows);
+    const rows: {
+      readonly key: string;
+      readonly kind: "group" | "stance";
+      readonly groupID: number | null;
+      readonly role: string | null;
+      readonly stance: Stance | null;
+      readonly label: string;
+      readonly preset: boolean;
+    }[] = activeTabState.hidden.map((entry) =>
+      entry.kind === "group"
+        ? {
+            key: "player:group:" + entry.groupID,
+            kind: "group" as const,
+            groupID: entry.groupID,
+            role: null,
+            stance: null,
+            label: entry.label,
+            preset: false,
+          }
+        : {
+            key: "player:stance:" + entry.role + ":" + entry.stance,
+            kind: "stance" as const,
+            groupID: null,
+            role: entry.role,
+            stance: entry.stance,
+            label: entry.label,
+            preset: false,
+          },
+    );
+    for (const row of presetGroupRows) {
+      rows.push({
+        key: "preset:group:" + row.groupID,
+        kind: "group",
+        groupID: row.groupID,
+        role: null,
+        stance: null,
+        label: row.label,
+        preset: true,
+      });
+    }
+    for (const row of presetStanceRows) {
+      rows.push({
+        key: "preset:stance:" + row.role + ":" + row.stance,
+        kind: "stance",
+        groupID: null,
+        role: row.role,
+        stance: row.stance,
+        label: row.label,
+        preset: true,
+      });
+    }
     return rows.sort((a, b) => a.label.localeCompare(b.label));
   });
 
@@ -431,17 +540,82 @@
   }
 
   /**
+   * The stance entry the selected row would earn — "Ships (Friendly)" for a
+   * friendly frigate, "Hostiles" for a rat — or null when the row's role
+   * carries no stance row at all: gates, rocks and celestials have no side,
+   * and police are the one family that is always neutral, so for them a group
+   * hide is the only honest word.
+   */
+  const stanceHideEntry = $derived(selectedRow ? stanceEntryFor(selectedRow, stanceContext) : null);
+
+  const stanceHideRefusalReason = $derived.by<string | null>(() => {
+    if (!selectedRow || stanceHideEntry === null) {
+      return "Pick something first";
+    }
+    // ⚠ THE SAME ABSOLUTE RULE AS THE GROUP HIDE.
+    if (activeTab.fixed) {
+      return "All shows everything, so there is nothing to hide";
+    }
+    // ⚠ AND THIS IS WHERE THE RELAXED INVARIANT SHOWS ITS FACE: a hostile row
+    // is the ONE refusal the group Hide carries that this verb does not.
+    // Hiding "Hostiles" names the side out loud, which is the explicit choice
+    // the rule allows.
+    return null;
+  });
+
+  /** Hide the picked row's side, which is what the toolbar's stance-Hide acts on. */
+  function hideSelectedStance(): void {
+    if (stanceHideRefusalReason !== null || !selectedRow || stanceHideEntry === null) {
+      return;
+    }
+    // ⚠ CAPTURE THE ROW BEFORE THE WRITE. `selectedRow` is a derived that reads
+    // through `rows` and so through the per-tab hidden map. `tabHidden.hideStance`
+    // writes into that map, which invalidates the derived — so reading it a
+    // second time, as the old code did, re-resolves it to null, the row that
+    // just left this tab, and `.itemID` on null is the crash hiding used to
+    // throw. The `row` held here is the stable
+    // object the derived answered with before the write, and it is what the write
+    // itself is aimed at, so the two cannot drift apart.
+    const row = selectedRow;
+    // ⚠ THE SELECTION DROPS, LIKE THE GROUP HIDE: the row leaves this tab the
+    // instant the pair is recorded, and the panel's rule is that a selection
+    // must never silently retarget onto whatever row is next.
+    if (tabHidden.hideStance(activeTabID, row, stanceContext) !== null && selectedID === row.itemID) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  }
+
+  /**
    * Bring back one of THIS tab's hidden rows. The row carries where its hiding
    * comes from: a group the player hid is dropped from the tab's hidden list,
    * and one the preset pre-hides gets its pre-hiding recorded as undone —
    * which is what makes it show on this tab while every other tab keeps its
    * preset.
    */
-  function showEntry(groupID: number, label: string, preset: boolean): void {
-    if (preset) {
-      tabHidden.addGroup(activeTabID, groupID, label);
-    } else {
-      tabHidden.unhideGroup(activeTabID, groupID);
+  function showEntry(row: {
+    readonly kind: "group" | "stance";
+    readonly groupID: number | null;
+    readonly role: string | null;
+    readonly stance: Stance | null;
+    readonly label: string;
+    readonly preset: boolean;
+  }): void {
+    if (row.kind === "stance" && row.role !== null && row.stance !== null) {
+      // ⚠ THE STANCE SIDE OF THE SAME DECISION: undoing a preset pre-hiding
+      // records the pair as shown; undoing a player hide drops it.
+      if (row.preset) {
+        tabHidden.addStance(activeTabID, row.role, row.stance);
+      } else {
+        tabHidden.unhideStance(activeTabID, row.role, row.stance);
+      }
+      return;
+    }
+    if (row.groupID !== null) {
+      if (row.preset) {
+        tabHidden.addGroup(activeTabID, row.groupID, row.label);
+      } else {
+        tabHidden.unhideGroup(activeTabID, row.groupID);
+      }
     }
   }
 
@@ -455,8 +629,11 @@
     if (activeTabState.hidden.length > 0) {
       tabHidden.clearHidden(activeTabID);
     }
-    for (const row of presetHiddenRows) {
+    for (const row of presetGroupRows) {
       tabHidden.addGroup(activeTabID, row.groupID, row.label);
+    }
+    for (const row of presetStanceRows) {
+      tabHidden.addStance(activeTabID, row.role, row.stance);
     }
   }
 
@@ -1145,96 +1322,120 @@
   {/if}
 
   <!-- ============================================================= filters -->
-  <!-- ========================================================= the toolbar -->
+  <!-- ============================================== the tab + verb bars -->
   <!--
-    ⚠ ONE ROW, LEFT = TABS, RIGHT = WHAT TO DO WITH WHAT IS SELECTED.
-    Every control here is an ordinary left click. There is deliberately no
-    context menu anywhere in this feature: right-click belongs to the browser,
-    so "hide this" on a right-click never reached the client at all.
+    ⚠ TWO BARS, NOT ONE: THE TABS OWN THE LINE ABOVE, THE OVERVIEW VERBS (Hide
+    and the stance-Hide) OWN THE LINE UNDER IT. A single row that held both let
+    two wide Hide buttons crowd the tab list off a narrow panel, so each concern
+    now gets its own full-width line. Every control here is an ordinary left
+    click. There is deliberately no context menu anywhere in this feature:
+    right-click belongs to the browser, so "hide this" on a right-click never
+    reached the client at all.
   -->
-  <div class="spc-toolbar">
-    <div class="spc-toolbar-left">
-      <div class="spc-tabs" role="tablist" aria-label="What to show">
-        {#each allTabs as tab (tab.id)}
-          <!--
-            ⚠ A TAB IS JUST A TAB NOW. The rename and delete controls used to sit
-            inside this wrapper, which put two more buttons on every tab and made
-            a four-tab bar carry twelve controls. They live beside the "+" now and
-            act on whichever tab is selected, so the bar costs three buttons no
-            matter how many tabs there are.
-          -->
-          <button
-            type="button"
-            role="tab"
-            class="spc-tab"
-            class:on={activeTabID === tab.id}
-            aria-selected={activeTabID === tab.id}
-            title={recipeByID(tab.recipeId).hint}
-            onclick={() => overviewTabs.select(tab.id)}
-          >{tab.name}</button>
-        {/each}
-      </div>
-      <button
-        type="button"
-        class="spc-tab-add"
-        onclick={openCreate}
-        title="New tab"
-        aria-label="New tab"
-      >+</button>
-      <!--
-        ⚠ RENAME AND DELETE ACT ON THE SELECTED TAB, and are refused on All.
-        The refusal is a disabled control carrying its reason, which is the same
-        rule the Hide button follows.
-      -->
-      <button
-        type="button"
-        class="spc-tab-tool"
-        title={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
-        aria-label={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
-        disabled={activeTab.fixed}
-        onclick={() => openRename(activeTab.id)}
-      >✎</button>
-      <button
-        type="button"
-        class="spc-tab-tool"
-        title={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
-        aria-label={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
-        disabled={activeTab.fixed}
-        onclick={() => openDelete(activeTab.id)}
-      >✕</button>
-      <button
-        type="button"
-        class="spc-tab-tool"
-        title="Move {activeTab.name} left"
-        aria-label="Move {activeTab.name} left"
-        disabled={activeTab.fixed}
-        onclick={() => overviewTabs.move(activeTab.id, -1)}
-      >◀</button>
-      <button
-        type="button"
-        class="spc-tab-tool"
-        title="Move {activeTab.name} right"
-        aria-label="Move {activeTab.name} right"
-        disabled={activeTab.fixed || activeTabID === allTabs[allTabs.length - 1]?.id}
-        onclick={() => overviewTabs.move(activeTab.id, 1)}
-      >▶</button>
+  <div class="spc-tabs-bar">
+    <div class="spc-tabs" role="tablist" aria-label="What to show">
+      {#each allTabs as tab (tab.id)}
+        <!--
+          ⚠ A TAB IS JUST A TAB NOW. The rename and delete controls used to sit
+          inside this wrapper, which put two more buttons on every tab and made
+          a four-tab bar carry twelve controls. They live beside the "+" now and
+          act on whichever tab is selected, so the bar costs three buttons no
+          matter how many tabs there are.
+        -->
+        <button
+          type="button"
+          role="tab"
+          class="spc-tab"
+          class:on={activeTabID === tab.id}
+          aria-selected={activeTabID === tab.id}
+          title={recipeByID(tab.recipeId).hint}
+          onclick={() => overviewTabs.select(tab.id)}
+        >{tab.name}</button>
+      {/each}
     </div>
+    <button
+      type="button"
+      class="spc-tab-add"
+      onclick={openCreate}
+      title="New tab"
+      aria-label="New tab"
+    >+</button>
+    <!--
+      ⚠ RENAME AND DELETE ACT ON THE SELECTED TAB, and are refused on All.
+      The refusal is a disabled control carrying its reason, which is the same
+      rule the Hide button follows.
+    -->
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+      aria-label={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+      disabled={activeTab.fixed}
+      onclick={() => openRename(activeTab.id)}
+    >✎</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+      aria-label={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+      disabled={activeTab.fixed}
+      onclick={() => openDelete(activeTab.id)}
+    >✕</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title="Move {activeTab.name} left"
+      aria-label="Move {activeTab.name} left"
+      disabled={activeTab.fixed}
+      onclick={() => overviewTabs.move(activeTab.id, -1)}
+    >◀</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title="Move {activeTab.name} right"
+      aria-label="Move {activeTab.name} right"
+      disabled={activeTab.fixed || activeTabID === allTabs[allTabs.length - 1]?.id}
+      onclick={() => overviewTabs.move(activeTab.id, 1)}
+    >▶</button>
+  </div>
 
-    <div class="spc-toolbar-right">
-      <!--
-        ⚠ HIDDEN IS REFUSED, NOT SILENT, WHEN NOTHING IS PICKED. A live button
-        that does nothing is worse than one that says why it cannot act — and it
-        is only disabled here because there is a REAL reason (no selection), not
-        because a request happens to be in flight.
-      -->
+  <!--
+    ⚠ THE SECOND BAR, ON ITS OWN LINE. The overview verbs (Hide and the
+    stance-Hide) live here rather than beside the tab list, so two wide buttons
+    can never push the tabs off a narrow panel — the tab list owns the line above
+    and the verbs own the line under it, each the full width of the panel.
+  -->
+  <div class="spc-tools-bar">
+    <!--
+      ⚠ HIDDEN IS REFUSED, NOT SILENT, WHEN NOTHING IS PICKED. A live button
+      that does nothing is worse than one that says why it cannot act — and it
+      is only disabled here because there is a REAL reason (no selection), not
+      because a request happens to be in flight.
+    -->
+    <button
+      type="button"
+      class="spc-tool"
+      disabled={hideRefusalReason !== null}
+      title={hideRefusalReason ?? `Hide everything in the ${hideGroupLabel} group from ${activeTab.name}`}
+      onclick={hideSelected}
+    >Hide</button>
+    <!--
+      ⚠ THE SECOND HIDE ONLY EXISTS WHEN THE PICKED ROW CARRIES A SIDE. Its
+      word names the role AND the side — "Hide Ships (Friendly)", "Hide
+      Hostiles" — which is the whole point: this is the one verb that may
+      reach a hostile, because pressing it names the side out loud.
+    -->
+    {#if stanceHideEntry !== null}
       <button
         type="button"
         class="spc-tool"
-        disabled={hideRefusalReason !== null}
-        title={hideRefusalReason ?? `Hide everything in the ${hideGroupLabel} group from ${activeTab.name}`}
-        onclick={hideSelected}
-      >Hide</button>
-    </div>
+        disabled={stanceHideRefusalReason !== null}
+        title={
+          stanceHideRefusalReason ?? `Hide ${stanceHideEntry.label} from ${activeTab.name}`
+        }
+        onclick={hideSelectedStance}
+      >Hide {stanceHideEntry.label}</button>
+    {/if}
   </div>
 
   <!-- ========================================================= the editor -->
@@ -1250,7 +1451,7 @@
       {#if tabEditor.mode === "delete"}
         <p class="spc-editor-confirm">
           Delete the tab <strong>{allTabs.find((tab) => tab.id === tabEditor.id)?.name}</strong>?
-          It goes back to being one of the four built-in filters.
+          It goes back to being one of the built-in filters.
         </p>
         <div class="spc-editor-actions">
           <button type="button" class="spc-tool bad" onclick={confirmDelete}>Yes, delete it</button>
@@ -1430,7 +1631,7 @@
             Show undoes that one entry — from whichever list it came from.
           -->
           <ul class="spc-hidden-list">
-            {#each hiddenMenuRows as row (row.groupID + ":" + (row.preset ? "preset" : "player"))}
+            {#each hiddenMenuRows as row (row.key)}
               <li class="spc-hidden-row">
                 <span class="spc-hidden-name">{row.label}</span>
                 <button
@@ -1438,7 +1639,7 @@
                   class="spc-hidden-show"
                   title="Show {row.label} on this tab"
                   aria-label="Show {row.label}"
-                  onclick={() => showEntry(row.groupID, row.label, row.preset)}
+                  onclick={() => showEntry(row)}
                 >Show</button>
               </li>
             {/each}

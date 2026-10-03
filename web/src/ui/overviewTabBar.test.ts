@@ -166,17 +166,18 @@ test("⚠ there is NO context menu anywhere in the panel", () => {
   assert.doesNotMatch(SOURCE, /contextmenu/i, "a context menu handler crept back in");
 });
 
-test("the toolbar exists and splits tabs left from overview verbs right", () => {
+test("the tabs and the overview verbs live on two separate bars", () => {
   resetShared();
   const body = panel();
-  assert.match(body, /class="spc-toolbar"/, "no toolbar");
-  assert.match(body, /class="spc-toolbar-left"/, "the tab side is missing");
-  assert.match(body, /class="spc-toolbar-right"/, "the verb side is missing");
-  // ⚠ THE ORDER IN THE MARKUP IS THE LAYOUT: tabs grow from the left edge, the
-  // Hide verb sits against the right one.
+  assert.match(body, /class="spc-tabs-bar"/, "the tab bar is missing");
+  assert.match(body, /class="spc-tools-bar"/, "the verb bar is missing");
+  // ⚠ TWO BARS, ONE CONCERN EACH. The tab list owns the line above and the Hide
+  // verbs own the line under it — in this order — so two wide buttons can never
+  // push the tabs off a narrow panel. A single shared row, where the two crowded
+  // each other, is the failure this split exists to forbid.
   assert.ok(
-    body.indexOf("spc-toolbar-left") < body.indexOf("spc-toolbar-right"),
-    "the verb side came before the tabs",
+    body.indexOf("spc-tabs-bar") < body.indexOf("spc-tools-bar"),
+    "the verb bar came before the tabs",
   );
 });
 
@@ -210,10 +211,10 @@ test("⚠ the per-row Hide control is GONE", () => {
 
 // --- the tab bar -------------------------------------------------------------
 
-test("the bar opens on All plus the three defaults", () => {
+test("the bar opens on All plus the five defaults", () => {
   resetShared();
   const text = visibleText(panel());
-  for (const label of ["All", "Mining", "Travel", "Combat"]) {
+  for (const label of ["All", "System", "PVE", "PVP", "Mining", "Travel"]) {
     assert.ok(text.includes(label), `the '${label}' tab is missing`);
   }
 });
@@ -383,6 +384,26 @@ test("⚠ ALL CARRIES NO HIDDEN MENU — IT IS THE FALLBACK THAT HIDES NOTHING",
   assert.match(SOURCE, /if \(activeTab\.fixed\)/, "the refusal is not the All tab's");
 });
 
+test("⚠ the stance hide holds the row in a local BEFORE the write, so it cannot read a stale selection", () => {
+  // ⚠ THE CRASH Hiding USED TO THROW. `selectedRow` is a derived that reads
+  // through `rows` and so through the per-tab hidden map. `tabHidden.hideStance`
+  // writes into that map, which invalidates the derived — and a second read of
+  // `selectedRow` (the old `selectedID === selectedRow.itemID`) re-resolves it to
+  // null, the row that just left the tab, and `.itemID` on null is the "can't
+  // access property 'itemID'" error. The row must be held in a local captured
+  // BEFORE the write, so the write and the comparison both aim at the same
+  // stable object. This is pinned from the source: an SSR render cannot press
+  // the button, so the shape of the handler is what is checked.
+  // ⚠ BOUND TO THE BODY. Everything after the handler is the rest of the panel
+  // (the template still legitimately reads `selectedRow.itemID` for the lock
+  // badges), so only the body up to the next `function` is checked.
+  const stanceHide = (SOURCE.split("function hideSelectedStance").pop() ?? "").split("\n  function ")[0] ?? "";
+  assert.match(stanceHide, /const row = selectedRow;/, "the row is not captured before the write");
+  assert.match(stanceHide, /tabHidden\.hideStance\(activeTabID, row, stanceContext\)/, "the write is not aimed at the held row");
+  assert.match(stanceHide, /selectedID === row\.itemID/, "the comparison is not the held row's id");
+  assert.doesNotMatch(stanceHide, /selectedRow\.itemID/, "the stance hide still reads selectedRow.itemID");
+});
+
 test("the hidden menu says 'Hidden Items', whether the tab hides anything or not", () => {
   // ⚠ THE LABEL IS A NAME, NOT A STATUS LINE. It used to read "Nothing hidden"
   // and then "1 hidden"; now it is the one word the section is, and the answer
@@ -434,8 +455,8 @@ test("the hidden menu can show this tab's groups back, one or all at once", () =
   // ⚠ The per-entry "Show" button only EXISTS while the menu is open, so its
   // presence is a source-level check — an SSR render always starts collapsed.
   assert.match(SOURCE, /class="spc-hidden-show"/, "no way to bring one back");
-  assert.match(SOURCE, /showEntry\(row\.groupID, row\.label, row\.preset\)/, "Show is not wired to the row");
-  assert.match(SOURCE, /tabHidden\.unhideGroup\(activeTabID, groupID\)/, "Show is not per-tab");
+  assert.match(SOURCE, /showEntry\(row\)/, "Show is not wired to the row");
+  assert.match(SOURCE, /tabHidden\.unhideGroup\(activeTabID, row\.groupID\)/, "Show is not per-tab");
   assert.match(SOURCE, /Show everything/, "no way to unhide the tab's hiding at once");
   assert.match(SOURCE, /showEverythingOnTab\(\);/, "Show everything has no action");
   assert.match(SOURCE, /tabHidden\.clearHidden\(activeTabID\)/, "Show everything wipes the wrong tab");
@@ -476,14 +497,15 @@ test("the preset's pre-hidings sit in the menu, one flat list with the player's 
   // on THIS tab only.
   assert.doesNotMatch(SOURCE, /Not shown on this tab/, "a picker section came back");
   assert.doesNotMatch(SOURCE, /Hidden on this tab/, "a subcategory came back");
-  assert.match(SOURCE, /const presetHiddenRows = \$derived/, "the pre-hidings have no list to read");
+  assert.match(SOURCE, /const presetGroupRows = \$derived/, "the group pre-hidings have no list to read");
+  assert.match(SOURCE, /const presetStanceRows = \$derived/, "the stance pre-hidings have no list to read");
   assert.match(SOURCE, /const hiddenMenuRows = \$derived/, "the menu's flat list has no list to read");
   assert.match(
     SOURCE,
-    /presetHides\(activeTab, entity, activeTabState\)/,
+    /presetGroupHides\(activeTab, entity, activeTabState, stanceContext\)/,
     "the preset rows are not derived from the shared rule",
   );
-  assert.match(SOURCE, /tabHidden\.addGroup\(activeTabID, groupID, label\)/, "Show is not per-tab");
+  assert.match(SOURCE, /tabHidden\.addGroup\(activeTabID, row\.groupID, row\.label\)/, "Show is not per-tab");
 });
 
 test("the menu's flat list never repeats a group the tab already decided", () => {
@@ -494,7 +516,7 @@ test("the menu's flat list never repeats a group the tab already decided", () =>
   // nothing.
   assert.match(
     SOURCE,
-    /if \(!presetHides\(activeTab, entity, activeTabState\)\) continue;/,
+    /if \(!presetGroupHides\(activeTab, entity, activeTabState, stanceContext\)\) continue;/,
     "the preset rows ignore the shared undecided-only rule",
   );
 });
@@ -538,10 +560,12 @@ test("⚠ the radar and the list answer from the SAME tab, the SAME map, the SAM
   assert.match(SOURCE, /tabShows\(/, "the list does not use the shared resolver");
 });
 
-test("nothing in the panel reads a fleet, a corporation or a mission", () => {
-  // ⚠ THE SECOND-PASS CONTRACT: no tab classifies anything by who the player is.
-  // A tab is a name and a recipe, and the first pass violated this by reading
-  // the identity of every object on the grid.
+test("the panel reads the player's side through the shared stance module, and no fleet or mission", () => {
+  // ⚠ THE ITERATION-5 CONTRACT. A tab no longer classifies on its own: it hands
+  // the loaded identity to `stance.ts` and reads three-word answers back. The
+  // panel may reference the selected character only to build that context, and
+  // it must not reach for a fleet, a corporation id or a mission of its own.
+  assert.match(SOURCE, /stanceContextFrom\(\$character\.characters, \$character\.selectedCharacterID\)/);
   for (const needle of ["fleet", "corporationID", "relationContext", "missionIDs"]) {
     assert.ok(
       !new RegExp(needle, "i").test(SOURCE),
@@ -550,7 +574,7 @@ test("nothing in the panel reads a fleet, a corporation or a mission", () => {
   }
 });
 
-test("the tab editor offers a picker over the four recipes, All included", () => {
+test("the tab editor offers a picker over the five recipes, All included", () => {
   // ⚠ THE REQUEST: a new tab is built by picking one of the original filters.
   assert.match(SOURCE, /class="spc-editor"/);
   assert.match(SOURCE, /OVERVIEW_RECIPES as recipe/);
@@ -565,18 +589,20 @@ test("the tab editor offers a picker over the four recipes, All included", () =>
 
 test("the shared bar and a fresh bar never share state", () => {
   const fresh = createTabBar();
-  overviewTabs.create("combat", "Only mine");
+  overviewTabs.create("pve", "Only mine");
   assert.equal(fresh.tabs.get().some((tab) => tab.name === "Only mine"), false);
   resetShared();
 });
 
 test("reset restores the shipped bar", () => {
-  overviewTabs.create("combat", "Temp");
+  overviewTabs.create("pve", "Temp");
   overviewTabs.reset();
   assert.deepEqual(overviewTabs.tabs.get().map((tab) => tab.name), [
     "All",
+    "System",
+    "PVE",
+    "PVP",
     "Mining",
     "Travel",
-    "Combat",
   ]);
 });

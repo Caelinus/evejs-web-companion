@@ -17,7 +17,9 @@ import {
   groupIsHidden,
   groupIsShown,
   hiddenEntryFor,
+  presetGroupHides,
   presetHides,
+  presetStanceHides,
   stateFor,
   tabShows,
   type TabHiddenState,
@@ -25,10 +27,11 @@ import {
 import { recipeByID, recipeAllows } from "./overviewRecipes.ts";
 import { isHostile } from "./overview.ts";
 import type { OverviewTab } from "./overviewTabs.ts";
+import type { OverviewRecipeID } from "./overviewRecipes.ts";
 import type { SpaceEntity } from "../store/types.ts";
 
 /** One plain tab: `id` as its name, built from a recipe, never fixed. */
-function tab(id: string, recipeId: "all" | "mining" | "travel" | "combat"): OverviewTab {
+function tab(id: string, recipeId: OverviewRecipeID): OverviewTab {
   return { id, name: id, recipeId, fixed: false };
 }
 
@@ -36,6 +39,8 @@ function tab(id: string, recipeId: "all" | "mining" | "travel" | "combat"): Over
 const ALL: OverviewTab = { id: "all", name: "All", recipeId: "all", fixed: true };
 const mining = tab("mining", "mining");
 const travel = tab("travel", "travel");
+const pve = tab("pve", "pve");
+const pvp = tab("pvp", "pvp");
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
 
@@ -140,7 +145,7 @@ test("a row with a group is always matched by that group, whatever its type", ()
 });
 
 test("covers is the whole of the matching rule", () => {
-  const entry = { groupID: PLANET_GROUP, label: "Planet" };
+  const entry = { kind: "group" as const, groupID: PLANET_GROUP, label: "Planet" };
   assert.equal(covers(entry, PLANET), true);
   assert.equal(covers(entry, OTHER_PLANET), true);
   assert.equal(covers(entry, MOON), false);
@@ -154,7 +159,7 @@ test("⚠ a HOSTILE is never hidden, even when its group is hidden", () => {
   // not one object — so a group that happens to contain a threat is a far easier
   // accident. A rat is `kind: "ship"`, and a group covering player hulls would
   // otherwise take the contents of the threat strip out of the list.
-  const state: TabHiddenState = { hidden: [{ groupID: 25, label: "Pirate" }], shown: [] };
+  const state: TabHiddenState = { hidden: [{ kind: "group", groupID: 25, label: "Pirate" }], shown: [] };
   assert.equal(tabShows(mining, RAT, state), true, "a threat was hidden by group");
   assert.equal(groupIsHidden(25, state), true, "the list still records the ask");
   assert.equal(isHostile(RAT), true);
@@ -165,9 +170,9 @@ test("⚠ ALL IS ABSOLUTE, EVEN WITH FULL LISTS LOADED FOR IT", () => {
   // able to empty the tab that is the way back to seeing everything.
   const state: TabHiddenState = {
     hidden: [
-      { groupID: PLANET_GROUP, label: "Planet" },
-      { groupID: 25, label: "Pirate" },
-      { groupID: ASTEROID_GROUP, label: "Asteroid" },
+      { kind: "group", groupID: PLANET_GROUP, label: "Planet" },
+      { kind: "group", groupID: 25, label: "Pirate" },
+      { kind: "group", groupID: ASTEROID_GROUP, label: "Asteroid" },
     ],
     shown: [],
   };
@@ -182,7 +187,7 @@ test("⚠ hiding on one tab hides it NOWHERE ELSE", () => {
   // tab: the tab that never hid the group keeps showing it, because it has its
   // own state — not because the group is special.
   const hiddenHere: TabHiddenState = {
-    hidden: [{ groupID: PLANET_GROUP, label: "Planet" }],
+    hidden: [{ kind: "group", groupID: PLANET_GROUP, label: "Planet" }],
     shown: [],
   };
   assert.equal(tabShows(mining, PLANET, hiddenHere), false, "the tab that hid it lost it");
@@ -212,10 +217,10 @@ test("the preset PRE-HIDES what it does not name — and only while undecided", 
   // What the preset names is never a hiding candidate.
   assert.equal(presetHides(mining, ROCK, EMPTY_STATE), false, "a rock pre-hidden on the rocks tab");
   // The tab hid it itself: the player's entry owns the row, not the preset's.
-  const hidIt: TabHiddenState = { hidden: [{ groupID: GATE_GROUP, label: "Stargate" }], shown: [] };
+  const hidIt: TabHiddenState = { hidden: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }], shown: [] };
   assert.equal(presetHides(mining, GATE, hidIt), false, "the hiding is listed twice");
   // The player undid the pre-hiding: the `shown` entry owns it.
-  const unPreHid: TabHiddenState = { hidden: [], shown: [{ groupID: GATE_GROUP, label: "Stargate" }] };
+  const unPreHid: TabHiddenState = { hidden: [], shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }] };
   assert.equal(presetHides(mining, GATE, unPreHid), false, "the undo was not recorded");
   // Hostiles and the fixed All tab never count: the rules that outrank the
   // preset sit in one place, and All pre-hides nothing.
@@ -229,7 +234,7 @@ test("the preset PRE-HIDES what it does not name — and only while undecided", 
 test("⚠ adding a group expands the tab beyond its preset", () => {
   // ⚠ THE EXPANSION THE PLAYER ASKED FOR. The preset hides the gate by omission;
   // one entry in the tab's `shown` list puts it back — on that tab only.
-  const state: TabHiddenState = { hidden: [], shown: [{ groupID: GATE_GROUP, label: "Stargate" }] };
+  const state: TabHiddenState = { hidden: [], shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }] };
   assert.ok(!recipeAllows(recipeByID("mining"), GATE), "the premise: gates are not mining");
   assert.equal(tabShows(mining, GATE, EMPTY_STATE), false, "before: the preset did not show it");
   assert.equal(tabShows(mining, GATE, state), true, "after: the tab was expanded");
@@ -240,8 +245,8 @@ test("⚠ a group the tab hid beats a group the tab added", () => {
   // ⚠ THE ORDER MATTERS AND IT IS FIXED: hidden beats shown. A group that is in
   // both of one tab's lists is the player's last word winning, not the first.
   const state: TabHiddenState = {
-    hidden: [{ groupID: GATE_GROUP, label: "Stargate" }],
-    shown: [{ groupID: GATE_GROUP, label: "Stargate" }],
+    hidden: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }],
+    shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }],
   };
   assert.equal(tabShows(mining, GATE, state), false, "the hidden word came first");
 });
@@ -250,7 +255,7 @@ test("a row with no group is decided by the preset alone", () => {
   // ⚠ THE LISTS CANNOT REACH IT. An ungrouped row has no group to hide or add,
   // so it answers to the recipe and nothing else.
   const ungrouped = entity({ itemID: 16, groupID: null, kind: "asteroid" });
-  const state: TabHiddenState = { hidden: [{ groupID: 0, label: "None" }], shown: [] };
+  const state: TabHiddenState = { hidden: [{ kind: "group", groupID: 0, label: "None" }], shown: [] };
   assert.equal(
     tabShows(mining, ungrouped, state),
     recipeAllows(recipeByID("mining"), ungrouped),
@@ -381,4 +386,169 @@ test("a hostile ask is recorded, and the resolver still shows it", () => {
   assert.equal(groupIsHidden(25, store.stateFor("mining")), true, "the ask was not recorded");
   assert.equal(tabShows(mining, RAT, store.stateFor("mining")), true, "the threat was hidden");
   assert.equal(isHostile(RAT), true);
+});
+
+// --- the stance axis -----------------------------------------------------------
+
+const MY_CHARACTER = 9101;
+const MY_CORP = 9201;
+const MY_ALLIANCE = 9301;
+const STANCE_CONTEXT = {
+  characterID: MY_CHARACTER,
+  corporationID: MY_CORP,
+  allianceID: MY_ALLIANCE,
+};
+
+const FRIENDLY_SHIP = entity({ itemID: 30, kind: "ship", characterID: MY_CHARACTER });
+const NEUTRAL_SHIP = entity({ itemID: 31, kind: "ship" });
+
+test("⚠ a STANCE entry is the only entry that may hide a hostile", () => {
+  // ⚠ THE RELAXED INVARIANT, AS A RULE: a group entry that would cover a
+  // threat does not apply (the test above pins it), while an entry that NAMES
+  // the hostile side does. Hiding "Hostiles" is the explicit choice the
+  // relaxation allows; a blanket group is no one's choice about a threat.
+  const state: TabHiddenState = {
+    hidden: [{ kind: "stance", role: "hostile", stance: "hostile", label: "Hostiles" }],
+    shown: [],
+  };
+  assert.equal(tabShows(mining, RAT, state, STANCE_CONTEXT), false, "the player named the side");
+  assert.equal(tabShows(ALL, RAT, state, STANCE_CONTEXT), true, "All is still absolute");
+});
+
+test("a stance hide covers the side, not the whole role", () => {
+  const state: TabHiddenState = {
+    hidden: [{ kind: "stance", role: "ship", stance: "neutral", label: "Ships (Neutral)" }],
+    shown: [],
+  };
+  // PVE allows ships, so only the stance entry can keep them out.
+  assert.equal(tabShows(pve, NEUTRAL_SHIP, state, STANCE_CONTEXT), false, "the neutral side went");
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, state, STANCE_CONTEXT), true, "the friendly side stayed");
+});
+
+test("the PVP preset pre-hides the friendly ships until the tab undoes it", () => {
+  const pvp = tab("pvp", "pvp");
+  assert.equal(tabShows(pvp, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "the preset pre-hid it");
+  assert.equal(tabShows(pvp, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the neutral side stayed");
+  assert.equal(tabShows(pvp, RAT, EMPTY_STATE, STANCE_CONTEXT), true, "a hostile stayed");
+  const undone: TabHiddenState = {
+    hidden: [],
+    shown: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
+  };
+  assert.equal(tabShows(pvp, FRIENDLY_SHIP, undone, STANCE_CONTEXT), true, "Show brought it back on this tab only");
+  // Without a context nothing reads friendly, so the preset pre-hides nothing.
+  assert.equal(tabShows(pvp, FRIENDLY_SHIP, EMPTY_STATE, null), true, "no context, no friendly");
+});
+
+test("presetStanceHides lists only undecided pairs, and one row earns one word", () => {
+  const pvp = tab("pvp", "pvp");
+  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), true);
+  assert.equal(presetStanceHides(pvp, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "the preset does not name neutral ships");
+  // Decided in either direction, the pair leaves the preset's hands.
+  const hidIt: TabHiddenState = {
+    hidden: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
+    shown: [],
+  };
+  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, hidIt, STANCE_CONTEXT), false, "the player's entry owns it");
+  const unPreHid: TabHiddenState = {
+    hidden: [],
+    shown: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
+  };
+  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, unPreHid, STANCE_CONTEXT), false, "the undo is recorded");
+  // A row the GROUP pre-hides own keeps the group's word: the stance side
+  // stays silent so no row earns two menu entries.
+  assert.equal(presetStanceHides(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "mining owns neutral ships by role");
+  assert.equal(presetGroupHides(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the group word owns it");
+  assert.equal(presetStanceHides(ALL, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "All pre-hides nothing");
+});
+
+// --- the stance entries in the store -------------------------------------------
+
+test("the store hides a stance pair, idempotently, per tab", () => {
+  const store = createTabHiddenStore();
+  const entry = store.hideStance("pvp", FRIENDLY_SHIP, STANCE_CONTEXT);
+  assert.ok(entry);
+  assert.equal(entry.kind, "stance");
+  assert.equal(entry.role, "ship");
+  assert.equal(entry.stance, "friendly");
+  assert.equal(entry.label, "Ships (Friendly)");
+  // The same pair twice is one entry…
+  store.hideStance("pvp", FRIENDLY_SHIP, STANCE_CONTEXT);
+  assert.equal(store.stateFor("pvp").hidden.length, 1, "the pair was doubled");
+  // …and a different side is a different entry.
+  store.hideStance("pvp", NEUTRAL_SHIP, STANCE_CONTEXT);
+  assert.equal(store.stateFor("pvp").hidden.length, 2, "the other side is the same row, not the same entry");
+  // The other tab keeps its own lists.
+  assert.deepEqual(store.stateFor("pve"), EMPTY_STATE, "the hiding leaked to a tab");
+  // A row whose role carries no stance row is refused with null, like the group hide.
+  assert.equal(store.hideStance("pvp", GATE, STANCE_CONTEXT), null);
+  // And undoing drops exactly the pair.
+  store.unhideStance("pvp", "ship", "neutral");
+  assert.equal(store.stateFor("pvp").hidden.length, 1, "the undo took the wrong side");
+  store.unhideStance("pvp", "ship", "neutral");
+  assert.equal(store.stateFor("pvp").hidden.length, 1, "a second undo is not a no-op");
+});
+
+test("addStance / removeStance are the stance mirror of the group side", () => {
+  const store = createTabHiddenStore();
+  store.addStance("pvp", "ship", "friendly");
+  assert.equal(store.stateFor("pvp").shown.length, 1, "the expansion was not recorded");
+  store.addStance("pvp", "ship", "friendly");
+  assert.equal(store.stateFor("pvp").shown.length, 1, "the undo was doubled");
+  store.addStance("pvp", "gate", "neutral");
+  assert.equal(store.stateFor("pvp").shown.length, 1, "a role without a stance row was admitted");
+  store.removeStance("pvp", "ship", "friendly");
+  assert.deepEqual(store.stateFor("pvp").shown, [], "the expansion was not taken off");
+});
+
+test("clearHidden forgets the tab's stance hides too", () => {
+  const store = createTabHiddenStore();
+  store.hide("mining", PLANET, "Planet");
+  store.hideStance("mining", FRIENDLY_SHIP, STANCE_CONTEXT);
+  store.clearHidden("mining");
+  assert.deepEqual(store.stateFor("mining").hidden, [], "a stance hide survived the clear");
+});
+
+// --- the storage key -------------------------------------------------------------
+
+test("⚠ a v3 store is read whole into the stance era, and rewrites go to v4", () => {
+  // ⚠ THE MIGRATION THE PLAYER DOES NOT SEE. Their per-tab group hides are a
+  // shape the sanitizer still accepts, so they come through untouched — and the
+  // first change rewrites the map under the new key.
+  const storage = new Map<string, string>([
+    [
+      "evejs-web:overview-hidden:v3",
+      JSON.stringify({
+        mining: {
+          hidden: [{ groupID: 7, label: "Planet" }],
+          shown: [{ groupID: 10, label: "Stargate" }],
+        },
+      }),
+    ],
+  ]);
+  const stub = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      storage.set(key, value);
+    },
+    removeItem: (key: string) => {
+      storage.delete(key);
+    },
+  };
+  const original = (globalThis as { localStorage?: unknown }).localStorage;
+  (globalThis as { localStorage?: unknown }).localStorage = stub;
+  try {
+    const store = createTabHiddenStore();
+    const state = store.stateFor("mining");
+    assert.equal(state.hidden.length, 1, "the v3 hide was lost");
+    assert.equal(state.hidden[0]?.kind, "group", "the old entry did not read as a group");
+    assert.equal(state.shown.length, 1, "the v3 expansion was lost");
+    store.hide("mining", MOON, "Moon");
+    assert.ok(storage.has("evejs-web:overview-hidden:v4"), "the rewrite went to the old key");
+    assert.ok(
+      storage.get("evejs-web:overview-hidden:v4")?.includes('"kind":"group"') === true,
+      "the v4 record does not name its kind",
+    );
+  } finally {
+    (globalThis as { localStorage?: unknown }).localStorage = original;
+  }
 });

@@ -1,7 +1,7 @@
 // THE PLAYER'S OWN OVERVIEW TABS (goal R90, second pass).
 //
 // R79 gave the overview four fixed tabs. This replaces that with a tab row the
-// PLAYER owns: named, ordered, created, renamed, deleted. The four recipes live
+// PLAYER owns: named, ordered, created, renamed, deleted. The recipes live
 // in `overviewRecipes.ts` and are what a tab is BUILT FROM — a tab is a name
 // plus a recipe, nothing more.
 //
@@ -25,7 +25,13 @@
 // SERVER reports, and a snapshot poll must never be able to rewrite a tab bar.
 
 import { createSignal, readonlySignal, type ReadableSignal } from "../store/signals.ts";
-import { applyRecipe, recipeByID, type OverviewRecipeID } from "./overviewRecipes.ts";
+import {
+  applyRecipe,
+  DEFAULT_TAB_RECIPES,
+  recipeByID,
+  type OverviewRecipeID,
+} from "./overviewRecipes.ts";
+import type { StanceContext } from "./stance.ts";
 import type { SpaceEntity } from "../store/types.ts";
 
 const STORAGE_KEY = "evejs-web:overview-tabs:v1";
@@ -78,9 +84,9 @@ function mintTabID(): string {
   return `t${minted}-${Math.floor(Date.now() % 1_000_000)}`;
 }
 
-/** The starting tab bar: All, fixed, plus the three that ship as editable. */
+/** The starting tab bar: All, fixed, plus the five that ship as editable. */
 export function defaultTabs(): readonly OverviewTab[] {
-  const editable = ["mining", "travel", "combat"].map((recipeId) => ({
+  const editable = DEFAULT_TAB_RECIPES.map((recipeId) => ({
     id: mintTabID(),
     name: recipeByID(recipeId).label,
     recipeId: recipeId as OverviewRecipeID,
@@ -157,8 +163,12 @@ function load(): readonly OverviewTab[] {
  * new tab hid the thing shooting at me" is the failure this feature is most
  * likely to produce and the player cannot diagnose it from a tab bar.
  */
-export function tabAllows(tab: OverviewTab, entity: SpaceEntity): boolean {
-  return applyRecipe([entity], recipeByID(tab.recipeId)).length > 0;
+export function tabAllows(
+  tab: OverviewTab,
+  entity: SpaceEntity,
+  context: StanceContext | null = null,
+): boolean {
+  return applyRecipe([entity], recipeByID(tab.recipeId), context).length > 0;
 }
 
 export interface TabBar {

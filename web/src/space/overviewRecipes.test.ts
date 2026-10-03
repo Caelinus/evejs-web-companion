@@ -15,6 +15,7 @@ import {
   applyRecipe,
   recipeAllows,
   recipeByID,
+  recipePreHidesStance,
   type OverviewRecipeID,
 } from "./overviewRecipes.ts";
 import {
@@ -81,14 +82,16 @@ function idsFor(recipeID: string): number[] {
   return applyRecipe(EVERYTHING, recipeByID(recipeID)).map((row) => row.itemID);
 }
 
-// --- the four recipes --------------------------------------------------------
+// --- the six recipes ---------------------------------------------------------
 
-test("there are exactly the four recipes the retail overview offers", () => {
+test("there are exactly the six recipes the preset refresh offers", () => {
   assert.deepEqual(OVERVIEW_RECIPES.map((recipe) => recipe.id), [
     "all",
+    "system",
+    "pve",
+    "pvp",
     "mining",
     "travel",
-    "combat",
   ]);
 });
 
@@ -112,19 +115,41 @@ test("Travel shows the things you fly to", () => {
   assert.equal(ids.includes(ROCK.itemID), false, "rocks are not a destination");
 });
 
-test("Combat shows ships, drones and wrecks", () => {
-  const ids = idsFor("combat");
+test("System shows the whole system and only the rocks fall out", () => {
+  const ids = idsFor("system");
+  assert.ok(ids.includes(PLAYER_SHIP.itemID), "ships");
+  assert.ok(ids.includes(POLICE.itemID), "law enforcement");
+  assert.ok(ids.includes(WRECK.itemID), "wrecks");
+  assert.ok(ids.includes(DRONE.itemID), "drones");
+  assert.ok(ids.includes(STATION.itemID), "structures");
+  assert.ok(ids.includes(GATE.itemID), "gates");
+  assert.ok(ids.includes(PLANET.itemID), "celestials");
+  assert.equal(ids.includes(ROCK.itemID), false, "rocks are the one thing left out");
+});
+
+test("PVE shows ships, drones and wrecks", () => {
+  const ids = idsFor("pve");
   assert.ok(ids.includes(PLAYER_SHIP.itemID));
   assert.ok(ids.includes(WRECK.itemID));
   assert.ok(ids.includes(DRONE.itemID));
   assert.equal(ids.includes(ROCK.itemID), false);
 });
 
-test("the default tabs are the three editable ones — All is not one of them", () => {
+test("⚠ the old 'combat' id still answers as PVE, so a saved bar keeps working", () => {
+  // ⚠ THE RENAME MIGRATION. A bar that shipped before the refresh names its
+  // combat tab 'combat'; it must resolve to the renamed recipe, not fall back
+  // to All and quietly start showing the whole grid.
+  assert.equal(recipeByID("combat").id, "pve");
+  assert.deepEqual(idsFor("combat"), idsFor("pve"), "the alias answers a different recipe");
+  // A truly unknown id still falls back to All.
+  assert.equal(recipeByID("not-a-recipe").id, "all");
+});
+
+test("the default tabs are the five editable ones — All is not one of them", () => {
   // ⚠ THE DISTINCTION THE PANEL'S FIXED-TAB RULE TURNS ON. All is a recipe and
   // it is the fixed tab, but it is NOT a default *editable* tab; shipping it in
   // this list would create a second copy of it on first run.
-  assert.deepEqual(DEFAULT_TAB_RECIPES, ["mining", "travel", "combat"]);
+  assert.deepEqual(DEFAULT_TAB_RECIPES, ["system", "pve", "pvp", "mining", "travel"]);
   assert.equal(DEFAULT_TAB_RECIPES.includes(ALL_RECIPE), false);
 });
 
@@ -145,6 +170,89 @@ test("an NPC of unknown kind counts as a threat and is force-shown", () => {
   const unknown = entity({ itemID: 99, kind: "ship", isNpc: true, npcEntityType: null });
   assert.equal(bracketRole(unknown), "hostile");
   assert.equal(recipeAllows(recipeByID("travel"), unknown), true);
+});
+
+// --- the stance axis ---------------------------------------------------------
+
+const MY_CHARACTER = 9101;
+const MY_CORP = 9201;
+const MY_ALLIANCE = 9301;
+const CONTEXT = { characterID: MY_CHARACTER, corporationID: MY_CORP, allianceID: MY_ALLIANCE };
+
+const FRIENDLY_SHIP = entity({
+  itemID: 20,
+  kind: "ship",
+  characterID: MY_CHARACTER,
+});
+const CORP_SHIP = entity({
+  itemID: 21,
+  kind: "ship",
+  corporationID: MY_CORP,
+});
+const ALLIANCE_SHIP = entity({
+  itemID: 22,
+  kind: "ship",
+  allianceID: MY_ALLIANCE,
+});
+const OWNED_DRONE = entity({ itemID: 23, kind: "drone", ownerID: MY_CHARACTER });
+
+test("PVP hides the friendly side by role-and-side, and nothing else", () => {
+  const pvp = recipeByID("pvp");
+  // ⚠ THE REQUEST IT EXISTS FOR. A hostile stays, a friendly one goes —
+  // same role, different side, different answer.
+  assert.equal(recipePreHidesStance(pvp, FRIENDLY_SHIP, CONTEXT), true, "own ship");
+  assert.equal(recipePreHidesStance(pvp, CORP_SHIP, CONTEXT), true, "corp-mate");
+  assert.equal(recipePreHidesStance(pvp, ALLIANCE_SHIP, CONTEXT), true, "alliance-mate");
+  assert.equal(recipePreHidesStance(pvp, OWNED_DRONE, CONTEXT), true, "own drone");
+  assert.equal(recipePreHidesStance(pvp, PLAYER_SHIP, CONTEXT), false, "a neutral ship");
+  assert.equal(recipePreHidesStance(pvp, RAT, CONTEXT), false, "a hostile is never pre-hidden");
+  // And the role allow-list alone still admits them: the HIDE comes from the
+  // stance entry, not from the roles.
+  assert.equal(recipeAllows(pvp, FRIENDLY_SHIP), true);
+});
+
+test("PVP differs from PVE only by its stance pre-hides", () => {
+  // ⚠ THE SPLIT THE PLAN PINNED: PVE and PVP are the same roles; the preset
+  // refresh's whole "PVP" column is stance.
+  const pve = recipeByID("pve");
+  const pvp = recipeByID("pvp");
+  assert.ok(pve.roles, "PVE lost its role set");
+  assert.ok(pvp.roles, "PVP lost its role set");
+  assert.deepEqual([...pve.roles], [...pvp.roles], "the roles changed");
+  assert.equal(pve.stancePreHides, undefined, "PVE names a side");
+  assert.ok(pvp.stancePreHides?.length, "PVP names no side");
+  // Without a context nothing reads as friendly, so the two answer alike.
+  assert.deepEqual(
+    applyRecipe([FRIENDLY_SHIP], pve).length,
+    applyRecipe([FRIENDLY_SHIP], pvp, null).length,
+  );
+  // With one, PVP drops the friendly ship and PVE keeps it.
+  assert.equal(applyRecipe([FRIENDLY_SHIP], pve, CONTEXT).length, 1);
+  assert.equal(applyRecipe([FRIENDLY_SHIP], pvp, CONTEXT).length, 0, "the friendly ship stayed on PVP");
+});
+
+test("Mining pre-hides a lone neutral ship; a logi and a rat both stay", () => {
+  const mining = recipeByID("mining");
+  assert.equal(recipePreHidesStance(mining, PLAYER_SHIP, CONTEXT), true, "neutral noise");
+  assert.equal(recipePreHidesStance(mining, FRIENDLY_SHIP, CONTEXT), false, "your logi is not noise");
+  assert.equal(recipePreHidesStance(mining, RAT, CONTEXT), false, "a threat is not noise");
+  // And a friendly ship is not shown on Mining at all: the role allow-list
+  // (ships are not mining) still governs; the stance axis only refines roles
+  // the recipe shows, it never admits or ejects on its own.
+  assert.equal(recipeAllows(mining, FRIENDLY_SHIP), false, "the role rule still governs");
+});
+
+test("no default recipe pre-hides the hostile stance", () => {
+  // ⚠ THE INVARIANT THAT KEEPS THE RELAXATION SAFE. Hiding a hostile requires
+  // naming it — a recipe entry or the player's own "Hostiles" hide — and no
+  // shipped preset names the hostile side.
+  for (const recipe of OVERVIEW_RECIPES) {
+    assert.equal(
+      recipePreHidesStance(recipe, RAT, CONTEXT),
+      false,
+      `'${recipe.id}' pre-hides a hostile`,
+    );
+  }
 });
 
 test("recipes classify through bracketRole, so the list and the picture agree", () => {
@@ -168,10 +276,17 @@ test("filtering keeps the order it was given", () => {
 
 // --- the tab bar -------------------------------------------------------------
 
-test("a fresh tab bar is All plus the three defaults, All first", () => {
+test("a fresh tab bar is All plus the five defaults, All first", () => {
   const bar = createTabBar();
   const tabs = bar.tabs.get();
-  assert.deepEqual(tabs.map((tab) => tab.name), ["All", "Mining", "Travel", "Combat"]);
+  assert.deepEqual(tabs.map((tab) => tab.name), [
+    "All",
+    "System",
+    "PVE",
+    "PVP",
+    "Mining",
+    "Travel",
+  ]);
   assert.equal(tabs[0]?.fixed, true, "All must be first and fixed");
   assert.equal(bar.selectedID.get(), "all", "the bar opens on All");
 });
@@ -200,9 +315,9 @@ test("All cannot be deleted, renamed or moved", () => {
 
 test("creating a tab takes a name and a recipe, and selects the new tab", () => {
   const bar = createTabBar();
-  const tab = bar.create("combat", "Ratting");
+  const tab = bar.create("pve", "Ratting");
   assert.equal(tab.name, "Ratting");
-  assert.equal(tab.recipeId, "combat");
+  assert.equal(tab.recipeId, "pve");
   assert.equal(tab.fixed, false);
   assert.equal(bar.selectedID.get(), tab.id, "the new tab was not selected");
   assert.equal(bar.selected.get().name, "Ratting");
@@ -237,7 +352,7 @@ test("an empty name falls back to the recipe's label", () => {
   // ⚠ NOT REFUSED. A tab with no name is indistinguishable from one that failed
   // to draw, so it takes the recipe's own name instead.
   assert.equal(normalizeTabName("", "mining"), "Mining");
-  assert.equal(normalizeTabName("   ", "combat"), "Combat");
+  assert.equal(normalizeTabName("   ", "pve"), "PVE");
   const bar = createTabBar();
   const tab = bar.create("travel", "");
   assert.equal(tab.name, "Travel");
@@ -261,7 +376,7 @@ test("deleting the selected tab falls back to All rather than to whatever is nex
   // ⚠ THE PANEL'S STANDING RULE, applied here: a selection never silently
   // retargets onto something the player did not choose.
   const bar = createTabBar();
-  const tab = bar.create("combat", "Ratting");
+  const tab = bar.create("pve", "Ratting");
   assert.equal(bar.selectedID.get(), tab.id);
   bar.remove(tab.id);
   assert.equal(bar.selectedID.get(), "all");
@@ -270,7 +385,7 @@ test("deleting the selected tab falls back to All rather than to whatever is nex
 
 test("deleting some OTHER tab leaves the selection alone", () => {
   const bar = createTabBar();
-  const keep = bar.create("combat", "Keep");
+  const keep = bar.create("pve", "Keep");
   const drop = bar.create("travel", "Drop");
   bar.select(keep.id);
   bar.remove(drop.id);
@@ -281,18 +396,18 @@ test("deleting some OTHER tab leaves the selection alone", () => {
 test("moving a tab swaps it with its neighbour and never past All", () => {
   const bar = createTabBar();
   const names = (): string[] => bar.tabs.get().map((tab) => tab.name);
-  assert.deepEqual(names(), ["All", "Mining", "Travel", "Combat"]);
+  assert.deepEqual(names(), ["All", "System", "PVE", "PVP", "Mining", "Travel"]);
 
   bar.select("all");
-  // Move the LAST tab left twice: Travel, then Mining. It must stop there.
-  const combat = bar.tabs.get()[3];
-  assert.ok(combat);
-  bar.move(combat.id, -1);
-  assert.deepEqual(names(), ["All", "Mining", "Combat", "Travel"]);
-  const moved = bar.tabs.get()[2];
+  // Move the LAST tab left twice: over Mining, then over PVP. It must stop there.
+  const travel = bar.tabs.get()[5];
+  assert.ok(travel);
+  bar.move(travel.id, -1);
+  assert.deepEqual(names(), ["All", "System", "PVE", "PVP", "Travel", "Mining"]);
+  const moved = bar.tabs.get()[4];
   assert.ok(moved);
   bar.move(moved.id, -1);
-  assert.deepEqual(names(), ["All", "Combat", "Mining", "Travel"]);
+  assert.deepEqual(names(), ["All", "System", "PVE", "Travel", "PVP", "Mining"]);
   // ⚠ One more step left would swap with All. It must NOT.
   bar.move(bar.tabs.get()[1]?.id ?? "", -1);
   assert.equal(names()[0], "All", "All was pushed out of its slot");
@@ -301,15 +416,16 @@ test("moving a tab swaps it with its neighbour and never past All", () => {
 test("moving past either end is a no-op, not a wrap-around", () => {
   const bar = createTabBar();
   const before = bar.tabs.get().map((tab) => tab.id);
-  // ⚠ MINING IS THE FIRST EDITABLE SLOT, so a move LEFT is already off the end
+  // ⚠ SYSTEM IS THE FIRST EDITABLE SLOT, so a move LEFT is already off the end
   // — and it must not wrap round and swap with All, which sits one place left.
-  const mining = bar.tabs.get()[1];
-  assert.ok(mining);
-  bar.move(mining.id, -1);
+  const system = bar.tabs.get()[1];
+  assert.ok(system);
+  bar.move(system.id, -1);
   assert.deepEqual(bar.tabs.get().map((tab) => tab.id), before);
-  const combat = bar.tabs.get()[3];
-  assert.ok(combat);
-  bar.move(combat.id, 1); // right, off the far end
+  // And the LAST tab moved RIGHT is off the far end: it must not wrap.
+  const travel = bar.tabs.get()[5];
+  assert.ok(travel);
+  bar.move(travel.id, 1);
   assert.deepEqual(bar.tabs.get().map((tab) => tab.id), before);
 });
 
@@ -331,12 +447,19 @@ test("the selected tab and its id never describe different tabs", () => {
   assert.equal(bar.selected.get().id, tab.id, "the rename orphaned the id");
 });
 
-test("reset puts the bar back to All plus the three defaults", () => {
+test("reset puts the bar back to All plus the five defaults", () => {
   const bar = createTabBar();
-  bar.create("combat", "Ratting");
+  bar.create("pve", "Ratting");
   bar.remove(bar.tabs.get()[2]?.id ?? "");
   bar.reset();
-  assert.deepEqual(bar.tabs.get().map((tab) => tab.name), ["All", "Mining", "Travel", "Combat"]);
+  assert.deepEqual(bar.tabs.get().map((tab) => tab.name), [
+    "All",
+    "System",
+    "PVE",
+    "PVP",
+    "Mining",
+    "Travel",
+  ]);
   assert.equal(bar.selectedID.get(), "all");
 });
 
@@ -345,7 +468,7 @@ test("a subscriber is told when the tab changes", () => {
   const bar = createTabBar();
   const seen: string[] = [];
   const stop = bar.selectedID.subscribe((id) => seen.push(id));
-  const tab = bar.create("combat", "Ratting");
+  const tab = bar.create("pve", "Ratting");
   stop();
   assert.deepEqual(seen, ["all", tab.id]);
 });
@@ -353,8 +476,8 @@ test("a subscriber is told when the tab changes", () => {
 test("two tab bars built separately never share state", () => {
   const a = createTabBar();
   const b = createTabBar();
-  a.create("combat", "Only mine");
-  assert.equal(b.tabs.get().length, 4);
+  a.create("pve", "Only mine");
+  assert.equal(b.tabs.get().length, 6);
   assert.equal(b.tabs.get().some((tab) => tab.name === "Only mine"), false);
 });
 
@@ -365,11 +488,14 @@ test("every created tab carries a recipe that exists", () => {
   assert.equal(recipeByID(tab.recipeId).id, "travel");
 });
 
-test("a tab never hides a hostile, whatever recipe it is built on", () => {
+test("a tab never hides a hostile BY ROLE, whatever recipe it is built on", () => {
   // ⚠ THE GUARANTEE THE PLAYER CANNOT BREAK BY MAKING THEIR OWN TAB. A tab is a
-  // name and a recipe; it has no way to express "and also hide the rat".
+  // name and a recipe; it has no way to express "and also hide the rat" by
+  // ROLE. (The stance axis can reach a hostile — that is the relaxed rule —
+  // but no default recipe pre-hides the hostile side, which the test above
+  // pins.)
   const bar = createTabBar();
-  for (const recipeId of ["all", "mining", "travel", "combat"] as OverviewRecipeID[]) {
+  for (const recipeId of ["all", "system", "pve", "pvp", "mining", "travel"] as OverviewRecipeID[]) {
     const tab = { id: "t", name: "x", recipeId, fixed: false };
     assert.equal(tabAllows(tab, RAT), true, `a '${recipeId}' tab hid a threat`);
     assert.equal(tabAllows(tab, isHostile(RAT) ? RAT : RAT), true);

@@ -8953,36 +8953,33 @@
   .spc-tab:hover:not(.on) { color: var(--stn-bright); }
   .spc-tab.on { color: var(--stn-bright); border-bottom-color: var(--stn-accent); }
 
-  /* --- R90 the toolbar: tabs left, overview verbs right ------------------- */
-  /* ⚠ THE SPLIT IS THE REQUEST, and it is also the only reading that works on a
-     narrow panel: a row that mixes "which slice am I looking at" with "what do I
-     do to this thing" makes both harder to find. Tabs grow from the left, verbs
-     sit against the right edge, and the two never overlap because the tab list
-     scrolls on its own rather than pushing the verbs off the panel. */
-  .spc-toolbar {
+  /* --- R90 the two bars: tabs on their own line, overview verbs on the next */
+  /* ⚠ TWO BARS, NOT ONE. A single row that mixed "which slice am I looking at"
+     with "what do I do to this thing" let two wide Hide buttons crowd the tab
+     list off the left edge of a narrow panel — the tabs and the verbs fought
+     for the same line and the verbs won. Now the tab list owns a whole line and
+     the utility verbs own the line under it, each the full width of the panel,
+     so the verbs can never push the tabs away no matter how many there are. */
+  .spc-tabs-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     padding: 4px 8px;
     border-bottom: 1px solid var(--stn-line);
     background: var(--stn-page);
   }
-  .spc-toolbar-left {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .spc-toolbar-right {
+  .spc-tools-bar {
     flex: none;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--stn-line);
+    background: var(--stn-page);
   }
   /* ⚠ The tab list scrolls HORIZONTALLY on its own. Without this a player with
-     eight tabs pushes the Hide button off the right edge of the panel — and the
-     Hide button is the one control that must never be unreachable. */
+     eight tabs pushes their own tools off the right edge of the tab line. */
   .spc-tabs {
     flex: 1 1 auto;
     min-width: 0;
