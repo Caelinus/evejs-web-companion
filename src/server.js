@@ -196,7 +196,13 @@ function heldOnGamePort(webSessionID) {
   }
   return true;
 }
-async function isCharacterHeld(characterID, callerSessionID = null) {
+async function isCharacterHeld(characterID, callerSessionID = null, preparationOwner = null, probeReservation = null) {
+  const reservation = characterOperations.get(characterID);
+  // Only the exact private customs-export reservation can probe its own hold.
+  // Both maps must still contain it; a name or stale token grants no exception.
+  const ownsProbe = probeReservation !== null && reservation === probeReservation &&
+    sessionOperations.get(callerSessionID) === probeReservation;
+  if (reservation && !ownsProbe) return true;
   if (replenishment.unresolved(characterID).length) return true;
   for (const [sessionID, held] of bridgeSessions) {
     if (sessionID === callerSessionID || Number(held.characterID) !== Number(characterID)) continue;
@@ -265,7 +271,8 @@ const botHost =
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
 app.locals.replenishment = replenishment;
-const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost });
+const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost,
+  withLease: mutationFence.withLease });
 const factorySkills = createFactorySkills({ store, gateway, data: staticData, queues: trainingQueues, sessions: factorySessions });
 const trainingOnboarding = createTrainingOnboarding({ store, gateway, sessions: factorySessions });
 // startServer() seeds the starter bots once the port is open, and all it
@@ -466,9 +473,6 @@ const requireAuth = makeRequireAuth();
 // The standalone training control plane never clears cockpit ownership as a
 // side effect of an account-read failure.
 const requireTrainingAuth = makeRequireAuth({ cleanupSession: false });
-// Phase 6A account observation never selects a pilot or clears cockpit ownership.
-require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
-  operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment });
 
 // The SSE push channel alone. `EventSource` cannot set request headers — the
 // API has no hook for it — so GET /api/bridge/events accepts the token as the
@@ -726,6 +730,24 @@ const provisioningRoutes = registerProvisioningRoutes({ app, requireAuth, requir
     held.activeShipID = Number(ready.flight.shipID);
     if (dispatchError) throw dispatchError;
   } });
+
+require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
+  operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment, sessions: factorySessions,
+  selectedAdapter: provisioningRoutes.adapter,
+  filePath: options.provisioningCenterJournalPath || (options.eveStore ? null : path.join(config.dataDir, "provisioning-center-control.json")),
+  fault: options.provisioningCenterFault || null,
+  attach(account, characterID, selected, operationID) {
+    const webSessionID = `provisioning-center:${operationID}`;
+    if (bridgeSessions.has(webSessionID) || [...bridgeSessions.values()].some(h => h.characterID === characterID))
+      throw Object.assign(new Error("Pilot ownership changed."), { code: "PILOT_BUSY" });
+    const held = makeHeldCharacter(account, characterID, selected);
+    held.temporaryProvisioning = true;
+    held.droneRecoveryReady = !!held.stationID && !held.structureID;
+    bridgeSessions.set(webSessionID, held);
+    return { held, req: { account, webSessionID } };
+  },
+  detach(binding) { if (bridgeSessions.get(binding.req.webSessionID) === binding.held) bridgeSessions.delete(binding.req.webSessionID); },
+});
 
 // Thin bridge proxy for the whitelisted EveJS callMethod path (goal R1).
 // Forwards the retail call tuple (service, method, args, kwargs) to the
@@ -1082,7 +1104,12 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     [characterID, null, true], null,
     { userid: Number(account.accountID), userName: String(account.username || "") },
   );
-  bridgeSessions.set(webSessionID, {
+  bridgeSessions.set(webSessionID, makeHeldCharacter(account, characterID, outcome));
+  joinHeldChat(bridgeSessions.get(webSessionID));
+  return outcome;
+}
+function makeHeldCharacter(account, characterID, outcome) {
+  return {
     bridgeSessionID: outcome.bridgeSessionID,
     characterID: Number(outcome.session.characterID) || characterID,
     accountID: Number(account.accountID),
@@ -1105,9 +1132,7 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     droneRecoveryReady: false,
     droneRecoveryCheckID: randomUUID(),
     recoveryDroneIDs: new Set(),
-  });
-  joinHeldChat(bridgeSessions.get(webSessionID));
-  return outcome;
+  };
 }
 
 // Select a character onto a persistent browser-backed session (goal R2): the
@@ -20377,7 +20402,7 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
               (Number.isSafeInteger(structureID) && structureID > 0))) return null;
         return { shipID, stationID, structureID };
       };
-      if (await isCharacterHeld(characterID, req.webSessionID)) {
+      if (await isCharacterHeld(characterID, req.webSessionID, null, reservation)) {
         res.status(409).json({
           ok: false,
           error: "CHARACTER_IN_USE",
@@ -20456,7 +20481,7 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
       const confirmOffline = async (attempts = 1) => {
         for (let attempt = 0; attempt < attempts; attempt++) {
           assertExportOwnership();
-          const heldElsewhere = await isCharacterHeld(characterID, req.webSessionID);
+          const heldElsewhere = await isCharacterHeld(characterID, req.webSessionID, null, reservation);
           assertExportOwnership();
           if (heldElsewhere) break;
           const status = await gateway.getCharacterStatus(req.account.accountID, characterID);
