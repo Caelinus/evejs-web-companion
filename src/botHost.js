@@ -805,6 +805,7 @@ function createBotHost(options) {
     expectedScriptHash = null,
     expectedExpiresAt = null,
     callerSessionID = null,
+    probeReservation = null,
     beforeStart = null,
     operationID = null,
     operationRole = null,
@@ -953,7 +954,7 @@ function createBotHost(options) {
     let heldByAnother;
     try {
       heldByAnother = await isCharacterHeld(characterID, callerSessionID,
-        { resumed, operationRunID, logicalRunID, operationPreparation });
+        { resumed, operationRunID, logicalRunID, operationPreparation, accountID: Number(account.accountID) }, probeReservation);
     } catch (error) {
       logError(error);
       return { ok: false, code: "CHARACTER_OWNERSHIP_UNVERIFIED",
@@ -1023,6 +1024,10 @@ function createBotHost(options) {
       store: null,
       unsubscribe: null,
       claimSecret: createClaimSecret(),
+      // A public Start carries only its in-process reservation capability.
+      // Its first select must use the runtime's existing atomic free-only seam.
+      // Neither this flag nor the capability is persisted as resume authority.
+      freePilotOnly: probeReservation !== null,
       // The web session the bot's own token names -- the key its held game
       // session sits under in the server's bridgeSessions. Only ever handed
       // out by readableSessionOf below, and never serialized.
@@ -1377,7 +1382,7 @@ function createBotHost(options) {
         return record.recoveryPromise;
       };
 
-      if (beforeStart) await beforeStart();
+      if (beforeStart) await beforeStart({ claimSecret: record.claimSecret });
       await flow.selectCharacter(characterID);
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;
@@ -1451,7 +1456,7 @@ function createBotHost(options) {
       record.status = "error";
       record.why = error && error.message ? String(error.message) : "The bot could not be started.";
       await finalize(record);
-      return { ok: false, code: error && ["PILOT_RELEASE_UNVERIFIED", "DRONE_HANDOFF_UNSAFE", "DRONE_RECOVERY_PENDING"].includes(error.code)
+      return { ok: false, code: error && ["CHARACTER_IN_USE", "PILOT_RELEASE_UNVERIFIED", "DRONE_HANDOFF_UNSAFE", "DRONE_RECOVERY_PENDING"].includes(error.code)
         ? error.code : "BOT_START_FAILED", message: record.why };
     }
   }
@@ -2085,6 +2090,8 @@ function createBotHost(options) {
     list,
     claimedBy,
     authorizesClaim,
+    requiresFreeSelection: (characterID, secret) => authorizesClaim(characterID, secret) &&
+      records.get(claims.get(Number(characterID)))?.freePilotOnly === true,
     readableSessionOf,
     activeCharacterIDs,
     activeBots,
