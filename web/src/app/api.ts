@@ -5306,6 +5306,7 @@ export async function finishMiningOperationDrain(targetKey: string, options: Api
 }
 
 export interface MiningOperationMemberDefinition {
+  readonly preparation?: import("./miningPreparation.ts").MiningPreparationFitting;
   readonly characterID: number;
   readonly characterName: string;
   readonly accountName: string;
@@ -5315,6 +5316,7 @@ export interface MiningOperationMemberDefinition {
 }
 
 export interface MiningOperationDefinition {
+  readonly preparation?: import("./miningPreparation.ts").MiningPreparationConfig;
   readonly support?: import("../nav/scriptConditions.ts").MiningSupportOptions;
   readonly policies?: {
     readonly version: 1;
@@ -5362,6 +5364,8 @@ export interface MiningOperationDefinition {
 }
 
 export interface MiningOperationRuntime {
+  readonly operationRunID?: string | null;
+  readonly preparation?: import("./miningPreparation.ts").MiningPreparationProjection;
   readonly operationID: string;
   readonly state: string;
   readonly statusReason?: string | null;
@@ -5369,6 +5373,7 @@ export interface MiningOperationRuntime {
   readonly recoveryRequired?: boolean;
   readonly currentTarget: MiningOperationTarget | null;
   readonly members: readonly (MiningOperationMemberDefinition & {
+    readonly preparation?: import("./miningPreparation.ts").MiningMemberPreparation;
     readonly runtimeState: string;
     readonly phase: string | null;
     readonly reason: string | null;
@@ -5469,11 +5474,23 @@ export interface OperationLaunchPlanMember {
   readonly script: { readonly scriptID: string; readonly name: string; readonly rev: number; readonly doc: JsonValue };
 }
 
-export async function getMiningOperationLaunchPlan(operationID: string, options: ApiOptions = {}): Promise<{ readonly planHash: string; readonly warnings: readonly string[]; readonly members: readonly OperationLaunchPlanMember[] }> {
+export interface MiningOperationLaunchPlan {
+  readonly planHash: string; readonly warnings: readonly string[]; readonly members: readonly OperationLaunchPlanMember[];
+  readonly preparation?: import("./miningPreparation.ts").MiningPreparationProjection;
+}
+export async function getMiningOperationLaunchPlan(operationID: string, options: ApiOptions = {}): Promise<MiningOperationLaunchPlan> {
   const data = await getJson(`/api/mining-operations/${encodeURIComponent(operationID)}/launch-plan`, options);
   return { planHash: typeof data.planHash === "string" ? data.planHash : "",
     warnings: (Array.isArray(data.warnings) ? data.warnings : []).filter((row): row is string => typeof row === "string"),
-    members: (Array.isArray(data.members) ? data.members : []) as unknown as OperationLaunchPlanMember[] };
+    members: (Array.isArray(data.members) ? data.members : []) as unknown as OperationLaunchPlanMember[],
+    ...(data.preparation && typeof data.preparation === "object" ? { preparation: data.preparation as unknown as import("./miningPreparation.ts").MiningPreparationProjection } : {}) };
+}
+
+/** Account-owned fitting observation only; never selects or acquires a pilot. */
+export async function getMiningPreparationOptions(accountName: string, characterID: number, providerCharacterID: number | null = null,
+  options: ApiOptions = {}): Promise<import("./miningPreparation.ts").MiningPreparationOptions> {
+  const query = new URLSearchParams({ accountName, characterID: String(characterID), ...(providerCharacterID ? { providerCharacterID: String(providerCharacterID) } : {}) });
+  return await getJson(`/api/mining-operations/preparation-options?${query}`, options) as unknown as import("./miningPreparation.ts").MiningPreparationOptions;
 }
 
 export interface OperationPilotChoice {
