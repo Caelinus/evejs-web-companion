@@ -181,8 +181,6 @@ export function describeAction(action: ScriptAction): string {
       return `loot container ${action.containerID}`;
     case "collectLaunch":
       return `collect launch ${action.launchID} from container ${action.containerID}`;
-    case "collectCustoms":
-      return `empty customs office ${action.officeID}`;
     case "haulTransfer":
       return `move ${action.quantity} of ${action.itemID} into route division ${action.division}`;
     case "reprocessOre":

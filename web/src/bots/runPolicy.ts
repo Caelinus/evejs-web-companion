@@ -149,10 +149,6 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   // container of the pilot's own. Deleting a launch record happens only after
   // a re-read shows that container empty, so a replay finds nothing to undo.
   "collect-launches": policy(["inventory", "colony"]),
-  // Restart-safe for the same reason, and one fewer moving part: there is no
-  // record to delete. Every tick re-reads each office and takes only from the
-  // pilot's own depositor-scoped rows, so a replay finds nothing to undo.
-  "collect-customs": policy(["inventory", "colony"]),
   "repair-ship": policy(["financial", "inventory"], false),
   "buy-item": policy(["financial"], false),
   "sell-item": policy(["financial", "inventory"], false),

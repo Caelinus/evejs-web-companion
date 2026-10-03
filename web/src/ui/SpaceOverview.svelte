@@ -27,8 +27,19 @@
   import { onMount } from "svelte";
   import TypeIcon from "./TypeIcon.svelte";
   import { SELECTION_GONE, selectionHasVanished, spaceSelection } from "../space/selection.ts";
-  import { overviewPreset } from "../space/overviewPreset.ts";
-  import { OVERVIEW_PRESETS, applyPreset } from "../space/overviewPresets.ts";
+  import { overviewTabs } from "../space/overviewTabs.ts";
+  import {
+    OVERVIEW_RECIPES,
+    recipeByID,
+    type OverviewRecipeID,
+  } from "../space/overviewRecipes.ts";
+  import {
+    EMPTY_STATE,
+    presetHides,
+    tabHidden,
+    tabHiddenMap,
+    tabShows,
+  } from "../space/overviewHidden.ts";
   import {
     buildOverviewRows,
     formatDistance,
@@ -98,9 +109,9 @@
   /**
    * The nearest N rows the list keeps.
    *
-   * ⚠ The preset is applied BEFORE this, never after: filtering afterwards
-   * would let 200 gates crowd every rock off the Mining tab while the tab
-   * claimed to be showing rocks.
+   * ⚠ The tab is applied BEFORE this, never after: filtering afterwards would let
+   * 200 gates crowd every rock off a Mining tab while the tab claimed to be
+   * showing rocks.
    */
   const ROW_CAP = 200;
 
@@ -111,6 +122,21 @@
   let rangeMenu = $state<RangeKind | null>(null);
   let customRange = $state("");
   let customRangeError = $state("");
+  /** The "new tab" / "rename" editor, or null when it is closed. */
+  let tabEditor = $state<{ readonly mode: "create" } | { readonly mode: "rename"; readonly id: string } | null>(null);
+  let draftName = $state("");
+  let draftRecipe = $state<OverviewRecipeID>("mining");
+  let draftError = $state("");
+  /**
+   * The hidden-objects menu for the ACTIVE TAB, collapsed by default and pinned
+   * at the BOTTOM.
+   *
+   * ⚠ IT DOES NOT OPEN ITSELF. Hiding used to flip this on so the player could
+   * not miss the undo, but every tab has its own list now and `All` still shows
+   * everything — the menu is a fallback for when something is lost, not a toast
+   * for the last press. It stays collapsed until the player asks for it.
+   */
+  let hiddenMenuOpen = $state(false);
 
   /**
    * ⚠ A SET, NOT A FLAG. A single shared busy flag greys out every verb because
@@ -127,16 +153,91 @@
 
   // --- the list ---------------------------------------------------------------
 
-  const presetSignal = overviewPreset.preset;
-  const presetIDSignal = overviewPreset.id;
-  const activePreset = $derived($presetSignal);
-  const activePresetID = $derived($presetIDSignal);
+  const tabsSignal = overviewTabs.tabs;
+  const tabIDSignal = overviewTabs.selectedID;
+  const tabSignal = overviewTabs.selected;
+  const allTabs = $derived($tabsSignal);
+  const activeTabID = $derived($tabIDSignal);
+  const activeTab = $derived($tabSignal);
 
+  /**
+   * The active tab's two lists, read off the app-wide map.
+   *
+   * ⚠ EVERY HIDE IS PER-TAB. The map keys state by the tab's opaque id, so
+   * hiding a group here touches only this tab; every other tab — and the All
+   * tab, which is absolute — keeps showing it. The radar answers from the very
+   * same map, so the picture and the list cannot disagree about it.
+   */
+  const activeTabState = $derived($tabHiddenMap.get(activeTabID) ?? EMPTY_STATE);
+
+  /**
+   * ⚠ ALL IS ABSOLUTE, AND IT IS THE ONLY TAB THAT IS.
+   *
+   * The fixed tab shows every object on the grid, including the ones hidden on
+   * every OTHER tab — it is the way back to seeing everything, and a way back
+   * that quietly respected the hidden lists would not be one. Every OTHER tab
+   * answers through `tabShows` with its own two lists, which is what makes the
+   * Hide control mean anything at all: hide a rock and it leaves the Mining
+   * tab, not merely the All tab.
+   */
   const presetSnapshot = $derived.by(() => {
-    if (!snapshot || activePreset.roles === null) {
+    if (!snapshot) {
       return snapshot;
     }
-    return { ...snapshot, entities: applyPreset(snapshot.entities, activePreset) };
+    return {
+      ...snapshot,
+      entities: snapshot.entities.filter((entity) => tabShows(activeTab, entity, activeTabState)),
+    };
+  });
+
+  /**
+   * The preset's pre-hidings that are still undecided on this tab — the
+   * virtual entries the preset dropped into this tab's hidden list in
+   * advance, now that the preset pre-hides instead of allowing.
+   *
+   * ⚠ DERIVED FROM THE GRID, NEVER FROM A PRECOMPUTED UNIVERSE. Group ids are
+   * the server's taxonomy and grow with it; the only honest list of "what
+   * this tab's preset pre-hides" is "what the grid holds that the preset does
+   * not show".
+   *
+   * ⚠ UNDECIDED ONLY. A group the tab hid itself is owned by the tab's
+   * `hidden` list, and one the player already showed is owned by `shown`;
+   * each appears in the menu exactly once, under the list that owns it, so no
+   * row ever sits in the menu doing nothing.
+   *
+   * ⚠ NAMES, NOT IDS. The menu shows the same group word the list's Group
+   * column shows, and the group id travels only as the list's row key.
+   */
+  const presetHiddenRows = $derived.by((): { readonly groupID: number; readonly label: string; readonly preset: boolean }[] => {
+    if (!snapshot || activeTab.fixed) {
+      return [];
+    }
+    const byGroup = new Map<number, string>();
+    for (const entity of snapshot.entities) {
+      if (entity.isSelf) continue;
+      if (entity.groupID === null || entity.groupID <= 0) continue;
+      if (!presetHides(activeTab, entity, activeTabState)) continue;
+      if (!byGroup.has(entity.groupID)) {
+        const group = groupName(entity);
+        byGroup.set(entity.groupID, group === "—" ? typeName(entity) : group);
+      }
+    }
+    return [...byGroup.entries()]
+      .map(([groupID, label]) => ({ groupID, label, preset: true }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  /**
+   * THE MENU'S ONE FLAT LIST: everything hidden on this tab, the preset's
+   * pre-hidings and the player's own hides alike — one system, no
+   * subcategories. Each row's Show button undoes that one entry, from
+   * whichever list it came from.
+   */
+  const hiddenMenuRows = $derived.by(() => {
+    const rows: { readonly groupID: number; readonly label: string; readonly preset: boolean }[] =
+      activeTabState.hidden.map((entry) => ({ groupID: entry.groupID, label: entry.label, preset: false }));
+    rows.push(...presetHiddenRows);
+    return rows.sort((a, b) => a.label.localeCompare(b.label));
   });
 
   function typeName(entity: SpaceEntity): string {
@@ -255,6 +356,195 @@
     concernErrors = {};
     spaceSelection.toggle(itemID);
   }
+
+  /**
+   * Hide this object's group from THIS TAB, permanently, for this browser.
+   *
+   * ⚠ THE SELECTION IS DROPPED WHEN THE HIDE TAKES EFFECT. The object leaves
+   * this tab's list the instant it is hidden, and the panel's rule is that a
+   * selection must never silently retarget onto whatever row is next — so
+   * without this the action bar would slide its verbs onto a different object
+   * one frame after the player pressed Hide.
+   */
+  // ⚠ NOT A CONTEXT MENU. Right-click is the obvious place for this and it does
+  // not work: the app is a web page, so the browser owns that gesture and the
+  // player gets "Save image as…" or nothing at all. Everything here is an
+  // ordinary left click on a real button.
+  function hideRow(row: OverviewRow): void {
+    // ⚠ THE GROUP, NOT THE OBJECT, AND NOT ITS OWN NAME. Pressing Hide on a
+    // planet hides every planet, and the restore menu says "Planet" rather than
+    // naming whichever rock was under the cursor. `groupName` is the same lookup
+    // the list's Group column uses, so the menu and the grid agree on the word.
+    const group = groupName(row);
+    const label = group === "—" ? typeName(row) : group;
+    // ⚠ PER-TAB, AND SILENT. The entry goes into the active tab's own list only,
+    // and the player is told nothing here: the entry is one line in this tab's
+    // hidden menu, every other tab still shows the group, and All shows it too.
+    // A row with no usable group is already refused by the button itself.
+    if (tabHidden.hide(activeTabID, row, label) !== null && selectedID === row.itemID) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  }
+
+  /**
+   * ⚠ WHY Hide IS OFFERED OR WITHHELD, IN WORDS, OR null IF IT MAY BE PRESSED.
+   *
+   * ⚠ THE THREAT CHECK HAS TO BE INSIDE A GUARD. `isHostile` reads
+   * `entity.isNpc` and throws on null, so `isHostile(selectedRow)` evaluated
+   * before the existence test takes the whole panel down on first paint — which
+   * is when nothing is ever selected. Deriving the reason once, in the order
+   * nothing-picked → all-tab → threat → allowed, means the guard is written
+   * once and the button's `disabled` and its tooltip cannot disagree about why.
+   *
+   * A threat is refused rather than silently ignored: `tabShows` would keep it
+   * shown anyway, so a live button that accepted it and did nothing would tell
+   * the player the client understood, and that would be a lie.
+   */
+  const hideRefusalReason = $derived.by<string | null>(() => {
+    if (!selectedRow) {
+      return "Pick something first";
+    }
+    // ⚠ THE ALL TAB HIDES NOTHING, BY DEFINITION. It is the fallback where
+    // everything else's hiding is undone, and a Hide that reached into it would
+    // be the one that could not be seen undone from within.
+    if (activeTab.fixed) {
+      return "All shows everything, so there is nothing to hide";
+    }
+    if (isHostile(selectedRow)) {
+      return "A threat is never hidden";
+    }
+    // ⚠ A ROW WITH NO GROUP IS REFUSED HERE, not accepted and ignored. Hiding is
+    // by group, so there is genuinely nothing to hide, and the button says
+    // so rather than taking the press.
+    if (selectedRow.groupID === null || selectedRow.groupID <= 0) {
+      return "That one has no group to hide it by";
+    }
+    return null;
+  });
+
+  /** Hide whatever is picked, which is what the toolbar's Hide button acts on. */
+  function hideSelected(): void {
+    if (hideRefusalReason !== null || !selectedRow) {
+      return;
+    }
+    hideRow(selectedRow);
+  }
+
+  /**
+   * Bring back one of THIS tab's hidden rows. The row carries where its hiding
+   * comes from: a group the player hid is dropped from the tab's hidden list,
+   * and one the preset pre-hides gets its pre-hiding recorded as undone —
+   * which is what makes it show on this tab while every other tab keeps its
+   * preset.
+   */
+  function showEntry(groupID: number, label: string, preset: boolean): void {
+    if (preset) {
+      tabHidden.addGroup(activeTabID, groupID, label);
+    } else {
+      tabHidden.unhideGroup(activeTabID, groupID);
+    }
+  }
+
+  /**
+   * "Show everything": undo this tab's hiding wholesale — the player's own
+   * hides AND the preset's pre-hidings, for every group the grid holds now.
+   * (A group the preset pre-hides later flies in is pre-hidden again: the
+   * preset's advance list applies to what the grid has not shown yet.)
+   */
+  function showEverythingOnTab(): void {
+    if (activeTabState.hidden.length > 0) {
+      tabHidden.clearHidden(activeTabID);
+    }
+    for (const row of presetHiddenRows) {
+      tabHidden.addGroup(activeTabID, row.groupID, row.label);
+    }
+  }
+
+  // --- the tab editor ---------------------------------------------------------
+
+  function openCreate(): void {
+    draftName = "";
+    // ⚠ THE PICKER OPENS ON MINING, NOT ON "All". "All" is already the tab in
+    // hand and is the one thing a new tab must not be a duplicate of; opening
+    // there would invite the player to create a second one by accident.
+    draftRecipe = "mining";
+    draftError = "";
+    tabEditor = { mode: "create" };
+  }
+
+  function openRename(id: string): void {
+    const tab = allTabs.find((candidate) => candidate.id === id);
+    if (!tab || tab.fixed) {
+      return;
+    }
+    draftName = tab.name;
+    draftRecipe = tab.recipeId;
+    draftError = "";
+    tabEditor = { mode: "rename", id };
+  }
+
+  /**
+   * ⚠ OPEN THE CONFIRMATION, NEVER DELETE STRAIGHT AWAY. A ✕ one click away from
+   * a ✎ one click away from a tab is a misclick waiting to happen, and a deleted
+   * tab is a piece of the player's own arrangement that cannot be rebuilt for
+   * them — `reset` would throw away every other tab too.
+   */
+  function openDelete(id: string): void {
+    const tab = allTabs.find((candidate) => candidate.id === id);
+    if (!tab || tab.fixed) {
+      return;
+    }
+    tabEditor = { mode: "delete", id };
+  }
+
+  function confirmDelete(): void {
+    if (tabEditor?.mode !== "delete") {
+      return;
+    }
+    // ⚠ THE TAB'S HIDDEN STATE GOES WITH THE TAB. It is keyed by the tab's
+    // opaque id, so a list left behind would outlive the tab it belonged to.
+    tabHidden.dropTab(tabEditor.id);
+    overviewTabs.remove(tabEditor.id);
+    closeEditor();
+  }
+
+  function closeEditor(): void {
+    tabEditor = null;
+    draftError = "";
+  }
+
+  /**
+   * ⚟ THE ONLY VALIDATION, AND IT EXISTS BECAUSE OF WHAT A TAB IS. An empty name
+   * falls back to the recipe's label rather than being refused — a tab with no
+   * name is indistinguishable from one that failed to draw. Duplicate names are
+   * NOT refused either: two tabs called "Mining" are confusing but harmless, and
+   * blocking them would stop a player naming a second Mining-shaped tab after a
+   * first one they already deleted.
+   */
+  function submitEditor(): void {
+    if (!tabEditor || tabEditor.mode === "delete") {
+      return;
+    }
+    if (tabEditor.mode === "create") {
+      overviewTabs.create(draftRecipe, draftName);
+    } else {
+      overviewTabs.rename(tabEditor.id, draftName);
+      overviewTabs.select(tabEditor.id);
+    }
+    closeEditor();
+  }
+
+  /**
+   * ⚠ THE GROUP'S OWN NAME, WHICH IS WHAT THE RESTORE MENU WILL SAY.
+   *
+   * `groupName` resolves through the type cache keyed on `typeID`, which is how
+   * the list's Group column already reads. Falling back to the TYPE name when the
+   * group is unresolved keeps the toolbar honest — it says "hide everything in
+   * the Merlina Rebel group" rather than a dash, and never shows a bare id.
+   */
+  const hideGroupLabel = $derived(
+    selectedRow ? (groupName(selectedRow) === "—" ? typeName(selectedRow) : groupName(selectedRow)) : "",
+  );
 
   // --- doing things -----------------------------------------------------------
 
@@ -855,19 +1145,151 @@
   {/if}
 
   <!-- ============================================================= filters -->
-  <div class="spc-filters">
-    <div class="spc-tabs" role="tablist" aria-label="What to show">
-      {#each OVERVIEW_PRESETS as preset (preset.id)}
-        <button
-          type="button"
-          role="tab"
-          class="spc-tab"
-          class:on={activePresetID === preset.id}
-          aria-selected={activePresetID === preset.id}
-          onclick={() => overviewPreset.choose(preset.id)}
-        >{preset.label}</button>
-      {/each}
+  <!-- ========================================================= the toolbar -->
+  <!--
+    ⚠ ONE ROW, LEFT = TABS, RIGHT = WHAT TO DO WITH WHAT IS SELECTED.
+    Every control here is an ordinary left click. There is deliberately no
+    context menu anywhere in this feature: right-click belongs to the browser,
+    so "hide this" on a right-click never reached the client at all.
+  -->
+  <div class="spc-toolbar">
+    <div class="spc-toolbar-left">
+      <div class="spc-tabs" role="tablist" aria-label="What to show">
+        {#each allTabs as tab (tab.id)}
+          <!--
+            ⚠ A TAB IS JUST A TAB NOW. The rename and delete controls used to sit
+            inside this wrapper, which put two more buttons on every tab and made
+            a four-tab bar carry twelve controls. They live beside the "+" now and
+            act on whichever tab is selected, so the bar costs three buttons no
+            matter how many tabs there are.
+          -->
+          <button
+            type="button"
+            role="tab"
+            class="spc-tab"
+            class:on={activeTabID === tab.id}
+            aria-selected={activeTabID === tab.id}
+            title={recipeByID(tab.recipeId).hint}
+            onclick={() => overviewTabs.select(tab.id)}
+          >{tab.name}</button>
+        {/each}
+      </div>
+      <button
+        type="button"
+        class="spc-tab-add"
+        onclick={openCreate}
+        title="New tab"
+        aria-label="New tab"
+      >+</button>
+      <!--
+        ⚠ RENAME AND DELETE ACT ON THE SELECTED TAB, and are refused on All.
+        The refusal is a disabled control carrying its reason, which is the same
+        rule the Hide button follows.
+      -->
+      <button
+        type="button"
+        class="spc-tab-tool"
+        title={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+        aria-label={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+        disabled={activeTab.fixed}
+        onclick={() => openRename(activeTab.id)}
+      >✎</button>
+      <button
+        type="button"
+        class="spc-tab-tool"
+        title={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+        aria-label={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+        disabled={activeTab.fixed}
+        onclick={() => openDelete(activeTab.id)}
+      >✕</button>
+      <button
+        type="button"
+        class="spc-tab-tool"
+        title="Move {activeTab.name} left"
+        aria-label="Move {activeTab.name} left"
+        disabled={activeTab.fixed}
+        onclick={() => overviewTabs.move(activeTab.id, -1)}
+      >◀</button>
+      <button
+        type="button"
+        class="spc-tab-tool"
+        title="Move {activeTab.name} right"
+        aria-label="Move {activeTab.name} right"
+        disabled={activeTab.fixed || activeTabID === allTabs[allTabs.length - 1]?.id}
+        onclick={() => overviewTabs.move(activeTab.id, 1)}
+      >▶</button>
     </div>
+
+    <div class="spc-toolbar-right">
+      <!--
+        ⚠ HIDDEN IS REFUSED, NOT SILENT, WHEN NOTHING IS PICKED. A live button
+        that does nothing is worse than one that says why it cannot act — and it
+        is only disabled here because there is a REAL reason (no selection), not
+        because a request happens to be in flight.
+      -->
+      <button
+        type="button"
+        class="spc-tool"
+        disabled={hideRefusalReason !== null}
+        title={hideRefusalReason ?? `Hide everything in the ${hideGroupLabel} group from ${activeTab.name}`}
+        onclick={hideSelected}
+      >Hide</button>
+    </div>
+  </div>
+
+  <!-- ========================================================= the editor -->
+  <!--
+    ⚠ THREE MODES IN ONE PANEL, AND THE DELETE ONE SAYS SO LOUDLY. The
+    confirmation is the same submenu the create and rename use, so there is one
+    place a submenu can appear from — but it is NOT styled like a form, because a
+    destructive action wearing the same clothes as "pick a recipe" is how a
+    misclick becomes a lost tab.
+  -->
+  {#if tabEditor}
+    <div class="spc-editor" class:danger={tabEditor.mode === "delete"}>
+      {#if tabEditor.mode === "delete"}
+        <p class="spc-editor-confirm">
+          Delete the tab <strong>{allTabs.find((tab) => tab.id === tabEditor.id)?.name}</strong>?
+          It goes back to being one of the four built-in filters.
+        </p>
+        <div class="spc-editor-actions">
+          <button type="button" class="spc-tool bad" onclick={confirmDelete}>Yes, delete it</button>
+          <button type="button" class="spc-tool" onclick={closeEditor}>Keep it</button>
+        </div>
+      {:else}
+        <label class="spc-editor-field">
+          <span class="spc-editor-label">
+            {tabEditor.mode === "create" ? "New tab" : "Rename tab"}
+          </span>
+          <input
+            type="text"
+            maxlength="24"
+            placeholder={recipeByID(draftRecipe).label}
+            aria-label="Tab name"
+            bind:value={draftName}
+          />
+        </label>
+        <label class="spc-editor-field">
+          <span class="spc-editor-label">Show</span>
+          <select aria-label="What this tab shows" bind:value={draftRecipe}>
+            {#each OVERVIEW_RECIPES as recipe (recipe.id)}
+              <option value={recipe.id}>{recipe.label} — {recipe.hint}</option>
+            {/each}
+          </select>
+        </label>
+        {#if draftError}<p class="spc-note bad">{draftError}</p>{/if}
+        <div class="spc-editor-actions">
+          <button type="button" class="spc-tool" onclick={submitEditor}>
+            {tabEditor.mode === "create" ? "Create tab" : "Save name"}
+          </button>
+          <button type="button" class="spc-tool" onclick={closeEditor}>Cancel</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ============================================================= filters -->
+  <div class="spc-filters">
     <label class="spc-search">
       <span class="spc-search-glyph" aria-hidden="true">⌕</span>
       <input type="search" placeholder="name, type or group" aria-label="Search what is around you" bind:value={search} />
@@ -935,6 +1357,13 @@
                 {formatDistance(row.distance)}
               </span>
             </button>
+            <!--
+              ⚠ NO PER-ROW HIDE CONTROL, AND THAT IS THE POINT. The first pass
+              put one on every row. That is 200 extra controls in a scrolling
+              list, and the one a player wants is the one for whatever they
+              just clicked — so hiding moved to the toolbar and acts on the
+              selection, which is a single control in a fixed place.
+            -->
           </li>
         {/each}
       {/if}
@@ -951,4 +1380,79 @@
       <p class="spc-note bad">{$space.error}</p>
     {/if}
   </div>
+
+  <!--
+    ==================================================== the hidden menu, per tab
+    ⚠ AT THE BOTTOM, OUTSIDE THE SCROLLER, COLLAPSED. This is the route back
+    from hiding, so it cannot be something you have to scroll to find: a
+    player who has hidden a belt of scenery and then wanted it back has to be
+    able to see that it is hidden and reach it in one click.
+
+    ⚠ AND IT IS THE ACTIVE TAB'S OWN. Every tab carries its own two lists —
+    hidden here shows up nowhere else, and the All tab (the fallback, which
+    hides nothing) carries no menu at all.
+
+    ⚠ ITS ENTRIES ARE GROUPS, NOT OBJECTS. One entry hides a whole group, so
+    200 identical emitters list as one row, not two hundred.
+
+    ⚠ ONE SYSTEM, ONE LIST. The preset pre-hides its groups in advance, and
+    the player's own hides sit alongside them, so the menu is a single flat
+    list of what this tab hides — no subcategories. A group the player
+    already showed is not listed: the overview shows it. All of it is names
+    the grid already shows; no id ever renders.
+  -->
+  {#if !activeTab.fixed}
+    <div class="spc-hidden-menu">
+      <!--
+        ⚠ THE LABEL IS CONSTANT. The menu is a fallback the player opens when
+        something is missing, not a status line: it says "Hidden Items" whether
+        the tab hides nothing or twenty groups, and the answer is inside.
+      -->
+      <button
+        type="button"
+        class="spc-hidden-toggle"
+        aria-expanded={hiddenMenuOpen}
+        onclick={() => (hiddenMenuOpen = !hiddenMenuOpen)}
+      >
+        <span class="spc-hidden-caret" class:open={hiddenMenuOpen} aria-hidden="true">▾</span>
+        Hidden Items
+      </button>
+
+      {#if hiddenMenuOpen}
+        {#if hiddenMenuRows.length === 0}
+          <p class="spc-note">
+            Pick something in the overview and press Hide, and its group will be listed here.
+          </p>
+        {:else}
+          <!--
+            ⚠ ONE FLAT LIST, NO SUBCATEGORIES. The preset's pre-hidings and
+            the player's own hides are one kind of entry, one row each, and
+            Show undoes that one entry — from whichever list it came from.
+          -->
+          <ul class="spc-hidden-list">
+            {#each hiddenMenuRows as row (row.groupID + ":" + (row.preset ? "preset" : "player"))}
+              <li class="spc-hidden-row">
+                <span class="spc-hidden-name">{row.label}</span>
+                <button
+                  type="button"
+                  class="spc-hidden-show"
+                  title="Show {row.label} on this tab"
+                  aria-label="Show {row.label}"
+                  onclick={() => showEntry(row.groupID, row.label, row.preset)}
+                >Show</button>
+              </li>
+            {/each}
+          </ul>
+          <button
+            type="button"
+            class="spc-link bad"
+            onclick={() => {
+              showEverythingOnTab();
+              hiddenMenuOpen = false;
+            }}
+          >Show everything</button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </div>

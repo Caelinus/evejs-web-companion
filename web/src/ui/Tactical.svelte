@@ -41,8 +41,8 @@
   import { formatDistance } from "../space/overview.ts";
   import { spaceSelection } from "../space/selection.ts";
   import { showInfo } from "./showInfo.ts";
-  import { overviewPreset } from "../space/overviewPreset.ts";
-  import { applyPreset } from "../space/overviewPresets.ts";
+  import { overviewTabs } from "../space/overviewTabs.ts";
+  import { EMPTY_STATE, tabHiddenMap, tabShows } from "../space/overviewHidden.ts";
   import { actionsForRow, type RowAction } from "../space/rowActions.ts";
   import { dispatchRowAction, isSingleCallAction } from "../space/rowActionRunner.ts";
   import { gateLinkFor } from "../space/gateLinks.ts";
@@ -80,8 +80,19 @@
    * pulled the rim in to the belt. The scale is fixed now, so a preset changes
    * WHAT is drawn and never where a given distance sits.)
    */
-  const presetSignal = overviewPreset.preset;
-  const measuredEntities = $derived(applyPreset(snapshot?.entities ?? [], $presetSignal));
+  const tabSignal = overviewTabs.selected;
+  const hiddenMapSignal = tabHiddenMap;
+  const measuredEntities = $derived.by(() => {
+    // ⚠ THE SAME QUESTION THE LIST ASKS, THROUGH THE SAME ANSWER. `tabShows`
+    // is the one resolver both surfaces use — the recipe, the tab's own
+    // hidden and added lists, the hostiles-are-never-hidden rule and All's
+    // absoluteness all come out of it, so the picture and the list cannot
+    // disagree about what a tab shows. Hiding on one tab therefore redraws
+    // only what that tab's picture shares with that tab's list.
+    const tab = $tabSignal;
+    const state = $hiddenMapSignal.get(tab.id) ?? EMPTY_STATE;
+    return (snapshot?.entities ?? []).filter((entity) => tabShows(tab, entity, state));
+  });
 
   // --- R91: the picture is exactly what the server last said -----------------
   //

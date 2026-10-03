@@ -192,17 +192,6 @@ export type ScriptAction =
    * container is seen empty.
    */
   | { readonly kind: "collectLaunch"; readonly containerID: number; readonly launchID: number }
-  /**
-   * Empty one planetary CUSTOMS OFFICE into the ship (collect-customs).
-   *
-   * The office's own storage is partitioned by depositor server-side, so the
-   * rows this takes are the pilot's own and no other hauler shares them - which
-   * is why, unlike lootContainer, there is no claim to make. And unlike
-   * collectLaunch there is no record to delete afterwards: an office is a
-   * structure that stays where it is, and the next tick's read of it is what
-   * says whether anything is left.
-   */
-  | { readonly kind: "collectCustoms"; readonly officeID: number }
   | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number;
       readonly from: import("../store/types.ts").InventoryPlace;
       readonly to: import("../store/types.ts").InventoryPlace;
@@ -560,9 +549,6 @@ const SETTLE_TICKS_BY_KIND: Partial<Record<ScriptAction["kind"], number>> = {
   // says the container was emptied (its launch record is gone), and a stale
   // read re-collecting an empty container costs one more empty open.
   collectLaunch: 1,
-  // And the same again: the next tick's office read is what says it emptied,
-  // and a stale read re-taking from an empty office costs one more empty open.
-  collectCustoms: 1,
 
   // GUARD (a) IS PRESENT, AND THE ENTRY IS STILL 1 ON PURPOSE. `buy-item` writes
   // `placed: true` in the issuing tick (~2914), so by the letter of the rule

@@ -378,12 +378,6 @@ const ENTRIES: Readonly<Record<MacroID, MacroCatalogEntry>> = {
     "Flies to each container your command centres launched in this system and takes what is inside, each into the right hold (an Epithal's planetary hold takes planetary goods). It finds them from your launch list, so there is no scanning. Finishes when every launch here is collected, or when the ship is full.",
     "Being in space in the system of your launches",
   ),
-  "collect-customs": entry(
-    "collect-customs",
-    "planets",
-    "Flies to each customs office in this system that is holding planetary goods of yours and takes what is inside, each into the right hold (an Epithal's planetary hold takes planetary goods). The Planetary Industry window's Haul button puts the goods there; this block brings them home. Finishes when every office here is empty, or when the ship is full.",
-    "Being in space in the system of your colonies",
-  ),
   "repair-ship": entry(
     "repair-ship",
     "ship",

@@ -281,10 +281,6 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   // In space: empty every launch container of yours in THIS system into the
   // ship. No args: the server's own launch list says where each one is.
   "collect-launches": { args: [], untilRequired: false },
-  // In space: empty every customs office in THIS system that holds goods of
-  // yours into the ship. No args: an office is found by its group, and what it
-  // lists is this pilot's own, so there is nothing to name.
-  "collect-customs": { args: [], untilRequired: false },
   // Docked: quote the active ship + its fitted modules at the repair shop and
   // fix whatever is damaged (the station charges the wallet).
   "repair-ship": { args: [], untilRequired: false },

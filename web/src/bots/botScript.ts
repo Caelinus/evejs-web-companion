@@ -864,11 +864,6 @@ export type MacroID =
   // planetary launch containers in this system and take what is inside,
   // using the server's own launch list (GetMyLaunchesDetails) to find them.
   | "collect-launches"
-  // The hauler's half of the CUSTOMS-OFFICE export (src/piCustomsExport.js):
-  // in space, empty every customs office in this system that holds goods of
-  // yours into the ship. An office is a structure, not a listed launch, so the
-  // block reads each one to find out whether it holds anything.
-  | "collect-customs"
   | "repair-ship"
   // ── The market set. Place orders at the station's market (server confirm-gated).
   | "buy-item"
@@ -955,7 +950,6 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "restart-extractors",
   "launch-commodities",
   "collect-launches",
-  "collect-customs",
   "repair-ship",
   "buy-item",
   "sell-item",

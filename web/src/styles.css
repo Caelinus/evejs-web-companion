@@ -8952,6 +8952,235 @@
   }
   .spc-tab:hover:not(.on) { color: var(--stn-bright); }
   .spc-tab.on { color: var(--stn-bright); border-bottom-color: var(--stn-accent); }
+
+  /* --- R90 the toolbar: tabs left, overview verbs right ------------------- */
+  /* ⚠ THE SPLIT IS THE REQUEST, and it is also the only reading that works on a
+     narrow panel: a row that mixes "which slice am I looking at" with "what do I
+     do to this thing" makes both harder to find. Tabs grow from the left, verbs
+     sit against the right edge, and the two never overlap because the tab list
+     scrolls on its own rather than pushing the verbs off the panel. */
+  .spc-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--stn-line);
+    background: var(--stn-page);
+  }
+  .spc-toolbar-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .spc-toolbar-right {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  /* ⚠ The tab list scrolls HORIZONTALLY on its own. Without this a player with
+     eight tabs pushes the Hide button off the right edge of the panel — and the
+     Hide button is the one control that must never be unreachable. */
+  .spc-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .spc-tabs::-webkit-scrollbar { display: none; }
+  .spc-tab-wrap { position: relative; display: flex; flex: none; }
+  /* ⚠ THE "+" IS A BARE GLYPH, BOXED ONLY ON HOVER LIKE ITS NEIGHBOURS. It
+     carries only the glyph; the words live in the tooltip and the accessible
+     name, because four words beside every other control crowds the tab list
+     on a narrow panel. It wears the same treatment as the tab tools beside it
+     — transparent until touched — while the boxed `.spc-tool` verbs (Hide)
+     stay boxed on purpose: they act on the selection, this just builds a tab. */
+  .spc-tab-add {
+    flex: none;
+    min-width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--stn-muted);
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .spc-tab-add:hover { color: var(--stn-bright); border-color: var(--stn-line); }
+  /* ⚠ THE TOOL BUTTONS ARE ALWAYS VISIBLE, NOT HOVER-ONLY. They used to hang off
+     each tab and fade in on hover, which meant a keyboard user had no way to
+     reach Rename or Delete at all. They now act on the selected tab and live
+     permanently beside the "+". */
+  .spc-tab-tool {
+    flex: none;
+    min-width: 22px;
+    height: 24px;
+    padding: 0 4px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--stn-muted);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .spc-tab-tool:hover:not(:disabled) { color: var(--stn-bright); border-color: var(--stn-line); }
+  .spc-tab-tool:disabled { opacity: 0.3; cursor: default; }
+  .spc-tool {
+    flex: none;
+    min-height: 24px;
+    padding: 0 8px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-secondary);
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  /* ⚠ THE DESTRUCTIVE VARIANT. "Delete" and "Yes, delete it" are the only two
+     controls in this panel that destroy something the player made, and they are
+     the only two that read as dangerous rather than merely available. */
+  .spc-tool.bad, .spc-link.bad { color: var(--stn-warn); border-color: var(--stn-warn); }
+  .spc-tool.bad:hover:not(:disabled) { color: var(--stn-page); background: var(--stn-warn); }
+  /* ⚠ THE "+" HIGHLIGHTS LIKE THE TOOL BUTTONS, NOT LIKE HIDE. It left the
+     boxed treatment, so it left the boxed highlight with it — the accent
+     border belongs to the `.spc-tool` verbs only. */
+  .spc-tool:hover:not(:disabled) {
+    color: var(--stn-bright);
+    border-color: var(--stn-accent);
+  }
+  /* ⚠ A DISABLED CONTROL SAYS WHY through its tooltip, because a greyed-out Hide
+     with no explanation is the silent decline the project already rejected
+     elsewhere. It is only disabled for a real reason — nothing picked, or a
+     threat — never because a request happens to be in flight. */
+  .spc-tool:disabled { opacity: 0.4; cursor: default; }
+
+  /* --- the tab editor ----------------------------------------------------- */
+  .spc-editor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 8px;
+    background: var(--stn-surface);
+    border-bottom: 1px solid var(--stn-line);
+  }
+  .spc-editor-field { display: flex; flex-direction: column; gap: 3px; }
+  .spc-editor-label {
+    color: var(--stn-muted);
+    font-family: var(--font-display);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .spc-editor-field input, .spc-editor-field select {
+    min-height: 26px;
+    padding: 0 6px;
+    background: var(--stn-page);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-bright);
+    font-family: var(--font-body);
+    font-size: 12px;
+  }
+  .spc-editor-actions { display: flex; gap: 6px; }
+  /* ⚠ THE DELETE CONFIRMATION IS NOT A FORM. It reuses the editor panel so there
+     is one place a submenu can appear from, but it wears a warning edge and a
+     wash so a destructive press never sits next to a harmless-looking "Save
+     name" button. */
+  .spc-editor.danger {
+    border-left: 3px solid var(--stn-warn);
+    background: var(--stn-surface);
+  }
+  .spc-editor-confirm {
+    flex: 1 1 100%;
+    margin: 0;
+    color: var(--stn-bright);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .spc-editor-confirm strong { color: var(--stn-warn); }
+
+  /* --- the hidden menu, at the BOTTOM ------------------------------------- */
+  /* ⚠ OUTSIDE `.spc-content`, so it never scrolls away. This is the only way
+     back from hiding, and a route to undo that you have to scroll to find is not
+     a route you can rely on. */
+  .spc-hidden-menu {
+    flex: none;
+    border-top: 1px solid var(--stn-line);
+    background: var(--stn-page);
+    max-height: 40%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .spc-hidden-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 10px;
+    background: transparent;
+    border: 0;
+    color: var(--stn-muted);
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    text-align: left;
+  }
+  .spc-hidden-toggle:hover { color: var(--stn-bright); }
+  /* ⚠ The caret ROTATES rather than swapping glyphs, so the menu's state is a
+     single property and cannot desync from `aria-expanded`. */
+  .spc-hidden-caret { display: inline-block; transition: transform 120ms ease; }
+  .spc-hidden-caret.open { transform: rotate(180deg); }
+  .spc-hidden-list {
+    margin: 0;
+    padding: 0 0 4px;
+    list-style: none;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .spc-hidden-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 10px;
+  }
+  .spc-hidden-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--stn-secondary);
+    font-size: 12px;
+  }
+  .spc-hidden-show {
+    flex: none;
+    padding: 1px 7px;
+    background: var(--stn-surface);
+    border: 1px solid var(--stn-line);
+    color: var(--stn-accent);
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .spc-hidden-show:hover { color: var(--stn-bright); border-color: var(--stn-accent); }
+  .spc-hidden-menu .spc-link { margin: 0 10px 6px; }
   .spc-search {
     flex: 1 1 130px;
     display: flex;
@@ -9017,7 +9246,15 @@
   .spc-sort.on { color: var(--stn-accent); }
 
   .spc-rows { min-width: 0; }
-  .spc-row { border-bottom: 1px solid var(--stn-hair); border-left: 2px solid transparent; }
+  /* ⚠ `position: relative` IS LOAD-BEARING, not tidiness: the hide control is
+     absolutely positioned against this row (see `.spc-row-hide`), and without a
+     positioned ancestor it would anchor to the scroll container and every row's
+     button would pile up in the same place. */
+  .spc-row {
+    position: relative;
+    border-bottom: 1px solid var(--stn-hair);
+    border-left: 2px solid transparent;
+  }
   .spc-row:hover { background: var(--stn-hover); }
   .spc-row.picked { background: var(--stn-picked); border-left-color: var(--stn-accent-strong); }
   .spc-row-btn {

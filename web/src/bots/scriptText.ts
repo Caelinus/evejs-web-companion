@@ -177,8 +177,6 @@ export function macroName(macro: MacroID): string {
       return "Launch from the command centre";
     case "collect-launches":
       return "Collect your planet launches";
-    case "collect-customs":
-      return "Collect from the customs offices";
     case "repair-ship":
       return "Repair the ship";
     case "buy-item":
@@ -773,8 +771,6 @@ function macroPhrase(step: MacroStep): string {
     }
     case "collect-launches":
       return "Collect every launch container of yours in this system";
-    case "collect-customs":
-      return "Empty every customs office in this system that holds your goods";
     case "board-previous-ship":
       return "Get back into the ship this run was flying before the refit";
     case "board-planetary-hauler":
