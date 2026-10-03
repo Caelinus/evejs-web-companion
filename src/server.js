@@ -17891,11 +17891,28 @@ app.post("/api/bridge/modules/deactivate", requireAuth, async (req, res, next) =
       [itemID, effect],
       null,
     );
+    const shutdownStartedAt = Date.now();
     let active = await readActiveModuleIDs(held);
     let landed = activationLanded(activeBefore.ids, active.ids, itemID, active.banks);
     // Accepted stop may finish at the cycle boundary. Observe, never resend it.
-    const deadline = Date.now() + (options.moduleReconcileMs ?? 15_000);
-    while (landed === true && Date.now() < deadline) {
+    const initialBudget = options.moduleReconcileMs ?? 15_000;
+    const { effectiveCycleMs, shutdownBudgetMs } = require("./moduleShutdownBudget");
+    let cycleMs = null;
+    if (landed === true) {
+      try {
+        const cycle = await boundCall(held, req.webSessionID, dogmaBindSpec(), "QueryAttributeValue", [itemID, 73], null);
+        cycleMs = effectiveCycleMs(cycle.result);
+        outcome.notifications.push(...(cycle.notifications || []));
+      } catch (error) {
+        assertCurrentHeldSession(held, req.webSessionID);
+        // Unreadable duration is UNKNOWN, never a static type fallback.
+      }
+    }
+    const deadline = shutdownStartedAt + shutdownBudgetMs(cycleMs, initialBudget);
+    // Keep the mutation HTTP request below the client's transport deadline.
+    // A longer exact-module observation continues through read-only requests.
+    const firstDeadline = Math.min(deadline, shutdownStartedAt + initialBudget);
+    while (landed === true && Date.now() < firstDeadline) {
       await new Promise(resolve => setTimeout(resolve, 200));
       active = await readActiveModuleIDs(held);
       landed = activationLanded(activeBefore.ids, active.ids, itemID, active.banks);
@@ -17905,11 +17922,35 @@ app.post("/api/bridge/modules/deactivate", requireAuth, async (req, res, next) =
       itemID,
       stopped: landed === null ? null : !landed,
       activeModuleIDs: active.ids,
+      shipID: held.activeShipID,
+      cycleMs,
+      remainingMs: landed === true && cycleMs !== null ? Math.max(0, deadline - Date.now()) : 0,
       notifications: [...outcome.notifications, ...active.notifications],
     });
   } catch (error) {
     next(error);
   }
+});
+
+// Post-dispatch observation only; this route never repeats Deactivate.
+app.get("/api/bridge/modules/:itemID/state", requireAuth, async (req, res, next) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const itemID = Number(req.params.itemID), shipID = Number(req.query.shipID);
+    if (!Number.isSafeInteger(itemID) || itemID <= 0 || !Number.isSafeInteger(shipID) || shipID <= 0) {
+      res.status(400).json({ ok: false, error: "INVALID_MODULE_SCOPE" }); return;
+    }
+    await readHeldFlight(held, req.webSessionID);
+    if (held.activeShipID !== shipID) {
+      res.status(409).json({ ok: false, error: "MODULE_SHIP_CHANGED" }); return;
+    }
+    const active = await readActiveModuleIDs(held);
+    assertCurrentHeldSession(held, req.webSessionID);
+    const landed = activationLanded(null, active.ids, itemID, active.banks);
+    res.json({ ok: true, itemID, shipID, stopped: landed === null ? null : !landed,
+      activeModuleIDs: active.ids, notifications: active.notifications });
+  } catch (error) { next(error); }
 });
 
 // --- R23 slice B: the mining loop -------------------------------------------

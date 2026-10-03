@@ -529,6 +529,20 @@ test("reload reconciliation trusts botHost association but not a stale current t
   assert.equal(runtime.history[0].kind, "RECOVERED_UNKNOWN");
 });
 
+for (const family of ["ORE_ANOMALY", "ICE"]) test(`${family} Defender recovery keeps hosted association but never restores stale site authority`, () => {
+  const h = harness([definition("recover", [member(1, "MINER"), member(2, "DEFENDER")], "SELF_UNLOAD", [family])]);
+  const rows = [{ operationID: "recover", operationRole: "MINER", characterID: 1, botID: "miner", status: "running", endedAt: null },
+    { operationID: "recover", operationRole: "DEFENDER", operationRunID: "old-run", characterID: 2,
+      botID: "defender", status: "paused", phase: "Recovery needs verification", why: "Review and Stop", endedAt: null }];
+  const runtime = h.operations.list(rows)[0].runtime;
+  assert.equal(runtime.state, "DEGRADED");
+  assert.equal(runtime.recoveryRequired, true);
+  assert.equal(runtime.currentTarget, null);
+  assert.equal(runtime.members.find(row => row.role === "DEFENDER").botID, "defender");
+  assert.equal(h.board.list().length, 0);
+  assert.equal(h.operations.assignment("recover", 2).currentTarget, null);
+});
+
 for (const family of ["BELT", "ORE_ANOMALY", "ICE"]) test(`${family} Self-Unload rendezvous releases only ready/healthy miners and keeps target family`, () => {
   const h = harness([definition("self", [member(1, "MINER"), member(2, "MINER"), member(3, "MINER")], "SELF_UNLOAD", [family])]);
   startAll(h, "self", [family]);

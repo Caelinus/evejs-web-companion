@@ -1,8 +1,29 @@
 import type { ScannedAnomaly, MiningOperationTarget } from "./scriptConditions.ts";
 import type { MiningHold, SpaceEntity, SpaceVector } from "../store/types.ts";
 import type { BotScript } from "../bots/botScript.ts";
+import type { ScanSite } from "../bridge/boundSmallServices.ts";
+import { siteKind } from "../scanner/siteKind.ts";
 
 export type SiteFamily = "ORE_ANOMALY" | "ICE";
+
+/** Preserve scanner identity through the shared script observation boundary.
+ * The dictionary key addresses the scanned site; instanceID addresses its
+ * current incarnation. The inner fields.siteID may instead name a dungeon. */
+export function scriptScannerSites(sites: readonly ScanSite[]): readonly ScannedAnomaly[] {
+  const positiveID = (value: unknown): number | null => {
+    const n = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  };
+  return sites.flatMap(site => site.targetID === null ? [] : [{
+    label: site.targetID,
+    kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+    archetypeID: positiveID(site.fields["archetypeID"]),
+    siteID: positiveID(site.siteID),
+    instanceID: positiveID(site.fields["instanceID"]),
+    position: site.position !== null && site.position.length >= 3 && site.position.slice(0, 3).every(Number.isFinite)
+      ? { x: site.position[0]!, y: site.position[1]!, z: site.position[2]! } : null,
+  }]);
+}
 
 export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], ice: readonly number[]): string | null {
   function visit(nodes: BotScript["program"]): string | null {

@@ -1,5 +1,6 @@
 import { utilityChargeFits, type CombatUtilities, type CombatUtility } from "./combatUtilities.ts";
 import type { ScriptAction } from "./scriptDecide.ts";
+import { automaticCombatUtility } from "./combatUtilityPolicy.ts";
 
 function fail(code: string, message: string): never { throw Object.assign(new Error(message), { code }); }
 interface UtilityIssueDeps {
@@ -15,7 +16,7 @@ export async function issueCombatUtility(action: Extract<ScriptAction, { kind: "
   const before = await deps.read();
   if (!deps.current()) fail("CALL_REFUSED", "Utility authority retired before dispatch.");
   const module = before?.modules.find(row => row.itemID === action.moduleID && row.typeID === action.typeID);
-  if (!before || !module || module.active || !module.modeKnown || before.capacitor === null ||
+  if (!before || !module || !automaticCombatUtility(module) || module.active || !module.modeKnown || before.capacitor === null ||
       module.capNeed === null || before.capacitor < module.capNeed) fail("CALL_REFUSED", "Exact idle utility fit/mode/cap is not proven.");
   if (["web", "painter"].includes(module.family) && (action.targetID <= 0 || await deps.targetValid?.(module) !== true))
     fail("CALL_REFUSED", "Fresh locked NPC and proven utility reach are required.");
