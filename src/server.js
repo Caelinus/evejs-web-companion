@@ -17587,52 +17587,12 @@ async function readLockedTargetIDs(held, webSessionID) {
 }
 
 /**
- * Did the module the caller named end up RUNNING? Answered as a set DELTA, not
- * by asking whether that exact itemID is in the running set.
- *
- * The reason is weapon banking. dogmaService.js Handle_Activate silently
- * redirects a banked weapon to its bank MASTER, and the snapshot then reports
- * the master's itemID — so a slave weapon can start cycling without its own id
- * ever appearing, and `ids.includes(itemID)` would call a successful shot a
- * failure. Asking "is this id running, OR did the running set grow?" is right
- * either way round.
- *
- * Measured live in R29: banking is NOT reachable from this browser today —
- * banks are built only by dogmaIM.LinkWeapons, which is not allowlisted, and
- * two same-type turrets fired together each reported their OWN itemID with
- * `isBanked:false` on every damage message. This is therefore a guard against
- * a real server behaviour the client cannot currently trigger, not a fix for a
- * bug firing today. It costs one extra snapshot read and cannot be wrong.
- *
- * Returns null when either snapshot could not answer — "unknown", never "off".
+ * Confirm the requested module, including an authoritative bank-master mapping.
+ * Unrelated growth in the active set is not proof. Missing bank authority is
+ * unknown rather than a guessed confirmation of a slave weapon.
  */
-function activationLanded(idsBefore, idsAfter, itemID) {
-  if (idsAfter === null) {
-    return null;
-  }
-  if (idsAfter.includes(itemID)) {
-    return true;
-  }
-  if (idsBefore === null) {
-    return false;
-  }
-  // The named module is absent, but something new IS cycling that was not
-  // before: that is the bank master standing in for the weapon we asked for.
-  const before = new Set(idsBefore);
-  if (idsAfter.some((id) => !before.has(id))) {
-    return true;
-  }
-  // Nothing is running at all, so nothing started. Unambiguous.
-  if (idsAfter.length === 0) {
-    return false;
-  }
-  // Otherwise the running set did not change and the module we named is not in
-  // it. From OUTSIDE, with no bank map, this has two indistinguishable causes:
-  // the weapon joined a bank whose master was already cycling, or the server
-  // took the call and did nothing. This bridge does not get to guess between
-  // "your gun is firing" and "your gun is not", so it says UNKNOWN — the same
-  // answer it gives when the snapshot cannot answer at all.
-  return null;
+function activationLanded(_idsBefore, idsAfter, itemID, banks) {
+  return require("./moduleActionEvidence").moduleActive(idsAfter, itemID, banks);
 }
 
 /**
@@ -17651,6 +17611,7 @@ async function readActiveModuleIDs(held) {
     // null (not []) when the snapshot could not answer at all, so the caller can
     // say "unknown" instead of "nothing is running".
     ids: ids === null ? null : ids.map((value) => Number(value) || 0).filter((v) => v > 0),
+    banks: ship && ship.weaponBanks && typeof ship.weaponBanks === "object" ? ship.weaponBanks : null,
     notifications: outcome ? outcome.notifications : [],
   };
 }
@@ -17844,7 +17805,7 @@ app.post("/api/bridge/modules/activate", requireAuth, async (req, res, next) => 
       ok: true,
       itemID,
       // null when the snapshot could not answer — "unknown", never "off".
-      active: activationLanded(activeBefore.ids, active.ids, itemID),
+      active: activationLanded(activeBefore.ids, active.ids, itemID, active.banks),
       activeModuleIDs: active.ids,
       notifications: [...outcome.notifications, ...active.notifications],
     });
@@ -17896,8 +17857,15 @@ app.post("/api/bridge/modules/deactivate", requireAuth, async (req, res, next) =
       [itemID, effect],
       null,
     );
-    const active = await readActiveModuleIDs(held);
-    const landed = activationLanded(activeBefore.ids, active.ids, itemID);
+    let active = await readActiveModuleIDs(held);
+    let landed = activationLanded(activeBefore.ids, active.ids, itemID, active.banks);
+    // Accepted stop may finish at the cycle boundary. Observe, never resend it.
+    const deadline = Date.now() + (options.moduleReconcileMs ?? 15_000);
+    while (landed === true && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      active = await readActiveModuleIDs(held);
+      landed = activationLanded(activeBefore.ids, active.ids, itemID, active.banks);
+    }
     res.json({
       ok: true,
       itemID,
