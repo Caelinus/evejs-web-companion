@@ -151,6 +151,19 @@ test("public Start permits its exact private reservation through the real host o
   assert.equal(h.sessions.size, 0); assert.equal(h.app.locals.botHost.claimedBy(characterID), null);
 });
 
+test("hosted Defender retains exact MCC role/run metadata through public ownership and release", async t => {
+  const h = await harness(t), start = h.app.locals.botHost.start;
+  h.app.locals.botHost.start = input => start({ ...input, operationID: "operation", operationRole: "DEFENDER", operationRunID: "run-1" });
+  const result = await h.start();
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.bot.operationRole, "DEFENDER");
+  assert.equal(result.body.bot.operationID, "operation");
+  assert.equal(h.probes[0][2].operationRunID, "run-1");
+  assert.equal((await h.stop(result.body.bot.botID)).status, 200);
+  assert.equal(h.sessions.size, 0);
+  assert.equal(h.app.locals.botHost.claimedBy(characterID), null);
+});
+
 test("exact identity in both maps is required, never a name, character or session alone", async t => {
   const h = await harness(t), entered = deferred(), release = deferred();
   h.hook(async args => { entered.resolve(args); await release.promise; });

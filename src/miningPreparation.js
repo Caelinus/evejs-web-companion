@@ -1,6 +1,7 @@
 "use strict";
-const { hash, fail } = require("./provisioningContracts");
+const { hash, fail, inspectContract } = require("./provisioningContracts");
 const { intent, assertSelected } = require("./provisioningIntent");
+const { defenderReadiness } = require("./standardDefenderReadiness");
 const positive = n => Number.isSafeInteger(n) && n > 0;
 const ready = value => ["VERIFIED", "DEGRADED"].includes(value?.state);
 const stockRows = rows => rows.map(r => [r.itemID,r.typeID,r.ownerID,r.locationID,r.flagID,r.quantity,!!r.singleton])
@@ -61,7 +62,7 @@ function readiness(status, policy, support = null) {
   if (short.some(t => requiredTarget(t,policy,support))) return { state: "BLOCKED", reason: "Required supply target is not FULL." };
   return short.length ? { state: "DEGRADED", reason: core && short.some(t=>t.typeID===16272) ? "Heavy Water short; Core optional." : "Optional supplies below target." } : { state: "VERIFIED", reason: null };
 }
-function createMiningPreparation({ store, readReview, engine, adapterFor, bots, currentRun, data, fault = null, now = Date.now }) {
+function createMiningPreparation({ store, readReview, readSkills, engine, adapterFor, bots, currentRun, data, fault = null, now = Date.now }) {
   const sourceLabel = s => s.kind === "corp" ? `Corporation ${s.corporationID} / division ${s.division}` : "Personal local hangar";
   function view(member, status, policy, support, extra = {}) {
     return { characterID: member.characterID, role: member.role, ...readiness(status,policy,support), equipment: status.equipment,
@@ -70,7 +71,7 @@ function createMiningPreparation({ store, readReview, engine, adapterFor, bots, 
   }
   async function plan(definition, caller = null) {
     const policy = normalizePreparation(definition.preparation), members = [];
-    for (const member of definition.members.filter(m=>m.role!=="DEFENDER")) {
+    for (const member of definition.members) {
       let detail;
       const support = definition.support?.characterID === member.characterID ? definition.support : null;
       try {
@@ -86,6 +87,11 @@ function createMiningPreparation({ store, readReview, engine, adapterFor, bots, 
         if (detail.status.equipment !== "VERIFIED") fail("EQUIPMENT_NOT_READY");
         if (detail.status.supplies === "UNKNOWN") fail("SUPPLIES_UNKNOWN");
         if (detail.candidateSource.take === "DENIED") fail("SOURCE_TAKE_DENIED");
+        if (member.role === "DEFENDER") {
+          const combat = defenderReadiness(detail.selected, detail.pilot.observation,
+            await readSkills?.(account.accountID, member.characterID), data, true);
+          if (combat.state !== "VERIFIED") fail("DEFENDER_NOT_READY", combat.reason);
+        }
         input.fittingID = detail.selected.definition.fittingID; input.corporationID = detail.selected.definition.corporationID;
         const result = view(member,detail.status,policy,support,{ fittingName: detail.selected.name });
         // A shortage can be replenished under the final owner. Missing fuel
@@ -180,13 +186,23 @@ function createMiningPreparation({ store, readReview, engine, adapterFor, bots, 
         const result=await engine.apply(guarded,{reviewID:verified.reviewID,reviewHash:verified.reviewHash});current();
         if(!['COMPLETE','RECONCILED'].includes(result.state))fail("REPLENISHMENT_CUSTODY");
       }
-      const final=await engine.review(guarded,accepted.input);current();
+      let final=await engine.review(guarded,accepted.input);current();
+      if (accepted.role === "DEFENDER") {
+        const capabilityRead = await guarded.read(accepted.input); current();
+        final = { ...final, context: capabilityRead.context,
+          status: inspectContract(capabilityRead.contract, capabilityRead.observation, data) };
+        const combat = defenderReadiness(capabilityRead.contract, capabilityRead.observation,
+          await readSkills?.(record.accountID, record.characterID), data);
+        current();
+        if (combat.state !== "VERIFIED") fail("DEFENDER_NOT_READY", combat.reason);
+      }
       const result=view(accepted,final.status,accepted.policy,accepted.support,{ custodyOperationID, ownerGeneration:generation,
         fittingName:accepted.fittingName, context:final.context, before:verified.status, finalReview:final.status, completedAt:now() });
       if(ready(result)) cp.complete(result);else cp.block(result);
       await boundary("VERIFIED",record);current();return result;
     } catch(error) {
-      const result={...cp.snapshot(),state:engine.unresolved(record.characterID).length?"RECOVERY_REQUIRED":"BLOCKED",reason:error.code||error.message};
+      const result={...cp.snapshot(),state:engine.unresolved(record.characterID).length?"RECOVERY_REQUIRED":"BLOCKED",
+        reason:error.code === "DEFENDER_NOT_READY" ? error.message : error.code||error.message};
       cp.block(result);return result;
     }
   }

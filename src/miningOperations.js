@@ -69,11 +69,16 @@ const OPERATION_MACROS = Object.freeze({
   MINER: new Set(["undock", "mine-at-belt", "fleet-mine", "warp-to-ore-anomaly", "jettison-ore", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "defend-with-drones", "hardeners-on", "wait", "repair-ship", "refine-ore", "compress-ore"]),
   COMMAND: new Set(["undock", "mining-support"]),
   HAULER: new Set(["join-support-fleet", "undock", "travel-to-belt", "loot-containers", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "hardeners-on", "wait", "repair-ship"]),
+  DEFENDER: new Set(["undock", "fight-with-drones", "wait"]),
 });
 
 function operationRoutineCompatibility(definition, role, audit, executionClasses) {
-  if (role === "DEFENDER") return "DEFENDER execution is not supported yet.";
   if (!audit) return "The referenced routine no longer exists.";
+  if (role === "DEFENDER") return definition.members?.filter(row => row.role === role).every(row =>
+    (row.routineMode || (row.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") &&
+    audit.unsupportedNodes.length === 0 && audit.macros.includes("fight-with-drones") &&
+    audit.macros.every(name => OPERATION_MACROS.DEFENDER.has(name))
+    ? null : "DEFENDER requires the Standard Defender profile; custom escort routines are unsupported.";
   if (role === "COMMAND") return definition.support && audit.unsupportedNodes.length === 0 &&
     audit.macros.includes("mining-support") && audit.macros.every(name => OPERATION_MACROS.COMMAND.has(name)) ? null : "COMMAND requires the Standard Mining Support profile.";
   if (audit.unsupportedNodes.length > 0) return `Unsupported program node: ${audit.unsupportedNodes[0]}.`;
@@ -588,6 +593,7 @@ function createMiningOperations(options) {
     }
     return {
       operationID,
+      operationRunID: runtime.operationRunID || null,
       operationName: def.name,
       ...(def.support ? { support: def.support, supportPolicy: policy,
         intendedFleetCharacterIDs: def.members.filter(row => row.role !== "DEFENDER").map(row => row.characterID) } : {}),
@@ -776,7 +782,7 @@ function createMiningOperations(options) {
       : def.support ? runtime.supportStatus?.reason || "Support observation is unavailable."
       : unhealthy ? `${unhealthy.characterName}: ${unhealthy.reason || unhealthy.phase || "required member unavailable"}`
       : "A required operation member is unavailable.";
-    const preparationMembers = members.filter(m=>m.role!=="DEFENDER");
+    const preparationMembers = members;
     return {
       operationID: def.operationID,
       operationRunID: runtime.operationRunID || null,

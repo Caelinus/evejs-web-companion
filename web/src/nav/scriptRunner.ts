@@ -59,6 +59,7 @@ import {
 import { isSessionChangeSettling, isTransportTransient, isTransitionTimeout, refusalWords } from "../bridge/refusals.ts";
 import { createTravelAssist, type TravelAssistDeps } from "./travelAssist.ts";
 import { settleCombat } from "./combatOwnership.ts";
+import { defenderActionCurrent } from "./operationDefender.ts";
 
 /**
  * What the next decide will look at — so `observe` reads ONLY what that macro
@@ -195,6 +196,7 @@ export interface ScriptRunnerSnapshot {
  * deciders (B1). All injected so the loop itself touches no globals.
  */
 export interface ScriptRunnerDeps {
+  readonly readOperationAssignment?: () => Promise<ScriptObservation["miningOperation"]>;
   readonly travelAssist?: Pick<TravelAssistDeps, "change">;
   observe(hint: ObserveHint): Promise<ScriptObservation>;
   /**
@@ -683,6 +685,15 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     if (isWorldCall(result.action)) {
+      if (obs.miningOperation?.role === "DEFENDER" && result.interruptID === null && deps.readOperationAssignment) {
+        let current: ScriptObservation["miningOperation"] = null;
+        try { current = await deps.readOperationAssignment(); } catch { /* No guessed target. */ }
+        if (token !== runToken || status !== "running") return;
+        if (!defenderActionCurrent(obs.miningOperation, current ?? null, result.action)) {
+          emit({ ...last, status: "running", phase: "Waiting for operation target", why: "Operation target changed before dispatch; old site work was retired." });
+          return;
+        }
+      }
       const beforeAction = memory;
       // A safety watch's home destination is intent, not action completion:
       // keep that latch even when this first movement request is refused.

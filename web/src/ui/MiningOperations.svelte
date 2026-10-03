@@ -128,8 +128,9 @@
     if (member.role === "COMMAND") return "Mining Command / Support · v1";
     if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
     const label = family === "BELT" ? "Belt" : family === "ORE_ANOMALY" ? "Ore Anomaly" : family === "ICE" ? "Ice" : null;
+    if (member.role === "DEFENDER") return label ? "Standard Defender · v1" : "No Standard Defender profile for this class";
     if (policy === "SELF_UNLOAD") return label && member.role === "MINER" ? `${label} Miner / Self Unload · v1` : "No Standard Self-Unload profile for this role";
-    return label === null || member.role === "DEFENDER" ? "Not yet executable" : member.role === "MINER" ? `${label} Miner / Hauler Service · v${family === "BELT" ? 2 : 1}` : `${label} Hauler · v1`;
+    return label === null ? "Not yet executable" : member.role === "MINER" ? `${label} Miner / Hauler Service · v${family === "BELT" ? 2 : 1}` : `${label} Hauler · v1`;
   }
 
   function words(cause: unknown): string {
@@ -156,7 +157,7 @@
     } finally { if (mounted && generation === editorGeneration && definitionRequests.get(key) === request) definitionBusy[key] = false; }
   }
   function refreshDefinitions(): void {
-    for (const member of members) if (member.role !== "DEFENDER") void readDefinitions(member, providerFor(member));
+    for (const member of members) void readDefinitions(member, providerFor(member));
     const first = members.find(member => member.role !== "DEFENDER");
     if (first && providerFor(first) !== preparation.providerCharacterID) void readDefinitions(first, preparation.providerCharacterID);
   }
@@ -463,7 +464,7 @@
   }
 
   function patchMember(characterID: number, patch: Partial<DraftMember>): void {
-    if (patch.role === "COMMAND") patch = { ...patch, routineMode: "STANDARD", automationID: "" };
+    if (patch.role === "COMMAND" || patch.role === "DEFENDER") patch = { ...patch, routineMode: "STANDARD", automationID: "" };
     members = members.map((member) => member.characterID === characterID ? { ...member, ...patch } : member);
   }
 
@@ -771,20 +772,20 @@
           <thead><tr><th>Pilot</th><th>Role</th><th>Routine mode</th><th>Expected fitting override</th><th>Effective profile / routine</th></tr></thead>
           <tbody>
             {#each members as member (member.characterID)}
+              {@const key = definitionKey(member, providerFor(member))}
               <tr>
                 <td>{member.characterName}</td>
                 <td><select value={member.role} onchange={(event) => patchMember(member.characterID, { role: event.currentTarget.value as DraftMember["role"], automationID: "" })}>
                   <option value="MINER">Miner</option>
                   <option value="HAULER">Hauler</option>
                   <option value="COMMAND">Command / Support</option>
-                  <option value="DEFENDER">Defender — execution not supported</option>
+                  <option value="DEFENDER">Standard Defender</option>
                 </select></td>
-                <td>{#if member.role === "COMMAND"}Standard / Automatic{:else if member.role === "DEFENDER"}Not yet executable{:else}<select value={modeOf(member)} onchange={(event) => patchMember(member.characterID, { routineMode: event.currentTarget.value as "STANDARD" | "CUSTOM", automationID: "" })}>
+                <td>{#if member.role === "COMMAND" || member.role === "DEFENDER"}Standard / Automatic{:else}<select value={modeOf(member)} onchange={(event) => patchMember(member.characterID, { routineMode: event.currentTarget.value as "STANDARD" | "CUSTOM", automationID: "" })}>
                   <option value="STANDARD">Standard / Automatic</option>
                   <option value="CUSTOM">Custom / Advanced</option>
                 </select>{/if}</td>
-                <td>{#if member.role !== "DEFENDER"}
-                  {@const key = definitionKey(member, providerFor(member))}
+                <td>
                   <label>Definition provider <select value={member.preparation?.providerCharacterID ?? 0} onchange={(event) => setMemberProvider(member, Number(event.currentTarget.value))}>
                     <option value={0}>Use operation default</option>
                     {#each providerChoices(member) as pilot}<option value={pilot.characterID}>{pilot.characterName}</option>{/each}
@@ -796,8 +797,8 @@
                   </select></label>
                   {#if definitionErrors[key]}<p class="error">{definitionErrors[key]}</p>{/if}
                   {#if optionsFor(member)?.definitions.status && optionsFor(member)?.definitions.status !== "READY"}<p class="notice">Fitting library unavailable. Equipment readiness remains unknown.</p>{/if}
-                {:else}Not executable{/if}</td>
-                <td>{#if member.role === "DEFENDER"}Not yet executable{:else if modeOf(member) === "STANDARD"}
+                </td>
+                <td>{#if modeOf(member) === "STANDARD"}
                   {#if standardAvailable}{profileName(member)}{:else}<span class="error">No Standard profile for this class/policy; use Custom / Advanced.</span>{/if}
                 {:else}<select required value={member.automationID} onchange={(event) => patchMember(member.characterID, { automationID: event.currentTarget.value })}>
                   <option value="">Choose operation-compatible routine…</option>
@@ -811,7 +812,7 @@
           </tbody>
         </table>
       {/if}
-      <p class="note">Defender is a first-class role, but launch is deliberately disabled until an existing combat primitive can stay with the operation target safely.</p>
+      <p class="note">Standard Defender follows the operation target using shared mobile combat. Its exact saved fitting must pass equipment, skills and ammunition readiness; combat utilities are optional.</p>
       <div class="actions"><button type="submit" disabled={busy !== null || !anchorValid}>Save operation</button><button type="button" onclick={() => { editing = false; editorGeneration++; }}>Cancel</button></div>
     </form>
   {/if}

@@ -799,6 +799,7 @@ for (const action of ["review", "apply", "recover"]) app.post(`/api/pilot-traini
 
 const miningPreparation = options.miningPreparation || require("./miningPreparation").createMiningPreparation({
   store, readReview: provisioningCenter.readReview, engine: replenishment, data: staticData, bots: () => botHost.listAll(),
+  readSkills: (accountID, characterID) => gateway.getSkills(accountID, characterID),
   currentRun: operationID => miningOperations.runtimeFor(operationID)?.operationRunID ||
     botHost.listAll().find(b=>b.operationID===operationID && !b.endedAt)?.operationRunID,
   adapterFor(record) {
@@ -813,7 +814,7 @@ app.locals.miningPreparation=miningPreparation;
 function operationPreparationBarrier(operationID,operationRunID) {
   const definition=miningOperations.definition(operationID), runtime=miningOperations.runtimeFor(operationID), rows=botHost.listAll();
   return !!definition && runtime?.operationRunID===operationRunID && !["STOPPING","STOPPED","PARKING","PARKING_FAILED"].includes(runtime.state) &&
-    definition.members.filter(m=>m.role!=="DEFENDER").every(m=>rows.some(b=>b.operationID===operationID && b.operationRunID===operationRunID &&
+    definition.members.every(m=>rows.some(b=>b.operationID===operationID && b.operationRunID===operationRunID &&
       b.characterID===m.characterID && !b.endedAt && b.preparationOwnerAvailable===true &&
       botHost.claimedBy(m.characterID)===b.botID && miningPreparation.ready(b.preparation)));
 }
@@ -22269,8 +22270,9 @@ function prepareMiningOperationLaunch(definition) {
   const scripts = new Map();
   const audits = new Map();
   for (const member of definition.members) {
-    if (member.role === "DEFENDER") continue;
     const mode = member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD");
+    if (member.role === "DEFENDER" && mode !== "STANDARD") return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+      message: `${member.characterName}: DEFENDER requires the Standard Defender profile.` };
     let script;
     if (mode === "STANDARD") {
       if (!standardProfileFor(definition, member)) return { ok: false, code: "STANDARD_OPERATION_PROFILE_UNAVAILABLE",
@@ -22303,13 +22305,11 @@ function prepareMiningOperationLaunch(definition) {
   if (commonClasses.length === 0) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
     message: "The member routines do not share an executable operation target class." };
   for (const member of definition.members) {
-    if (member.role === "DEFENDER") continue;
     const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
     if (reason) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}` };
   }
   const planHash = createHash("sha256").update(JSON.stringify({ definition, scripts: [...scripts] })).digest("hex");
-  const warnings = definition.members.filter((member) => member.role === "DEFENDER")
-    .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
+  const warnings = [];
   if (definition.policies?.parking.mode !== undefined && definition.policies.parking.mode !== "STAY_IN_PLACE") {
     const destination = definition.policies.parking.destination;
     warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${destination.kind === "structure" ? destination.name : destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
@@ -22341,7 +22341,7 @@ app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, async (r
     const plan = await withMiningPreparationPlan(definition,prepareMiningOperationLaunch(definition),req);
     if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
     res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings, preparation: plan.preparation,
-      members: definition.members.filter((member) => member.role !== "DEFENDER").map((member) => ({
+      members: definition.members.map((member) => ({
       characterID: member.characterID, routineMode: member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD"),
       script: plan.scripts.get(member.characterID),
     })) });
@@ -22375,7 +22375,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       // Check every intended member before begin() changes operation state or
       // the first bot starts. The held-session check in botHost still repeats
       // this against the actual ship and access state immediately before work.
-      for (const member of definition.members.filter((row) => row.role !== "DEFENDER")) {
+      for (const member of definition.members) {
         const account = await store.getAccount(member.accountName);
         const character = account && !account.banned
           ? await store.getCharacterForAccount(account.accountID, member.characterID) : null;
@@ -22421,7 +22421,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
     const deliveryStructure = definition.unloadDestination?.kind === "structure"
       ? definition.unloadDestination : null;
     if (deliveryStructure) {
-      for (const member of definition.members.filter((row) => row.role !== "DEFENDER" &&
+      for (const member of definition.members.filter((row) =>
         (row.routineMode || (row.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD")) {
         const account = await store.getAccount(member.accountName);
         const character = account && !account.banned
@@ -22441,7 +22441,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
               message: `${member.characterName}: docking access to the delivery structure is unavailable. No member was started.` });
             return;
           }
-          if (deliveryStructure.corporationDivision !== null) {
+          if (member.role !== "DEFENDER" && deliveryStructure.corporationDivision !== null) {
             if (character.corporationID !== deliveryStructure.corporationID) {
               res.status(409).json({ ok: false, error: "DELIVERY_CORPORATION_MISMATCH",
                 message: `${member.characterName}: the configured strict destination belongs to a different corporation. No member was started.` });
@@ -22481,8 +22481,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       const script = scripts.get(member.characterID);
       const audit = audits.get(member.characterID);
       let failure = null;
-      if (member.role === "DEFENDER") failure = "DEFENDER execution is not supported yet; no escort routine was started.";
-      else if (!script || !audit) failure = "The referenced saved automation no longer exists.";
+      if (!script || !audit) failure = "The referenced saved automation no longer exists.";
       else failure = operationRoutineCompatibility(definition, member.role, audit, commonClasses);
       if (failure) {
         miningOperations.memberFailed(definition.operationID, member.characterID, { code: "MEMBER_NOT_EXECUTABLE", message: failure });

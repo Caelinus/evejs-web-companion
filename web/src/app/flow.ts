@@ -10608,7 +10608,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // because `mine-at-belt` earns the read only when its belt argument
         // says "site" — pointed at a belt, the same block must not pay for a
         // scanner read it will never look at (see activeStepToursOreSites).
-        if (macro !== null && (ANOMALY_MACROS.has(macro) || hint.needsOreSites === true || macro === "mining-support" &&
+        if (macro !== null && (ANOMALY_MACROS.has(macro) || hint.needsOreSites === true || (macro === "mining-support" || miningOperation?.role === "DEFENDER") &&
             miningOperation?.area.targetClasses.some(family => family === "ORE_ANOMALY" || family === "ICE"))) {
           try {
             const full = decodeFullState(await api.loadScanFullState(callOptions));
@@ -11214,6 +11214,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         acquire: (runID, systemID, itemID, renewOnly) => api.claimContainer(runID, systemID, itemID, renewOnly, callOptions),
         release: (runID) => api.releaseContainerClaims(runID, callOptions),
       },
+      readOperationAssignment: () => api.readMiningOperationAssignment(callOptions),
       mutationCustody: () => hostedJettisonPending,
       issue: async (action, claimRunID, invocation) => {
         const generation = customBotGeneration;
