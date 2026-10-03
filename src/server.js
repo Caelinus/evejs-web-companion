@@ -20293,6 +20293,16 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
       }
       const held = bridgeSessions.get(req.webSessionID) ?? null;
       const heldHere = held !== null && Number(held.characterID) === characterID;
+      let callerRecoveryProof = null;
+      const dockedIdentity = (flight) => {
+        const shipID = Number(flight?.shipID);
+        const stationID = Number(flight?.stationID) || null;
+        const structureID = Number(flight?.structureID) || null;
+        if (flight?.docked !== true || !Number.isSafeInteger(shipID) || shipID <= 0 ||
+            !((Number.isSafeInteger(stationID) && stationID > 0) ||
+              (Number.isSafeInteger(structureID) && structureID > 0))) return null;
+        return { shipID, stationID, structureID };
+      };
       if (await isCharacterHeld(characterID, req.webSessionID)) {
         res.status(409).json({
           ok: false,
@@ -20337,6 +20347,11 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
             res.status(409).json({ ok: false, error: "CUSTOMS_EXPORT_REQUIRES_DOCKED", message: "Dock this pilot before exporting from its colonies." });
             return;
           }
+          const identity = dockedIdentity(status.flight);
+          if (identity && held.droneRecoveryReady === true &&
+              Number(held.activeShipID) === identity.shipID && Number(held.accountID) === Number(req.account.accountID)) {
+            callerRecoveryProof = identity;
+          }
         } else {
           // A BFF handle is not the only way to fly a pilot. Refuse an existing
           // retail/other controller too, rather than letting TCP select evict it.
@@ -20354,10 +20369,10 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
           }
         }
       }
-      const assertExportOwnership = () => {
+      const assertExportOwnership = (expectedHeld = releasedCaller ? null : held) => {
         const payload = auth.verifySessionToken(readSessionToken(req));
         if (characterOperations.get(characterID) !== reservation || sessionOperations.get(req.webSessionID) !== reservation ||
-            (bridgeSessions.get(req.webSessionID) ?? null) !== (releasedCaller ? null : held) ||
+            (bridgeSessions.get(req.webSessionID) ?? null) !== expectedHeld ||
             botHost.claimedBy(characterID) !== null || payload?.sessionID !== req.webSessionID ||
             Number(payload.accountID) !== Number(req.account.accountID)) {
           throw Object.assign(new Error("The original pilot session can no longer be safely restored."),
@@ -20412,6 +20427,25 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
             assertExportOwnership();
             await selectHeldCharacter(req.webSessionID, req.account, characterID);
             handedBack = true;
+            // This caller completed recovery before the docked hop. Carry that
+            // proof only across a fresh return to the same pilot, hull and dock.
+            // Ordinary selection and an unknown/changed return remain gated.
+            const restored = bridgeSessions.get(req.webSessionID);
+            if (callerRecoveryProof && Number(restored?.characterID) === characterID &&
+                Number(restored.accountID) === Number(req.account.accountID) &&
+                Number(restored.activeShipID) === callerRecoveryProof.shipID) {
+              try {
+                assertExportOwnership(restored);
+                const returned = dockedIdentity((await readHeldFlight(restored, req.webSessionID))?.flight);
+                assertExportOwnership(restored);
+                if (returned && returned.shipID === callerRecoveryProof.shipID &&
+                    returned.stationID === callerRecoveryProof.stationID && returned.structureID === callerRecoveryProof.structureID) {
+                  restored.droneRecoveryReady = true;
+                }
+              } catch (error) {
+                errorLogger(error);
+              }
+            }
           } catch (error) {
             errorLogger(error);
             handedBack = false;

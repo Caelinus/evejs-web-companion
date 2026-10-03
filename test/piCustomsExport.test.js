@@ -667,6 +667,62 @@ test("an active retail driver prevents handback without losing successful export
   assert.equal(bridgeSessionStore.has("sid"), false);
 });
 
+test("a recovered docked caller can undock after customs handback", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  let undocked = false;
+  gateway.readFlightStatus = async () => ({
+    flight: { docked: !undocked, inSpace: undocked, stationID: undocked ? null : 60000004,
+      shipID: 1000000100, solarSystemID: SYSTEM_ID },
+    notifications: [],
+  });
+  const writes = [];
+  gateway.callMethod = async (service, method) => {
+    writes.push(`${service}.${method}`);
+    if (service === "ship" && method === "Undock") undocked = true;
+    return { result: null, notifications: [] };
+  };
+  const baseUrl = await startTestServer({ gateway, client: fakeClient(), bridgeSessionStore });
+  const exported = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(exported.response.status, 200);
+  assert.equal(exported.payload.handedBack, true);
+  const undocking = await post(baseUrl, "/api/bridge/flight/undock", {});
+  assert.equal(undocking.response.status, 200, "the recovered pilot keeps its proven readiness after the temporary hop");
+  assert.equal(undocking.payload.flight.inSpace, true);
+  assert.deepEqual(writes, ["ship.Undock"]);
+});
+
+test("handback keeps recovery gated when the restored docked identity cannot be proved", async () => {
+  const changedFlights = [
+    { docked: false, inSpace: true, shipID: 1000000100, solarSystemID: SYSTEM_ID },
+    {},
+    { docked: true, stationID: 60000004, shipID: 1000000200 },
+    { docked: true, stationID: 60000005, shipID: 1000000100 },
+  ];
+  for (const changedFlight of changedFlights) {
+    const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+    const gateway = fakeGateway();
+    let reads = 0;
+    gateway.readFlightStatus = async () => ({
+      flight: ++reads === 1
+        ? { docked: true, stationID: 60000004, shipID: 1000000100 }
+        : changedFlight,
+    });
+    // A login refusal also restores the caller, without a settlement delay.
+    const baseUrl = await startTestServer({ gateway, client: fakeClient({ failLogin: true }), bridgeSessionStore });
+    const exported = await post(baseUrl, "/api/pi/customs-export", {
+      confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+    });
+    assert.equal(exported.response.status, 500);
+    assert.equal(bridgeSessionStore.get("sid")?.droneRecoveryReady, false);
+    const undocking = await post(baseUrl, "/api/bridge/flight/undock", {});
+    assert.equal(undocking.response.status, 409);
+    assert.equal(undocking.payload.error, "DRONE_RECOVERY_PENDING");
+  }
+});
+
 test("unreadable colonies are refused instead of reported as empty pads", async () => {
   const gateway = fakeGateway();
   gateway.getSnapshot = async () => ({ characters: {}, planetRuntimeState: null });
