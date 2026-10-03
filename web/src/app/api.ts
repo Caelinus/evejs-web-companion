@@ -2876,7 +2876,7 @@ export async function unlockTarget(
 
 function readModuleAction(itemID: number, data: Record<string, JsonValue>): ModuleActionResult {
   return {
-    itemID,
+    itemID: typeof data.itemID === "number" && Number.isSafeInteger(data.itemID) ? data.itemID : Number.NaN,
     active: typeof data.active === "boolean" ? data.active : null,
     stopped: typeof data.stopped === "boolean" ? data.stopped : null,
     activeModuleIDs: data.activeModuleIDs ?? null,
