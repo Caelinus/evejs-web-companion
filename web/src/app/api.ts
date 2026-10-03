@@ -894,6 +894,13 @@ export async function loadFitting(options: ApiOptions = {}): Promise<RawFittingR
   };
 }
 
+export async function combatUtilityTypes(typeIDs: readonly number[], options: ApiOptions = {}):
+  Promise<Readonly<Record<number, import("../nav/combatUtilities.ts").UtilityType>>> {
+  if (typeIDs.length === 0) return {};
+  const data = await getJson(`/api/bridge/combat-utility-types?typeIDs=${[...new Set(typeIDs)].join(",")}`, options);
+  return data.types as unknown as Readonly<Record<number, import("../nav/combatUtilities.ts").UtilityType>>;
+}
+
 /**
  * A fitting change's outcome. `applied` is the BFF's RE-READ of the slots
  * after the call, not an echo of the request: the server can decline a fit

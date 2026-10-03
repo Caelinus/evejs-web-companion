@@ -154,6 +154,8 @@ import { combatFit, weaponHasCycle } from "../nav/combatFit.ts";
 import type { CombatWeapons } from "../nav/combatWeapons.ts";
 import { issueCombatReload } from "../nav/combatReloadIssue.ts";
 import { requireModuleOutcome, moduleSettlementNote } from "../nav/moduleOutcome.ts";
+import { combatUtilityFit, type CombatUtilities } from "../nav/combatUtilities.ts";
+import { issueCombatUtility, issueUtilityReload } from "../nav/combatUtilityIssue.ts";
 import { nameKey, type NameRef } from "../store/names.ts";
 import {
   companionFitWarnings,
@@ -7156,7 +7158,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return invite === null ? null : { fleetID: invite.fleetID, inviterID: invite.inviterID };
   }
 
-  async function readCombatWeapons(shipID: number | null, weaponIDs: readonly number[]): Promise<CombatWeapons | null> {
+  async function readCombatLoadout(shipID: number | null, weaponIDs: readonly number[]): Promise<{
+    weapons: CombatWeapons; utilities: CombatUtilities | null;
+  } | null> {
       if (shipID === null) return null;
       try {
         const [fit, bound, inventory, space] = await Promise.all([
@@ -7173,11 +7177,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           size: sizes[row.typeID]?.[128] ?? null,
         }));
         const snapshot = decodeSpaceSnapshot(space.space);
-        return { ...combatFit(shipID, buildSlots(fit.slots, fit.shipInfo, fit.online), weaponIDs,
+        const slots = buildSlots(fit.slots, fit.shipInfo, fit.online);
+        const typeIDs = [...new Set([...slots.flatMap(slot => slot.module ? [slot.module.typeID,
+          ...(slot.module.charge ? [slot.module.charge.typeID] : [])] : []), ...rows.map(row => row.typeID)])];
+        const types = await api.combatUtilityTypes(typeIDs, callOptions);
+        return { utilities: combatUtilityFit(shipID, slots, bound.allInfo.value, types,
+          container.error === null ? rows.flatMap(row => types[row.typeID] ? [{ itemID: row.itemID, quantity: row.quantity, type: types[row.typeID]! }] : []) : null,
+          snapshot?.ship?.itemID === shipID ? snapshot.ship.capacitorRatio : null),
+          weapons: { ...combatFit(shipID, slots, weaponIDs,
           decodeChargeFits(fit.chargeFits), bound.allInfo.value, cargo),
-          weaponBanks: snapshot?.ship?.itemID === shipID ? snapshot.ship.weaponBanks : null };
+          weaponBanks: snapshot?.ship?.itemID === shipID ? snapshot.ship.weaponBanks : null } };
       } catch { return null; }
     }
+
+  async function readCombatWeapons(shipID: number | null, weaponIDs: readonly number[]): Promise<CombatWeapons | null> {
+    return (await readCombatLoadout(shipID, weaponIDs))?.weapons ?? null;
+  }
 
   function makeMiningBotDeps(): MiningBotDeps {
     // The bay's stack sizes from its last read, for `launchDrones` below.
@@ -11148,8 +11163,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           hardenerModuleIDs: hint.activeMacro === "fight-with-drones" ? capabilities.combatHardeners : capabilities.defense.hardeners,
           combatHardenerModuleIDs: capabilities.combatHardeners,
           weaponModuleIDs: hint.activeMacro === "fight-with-drones" ? capabilities.combatWeaponIDs : capabilities.defense.weapons,
-          combatWeapons: hint.needsMobileCombat || hint.activeMacro === "fight-with-drones"
-            ? await readCombatWeapons(observedShipID, capabilities.combatWeaponIDs) : null,
+          ...await (async () => {
+            const facts = hint.needsMobileCombat || hint.activeMacro === "fight-with-drones"
+              ? await readCombatLoadout(observedShipID, capabilities.combatWeaponIDs) : null;
+            return { combatWeapons: facts?.weapons ?? null, combatUtilities: facts?.utilities ?? null };
+          })(),
           maxTargetRangeM: capabilities.maxTargetRangeM,
           // ⚠ THE SECOND LEASH, AND IT IS NEVER THE SAME NUMBER AS THE ONE
           // ABOVE. Lock range says how far this hull can TARGET; control range
@@ -11260,6 +11278,27 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             await api.unlockTarget(action.targetID, callOptions);
             return;
           case "activate":
+            if (action.utility) {
+              const shipID = capabilityCache.peek().shipID;
+              return issueCombatUtility(action, {
+                current: () => characterID != null && store.station.get().online?.characterID === characterID &&
+                  token === callOptions.token && pilotGeneration === recoveryGeneration && generation === customBotGeneration &&
+                  shipID === capabilityCache.peek().shipID,
+                read: async () => (await readCombatLoadout(shipID, []))?.utilities ?? null,
+                targetValid: async module => {
+                  const [scene, targets] = await Promise.all([api.getSpaceSnapshot(callOptions), api.getTargets(callOptions)]);
+                  const fresh = decodeSpaceSnapshot(scene.space), locked = decodeTargetIDs(targets.targetIDs);
+                  const target = fresh?.entities.find(row => row.itemID === action.targetID && row.isNpc && row.characterID === null);
+                  if (fresh?.ship?.itemID !== shipID || !target || !target.geometryAvailable || !fresh.ship.geometryAvailable ||
+                      locked?.includes(action.targetID) !== true || module.rangeM === null || module.rangeM <= 0) return false;
+                  const a = fresh.ship.position, b = target.position;
+                  return Math.max(0, Math.hypot(a.x-b.x, a.y-b.y, a.z-b.z)-fresh.ship.radius-target.radius) <= module.rangeM;
+                },
+                activate: () => api.activateModule(action.moduleID, { typeID: action.typeID,
+                  ...(action.targetID > 0 ? { targetID: action.targetID } : {}), repeat: action.repeat ?? -1 }, callOptions),
+                sleep: () => new Promise(resolve => setTimeout(resolve, 250)),
+              });
+            }
             // targetID 0 = a SELF-targeted module (repairer, hardener) — the
             // target key is omitted so the server activates it on the ship.
             requireModuleOutcome(await api.activateModule(
@@ -11291,6 +11330,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           }
           case "loadCombatAmmo": {
             const shipID = capabilityCache.peek().shipID;
+            if (action.utility) return issueUtilityReload(action, {
+              current: () => characterID != null && store.station.get().online?.characterID === characterID &&
+                token === callOptions.token && pilotGeneration === recoveryGeneration && generation === customBotGeneration &&
+                shipID === capabilityCache.peek().shipID,
+              read: async () => (await readCombatLoadout(shipID, []))?.utilities ?? null,
+              load: () => api.loadAmmo([action.moduleID], [action.chargeItemID], "cargo", callOptions),
+              sleep: () => new Promise(resolve => setTimeout(resolve, 750)),
+            });
             return issueCombatReload(action, {
               current: () => characterID != null && store.station.get().online?.characterID === characterID &&
                 token === callOptions.token && pilotGeneration === recoveryGeneration && generation === customBotGeneration &&

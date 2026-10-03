@@ -201,6 +201,7 @@ export function pickAdvertisedFleet(
 
 export interface ScriptObservation {
   readonly combatWeapons?: import("./combatWeapons.ts").CombatWeapons | null;
+  readonly combatUtilities?: import("./combatUtilities.ts").CombatUtilities | null;
   /** Ordinary continuous hardeners, independent of the starting macro hint. */
   readonly combatHardenerModuleIDs?: readonly number[];
   /** Fresh normal-flow reads. No saved runtime fleet identity or base-range fallback. */
