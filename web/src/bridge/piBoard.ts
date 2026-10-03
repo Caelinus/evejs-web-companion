@@ -72,16 +72,7 @@ export interface PiBoardInput {
 /** A start from this window, as far as it has got. */
 export type PiDispatchState =
   | { readonly kind: "starting" }
-  // `exported` rides on a HAUL's start: what the customs-office hop sent up
-  // before the lap began. Absent on a restart, which exports nothing.
-  | {
-      readonly kind: "started";
-      readonly exported?: {
-        readonly units: number;
-        readonly colonies: number;
-        readonly refusals: readonly string[];
-      };
-    }
+  | { readonly kind: "started" }
   | { readonly kind: "refused"; readonly sentence: string };
 
 /**
@@ -654,9 +645,8 @@ export function piHaulWords(
   return {
     label: `Haul ${colonies}`,
     words:
-      `This sends what the ticked colonies' launchpads hold up into their customs offices, then starts a server run for ${pilotName} ` +
-      `that launches what their command centres hold, gets into a ship parked where the pilot is docked that has a planetary hold, ` +
-      `empties those customs offices and collects the launches, ${station} and unloads into ${where}, ` +
+      `This starts a server run for ${pilotName} that launches what the ticked colonies hold, gets into a ship parked ` +
+      `where the pilot is docked that has a planetary hold, collects the launches, ${station} and unloads into ${where}, ` +
       `then ${andBack}gets back into the ship it started in. The launch is taxed. It runs for two hours at most.`,
   };
 }
@@ -664,17 +654,7 @@ export function piHaulWords(
 /** What a Haul start from this window did, as one sentence. */
 export function piHaulDispatchWords(state: PiDispatchState | null): string | null {
   if (state === null) return null;
-  if (state.kind === "starting") return "Launching into the customs offices, then starting the haul...";
-  if (state.kind !== "started") return state.sentence;
-  const started = "The haul has started on the server. Its steps show in the Bot Manager.";
-  const exported = state.exported ?? null;
-  if (exported === null) return started;
-  // What went up is said first, because it is the half the Bot Manager cannot
-  // show: the hop happens before the run exists.
-  const launched = exported.units === 0
-    ? "Nothing was on the launchpads, so nothing new went up."
-    : `Launched ${exported.units} ${exported.units === 1 ? "unit" : "units"} from ` +
-      `${exported.colonies === 1 ? "1 colony" : `${exported.colonies} colonies`} into their customs offices.`;
-  // A colony the server refused is named in its own words; the rest still haul.
-  return [launched, ...exported.refusals, started].join(" ");
+  if (state.kind === "starting") return "Starting the haul on the server...";
+  if (state.kind === "started") return "The haul has started on the server. Its steps show in the Bot Manager.";
+  return state.sentence;
 }
