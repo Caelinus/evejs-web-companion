@@ -11,6 +11,7 @@ import type { BoundDogmaAllInfo, DogmaItemInfo } from "../bridge/boundDogma.ts";
 import type { FittingSlot, SpaceSnapshot } from "../store/types.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { BotScript } from "../bots/botScript.ts";
+import { AUTOMATIC_UTILITY_FAMILIES, automaticCombatUtility, combatUtilityRestriction } from "./combatUtilityPolicy.ts";
 
 const type: UtilityType = { typeID: 526, groupID: 65, categoryID: 7, effects: [6426], attributes: {}, volume: 5, capacity: null };
 const capType: UtilityType = { ...type, typeID: 3566, groupID: 76, effects: [48], attributes: {604:87}, capacity: 5 };
@@ -18,6 +19,10 @@ const charge: UtilityType = { ...type, typeID: 11285, groupID: 87, categoryID: 8
 const module: CombatUtility = { itemID: 11, typeID: 526, family: "web", effectID: 6426, type, charge: null, quantity: 0,
   active: false, targetID: null, rangeM: 10_000, falloffM: 0, capNeed: 5, modeKnown: true, chargeUnits: null };
 const cap: CombatUtility = { ...module, typeID:3566, family:"capacitor", effectID:48, type:capType, charge,quantity:1,chargeUnits:1,capNeed:0 };
+function phaseOne(family: CombatUtility["family"]): CombatUtility {
+  const [group, spec] = Object.entries(AUTOMATIC_UTILITY_FAMILIES).find(([, row]) => row[0] === family)!;
+  return { ...module, family, effectID: spec[1], type: { ...type, groupID: Number(group), effects: [spec[1]] } };
+}
 const world = (modules: readonly CombatUtility[] = [module], extra: Partial<ScriptObservation> = {}): ScriptObservation => ({
   inSpace:true,docked:false,inWarp:false,shieldRatio:1,armorRatio:1,hullRatio:1,health:1,oreHoldFraction:0,holdEmpty:true,
   hostileOnGrid:true,dronesOut:false,combatDroneIDs:[71],myDrones:[],lockedTargetIDs:[1],capacitorRatio:1,
@@ -82,7 +87,7 @@ test("targeted utility has conservative proven range; falloff never invents cert
   assert.equal(decideCombatUtilities(world([{...module,rangeM:null}]),{},1).action,null);
 });
 test("painter requires real drone or loaded supported weapon damage path",()=>{
-  const painter={...module,family:"painter" as const,effectID:6425};
+  const painter=phaseOne("painter");
   assert.equal(decideCombatUtilities(world([painter]),{},1).action?.kind,"activate");
   assert.equal(decideCombatUtilities(world([painter],{combatDroneIDs:[]}),{},1).action,null);
 });
@@ -112,14 +117,14 @@ test("utility OFF reconciliation is bounded without repeated deactivation",()=>{
   assert.ok(decideCombatUtilities(obs,memory,1).blocked);
 });
 test("sensor needs combat, tracking needs turret, omni needs combat drones; unknown mode is off",()=>{
-  const sensor={...module,family:"sensor" as const};
+  const sensor=phaseOne("sensor");
   assert.equal(decideCombatUtilities(world([sensor]),{},1).action?.kind,"activate");
   assert.equal(decideCombatUtilities(world([sensor]),{},null).action,null);
-  const tracking={...sensor,family:"tracking" as const};
+  const tracking=phaseOne("tracking");
   assert.equal(decideCombatUtilities(world([tracking]),{},1).action,null);
   const weapons={shipID:9001,cargo:[],weapons:[{itemID:22,typeID:561,tracking:1,reachM:10000,chargeTypeID:222,chargeQuantity:1,acceptedGroups:[83],chargeSize:1}]};
   assert.equal(decideCombatUtilities(world([tracking],{combatWeapons:weapons}),{},1).action?.kind,"activate");
-  assert.equal(decideCombatUtilities(world([{...sensor,family:"omni"}],{combatDroneIDs:[]}),{},1).action,null);
+  assert.equal(decideCombatUtilities(world([phaseOne("omni")],{combatDroneIDs:[]}),{},1).action,null);
   assert.equal(decideCombatUtilities(world([{...sensor,modeKnown:false}]),{},1).action,null);
 });
 test("ordinary cap booster enforces declared group/numeric size AND known physical size",()=>{
@@ -225,3 +230,47 @@ test("settlement stops only utility modules owned by invocation, waits for defer
   const off=world([{...module,active:false},{...module,itemID:99,active:true}]);
   assert.equal(settleCombat(off,first.nextMem).outcome.kind,"done");
 });
+
+test("unknown or mismatched identities cannot borrow a Phase-1 family permission", async () => {
+  for (const forged of [
+    { ...module, type: { ...type, groupID: 999 } },
+    { ...module, type: { ...type, effects: [999] } },
+    { ...module, effectID: 999 },
+    { ...module, family: "painter" as const },
+    { ...module, type: { ...type, categoryID: 8 } },
+    { ...module, type: { ...type, typeID: 999 } },
+  ]) {
+    assert.equal(automaticCombatUtility(forged), false);
+    assert.equal(decideCombatUtilities(world([forged]), {}, 1).action, null);
+    let issued = 0;
+    await assert.rejects(issueCombatUtility(action, { current: () => true, read: async () => facts(forged),
+      targetValid: async () => true, activate: async () => { issued++; return { itemID: 11, active: true }; } }), { code: "CALL_REFUSED" });
+    assert.equal(issued, 0);
+  }
+});
+
+for (const [group, effect, family] of [[71,6187,"neut"], [68,6197,"nos"], [201,6470,"ecm"], [208,6422,"damp"],
+  [291,6424,"tracking-disruptor"], [291,6423,"guidance-disruptor"], [52,5934,"scram"], [52,39,"disruptor"]] as const) {
+  const restricted = { ...type, groupID: group, effects: [effect] };
+  test(`${family} classification reports its essential unknown proof and never enrolls for automation`, () => {
+    const restriction = combatUtilityRestriction(restricted);
+    assert.equal(restriction?.family, family);
+    assert.equal(restriction?.status, "FAIL_CLOSED");
+    assert.ok(restriction!.reason.length > 20);
+    assert.equal(combatUtilityRestriction({ ...restricted, effects: [] }), null);
+    const sl = slots().map(s => ({ ...s, module: { ...s.module!, groupID: group } }));
+    const fit = combatUtilityFit(9001, sl, dogma(group, effect), {526: restricted}, [], 1)!;
+    assert.deepEqual(fit.modules, []);
+    assert.equal(fit.restrictions?.[0]?.family, family);
+  });
+  test(`${family} cannot bypass planning or fresh dispatch by claiming a Phase-1 family`, async () => {
+    // Even valid NPC geometry/lock/cap plus an apparently useful Phase-1 label
+    // cannot stand in for the actual target applicability contract.
+    const forged = { ...module, type: restricted };
+    assert.equal(decideCombatUtilities(world([forged]), {}, 1).action, null);
+    let issued = 0;
+    await assert.rejects(issueCombatUtility(action, { current: () => true, read: async () => facts(forged),
+      targetValid: async () => true, activate: async () => { issued++; return { itemID: 11, active: true }; } }), { code: "CALL_REFUSED" });
+    assert.equal(issued, 0);
+  });
+}

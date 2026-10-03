@@ -1,7 +1,9 @@
 # Standalone Defender combat core
 
 Defender composes the existing `fight-with-drones` block and shared runner safety.
-It does not introduce another combat engine or enable the MCC DEFENDER role.
+It does not introduce another combat engine. Standard MCC Defender reuses it;
+see [the completion boundary](defender-completion.md) for current capabilities,
+scanner identity and intentional recovery restrictions.
 `fight-the-rats` remains the stationary block.
 
 ## Routine and safety authority
@@ -110,15 +112,15 @@ custody. Old generations cannot dispatch further cleanup or complete a new run.
 
 The generic layers are combat fit/ammo facts, module outcomes, action ownership,
 settlement and the existing mobile ladder. Standalone Defender owns safety policy,
-home/patrol bindings, yield and station fallback. Future MCC Standard Defender
-should supply its profile and patrol policy through existing hosted ownership,
-preflight, operation lifecycle, recovery and Stop/Restart handling. It should use
-this combat core, not a second MCC combat engine.
+home/patrol bindings, yield and station fallback. MCC Standard Defender supplies
+its profile and operation-owned target through existing hosted ownership,
+preflight, operation lifecycle, recovery and Stop/Restart handling, reusing this
+combat core.
 
-Targeted utilities, self buffs, cap boosters and ancillary repair remain unused by
-this core. A future utility framework must first add explicit classifier,
-observation, targeting/range/charge/cap and outcome contracts, then enroll its
-actions in the same ownership/settlement interfaces. Exact turret application,
+Phase-1 targeted utilities, self buffs and ordinary cap boosters now use explicit
+classifier, observation, targeting/range/charge/cap and outcome contracts in the
+same ownership/settlement interfaces. Phase-2 EWAR and ancillary repair remain
+fail-closed until their useful-target and policy evidence is available. Exact turret application,
 safe bank ownership and broader weapon families require separate qualification.
 
 Qualification must use disposable Test identities, fresh authoritative reads,

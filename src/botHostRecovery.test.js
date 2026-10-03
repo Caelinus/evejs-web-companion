@@ -58,6 +58,55 @@ test("other destructive profiles and roles cannot recover through ore custody el
     assert.equal(f.selected(), 1);
   }
 });
+
+async function actualDefender() {
+  const { buildStandardProfile } = require("./miningOperationProfiles");
+  const { analyzeBotRunPolicy } = await import("../web/src/bots/runPolicy.ts");
+  const profile = buildStandardProfile({ area: { targetClasses: ["ORE_ANOMALY"] }, unloadPolicy: "SELF_UNLOAD",
+    unloadDestination: { stationID: 99, stationName: "Home", systemName: "System" },
+    members: [{ role: "MINER", routineMode: "STANDARD" }, { role: "DEFENDER", routineMode: "STANDARD" }] },
+  { role: "DEFENDER", routineMode: "STANDARD" });
+  const policy = analyzeBotRunPolicy(profile.doc);
+  assert.equal(policy.restartSafe, false);
+  return { ...profile, policy };
+}
+
+test("actual Defender reconnect refuses without double acquisition or losing Stop/cleanup custody", async () => {
+  const d = await actualDefender();
+  const f = fixture({ restartSafe: d.policy.restartSafe, saved: { ...d, rev: d.rev },
+    host: { prepareOperation: async () => ({ state: "VERIFIED" }), operationBarrierReady: () => true } });
+  const started = await f.host.start({ ...launch, ...d, doc: d.doc, scriptName: d.name, scriptRev: d.rev,
+    operationRole: "DEFENDER", operationRunID: "defender-run", operationPreparation: { fittingID: 4 }, deferMain: true });
+  assert.equal((await f.host.activateOperationMember(started.bot.botID, 7, "op", "defender-run")).ok, true);
+  assert.equal(f.host.reconnect(started.bot.botID, 7).code, "BOT_RECOVERY_UNAVAILABLE");
+  assert.equal(f.selected(), 1);
+  assert.equal(f.host.claimedBy(launch.characterID), started.bot.botID);
+  assert.equal(f.host.list(7)[0].operationRunID, "defender-run");
+  assert.equal((await f.host.stop(started.bot.botID, 7)).ok, true);
+  assert.equal(f.host.claimedBy(launch.characterID), null);
+  assert.ok(f.log.indexOf("settle-stop") < f.log.indexOf("logout"));
+});
+
+test("actual Defender productive WC restart remains visible and requires manual review instead of acquiring", async t => {
+  const d = await actualDefender();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "defender-restart-"));
+  assert.equal(path.dirname(dir), path.resolve(os.tmpdir()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const persistPath = path.join(dir, "bots.json");
+  const first = fixture({ restartSafe: false, saved: d, host: { persistPath,
+    prepareOperation: async () => ({ state: "VERIFIED" }), operationBarrierReady: () => true } });
+  const started = await first.host.start({ ...launch, ...d, scriptName: d.name, scriptRev: d.rev,
+    operationRole: "DEFENDER", operationRunID: "defender-run", operationPreparation: { fittingID: 4 }, deferMain: true });
+  assert.equal((await first.host.activateOperationMember(started.bot.botID, 7, "op", "defender-run")).ok, true);
+  const restored = fixture({ restartSafe: false, saved: d, host: { persistPath } });
+  await restored.host.resume();
+  assert.equal(restored.selected(), 0);
+  const report = restored.host.list(7)[0];
+  assert.match(report.why, /consequential action.*manually/);
+  assert.equal(report.operationRole, "DEFENDER");
+  assert.equal(restored.log.includes("start"), false);
+  await first.host.stop(started.bot.botID, 7);
+});
 function hostedPending(f) {
   const m = require("./jettisonCustody"); const owner = f.host.jettisonOwnerForClaim(launch.characterID, "generation-1");
   const scope = { ...owner.scope, shipID: 9001, systemID: 3, targetKey: "belt", targetClaimedAt: 100 };

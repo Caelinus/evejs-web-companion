@@ -19,7 +19,7 @@ import { dispatchSupportCollectionAction } from "./supportCollectionFlow.ts";
 import { NO_ROOM_CODE } from "../nav/refusalLedger.ts";
 import { confirmControlledDronesHome, controlledFlightSettled } from "../nav/controlledDroneStop.ts";
 import { runFleetParking, parkingScript, type FleetParkingPolicy } from "../nav/fleetParking.ts";
-import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
+import { iceHoldFraction, iceMiningType, siteMiningFitRefusal, scriptScannerSites } from "../nav/miningSite.ts";
 import { fittedTravelPropulsion, travelPropulsionActivation } from "../nav/travelAssist.ts";
 import { ensureSiteLogisticsBookmark } from "../nav/siteLogisticsBookmark.ts";
 import { readRecoveryDrones, recoverLostDroneFlight, type DroneRecoveryState } from "../nav/lostDroneRecovery.ts";
@@ -10616,22 +10616,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             // the handle a warp is issued against, and `scanStrengthAttribute`
             // (with `archetypeID` as its backstop) is what separates a rock
             // field from a pirate den — see scanner/siteKind.ts.
-            anomalies = full.anomalies.flatMap((site) =>
-              site.targetID === null
-                ? []
-                : [{
-                    label: site.targetID,
-                    kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
-                    // The row's own `position`, carried so a refused warp can be
-                    // told apart from standing in the site already. A row
-                    // without one stays null — never an origin, which would
-                    // read as "the ship is right here" for every site at once.
-                    position:
-                      site.position === null || site.position.length < 3
-                        ? null
-                        : { x: site.position[0]!, y: site.position[1]!, z: site.position[2]! },
-                  }],
-            );
+            anomalies = scriptScannerSites(full.anomalies);
           } catch {
             anomalies = null;
           }

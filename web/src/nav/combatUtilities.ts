@@ -6,6 +6,7 @@ import type { FittingSlot } from "../store/types.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { MacroMemory, ScriptAction } from "./scriptDecide.ts";
 import type { CombatOwnership } from "./combatOwnership.ts";
+import { AUTOMATIC_UTILITY_FAMILIES as FAMILIES, automaticCombatUtility, combatUtilityRestriction, type UtilityRestriction } from "./combatUtilityPolicy.ts";
 
 export type UtilityFamily = "web" | "painter" | "sensor" | "tracking" | "omni" | "capacitor";
 export interface UtilityType {
@@ -25,12 +26,8 @@ export interface CombatUtilities {
   readonly shipID: number; readonly modules: readonly CombatUtility[];
   readonly cargo: readonly UtilityCargo[] | null; readonly capacitor: number | null;
   readonly capacitorRatio: number | null;
+  readonly restrictions?: readonly (UtilityRestriction & { readonly itemID: number; readonly typeID: number })[];
 }
-// Pinned SDE group AND activation effect; no names, hulls, or module type allowlist.
-const FAMILIES: Readonly<Record<number, readonly [UtilityFamily, number]>> = {
-  65: ["web", 6426], 379: ["painter", 6425], 212: ["sensor", 2670],
-  213: ["tracking", 4559], 646: ["omni", 6557], 76: ["capacitor", 48],
-};
 // Explicit understood script modes from the pinned SDE. Other scripts stay off.
 const SCRIPTS: Readonly<Record<string, readonly number[]>> = {
   sensor: [29009, 29011, 41155], tracking: [28999, 29001], omni: [28999, 29001],
@@ -74,6 +71,12 @@ export function combatUtilityFit(shipID: number, slots: readonly FittingSlot[], 
   if (dogma === null || Number(dogma.activeShipID) !== shipID) return null;
   const capacity = attr(dogma.ships.find(row => Number(row.itemID) === shipID), 482);
   return { shipID, cargo, capacitorRatio: capRatio, capacitor: capacity !== null && capacity > 0 && capRatio !== null ? capacity * capRatio : null,
+    restrictions: slots.flatMap(slot => {
+      const m = slot.module, type = m && types[m.typeID];
+      const restriction = type && combatUtilityRestriction(type);
+      return m?.online && type?.groupID === m.groupID && restriction
+        ? [{ itemID: m.itemID, typeID: m.typeID, ...restriction }] : [];
+    }),
     modules: slots.flatMap(slot => {
       const m = slot.module, type = m && types[m.typeID], spec = type && FAMILIES[type.groupID];
       if (!m?.online || !type || type.categoryID !== 7 || type.groupID !== m.groupID || !spec || !type.effects.includes(spec[1])) return [];
@@ -145,7 +148,7 @@ export function decideCombatUtilities(obs: ScriptObservation, memory: MacroMemor
       combatOwned: { ...custody!, stoppingModuleID: undefined } };
   }
   for (const module of facts.modules) {
-    if (module.active || !module.modeKnown || module.family === "capacitor" || facts.capacitor === null ||
+    if (!automaticCombatUtility(module) || module.active || !module.modeKnown || module.family === "capacitor" || facts.capacitor === null ||
         module.capNeed === null || facts.capacitor < module.capNeed) continue;
     const targeted = module.family === "web" || module.family === "painter";
     if (targeted && (!targetValid || distance === null || module.rangeM === null || module.rangeM <= 0 || distance > module.rangeM ||
@@ -163,7 +166,7 @@ export function combatCapSustain(obs: ScriptObservation, memory: MacroMemory, fl
   if (!facts || facts.capacitor === null || facts.capacitorRatio === null || facts.capacitorRatio >= floor ||
       obs.inSpace !== true || obs.inWarp === true || obs.snapshot?.ship?.itemID !== facts.shipID) return none(memory);
   for (const module of facts.modules) {
-    if (module.family !== "capacitor" || module.active || (module.chargeUnits ?? 0) <= 0) continue;
+    if (!automaticCombatUtility(module) || module.family !== "capacitor" || module.active || (module.chargeUnits ?? 0) <= 0) continue;
     if (module.charge && module.modeKnown && module.quantity >= module.chargeUnits! &&
         (module.charge.attributes[67] ?? 0) > 0) {
       const result = request(module, 0, memory);

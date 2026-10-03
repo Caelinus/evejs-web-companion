@@ -7,6 +7,8 @@ import { SCRIPT_MACROS } from "./scriptMacros.ts";
 import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
 import { createScriptRunner } from "./scriptRunner.ts";
 import { defenderSiteIdentity, defenderActionCurrent } from "./operationDefender.ts";
+import { scriptScannerSites, miningSiteFamily, siteIdentity } from "./miningSite.ts";
+import { decodeFullState } from "../bridge/boundSmallServices.ts";
 import type { ScriptObservation, MiningOperationAssignment } from "./scriptConditions.ts";
 import type { SpaceSnapshot } from "../store/types.ts";
 const require=createRequire(import.meta.url);
@@ -104,4 +106,113 @@ test("retired runner generation cannot issue after delayed operation read",async
     registry:{...SCRIPT_MACROS,"fight-with-drones":(_s,_o,m)=>({action:{kind:"lock",targetID:12},why:"combat",phase:"combat",armed:true,outcome:{kind:"acting"},nextMem:m})},
     travelHome:()=>{throw Error("unexpected retreat");}});
   runner.start(doc());const pending=runner.tick();await ready;runner.stop();release(operation);await pending;assert.equal(issues,0);
+});
+
+function siteWorld(family: "ORE_ANOMALY" | "ICE", x = 1e9): ScriptObservation {
+  const site = { label: "Owned site", kind: "ore" as const, archetypeID: family === "ICE" ? 28 : 27,
+    siteID: 100, instanceID: 101, position: { x, y: 0, z: 0 } };
+  const assignment: MiningOperationAssignment = { ...operation, area: { ...operation.area, targetClasses: [family] },
+    currentTarget: { ...operation.currentTarget!, targetType: family, targetKey: `${family}:owned`, targetName: site.label,
+      siteID: site.siteID, instanceID: site.instanceID, siteIdentity: "site:100:instance:101", position: site.position } };
+  return world({ miningOperation: assignment, anomalies: [site] });
+}
+
+for (const family of ["ORE_ANOMALY", "ICE"] as const) {
+  test(`${family} Defender follows only the exact operation scanner assignment`, () => {
+    const obs = siteWorld(family);
+    const result = SCRIPT_MACROS["fight-with-drones"](step, obs, {}, {});
+    assert.deepEqual(result.action, { kind: "warpScan", target: "Owned site" });
+    assert.equal(result.nextMem?.operationDefender, true);
+    const definitionForSite = { ...definition, area: { targetClasses: [family] } };
+    assert.equal(operationRoutineCompatibility(definitionForSite, "DEFENDER", auditMiningScript(profile().doc), [family]), null);
+  });
+  test(`${family} missing/old-instance scanner evidence waits without inventing a target`, () => {
+    const obs = siteWorld(family);
+    for (const anomalies of [null, [], [{ ...obs.anomalies![0]!, instanceID: 102 }]]) {
+      assert.equal(SCRIPT_MACROS["fight-with-drones"](step, { ...obs, anomalies }, {}, {}).action.kind, "wait");
+    }
+    for (const currentTarget of [null, { ...obs.miningOperation!.currentTarget!, position: undefined },
+      { ...obs.miningOperation!.currentTarget!, siteIdentity: undefined }]) {
+      assert.equal(SCRIPT_MACROS["fight-with-drones"](step,
+        { ...obs, miningOperation: { ...obs.miningOperation!, currentTarget } }, {}, {}).action.kind, "wait");
+    }
+  });
+  test(`${family} arrival delegates idle combat without reissuing travel`, () => {
+    const obs = siteWorld(family, 0);
+    const hosted = SCRIPT_MACROS["fight-with-drones"](step, obs, {}, {});
+    const shared = SCRIPT_MACROS["fight-with-drones"](step, { ...obs, miningOperation: null, miningOperationRequired: false }, {}, {});
+    assert.deepEqual(hosted.action, shared.action);
+    assert.deepEqual(hosted.outcome, shared.outcome);
+    assert.equal(hosted.action.kind, "wait");
+  });
+  test(`${family} relocation retires owned modules before accepting new exact site`, () => {
+    const obs = siteWorld(family);
+    const combatOwned = { shipID: 9, modules: { 71: {} }, locks: [], drones: [], initialDrones: [], launched: false, movement: false, fleetCall: false };
+    const old = { operationDefender: true, defenderSiteIdentity: "old-site", combatOwned };
+    const first = SCRIPT_MACROS["fight-with-drones"](step,
+      { ...obs, snapshot: { ...obs.snapshot!, ship: { ...obs.snapshot!.ship!, activeModuleIDs: [71, 99] } } }, old, {});
+    assert.deepEqual(first.action, { kind: "deactivate", moduleID: 71, settlement: true });
+    const off = { ...obs, snapshot: { ...obs.snapshot!, ship: { ...obs.snapshot!.ship!, activeModuleIDs: [99] } } };
+    const settled = SCRIPT_MACROS["fight-with-drones"](step, off, first.nextMem!, {});
+    assert.equal(settled.action.kind, "wait");
+    assert.deepEqual(SCRIPT_MACROS["fight-with-drones"](step, off, settled.nextMem!, {}).action,
+      { kind: "warpScan", target: "Owned site" });
+  });
+  test(`${family} retired site/run/claim refuses new work while allowing owned cleanup`, () => {
+    const assigned = siteWorld(family).miningOperation!;
+    for (const current of [null, { ...assigned, operationRunID: "new-run" }, { ...assigned, operationRunID: null },
+      { ...assigned, stopRequested: true }, { ...assigned, currentTarget: { ...assigned.currentTarget!, claimedByOperationID: "foreign" } },
+      ...(["DRAINING", "DEPLETED"] as const).map(state => ({ ...assigned, currentTarget: { ...assigned.currentTarget!, state } }))]) {
+      assert.equal(defenderActionCurrent(assigned, current, { kind: "warpScan", target: "Owned site" }), false);
+      assert.equal(defenderActionCurrent(assigned, current, { kind: "deactivate", moduleID: 71 }), true);
+    }
+  });
+}
+
+test("actual Standard Defender recovery policy stays fail-closed because repair may be consequential", () => {
+  const policy = analyzeBotRunPolicy(doc());
+  assert.equal(policy.restartSafe, false);
+  assert.equal(policy.containsSubBots, false);
+  assert.ok(policy.riskClasses.includes("combat"));
+  assert.equal(doc().interrupts.find(row => row.id === "armor-maintenance")?.respond, "repair");
+});
+
+for (const [archetype, family] of [[27, "ORE_ANOMALY"], [28, "ICE"]] as const) {
+  test(`${family} raw scanner projection preserves exact site key, instance, family and operation warp`, () => {
+    const raw = [{ type: "dict", entries: [[5830000146001, { type: "object", name: "util.KeyVal", args: {
+      type: "dict", entries: [["targetID", "ABF-126"], ["archetypeID", archetype], ["scanStrengthAttribute", 211],
+        ["siteID", 9371], ["instanceID", 9371], ["position", [1e9, 0, 0]]] } }]] }, null, null, null];
+    const sites = scriptScannerSites(decodeFullState(raw).anomalies);
+    assert.equal(sites.length, 1);
+    const site = sites[0]!;
+    assert.equal(miningSiteFamily(site), family);
+    assert.equal(site.siteID, 5830000146001, "outer scan key is not overwritten by inner dungeon ID");
+    assert.equal(siteIdentity(site), "site:5830000146001:instance:9371");
+    const obs = siteWorld(family);
+    const assigned = { ...obs.miningOperation!.currentTarget!, siteID: site.siteID!, instanceID: site.instanceID,
+      siteIdentity: siteIdentity(site)!, targetName: site.label, position: site.position! };
+    assert.deepEqual(SCRIPT_MACROS["fight-with-drones"](step,
+      { ...obs, anomalies: sites, miningOperation: { ...obs.miningOperation!, currentTarget: assigned } }, {}, {}).action,
+    { kind: "warpScan", target: "ABF-126" });
+  });
+}
+test("scanner projection leaves unknown identity/geometry unreadable and drops unlabeled rows", () => {
+  const sites = scriptScannerSites([{ siteID: "9007199254740993", targetID: "Unknown", position: [0, NaN, 0],
+    fields: { archetypeID: null, instanceID: "invalid" } }, { siteID: 12, targetID: null, position: [0,0,0], fields: {} }]);
+  assert.equal(sites.length, 1);
+  assert.equal(sites[0]!.siteID, null);
+  assert.equal(sites[0]!.instanceID, null);
+  assert.equal(sites[0]!.position, null);
+  assert.equal(miningSiteFamily(sites[0]!), null);
+});
+test("scanner incarnation change invalidates old matching site even when label and outer key survive", () => {
+  const before = { siteID: 100, targetID: "Same label", position: [1e9,0,0], fields: { archetypeID: 27, instanceID: 1, scanStrengthAttribute: 211 } };
+  const old = scriptScannerSites([before])[0]!;
+  const next = scriptScannerSites([{ ...before, fields: { ...before.fields, instanceID: 2 } }]);
+  assert.notEqual(siteIdentity(old), siteIdentity(next[0]!));
+  const obs = siteWorld("ORE_ANOMALY");
+  const currentTarget = { ...obs.miningOperation!.currentTarget!, targetName: old.label, siteID: 100, instanceID: 1,
+    siteIdentity: siteIdentity(old)!, position: old.position! };
+  assert.equal(SCRIPT_MACROS["fight-with-drones"](step,
+    { ...obs, anomalies: next, miningOperation: { ...obs.miningOperation!, currentTarget } }, {}, {}).action.kind, "wait");
 });
