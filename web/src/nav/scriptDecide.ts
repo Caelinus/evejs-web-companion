@@ -49,7 +49,8 @@ import { alertSentence, conditionSentence, stepSentence } from "../bots/scriptTe
 import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory } from "./miningDroneFlight.ts";
 import { confirmedDrain } from "./miningLogistics.ts";
 import { hostileRows } from "../space/overview.ts";
-import { settleCombat } from "./combatOwnership.ts";
+import { settleCombat, combatOwnership, ownCombatAction } from "./combatOwnership.ts";
+import { combatCapSustain } from "./combatUtilities.ts";
 import {
   SENTENCE as COND_SENTENCE,
   bumpCannotTellStreak,
@@ -94,8 +95,8 @@ export type ScriptAction =
   | { readonly kind: "jump"; readonly fromGateID: number; readonly toGateID: number }
   | { readonly kind: "lock"; readonly targetID: number }
   | { readonly kind: "unlock"; readonly targetID: number }
-  | { readonly kind: "activate"; readonly moduleID: number; readonly targetID: number; readonly typeID?: number }
-  | { readonly kind: "loadCombatAmmo"; readonly moduleID: number; readonly chargeItemID: number; readonly chargeTypeID: number }
+  | { readonly kind: "activate"; readonly moduleID: number; readonly targetID: number; readonly typeID?: number; readonly utility?: true; readonly repeat?: 0; readonly capDemandFloor?: number }
+  | { readonly kind: "loadCombatAmmo"; readonly moduleID: number; readonly chargeItemID: number; readonly chargeTypeID: number; readonly utility?: true }
   /**
    * Switch a fitted module OFF. No target: deactivation always names the
    * caster's own fit.
@@ -1910,6 +1911,13 @@ function fireInterrupt(
             pauseReason: null,
             memory: mem,
           };
+        }
+        const sustain = combatCapSustain(obs, mem.macroMem[row.id] ?? {}, REPAIR_CAP_FLOOR);
+        if (sustain.action) {
+          const owned = ownCombatAction(combatOwnership(sustain.memory, obs), sustain.action, obs);
+          return { action: sustain.action, why: sustain.why, phase: "Sustaining repair", stepPath: row.id,
+            interruptID: row.id, status: "running", pauseReason: null,
+            memory: { ...mem, macroMem: { ...mem.macroMem, [row.id]: { ...sustain.memory, combatOwned: owned } } } };
         }
         return fallThrough(script, row.id, obs, mem, travelHome, registry);
       }

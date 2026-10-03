@@ -3919,6 +3919,24 @@ app.get("/api/bridge/fitting", requireAuth, async (req, res, next) => {
   }
 });
 
+// Read-only pinned type facts for the shared combat utility classifier. No live authority.
+app.get("/api/bridge/combat-utility-types", requireAuth, (req, res) => {
+  const ids = String(req.query.typeIDs || "").split(",").map(Number);
+  if (ids.length > 100 || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    res.status(400).json({ ok: false, error: "INVALID_TYPES" }); return;
+  }
+  const types = {};
+  for (const typeID of new Set(ids)) {
+    const type = staticData.getType(typeID), dogma = staticData.getTypeDogma(typeID);
+    if (!type || !dogma) continue;
+    types[typeID] = { typeID, groupID: type.groupID, categoryID: staticData.getTypeCategoryID(typeID),
+      effects: dogma.effects, attributes: dogma.attributes,
+      capacity: Number.isFinite(type.capacity) ? type.capacity : null,
+      volume: Number.isFinite(type.volume) ? type.volume : null };
+  }
+  res.json({ ok: true, types });
+});
+
 // Read just the slot rows — used to VERIFY a mutation actually landed. The
 // server can decline a fit SILENTLY (invbroker's SKILL_REQUIRED branch returns
 // null without raising a UserError), so a 200 from Add is not proof anything

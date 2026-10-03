@@ -102,6 +102,7 @@ import {
 import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./targetPriority.ts";
 import { combatReload, weaponUseful } from "./combatWeapons.ts";
 import { combatOwnership, ownCombatAction, settleCombat } from "./combatOwnership.ts";
+import { combatCapSustain, decideCombatUtilities } from "./combatUtilities.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -839,6 +840,13 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
     }
     const active = snapshot.ship?.activeModuleIDs;
     if (active != null && obs.capacitorRatio != null) {
+      const capBlockedProp = (obs.propulsionModules ?? []).some(module => !active.includes(module.itemID) &&
+        !(obs.scrammed === true && module.kind !== "afterburner"));
+      if (input.propMode === "auto" && capBlockedProp && obs.capacitorRatio < PROP_CAP_FLOOR) {
+        const sustain = combatCapSustain(obs, mem, PROP_CAP_FLOOR);
+        mem = sustain.memory;
+        if (sustain.action) return tick(sustain.action, sustain.why, PHASE_CLOSE, ACTING, true, { ...stall.mem, ...mem, closeTicks });
+      }
       const prop = decidePropulsionModule({ modules: obs.propulsionModules ?? [],
         activeModuleIDs: new Set(active), capacitorRatio: obs.capacitorRatio,
         scrammed: obs.scrammed ?? null, wantBurn: input.propMode === "auto", capFloor: PROP_CAP_FLOOR });
@@ -1093,6 +1101,12 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
       wantBurn,
       capFloor: PROP_CAP_FLOOR,
     });
+    if (wantBurn && obs.capacitorRatio != null && obs.capacitorRatio < PROP_CAP_FLOOR &&
+        props.some(module => !activeModuleIDs.includes(module.itemID) && !(obs.scrammed === true && module.kind !== "afterburner"))) {
+      const sustain = combatCapSustain(obs, mem, PROP_CAP_FLOOR);
+      mem = sustain.memory;
+      if (sustain.action) return tick(sustain.action, sustain.why, PHASE_FIGHT, ACTING, true, mem);
+    }
     if (decision.kind === "light") {
       // `targetID: 0` is this tree's "no target" for a self-activating module —
       // the same call the hardener rung makes.
@@ -1315,6 +1329,11 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
       );
     }
   }
+
+  const utility = decideCombatUtilities(obs, mem, targetID);
+  mem = utility.memory;
+  if (utility.action) return tick(utility.action, utility.why, PHASE_FIGHT,
+    utility.blocked ? { kind: "blocked", reason: utility.blocked } : ACTING, true, mem);
 
   // ─── Rung 8: guns ─────────────────────────────────────────────────────────
   //
