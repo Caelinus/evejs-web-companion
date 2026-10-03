@@ -152,6 +152,7 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   const host = fakeHost(heldSessions);
   let structureAccessAllowed = true;
   let preparationPlanAwait = null;
+  let defenderPreparationBlocked = false;
   const structureAccessCalls = [];
   const app = createApp({
     eveStore: {
@@ -162,7 +163,8 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
     },
     eveGatewayClient: { async callMethod(service, method, args, kwargs, sessionFields) {
       structureAccessCalls.push({ service, method, args, sessionFields });
-      return { result: { type: "list", items: structureAccessAllowed ? [1030000000001] : [] }, notifications: [] };
+      const allowed = typeof structureAccessAllowed === "function" ? structureAccessAllowed(sessionFields.characterID) : structureAccessAllowed;
+      return { result: { type: "list", items: allowed ? [1030000000001] : [] }, notifications: [] };
     } },
     webAuth,
     botHost: host,
@@ -192,9 +194,13 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
       unresolved: () => false,
       plan: async definition => {
         const accepted = { state: "READY", planHash: JSON.stringify(definition),
-          members: definition.members.filter(member => member.role !== "DEFENDER").map(member => ({
+          members: definition.members.map(member => ({
             characterID: member.characterID, role: member.role, state: "PENDING", intent: { fixture: true, characterID: member.characterID },
           })) };
+        if (defenderPreparationBlocked && definition.members.some(m => m.role === "DEFENDER")) {
+          accepted.state = "BLOCKED";
+          Object.assign(accepted.members.find(m => m.role === "DEFENDER"), {state:"BLOCKED",reason:"Defender skills NOT_READY"});
+        }
         if (preparationPlanAwait) await preparationPlanAwait(definition);
         return accepted;
       },
@@ -405,20 +411,45 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
 
   const withDefender = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: {
     ...operationInput,
-    name: "Modeled guard",
+    name: "Standard guard",
+    unloadDestination: {stationID:60003760,stationName:"Jita IV - Moon 4",systemName:"Jita"},
     members: [...operationInput.members, { characterID: 7002, characterName: "Guard", accountName: account.username, role: "DEFENDER", automationID: "" }],
   } });
   assert.equal(withDefender.response.status, 200);
   const defenderPlan = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/launch-plan`, { token });
-  assert.match(defenderPlan.payload.warnings[0], /DEFENDER execution is not supported/);
+  assert.deepEqual(defenderPlan.payload.warnings, []);
+  assert.equal(defenderPlan.payload.members.find(m=>m.characterID===7002).script.scriptID, "mcc.standard.defender");
+  await t.test("NOT_READY Defender refuses public MCC start before any hosted acquisition", async () => {
+    defenderPreparationBlocked = true;
+    const blockedPlan = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/launch-plan`, {token});
+    const before = host.inputs.length;
+    const blocked = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/start`, {method:"POST",token,body:{planHash:blockedPlan.payload.planHash}});
+    assert.equal(blocked.response.status,409);assert.match(blocked.payload.message,/equipment\/source/i);
+    assert.equal(host.inputs.length,before);defenderPreparationBlocked=false;
+  });
   const defenderStart = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/start`, {
     method: "POST", token,
-    body: { planHash: defenderPlan.payload.planHash, grants: { [character.characterID]: { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 } } },
+    body: { planHash: defenderPlan.payload.planHash, grants: Object.fromEntries([7001,7002].map(id=>[id,{scriptRev:1,riskClasses:[],maxRuntimeMinutes:60}])) },
   });
   assert.equal(defenderStart.response.status, 200);
-  assert.equal(defenderStart.payload.operations.find((row) => row.definition.operationID === withDefender.payload.definition.operationID).runtime.state, "DEGRADED");
-  assert.equal(defenderStart.payload.results.find((row) => row.characterID === 7002).error, "MEMBER_NOT_EXECUTABLE");
-  await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/stop`, { method: "POST", token, body: {} });
+  await t.test("READY Standard Defender enters normal hosted preparation and operation lifecycle", () => {
+    assert.equal(defenderStart.payload.operations.find((row) => row.definition.operationID === withDefender.payload.definition.operationID).runtime.state, "SELECTING");
+    assert.equal(defenderStart.payload.results.find(row=>row.characterID===7002).ok,true);
+    const input=host.inputs.findLast(row=>row.characterID===7002);
+    assert.equal(input.scriptID,"mcc.standard.defender");assert.equal(input.operationRole,"DEFENDER");assert.ok(input.operationPreparation);
+    assert.ok(host.events.some(row=>row.kind==="activated"&&row.characterID===7002));
+  });
+  await t.test("MCC Stop includes Standard Defender in existing release lifecycle",async()=>{
+    const stopped=await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/stop`, { method: "POST", token, body: {} });
+    assert.equal(stopped.response.status,200);assert.equal(host.claimedBy(7002),null);assert.ok(host.stops.includes("bot-7002"));
+  });
+  await t.test("busy Defender cannot bypass hosted ownership and blocks the MAIN barrier",async()=>{
+    host.failures.set(7002,{code:"CHARACTER_IN_USE",message:"Pilot already held"});
+    const started=await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/start`, {method:"POST",token,body:{planHash:defenderPlan.payload.planHash}});
+    assert.equal(started.payload.results.find(row=>row.characterID===7002).error,"CHARACTER_IN_USE");
+    assert.ok(host.rows.findLast(row=>row.characterID===7001).deferMain);host.failures.delete(7002);
+    await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/stop`,{method:"POST",token,body:{}});
+  });
 
   const crewOperation = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: {
     ...operationInput,
@@ -549,4 +580,18 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(deniedStart.response.status, 409);
   assert.equal(deniedStart.payload.error, "PARKING_STRUCTURE_ACCESS_DENIED");
   assert.equal(host.inputs.length, startsBefore, "no member starts when structure preflight fails");
+  await t.test("Defender emergency structure home needs its own docking access before any acquisition", async () => {
+    structureAccessAllowed = characterID => characterID !== 7002;
+    const saved = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+      body: { ...withDefender.payload.definition, operationID: undefined, name: "Guard structure home", unloadDestination: structure } });
+    assert.equal(saved.response.status, 200);
+    const plan = await request(baseUrl, `/api/mining-operations/${saved.payload.definition.operationID}/launch-plan`, { token });
+    const before = host.inputs.length;
+    const start = await request(baseUrl, `/api/mining-operations/${saved.payload.definition.operationID}/start`, { method: "POST", token,
+      body: { planHash: plan.payload.planHash } });
+    assert.equal(start.response.status, 409);
+    assert.equal(start.payload.error, "DELIVERY_STRUCTURE_ACCESS_DENIED");
+    assert.match(start.payload.message, /Guard/);
+    assert.equal(host.inputs.length, before);
+  });
 });

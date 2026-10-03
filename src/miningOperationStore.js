@@ -99,7 +99,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     }
     if (!ROLES.has(role)) throw fail("MINING_OPERATION_INVALID", "Every member needs an explicit role.");
     if (!["STANDARD", "CUSTOM"].includes(routineMode)) throw fail("MINING_OPERATION_INVALID", "Choose Standard or Custom routine mode.");
-    if (routineMode === "CUSTOM" && !automationID && role !== "DEFENDER") throw fail("MINING_OPERATION_INVALID", "Custom members need an operation routine reference.");
+    if (routineMode === "CUSTOM" && !automationID) throw fail("MINING_OPERATION_INVALID", "Custom members need an operation routine reference.");
     if (routineMode === "STANDARD" && automationID) throw fail("MINING_OPERATION_INVALID", "A Standard member cannot also select a custom routine.");
     if (!accountName) throw fail("MINING_OPERATION_INVALID", "Every member needs its owning account reference.");
     seen.add(characterID);

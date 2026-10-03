@@ -15,7 +15,8 @@ const { fittingFingerprint } = require("./pilotTrainingFittings");
 function world(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcc-preparation-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const data = { getType: id => ({ 100:{categoryID:6},200:{categoryID:7},300:{categoryID:8},16272:{categoryID:4} })[id], getTypeName: id => `Type ${id}` };
+  const data = { getType: id => ({ 100:{categoryID:6,groupID:26},200:{categoryID:7,groupID:74},300:{categoryID:8,groupID:85},16272:{categoryID:4} })[id], getTypeName: id => `Type ${id}`,
+    getTypeDogma:id=>({effects:id===200?[12]:[],attributes:id===200?{128:1,604:85}:id===300?{128:1}:{}}),getSkillType:()=>null };
   const fit = { fittingID:1,ownerID:900,shipTypeID:100,name:"Exact miner",savedDate:"123",items:[{typeID:200,flagID:27,quantity:1},{typeID:300,flagID:options.loadedQuantity != null?27:5,quantity:10}] };
   fit.fingerprint = fittingFingerprint(fit.shipTypeID,fit.items);
   const provider = { scope:"CORPORATION",corporationID:900,accountID:1,characterID:11 };
@@ -24,7 +25,7 @@ function world(t, options = {}) {
   const bots=[];
   const source=options.personalSource?{kind:"hangar"}:{kind:"corp",corporationID:900,division:2};
   const policy={source,suppliesRequired:options.required === true,...(options.supplies ? {supplies:options.supplies} : {})};
-  const definition={operationID:"operation-1",preparation:policy,members:[{characterID:11,accountName:"owned",role:"MINER"}],...(options.support ? {support:options.support} : {})};
+  const definition={operationID:"operation-1",preparation:policy,members:[{characterID:11,accountName:"owned",role:options.defender?"DEFENDER":"MINER"}],...(options.support ? {support:options.support} : {})};
   const contract = input => buildContract(fit,provider,data,input.supplyPolicy);
   const row=(id,typeID,ownerID,locationID,flagID,quantity,singleton=false)=>({itemID:id,typeID,ownerID,locationID,flagID,quantity,singleton});
   const separate=id=>options.splitSources && id===12;
@@ -72,7 +73,7 @@ function world(t, options = {}) {
         if(options.offlineOtherHull)sourceStock.push(row(99001,100,options.personalSource?input.characterID:900,read.source.pin.locationID,read.source.pin.flag,1,true));
         return {selected:read.contract,status:inspectContract(read.contract,observed,data),pilot:{...read.context,quality:"COMPLETE",dockState:"DOCKED",observation:observed,control:{state:"FREE"},revision:"world-1"},
           candidateSource:{...source,quality:"COMPLETE",query:"ALLOWED",take:options.take===false?"DENIED":"ALLOWED",officeID:options.personalSource?null:separate(input.characterID)?703:701,contentsLocationID:separate(input.characterID)?702:700,dockedLocationID:600,flag:options.personalSource?4:116,rows:sourceStock}};
-      },engine,adapterFor,bots:()=>bots,currentRun:()=>run,data,now:()=>now++,fault:options.fault});
+      },readSkills:options.readSkills || (async()=>({serverNowMs:1000,skills:[],queue:{active:false,entries:[]}})),engine,adapterFor,bots:()=>bots,currentRun:()=>run,data,now:()=>now++,fault:options.fault});
   }
   function record(intent,resumed=false) {
     const value={accountID:1,characterID:intent.characterID,operationID:"operation-1",operationRunID:"operation-run-1",logicalRunID:`logical-${intent.characterID}`,operationPreparation:intent,
@@ -84,6 +85,18 @@ function world(t, options = {}) {
   return {definition,states,bots,record,restart,get preparation(){return preparation;},get engine(){return engine;},get startup(){return startup;},get dispatches(){return dispatches;},get stock(){return stock;},setStock:value=>{stock=value;},setRun:value=>{run=value;},fit};
 }
 async function accepted(w) { const plan=await w.preparation.plan(w.definition);assert.equal(plan.state,"READY");return plan.members[0].intent; }
+
+test("Standard Defender uses shared replenishment then verifies damage/ammo under final hosted owner",async t=>{
+  const w=world(t,{defender:true,cargo:0,stock:20}),r=w.record(await accepted(w));
+  assert.equal((await w.preparation.prepare(r)).state,"VERIFIED");assert.equal(w.dispatches,1);
+  r.preparationCheckpoint.enterMain();assert.equal(w.startup.get(r.logicalRunID).preparation.mainEntered,true);
+});
+test("Defender skills becoming UNKNOWN after acquisition block MAIN without false readiness",async t=>{
+  let calls=0;const w=world(t,{defender:true,cargo:10,readSkills:async()=>++calls===1?{serverNowMs:1000,skills:[],queue:{active:false,entries:[]}}:null});
+  const r=w.record(await accepted(w)),result=await w.preparation.prepare(r);
+  assert.equal(result.state,"BLOCKED");assert.match(result.reason,/skill qualification UNKNOWN/);assert.equal(w.dispatches,0);
+  assert.throws(()=>r.preparationCheckpoint.enterMain(),/complete/);
+});
 
 test("zero deficit verifies once without apply, journal transfer or startup replay",async t=>{
   const w=world(t,{cargo:10}),r=w.record(await accepted(w));

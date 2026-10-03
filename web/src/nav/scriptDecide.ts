@@ -1118,6 +1118,10 @@ export function decideScriptAction(
     (obs.miningOperation == null ||
       (obs.miningOperation.role === "MINER" && obs.miningOperation.currentTarget === null));
   if (operationHeld && base.memory.latched === null) {
+    // The operation-aware combat adapter settles its owned state when site
+    // authority disappears. Do not replace that cleanup with a generic wait.
+    if (activeMacroID(script, mem) === "fight-with-drones" &&
+        Object.values(mem.macroMem).some(state => state.operationDefender === true)) return base;
     const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
     const miner = obs.miningModuleIDs?.find(id => active.has(id));
     if (miner !== undefined) return { ...base, action: { kind: "deactivate", moduleID: miner },

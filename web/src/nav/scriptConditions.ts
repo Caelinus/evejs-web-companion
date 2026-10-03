@@ -102,6 +102,7 @@ export interface MiningOperationTarget {
   readonly claimedByOperationID: string | null;
 }
 export interface MiningOperationAssignment {
+  readonly operationRunID?: string | null;
   readonly support?: MiningSupportOptions;
   readonly supportPolicy?: { readonly mode: "NORMAL" | "FALLBACK" | "PAUSE" | "STOP"; readonly reason: string | null };
   readonly intendedFleetCharacterIDs?: readonly number[];

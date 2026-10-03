@@ -986,7 +986,7 @@ function createBotHost(options) {
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
       operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
-      operationRole: ["MINER", "HAULER", "COMMAND"].includes(operationRole) ? operationRole : null,
+      operationRole: ["MINER", "HAULER", "COMMAND", "DEFENDER"].includes(operationRole) ? operationRole : null,
       operationRunID,
       operationPreparation: operationPreparation ? structuredClone(operationPreparation) : null,
       preparation: operationPreparation ? { state: "PENDING" } : null,
