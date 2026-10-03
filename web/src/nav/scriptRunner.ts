@@ -149,6 +149,11 @@ function actionTargetID(action: ScriptAction): number | null {
   if (action.kind === "lootContainer" || action.kind === "collectLaunch") {
     return action.containerID;
   }
+  // An office is walked in a list exactly as a can is: one that will not give
+  // up its contents must not spend the next office's budget.
+  if (action.kind === "collectCustoms") {
+    return action.officeID;
+  }
   return null;
 }
 
