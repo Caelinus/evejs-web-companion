@@ -35,7 +35,9 @@ test("review distinguishes coverage/blockers, explicit mode/stage, and does not 
 });
 test("queue review is ephemeral; mount/refresh never calls Apply or starts queue polling", () => {
   const source = readFileSync(new URL("./GoblinFactory.svelte", import.meta.url), "utf8");
-  assert.doesNotMatch(source.slice(source.indexOf("  onMount(")), /applyTrainingQueue\(|setInterval\(|readSpaceSnapshot/);
+  const localClock = "const freshnessClock = setInterval(() => observationNow = Date.now(), 1000);";
+  assert.ok(source.includes(localClock));
+  assert.doesNotMatch(source.slice(source.indexOf("  onMount(")).replace(localClock, ""), /applyTrainingQueue\(|setInterval\(|readSpaceSnapshot/);
   assert.match(source, /review: null, queue: null/);
   assert.match(source, /onApply=\{\(\) => void applyQueue\(row\)\}/);
 });

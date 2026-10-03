@@ -76,7 +76,7 @@ function createProvisioningCenterApply({ sessions, gateway, engine, operations, 
           const value = await action();
           if (hash([binding.held.bridgeSessionID, null]) !== generation ||
               (value?.context && value.context.sessionGeneration !== generation) || (value?.sessionGeneration && value.sessionGeneration !== generation)) fail("PROVISIONING_GENERATION_CHANGED");
-          if (planning && value?.source) assertSelected(row.pin, value);
+          if (planning && value?.source) assertSelected(row.pin, value, data);
           if (value?.contract && value.contract.definitionFingerprint !== row.pin.definitionFingerprint) fail("REVIEW_STALE");
           return value;
         };
@@ -87,7 +87,7 @@ function createProvisioningCenterApply({ sessions, gateway, engine, operations, 
         catch (e) { if (["FITTING_UNAVAILABLE", "FITTING_SOURCE_CHANGED", "INVALID_FIT", "PROVIDER_NOT_OWNED"].includes(e.code)) fail("REVIEW_STALE"); throw e; }
         if (hash(intent(freshOffline)) !== row.reviewHash) fail("REVIEW_STALE");
         const fresh = await adapter.readShip(row.input);
-        assertSelected(row.pin, fresh);
+        assertSelected(row.pin, fresh, data);
         // A consumer may impose an additional read-only policy (e.g. Training
         // skills). It cannot replace acquisition, the shared barrier or engine.
         // The callback is memory-only; restart recovery never repeats Apply.

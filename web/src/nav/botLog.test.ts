@@ -31,6 +31,7 @@ const EVERY_ACTION: readonly ScriptAction[] = [
   { kind: "activate", moduleID: 500, targetID: 1001 },
   { kind: "activate", moduleID: 500, targetID: 0 },
   { kind: "deactivate", moduleID: 500 },
+  { kind: "loadCombatAmmo", moduleID: 500, chargeItemID: 501, chargeTypeID: 502 },
   { kind: "launchDrones", droneItemIDs: [11, 12] },
   { kind: "engageDrones", droneIDs: [11], targetID: 1001 },
   { kind: "mineDrones", droneIDs: [11], targetID: 1001 },

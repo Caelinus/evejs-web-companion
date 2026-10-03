@@ -15,7 +15,7 @@ const { fittingFingerprint } = require("./pilotTrainingFittings");
 function world(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcc-preparation-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const data = { getType: id => ({ 100:{categoryID:6,groupID:26},200:{categoryID:7,groupID:74},300:{categoryID:8,groupID:85},16272:{categoryID:4} })[id], getTypeName: id => `Type ${id}`,
+  const data = { getType: id => ({ 100:{categoryID:6,groupID:26},200:{categoryID:7,groupID:74,groupName:"Hybrid Weapon"},300:{categoryID:8,groupID:85},16272:{categoryID:4} })[id], getTypeName: id => `Type ${id}`,
     getTypeDogma:id=>({effects:id===200?[12]:[],attributes:id===200?{128:1,604:85}:id===300?{128:1}:{}}),getSkillType:()=>null };
   const fit = { fittingID:1,ownerID:900,shipTypeID:100,name:"Exact miner",savedDate:"123",items:[{typeID:200,flagID:27,quantity:1},{typeID:300,flagID:options.loadedQuantity != null?27:5,quantity:10}] };
   fit.fingerprint = fittingFingerprint(fit.shipTypeID,fit.items);

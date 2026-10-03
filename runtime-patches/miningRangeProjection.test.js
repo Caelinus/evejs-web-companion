@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { projectModuleReach } = require("./miningRangeProjection");
-const reference = process.env.EVEJS_CLEAN_REFERENCE || path.resolve(__dirname, "../../../EveJS-0.12.9");
+const legacyReference = path.resolve(__dirname, "../../../EveJS-0.12.9");
+const reference = process.env.EVEJS_CLEAN_REFERENCE || (fs.existsSync(legacyReference) ? legacyReference :
+  require("../scripts/prepare-runtime-test-reference").prepareRuntimeTestReference().reference);
 
 // Reconstruct the actual tracked patch in memory. No clean-reference writes or
 // runtime entrypoint/database imports. Context assertions also guard patch drift.

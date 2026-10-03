@@ -68,6 +68,40 @@ test("FREE is observation: only free-only acquisition, generation and fresh barr
   assert.equal(f.world.hangar.find(r=>r.itemID===70).quantity,2);assert.equal(f.world.mutations.filter(k=>k==="ASSEMBLE_HULL").length,1);
   assert.doesNotMatch(fs.readFileSync(f.filePath,"utf8"),/private-session|bridgeSessionID/);
 });
+for (const mode of ["loaded", "excluded-hold"]) test(`Center Apply compares equivalent offline and selected ${mode} observations`, async t => {
+  const f = fixture(t);
+  f.world.context.shipTypeID = 1; f.world.hangar[0].typeID = 1;
+  f.world.fitted = [{ itemID: 200, identity: "200", typeID: 2, ownerID: 11, locationID: 50, flagID: 27,
+    quantity: 1, singleton: true, loaded: false },
+  { itemID: 201, identity: "201", typeID: 3, ownerID: 11, locationID: 50, flagID: mode === "loaded" ? 27 : 134,
+    quantity: 3, singleton: false, loaded: false }];
+  const read = f.adapter.readShip;
+  f.adapter.readShip = async (...args) => {
+    const value = await read(...args);
+    value.observation.rows = value.observation.rows.filter(r => r.flagID !== 134).map(r => r.typeID === 3 ?
+      { ...r, itemID: null, identity: "[50,27,3]", loaded: true } : r);
+    return value;
+  };
+  const review = await f.review(); assert.equal(review.canApply, true);
+  const outcome = await f.apply(review);
+  assert.equal(outcome.state, "ALREADY_SATISFIED", JSON.stringify(outcome));
+  assert.equal(outcome.finalReview.status.equipment, "VERIFIED");
+  assert.equal(f.world.mutations.length, 0); assert.equal(f.world.releases, 1); assert.equal(f.world.online, false);
+});
+test("loaded charge quantity drift still refuses Center Apply before mutation", async t => {
+  const f = fixture(t); f.world.context.shipTypeID = 1; f.world.hangar[0].typeID = 1;
+  f.world.fitted = [{ itemID: 200, typeID: 2, ownerID: 11, locationID: 50, flagID: 27, quantity: 1, singleton: true },
+    { itemID: 201, typeID: 3, ownerID: 11, locationID: 50, flagID: 27, quantity: 3, singleton: false }];
+  const read = f.adapter.readShip;
+  f.adapter.readShip = async (...args) => {
+    const value = await read(...args);
+    value.observation.rows = value.observation.rows.map(r => r.typeID === 3 ? { ...r, itemID: null, loaded: true, quantity: 2 } : r);
+    return value;
+  };
+  const outcome = await f.apply(await f.review());
+  assert.equal(outcome.state, "REFUSED"); assert.equal(outcome.reason, "REVIEW_STALE");
+  assert.equal(f.world.mutations.length, 0); assert.equal(f.world.online, false);
+});
 for(const mode of ["busy","race","reserved"])test(`${mode} refuses without takeover or provisioning`,async t=>{
   const f=fixture(t),r=await f.review();if(mode==="busy")f.world.online=true;if(mode==="race")f.world.selectionRace=true;if(mode==="reserved")f.operations.set(11,Symbol("another-owner"));
   const out=await f.apply(r);assert.equal(out.state,"REFUSED");assert.equal(out.reason,"PILOT_BUSY");assert.equal(f.world.mutations.length,0);

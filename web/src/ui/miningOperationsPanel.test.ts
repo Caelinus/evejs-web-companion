@@ -42,11 +42,14 @@ test("the shared WC header opens the standalone MCC URL instead of a floating wi
   }
 });
 
-test("unsupported target and defender execution are explicit, not false capabilities", () => {
+test("supported Defender and unsupported targets describe their actual execution contract", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /Ice — online Ice Harvesters required/);
   assert.match(source, /Gas — not supported yet/);
-  assert.match(source, /Defender — execution not supported/);
+  assert.match(source, /<option value="DEFENDER">Standard Defender<\/option>/);
+  assert.match(source, /Standard Defender follows the operation target using shared mobile combat/);
+  assert.match(source, /exact saved fitting must pass equipment, skills and ammunition readiness/);
+  assert.doesNotMatch(source, /Defender — execution not supported/);
   assert.match(source, /dynamic discovery deferred/);
   assert.match(source, /bind:group=\{targetFamily\} value="ORE_ANOMALY"/);
 });

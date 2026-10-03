@@ -8,7 +8,9 @@ const vm = require("node:vm");
 // Execute only source functions in an isolated VM. Inventory, static metadata,
 // character/session and modifier inputs are fixtures; no runtime entrypoint,
 // database, listener or real inventory writer is loaded.
-const reference = process.env.EVEJS_CLEAN_REFERENCE || path.resolve(__dirname, "../../../EveJS-0.12.9");
+const legacyReference = path.resolve(__dirname, "../../../EveJS-0.12.9");
+const reference = process.env.EVEJS_CLEAN_REFERENCE || (fs.existsSync(legacyReference) ? legacyReference :
+  require("../scripts/prepare-runtime-test-reference").prepareRuntimeTestReference().reference);
 function loadSource(relative, dependencies = {}) {
   const filename = path.join(reference, relative);
   const module = { exports: {} };

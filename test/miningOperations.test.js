@@ -67,13 +67,14 @@ function anomaly(name = "ABC-123") {
   return { targetType: "ORE_ANOMALY", systemID: 30000142, systemName: "Jita", targetName: name };
 }
 
-test("unsupported Defender remains an operation failure without blocking executable-member preparation", () => {
+test("an unsupported required Defender blocks aggregate preparation while preserving the ready miner", () => {
   const h=harness([definition("prep-defender",[member(1,"MINER"),member(2,"DEFENDER")])]);
   startAll(h,"prep-defender");h.operations.memberFailed("prep-defender",2,{code:"MEMBER_NOT_EXECUTABLE",message:"Defender unsupported"});
   const projected=h.operations.list([{operationID:"prep-defender",characterID:1,botID:"bot-1",status:"running",endedAt:null,
     preparation:{state:"VERIFIED",equipment:"VERIFIED",supplies:"FULL",targets:[]}}])[0].runtime;
   assert.equal(projected.state,"DEGRADED");assert.equal(projected.members.find(row=>row.role==="DEFENDER").preparation.state,"BLOCKED");
-  assert.equal(projected.preparation.state,"VERIFIED");assert.deepEqual(projected.preparation.members.map(row=>row.characterID),[1]);
+  assert.equal(projected.members.find(row=>row.role==="MINER").preparation.state,"VERIFIED");
+  assert.equal(projected.preparation.state,"BLOCKED");assert.deepEqual(projected.preparation.members.map(row=>row.characterID),[1,2]);
 });
 
 test("aggregate preparation exposes PREPARING and respects recovery/blocked precedence over it", () => {
@@ -645,5 +646,10 @@ test("operation routine contract rejects pinned and independent resource travel 
   assert.match(operationRoutineCompatibility(definition, "MINER", auditMiningScript(composed), ["BELT"]), /Unsupported program node/);
   const hauler = { program: [macro("travel-to-belt", { belt: { kind: "belt", belt: { mode: "nearest" } } }), macro("loot-containers"), macro("deliver-ore")] };
   assert.equal(operationRoutineCompatibility({ unloadPolicy: "HAULER_SERVICE" }, "HAULER", auditMiningScript(hauler), ["BELT"]), null);
-  assert.match(operationRoutineCompatibility(definition, "DEFENDER", auditMiningScript(normal), ["BELT"]), /not supported/);
+  const defender = { ...definition, members: [{ role: "DEFENDER", routineMode: "STANDARD" }] };
+  assert.match(operationRoutineCompatibility(defender, "DEFENDER", auditMiningScript(normal), ["BELT"]), /requires the Standard Defender profile/);
+  const defenderDoc = { program: [macro("undock"), macro("fight-with-drones"), macro("wait")] };
+  assert.equal(operationRoutineCompatibility(defender, "DEFENDER", auditMiningScript(defenderDoc), ["BELT"]), null);
+  assert.match(operationRoutineCompatibility({ ...defender, members: [{ role: "DEFENDER", routineMode: "CUSTOM" }] },
+    "DEFENDER", auditMiningScript(defenderDoc), ["BELT"]), /custom escort routines are unsupported/);
 });
