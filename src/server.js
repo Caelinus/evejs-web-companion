@@ -198,10 +198,12 @@ function heldOnGamePort(webSessionID) {
 }
 async function isCharacterHeld(characterID, callerSessionID = null, preparationOwner = null, probeReservation = null) {
   const reservation = characterOperations.get(characterID);
-  // Only the exact private customs-export reservation can probe its own hold.
+  // Only the exact private operation reservation can probe its own hold.
   // Both maps must still contain it; a name or stale token grants no exception.
-  const ownsProbe = probeReservation !== null && reservation === probeReservation &&
+  const ownsProbeNow = () => probeReservation !== null && characterOperations.get(characterID) === probeReservation &&
     sessionOperations.get(callerSessionID) === probeReservation;
+  const ownsProbe = ownsProbeNow();
+  if (probeReservation !== null && !ownsProbe) return true;
   const handoff = reservation?.kind === "mining-operation-handoff" &&
     reservation.operationRunID === preparationOwner?.operationRunID &&
     reservation.operationID === preparationOwner?.operationPreparation?.operationID;
@@ -228,7 +230,14 @@ async function isCharacterHeld(characterID, callerSessionID = null, preparationO
       if (bridgeSessions.get(sessionID) === held) forgetBridgeSession(sessionID);
     }
   }
-  return false;
+  // A public hosted Start may hand off its own cockpit, but may never take an
+  // external retail/browser/Factory pilot. The actual select is also atomic
+  // free-only, so a new external owner after this read still cannot be evicted.
+  if (ownsProbe && preparationOwner?.accountID && Number(bridgeSessions.get(callerSessionID)?.characterID) !== Number(characterID)) {
+    const status = await gateway.getCharacterStatus(preparationOwner.accountID, characterID);
+    if (status?.characterID !== characterID || status.online !== false || status.controlState !== "offline") return true;
+  }
+  return probeReservation !== null && !ownsProbeNow();
 }
 // Short-lived cache for the auth path's account lookup (src/accountCache.js).
 // Without it, every authenticated request costs a second owner call re-reading
@@ -1162,13 +1171,17 @@ function buildStationStatic(stationID) {
 }
 
 // Shared by ordinary select and the narrowly guarded handoff restoration.
-async function selectHeldCharacter(webSessionID, account, characterID) {
+async function selectHeldCharacter(webSessionID, account, characterID, { freeOnly = false } = {}) {
   const pendingCustody = replenishment.unresolved(characterID).length > 0;
   if (pendingCustody && typeof gateway.selectFactoryCharacter !== "function")
     throw Object.assign(new Error("Free-only custody recovery selection is unavailable; pilot control remains fenced."),
       { code: "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE", statusCode: 409 });
+  if (freeOnly && typeof gateway.selectFactoryCharacter !== "function")
+    throw Object.assign(new Error("Atomic free-pilot selection is unavailable; hosted Start cannot take over a pilot."),
+      { code: "CHARACTER_OWNERSHIP_UNVERIFIED", statusCode: 409 });
   const outcome = pendingCustody ? await mutationFence.withCustodySelection(characterID,
-    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : await gateway.selectCharacter(
+    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : freeOnly
+    ? await gateway.selectFactoryCharacter(Number(account.accountID), characterID) : await gateway.selectCharacter(
     [characterID, null, true], null,
     { userid: Number(account.accountID), userName: String(account.username || "") },
   );
@@ -1295,7 +1308,9 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     // previous persistent session (retail semantics live on the gateway side;
     // the handler's own refusals pass through as CALL_REFUSED).
     await releaseHeldBridgeSession(req.webSessionID);
-    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
+    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID, {
+      freeOnly: botHost.requiresFreeSelection?.(characterID, req.get(botHostModule.BOT_HEADER)) === true,
+    });
     // Hosted bots already own their claim; browser sessions must complete the
     // nearby lost-flight check before any automation handoff or movement.
     if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
@@ -23223,14 +23238,36 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
     characterOperations.set(characterID, reservation);
     sessionOperations.set(req.webSessionID, reservation);
     let releasedCaller = false;
+    let transferred = false;
     try {
-      const beforeStart = async () => {
+      const assertReservation = () => {
+        if (characterOperations.get(characterID) !== reservation || sessionOperations.get(req.webSessionID) !== reservation)
+          throw Object.assign(new Error("This hosted Start reservation is no longer current."), { code: "CHARACTER_IN_USE" });
+      };
+      const transferReservation = owner => {
+        // Injected legacy hosts need no handoff capability. The production host
+        // always supplies its newly minted private claim, never a public botID.
+        if (!owner) return;
+        assertReservation();
+        if (!botHost.authorizesClaim(characterID, owner.claimSecret) ||
+            botHost.requiresFreeSelection?.(characterID, owner.claimSecret) !== true)
+          throw Object.assign(new Error("The hosted claim did not acquire this Start."), { code: "CHARACTER_IN_USE" });
+        characterOperations.delete(characterID);
+        transferred = true;
+        // The caller session stays fenced until this request ends. Character
+        // authority is now the existing hosted claim, including failure cleanup.
+      };
+      const beforeStart = async owner => {
+        assertReservation();
         const held = bridgeSessions.get(req.webSessionID);
-        if (!held || Number(held.characterID) !== characterID) return;
+        if (!held || Number(held.characterID) !== characterID) { transferReservation(owner); return; }
         if (hasPendingRecovery(held, characterID)) {
           throw Object.assign(new Error("Lost-drone recovery is still pending."), { code: "DRONE_RECOVERY_PENDING" });
         }
         const status = await readHeldFlight(held, req.webSessionID);
+        assertReservation();
+        if (bridgeSessions.get(req.webSessionID) !== held || Number(held.accountID) !== Number(req.account.accountID))
+          throw Object.assign(new Error("The caller's pilot session changed before handoff."), { code: "CHARACTER_IN_USE" });
         if (status?.flight?.docked !== true) {
           if (status?.flight?.inSpace !== true) {
             throw Object.assign(new Error("Pilot location could not be confirmed before handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
@@ -23244,8 +23281,11 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
             throw Object.assign(new Error("Return controlled drones to the bay before server handoff."), { code: "DRONE_HANDOFF_UNSAFE" });
           }
         }
+        assertReservation();
         await releaseHeldBridgeSession(req.webSessionID, { confirmed: true });
         releasedCaller = true;
+        assertReservation();
+        transferReservation(owner);
       };
       const outcome =
         kind === "companion"
@@ -23256,6 +23296,7 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
             request: body.request,
             grant: body.grant,
             callerSessionID: req.webSessionID,
+            probeReservation: reservation,
             beforeStart,
           })
           : await botHost.start({
@@ -23268,20 +23309,35 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
             doc: record.doc,
             grant: body.grant,
             callerSessionID: req.webSessionID,
+            probeReservation: reservation,
             beforeStart,
           });
       if (!outcome.ok) {
         let message = outcome.message;
         if (releasedCaller && !bridgeSessions.has(req.webSessionID) && !botHost.claimedBy(characterID)) {
+          let restoreReservation = reservation;
+          if (transferred) {
+            restoreReservation = null;
+            if (!characterOperations.has(characterID) && sessionOperations.get(req.webSessionID) === reservation) {
+              restoreReservation = Symbol("bot-restore");
+              characterOperations.set(characterID, restoreReservation);
+              sessionOperations.set(req.webSessionID, restoreReservation);
+            }
+          }
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
-            if (payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)
-              && !(await isCharacterHeld(characterID, req.webSessionID))) {
-              await selectHeldCharacter(req.webSessionID, req.account, characterID);
+            if (restoreReservation !== null && payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)
+              && !(await isCharacterHeld(characterID, req.webSessionID, { accountID: Number(req.account.accountID) }, restoreReservation))) {
+              await selectHeldCharacter(req.webSessionID, req.account, characterID, { freeOnly: true });
             }
           } catch (error) {
             errorLogger(error);
             message = `${message} Browser ownership could not be safely restored; select the pilot again after checking its current session.`;
+          } finally {
+            if (restoreReservation !== reservation && restoreReservation !== null) {
+              if (characterOperations.get(characterID) === restoreReservation) characterOperations.delete(characterID);
+              if (sessionOperations.get(req.webSessionID) === restoreReservation) sessionOperations.delete(req.webSessionID);
+            }
           }
         }
         res.status(BOT_START_STATUS[outcome.code] || 500).json({ ok: false, error: outcome.code, message });
