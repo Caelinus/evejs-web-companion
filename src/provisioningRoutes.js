@@ -46,7 +46,7 @@ function corporationAccess(member, corporation, locationID, division) {
 
 function registerProvisioningRoutes(d) {
   const { app, requireAuth, requireHeld, engine, store, gateway, data, flight, currentHeld, inventoryLocation,
-    resolvePlace, boundCall, cargoBindSpec, slots, shipBays, capacity, heldCall, mutationFence, pendingRecovery } = d;
+    resolvePlace, boundCall, cargoBindSpec, inventoryManagerBindSpec, slots, shipBays, capacity, heldCall, mutationFence, pendingRecovery, boardShip } = d;
   const routerPromise = import(pathToFileURL(path.resolve(__dirname, "../web/src/bridge/bayRouting.ts")).href);
   routerPromise.catch(() => {});
   const strictList = async (held, sessionID, place) => {
@@ -138,6 +138,21 @@ function registerProvisioningRoutes(d) {
       if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
       return { context: scope, ...definitions, observation: observed, source: origin };
     }
+    async function readShip(input, targetHullID = null, sourcePin = null) {
+      const scope = await context(), definitions = await library(input);
+      const observed = await observation(scope), origin = await source(input, scope, sourcePin);
+      const place = await resolvePlace(held, sessionID, { kind: "hangar" });
+      const hangar = await strictList(held, sessionID, place);
+      if (hangar.some(r => r.ownerID !== scope.characterID || r.locationID !== scope.locationID || r.flagID !== 4 || r.loaded)) fail("HANGAR_IDENTITY_UNKNOWN");
+      let target = { complete: true, shipID: null, shipTypeID: definitions.contract.shipTypeID, rows: [] };
+      if (targetHullID) {
+        const hull = hangar.find(r => r.itemID === targetHullID && r.singleton && r.typeID === definitions.contract.shipTypeID);
+        if (!hull) fail("TARGET_HULL_CHANGED");
+        target = { ...await observation({ ...scope, shipID: targetHullID, shipTypeID: hull.typeID }), shipID: targetHullID };
+      }
+      if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
+      return { context: scope, ...definitions, observation: observed, source: origin, hangar, target };
+    }
     async function readMovement(move, sourcePin) {
       const scope = await context();
       if (scope.shipID !== move.shipID || scope.locationID !== sourcePin.dockedLocationID) fail("RECONCILIATION_SCOPE_CHANGED");
@@ -180,28 +195,51 @@ function registerProvisioningRoutes(d) {
       }
       return null;
     }
-    return { context, read, plan, readMovement,
+    async function dispatch(move, current, lease) {
+      if (hash(await context()) !== hash(current.context)) fail("PROVISIONING_CONTEXT_CHANGED");
+      const definition = current.contract.definition;
+      const freshLibrary = await library({ providerCharacterID: definition.characterID, corporationID: definition.corporationID,
+        fittingID: definition.fittingID });
+      if (freshLibrary.contract.definitionFingerprint !== current.contract.definitionFingerprint) fail("REVIEW_REQUIRED");
+      const from = await source({ source: current.source.pin.descriptor }, current.context, current.source.pin);
+      if (hash(from.pin) !== hash(current.source.pin) || from.access.take !== true ||
+          hash(from.access) !== hash(current.source.access)) fail("SOURCE_AUTHORITY_CHANGED");
+      const selected = from.rows.find(r => r.itemID === move.itemID && r.typeID === move.typeID && r.quantity >= move.quantity);
+      if (!selected || selected.locationID !== move.sourceLocationID) fail("SOURCE_CHANGED");
+      const to = await resolvePlace(held, sessionID, move.destination);
+      const spec = { ...to.spec, expectedDockedLocationID: current.context.locationID, expectedShipID: move.shipID };
+      return mutationFence.withLease(lease, () => boundCall(held, sessionID, spec, "Add",
+        [move.itemID, move.sourceLocationID], { flag: to.flag, qty: move.quantity }));
+    }
+    return { context, read, readShip, plan, readMovement, dispatch,
+      async dispatchShip(action, current, lease) {
+        engine.assertWritable(held.characterID, lease);
+        const revalidate = async () => {
+          const fresh = await readShip({ providerCharacterID: current.contract.definition.characterID,
+            corporationID: current.contract.definition.corporationID, fittingID: current.contract.definition.fittingID,
+            source: current.source.pin.descriptor }, current.target.shipID, current.source.pin);
+          const comparable = r => ({ context: r.context, contract: r.contract, observation: r.observation,
+            source: { pin: r.source.pin, access: r.source.access, rows: r.source.rows }, hangar: r.hangar, target: r.target });
+          if (hash(comparable(fresh)) !== hash(comparable(current)) || fresh.source.access.take !== true || pendingRecovery(held)) fail("REVIEW_REQUIRED");
+        };
+        await revalidate();
+        const move = action.move;
+        return mutationFence.withLease(lease, async () => {
+          if (action.kind === "ASSEMBLE_HULL") return heldCall(held, sessionID, "ship", "AssembleShip", [[move.itemID], "", null], null);
+          if (action.kind === "BOARD_HULL") return boardShip(held, sessionID, move.itemID, revalidate);
+          if (action.kind === "FIT_ITEM") {
+            const spec = { ...inventoryManagerBindSpec(held), expectedDockedLocationID: current.context.locationID, expectedShipID: move.shipID };
+            return boundCall(held, sessionID, spec, "FitFitting", [move.shipID, null, { [move.typeID]: [move.itemID] },
+              move.sourceLocationID, { [move.flag]: move.typeID }, {}, false], null);
+          }
+          return dispatch(move, current, lease); // SAME authorized loader as Replenish.
+        });
+      },
       async validateMove(move, current, lease) {
         if (pendingRecovery(held)) fail("PROVISIONING_CONTEXT_UNAVAILABLE");
         engine.assertWritable(held.characterID, lease);
         if (hash(await context()) !== hash(current.context) || move.sourceLocationID !== current.source.pin.locationID ||
             move.shipID !== current.context.shipID || !Number.isSafeInteger(move.quantity) || move.quantity <= 0) fail("TRANSFER_SCOPE_CHANGED");
-      },
-      async dispatch(move, current, lease) {
-        if (hash(await context()) !== hash(current.context)) fail("PROVISIONING_CONTEXT_CHANGED");
-        const definition = current.contract.definition;
-        const freshLibrary = await library({ providerCharacterID: definition.characterID, corporationID: definition.corporationID,
-          fittingID: definition.fittingID });
-        if (freshLibrary.contract.definitionFingerprint !== current.contract.definitionFingerprint) fail("REVIEW_REQUIRED");
-        const from = await source({ source: current.source.pin.descriptor }, current.context);
-        if (hash(from.pin) !== hash(current.source.pin) || from.access.take !== true ||
-            hash(from.access) !== hash(current.source.access)) fail("SOURCE_AUTHORITY_CHANGED");
-        const selected = from.rows.find(r => r.itemID === move.itemID && r.typeID === move.typeID && r.quantity >= move.quantity);
-        if (!selected || selected.locationID !== move.sourceLocationID) fail("SOURCE_CHANGED");
-        const to = await resolvePlace(held, sessionID, move.destination);
-        const spec = { ...to.spec, expectedDockedLocationID: current.context.locationID, expectedShipID: move.shipID };
-        return mutationFence.withLease(lease, () => boundCall(held, sessionID, spec, "Add",
-          [move.itemID, move.sourceLocationID], { flag: to.flag, qty: move.quantity }));
       } };
   }
   const endpoint = action => async (req, res, next) => {
@@ -229,13 +267,20 @@ function registerProvisioningRoutes(d) {
       providerCharacterID, definitionCorporationID: library.corporationID || null,
       definitionStatus: library.status,
       fittings: library.status === "READY" ? library.fittings.map(f => ({ fittingID: f.fittingID, name: f.name || "Invalid fitting", invalid: !!f.invalid })) : [], containers,
-      pending: engine.unresolved(held.characterID).map(row => ({ operationID: row.key, state: row.state })) };
+      pending: engine.unresolved(held.characterID).map(row => ({ operationID: row.key, state: row.state, kind: row.kind || "REPLENISHMENT", input: row.input })) };
   }));
   app.post("/api/bridge/provisioning/review", requireAuth, endpoint((req, held) => engine.review(adapter(req, held), reviewInput(req.body))));
+  app.post("/api/bridge/provisioning/ship-review", requireAuth, endpoint((req, held) => engine.reviewShip(adapter(req, held), reviewInput(req.body), req.body.operationID || null)));
+  app.post("/api/bridge/provisioning/provision-ship", requireAuth, endpoint((req, held) => {
+    if (req.body.confirm !== true) fail("CONFIRMATION_REQUIRED");
+    return engine.applyShip(adapter(req, held), req.body);
+  }));
   app.post("/api/bridge/provisioning/replenish", requireAuth, endpoint((req, held) => {
     if (req.body.confirm !== true) fail("CONFIRMATION_REQUIRED");
     return engine.apply(adapter(req, held), req.body);
   }));
   app.post("/api/bridge/provisioning/reconcile", requireAuth, endpoint((req, held) => engine.reconcile(adapter(req, held), req.body.operationID)));
+  // Authorized consumers share this selected-session adapter and engine.
+  return { adapter };
 }
 module.exports = { registerProvisioningRoutes, corporationAccess };

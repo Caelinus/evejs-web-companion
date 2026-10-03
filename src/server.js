@@ -488,7 +488,7 @@ const requireStreamAuth = makeRequireAuth({ allowQueryParam: true });
 // Apply acquired its reservation. No browser-supplied lease is accepted.
 app.use("/api/bridge", requireAuth, (req, res, next) => {
   try {
-    if (req.method === "POST" && !["/call", "/provisioning/review", "/provisioning/reconcile"].includes(req.path)) {
+    if (req.method === "POST" && !["/call", "/provisioning/review", "/provisioning/ship-review", "/provisioning/provision-ship", "/provisioning/reconcile", "/drone-recovery/ready"].includes(req.path)) {
       const held = bridgeSessions.get(req.webSessionID);
       if (req.path === "/select") {
         const target = Number(req.body?.characterID);
@@ -678,6 +678,7 @@ const TRANSITION_GATE_EXEMPT_POST_PATHS = new Set([
   "/api/bridge/select",
   "/api/bridge/release",
   "/api/bridge/provisioning/review", // read-only despite the structured POST body
+  "/api/bridge/provisioning/ship-review", // read-only plan; Apply reserves in the shared engine
   "/api/bridge/provisioning/reconcile", // evidence reads only; never dispatches
 ]);
 app.use((req, res, next) => {
@@ -705,11 +706,23 @@ app.use((req, res, next) => {
   });
 });
 
-registerProvisioningRoutes({ app, requireAuth, requireHeld: requireHeldBridgeSession, engine: replenishment, store, gateway, data: staticData,
+const provisioningRoutes = registerProvisioningRoutes({ app, requireAuth, requireHeld: requireHeldBridgeSession, engine: replenishment, store, gateway, data: staticData,
   flight: readHeldFlight, currentHeld: assertCurrentHeldSession, inventoryLocation: inventoryLocationID,
-  resolvePlace, boundCall, cargoBindSpec, slots: () => ALL_SLOT_FLAGS, shipBays: () => SHIP_BAYS,
+  resolvePlace, boundCall, cargoBindSpec, inventoryManagerBindSpec, slots: () => ALL_SLOT_FLAGS, shipBays: () => SHIP_BAYS,
   capacity: decodeCapacityReading, heldCall: heldTopLevelCall, mutationFence,
-  pendingRecovery: held => hasPendingRecovery(held, held.characterID) });
+  pendingRecovery: held => hasPendingRecovery(held, held.characterID),
+  boardShip: async (held, sessionID, shipID, revalidate) => {
+    const response = { status() { return this; }, json(value) { throw Object.assign(new Error(value.message || value.error), { code: value.error, statusCode: 409 }); } };
+    if (!await acquireRouteTransition(response, held, "board", { shipID }, revalidate)) return;
+    let dispatchError;
+    try { await boundCall(held, sessionID, shipBindSpec(held), "Board", [shipID, held.activeShipID], null); }
+    catch (error) { dispatchError = error; }
+    markTransitionAccepted(held); // Outcome may be uncertain; observe even on error.
+    const ready = await awaitRouteTransition(held, sessionID, "board", { shipID });
+    if (!ready.ok) throw Object.assign(new Error("Exact target hull transition is unproven."), { code: "PROVISIONING_BOARD_UNPROVEN", statusCode: 409 });
+    held.activeShipID = Number(ready.flight.shipID);
+    if (dispatchError) throw dispatchError;
+  } });
 
 // Thin bridge proxy for the whitelisted EveJS callMethod path (goal R1).
 // Forwards the retail call tuple (service, method, args, kwargs) to the
@@ -1521,7 +1534,7 @@ function planetBindSpec(planetID) {
 async function boundCall(held, webSessionID, bindSpec, method, args, kwargs, bindNotifications = null) {
   assertCurrentHeldSession(held, webSessionID);
   if (bindSpec.service === "invbroker" &&
-      ["Add", "MultiAdd", "MultiMerge", "StackAll", "TrashItems", "SplitStack"].includes(method)) {
+      ["Add", "MultiAdd", "MultiMerge", "StackAll", "TrashItems", "SplitStack", "FitFitting"].includes(method)) {
     // A picked structure or earlier service read is not mutation authority.
     // Recheck the live location and access before every inventory write.
     const flight = await readHeldFlight(held, webSessionID);
@@ -16305,7 +16318,7 @@ function beginRouteTransition(res, held, kind, expected) {
  * Only the latter waits here; ordinary warp/module/inventory calls continue
  * once the prior transition's authoritative readiness phase is `ready`.
  */
-async function acquireRouteTransition(res, held, kind, expected) {
+async function acquireRouteTransition(res, held, kind, expected, beforeBegin = null) {
   if (held.transition && held.transition.phase !== "ready") {
     return beginRouteTransition(res, held, kind, expected);
   }
@@ -16334,6 +16347,7 @@ async function acquireRouteTransition(res, held, kind, expected) {
       }
     }
   }
+  if (beforeBegin) await beforeBegin();
   return beginRouteTransition(res, held, kind, expected);
 }
 

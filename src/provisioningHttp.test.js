@@ -116,7 +116,9 @@ test("authenticated HTTP Review/Replenish uses real parsers, bindings and pilot 
   server = http.createServer(restored); await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
   assert.equal((await request("/api/bridge/select", { characterID: 10 })).body.error, "CHARACTER_IN_USE");
   state.free = true;
-  assert.equal((await request("/api/bridge/select", { characterID: 10 })).status, 200);
+  const selected = await request("/api/bridge/select", { characterID: 10 });
+  assert.equal(selected.status, 200);
+  assert.equal((await request("/api/bridge/drone-recovery/ready", { checkID: selected.body.droneRecoveryCheckID })).status, 200);
   const recoveryOptions = await request("/api/bridge/provisioning/options?providerCharacterID=11");
   assert.equal(recoveryOptions.body.pending[0].operationID, review.body.reviewID);
   assert.equal((await request("/api/bridge/inventory/stack", { target: "hangar" })).body.error, "REPLENISHMENT_CUSTODY");

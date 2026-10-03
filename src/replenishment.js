@@ -1,6 +1,7 @@
 "use strict";
 const { createOperationJournal } = require("./operationJournal");
 const { hash, fail, inspectContract, matchFittings } = require("./provisioningContracts");
+const { validShipRecord, createShipOperations } = require("./shipProvisioning");
 const sum = (rows, typeID) => rows.filter(row => row.typeID === typeID).reduce((n, row) => n + row.quantity, 0);
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -25,17 +26,20 @@ function createReplenishment({ filePath = null, operations, data, now = Date.now
     if (!positive(row.accountID) || !positive(row.characterID) || !row.context ||
         row.context.accountID !== row.accountID || row.context.characterID !== row.characterID || !positive(row.context.shipID) ||
         !positive(row.context.locationID) || !digest(row.reviewHash) || !digest(row.contract?.definitionFingerprint) || !row.sourcePin ||
+        (row.kind === "SHIP_PROVISION" ? !validShipRecord(row, verifyMovement, data) : (
+        !!row.kind ||
         !Array.isArray(row.moves) || !["PREPARED", "PENDING", "BLOCKED", "COMPLETE", "REFUSED", "RECONCILED"].includes(row.state) ||
         row.moves.some(move => !positive(move.itemID) || !positive(move.typeID) || !positive(move.quantity) ||
           move.shipID !== row.context.shipID || !positive(move.sequence) || !["PENDING", "VERIFIED", "AMBIGUOUS"].includes(move.state) ||
           !validRows(move.before?.source) || !validRows(move.before?.destination) ||
           (move.state === "VERIFIED" && (!validRows(move.after?.source) || !validRows(move.after?.destination) ||
             verifyMovement(move.before, move.after, move) !== "VERIFIED"))) ||
-        (["COMPLETE", "RECONCILED", "PREPARED", "REFUSED"].includes(row.state) && row.moves.some(move => move.state !== "VERIFIED")))
+        (["COMPLETE", "RECONCILED", "PREPARED", "REFUSED"].includes(row.state) && row.moves.some(move => move.state !== "VERIFIED")))))
       fail("CUSTODY_JOURNAL_INVALID");
   }
   const reviews = new Map();
-  const unresolved = pilot => journal.list().filter(row => row.characterID === pilot && ["PENDING", "BLOCKED"].includes(row.state));
+  const unresolved = pilot => journal.list().filter(row => row.characterID === pilot &&
+    (row.kind === "SHIP_PROVISION" ? !["COMPLETE", "REFUSED"].includes(row.state) : ["PENDING", "BLOCKED"].includes(row.state)));
   function assertWritable(pilot, lease = null) {
     const active = operations.get(pilot);
     if (lease && active !== lease) fail("REPLENISHMENT_GENERATION_CHANGED");
@@ -92,7 +96,7 @@ function createReplenishment({ filePath = null, operations, data, now = Date.now
       return { operationID: reviewID, state: existing.state, result: existing.result || null };
     }
     const accepted = reviews.get(reviewID);
-    if (!accepted || accepted.expiresAt < now() || hash(accepted.pin) !== reviewHash ||
+    if (!accepted || accepted.kind || accepted.expiresAt < now() || hash(accepted.pin) !== reviewHash ||
         hash(context) !== hash(accepted.read.context)) fail("REVIEW_REQUIRED");
     const lease = reserve(context.characterID, reviewID);
     let row;
@@ -160,6 +164,7 @@ function createReplenishment({ filePath = null, operations, data, now = Date.now
   async function reconcile(adapter, id) {
     const context = await adapter.context();
     const row = journal.get(id);
+    if (row?.kind === "SHIP_PROVISION") return shipOperations.reconcileShip(adapter, id);
     if (!row || row.accountID !== context.accountID || row.characterID !== context.characterID) fail("OPERATION_NOT_OWNED");
     const lease = reserve(context.characterID, id, true);
     try {
@@ -174,6 +179,7 @@ function createReplenishment({ filePath = null, operations, data, now = Date.now
       journal.put(id, row); return { operationID: id, state: row.state, result: row.result || null };
     } finally { release(context.characterID, lease); }
   }
-  return { review, apply, reconcile, assertWritable, assertSelectable, enterWrite, unresolved, journal };
+  const shipOperations = createShipOperations({ journal, reviews, reserve, release, assertWritable, unresolved, data, now, verifyMovement });
+  return { review, apply, reconcile, ...shipOperations, assertWritable, assertSelectable, enterWrite, unresolved, journal };
 }
 module.exports = { createReplenishment, verifyMovement };

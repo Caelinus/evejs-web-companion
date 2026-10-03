@@ -3,7 +3,7 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { registerProvisioningRoutes } = require("./provisioningRoutes");
 const { createReplenishment } = require("./replenishment");
 const { createPilotMutationFence } = require("./pilotMutationFence");
-const types = { 1: { categoryID: 6 }, 2: { categoryID: 7 }, 3: { categoryID: 8, groupID: 83, volume: .01 },
+const types = { 1: { categoryID: 6, groupID: 25 }, 2: { categoryID: 7 }, 3: { categoryID: 8, groupID: 83, volume: .01 },
   4: { categoryID: 2, groupID: 12 }, 6: { categoryID: 4, groupID: 1136 } };
 const data = { getType: id => types[id], getTypeName: id => `Type ${id}` };
 const wireList = items => ({ type: "list", items });
@@ -14,18 +14,23 @@ function fixture() {
   const state = { writes: [], date: "100", stock: 4000, aboard: 3200, take: true, query: true, incomplete: false,
     providerCalls: [], sourceReads: [], failAfter: false };
   const engine = createReplenishment({ operations, data });
+  engine.withTemporaryControl = () => { throw new Error("Held provisioning must not acquire temporary Factory control."); };
   const mutationFence = createPilotMutationFence({ heldSessions: new Map([["tab", held]]), assertWritable: engine.assertWritable });
   const row = (itemID, typeID, quantity, locationID, flagID, ownerID = 10, singleton = 0) =>
     ({ itemID, typeID, quantity, locationID, flagID, ownerID, singleton });
   function items(key, flag) {
     if (key === "ship") return [row(70, 2, 1, 50, 27, 10, 1), row(90, 3, state.aboard, 50, 5), row(91, 6, 7, 50, 5)]
       .filter(r => flag === undefined || r.flagID === flag);
-    if (key === "hangar") return [row(300, 4, -1, 60, 4, 10, 1), ...(state.stock ? [row(100, 3, state.stock, 60, 4)] : [])];
+    if (key === "hangar") return [row(50, 1, 1, 60, 4, 10, 1), row(300, 4, -1, 60, 4, 10, 1),
+      ...(state.stock ? [row(100, 3, state.stock, 60, 4)] : [])];
     if (key === "corp") return state.stock ? [row(100, 3, state.stock, 777, 115, 30)] : [];
     if (key === "container") return state.stock ? [row(100, 3, state.stock, 300, 0)] : [];
     throw new Error(`unexpected inventory ${key}`);
   }
   const gateway = mutationFence.wrap({
+    selectFactoryCharacter() { throw new Error("Held provisioning must not select a Factory pilot."); },
+    selectCharacter() { throw new Error("Held provisioning must not select or take over a pilot."); },
+    releaseBridgeSession() { throw new Error("Held provisioning must keep the cockpit pilot selected."); },
     async callMethod(service, method, args, kwargs, fields, bridgeSessionID) {
       assert.equal(service, "corpFittingMgr"); assert.equal(method, "GetFittings"); assert.equal(bridgeSessionID, undefined);
       state.providerCalls.push(fields);
@@ -57,10 +62,11 @@ function fixture() {
     }
     throw new Error("invalid descriptor");
   };
-  registerProvisioningRoutes({ app: { get: (p, ...fns) => routes.set(`GET ${p}`, fns), post: (p, ...fns) => routes.set(`POST ${p}`, fns) },
+  const registered = registerProvisioningRoutes({ app: { get: (p, ...fns) => routes.set(`GET ${p}`, fns), post: (p, ...fns) => routes.set(`POST ${p}`, fns) },
     requireAuth: (_req, _res, next) => next(), requireHeld: () => held, engine, data, gateway,
     store: { listCharactersForAccount: async () => [{ accountID: 7, characterID: 10, corporationID: 30, characterName: "Current" },
-      { accountID: 7, characterID: 11, corporationID: 20, characterName: "Provider" }] },
+      { accountID: 7, characterID: 11, corporationID: 20, characterName: "Provider" },
+      { accountID: 7, characterID: 12, corporationID: 30, characterName: "Other cockpit pilot" }] },
     flight: async () => ({ flight: { docked: true, shipID: held.activeShipID, shipTypeID: 1 } }),
     currentHeld: () => {}, inventoryLocation: () => held.stationID, pendingRecovery: () => false,
     resolvePlace, cargoBindSpec: () => ({ key: "ship" }), slots: () => [27], shipBays: () => [{ key: "ammo", flag: 143, label: "Ammo" }],
@@ -77,7 +83,8 @@ function fixture() {
     await fns[1](req, res, error => { throw error; }); return res.body;
   }
   const input = { providerCharacterID: 11, corporationID: 20, fittingID: 4, source: { kind: "hangar" } };
-  return { state, held, engine, operations, invoke, input };
+  return { state, held, engine, operations, invoke, input,
+    adapter: () => registered.adapter({ webSessionID: "tab", account: { accountID: 7 } }, held) };
 }
 test("route consumer separates provider from physical authority and routes deficits into ordinary cargo", async () => {
   const f = fixture();
@@ -92,6 +99,88 @@ test("route consumer separates provider from physical authority and routes defic
   assert.deepEqual(f.state.writes, [[100, 60, 1800]]);
   await f.invoke("replenish", request); assert.equal(f.state.writes.length, 1);
   assert.ok(f.state.providerCalls.every(fields => fields.characterID === 11 && fields.corpid === 20));
+});
+
+test("held Ship Review no-ops exact equipment, then shared Replenish fills its LOW supplies without acquiring another hull", async () => {
+  const f = fixture();
+  const review = await f.invoke("ship-review", { ...f.input, characterID: 12, shipID: 999,
+    stationID: 999, sessionGeneration: "browser-selected-generation" });
+  assert.equal(review.context.characterID, f.held.characterID);
+  assert.equal(review.context.shipID, f.held.activeShipID);
+  assert.equal(review.context.locationID, f.held.stationID);
+  assert.equal(review.contract.definition.characterID, 11);
+  assert.equal(review.status.equipment, "VERIFIED");
+  assert.equal(review.status.supplies, "LOW");
+  assert.equal(review.plan.mode, "ALREADY_SATISFIED");
+  assert.equal(review.plan.hullQuantity, 0);
+  assert.deepEqual(review.plan.steps, []);
+  assert.equal(review.canApply, true);
+  await assert.rejects(f.invoke("replenish", { ...review, confirm: true }), { code: "REVIEW_REQUIRED" });
+  const result = await f.invoke("provision-ship", { reviewID: review.reviewID, reviewHash: review.reviewHash, confirm: true });
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(result.result.alreadySatisfied, true);
+  assert.equal(result.result.supplies, "LOW");
+  assert.equal(result.manifest.targetHullID, 50);
+  const record = f.engine.journal.get(review.reviewID);
+  assert.equal(record.kind, "SHIP_PROVISION");
+  assert.deepEqual(record.input, f.input);
+  assert.deepEqual(record.actions, []);
+  assert.deepEqual(record.moves, []);
+  assert.deepEqual(f.state.writes, []);
+  assert.equal(f.operations.size, 0);
+  assert.equal((await f.invoke("provision-ship", { ...review, confirm: true })).result.alreadySatisfied, true);
+  assert.deepEqual(f.state.writes, []);
+
+  const replenishReview = await f.invoke("review", f.input);
+  await assert.rejects(f.invoke("provision-ship", { ...replenishReview, confirm: true }), { code: "REVIEW_REQUIRED" });
+  await f.invoke("replenish", { ...replenishReview, confirm: true });
+  assert.deepEqual(f.state.writes, [[100, 60, 1800]]);
+  assert.equal(f.engine.journal.get(replenishReview.reviewID).result.supplies, "FULL");
+  assert.equal(f.held.characterID, 10);
+  assert.equal(f.held.activeShipID, 50);
+  assert.equal(f.held.bridgeSessionID, "own-generation");
+  const full = await f.invoke("ship-review", f.input);
+  assert.equal(full.status.supplies, "FULL");
+  assert.equal((await f.invoke("provision-ship", { ...full, confirm: true })).result.alreadySatisfied, true);
+  assert.deepEqual(f.state.writes, [[100, 60, 1800]]);
+});
+
+for (const [reviewRoute, applyRoute] of [["review", "replenish"], ["ship-review", "provision-ship"]]) {
+  for (const change of ["generation", "hosted claim", "pilot", "ship", "station"])
+    test(`held ${applyRoute} rejects ${change} drift after ${reviewRoute} with no mutation or custody`, async () => {
+      const f = fixture(), review = await f.invoke(reviewRoute, f.input);
+      if (change === "generation") f.held.bridgeSessionID = "replacement-generation";
+      if (change === "hosted claim") f.held.botClaimSecret = "replacement-hosted-claim";
+      if (change === "pilot") f.held.characterID = 12;
+      if (change === "ship") f.held.activeShipID = 51;
+      if (change === "station") f.held.stationID = 61;
+      const refusal = applyRoute === "provision-ship" ?
+        { pilot: "SOURCE_IDENTITY_UNKNOWN", station: "HANGAR_IDENTITY_UNKNOWN" }[change] : null;
+      await assert.rejects(f.invoke(applyRoute, { reviewID: review.reviewID, reviewHash: review.reviewHash, confirm: true }),
+        { code: refusal || "REVIEW_REQUIRED" });
+      assert.deepEqual(f.state.writes, []);
+      assert.equal(f.engine.journal.list().length, 0);
+      assert.equal(f.operations.size, 0);
+    });
+}
+
+test("held Ship Review preserves denied corporation source authority while exact equipment remains a no-op", async () => {
+  const f = fixture();
+  f.input.source = { kind: "corp", corporationID: 30, division: 1 };
+  f.state.take = false;
+  const review = await f.invoke("ship-review", f.input);
+  assert.equal(review.plan.mode, "ALREADY_SATISFIED");
+  assert.equal(review.source.access.take, false);
+  const result = await f.invoke("provision-ship", { ...review, confirm: true });
+  assert.equal(result.result.alreadySatisfied, true);
+  assert.deepEqual(f.state.writes, []);
+  assert.equal(f.engine.journal.get(review.reviewID).sourcePin.locationID, 777);
+  // Ship Review also reads personal hangar to validate hull candidates. It must
+  // not replace the explicitly selected corporation source with those rows.
+  assert.equal(f.engine.journal.get(review.reviewID).sourcePin.descriptor.kind, "corp");
+  f.state.query = false;
+  await assert.rejects(f.invoke("ship-review", f.input), { code: "CORPORATION_QUERY_DENIED" });
+  assert.deepEqual(f.state.writes, []);
 });
 test("strict corporation source pins real office row location and Query never implies Take or personal fallback", async () => {
   const f = fixture(); f.input.source = { kind: "corp", corporationID: 30, division: 1 }; f.state.take = false;
@@ -130,6 +219,32 @@ test("empty corporate stock after a partial transfer retains the pinned contents
   const result = await f.invoke("replenish", { ...review, confirm: true });
   assert.equal(result.state, "COMPLETE"); assert.equal(result.result.equipment, "VERIFIED");
   assert.equal(result.result.targets[0].deficit, 800); assert.equal(result.result.supplies, "LOW");
+});
+
+test("fresh selected adapter retains an accepted physical corporation source when another member emptied its stock", async () => {
+  const f = fixture(); f.input.source = { kind: "corp", corporationID: 30, division: 1 };
+  const accepted = (await f.adapter().read(f.input)).source.pin;
+  assert.equal(accepted.locationID, 777);
+  f.state.stock = 0;
+  assert.equal((await f.adapter().read(f.input)).source.pin.locationID, null, "a fresh adapter has no earlier listed location");
+  const selected = f.adapter();
+  const read = await selected.read(f.input, accepted);
+  assert.deepEqual(read.source.rows, []);
+  assert.deepEqual(read.source.pin, accepted);
+  const review = await f.engine.review({ ...selected, read: input => selected.read(input, accepted) }, f.input);
+  assert.equal(review.status.equipment, "VERIFIED"); assert.equal(review.status.supplies, "LOW");
+  assert.equal(review.source.pin.locationID, 777); assert.equal(review.source.access.take, true);
+  assert.ok(f.state.sourceReads.every(key => key === "corp"));
+  assert.deepEqual(f.state.writes, []); assert.deepEqual(f.engine.journal.list(), []);
+
+  for (const change of [{ office: "another-office" }, { descriptor: { kind: "hangar" } },
+    { descriptor: { ...accepted.descriptor, division: 2 } }, { ownerID: 10 }, { flag: 116 }, { dockedLocationID: 61 }]) {
+    const wrong = await f.adapter().read(f.input, { ...accepted, ...change });
+    assert.equal(wrong.source.pin.locationID, null, `foreign physical source must not prime: ${JSON.stringify(change)}`);
+  }
+  f.state.query = false;
+  await assert.rejects(f.adapter().read(f.input, accepted), { code: "CORPORATION_QUERY_DENIED" });
+  assert.deepEqual(f.state.writes, []);
 });
 test("unknown inventory, changed generation/date and other operation prevent route mutation", async () => {
   const f = fixture(); f.state.incomplete = true;
