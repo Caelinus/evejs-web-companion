@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { centerLogin, centerRoster, centerReview, matchLabel, type Roster, type CenterReview } from "../provisioning/centerClient.ts";
+  import { centerLogin, centerRoster, centerReview, centerApply, centerOperation, centerRecover, matchLabel, type Roster, type CenterReview, type ApplyOutcome } from "../provisioning/centerClient.ts";
   let username = $state(""), password = $state(""), token = $state<string | null>(null), account = $state("");
   let roster = $state<Roster | null>(null), detail = $state<CenterReview | null>(null), pilotID = $state(0), provider = $state(0), fittingID = $state(0);
   let sourceKind = $state("hangar"), division = $state(1), busy = $state(false), error = $state("");
   let ticket = 0;
+  let outcome = $state<ApplyOutcome | null>(null), applying = $state(false);
   onMount(() => { const saved = sessionStorage.getItem("ship-provisioning:account"); if (saved) {
     try { const value = JSON.parse(saved); token = value.token; account = value.account; void run(refresh); } catch { sessionStorage.removeItem("ship-provisioning:account"); }
   } });
@@ -19,12 +20,25 @@
     if(version===ticket) detail=value;
   }
   function invalidate() { ticket++; detail=null; }
-  function logout() { ticket++; token=null; roster=null; detail=null; sessionStorage.removeItem("ship-provisioning:account"); }
+  function logout() { ticket++; token=null; roster=null; detail=null; outcome=null; sessionStorage.removeItem("ship-provisioning:account"); }
+  async function apply() {
+    const accepted=detail?.applyReview;
+    if(!token || !accepted?.canApply || !accepted.reviewHash) return;
+    const credential=token; applying=true; outcome=null;
+    const pending=centerApply(credential,accepted.reviewID,accepted.reviewHash);
+    const monitor=(async()=>{ while(applying) { await new Promise(r=>setTimeout(r,1000)); if(!applying) break;
+      try { const polled=(await centerOperation(credential,accepted.reviewID)).outcome; if(applying) outcome=polled; } catch { /* POST may not have reached the durable boundary yet. */ }
+    } })();
+    try { outcome=(await pending).outcome; } finally { applying=false; await monitor; }
+    await review();
+    roster=await centerRoster(credential); // Replace the pre-Apply hull/control roster with fresh observations.
+  }
+  async function recover(id: string) { if(!token) return; outcome=(await centerRecover(token,id)).outcome; await review(); roster=await centerRoster(token); }
 </script>
 
 <main class="center">
-  <header><h1>Ship Provisioning Center</h1><p>Готовый фит · read-only account inspection</p><a href="/">Return to pilot workspace</a></header>
-  <p>Inspect owned pilots without selecting or acquiring them. Ship assembly and standalone Apply are unavailable in Phase 6A.</p>
+  <header><h1>Ship Provisioning Center</h1><p>Account-wide Review and Provision</p><a href="/">Return to pilot workspace</a></header>
+  <p>Review never selects a pilot. Apply temporarily acquires only a free pilot, revalidates the accepted plan, provisions through the shared engine, then releases control.</p>
   {#if !token}
     <form onsubmit={e=>{e.preventDefault();void run(login);}}><label>Account<input bind:value={username} autocomplete="username" /></label><label>Password<input type="password" bind:value={password} autocomplete="current-password" /></label><button disabled={busy || !username}>Sign in for read-only Review</button></form>
   {:else}
@@ -36,7 +50,7 @@
       </tbody></table>
       {#if !roster.pilots.length}<p>{roster.completeRoster ? "No owned pilots." : "Pilot list unavailable; absence is not verified."}</p>{/if}
       {#if pilotID}
-        <section><h2>Read-only pilot Review</h2><div class="selectors">
+        <section><h2>Pilot Review · read-only</h2><div class="selectors">
           <label>Fitting definition provider<select bind:value={provider} onchange={()=>{fittingID=0;invalidate();}} disabled={busy}>{#each roster.providers as p}<option value={p.characterID}>{p.name} · corporation {p.corporationID ?? "UNKNOWN"}</option>{/each}</select></label>
           <label>Physical item source<select bind:value={sourceKind} onchange={invalidate} disabled={busy}><option value="hangar">Target pilot personal local hangar</option><option value="corp">Target pilot corporation division</option></select></label>
           {#if sourceKind==="corp"}<label>Corporation division<select bind:value={division} onchange={invalidate} disabled={busy}>{#each [1,2,3,4,5,6,7] as n}<option value={n}>Division {n}</option>{/each}</select></label>{/if}
@@ -61,10 +75,24 @@
         <p>Stock observation: {detail.candidateSource.quality} · Query {detail.candidateSource.query} · Take {detail.candidateSource.take}. {detail.candidateSource.reasons.join(" · ")}</p>
         <table><thead><tr><th>Observed stock</th><th>Quantity</th><th>Item ID</th></tr></thead><tbody>{#each detail.candidateSource.rows as item}<tr><td>{item.name}</td><td>{item.quantity}</td><td>{item.itemID}</td></tr>{/each}</tbody></table>
         {#if detail.evidence}<h3>Observation evidence</h3><p>{detail.evidence.boundary} · stable {detail.evidence.stable ? "yes" : "no"} · {new Date(detail.evidence.completedAt).toISOString()}</p><small>{detail.evidence.digest}</small><p>{detail.evidence.unsupported.join(" · ")}</p>{/if}
+        <h3>Accepted provisioning plan</h3>
+        <p>Target pilot: {detail.pilot.name} · {detail.pilot.characterID}. Current hull: {detail.pilot.hullName || "UNKNOWN"}. Fitting: {detail.selected?.name || "Select a definition"}.</p>
+        <p>Provider corporation: {detail.definitions.corporationID ?? "UNKNOWN"}. Physical source: {detail.candidateSource.kind} · corporation {detail.candidateSource.corporationID ?? "personal"} · division {detail.candidateSource.division ?? "—"}.</p>
+        {#if detail.applyReview.plan}
+          <p>Target hull: {detail.applyReview.plan.targetHullName}. Hull acquisition: <strong>{detail.applyReview.plan.hullQuantity}</strong> · {detail.applyReview.plan.mode}.</p>
+          <p>{detail.applyReview.plan.steps.join(" → ") || "ALREADY SATISFIED / NO HULL ACQUISITION"}</p>
+          <p>Unsupported: {detail.applyReview.plan.unsupported.join(" · ") || "none"}. Shortages: {detail.applyReview.plan.shortages.join(" · ") || "none"}. Destructive actions: {detail.applyReview.plan.destructiveActions.join(" · ") || "none"}.</p>
+        {/if}
+        <p>Supplies policy: NEW HULL ONLY. New hull provisioning loads declared deficits; an exact existing ship is a no-op, even when supplies remain LOW. Use the held-pilot Replenish action for a separate top-up.</p>
+        <p>Apply authority: free-only acquisition required; source/Take revalidated after acquisition. Offline FREE and Query visibility do not grant mutation authority.</p>
+        <p>{detail.applyReview.canApply ? "READY FOR APPLY · complete supported plan; selected-session revalidation still required" : detail.applyReview.reasons.join(" · ")}</p>
+        <button disabled={busy || !detail.applyReview.canApply} onclick={()=>void run(apply)}>Apply accepted plan</button>
+        {#each detail.pendingApply as operation}<p>Recovery: {operation.state} · {operation.reason || "pending ownership/custody proof"} <button disabled={busy} onclick={()=>void run(()=>recover(operation.operationID))}>Reconcile control without reacquiring</button></p>{/each}
       </section>
     {/if}
   {/if}
-  {#if busy}<p role="status">Reading authoritative observation…</p>{/if}
+  {#if outcome}<section aria-label="Apply outcome"><h2>{outcome.state}</h2><p>{outcome.reason || ""}</p><p>Control: {outcome.control?.state || "not acquired"} · generation {outcome.control?.generation || "—"}</p><p>Revalidation: {outcome.revalidation?.state || "not proven"}</p><p>Provisioning: {outcome.provisioning?.state || "not dispatched"} · hull {outcome.provisioning?.manifest?.targetHullID ?? "—"}</p><p>Release: <strong>{outcome.release.state}</strong></p>{#if outcome.finalReview}<p>Final equipment: {outcome.finalReview.status.equipment} · Supplies: {outcome.finalReview.status.supplies}</p>{/if}<small>Operation {outcome.operationID}</small></section>{/if}
+  {#if busy}<p role="status">{applying ? outcome?.state || "ACQUIRING CONTROL" : "Reading authoritative observation…"}</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
 </main>
 <style>

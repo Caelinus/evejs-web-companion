@@ -25,13 +25,16 @@ test("physical loaded charges and carried spares share the accepted counting pol
 test("account HTTP roster/detail is read-only, uses shared exact Review and refuses foreign scope",async t=>{
  const row=(itemID,typeID,locationID,flagID,quantity=1,singleton=0,ownerID=10)=>({itemID,typeID,locationID,flagID,quantity,stacksize:quantity,singleton,ownerID});
  const tables={accounts:{qa:{id:1}},characters:{10:{accountId:1,characterName:"QA",corporationID:20,shipID:50,shipTypeID:1,stationID:60,solarSystemID:70}},items:{50:row(50,1,60,4,1,1),51:row(51,2,50,27,1,1),52:row(52,3,50,5,3)},corporations:{records:{20:{stationID:60}}},corporationRuntime:{corporations:{20:{members:{10:{roles:"0",titleMask:0,rolesAtHQ:"1048576"}},offices:{80:{corporationID:20,officeID:80,stationID:60,impounded:false}}}}}};
- let broken=false,drift=false, reads=0,selected=0,busy=false,definitionCount=1;
+ let broken=false,drift=false, reads=0,selected=0,busy=false,definitionCount=1,definitionSavedDate="100",enableApply=false,released=0;
  const project=createProvisioningObservation({read:table=>broken&&table==="items"?{success:false}:{success:true,data:tables[table]},processRole:"world",control:characterID=>({characterID,online:busy,controlState:busy?"browser_pilot":"offline"})});
  const object=args=>({type:"object",args:{type:"dict",entries:Object.entries(args)}});
  const gateway={async getProvisioningObservation(accountID,characterID=null,source){assert.equal(accountID,1);reads++;if(drift&&reads%2===0)tables.items[52].stacksize++;return project.project(accountID,characterID,source);},
- async callMethod(service,method,args,kwargs,fields){assert.equal(service,"corpFittingMgr");assert.equal(method,"GetFittings");assert.equal(fields.characterID,10);assert.equal(fields.corpid,20);return{result:{type:"dict",entries:Array.from({length:definitionCount},(_,i)=>[4+i,object({fittingID:4+i,ownerID:20,name:`Fit ${i+1}`,shipTypeID:1,savedDate:"100",fitData:{type:"list",items:[{type:"tuple",items:[2,27,1]},{type:"tuple",items:[3,5,5]}]}})])}};},
- async selectCharacter(){selected++;throw new Error("No selection permitted");},async selectFactoryCharacter(){selected++;throw new Error("No factory permitted");}};
- const app=createApp({eveGatewayClient:gateway,eveStore:{getAccount:async()=>({accountID:1,username:"qa",banned:false}),listCharactersForAccount:async()=>[]},
+ async callMethod(service,method,args,kwargs,fields){assert.equal(service,"corpFittingMgr");assert.equal(method,"GetFittings");assert.equal(fields.characterID,10);assert.equal(fields.corpid,20);return{result:{type:"dict",entries:Array.from({length:definitionCount},(_,i)=>[4+i,object({fittingID:4+i,ownerID:20,name:`Fit ${i+1}`,shipTypeID:1,savedDate:definitionSavedDate,fitData:{type:"list",items:[{type:"tuple",items:[2,27,1]},{type:"tuple",items:[3,5,5]}]}})])}};},
+ async selectCharacter(){selected++;throw new Error("No selection permitted");},
+ async getCharacterStatus(){return{characterID:10,online:busy,controlState:busy?"browser_pilot":"offline"};},
+ async selectFactoryCharacter(){assert.equal(enableApply,true,"Review cannot select a pilot");selected++;busy=true;return{bridgeSessionID:"qa-private",session:{characterID:10,shipID:50,shipTypeID:1,stationID:60,corporationID:20}};},
+ async releaseBridgeSession(){released++;busy=false;return{released:true,offline:true};}};
+ const app=createApp({eveGatewayClient:gateway,eveStore:{getAccount:async()=>({accountID:1,username:"qa",banned:false}),listCharactersForAccount:async()=>[{characterID:10}]},
   webAuth:{verifySessionToken:()=>({accountID:1,username:"qa",sessionID:"standalone"}),createSessionToken:()=>"qa-token"},errorLogger:()=>{},
   staticData:{getType:id=>({1:{categoryID:6},2:{categoryID:7},3:{categoryID:8}})[id],getTypeName:id=>`Type ${id}`,getStationName:()=>"Station",getSolarSystemName:()=>"System"}});
  const server=http.createServer(app);await new Promise(r=>server.listen(0,"127.0.0.1",r));t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(root,{recursive:true,force:true});});
@@ -52,5 +55,15 @@ test("account HTTP roster/detail is read-only, uses shared exact Review and refu
  drift=true;const mixed=(await request(base+"/review?characterID=10&fittingID=4")).body;
  assert.equal(mixed.status.equipment,"UNKNOWN");assert.equal(mixed.pilot.observation.complete,false);assert.equal(mixed.pilot.control.state,"UNKNOWN");assert.equal(mixed.candidateSource.quality,"PARTIAL");drift=false;
  const login=await request(base+"/login","POST",{username:"qa"});assert.equal(login.cookie,null);assert.equal(selected,0);
- assert.equal((await request(base+"/apply","POST",{})).status,404);
+ assert.equal((await request(base+"/apply","POST",{})).body.error,"CONFIRMATION_REQUIRED");assert.equal(selected,0);
+ // Exercise the real HTTP -> account/provider GetFittings -> buildContract ->
+ // server accepted-intent -> post-acquisition readReview refusal path.
+ const accepted=(await request(base+"/review?characterID=10&fittingID=4")).body;
+ assert.equal(accepted.applyReview.canApply,true);definitionSavedDate="101";enableApply=true;
+ const beforeApply=structuredClone(tables);
+ const refused=(await request(base+"/apply","POST",{confirm:true,reviewID:accepted.applyReview.reviewID,reviewHash:accepted.applyReview.reviewHash})).body.outcome;
+ assert.equal(refused.state,"REFUSED");assert.equal(refused.reason,"REVIEW_STALE");assert.equal(refused.provisioning,null);
+ assert.equal(refused.release.state,"VERIFIED_OFFLINE");assert.equal(selected,1);assert.equal(released,1);assert.equal(busy,false);
+ assert.equal(app.locals.replenishment.journal.list().length,0);assert.deepEqual(tables,beforeApply);
+ assert.deepEqual(app.locals.provisioningCenterApply.journal.get(accepted.applyReview.reviewID).pin.definition,accepted.selected.definition);
 });

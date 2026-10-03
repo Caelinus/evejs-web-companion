@@ -30,7 +30,9 @@ function validateProjection(value, accountID) {
   }
   return value;
 }
-function registerProvisioningCenter({ app, requireAuth, gateway, data, operations, heldSessions, botHost, engine }) {
+function registerProvisioningCenter({ app, requireAuth, gateway, data, operations, heldSessions, botHost, engine,
+  sessions, selectedAdapter, attach, detach, filePath, fault }) {
+  let applyService;
   const projection = async (accountID, characterID = null, source = { kind: "hangar" }) =>
     validateProjection(await gateway.getProvisioningObservation(accountID, characterID, source), accountID);
   const store = { async listCharactersForAccount(accountID) {
@@ -39,6 +41,8 @@ function registerProvisioningCenter({ app, requireAuth, gateway, data, operation
     return p.pilots.map(r => ({ accountID, characterID: r.characterID, corporationID: r.corporationID, characterName: r.name }));
   } };
   const ownership = p => {
+    const center = applyService?.pending(p.characterID) || [];
+    if (center.length) return { ...p.control, state: center.some(r => r.active) ? "BUSY" : "RECOVERY", owner: "CENTER_APPLY" };
     if (engine.unresolved(p.characterID).length) return { ...p.control, state: "RECOVERY", owner: "CUSTODY" };
     if (botHost.claimedBy(p.characterID) !== null) return { ...p.control, state: "BUSY", owner: "HOSTED_BOT" };
     if ([...heldSessions.values()].some(h => h.characterID === p.characterID)) return { ...p.control, state: "BUSY", owner: "WC_BROWSER" };
@@ -109,6 +113,9 @@ function registerProvisioningCenter({ app, requireAuth, gateway, data, operation
         candidateSource: { ...pilot.source, rows: named(pilot.source.rows), revalidateOnApply: true },
         readOnly: true };
   }
+  applyService = require("./provisioningCenterApply").createProvisioningCenterApply({ sessions, gateway, engine, operations, data,
+    readReview, selectedAdapter, attach, detach, filePath, fault });
+  app.locals.provisioningCenterApply = applyService;
   app.get("/api/ship-provisioning/review", requireAuth, async (req,res,next) => {
     try {
       const characterID = queryID(req.query.characterID), providerCharacterID = queryID(req.query.providerCharacterID,characterID), fittingID = queryID(req.query.fittingID,0,true);
@@ -117,9 +124,20 @@ function registerProvisioningCenter({ app, requireAuth, gateway, data, operation
       if (!["hangar","corp"].includes(sourceKind)) fail("SOURCE_UNSUPPORTED");
       const source = sourceKind === "corp" ? { kind: "corp", corporationID: queryID(req.query.corporationID), division: queryID(req.query.division) } : { kind: "hangar" };
       const input = { characterID, providerCharacterID, fittingID, source }, detail = await readReview(req.account.accountID, input);
-      res.json({ ok: true, ...detail });
+      // The chosen UNIQUE definition is pinned explicitly; Apply cannot choose
+      // another match or policy after acquisition.
+      const selectedInput = { ...input, corporationID: detail.definitions.corporationID, fittingID: detail.selected?.definition.fittingID || 0 };
+      res.json({ ok: true, ...detail, applyReview: applyService.prepare(detail, selectedInput),
+        pendingApply: applyService.pending(characterID).map(r => ({ operationID: r.key, state: r.state, reason: r.reason || null })) });
     } catch (e) { next(e); }
   });
-  return { roster, readReview };
+  for (const action of ["apply", "recover"]) app.post(`/api/ship-provisioning/${action}`, requireAuth, async (req,res,next) => {
+    try { res.json({ ok: true, outcome: action === "apply" ? await applyService.apply(req.account,req.body) : await applyService.recover(req.account,req.body?.operationID) }); }
+    catch (e) { next(e); }
+  });
+  app.get("/api/ship-provisioning/operation", requireAuth, (req,res,next) => {
+    try { res.json({ ok: true, outcome: applyService.status(req.account,req.query.operationID) }); } catch (e) { next(e); }
+  });
+  return { roster, readReview, applyService };
 }
 module.exports = { registerProvisioningCenter, validateProjection };

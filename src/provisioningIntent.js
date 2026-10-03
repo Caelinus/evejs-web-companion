@@ -28,4 +28,4 @@ function assertSelected(pin, read) {
   if (s.access.take !== true) fail(s.access.take === false ? "SOURCE_TAKE_DENIED" : "SOURCE_TAKE_UNKNOWN");
 }
 
-module.exports = { intent, assertSelected };
+module.exports = { intent, assertSelected, rows };
