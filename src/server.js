@@ -202,8 +202,22 @@ async function isCharacterHeld(characterID, callerSessionID = null, preparationO
   // Both maps must still contain it; a name or stale token grants no exception.
   const ownsProbe = probeReservation !== null && reservation === probeReservation &&
     sessionOperations.get(callerSessionID) === probeReservation;
-  if (reservation && !ownsProbe) return true;
-  if (replenishment.unresolved(characterID).length) return true;
+  const handoff = reservation?.kind === "mining-operation-handoff" &&
+    reservation.operationRunID === preparationOwner?.operationRunID &&
+    reservation.operationID === preparationOwner?.operationPreparation?.operationID;
+  if (reservation && !ownsProbe && !handoff) return true;
+  if (replenishment.unresolved(characterID).length) {
+    const checkpoint = preparationOwner?.resumed && botHost.preparationForRun?.(preparationOwner.logicalRunID);
+    const custodyID = checkpoint?.custodyOperationID || checkpoint?.evidence?.custodyOperationID;
+    const pending = replenishment.unresolved(characterID);
+    if (!checkpoint || checkpoint.mainEntered || checkpoint.operationRunID !== preparationOwner.operationRunID ||
+        JSON.stringify(checkpoint.intent) !== JSON.stringify(preparationOwner.operationPreparation) ||
+        pending.some(row=>row.key!==custodyID || row.accountID!==checkpoint.intent.accountID)) return true;
+    // Custody is observation/reconciliation permission only. A restart may
+    // re-establish the same run only after runtime positively proves offline.
+    const status = await gateway.getCharacterStatus(checkpoint.intent.accountID,characterID);
+    if (status?.characterID!==characterID || status.online!==false || status.controlState!=="offline") return true;
+  }
   for (const [sessionID, held] of bridgeSessions) {
     if (sessionID === callerSessionID || Number(held.characterID) !== Number(characterID)) continue;
     try {
@@ -261,6 +275,22 @@ const botHost =
       }
     },
     errorLogger,
+    prepareOperation: record => {
+      const reservation = characterOperations.get(record.characterID);
+      if (reservation?.kind === "mining-operation-handoff" && reservation.operationID===record.operationID &&
+          reservation.operationRunID===record.operationRunID && botHost.authorizesClaim(record.characterID,record.claimSecret))
+        characterOperations.delete(record.characterID);
+      return miningPreparation.prepare(record);
+    },
+    preparationUnresolved: record => miningPreparation.unresolved(record),
+    operationBarrierReady: record => operationPreparationBarrier(record.operationID,record.operationRunID),
+    onOperationResume: async () => {
+      miningOperations.reconcileBots(botHost.listAll());
+      for (const definition of miningOperationStore.list()) {
+        const runtime = miningOperations.runtimeFor(definition.operationID);
+        if (runtime?.operationRunID) await activatePreparedOperation(definition,runtime.operationRunID);
+      }
+    },
     onOperationDeadline: operationID => {
       const definition = miningOperations.definition(operationID);
       if (!definition) throw new Error("The expiring operation definition is unavailable.");
@@ -731,7 +761,7 @@ const provisioningRoutes = registerProvisioningRoutes({ app, requireAuth, requir
     if (dispatchError) throw dispatchError;
   } });
 
-require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
+const provisioningCenter = require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
   operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment, sessions: factorySessions,
   selectedAdapter: provisioningRoutes.adapter,
   filePath: options.provisioningCenterJournalPath || (options.eveStore ? null : path.join(config.dataDir, "provisioning-center-control.json")),
@@ -748,6 +778,35 @@ require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: r
   },
   detach(binding) { if (bridgeSessions.get(binding.req.webSessionID) === binding.held) bridgeSessions.delete(binding.req.webSessionID); },
 });
+
+const miningPreparation = options.miningPreparation || require("./miningPreparation").createMiningPreparation({
+  store, readReview: provisioningCenter.readReview, engine: replenishment, data: staticData, bots: () => botHost.listAll(),
+  currentRun: operationID => miningOperations.runtimeFor(operationID)?.operationRunID ||
+    botHost.listAll().find(b=>b.operationID===operationID && !b.endedAt)?.operationRunID,
+  adapterFor(record) {
+    const held=bridgeSessions.get(record.webSessionID);
+    if (!held || held.characterID!==record.characterID || held.botClaimSecret!==record.claimSecret ||
+        !botHost.authorizesClaim(record.characterID,record.claimSecret)) throw Object.assign(new Error("Hosted preparation authority changed."),{code:"HOSTED_GENERATION_CHANGED"});
+    return provisioningRoutes.adapter({account:{accountID:record.accountID},webSessionID:record.webSessionID},held);
+  },
+  fault: options.miningPreparationFault || null,
+});
+app.locals.miningPreparation=miningPreparation;
+function operationPreparationBarrier(operationID,operationRunID) {
+  const definition=miningOperations.definition(operationID), runtime=miningOperations.runtimeFor(operationID), rows=botHost.listAll();
+  return !!definition && runtime?.operationRunID===operationRunID && !["STOPPING","STOPPED","PARKING","PARKING_FAILED"].includes(runtime.state) &&
+    definition.members.filter(m=>m.role!=="DEFENDER").every(m=>rows.some(b=>b.operationID===operationID && b.operationRunID===operationRunID &&
+      b.characterID===m.characterID && !b.endedAt && b.preparationOwnerAvailable===true &&
+      botHost.claimedBy(m.characterID)===b.botID && miningPreparation.ready(b.preparation)));
+}
+async function activatePreparedOperation(definition,operationRunID) {
+  if (!operationPreparationBarrier(definition.operationID,operationRunID)) return false;
+  for (const bot of botHost.listAll().filter(b=>b.operationID===definition.operationID && b.operationRunID===operationRunID && !b.endedAt && b.deferMain)) {
+    const result=await botHost.activateOperationMember(bot.botID,bot.accountID,definition.operationID,operationRunID);
+    if (!result.ok) miningOperations.memberFailed(definition.operationID,bot.characterID,{code:result.code,message:result.message});
+  }
+  return true;
+}
 
 // Thin bridge proxy for the whitelisted EveJS callMethod path (goal R1).
 // Forwards the retail call tuple (service, method, args, kwargs) to the
@@ -22244,13 +22303,30 @@ function prepareMiningOperationLaunch(definition) {
   return { ok: true, scripts, audits, commonClasses, planHash, warnings };
 }
 
-app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, (req, res, next) => {
+app.get("/api/mining-operations/preparation-options", requireAuth, async (req,res,next) => {
+  try {
+    const account = await store.getAccount(String(req.query.accountName || ""));
+    const characterID=Number(req.query.characterID), providerCharacterID=Number(req.query.providerCharacterID || characterID);
+    if (!account || account.banned || !await store.getCharacterForAccount(account.accountID,characterID))
+      throw Object.assign(new Error("Account-owned pilot unavailable."),{code:"CHARACTER_NOT_FOUND",statusCode:409});
+    const source = req.query.sourceKind==="corp" ? {kind:"corp",corporationID:Number(req.query.corporationID),division:Number(req.query.division)} : {kind:"hangar"};
+    const detail=await provisioningCenter.readReview(account.accountID,{characterID,providerCharacterID,fittingID:0,source});
+    res.json({ok:true,definitions:detail.definitions,pilot:detail.pilot,candidateSource:detail.candidateSource});
+  } catch(error) { next(error); }
+});
+async function withMiningPreparationPlan(definition,plan,req) {
+  if (!plan.ok) return plan;
+  const held=bridgeSessions.get(req.webSessionID);
+  const preparation=await miningPreparation.plan(definition,held ? {characterID:held.characterID,accountID:Number(held.accountID)} : null);
+  return {...plan,preparation,planHash:createHash("sha256").update(JSON.stringify([plan.planHash,preparation.planHash])).digest("hex")};
+}
+app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, async (req, res, next) => {
   try {
     const definition = miningOperations.definition(req.params.operationID);
     if (!definition) { res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" }); return; }
-    const plan = prepareMiningOperationLaunch(definition);
+    const plan = await withMiningPreparationPlan(definition,prepareMiningOperationLaunch(definition),req);
     if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
-    res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings,
+    res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings, preparation: plan.preparation,
       members: definition.members.filter((member) => member.role !== "DEFENDER").map((member) => ({
       characterID: member.characterID, routineMode: member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD"),
       script: plan.scripts.get(member.characterID),
@@ -22269,12 +22345,12 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       res.status(409).json({ ok: false, error: "MINING_OPERATION_INVALID", message: error.message });
       return;
     }
-    const plan = prepareMiningOperationLaunch(definition);
+    const plan = await withMiningPreparationPlan(definition,prepareMiningOperationLaunch(definition),req);
     if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
-    if ((definition.members.some((member) => member.role !== "DEFENDER" &&
-        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") ||
-        (definition.policies?.parking.mode && definition.policies.parking.mode !== "STAY_IN_PLACE")) &&
-        req.body?.planHash !== plan.planHash) {
+    if (plan.preparation.state!=="READY") {
+      res.status(409).json({ok:false,error:"OPERATION_EQUIPMENT_NOT_READY",preparation:plan.preparation,message:"Review member equipment/source before Start."});return;
+    }
+    if (req.body?.planHash !== plan.planHash) {
       res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
         message: "The operation profile or destination changed since preflight. Review and Start again." });
       return;
@@ -22376,7 +22452,11 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       }
     }
     const { scripts, audits, commonClasses } = plan;
-    const begin = miningOperations.begin(definition.operationID, commonClasses);
+    if (JSON.stringify(miningOperations.definition(definition.operationID))!==JSON.stringify(definition)) {
+      res.status(409).json({ok:false,error:"OPERATION_LAUNCH_PLAN_STALE",message:"Operation configuration changed during preflight. Review and Start again."});return;
+    }
+    const operationRunID = randomUUID();
+    const begin = miningOperations.begin(definition.operationID, commonClasses, operationRunID);
     if (!begin.ok) {
       res.status(MINING_OPERATION_STATUS[begin.code] || 409).json(begin);
       return;
@@ -22424,7 +22504,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_IN_USE", message: failure });
         continue;
       }
-      const reservation = Symbol("mining-operation-handoff");
+      const reservation = {kind:"mining-operation-handoff",operationID:definition.operationID,operationRunID};
       characterOperations.set(member.characterID, reservation);
       if (callerSessionID !== null) sessionOperations.set(callerSessionID, reservation);
       let released = false;
@@ -22443,6 +22523,9 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
           operationID: definition.operationID,
           operationRole: member.role,
           operationControllerAccountID: Number(req.account.accountID),
+          operationRunID,
+          operationPreparation: plan.preparation.members.find(m=>m.characterID===member.characterID).intent,
+          deferMain: true,
           beforeStart: callerSessionID === null ? null : async () => {
             const held = bridgeSessions.get(callerSessionID);
             if (held && Number(held.characterID) === member.characterID) {
@@ -22499,6 +22582,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         results.push({ characterID: member.characterID, ok: true, bot: outcome.bot });
       }
     }
+    await activatePreparedOperation(definition,operationRunID);
     miningOperations.finishLaunch(definition.operationID);
     res.json({ ok: true, results, ...operationPayload() });
   } catch (error) {
