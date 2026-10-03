@@ -391,3 +391,40 @@ test("the export summary names a planet with no office, and says nothing about a
     refusals: ["Alpha II has no customs office to launch into."],
   });
 });
+
+test("a partial pad export keeps its successful units and refusal while the haul still collects them", async () => {
+  const result: CustomsExportResult = {
+    connected: true,
+    handedBack: null,
+    planets: [{
+      planetID: 40000001, planetName: "Alpha II", solarSystemID: 30000001, solarSystemName: "Alpha",
+      officeID: 1_200_040_000_001, exported: true, units: 70,
+      reason: "refused", message: "CannotLaunchCommoditiesNotFound",
+    }],
+  };
+  assert.deepEqual(summarizeCustomsExport(result), {
+    units: 70,
+    colonies: 1,
+    refusals: ["Alpha II: CannotLaunchCommoditiesNotFound"],
+  });
+  const library: Saved[] = [];
+  const d = deps(library, { exportResult: result });
+  const outcome = await haulFor("acct", PILOT, COLONIES.slice(0, 1), null, null, d);
+  assert.equal(outcome.kind, "started");
+  const doc = library[0]!.doc as ReturnType<typeof piHaulBotDoc>;
+  const collector = doc.program.find((step) => step.kind === "macro" && step.macro === "collect-customs");
+  assert.ok(collector?.kind === "macro");
+  // A partial export goes into the same depositor-scoped office. The generated
+  // collector still takes that positive inventory rather than omitting it.
+  const collected = SCRIPT_MACROS["collect-customs"]!(collector, {
+    inSpace: true, inWarp: false, holds: null,
+    flightStatus: { docked: false },
+    snapshot: {
+      inSpace: true,
+      entities: [{ itemID: 1_200_040_000_001, groupID: 1025, radius: 1000, position: { x: 1000, y: 0, z: 0 } }],
+      ship: { position: { x: 0, y: 0, z: 0 } },
+    },
+    customsOffices: [{ officeID: 1_200_040_000_001, units: 70, stacks: 1 }],
+  } as never, {}, {});
+  assert.deepEqual(collected.action, { kind: "collectCustoms", officeID: 1_200_040_000_001 });
+});

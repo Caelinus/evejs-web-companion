@@ -322,8 +322,10 @@ export function summarizeCustomsExport(result: CustomsExportResult): PiHaulExpor
     if (planet.exported) {
       units += planet.units;
       colonies += 1;
-      continue;
     }
+    // A later pad can refuse after an earlier pad exported successfully.
+    // Count that progress and still retain the refusal from the same colony.
+    if (planet.reason === null) continue;
     const where = planet.planetName ?? "One colony";
     // "nothing on the pads" is the ordinary case between hauls, not a refusal.
     if (planet.reason === "nothing-on-the-pads") continue;

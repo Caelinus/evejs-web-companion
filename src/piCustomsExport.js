@@ -176,12 +176,14 @@ async function exportPlannedColonies(client, plan, { log = () => {} } = {}) {
       results.push({ ...entry, officeID: null, exported: false, units: 0, reason: entry.reason ?? "nothing-on-the-pads", message: null });
       continue;
     }
+    let officeID = null;
+    let moved = 0;
     try {
       if (!officesBySystem.has(entry.solarSystemID)) {
         const items = await client.call("map", "GetSolarsystemItems", [entry.solarSystemID]);
         officesBySystem.set(entry.solarSystemID, officesByPlanetID(rowsetRows(items)));
       }
-      const officeID = officesBySystem.get(entry.solarSystemID).get(entry.planetID) ?? null;
+      officeID = officesBySystem.get(entry.solarSystemID).get(entry.planetID) ?? null;
       if (officeID === null) {
         results.push({ ...entry, officeID: null, exported: false, units: 0, reason: "no-office", message: null });
         continue;
@@ -189,13 +191,12 @@ async function exportPlannedColonies(client, plan, { log = () => {} } = {}) {
       // The office states its own tax and the server compares what we send
       // against it to the sixth decimal (TaxChanged), so it is read now rather
       // than carried from an earlier read.
-      const taxRate = Number(await client.call("planetOrbitalRegistryBroker", "GetTaxRate", [officeID]));
+      const taxRate = numberOf(await client.call("planetOrbitalRegistryBroker", "GetTaxRate", [officeID]));
       if (!Number.isFinite(taxRate)) {
-        results.push({ ...entry, officeID, exported: false, units: 0, reason: "no-tax-rate", message: null });
+        results.push({ ...entry, officeID, exported: false, units: 0, reason: "no-tax-rate", message: "The customs office did not provide an export tax rate." });
         continue;
       }
       const office = await client.bind("invbroker", [officeID]);
-      let moved = 0;
       for (const pad of entry.pads) {
         const commodities = {
           type: "dict",
@@ -219,9 +220,11 @@ async function exportPlannedColonies(client, plan, { log = () => {} } = {}) {
       // between the read and the call) beats a sentence of ours.
       results.push({
         ...entry,
-        officeID: null,
-        exported: false,
-        units: 0,
+        // Earlier pads already committed. Keep that progress beside the
+        // refusal so the caller can report and collect the portion sent up.
+        officeID,
+        exported: moved > 0,
+        units: moved,
         reason: "refused",
         message: error && error.message ? String(error.message) : null,
       });
@@ -249,6 +252,7 @@ async function runCustomsExport({
   env = process.env,
   createClient = (endpoint) => new GameClient(endpoint),
   settleMs = SELECT_SETTLE_MS,
+  beforeSelect = async () => {},
   log = () => {},
 }) {
   const plan = planned ?? planCustomsExports(colonies, planetIDs);
@@ -270,6 +274,7 @@ async function runCustomsExport({
   const client = createClient(gameEndpoint(env));
   try {
     await client.login(accountName);
+    await beforeSelect();
     await client.call("charUnboundMgr", "SelectCharacterID", [characterID]);
     if (settleMs > 0) await sleep(settleMs);
     const results = await exportPlannedColonies(client, plan, { log });

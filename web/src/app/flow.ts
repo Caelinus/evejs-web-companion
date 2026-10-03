@@ -10507,7 +10507,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           try {
             customsOffices = await Promise.all(officeIDs.map(async (officeID) => {
               const reads = await api.openContainer(officeID, callOptions);
-              const rows = decodeInventoryRows(reads.list, reads.volumes);
+              const rows = decodeInventoryRowsChecked(reads.list, reads.volumes);
+              if (rows === null) throw new Error("The customs office inventory was unreadable.");
               return {
                 officeID,
                 stacks: rows.length,

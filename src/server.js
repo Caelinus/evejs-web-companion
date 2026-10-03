@@ -180,7 +180,7 @@ function heldOnGamePort(webSessionID) {
   if (until === undefined) {
     return false;
   }
-  if (until <= Date.now()) {
+  if (until <= Date.now() && !sessionOperations.has(webSessionID)) {
     gamePortHolds.delete(webSessionID);
     return false;
   }
@@ -11906,6 +11906,12 @@ function readIndustryJobStatus(row) {
 // persistent session drops the whole held session (as /api/bridge/call).
 async function heldTopLevelCall(held, webSessionID, service, method, args, kwargs) {
   try {
+    // A command can have entered its readiness read before the export hold.
+    // Check again at the write boundary so that command cannot dispatch late.
+    if (isBridgeWritePair(service, method) && heldOnGamePort(webSessionID)) {
+      throw Object.assign(new Error("This pilot is exporting from its colonies. Try again once the pilot is returned."),
+        { code: "CHARACTER_IN_USE", statusCode: 409 });
+    }
     assertCurrentHeldSession(held, webSessionID);
     return await gateway.callMethod(
       service,
@@ -20229,6 +20235,8 @@ app.get("/api/roster/planets", requireAuth, async (req, res, next) => {
  * worth launching.
  */
 const PI_CUSTOMS_EXPORT_MAX_PLANETS = 24;
+const PI_CUSTOMS_EXPORT_RESTORE_ATTEMPTS = 21;
+const PI_CUSTOMS_EXPORT_RESTORE_POLL_MS = 100;
 
 app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This launches those colonies' launchpad goods into their customs offices, which charge export tax, and briefly logs the pilot out of this tab. Confirm to continue.")) {
@@ -20237,7 +20245,7 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const characterID = Number(body.characterID) || 0;
   const planetIDs = bridgeIDList(body.planetIDs);
-  if (characterID <= 0 || planetIDs.length === 0) {
+  if (!Number.isSafeInteger(characterID) || characterID <= 0 || planetIDs.length === 0) {
     res.status(400).json({
       ok: false,
       error: "INVALID_REQUEST",
@@ -20259,98 +20267,178 @@ app.post("/api/pi/customs-export", requireAuth, async (req, res, next) => {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
-    // ONE HULL, ONE DRIVER — the same rule /api/bridge/select keeps, for the
-    // same reason: the select below would take the ship out from under them.
-    if (botHost.claimedBy(characterID) !== null) {
-      res.status(409).json({
-        ok: false,
-        error: "CHARACTER_IN_USE_BY_BOT",
-        message: "A server bot is flying this pilot. Stop the bot first.",
-      });
+    // Reserve before any asynchronous ownership or snapshot read, including
+    // exports for an offline pilot. Selection, bot handoff and another export
+    // must not acquire this pilot while the game connection is being prepared.
+    if (characterOperations.has(characterID) || sessionOperations.has(req.webSessionID)) {
+      res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "A pilot ownership change is already in progress." });
       return;
     }
-    const held = bridgeSessions.get(req.webSessionID) ?? null;
-    const heldHere = held !== null && Number(held.characterID) === characterID;
-    if (await isCharacterHeld(characterID, req.webSessionID)) {
-      res.status(409).json({
-        ok: false,
-        error: "CHARACTER_IN_USE",
-        message: "Another tab is flying this pilot. Log it out there first.",
-      });
-      return;
-    }
-    const snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
-    const { colonies } = coloniesFromSnapshot(snapshot);
-    // ⚠ THE PLAN DECIDES WHETHER ANYBODY IS LOGGED OUT. The hop is what costs a
-    // session, and it only happens when a ticked launchpad is holding something
-    // -- so the plan is read FIRST and a pilot with nothing to send is never
-    // released at all. Without this the tab's pilot blinked out and back on
-    // every Haul, including the ones that had nothing to launch.
-    const plan = planCustomsExports(colonies, planetIDs);
-    const willConnect = plan.some((entry) => entry.pads.length > 0);
-    // The tab's own pilot goes on hold for the hop, exactly as /api/bridge/select
-    // reserves one for a character switch - and with the extra gamePortHolds
-    // entry, which is what keeps a read landing mid-hop from pruning the cockpit.
     const reservation = Symbol("customs-export");
-    const holding = heldHere && willConnect;
-    const ownsCharacterReservation = holding && !characterOperations.has(characterID);
-    if (holding) {
-      if (ownsCharacterReservation) characterOperations.set(characterID, reservation);
-      sessionOperations.set(req.webSessionID, reservation);
-      gamePortHolds.set(req.webSessionID, Date.now() + GAME_PORT_HOLD_MS);
-    }
-    let outcome;
+    characterOperations.set(characterID, reservation);
+    sessionOperations.set(req.webSessionID, reservation);
+    let releasedCaller = false;
+    let holding = false;
     let handedBack = null;
     try {
-      if (holding) {
-        // One client session per web login, as the select route puts it: the
-        // game port is about to take this character, so let go of it here first.
-        await releaseHeldBridgeSession(req.webSessionID);
+      // ONE HULL, ONE DRIVER — the same rule /api/bridge/select keeps, for the
+      // same reason: the select below would take the ship out from under them.
+      if (botHost.claimedBy(characterID) !== null) {
+        res.status(409).json({
+          ok: false,
+          error: "CHARACTER_IN_USE_BY_BOT",
+          message: "A server bot is flying this pilot. Stop the bot first.",
+        });
+        return;
       }
-      outcome = await runCustomsExport({
-        accountName: req.account.username,
-        characterID,
-        colonies,
-        planetIDs,
-        plan,
-        createClient: gameClientFactory,
-        log: (line) => console.log(`[PI customs export] character ${characterID}: ${line}`),
-      });
-      // Hand the pilot back to the tab that asked, if it was the tab's own. A
-      // failure here is reported rather than thrown: the goods DID move, and a
-      // caller told otherwise would launch them again.
+      const held = bridgeSessions.get(req.webSessionID) ?? null;
+      const heldHere = held !== null && Number(held.characterID) === characterID;
+      if (await isCharacterHeld(characterID, req.webSessionID)) {
+        res.status(409).json({
+          ok: false,
+          error: "CHARACTER_IN_USE",
+          message: "Another tab is flying this pilot. Log it out there first.",
+        });
+        return;
+      }
+      const snapshot = await gateway.getSnapshot(req.account.accountID, characterID);
+      const { coloniesReadable, colonies } = coloniesFromSnapshot(snapshot);
+      if (!coloniesReadable) {
+        res.status(502).json({ ok: false, error: "CUSTOMS_EXPORT_UNREADABLE", message: "The pilot's colonies could not be read. Nothing was launched." });
+        return;
+      }
+      // ⚠ THE PLAN DECIDES WHETHER ANYBODY IS LOGGED OUT. The hop is what costs a
+      // session, and it only happens when a ticked launchpad is holding something
+      // -- so the plan is read FIRST and a pilot with nothing to send is never
+      // released at all. Without this the tab's pilot blinked out and back on
+      // every Haul, including the ones that had nothing to launch.
+      const plan = planCustomsExports(colonies, planetIDs);
+      const willConnect = plan.some((entry) => entry.pads.length > 0);
+      holding = heldHere && willConnect;
       if (holding) {
-        try {
-          await selectHeldCharacter(req.webSessionID, req.account, characterID);
-          handedBack = true;
-        } catch (error) {
-          errorLogger(error);
-          handedBack = false;
+        gamePortHolds.set(req.webSessionID, Date.now() + GAME_PORT_HOLD_MS);
+      }
+      const assertNoTransition = () => {
+        if (held.transitionReservation || (held.transition && held.transition.phase !== "ready")) {
+          throw Object.assign(new Error("Finish the pilot's session change before exporting from its colonies."),
+            { code: "SESSION_CHANGE_IN_PROGRESS", statusCode: 409 });
+        }
+      };
+      if (willConnect) {
+        if (heldHere) {
+          assertNoTransition();
+          if (hasPendingRecovery(held, characterID)) {
+            res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING", message: "Finish this pilot's lost-drone recovery before exporting from its colonies." });
+            return;
+          }
+          const status = await readHeldFlight(held, req.webSessionID);
+          assertNoTransition();
+          if (status?.flight?.docked !== true) {
+            res.status(409).json({ ok: false, error: "CUSTOMS_EXPORT_REQUIRES_DOCKED", message: "Dock this pilot before exporting from its colonies." });
+            return;
+          }
+        } else {
+          // A BFF handle is not the only way to fly a pilot. Refuse an existing
+          // retail/other controller too, rather than letting TCP select evict it.
+          const status = await gateway.getCharacterStatus(req.account.accountID, characterID);
+          if (status?.characterID !== characterID || status.online !== false || status.controlState !== "offline") {
+            res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is online or its ownership could not be confirmed. Log it out before exporting." });
+            return;
+          }
+          const saved = snapshot?.characters?.[String(characterID)];
+          const stationID = Number(saved?.stationID ?? saved?.stationid);
+          const structureID = Number(saved?.structureID ?? saved?.structureid);
+          if (!(Number.isSafeInteger(stationID) && stationID > 0) && !(Number.isSafeInteger(structureID) && structureID > 0)) {
+            res.status(409).json({ ok: false, error: "CUSTOMS_EXPORT_REQUIRES_DOCKED", message: "Dock this pilot before exporting from its colonies." });
+            return;
+          }
         }
       }
-    } finally {
-      if (holding) {
-        gamePortHolds.delete(req.webSessionID);
-        if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
-        if (characterOperations.get(characterID) === reservation) characterOperations.delete(characterID);
+      const assertExportOwnership = () => {
+        const payload = auth.verifySessionToken(readSessionToken(req));
+        if (characterOperations.get(characterID) !== reservation || sessionOperations.get(req.webSessionID) !== reservation ||
+            (bridgeSessions.get(req.webSessionID) ?? null) !== (releasedCaller ? null : held) ||
+            botHost.claimedBy(characterID) !== null || payload?.sessionID !== req.webSessionID ||
+            Number(payload.accountID) !== Number(req.account.accountID)) {
+          throw Object.assign(new Error("The original pilot session can no longer be safely restored."),
+            { code: "CHARACTER_IN_USE", statusCode: 409 });
+        }
+      };
+      const confirmOffline = async (attempts = 1) => {
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          assertExportOwnership();
+          const heldElsewhere = await isCharacterHeld(characterID, req.webSessionID);
+          assertExportOwnership();
+          if (heldElsewhere) break;
+          const status = await gateway.getCharacterStatus(req.account.accountID, characterID);
+          assertExportOwnership();
+          if (status?.characterID === characterID && status.online === false && status.controlState === "offline") return;
+          if (attempt + 1 < attempts) {
+            await new Promise((resolve) => setTimeout(resolve, PI_CUSTOMS_EXPORT_RESTORE_POLL_MS));
+          }
+        }
+        throw Object.assign(new Error("This pilot is online or its ownership could not be confirmed. Log it out before exporting."),
+          { code: "CHARACTER_IN_USE", statusCode: 409 });
+      };
+      let outcome;
+      try {
+        if (holding) {
+          // One client session per web login, as the select route puts it: the
+          // game port is about to take this character, so let go of it here first.
+          await releaseHeldBridgeSession(req.webSessionID, { confirmed: true });
+          releasedCaller = true;
+        }
+        outcome = await runCustomsExport({
+          accountName: req.account.username,
+          characterID,
+          colonies,
+          planetIDs,
+          plan,
+          createClient: gameClientFactory,
+          // Login can take seconds. Recheck immediately before the takeover-capable
+          // select, even though the pilot was offline when the plan was read.
+          beforeSelect: () => confirmOffline(),
+          log: (line) => console.log(`[PI customs export] character ${characterID}: ${line}`),
+        });
+      } finally {
+        // Restore a definitely released caller even if game login/select failed.
+        // The reservation and fresh auth/ownership checks keep rollback from
+        // replacing a newer controller or resurrecting an expired login.
+        if (releasedCaller) {
+          try {
+            // Local close precedes the server's socket cleanup. Wait briefly for
+            // authoritative offline status; never select over an online driver.
+            await confirmOffline(PI_CUSTOMS_EXPORT_RESTORE_ATTEMPTS);
+            assertExportOwnership();
+            await selectHeldCharacter(req.webSessionID, req.account, characterID);
+            handedBack = true;
+          } catch (error) {
+            errorLogger(error);
+            handedBack = false;
+          }
+        }
       }
+      res.json({
+        ok: true,
+        connected: outcome.connected,
+        handedBack,
+        planets: outcome.results.map((entry) => ({
+          planetID: entry.planetID,
+          planetName: entry.planetName,
+          solarSystemID: entry.solarSystemID,
+          solarSystemName: entry.solarSystemName,
+          officeID: entry.officeID,
+          exported: entry.exported,
+          units: entry.units,
+          reason: entry.reason,
+          message: entry.message,
+        })),
+      });
+    } finally {
+      if (holding) gamePortHolds.delete(req.webSessionID);
+      if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
+      if (characterOperations.get(characterID) === reservation) characterOperations.delete(characterID);
     }
-    res.json({
-      ok: true,
-      connected: outcome.connected,
-      handedBack,
-      planets: outcome.results.map((entry) => ({
-        planetID: entry.planetID,
-        planetName: entry.planetName,
-        solarSystemID: entry.solarSystemID,
-        solarSystemName: entry.solarSystemName,
-        officeID: entry.officeID,
-        exported: entry.exported,
-        units: entry.units,
-        reason: entry.reason,
-        message: entry.message,
-      })),
-    });
   } catch (error) {
     next(error);
   }

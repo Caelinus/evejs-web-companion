@@ -208,13 +208,22 @@ class GameClient {
   }
 
   close() {
+    this._rejectWaiters(new Error("The game connection closed."));
+    // A finished hop must release its local connection even when the peer
+    // keeps its writable side open after our FIN.
+    if (this.socket && !this.socket.destroyed) this.socket.destroy();
+  }
+
+  _rejectWaiters(error) {
     this.closed = true;
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
     for (const [, waiter] of this.pending) {
       clearTimeout(waiter.timer);
-      waiter.reject(new Error("The game connection closed."));
+      waiter.reject(error);
     }
     this.pending.clear();
-    if (this.socket && !this.socket.destroyed) this.socket.end();
+    this.buffer = Buffer.alloc(0);
+    this.inbox = [];
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -230,19 +239,17 @@ class GameClient {
         clearTimeout(timer);
         resolve();
       });
-      socket.once("error", (error) => {
+      socket.on("error", (error) => {
         clearTimeout(timer);
+        this._rejectWaiters(error);
         reject(error);
       });
       socket.on("data", (chunk) => this._onData(chunk));
       socket.on("close", () => {
-        this.closed = true;
-        for (const waiter of this.waiters.splice(0)) waiter.reject(new Error("The game connection closed."));
-        for (const [, waiter] of this.pending) {
-          clearTimeout(waiter.timer);
-          waiter.reject(new Error("The game connection closed."));
-        }
-        this.pending.clear();
+        clearTimeout(timer);
+        const error = new Error("The game connection closed.");
+        this._rejectWaiters(error);
+        reject(error);
       });
       this.socket = socket;
     });
@@ -275,11 +282,16 @@ class GameClient {
     if (this.inbox.length > 0) return Promise.resolve(this.inbox.shift());
     if (this.closed) return Promise.reject(new Error("The game connection closed."));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("The game server stopped answering the handshake.")), CALL_TIMEOUT_MS);
-      this.waiters.push({
+      const waiter = {
         resolve: (value) => { clearTimeout(timer); resolve(value); },
         reject: (error) => { clearTimeout(timer); reject(error); },
-      });
+      };
+      const timer = setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        waiter.reject(new Error("The game server stopped answering the handshake."));
+      }, CALL_TIMEOUT_MS);
+      this.waiters.push(waiter);
     });
   }
 

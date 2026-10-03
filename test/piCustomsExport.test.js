@@ -367,7 +367,7 @@ function fakeGateway({ colonies = null } = {}) {
       return {
         source: "evejs-web-gateway",
         items: [],
-        characters: { [String(characterID)]: { corporationID: 98000001 } },
+        characters: { [String(characterID)]: { corporationID: 98000001, stationID: 60000004 } },
         planetRuntimeState: { schemaVersion: 1, coloniesByKey, launchesByID: {} },
       };
     },
@@ -390,10 +390,295 @@ function fakeGateway({ colonies = null } = {}) {
     },
     async readFlightStatus() {
       // Only ever reached by isCharacterHeld, for a session this test planted.
-      return { flight: { docked: true } };
+      return { flight: { docked: true, stationID: 60000004, shipID: 1000000100 } };
+    },
+    async getCharacterStatus(_accountID, characterID) {
+      return { characterID, online: false, controlState: "offline" };
     },
   };
 }
+
+function heldPilot() {
+  return {
+    bridgeSessionID: "bridge-before", characterID: FARMER_ID,
+    accountID: ACCOUNT.accountID, activeShipID: 1000000100,
+    droneRecoveryReady: true, boundHandles: new Map(), streamSubscribers: new Set(),
+  };
+}
+
+test("a failed game login restores the caller after a confirmed release", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  const client = fakeClient({ failLogin: true });
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 500);
+  assert.deepEqual(gateway.released, ["bridge-before"]);
+  assert.deepEqual(gateway.selected, [{ characterID: FARMER_ID, userid: ACCOUNT.accountID }]);
+  assert.equal(bridgeSessionStore.get("sid")?.characterID, FARMER_ID);
+  assert.equal(client.closed, true);
+});
+
+test("an unheld export reserves the pilot before its snapshot read and rejects competing ownership changes", async () => {
+  const gateway = fakeGateway();
+  let releaseSnapshot, enteredSnapshot;
+  const gate = new Promise(resolve => { releaseSnapshot = resolve; });
+  const entered = new Promise(resolve => { enteredSnapshot = resolve; });
+  const readSnapshot = gateway.getSnapshot;
+  gateway.getSnapshot = async (...args) => { enteredSnapshot(); await gate; return readSnapshot(...args); };
+  const client = fakeClient({ failLogin: true });
+  const baseUrl = await startTestServer({ gateway, client });
+  const exporting = post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  await entered;
+  try {
+    const selecting = await post(baseUrl, "/api/bridge/select", { characterID: FARMER_ID });
+    assert.equal(selecting.response.status, 409);
+    assert.equal(selecting.payload.error, "CHARACTER_IN_USE");
+    const overlapping = await post(baseUrl, "/api/pi/customs-export", {
+      confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+    });
+    assert.equal(overlapping.response.status, 409);
+    assert.equal(overlapping.payload.error, "CHARACTER_IN_USE");
+  } finally {
+    releaseSnapshot();
+    await exporting;
+  }
+  assert.deepEqual(gateway.selected, []);
+  // The failed export releases its reservation, so a later select can succeed.
+  assert.equal((await post(baseUrl, "/api/bridge/select", { characterID: FARMER_ID })).response.status, 200);
+});
+
+test("an unconfirmed release keeps the caller and does not open the game connection", async () => {
+  const held = heldPilot();
+  const bridgeSessionStore = new Map([["sid", held]]);
+  const gateway = fakeGateway();
+  gateway.releaseBridgeSession = async () => ({ released: false });
+  const client = fakeClient();
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "PILOT_RELEASE_UNVERIFIED");
+  assert.equal(bridgeSessionStore.get("sid"), held);
+  assert.deepEqual(client.calls, []);
+});
+
+test("a caller still in space is not disconnected for a customs export", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  gateway.readFlightStatus = async () => ({ flight: { docked: false, inSpace: true, shipID: 1000000100 } });
+  const client = fakeClient();
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "CUSTOMS_EXPORT_REQUIRES_DOCKED");
+  assert.deepEqual(gateway.released, []);
+  assert.deepEqual(client.calls, []);
+});
+
+test("an offline pilot saved in space is not selected for a customs export", async () => {
+  const gateway = fakeGateway();
+  const readSnapshot = gateway.getSnapshot;
+  gateway.getSnapshot = async (...args) => {
+    const snapshot = await readSnapshot(...args);
+    snapshot.characters[String(FARMER_ID)] = { stationID: null, structureID: null };
+    return snapshot;
+  };
+  const client = fakeClient();
+  const baseUrl = await startTestServer({ gateway, client });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "CUSTOMS_EXPORT_REQUIRES_DOCKED");
+  assert.deepEqual(client.calls, []);
+});
+
+test("a retail-controlled pilot is not taken over by an unheld export", async () => {
+  const gateway = fakeGateway();
+  gateway.getCharacterStatus = async () => ({ characterID: FARMER_ID, online: true, controlState: "retail_client" });
+  const client = fakeClient();
+  const baseUrl = await startTestServer({ gateway, client });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "CHARACTER_IN_USE");
+  assert.deepEqual(client.calls, []);
+});
+
+test("the caller is held against undock while its export readiness read is pending", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  let releaseRead, enteredRead, reads = 0;
+  const gate = new Promise(resolve => { releaseRead = resolve; });
+  const entered = new Promise(resolve => { enteredRead = resolve; });
+  gateway.readFlightStatus = async () => {
+    if (++reads === 1) { enteredRead(); await gate; }
+    return { flight: { docked: true, stationID: 60000004, shipID: 1000000100 } };
+  };
+  const client = fakeClient({ failLogin: true });
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const exporting = post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  await entered;
+  try {
+    const undocking = await post(baseUrl, "/api/bridge/flight/undock", {});
+    assert.equal(undocking.response.status, 409);
+    assert.equal(undocking.payload.error, "CHARACTER_IN_USE");
+    assert.equal(reads, 1, "the blocked undock never enters its readiness read");
+  } finally {
+    releaseRead();
+    await exporting;
+  }
+});
+
+test("an already pending session transition prevents caller release", async () => {
+  const held = heldPilot();
+  held.transitionReservation = { kind: "undock", token: Symbol("pending-undock") };
+  const bridgeSessionStore = new Map([["sid", held]]);
+  const gateway = fakeGateway();
+  const client = fakeClient({ failLogin: true });
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "SESSION_CHANGE_IN_PROGRESS");
+  assert.deepEqual(gateway.released, []);
+  assert.deepEqual(client.calls, []);
+});
+
+test("an undock already reading readiness cannot dispatch after the export hold", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  let releaseUndockRead, releaseExportRead, enteredUndockRead, enteredExportRead, reads = 0;
+  const undockGate = new Promise(resolve => { releaseUndockRead = resolve; });
+  const exportGate = new Promise(resolve => { releaseExportRead = resolve; });
+  const undockEntered = new Promise(resolve => { enteredUndockRead = resolve; });
+  const exportEntered = new Promise(resolve => { enteredExportRead = resolve; });
+  gateway.readFlightStatus = async () => {
+    if (++reads === 1) { enteredUndockRead(); await undockGate; }
+    else if (reads === 2) { enteredExportRead(); await exportGate; }
+    return { flight: { docked: true, stationID: 60000004, shipID: 1000000100 } };
+  };
+  const writes = [];
+  gateway.callMethod = async (...args) => { writes.push(args); return { notifications: [] }; };
+  const client = fakeClient({ failLogin: true });
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const undocking = post(baseUrl, "/api/bridge/flight/undock", {});
+  await undockEntered;
+  const exporting = post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  await exportEntered;
+  try {
+    releaseUndockRead();
+    const { response, payload } = await undocking;
+    assert.equal(response.status, 409);
+    assert.equal(payload.error, "CHARACTER_IN_USE");
+    assert.deepEqual(writes, [], "no ship.Undock reaches the gateway");
+  } finally {
+    releaseUndockRead();
+    releaseExportRead();
+    await exporting;
+  }
+});
+
+test("a newer retail login during TCP login is refused before character select", async () => {
+  const gateway = fakeGateway();
+  let retailOnline = false, releaseLogin, enteredLogin;
+  const gate = new Promise(resolve => { releaseLogin = resolve; });
+  const entered = new Promise(resolve => { enteredLogin = resolve; });
+  gateway.getCharacterStatus = async () => ({
+    characterID: FARMER_ID, online: retailOnline,
+    controlState: retailOnline ? "retail_client" : "offline",
+  });
+  const client = fakeClient();
+  client.login = async (accountName) => { client.calls.push(["login", accountName]); enteredLogin(); await gate; };
+  const baseUrl = await startTestServer({ gateway, client });
+  const exporting = post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  await entered;
+  retailOnline = true;
+  releaseLogin();
+  const { response, payload } = await exporting;
+  assert.equal(response.status, 409);
+  assert.equal(payload.error, "CHARACTER_IN_USE");
+  assert.deepEqual(client.calls, [["login", ACCOUNT.username]]);
+  assert.equal(client.closed, true);
+  assert.deepEqual(gateway.selected, []);
+});
+
+test("handback waits for the closing game session to become offline", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  const client = fakeClient({ failLogin: true });
+  let closingReads = 0;
+  gateway.getCharacterStatus = async () => {
+    assert.equal(client.closed, true, "handback status is read after game connection close");
+    const online = ++closingReads < 3;
+    return { characterID: FARMER_ID, online, controlState: online ? "retail_client" : "offline" };
+  };
+  const selectCharacter = gateway.selectCharacter;
+  gateway.selectCharacter = async (...args) => {
+    assert.equal(closingReads, 3, "no takeover-capable select occurs during server cleanup");
+    return selectCharacter(...args);
+  };
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 500, "the original login refusal is preserved");
+  assert.equal(closingReads, 3);
+  assert.deepEqual(gateway.selected, [{ characterID: FARMER_ID, userid: ACCOUNT.accountID }]);
+  assert.equal(bridgeSessionStore.get("sid")?.characterID, FARMER_ID);
+});
+
+test("an active retail driver prevents handback without losing successful export results", async () => {
+  const bridgeSessionStore = new Map([["sid", heldPilot()]]);
+  const gateway = fakeGateway();
+  const client = fakeClient();
+  let closingReads = 0;
+  gateway.getCharacterStatus = async () => {
+    const online = client.closed;
+    if (online) closingReads++;
+    return { characterID: FARMER_ID, online, controlState: online ? "retail_client" : "offline" };
+  };
+  const baseUrl = await startTestServer({ gateway, client, bridgeSessionStore });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.handedBack, false);
+  assert.equal(payload.planets[0].exported, true);
+  assert.equal(payload.planets[0].units, 300);
+  assert.ok(closingReads > 1 && closingReads <= 21, "offline polling is bounded");
+  assert.deepEqual(gateway.selected, []);
+  assert.equal(bridgeSessionStore.has("sid"), false);
+});
+
+test("unreadable colonies are refused instead of reported as empty pads", async () => {
+  const gateway = fakeGateway();
+  gateway.getSnapshot = async () => ({ characters: {}, planetRuntimeState: null });
+  const client = fakeClient();
+  const baseUrl = await startTestServer({ gateway, client });
+  const { response, payload } = await post(baseUrl, "/api/pi/customs-export", {
+    confirm: true, characterID: FARMER_ID, planetIDs: [PLANET_A],
+  });
+  assert.equal(response.status, 502);
+  assert.equal(payload.error, "CUSTOMS_EXPORT_UNREADABLE");
+  assert.deepEqual(client.calls, []);
+});
 
 async function startTestServer({ gateway, client, botHost, bridgeSessionStore } = {}) {
   const app = createApp({
@@ -474,6 +759,7 @@ test("the caller's OWN pilot is handed straight back to the tab", async () => {
     bridgeSessionID: "bridge-before",
     characterID: FARMER_ID,
     accountID: ACCOUNT.accountID,
+    droneRecoveryReady: true,
     boundHandles: new Map(),
     streamSubscribers: new Set(),
   }]]);
@@ -501,6 +787,7 @@ test("⚠ a read landing mid-hop is told to wait, NOT that the pilot is gone", a
     bridgeSessionID: "bridge-before",
     characterID: FARMER_ID,
     accountID: ACCOUNT.accountID,
+    droneRecoveryReady: true,
     boundHandles: new Map(),
     streamSubscribers: new Set(),
   }]]);
@@ -565,6 +852,7 @@ test("⚠ a pilot another tab is flying is refused, and nothing is sent", async 
     bridgeSessionID: "bridge-other",
     characterID: FARMER_ID,
     accountID: ACCOUNT.accountID,
+    droneRecoveryReady: true,
     boundHandles: new Map(),
     streamSubscribers: new Set(),
   }]]);
@@ -591,6 +879,7 @@ test("⚠ a pilot with nothing to send is never logged out at all", async () => 
     bridgeSessionID: "bridge-before",
     characterID: FARMER_ID,
     accountID: ACCOUNT.accountID,
+    droneRecoveryReady: true,
     boundHandles: new Map(),
     streamSubscribers: new Set(),
   }]]);
