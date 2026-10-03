@@ -5202,14 +5202,31 @@ export async function loadMinerTraining(
 
 export async function loadQualification(characterID: number, role: string,
   configurations: readonly import("../training/configurations.ts").TrainingConfiguration[], options: ApiOptions,
-  targetConfigurationID: string | null): Promise<MinerTrainingRead> {
+  targetConfigurationID: string | null, equipmentSource: import("../training/types.ts").TrainingEquipmentSource = { kind: "hangar" }): Promise<MinerTrainingRead> {
   const query = new URLSearchParams({ characterID: String(characterID), role, configurations: JSON.stringify(configurations) });
+  query.set("equipmentSource", JSON.stringify(equipmentSource));
   if (targetConfigurationID) query.set("targetConfigurationID", targetConfigurationID);
   const data = await getJson(`/api/pilot-training/qualification?${query}`, options);
   const report = data.report as unknown as MinerTrainingRead["report"];
   if (!report || report.role !== role || report.pilot?.characterID !== characterID || !Array.isArray(report.stages) ||
     !Array.isArray(data.fittings) || !Number.isSafeInteger(data.corporationID)) throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Qualification read is incomplete.", 502);
   return { report, corporationID: data.corporationID as number, fittings: data.fittings as unknown as MinerTrainingRead["fittings"], queue: data.queue as unknown as MinerTrainingRead["queue"] };
+}
+
+export async function reviewTrainingEquipment(request: { characterID: number; role: string; configurationID: string;
+  configurations: readonly import("../training/configurations.ts").TrainingConfiguration[]; targetStage: string | null; source: import("../training/types.ts").TrainingEquipmentSource }, options: ApiOptions): Promise<import("../training/types.ts").TrainingEquipmentReview> {
+  const data = await postJson("/api/pilot-training/equipment/review", request, options);
+  const review = data.review as unknown as import("../training/types.ts").TrainingEquipmentReview;
+  if (!review?.applyReview || review.fresh?.report.pilot.characterID !== request.characterID) throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Equipment plan is unreadable.", 502);
+  return review;
+}
+export async function applyTrainingEquipment(reviewID: string, reviewHash: string, options: ApiOptions): Promise<import("../provisioning/centerClient.ts").ApplyOutcome> {
+  const data = await postJson("/api/pilot-training/equipment/apply", { reviewID, reviewHash, confirm: true }, options);
+  return data.outcome as unknown as import("../provisioning/centerClient.ts").ApplyOutcome;
+}
+export async function recoverTrainingEquipment(operationID: string, options: ApiOptions): Promise<import("../provisioning/centerClient.ts").ApplyOutcome> {
+  const data = await postJson("/api/pilot-training/equipment/recover", { operationID }, options);
+  return data.outcome as unknown as import("../provisioning/centerClient.ts").ApplyOutcome;
 }
 
 export async function reviewTrainingQueue(

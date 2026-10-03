@@ -779,6 +779,15 @@ const provisioningCenter = require("./provisioningCenter").registerProvisioningC
   detach(binding) { if (bridgeSessions.get(binding.req.webSessionID) === binding.held) bridgeSessions.delete(binding.req.webSessionID); },
 });
 
+const trainingEquipment = require("./trainingEquipment").createTrainingEquipment({ center: provisioningCenter,
+  async readQualification(account, input) {
+    return (await readMinerPilot({ store, gateway, data: staticData, account, ...input })).read;
+  } });
+for (const action of ["review", "apply", "recover"]) app.post(`/api/pilot-training/equipment/${action}`, requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, [action === "review" ? "review" : "outcome"]: await trainingEquipment[action](req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
 const miningPreparation = options.miningPreparation || require("./miningPreparation").createMiningPreparation({
   store, readReview: provisioningCenter.readReview, engine: replenishment, data: staticData, bots: () => botHost.listAll(),
   currentRun: operationID => miningOperations.runtimeFor(operationID)?.operationRunID ||
@@ -19575,7 +19584,11 @@ app.get("/api/pilot-training/qualification", requireTrainingAuth, async (req, re
     try { configurations = JSON.parse(raw); } catch { throw Object.assign(new Error("Invalid configuration."), { statusCode: 400 }); }
     const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account,
       characterID, configurations, role: req.query.role, targetStage: req.query.targetConfigurationID || null });
-    res.json({ ok: true, ...read });
+    const sourceText = String(req.query.equipmentSource || '{"kind":"hangar"}');
+    if (sourceText.length > 512) throw Object.assign(new Error("Invalid physical source."), { statusCode: 400 });
+    let source;
+    try { source = JSON.parse(sourceText); } catch { throw Object.assign(new Error("Invalid physical source."), { statusCode: 400 }); }
+    res.json({ ok: true, ...await trainingEquipment.enrich(req.account, read, configurations, source) });
   } catch (error) { next(error); }
 });
 

@@ -191,3 +191,90 @@ test("generic consumer policy runs only after acquisition and fresh barrier, can
   assert.equal(outcome.release.state, "VERIFIED_OFFLINE");
   assert.equal(f.world.mutations.length, 0);
 });
+
+function trainingFixture(t, corp = false) {
+  const f = fixture(t, corp), { createTrainingEquipment, acceptedDefinition } = require("./trainingEquipment");
+  const config = { configurationID: "exact", roleID: "GUARD", order: 0, corporationOwnerID: 20,
+    fittingID: 4, hullTypeID: 1, acceptedSavedDate: f.fitting.savedDate, acceptedFingerprint: f.fitting.fingerprint };
+  let skills = "READY", reads = 0;
+  const service = createTrainingEquipment({ center: { readReview: f.offline, applyService: f.service() },
+    async readQualification() {
+      reads++;
+      return { report: { role: "GUARD", pilot: { characterID: 11 }, stages: [{ id: "exact", skillQualification: skills,
+        fitting: { status: acceptedDefinition(config, await f.offline()) ? "READY" : "REVIEW_REQUIRED" } }] } };
+    } });
+  return { ...f, training: service, config, request: { characterID: 11, role: "GUARD", configurationID: "exact", configurations: [config], source: f.input.source },
+    skill: value => { skills = value; }, reads: () => reads,
+    trainingApply: r => service.apply(f.account, { confirm: true, reviewID: r.applyReview.reviewID, reviewHash: r.applyReview.reviewHash }) };
+}
+test("Phase 8: Training reuses shared Phase 5 custody, fresh barrier and release; repeat does not acquire another hull or supplies", async t => {
+  const f = trainingFixture(t), r = await f.training.review(f.account, f.request);
+  assert.equal(r.applyReview.plan.mode, "NEW_HULL"); assert.equal(f.world.selections, 0);
+  const out = await f.trainingApply(r);
+  assert.equal(out.state, "COMPLETE"); assert.equal(out.release.state, "VERIFIED_OFFLINE");
+  assert.equal(out.finalReview.status.equipment, "VERIFIED"); assert.equal(out.finalReview.status.supplies, "LOW");
+  assert.equal(f.reads(), 2, "skills re-read after acquisition, before shared engine");
+  assert.ok(f.engine().journal.get(out.provisioning.operationID));
+  const again = await f.training.review(f.account, f.request), before = f.world.mutations.length;
+  const stage = again.fresh.report.stages[0];
+  assert.equal(stage.dutyReadiness, "READY"); assert.equal(stage.equipment.status.supplies, "LOW");
+  assert.equal(again.applyReview.plan.hullQuantity, 0);
+  const repeated = await f.trainingApply(again);
+  assert.equal(repeated.state, "ALREADY_SATISFIED"); assert.equal(f.world.mutations.length, before);
+});
+test("Phase 8: skills NOT READY plus exact equipment remains NOT DUTY READY; observation never acquires control", async t => {
+  const f = trainingFixture(t); await f.trainingApply(await f.training.review(f.account, f.request));
+  f.skill("NOT_READY"); const mutations = f.world.mutations.length, selections = f.world.selections;
+  const base = { report: { role: "GUARD", pilot: { characterID: 11 }, stages: [{ id: "exact", fitting: { status: "READY" }, skillQualification: "NOT_READY" }] } };
+  const read = await f.training.enrich(f.account, base, [f.config]);
+  assert.equal(read.report.stages[0].equipmentReadiness, "VERIFIED"); assert.equal(read.report.stages[0].dutyReadiness, "NOT_READY");
+  await assert.rejects(f.training.review(f.account, f.request), { code: "SKILLS_NOT_READY" });
+  assert.equal(f.world.selections, selections); assert.equal(f.world.mutations.length, mutations);
+});
+test("Phase 8: Training policy drift after Review refuses before provisioning and safely releases temporary control", async t => {
+  const f = trainingFixture(t), r = await f.training.review(f.account, f.request); f.skill("NOT_READY");
+  const out = await f.trainingApply(r);
+  assert.equal(out.state, "REFUSED"); assert.equal(out.reason, "SKILLS_NOT_READY");
+  assert.equal(f.world.mutations.length, 0); assert.equal(out.release.state, "VERIFIED_OFFLINE");
+});
+test("Phase 8: accepted fitting drift invalidates equipment and refuses through production Center barrier", async t => {
+  const f = trainingFixture(t), r = await f.training.review(f.account, f.request);
+  const changed = { ...f.fitting, savedDate: "101" }; f.world.contract = buildContract(changed, f.provider, f.data);
+  const out = await f.trainingApply(r);
+  assert.equal(out.reason, "REVIEW_STALE"); assert.equal(f.world.mutations.length, 0); assert.equal(out.release.state, "VERIFIED_OFFLINE");
+  const read = await f.training.enrich(f.account, r.fresh, [f.config]);
+  assert.equal(read.report.stages[0].equipmentReadiness, "UNKNOWN"); assert.equal(read.report.stages[0].dutyReadiness, "NOT_READY");
+});
+test("Phase 8: busy Training pilot cannot receive a mutation-capable Review or takeover", async t => {
+  const f = trainingFixture(t); f.world.online = true;
+  const r = await f.training.review(f.account, f.request); assert.equal(r.applyReview.canApply, false);
+  await assert.rejects(f.trainingApply(r), /REVIEW_REQUIRED/);
+  assert.equal(f.world.selections, 0); assert.equal(f.world.mutations.length, 0); assert.equal(f.world.online, true);
+});
+test("Phase 8: corporation source drift uses shared refusal, never personal fallback", async t => {
+  const f = trainingFixture(t, true), r = await f.training.review(f.account, f.request); f.world.source[0].quantity--;
+  const out = await f.trainingApply(r);
+  assert.equal(out.reason, "REVIEW_STALE"); assert.equal(f.world.mutations.length, 0); assert.equal(out.release.state, "VERIFIED_OFFLINE");
+});
+test("Phase 8: incomplete observation cannot inherit a VERIFIED classification", async t => {
+  const f = trainingFixture(t), { createTrainingEquipment } = require("./trainingEquipment");
+  const service = createTrainingEquipment({ center: { async readReview() {
+    const detail = await f.offline(); detail.pilot.quality = "PARTIAL"; detail.pilot.observation.complete = false;
+    detail.status = { equipment: "VERIFIED", supplies: "FULL", targets: [] }; return detail;
+  } } });
+  const base = { report: { role: "GUARD", pilot: { characterID: 11 }, stages: [{ id: "exact", fitting: { status: "READY" }, skillQualification: "READY" }] } };
+  const read = await service.enrich(f.account, base, [f.config]);
+  assert.equal(read.report.stages[0].equipmentReadiness, "UNKNOWN"); assert.equal(read.report.stages[0].equipment.status.supplies, "UNKNOWN");
+  assert.equal(read.report.stages[0].dutyReadiness, "NOT_READY"); assert.equal(f.world.selections, 0);
+});
+test("Phase 8: generation drift during the additional Training read cannot command the replacement session", async t => {
+  const f = trainingFixture(t), { createTrainingEquipment } = require("./trainingEquipment"); let reads = 0;
+  const service = createTrainingEquipment({ center: { readReview: f.offline, applyService: f.service() }, async readQualification() {
+    if (++reads === 2) f.world.context.sessionGeneration = "replacement-generation";
+    return { report: { role: "GUARD", pilot: { characterID: 11 }, stages: [{ id: "exact", fitting: { status: "READY" }, skillQualification: "READY" }] } };
+  } });
+  const r = await service.review(f.account, f.request);
+  const out = await service.apply(f.account, { confirm: true, reviewID: r.applyReview.reviewID, reviewHash: r.applyReview.reviewHash });
+  assert.equal(out.reason, "PROVISIONING_GENERATION_CHANGED"); assert.equal(f.world.mutations.length, 0);
+  assert.equal(out.release.state, "VERIFIED_OFFLINE");
+});
