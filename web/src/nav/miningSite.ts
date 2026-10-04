@@ -40,6 +40,18 @@ export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], 
   }
   return visit(script.program);
 }
+/** Does any block in the script fly to or mine the scanner's ore or ice sites? Those need the miners split into ore lasers and ice harvesters. */
+export function scriptMinesScannerSites(script: BotScript): boolean {
+  function visit(nodes: BotScript["program"]): boolean {
+    return nodes.some((node) => {
+      if (node.kind === "loop") return visit(node.body);
+      if (node.kind === "branch") return visit(node.then) || visit(node.else);
+      const belt = node.kind === "macro" ? node.args["belt"] : undefined;
+      return belt?.kind === "belt" && (belt.belt.mode === "site" || belt.belt.mode === "ice-site");
+    });
+  }
+  return visit(script.program);
+}
 // Scanner archetypes distinguish Ice from ore even though both use scan strength 211.
 export function miningSiteFamily(site: ScannedAnomaly): SiteFamily | null {
   if (site.kind !== "ore") return null;

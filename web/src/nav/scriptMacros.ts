@@ -32,7 +32,6 @@ import { launchFullPercent } from "../bots/macroSpecs.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import { beltTravelStep, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
-import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import {
   agentActionID,
   cargoRoom,
@@ -507,8 +506,8 @@ function stationTarget(step: MacroStep, obs: ScriptObservation, board: ScriptBoa
   return resolveStationRef(arg.ref, obs.startingStationID ?? null, board);
 }
 
-function rockLabel(rock: SpaceEntity): string {
-  return rock.name ?? "a rock";
+function rockLabel(rock: SpaceEntity, oneNoun = "a rock"): string {
+  return rock.name ?? oneNoun;
 }
 
 /** True when a step pins a specific belt rather than "nearest". */
@@ -774,7 +773,12 @@ const undock: MacroDecider = (_step, obs) => {
 // it. No rocks, no locking: just the trip, for a hauler heading out to pick up
 // a jetcan without ever sitting down to mine. Reuses mine-at-belt's own
 // beltTarget/isChosenBelt (below) so "pin a belt" behaves identically in both.
-const travelToBelt: MacroDecider = (step, obs, mem) => {
+const travelToBelt: MacroDecider = (step, obs, mem, board) => {
+  // With no operation behind it, "the scanner's ore/ice sites" is the same
+  // scanner tour Warp-to-the-next-ore-site runs, kept apart by family.
+  if (isSiteMode(step) && obs.miningOperation == null) {
+    return (siteTour(step).flavour === ICE_FLAVOUR ? warpToIceAnomaly : warpToOreAnomalyBase)(step, obs, mem, board);
+  }
   if (isSiteMode(step)) return operationSiteTravel(obs, mem, operationSiteFamily(step));
   const operationTick = operationTravelToBelt(obs, mem);
   if (operationTick !== null) return operationTick;
@@ -1236,7 +1240,7 @@ const miningSupport: MacroDecider = (_step, obs, mem) => {
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
   const operationTick = operationMineAtTarget(step, obs, mem);
   if (operationTick !== null) return operationTick;
-  if (isSiteMode(step) && operationSiteFamily(step) === "ICE") return operationSiteTravel(obs, mem, "ICE");
+  if (isSiteMode(step) && operationSiteFamily(step) === "ICE" && obs.miningOperation != null) return operationSiteTravel(obs, mem, "ICE");
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Flying to the belt", ACTING, false, mem);
@@ -1464,6 +1468,24 @@ function dryBeltNames(dryBelts: readonly DryBelt[] | null, family: OreFamilyArg 
  *  belts' `obs.dryBelts` (BFF-shared, belt-name-keyed) and deliberately not
  *  `MINE_ORE_TIER_KEY` (system-wide, one-way) — see the `mineAtBelt` header. */
 const ORE_SITES_BARREN_KEY = "oreSitesBarren";
+const ICE_SITES_BARREN_KEY = "iceSitesBarren";
+
+/**
+ * The two site tours SITE mode can follow: the scanner's ore sites or its ice
+ * sites. Each has its own visited and barren lists, so an ice field the bot
+ * walked away from is never read as an ore site that went barren, and the
+ * other way round.
+ */
+interface SiteTour {
+  readonly flavour: AnomalyFlavour;
+  readonly barrenKey: string;
+}
+
+function siteTour(step: MacroStep): SiteTour {
+  return operationSiteFamily(step) === "ICE"
+    ? { flavour: ICE_FLAVOUR, barrenKey: ICE_SITES_BARREN_KEY }
+    : { flavour: ORE_FLAVOUR, barrenKey: ORE_SITES_BARREN_KEY };
+}
 
 /**
  * Which ore site the ship is standing on, read off `warp-to-ore-anomaly`'s own
@@ -1479,25 +1501,25 @@ const ORE_SITES_BARREN_KEY = "oreSitesBarren";
  * `warp-to-ore-anomaly` in front of it, which `mineAtBeltSiteBarren` turns
  * into "ask for a tour block" rather than a guessed label.
  */
-function currentOreSiteLabel(board: ScriptBoard): string | null {
-  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+function currentOreSiteLabel(board: ScriptBoard, tour: SiteTour): string | null {
+  const visited = String(board[tour.flavour.boardKey] ?? "")
     .split(",")
     .filter((label) => label.length > 0);
   return visited.length > 0 ? visited[visited.length - 1]! : null;
 }
 
 /** The labels THIS pilot's site tour has already found barren — same CSV encoding as every other board list in this file. */
-function barrenOreSiteLabels(board: ScriptBoard): ReadonlySet<string> {
+function barrenOreSiteLabels(board: ScriptBoard, tour: SiteTour): ReadonlySet<string> {
   return new Set(
-    String(board[ORE_SITES_BARREN_KEY] ?? "")
+    String(board[tour.barrenKey] ?? "")
       .split(",")
       .filter((label) => label.length > 0),
   );
 }
 
 /** Append one label to `warp-to-ore-anomaly`'s own visited CSV — see requirement 3 on why this block writes into a key it does not own: without it, that step's next tick would warp the ship right back to the site this one just walked away from. */
-function appendOreVisited(board: ScriptBoard, label: string): string {
-  const visited = String(board[ORE_FLAVOUR.boardKey] ?? "")
+function appendOreVisited(board: ScriptBoard, tour: SiteTour, label: string): string {
+  const visited = String(board[tour.flavour.boardKey] ?? "")
     .split(",")
     .filter((existing) => existing.length > 0);
   return [...visited, label].join(",");
@@ -1529,16 +1551,30 @@ function mineAtBeltSite(
   ores: readonly OreFamilyArg[],
   measurement: SpaceMeasurement | null,
 ): MacroTick {
+  const tour = siteTour(step);
+  if (tour.flavour === ICE_FLAVOUR) {
+    // Ice takes the harvesters and only the harvesters: an ore laser cycled on
+    // an ice chunk mines nothing, and a harvester on a rock is refused.
+    const harvesters = obs.iceMiningModuleIDs ?? [];
+    if (harvesters.length === 0) {
+      return tick(WAIT, "No online Ice Harvester is confirmed in the fitted high slots.", "Ice fit unavailable", {
+        kind: "blocked",
+        reason: "ICE_MINING_CAPABILITY_REQUIRED: fit an online Ice Harvester; ore miners are not a fallback.",
+      });
+    }
+    obs = { ...obs, miningModuleIDs: harvesters };
+    allRocks = allRocks.filter((rock) => siteRockMatches(rock, "ICE"));
+  }
   if (ores.length === 0) {
     if (allRocks.length === 0) {
-      return mineAtBeltSiteBarren(obs, mem, board, ores);
+      return mineAtBeltSiteBarren(obs, mem, board, ores, tour);
     }
     return mineWithRocks(step, obs, mem, snapshot, richestRocks(allRocks, num(mem, "rockID")), measurement);
   }
 
   const family = ores.find((candidate) => allRocks.some((rock) => rock.groupID === candidate.groupID)) ?? null;
   if (family === null) {
-    return mineAtBeltSiteBarren(obs, mem, board, ores);
+    return mineAtBeltSiteBarren(obs, mem, board, ores, tour);
   }
   const familyRocks = allRocks.filter((rock) => rock.groupID === family.groupID);
   return mineWithRocks(step, obs, mem, snapshot, highestGradeRocks(familyRocks), measurement);
@@ -1589,6 +1625,7 @@ function mineAtBeltSiteBarren(
   mem: MacroMemory,
   board: ScriptBoard,
   ores: readonly OreFamilyArg[],
+  tour: SiteTour,
 ): MacroTick {
   // Consecutive: any tick this function is even reached means the current
   // read found no wanted rock, so there is no separate "saw a rock, reset
@@ -1614,17 +1651,17 @@ function mineAtBeltSiteBarren(
 
   const anomalies = obs.anomalies ?? null;
   if (anomalies === null) {
-    return tick(WAIT, "Reading the scanner for the next ore site.", "Scanning", ACTING, false, { ...mem, oreGridEmptyReads: emptyReads });
+    return tick(WAIT, `Reading the scanner for the next ${tour.flavour.noun}.`, "Scanning", ACTING, false, { ...mem, oreGridEmptyReads: emptyReads });
   }
 
-  const currentLabel = currentOreSiteLabel(board);
+  const currentLabel = currentOreSiteLabel(board, tour);
   if (currentLabel === null) {
     // No `warp-to-ore-anomaly` ahead of this block ever wrote a label, so
     // there is nothing to mark barren and nothing safe to guess. Reported as
     // `blocked` rather than an endless wait: a grid that never gets more rock
     // is exactly as stuck as a system with none left, and the player needs
     // to know WHY, not just that nothing is moving.
-    const reason = "This block needs a Fly-to-an-ore-site block ahead of it, so it knows which site just went barren.";
+    const reason = `This block needs a Fly-to-${tour.flavour.oneNoun.replace(/ /g, "-")} block ahead of it, so it knows which site just went barren.`;
     return tick(WAIT, "This grid has no rock of the wanted ore, and no tour block named which site this is.", "Nothing to mine", {
       kind: "blocked",
       reason,
@@ -1632,15 +1669,15 @@ function mineAtBeltSiteBarren(
   }
 
   const oreNames = ores.length > 0 ? ores.map((family) => family.name).join(" and ") : null;
-  const barren = new Set(barrenOreSiteLabels(board));
+  const barren = new Set(barrenOreSiteLabels(board, tour));
   barren.add(currentLabel);
-  const barrenPatch = { [ORE_SITES_BARREN_KEY]: [...barren].join(",") };
+  const barrenPatch = { [tour.barrenKey]: [...barren].join(",") };
 
-  const next = anomalies.find((site) => site.kind === "ore" && !barren.has(site.label));
+  const next = anomalies.find((site) => tour.flavour.matches(site) && !barren.has(site.label));
   if (next === undefined) {
     const reason = oreNames !== null
-      ? `Every ore site in this system is out of ${oreNames}.`
-      : "Every ore site in this system is mined out.";
+      ? `Every ${tour.flavour.noun} in this system is out of ${oreNames}.`
+      : `Every ${tour.flavour.noun} in this system is mined out.`;
     return withBoardPatch(
       tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason }),
       barrenPatch,
@@ -1648,11 +1685,11 @@ function mineAtBeltSiteBarren(
   }
 
   const why = oreNames !== null
-    ? `No ${oreNames} left here, moving to the next ore site.`
-    : "This ore site is mined out, moving to the next one.";
+    ? `No ${oreNames} left here, moving to the next ${tour.flavour.noun}.`
+    : `This ${tour.flavour.noun} is mined out, moving to the next one.`;
   return withBoardPatch(
-    tick({ kind: "warpScan", target: next.label }, why, "Flying to the ore site", ACTING, false, {}),
-    { ...barrenPatch, [ORE_FLAVOUR.boardKey]: appendOreVisited(board, next.label) },
+    tick({ kind: "warpScan", target: next.label }, why, tour.flavour.flying, ACTING, false, {}),
+    { ...barrenPatch, [tour.flavour.boardKey]: appendOreVisited(board, tour, next.label) },
   );
 }
 
@@ -1666,7 +1703,10 @@ function mineWithRocks(
   measurement: SpaceMeasurement | null,
   effectiveRangeMeters?: number,
 ): MacroTick {
-  // We have rocks. Track the one we are working.
+  // We have rocks. Track the one we are working. On an ice field they are
+  // ice chunks, and the pilot reads them as that.
+  const noun = rocks.some((r) => r.miningResourceFamily === "ice") ? "ice chunk" : "rock";
+  const oneNoun = noun === "rock" ? "a rock" : "an ice chunk";
   let rockID = num(mem, "rockID");
   const present = rockID !== null && rocks.some((r) => r.itemID === rockID);
   if (!present) {
@@ -1684,8 +1724,8 @@ function mineWithRocks(
     // Orbit the new rock at 5km to get into mining range; lock next tick.
     return tick(
       { kind: "orbit", targetID: pick.itemID, range: ORBIT_RANGE_M },
-      `Closing in on ${rockLabel(pick)}.`,
-      "Approaching a rock",
+      `Closing in on ${rockLabel(pick, oneNoun)}.`,
+      `Approaching ${oneNoun}`,
       ACTING,
       true,
       clearCloseInStall({
@@ -1731,15 +1771,15 @@ function mineWithRocks(
           stallStage: num(stall.mem, "stallStage") ?? 0,
         };
         if (stall.step === "reorder") {
-          return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, "Approaching a rock", ACTING, true, closing);
+          return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, `Approaching ${oneNoun}`, ACTING, true, closing);
         }
         if (stall.step === "unstick") {
-          return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Approaching a rock", ACTING, true, closing);
+          return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, `Approaching ${oneNoun}`, ACTING, true, closing);
         }
         if (stall.step === "stuck") {
-          return tick(WAIT, STALL_STUCK_WHY, "Approaching a rock", { kind: "blocked", reason: STALL_STUCK_REASON });
+          return tick(WAIT, STALL_STUCK_WHY, `Approaching ${oneNoun}`, { kind: "blocked", reason: STALL_STUCK_REASON });
         }
-        return tick(WAIT, "Closing in — too far out to lock yet.", "Approaching a rock", ACTING, true, closing);
+        return tick(WAIT, "Closing in — too far out to lock yet.", `Approaching ${oneNoun}`, ACTING, true, closing);
       };
       // A refusal that arrives while the pre-gate holds the press is absorbed, not left
       // to be read as "new" once the rock is in range.
@@ -1770,7 +1810,7 @@ function mineWithRocks(
         if (rockDist === null) return timed(seen);
         if (rockDist > LOCK_REPRESS_PROGRESS * refusedAt) return closingIn(seen, refusedAt);
       }
-      return tick({ kind: "lock", targetID: rockID }, "Locking the rock.", "Locking on", ACTING, true, {
+      return tick({ kind: "lock", targetID: rockID }, `Locking the ${noun}.`, "Locking on", ACTING, true, {
         rockID,
         lockIssued: true,
         waited: 0,
@@ -1803,7 +1843,7 @@ function mineWithRocks(
       return tick(
         { kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M },
         "Closing in — too far out to mine yet.",
-        "Approaching a rock",
+        `Approaching ${oneNoun}`,
         ACTING,
         true,
         clearCloseInStall({ rockID, lockIssued: true, waited: 0, approachedRockID: rockID }),
@@ -1829,15 +1869,15 @@ function mineWithRocks(
       stallStage: num(stall.mem, "stallStage") ?? 0,
     };
     if (stall.step === "reorder") {
-      return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, "Approaching a rock", ACTING, true, closing);
+      return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, `Approaching ${oneNoun}`, ACTING, true, closing);
     }
     if (stall.step === "unstick") {
-      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Approaching a rock", ACTING, true, closing);
+      return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, `Approaching ${oneNoun}`, ACTING, true, closing);
     }
     if (stall.step === "stuck") {
-      return tick(WAIT, STALL_STUCK_WHY, "Approaching a rock", { kind: "blocked", reason: STALL_STUCK_REASON });
+      return tick(WAIT, STALL_STUCK_WHY, `Approaching ${oneNoun}`, { kind: "blocked", reason: STALL_STUCK_REASON });
     }
-    return tick(WAIT, "Closing in — too far out to mine yet.", "Approaching a rock", ACTING, true, closing);
+    return tick(WAIT, "Closing in — too far out to mine yet.", `Approaching ${oneNoun}`, ACTING, true, closing);
   }
 
   // Locked and in range — switch on any mining module that is not already cycling.
@@ -1869,7 +1909,7 @@ function mineWithRocks(
       { rockID, lockIssued: true, waited: 0, approachedRockID: rockID },
     );
   }
-  return tick(WAIT, "Mining the rock.", "Mining", ACTING, true, { rockID, lockIssued: true, waited: 0, approachedRockID: rockID });
+  return tick(WAIT, `Mining the ${noun}.`, "Mining", ACTING, true, { rockID, lockIssued: true, waited: 0, approachedRockID: rockID });
 }
 
 // ── deliver-ore ──────────────────────────────────────────────────────────────
@@ -4228,6 +4268,8 @@ const EMPTY_GRID_CONFIRM_TICKS = 3;
 
 /** The words each variant uses about its own sites — the only thing that differs. */
 interface AnomalyFlavour {
+  /** Which scanner rows this tour flies to. Never a name match — see the kind filter note above. */
+  readonly matches: (site: ScannerSite) => boolean;
   /** The board slot holding this run's visited labels. Separate per kind so
    *  one block's tour never marks the other block's sites as seen. */
   readonly boardKey: string;
@@ -4306,7 +4348,22 @@ function shipStandsInSite(obs: ScriptObservation, target: string | null): boolea
   return distanceMeters(here, site) < MIN_WARP_DISTANCE_M;
 }
 
+type ScannerSite = NonNullable<ScriptObservation["anomalies"]>[number];
+
+/**
+ * An ice field is an ORE row to the scanner: it is scanned gravimetric (211),
+ * so `siteKind` groups it with the asteroid clusters exactly as the client's
+ * Probe Scanner does. Only the dungeon archetype tells the two apart, and the
+ * difference is the fit: ore lasers cannot touch ice and an Ice Harvester
+ * cannot touch ore, so a tour that mixed them parked every miner in a field
+ * half its modules could not work.
+ */
+function isIceSite(site: ScannerSite): boolean {
+  return site.kind === "ore" && miningSiteFamily(site) === "ICE";
+}
+
 const COMBAT_FLAVOUR: AnomalyFlavour = {
+  matches: (site) => site.kind === "combat",
   boardKey: "anomsVisited",
   noun: "den",
   oneNoun: "a den",
@@ -4320,6 +4377,7 @@ const COMBAT_FLAVOUR: AnomalyFlavour = {
 };
 
 const ORE_FLAVOUR: AnomalyFlavour = {
+  matches: (site) => site.kind === "ore" && !isIceSite(site),
   boardKey: "oreAnomsVisited",
   noun: "ore site",
   oneNoun: "an ore site",
@@ -4338,6 +4396,18 @@ const ORE_FLAVOUR: AnomalyFlavour = {
   // that same site picked first on the next one, the server refused the warp
   // for standing in it, and the run ended on "The ship would not warp to the
   // ore site" with the rock in front of the ship.
+  alreadyHere: shipStandsInSite,
+};
+
+const ICE_FLAVOUR: AnomalyFlavour = {
+  matches: isIceSite,
+  boardKey: "iceAnomsVisited",
+  noun: "ice site",
+  oneNoun: "an ice site",
+  flying: "Flying to the ice site",
+  emptyScannerHint:
+    "Ice on the overview is not an ice site: an ice field is a cosmic anomaly, and only the scanner lists it.",
+  givesUpOnSites: false,
   alreadyHere: shipStandsInSite,
 };
 
@@ -4404,7 +4474,6 @@ function allGivenUpReason(flavour: AnomalyFlavour, total: number): string {
 }
 
 function warpToAnomalyOfKind(
-  wanted: ExplorationSiteKind,
   flavour: AnomalyFlavour,
 ): MacroDecider {
   return (step, obs, mem, board) => {
@@ -4450,7 +4519,7 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, 0, 0),
       });
     }
-    const ofKind = anomalies.filter((site) => site.kind === wanted);
+    const ofKind = anomalies.filter(flavour.matches);
     // ── PHASE 2: a site is committed — read what became of the last warp, or press ──
     //
     // ⚠ THE TARGET IS COMMITTED BY A WAIT TICK BEFORE THE WARP IS ISSUED, AND THAT
@@ -4641,7 +4710,7 @@ function warpToAnomalyOfKind(
     refused: readonly string[],
   ) {
     const visited = visitedLabels(board);
-    const ofKind = anomalies.filter((site) => site.kind === wanted && !refused.includes(site.label));
+    const ofKind = anomalies.filter((site) => flavour.matches(site) && !refused.includes(site.label));
     const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
     const workable =
       ledger === null ? ofKind : ofKind.filter((site) => !isAbandoned(ledger, site.label));
@@ -4664,8 +4733,9 @@ function warpToAnomalyOfKind(
   }
 }
 
-const warpToAnomaly: MacroDecider = warpToAnomalyOfKind("combat", COMBAT_FLAVOUR);
-const warpToOreAnomalyBase: MacroDecider = warpToAnomalyOfKind("ore", ORE_FLAVOUR);
+const warpToAnomaly: MacroDecider = warpToAnomalyOfKind(COMBAT_FLAVOUR);
+const warpToOreAnomalyBase: MacroDecider = warpToAnomalyOfKind(ORE_FLAVOUR);
+const warpToIceAnomaly: MacroDecider = warpToAnomalyOfKind(ICE_FLAVOUR);
 const warpToOreAnomaly: MacroDecider = (step, obs, mem, board) => {
   if (obs.miningOperation == null) return warpToOreAnomalyBase(step, obs, mem, board);
   const target = obs.miningOperation.currentTarget;

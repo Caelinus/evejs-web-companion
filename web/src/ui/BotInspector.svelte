@@ -188,7 +188,7 @@
   // that "nearest" quietly toured the wrong grid the moment a mining site ran
   // dry (see `BeltArg` in botScript.ts). Nothing to type for it, same as
   // "nearest" — the scanner is read fresh each time the block needs a target.
-  function beltMode(step: MacroStep, key: string): "nearest" | "named" | "site" {
+  function beltMode(step: MacroStep, key: string): "nearest" | "named" | "site" | "ice-site" {
     const arg = argOf(step, key);
     if (arg === undefined || arg.kind !== "belt") {
       return "nearest";
@@ -198,6 +198,9 @@
     }
     if (arg.belt.mode === "site") {
       return "site";
+    }
+    if (arg.belt.mode === "ice-site") {
+      return "ice-site";
     }
     return "nearest";
   }
@@ -362,7 +365,7 @@
     // Leaving "named" for "nearest" or "site" — catch the typed name on the
     // way out, the last moment it exists (see the comment on typedBeltNames).
     typedBeltNames[beltSlotKey(step, key)] = beltName(step, key);
-    onArg(key, { kind: "belt", belt: { mode: mode === "site" ? "site" : "nearest" } });
+    onArg(key, { kind: "belt", belt: { mode: mode === "site" || mode === "ice-site" ? mode : "nearest" } });
   }
   /**
    * The typed belt name.
@@ -926,6 +929,7 @@
         >
           <option value="nearest">the nearest belt</option>
           <option value="site">the scanner's ore sites</option>
+          {#if step.macro !== "fleet-mine"}<option value="ice-site">the scanner's ice sites</option>{/if}
           <option value="named">a belt I name</option>
         </select>
         {#if beltMode(step, arg.key) === "named"}

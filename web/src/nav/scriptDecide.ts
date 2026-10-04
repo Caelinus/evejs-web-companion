@@ -1039,6 +1039,15 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
   return belt !== undefined && belt.kind === "belt" && ["site", "ice-site"].includes(belt.belt.mode);
 }
 
+/** Is the active block working the scanner's ICE sites? Its hold is the ice hold, not the ore hold. */
+export function activeStepMinesIce(script: BotScript, mem: ScriptMemory): boolean {
+  if (!activeStepToursOreSites(script, mem)) {
+    return false;
+  }
+  const belt = activeStep(script, mem.position)?.args["belt"];
+  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "ice-site";
+}
+
 /**
  * Does the active block match items by NAME? The one thing type ids and group
  * ids cannot answer, and the only reason to pay for a name lookup on a tick.

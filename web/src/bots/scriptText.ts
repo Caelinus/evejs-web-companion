@@ -85,7 +85,7 @@ function beltPhrase(belt: BeltArg): string {
   if (belt.mode === "site") {
     return "the ore site the scanner shows";
   }
-  if (belt.mode === "ice-site") return "the operation's Ice site";
+  if (belt.mode === "ice-site") return "the ice site the scanner shows";
   return worldRefPhrase(belt.ref, "belt");
 }
 
