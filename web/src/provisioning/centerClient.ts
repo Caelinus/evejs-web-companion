@@ -13,7 +13,7 @@ export interface Roster { quality: string; completeRoster: boolean; reasons: rea
   providers: readonly { characterID: number; name: string; corporationID: number | null }[] }
 export interface CenterReview { pilot: Pilot; matches: Match; status: ProvisioningStatus; selected: Contract | null; equipment: readonly EquipmentRow[]; requirements: readonly Requirement[];
   applyReview: { reviewID: string; reviewHash: string | null; canApply: boolean; reasons: readonly string[]; suppliesPolicy: string;
-    plan: { mode: string; hullQuantity: number; targetHullName: string; steps: readonly string[]; unsupported: readonly string[]; shortages: readonly string[]; destructiveActions: readonly string[] } | null };
+    plan: { mode: string; hullQuantity: number | null; targetHullName: string; steps: readonly string[]; unsupported: readonly string[]; shortages: readonly string[]; destructiveActions: readonly string[] } | null };
   pendingApply: readonly { operationID: string; state: string; reason: string | null }[];
   definitions: { status: string; corporationID: number | null; providerCharacterID: number; contracts: readonly Contract[]; invalid: readonly { fittingID: number; reason: string }[] };
   candidateSource: { kind: string; quality: string; query: string; take: string; rows: readonly EquipmentRow[]; corporationID: number | null; division: number | null;

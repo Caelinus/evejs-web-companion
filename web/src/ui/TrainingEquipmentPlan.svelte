@@ -6,7 +6,7 @@
 </script>
 <section aria-label="Equipment provisioning plan">
   <h3>Manual Provision Equipment</h3>
-  <p class="note">Offline equipment Review and Provision Equipment are unavailable on stock EveJS. Select the pilot and use Ready Fit, Provision Ship or Replenish in its workspace. Training qualification and queue actions remain available.</p>
+  <p class="note">Review pins this Training configuration and physical source. Confirm Provision Equipment to briefly select an offline pilot, recheck trained hard skills and fitting identity, provision a supported NPC-station plan, verify and release. Read-only qualification selects nobody.</p>
   {#if message}<p role="status">{message}</p>{/if}
   {#if review}
     {@const detail = review.detail}
@@ -20,11 +20,11 @@
     <p>Supplies: {detail.status.supplies}. LOW supplies do not invalidate structural readiness.</p>
     <ul>{#each detail.status.targets as target}<li>{target.name}: {target.current ?? "UNKNOWN"} / {target.target} · {target.state}</li>{/each}</ul>
     <details><summary>Observed source stock</summary><ul>{#each detail.candidateSource.rows as row}<li>{row.name} × {row.quantity}</li>{/each}</ul></details>
-    <p role="status">Apply unavailable on stock EveJS. {accepted.reasons.join(" · ")}</p>
-    <button type="button" disabled onclick={onApply}>Provision Equipment</button>
+    <p role="status">Physical equipment and stock remain UNKNOWN until the selected Review. {accepted.reasons.join(" · ")}</p>
+    <button type="button" disabled={busy || !accepted.canApply} onclick={onApply}>Confirm Provision Equipment</button>
   {/if}
   {#if outcome}<p role="status">{outcome.state} · {outcome.reason || ""} · Equipment {outcome.finalReview?.status.equipment || "UNKNOWN"} · Supplies {outcome.finalReview?.status.supplies || "UNKNOWN"} · Control release: {outcome.release.state}</p>
-    {#if outcome.state === "BLOCKED"}<button class="minor" disabled={busy} onclick={() => onRecover(outcome.operationID)}>Reconcile control release</button>{/if}
+    {#if outcome.state === "BLOCKED" || outcome.state === "UNCERTAIN"}<button class="minor" disabled={busy} onclick={() => onRecover(outcome.operationID)}>Reconcile control release</button>{/if}
   {/if}
 </section>
 <style>section { padding: 1rem; margin: 1rem 0; border: 1px solid #455569; border-radius: 6px; }</style>
