@@ -12,7 +12,7 @@
 
 <section class="preparation" aria-label={planning ? "Launch equipment and supplies review" : "Operation equipment and supplies preparation"}>
   <h4>{planning ? "Launch preflight" : "Preparation barrier"}: {preparationStateLabel(preparation?.state)}</h4>
-  <p class="muted">{stale ? "Last known server observation. " : ""}{planning ? "Read-only member review; Start revalidates before hosted preparation." : "Productive work waits for the server preparation barrier. Hosting alone does not establish readiness."}</p>
+  <p class="muted">{stale ? "Last known server observation. " : ""}{planning ? "Configuration and fitting definitions only. Final hosted preparation verifies equipment and supplies before productive work." : "Productive work waits for the server preparation barrier. Hosting alone does not establish readiness."}</p>
   {#if preparation?.reason}<p class="notice">{preparation.reason}</p>{/if}
   {#if !preparation}<p class="notice">Equipment and supply readiness has not been reported.</p>{/if}
   <div class="table-wrap"><table>

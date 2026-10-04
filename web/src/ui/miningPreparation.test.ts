@@ -64,7 +64,8 @@ test("optional Core shortage is DEGRADED while required shortage and ambiguous c
   assert.match(markup(), /DEGRADED/);
   assert.match(markup({ state: "BLOCKED", reason: "Core required — Heavy Water missing", supplies: "MISSING" }), /Core required/);
   assert.match(markup({ state: "RECOVERY_REQUIRED", reason: "Transfer outcome unproven", equipment: "UNKNOWN", supplies: "UNKNOWN" }), /RECOVERY REQUIRED/);
-  assert.match(markup({}, { planning: true }), /Read-only member review/);
+  assert.match(markup({}, { planning: true }), /Configuration and fitting definitions only/);
+  assert.match(markup({}, { planning: true }), /Final hosted preparation verifies equipment and supplies/);
 });
 
 test("supply details render server effective criticality for global requirements and Core overrides", () => {

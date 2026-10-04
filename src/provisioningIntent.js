@@ -39,4 +39,18 @@ function assertSelected(pin, read, data = null) {
   if (s.access.take !== true) fail(s.access.take === false ? "SOURCE_TAKE_DENIED" : "SOURCE_TAKE_UNKNOWN");
 }
 
-module.exports = { intent, assertSelected, rows };
+// Capture physical facts only under the final selected owner. This is never an
+// offline observation or a promise that equipment was ready during planning.
+function selectedIntent(read) {
+  const c = read.context, d = read.contract, s = read.source.pin;
+  if (!read.observation.complete || !read.target?.complete) fail("REVIEW_STALE");
+  const pin = { ...Object.fromEntries(["accountID","characterID","corporationID","locationID","shipID","shipTypeID"].map(k=>[k,c[k]])),
+    definition: d.definition, definitionFingerprint: d.definitionFingerprint, equipmentFingerprint: d.equipmentFingerprint,
+    supplyPolicyFingerprint: d.supplyPolicyFingerprint, observed: rows(read.observation.rows),
+    source: { ...s.descriptor, contentsLocationID: s.locationID, dockedLocationID: s.dockedLocationID, flag: s.flag,
+      officeID: s.descriptor.kind === "corp" ? Number(String(s.office).split(":")[1]) : null, stock: rows(read.source.rows) } };
+  assertSelected(pin, read);
+  return pin;
+}
+
+module.exports = { intent, assertSelected, selectedIntent, rows };

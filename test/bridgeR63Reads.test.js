@@ -206,23 +206,22 @@ test("access-scoped all-system search returns named structures but not inaccessi
   assert.equal(gateway.calls.call.filter((call) => call.method === "GetStructureInfo").length, 1);
 });
 
-test("service authority is fresh and unreadable state does not grant a capability", async () => {
+test("stock docking access does not manufacture unavailable structure service capability", async () => {
   const id = 1_030_000_000_003;
-  let access = true, readable = true;
+  let access = true;
   const gateway = fakeGateway({
     async callMethod(_service, method) {
       if (method === "CheckMyDockingAccessToStructures") return { result: { type: "list", items: access ? [id] : [] } };
-      if (method === "GetMyAccessibleStructureServices") return { result: readable ? { type: "list", items: [1, 2, 3] } : null };
+      if (method === "GetMyAccessibleStructureServices") assert.fail("Private service authority must not be called");
       return { result: null };
     },
   });
   const { baseUrl } = await startTestServer({ gateway });
   await selectOnServer(baseUrl);
   const okay = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
-  assert.deepEqual(okay.payload.serviceIDs, [1, 2, 3]);
-  readable = false;
-  const unknown = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
-  assert.notEqual(unknown.response.status, 200);
+  assert.equal(okay.response.status, 409);
+  assert.equal(okay.payload.error, "STRUCTURE_SERVICE_AUTHORITY_UNAVAILABLE");
+  assert.equal(okay.payload.serviceIDs, undefined);
   access = false;
   const denied = await apiRequest(baseUrl, `/api/dockable-structures/${id}/services`);
   assert.notEqual(denied.response.status, 200);

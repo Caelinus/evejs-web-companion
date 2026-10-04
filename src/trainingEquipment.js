@@ -45,7 +45,7 @@ function createTrainingEquipment({ center, readQualification, now = Date.now }) 
       try {
         if (!config || stage.fitting.status !== "READY") fail("REVIEW_REQUIRED", stage.fitting.reason || "Accept a readable Training fitting first.");
         observation = equipment(await inspect(account, read.report.pilot.characterID, config, source));
-      } catch (e) { observation = equipment(null, e.code || "OBSERVATION_UNAVAILABLE"); }
+      } catch (e) { observation = equipment(null, e.code === "PROVISIONING_OFFLINE_AUTHORITY_UNAVAILABLE" ? e.message : e.code || "OBSERVATION_UNAVAILABLE"); }
       stages.push({ ...stage, equipmentReadiness: observation.status.equipment, equipmentReason: observation.reason,
         equipment: observation, dutyReadiness: dutyReady(stage.skillQualification, observation.status.equipment) });
     }

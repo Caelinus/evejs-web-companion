@@ -1,23 +1,9 @@
-# MCC provisioning preflight
+# MCC stock preparation
 
-Read-only launch planning pins definition and physical source separately.
-Preparation runs under each final hosted owner: no Factory prepare/release/
-reacquire. It reviews exact structural equipment and performs one Startup
-Replenish through the shared engine. Wrong/missing equipment blocks; MCC never
-acquires a new hull automatically.
+Launch planning pins configuration and saved fitting definitions only. Equipment, supplies and source access remain UNKNOWN/PENDING. Under each exact final hosted owner, stock inventory reads resolve an explicit or unique exact fitting, verify equipment/source Query/Take and perform one shared Startup Replenish. MCC does not refit or acquire a hull automatically.
 
-Durable external-preparation checkpoints, deferred activation and the aggregate
-MAIN barrier are one lifecycle. Every non-defender must retain the same run's
-owner and VERIFIED/DEGRADED preparation before productive MAIN starts. Core
-requirements may block; optional supply shortages remain DEGRADED without
-invalidating structural equipment. Stop/new Start creates a fresh logical run.
+A version-2 durable checkpoint saves its first selected physical baseline before mutation and preserves it on recovery. Earlier verified sibling custody is already represented; only later verified same-run movements at the exact physical source adjust it. Historical version-1 accepted offline pins remain strict and are never reinterpreted as new intent. Pending custody is reconciled without resend; a missing journal after a durable invocation does not dispatch again.
 
-Hosted restart may reconcile only its exact pending custody and preparation
-intent before MAIN, with positive runtime offline proof. It cannot reuse stale
-runs or steal a browser/retail owner. The MCC same-run handoff exception remains
-separate from customs export's exact private reservation exception.
+The aggregate MAIN barrier waits for every current final owner and VERIFIED/DEGRADED preparation. Required shortages block; optional shortages remain DEGRADED. Defender validates stock skills and damage/ammunition before transfer and before MAIN. Exact WC reservations/generations, drone and customs-export safeguards remain. External duplicate-login races follow stock retail server policy.
 
-Accepted live evidence includes zero-deficit productive Start/Stop, shortage,
-restart/custody and aggregate barrier cases. Publication reuses unchanged
-engine evidence and only repeats a small Start/Stop if ownership integration
-changes. One writer per writable journal directory remains mandatory.
+No offline projection or Factory endpoint is used. See [stock integration policy](stock-evejs-integration-policy.md).

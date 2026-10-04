@@ -275,7 +275,8 @@ test("gateway client releaseBridgeSession posts the handle to /session/release",
     bridgeSessionID: BRIDGE_SESSION_ID,
     session: { userid: 4 },
   });
-  assert.deepEqual(outcome, { released: true, offline: false, characterID: 7 });
+  assert.deepEqual(outcome, { released: true, characterID: 7 });
+  assert.equal(Object.hasOwn(outcome, "offline"), false, "handle release is not authoritative offline proof");
 });
 
 test("gateway client callMethod forwards a bridgeSessionID only when supplied", async () => {

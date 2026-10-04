@@ -1,3 +1,5 @@
+> Historical audit. Runtime-patch deployment references are superseded by the [stock integration policy](stock-evejs-integration-policy.md); do not deploy retired core patches.
+
 # EveJS web client code review and implementation report
 
 **Report date:** October 2, 2026
@@ -51,8 +53,8 @@ Run the same web-project checks from this repository in PowerShell, using the ex
 ```powershell
 $env:EVEJS_ROOT = 'C:\path\to\eve.js'
 $env:EVEJS_REPO = $env:EVEJS_ROOT
-$runtimeReference = node scripts/prepare-runtime-test-reference.js | ConvertFrom-Json
-$env:EVEJS_CLEAN_REFERENCE = $runtimeReference.reference
+# Retired patch fixtures: use immutable stock source via STOCK_EVEJS_ROOT.
+$env:STOCK_EVEJS_ROOT = $env:EVEJS_ROOT
 $env:EVEJS_PROPULSION_AUDIT_ROOT = $env:EVEJS_ROOT
 npm test -- --test-concurrency=4 --test-timeout=30000
 npm run typecheck
@@ -63,7 +65,7 @@ The test baseline was repaired in separate commits: the new PI bot-log action, i
 
 ## Remaining validation and maintenance work
 
-The three optional Factory gateway checks require the patched Factory runtime described in [pilot-training-runtime-setup.md](pilot-training-runtime-setup.md). The existing EveJS gateway does not have those methods installed, so those checks are not evidence of working Factory deployment.
+The former private Factory implementation checks are retired; current skill acquisition refuses explicitly on stock web gateway.
 
 Live multi-pilot and ship-operation QA remains necessary before deployment. Prioritize cookie/session cancellation, rapid pause/resume with commands in flight, loss of a mutation response, drone recall/relaunch, assistance recipient changes, formation after warp/looting, and courier surplus preservation. The real-runtime checks used isolated test data; they did not drive live player ships or assets.
 

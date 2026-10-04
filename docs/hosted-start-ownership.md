@@ -49,7 +49,8 @@ ordinary public Start cannot borrow it. Factory/temporary control, foreign
 browser sessions, other hosted bots and unresolved custody remain blocking for
 fresh Start. A resumed MCC preparation may reconcile only its exact current
 checkpoint, account, operation/run and custody ID before MAIN. Its existing
-optional Factory recovery selector remains a separate private feature contract.
+held session may reconcile custody. Reacquisition while custody is unresolved
+refuses explicitly: stock selection supplies no per-request free-only authority.
 No Defender combat policy or MCC Defender execution is changed here.
 
 The integration regression exercises the actual public route, actual host and

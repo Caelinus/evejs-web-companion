@@ -6,13 +6,14 @@ import type { AcquisitionReview } from "../training/types.ts";
 register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const Panel = (await import("./SkillAcquisition.svelte")).default;
-test("acquisition review shows exact finance, target and explicit confirmation without mutation on render",()=>{
+test("historical acquisition review preserves finance while unavailable purchase stays disabled",()=>{
   let calls=0;
   const review={mode:"FAST",stage:"PROCURER",canAcquire:true,reviewID:"one-shot",skills:[{typeID:11,name:"Astrogeology",price:"450000.00"}],
     total:"31500000.00",personalBalance:"12000000.00",shortfall:"19500000.00",blockers:[],cleanup:[],
     funding:{characterID:10,corporationID:98,division:1000,balance:"100000000.00"}} as unknown as AcquisitionReview;
   const html=render(Panel,{props:{review,outcome:null,busy:false,mode:"FAST",stage:"PROCURER",officers:[],message:"",onReview(){calls++;},onAcquire(){calls++;},onChange(){}}}).body;
-  for(const value of ["31,500,000 ISK","12,000,000 ISK","19,500,000 ISK","Astrogeology","Corporation 98","Acquire missing skills · FAST → PROCURER","Character wallet only","queue is a separate action"]) assert.ok(html.includes(value),value);
+  for(const value of ["31,500,000 ISK","12,000,000 ISK","19,500,000 ISK","Astrogeology","Corporation 98","Acquire missing skills · FAST → PROCURER","Character wallet only","Direct purchase is unavailable on stock EveJS web gateway","Inject skillbooks in the game client"]) assert.ok(html.includes(value),value);
+  assert.equal((html.match(/<button[^>]*disabled[^>]*>/g)||[]).length,2,"neither stale review nor fresh panel can purchase");
   assert.equal(calls,0);
 });
 test("Farmer's owned cockpit retains its existing release authority",()=>{

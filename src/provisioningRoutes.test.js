@@ -12,7 +12,7 @@ function fixture() {
   const routes = new Map(), operations = new Map();
   const held = { accountID: 7, characterID: 10, corporationID: 30, activeShipID: 50, stationID: 60, bridgeSessionID: "own-generation" };
   const state = { writes: [], date: "100", stock: 4000, aboard: 3200, take: true, query: true, incomplete: false,
-    providerCalls: [], sourceReads: [], failAfter: false };
+    providerCalls: [], sourceReads: [], failAfter: false, duplicateFit: false };
   const engine = createReplenishment({ operations, data });
   engine.withTemporaryControl = () => { throw new Error("Held provisioning must not acquire temporary Factory control."); };
   const mutationFence = createPilotMutationFence({ heldSessions: new Map([["tab", held]]), assertWritable: engine.assertWritable });
@@ -34,9 +34,10 @@ function fixture() {
     async callMethod(service, method, args, kwargs, fields, bridgeSessionID) {
       assert.equal(service, "corpFittingMgr"); assert.equal(method, "GetFittings"); assert.equal(bridgeSessionID, undefined);
       state.providerCalls.push(fields);
-      return { result: { type: "dict", entries: [[4, wireObject({ fittingID: 4, ownerID: fields.corpid, shipTypeID: 1,
+      const fit = id => [id, wireObject({ fittingID: id, ownerID: fields.corpid, shipTypeID: 1,
         name: "Exact", savedDate: { type: "long", value: state.date }, fitData: wireList([
-          { type: "tuple", items: [2, 27, 1] }, { type: "tuple", items: [3, 5, 5000] }]) })]] } };
+          { type: "tuple", items: [2, 27, 1] }, { type: "tuple", items: [3, 5, 5000] }]) })];
+      return { result: { type: "dict", entries: [fit(4), ...(state.duplicateFit ? [fit(5)] : [])] } };
     },
     async callBoundMethod(service, method, args, kwargs, fields, bridgeSessionID, spec) {
       assert.equal(bridgeSessionID, held.bridgeSessionID);
@@ -99,6 +100,25 @@ test("route consumer separates provider from physical authority and routes defic
   assert.deepEqual(f.state.writes, [[100, 60, 1800]]);
   await f.invoke("replenish", request); assert.equal(f.state.writes.length, 1);
   assert.ok(f.state.providerCalls.every(fields => fields.characterID === 11 && fields.corpid === 20));
+});
+
+test("final selected MCC adapter resolves a unique exact fit but refuses ambiguous or incomplete equipment", async () => {
+  const f = fixture(), input = { ...f.input, fittingID: 0 };
+  const unique = await f.adapter().readPreparation(input);
+  assert.equal(unique.contract.definition.fittingID, 4);
+  assert.equal(unique.observation.complete, true);
+  assert.equal(unique.context.characterID, 10);
+  assert.equal(unique.source.pin.locationID, 60);
+  f.state.duplicateFit = true;
+  await assert.rejects(f.adapter().readPreparation(input), { code: "EQUIPMENT_NOT_READY" });
+  assert.equal((await f.adapter().readPreparation(f.input)).contract.definition.fittingID, 4,
+    "an explicit exact fitting remains usable when definitions share equipment");
+  f.state.incomplete = true;
+  await assert.rejects(f.adapter().readPreparation(input), { code: "EQUIPMENT_NOT_READY" });
+  assert.equal((await f.adapter().readPreparation(f.input)).observation.complete, false,
+    "explicit selection never manufactures complete inventory evidence");
+  assert.deepEqual(f.state.writes, []);
+  assert.equal(f.engine.journal.list().length, 0);
 });
 
 test("held Ship Review no-ops exact equipment, then shared Replenish fills its LOW supplies without acquiring another hull", async () => {

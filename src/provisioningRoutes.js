@@ -3,8 +3,20 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { readAccountCorpFittings } = require("./pilotTrainingFittings");
 const { row: serviceRow } = require("./trainingOnboarding");
-const { hash, fail, inventoryRows, buildContract } = require("./provisioningContracts");
+const { hash, fail, inventoryRows, buildContract, matchFittings } = require("./provisioningContracts");
 const containerGroups = new Set([12, 340, 448, 649]); // EveJS itemStore's cargo-container groups.
+
+async function readProvisioningDefinitions({ store, gateway, data, accountID, providerCharacterID, supplyPolicy }) {
+  const value = await readAccountCorpFittings({ store, gateway, data, accountID, characterID: providerCharacterID });
+  const contracts = [], invalid = [];
+  for (const fit of value.fittings || []) {
+    try {
+      contracts.push(buildContract(fit, { scope: "CORPORATION", accountID, characterID: providerCharacterID,
+        corporationID: value.corporationID }, data, supplyPolicy));
+    } catch { invalid.push({ fittingID: fit.fittingID, reason: "INVALID_FIT" }); }
+  }
+  return { status: value.status, corporationID: value.corporationID || null, providerCharacterID, contracts, invalid };
+}
 
 // Keep browser additions (including credentials) out of the durable contract.
 function reviewInput(value) {
@@ -70,19 +82,14 @@ function registerProvisioningRoutes(d) {
         recoveryReady: !pendingRecovery(held),
         sessionGeneration: hash([held.bridgeSessionID, held.botClaimSecret || null]) };
     }
-    async function library(input) {
+    async function library(input, allowMatch = false) {
       if (!Number.isSafeInteger(input.providerCharacterID) || !Number.isSafeInteger(input.corporationID)) fail("INVALID_DEFINITION_SOURCE");
-      const result = await readAccountCorpFittings({ store, gateway, data, accountID: Number(req.account.accountID), characterID: input.providerCharacterID });
+      const result = await readProvisioningDefinitions({ store, gateway, data, accountID: Number(req.account.accountID),
+        providerCharacterID: input.providerCharacterID, supplyPolicy: input.supplyPolicy });
       if (result.status !== "READY" || result.corporationID !== input.corporationID) fail("FITTING_SOURCE_CHANGED");
-      const provider = { scope: "CORPORATION", accountID: Number(req.account.accountID), characterID: input.providerCharacterID,
-        corporationID: result.corporationID };
-      const contracts = [];
-      for (const fit of result.fittings.filter(f => !f.invalid)) {
-        try { contracts.push(buildContract(fit, provider, data, input.supplyPolicy)); }
-        catch (error) { if (fit.fittingID === input.fittingID) throw error; }
-      }
+      const contracts = result.contracts;
       const contract = contracts.find(c => c.definition.fittingID === input.fittingID);
-      if (!contract) fail("INVALID_FIT");
+      if (!contract && !(allowMatch && input.fittingID === 0)) fail("INVALID_FIT");
       return { contract, contracts };
     }
     async function source(input, scope, recoveryPin = null) {
@@ -137,6 +144,18 @@ function registerProvisioningRoutes(d) {
       const observed = await observation(scope), origin = await source(input, scope, sourcePin);
       if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
       return { context: scope, ...definitions, observation: observed, source: origin };
+    }
+    async function readPreparation(input, sourcePin = null) {
+      const scope = await context(), definitions = await library(input, true);
+      const observed = await observation(scope), origin = await source(input, scope, sourcePin);
+      let contract = definitions.contract;
+      if (!contract) {
+        const matches = matchFittings(definitions.contracts, observed, data);
+        if (matches.state !== "MATCH") fail("EQUIPMENT_NOT_READY", `Selected equipment match ${matches.state}; choose an exact fitting.`);
+        contract = definitions.contracts.find(c => c.definition.fittingID === matches.alternatives[0].definition.fittingID);
+      }
+      if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
+      return { context: scope, ...definitions, contract, observation: observed, source: origin, target: { complete: observed.complete } };
     }
     async function readShip(input, targetHullID = null, sourcePin = null) {
       const scope = await context(), definitions = await library(input);
@@ -211,7 +230,7 @@ function registerProvisioningRoutes(d) {
       return mutationFence.withLease(lease, () => boundCall(held, sessionID, spec, "Add",
         [move.itemID, move.sourceLocationID], { flag: to.flag, qty: move.quantity }));
     }
-    return { context, read, readShip, plan, readMovement, dispatch,
+    return { context, read, readPreparation, readShip, plan, readMovement, dispatch,
       async dispatchShip(action, current, lease) {
         engine.assertWritable(held.characterID, lease);
         const revalidate = async () => {
@@ -283,4 +302,4 @@ function registerProvisioningRoutes(d) {
   // Authorized consumers share this selected-session adapter and engine.
   return { adapter };
 }
-module.exports = { registerProvisioningRoutes, corporationAccess };
+module.exports = { registerProvisioningRoutes, corporationAccess, readProvisioningDefinitions };
