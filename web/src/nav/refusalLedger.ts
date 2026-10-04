@@ -121,6 +121,16 @@ export function settleTicksForRefusals(count: number): number {
 }
 
 /**
+ * The step id a call with NO step is booked under.
+ *
+ * Exported because a decider can BORROW a block for such a call — the trip home
+ * the runner latches itself is the case — and the block reads the ledger by the
+ * id of the step it is handed. Handing it this one is how it finds its own
+ * records.
+ */
+export const NO_STEP_ID = "-";
+
+/**
  * The identity of a failure. A target id is part of it on purpose: one jetcan
  * that will not give up its contents must not spend the budget that belongs to
  * the next one, and must not be masked by it either.
@@ -130,7 +140,7 @@ export function refusalKey(
   actionKind: string,
   targetID: number | null,
 ): string {
-  return `${stepPath ?? "-"}:${actionKind}:${targetID ?? "-"}`;
+  return `${stepPath ?? NO_STEP_ID}:${actionKind}:${targetID ?? "-"}`;
 }
 
 /** Classify a raw wire refusal. `stillOnGrid` is only consulted for a bind miss. */
@@ -300,6 +310,6 @@ export function shipHasNoRoom(
   if (!records) {
     return false;
   }
-  const prefix = `${stepID ?? "-"}:${actionKind}:`;
+  const prefix = `${stepID ?? NO_STEP_ID}:${actionKind}:`;
   return records.some((record) => record.kind === "no-room" && record.key.startsWith(prefix));
 }

@@ -4669,3 +4669,83 @@ test("salvage: a lock record left from an earlier visit costs one tick, not the 
   assert.equal(refused.why, "Waiting for the lock.");
   assert.equal(refused.nextMem["lockIssued"], true);
 });
+
+test("fight-with-drones: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const fight = SCRIPT_MACROS["fight-with-drones"]!;
+  const s = { id: "d", kind: "macro", macro: "fight-with-drones", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([rat]), weaponModuleIDs: [500], refusals: [leftoverLock("d")] });
+  // The hold comes first on this ladder; the lock rung is what is under test.
+  const holding = fight(s, world, {}, {});
+  assert.equal(holding.action.kind, "keepAtRange");
+
+  const read = fight(s, world, holding.nextMem, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.equal(read.nextMem["targetID"], undefined, "no target is adopted for a lock that was never asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6661);
+
+  const refused = fight(s, obs({ ...world, refusals: [{ ...leftoverLock("d"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["targetID"], 6661);
+  assert.equal(refused.nextMem["lockRefusalsSeen"], 3);
+});
+
+test("fight-with-drones: a leftover lock record is not booked against a pre-lock that was never pressed", () => {
+  const fight = SCRIPT_MACROS["fight-with-drones"]!;
+  const s = { id: "d", kind: "macro", macro: "fight-with-drones", args: {} } as const;
+  const at = (itemID: number, x: number) =>
+    entity({ itemID, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x, y: 0, z: 0 } });
+  // The primary is already locked on arrival, so no press of this visit has
+  // committed a count and the record on the ledger is somebody else's.
+  const world = obs({
+    snapshot: snapshot([at(6661, 5000), at(6662, 6000)]),
+    weaponModuleIDs: [500],
+    lockedTargetIDs: [6661],
+    maxLockedTargets: 3,
+    refusals: [leftoverLock("d")],
+  });
+  const holding = fight(s, world, {}, {});
+  assert.equal(holding.action.kind, "keepAtRange");
+  const held: MacroMemory = { ...holding.nextMem, targetID: 6661, lockIssued: true, waited: 0 };
+
+  const read = fight(s, world, held, {});
+  assert.notEqual(read.action.kind, "lock");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.deepEqual(read.nextMem["preLocked"] ?? [], [], "nothing is marked as asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6662, "and the pre-lock goes out on the next tick");
+});
+
+test("remote-rep / remote-cap: a leftover lock record costs one tick and does not adopt the mate", () => {
+  const hurt = entity({ itemID: 7001, kind: "ship", characterID: 5001, shieldRatio: 0.4, armorRatio: 1, hullRatio: 1, capacitorRatio: 0.2, position: { x: 3000, y: 0, z: 0 } });
+  const cases = [
+    { block: remoteRep, s: repStep, fit: { remoteShieldRepairerIDs: [600] }, lockOn: "repLockOn" },
+    {
+      block: remoteCapBlock,
+      s: { id: "rc", kind: "macro", macro: "remote-cap", args: {} } as MacroStep,
+      fit: { remoteCapModuleIDs: [640] },
+      lockOn: "capLockOn",
+    },
+  ];
+  for (const { block, s, fit, lockOn } of cases) {
+    const world = obs({ snapshot: snapshot([hurt], { activeModuleIDs: [] }), fleetMemberCharacterIDs: [5001], ...fit, refusals: [leftoverLock(s.id)] });
+
+    const read = block(s, world, {}, {});
+    assert.equal(read.action.kind, "wait", s.macro);
+    assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+    assert.equal(read.nextMem[lockOn], null, "the mate is not adopted, so the next tick still presses");
+
+    const press = block(s, world, read.nextMem, {});
+    assert.ok(press.action.kind === "lock" && press.action.targetID === 7001, s.macro);
+
+    const refused = block(s, obs({ ...world, refusals: [{ ...leftoverLock(s.id), count: 3 }] }), read.nextMem, {});
+    assert.equal(refused.action.kind, "wait");
+    assert.equal(refused.why, "Waiting for the lock.");
+    assert.equal(refused.nextMem[lockOn], 7001, "a refused press is waited out against the mate it was for");
+  }
+});

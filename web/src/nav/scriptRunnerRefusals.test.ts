@@ -16,7 +16,7 @@ import type { BotScript, InterruptRow, MacroStep, ProgramNode } from "../bots/bo
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { HomeTravelDecider, MacroDecider, ScriptAction } from "./scriptDecide.ts";
-import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
 import { createScriptRunner } from "./scriptRunner.ts";
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
@@ -82,6 +82,7 @@ function rig(
   refuse: (action: ScriptAction) => string | null,
   registry: Record<string, MacroDecider> = SCRIPT_MACROS as unknown as Record<string, MacroDecider>,
   watches: readonly InterruptRow[] = [],
+  travelHome: HomeTravelDecider = home,
 ) {
   const issued: ScriptAction[] = [];
   /** Every status line the run showed, in order: how a test sees which rung a block reached. */
@@ -103,7 +104,7 @@ function rig(
     isSessionLost: () => false,
     refusalReason: (error) => (error instanceof Error ? error.message : String(error)),
     registry: registry as never,
-    travelHome: home,
+    travelHome,
   });
   runner.start(script(program, watches));
   const run = async (ticks: number, until: () => boolean = () => false): Promise<void> => {
@@ -331,4 +332,156 @@ test("fight-back watch: the borrowed ladder reads the refusal under the WATCH RO
   assert.ok(locksOn(issued, 6661) <= 2);
   assert.equal(runner.getStatus(), "running");
   assert.notEqual(runner.snapshot().phase, "Heading home");
+});
+
+// ── fight-with-drones: the primary's lock and the pre-lock ───────────────────
+//
+// The drone boat's ladder is fight-the-rats' shape: the pick and the press are
+// one tick, and the timed wait opens on a flag the press writes. Its pre-lock
+// rung stops on "already asked for this one", which a refused press never wrote.
+
+const droneStep: MacroStep = { id: "d", kind: "macro", macro: "fight-with-drones", args: {} };
+
+test("fight-with-drones: a refused lock reaches 'would not lock' instead of the ten-refusal trip home", async () => {
+  const { issued, said, run, runner } = rig(
+    [droneStep],
+    () => calm({ snapshot: space([rat(6661, 5000)]), hostileOnGrid: true, weaponModuleIDs: [500] }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the block said so");
+  assert.ok(locksOn(issued, 6661) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home", "and the ship is still in the fight");
+});
+
+test("fight-with-drones: a refused PRE-lock is asked for once, not until the ten-refusal trip home", async () => {
+  const locked: number[] = [];
+  const { issued, run, runner } = rig(
+    [droneStep],
+    () =>
+      calm({
+        snapshot: space([rat(6661, 5000), rat(6662, 6000)]),
+        hostileOnGrid: true,
+        weaponModuleIDs: [500],
+        lockedTargetIDs: [...locked],
+        maxLockedTargets: 3,
+      }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      // Whichever the ladder makes its primary locks; the other one never does.
+      if (locked.length > 0 && !locked.includes(action.targetID)) return REFUSED_LOCK;
+      if (!locked.includes(action.targetID)) locked.push(action.targetID);
+      return null;
+    },
+  );
+  await run(150);
+  assert.equal(locked.length, 1, "the primary locked");
+  const spare = locked[0] === 6661 ? 6662 : 6661;
+  assert.equal(locksOn(issued, spare), 1, "the pre-lock that was refused is not asked for again");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home", "and the ship is still in the fight");
+});
+
+// ── remote-rep / remote-cap: the fleet-mate's lock ───────────────────────────
+//
+// Both decided "this is a new mate, press the lock" by comparing the mate to an
+// id the PRESS wrote. A refused press never wrote it, so every tick was a new
+// mate and "would not lock" was never said.
+
+/** A fleet-mate on grid. The character id is ESI's own published example. */
+const MATE_CHARACTER = 90000001;
+const mate = (itemID: number, x: number, over: Partial<SpaceEntity>) =>
+  thing(itemID, x, { kind: "ship", isNpc: false, characterID: MATE_CHARACTER, shieldRatio: 1, armorRatio: 1, hullRatio: 1, ...over });
+
+const repStep: MacroStep = { id: "r", kind: "macro", macro: "remote-rep", args: {} };
+const capStep: MacroStep = { id: "c", kind: "macro", macro: "remote-cap", args: {} };
+
+test("remote-rep: a refused lock reaches 'would not lock' instead of the ten-refusal trip home", async () => {
+  const { issued, said, run, runner } = rig(
+    [repStep],
+    () =>
+      calm({
+        snapshot: space([mate(7001, 3000, { shieldRatio: 0.4 })]),
+        fleetMemberCharacterIDs: [MATE_CHARACTER],
+        remoteShieldRepairerIDs: [600],
+      }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the block said so");
+  assert.ok(locksOn(issued, 7001) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home");
+});
+
+test("remote-cap: a refused lock reaches 'would not lock' instead of the ten-refusal trip home", async () => {
+  const { issued, said, run, runner } = rig(
+    [capStep],
+    () =>
+      calm({
+        snapshot: space([mate(7001, 3000, { capacitorRatio: 0.3 })]),
+        fleetMemberCharacterIDs: [MATE_CHARACTER],
+        remoteCapModuleIDs: [800],
+      }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the block said so");
+  assert.ok(locksOn(issued, 7001) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home");
+});
+
+// ── the fight out of a blocked trip home ────────────────────────────────────────
+//
+// The trip borrows fight-the-rats, and the runner books the trip's presses under
+// the LATCH: the watch row that fired, or no step at all when the runner latched
+// the trip itself. The borrowed ladder read the ledger under a made-up step id
+// and so never saw its own refusals. Worse than a trip home here: a second fault
+// under a latch is a stop, so the ship was left paused in space, still held.
+
+/** A ship that cannot leave: the autopilot failed on the way to the home station. */
+const held = (over: Partial<ScriptObservation> = {}) =>
+  calm({
+    snapshot: space([rat(6661, 5000)]),
+    hostileOnGrid: true,
+    weaponModuleIDs: [500],
+    homeStationID: 1,
+    travel: { status: "paused", destinationStationID: 1, remainingJumps: 0, failureReason: "You are warp scrambled." },
+    ...over,
+  });
+
+test("fight free: under a WATCH's latch a refused lock reaches 'would not lock' instead of a stop in space", async () => {
+  // Health under the floor watch every script here carries, so the watch latches the trip.
+  const { issued, said, run, runner } = rig(
+    [fightStep],
+    () => held({ health: 0.2, shieldRatio: 0.2, armorRatio: 0.2, hullRatio: 0.2 }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+    undefined,
+    [],
+    scriptTravelHome,
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.equal(runner.snapshot().phase, "Fighting free");
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the trip said so");
+  assert.ok(locksOn(issued, 6661) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running", "and the ship is still fighting, not paused in space");
+});
+
+test("fight free: under the RUNNER's own latch, which names no step, the refusal is read too", async () => {
+  const { issued, said, run, runner } = rig(
+    [fightStep],
+    () => held(),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+    undefined,
+    [],
+    scriptTravelHome,
+  );
+  assert.equal(runner.headHome("Sent home."), true);
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.equal(runner.snapshot().phase, "Fighting free");
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the trip said so");
+  assert.ok(locksOn(issued, 6661) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running", "and the ship is still fighting, not paused in space");
 });

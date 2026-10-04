@@ -60,7 +60,7 @@ import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
 import { preferredResources } from "./resourcePriority.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
-import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
+import { isUnreachable, NO_STEP_ID, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
 import {
@@ -71,7 +71,7 @@ import {
   launchStalled,
   type DroneRoster,
 } from "./droneLaunch.ts";
-import { decideDroneBoat } from "./droneBoatLadder.ts";
+import { decideDroneBoat, type LockRefusals } from "./droneBoatLadder.ts";
 import { decideDroneRotation, readRotationMemory } from "./droneRotation.ts";
 import {
   decodeLedger,
@@ -2971,7 +2971,7 @@ function isOwnWreck(wreck: SpaceEntity, obs: ScriptObservation): boolean {
  * really was refused costs one more before it is believed; every later one is
  * believed at once.
  */
-function readLockRefusals(step: MacroStep, obs: ScriptObservation, mem: MacroMemory) {
+function readLockRefusals(step: MacroStep, obs: ScriptObservation, mem: MacroMemory): LockRefusals {
   const count = refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0;
   const seen = num(mem, "lockRefusalsSeen");
   return { count, unread: seen === null && count > 0, fresh: seen !== null && count > seen };
@@ -4160,6 +4160,7 @@ const fightWithDrones: MacroDecider = (step, obs, mem, board) => {
     propMode: propModeOf(step),
     squad: role,
     calledTargetID: called?.itemID ?? null,
+    lockRefusals: readLockRefusals(step, obs, mem),
   });
   return nameThePropulsionEffect(decided, obs);
 };
@@ -5704,6 +5705,7 @@ function remoteRepIDs(obs: ScriptObservation): readonly number[] {
  * as well would fight its own orbit command every tick.
  */
 function repHurtMate(
+  step: MacroStep,
   obs: ScriptObservation,
   mem: MacroMemory,
   phase: string,
@@ -5731,12 +5733,31 @@ function repHurtMate(
       // A NEW mate resets everything counted per-target, or the last one's spent
       // budget silently disarms the reps for this one (the bug the PvP ladder
       // had, where a shared counter outlived the target it was counting for).
+      //
+      // ⚠ `changed` IS READ FROM WHAT THE PRESS WRITES, and a refused press
+      // commits nothing (see `readLockRefusals`): every tick after a refusal was a
+      // "new" mate and a new press, and the timed wait below was never reached.
+      // So the refusal is read here, before pressing again.
+      const lockRefusals = readLockRefusals(step, obs, mem);
+      if (lockRefusals.unread) {
+        // Counted, and the mate left unadopted so the next tick still presses.
+        return tick(WAIT, "Checking the last lock.", phase, ACTING, true, {
+          ...mem,
+          repLockOn: null,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      if (lockRefusals.fresh) {
+        // The timed wait below, exactly what a refused lock got before 2fd4a77.
+        return tick(WAIT, "Waiting for the lock.", phase, ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the hurt fleet-mate.", phase, ACTING, true, {
         ...mem,
         repLockOn: target.itemID,
         repWaited: 0,
         repTries: 0,
         repApproached: null,
+        lockRefusalsSeen: 0,
       });
     }
     const waited = (num(mem, "repWaited") ?? 0) + 1;
@@ -5798,7 +5819,7 @@ function repHurtMate(
 
 // ── remote-rep ───────────────────────────────────────────────────────────────
 // Reactive: rep the most-hurt fleet-mate; done once everyone on grid is full.
-const remoteRep: MacroDecider = (_step, obs, mem) => {
+const remoteRep: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp - nothing decided mid-warp.", "Supporting", ACTING, false, mem);
   }
@@ -5814,7 +5835,7 @@ const remoteRep: MacroDecider = (_step, obs, mem) => {
   if ((obs.fleetMemberCharacterIDs ?? null) === null) {
     return tick(WAIT, "Reading the authoritative fleet roster.", "Supporting", ACTING, false, mem);
   }
-  const rep = repHurtMate(obs, mem, "Supporting");
+  const rep = repHurtMate(step, obs, mem, "Supporting");
   if (rep === null) {
     return tick(WAIT, "Everyone on grid is at full health.", "Supporting", { kind: "done" });
   }
@@ -5825,7 +5846,7 @@ const remoteRep: MacroDecider = (_step, obs, mem) => {
 // Sustained: orbit the nearest fleet-mate up close and keep repping whoever is
 // hurt. Never finishes on its own - a watch or the player stops it. Orbits ONCE
 // (re-issued only when the anchor changes), so it does not spam orbit commands.
-const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
+const orbitAndBoost: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp - nothing decided mid-warp.", "Boosting", ACTING, false, mem);
   }
@@ -5844,7 +5865,7 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
   const snapshot = obs.snapshot;
   const friendlies = fleetMatesOnGrid(obs) ?? [];
   if (friendlies.length === 0) {
-    const settlement = repHurtMate(obs, mem, "Boosting", false);
+    const settlement = repHurtMate(step, obs, mem, "Boosting", false);
     if (settlement !== null) return settlement;
     return tick(WAIT, "No fleet-mate on grid to support yet.", "Boosting", ACTING, false, mem);
   }
@@ -5860,7 +5881,7 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
     );
   }
   // No approach from in here — the orbit above is this block's way of closing.
-  const rep = repHurtMate(obs, mem, "Boosting", false);
+  const rep = repHurtMate(step, obs, mem, "Boosting", false);
   if (rep !== null) {
     return rep;
   }
@@ -6440,7 +6461,7 @@ const dockAtNearest: MacroDecider = (_step, obs, mem) => {
 // different reading (the snapshot already carries every ship's capacitorRatio).
 const CAP_HUNGRY = 0.9; // below this is worth a cycle
 
-const remoteCap: MacroDecider = (_step, obs, mem) => {
+const remoteCap: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Feeding cap", ACTING, false, mem);
   }
@@ -6478,13 +6499,26 @@ const remoteCap: MacroDecider = (_step, obs, mem) => {
   const locked = (obs.lockedTargetIDs ?? []).includes(target.itemID);
   if (!locked) {
     if (changed) {
-      // A new mate resets what is counted per-target (see repHurtMate).
+      // A new mate resets what is counted per-target (see repHurtMate), and a
+      // refused press is read off the ledger before pressing again (same place).
+      const lockRefusals = readLockRefusals(step, obs, mem);
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Feeding cap", ACTING, true, {
+          ...mem,
+          capLockOn: null,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      if (lockRefusals.fresh) {
+        return tick(WAIT, "Waiting for the lock.", "Feeding cap", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the fleet-mate who needs cap.", "Feeding cap", ACTING, true, {
         ...mem,
         capLockOn: target.itemID,
         capWaited: 0,
         capTries: 0,
         capApproached: null,
+        lockRefusalsSeen: 0,
       });
     }
     const waited = (num(mem, "capWaited") ?? 0) + 1;
@@ -6936,8 +6970,19 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
  */
 const MAX_ESCAPE_ATTEMPTS = 3;
 
-/** The synthetic step the escape borrows the combat blocks under. */
-const ESCAPE_STEP: MacroStep = { id: "__escape__", kind: "macro", macro: "fight-the-rats", args: {} };
+/**
+ * The synthetic step the escape borrows the combat blocks under.
+ *
+ * ⚠ ITS ID IS THE ONE THE RUNNER BOOKS THE TRIP UNDER, NOT A NAME OF ITS OWN. The
+ * borrowed ladder reads the refusal ledger by the id of the step it is handed
+ * (`readLockRefusals`), and the runner keys the trip's presses by the latch: the
+ * watch row that fired, or no step at all. Under a made-up id the ladder never
+ * saw its own refused lock, pressed it ten times, and the run then STOPPED in
+ * space — a second fault under a latch is a stop — with the ship still held.
+ */
+function escapeStep(bookedUnder: string | null): MacroStep {
+  return { id: bookedUnder ?? NO_STEP_ID, kind: "macro", macro: "fight-the-rats", args: {} };
+}
 
 /** The synthetic step the last-resort dock borrows `dock-at-nearest` under. */
 const HARBOUR_STEP: MacroStep = { id: "__harbour__", kind: "macro", macro: "dock-at-nearest", args: {} };
@@ -7007,7 +7052,12 @@ function dockLastResort(obs: ScriptObservation, mem: MacroMemory, blockedReason:
  * no way to shoot it, or the escape budget is spent — and the blocked trip then
  * stands and stops the bot, which is the honest end.
  */
-function fightTheWayOut(obs: ScriptObservation, mem: MacroMemory, stationID: number): MacroTick | null {
+function fightTheWayOut(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  stationID: number,
+  bookedUnder: string | null,
+): MacroTick | null {
   const snapshot = obs.snapshot ?? null;
   if (snapshot === null || obs.inSpace !== true || obs.inWarp === true) {
     return null; // cannot judge the grid, or already leaving
@@ -7048,20 +7098,21 @@ function fightTheWayOut(obs: ScriptObservation, mem: MacroMemory, stationID: num
   }
   // Held. The tank goes up first, then the guns — the same order the pirate
   // watch uses, and the same blocks.
+  const step = escapeStep(bookedUnder);
   const hardenMem = (mem["escapeHarden"] as MacroMemory | undefined) ?? {};
-  const harden = hardenersOn(ESCAPE_STEP, obs, hardenMem, {});
+  const harden = hardenersOn(step, obs, hardenMem, {});
   if (harden.outcome.kind === "acting") {
     return { ...harden, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeHarden: harden.nextMem } };
   }
   const fightMem = (mem["escapeFight"] as MacroMemory | undefined) ?? {};
-  const fight = fightTheRats(ESCAPE_STEP, obs, fightMem, {});
+  const fight = fightTheRats(step, obs, fightMem, {});
   if (fight.outcome.kind !== "acting") {
     return null; // no way to fight — the blocked trip stands
   }
   return { ...fight, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeFight: fight.nextMem } };
 }
 
-export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
+export const scriptTravelHome: HomeTravelDecider = (obs, mem, bookedUnder = null) => {
   if (obs.flightStatus?.docked === true) {
     // Docked ANYWHERE is safe — the point of a fired watch is to be in a
     // station, not to commute. Stop here.
@@ -7084,7 +7135,7 @@ export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
   // disarm it in the one moment it needs them.
   const ride = rideAutopilotTo(obs, target, "Heading home", obs.homeDockableKind ?? "station");
   if (ride !== null && ride.outcome.kind === "blocked") {
-    const escape = fightTheWayOut(obs, mem, target);
+    const escape = fightTheWayOut(obs, mem, target, bookedUnder);
     if (escape !== null) {
       return escape;
     }
