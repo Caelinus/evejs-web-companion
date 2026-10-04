@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { BotScript, MacroStep, ProgramNode } from "../bots/botScript.ts";
+import type { BotScript, InterruptRow, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { HomeTravelDecider, MacroDecider, ScriptAction } from "./scriptDecide.ts";
@@ -63,11 +63,11 @@ const home: HomeTravelDecider = () => ({
   action: { kind: "wait" }, why: "home", phase: "Heading home", armed: true, outcome: { kind: "acting" }, nextMem: {},
 });
 
-function script(program: readonly ProgramNode[]): BotScript {
+function script(program: readonly ProgramNode[], watches: readonly InterruptRow[] = []): BotScript {
   return {
     format: "evejs-bot-script", version: 1, name: "t", notes: "",
     home: { entity: "station", id: 1, name: "Home", systemName: null },
-    interrupts: [{ id: "floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }],
+    interrupts: [{ id: "floor", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-pause" }, ...watches],
     program,
   };
 }
@@ -81,8 +81,11 @@ function rig(
   observation: () => ScriptObservation,
   refuse: (action: ScriptAction) => string | null,
   registry: Record<string, MacroDecider> = SCRIPT_MACROS as unknown as Record<string, MacroDecider>,
+  watches: readonly InterruptRow[] = [],
 ) {
   const issued: ScriptAction[] = [];
+  /** Every status line the run showed, in order: how a test sees which rung a block reached. */
+  const said: string[] = [];
   const runner = createScriptRunner({
     observe: async () => observation(),
     issue: async (action) => {
@@ -94,19 +97,21 @@ function rig(
       return null;
     },
     sleep: async () => {},
-    onProgress: () => {},
+    onProgress: (snapshot) => {
+      if (snapshot.why !== null) said.push(snapshot.why);
+    },
     isSessionLost: () => false,
     refusalReason: (error) => (error instanceof Error ? error.message : String(error)),
     registry: registry as never,
     travelHome: home,
   });
-  runner.start(script(program));
+  runner.start(script(program, watches));
   const run = async (ticks: number, until: () => boolean = () => false): Promise<void> => {
     for (let i = 0; i < ticks && runner.getStatus() === "running" && !until(); i += 1) {
       await runner.tick();
     }
   };
-  return { runner, issued, run };
+  return { runner, issued, said, run };
 }
 
 const oreSite = (label: string, x: number) => ({ label, kind: "ore" as const, position: { x, y: 0, z: 0 } });
@@ -204,4 +209,126 @@ test("mine-at-belt: with a known lock range nothing is pressed beyond it, and on
   x = 39_000;
   await run(40, () => locks() >= 1);
   assert.equal(locks(), 1, "inside it, one lock");
+});
+
+// ── salvage-wrecks / fight-the-rats: the lock press ──────────────────────────
+//
+// Both blocks wrote `lockIssued` on the pressing tick and gave up on a target
+// from the timed wait that flag opens. A refused press never set it, so the
+// press was repeated on every backoff and "would not lock" was never said.
+
+/** Anything on the grid that is not a rock, built from the rock. */
+function thing(itemID: number, x: number, over: Partial<SpaceEntity>): SpaceEntity {
+  return { ...rock(itemID, x), name: null, miningYieldTypeID: null, beltID: null, ...over };
+}
+const wreck = (itemID: number, x: number) => thing(itemID, x, { kind: "wreck" });
+const rat = (itemID: number, x: number) => thing(itemID, x, { kind: "ship", isNpc: true, npcEntityType: "npc" });
+
+const salvageStep: MacroStep = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} };
+const fightStep: MacroStep = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} };
+const WOULD_NOT_LOCK = /would not lock/;
+
+const locksOn = (issued: readonly ScriptAction[], targetID: number) =>
+  issued.filter((a) => a.kind === "lock" && a.targetID === targetID).length;
+
+test("salvage-wrecks: with every lock refused each wreck is passed in turn and the block finishes", async () => {
+  const { state, registry } = withMarker();
+  const { issued, said, run, runner } = rig(
+    [salvageStep, marker],
+    () => calm({ snapshot: space([wreck(70001, 3000), wreck(70002, 4000)]), salvageModuleIDs: [800] }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+    registry,
+  );
+  await run(300, () => state.reached);
+  assert.equal(state.reached, true, "both wrecks were passed and the program moved on");
+  assert.notEqual(runner.snapshot().phase, "Heading home");
+  assert.equal(said.filter((why) => WOULD_NOT_LOCK.test(why)).length, 2, "each wreck was given up on in words");
+  // The visit's first refusal has no committed count to be compared with, so it
+  // is believed on the second press; every later one is believed on the first.
+  assert.equal(locksOn(issued, 70001), 2);
+  assert.equal(locksOn(issued, 70002), 1);
+});
+
+test("salvage-wrecks: a wreck whose lock is refused is passed and the NEXT wreck is salvaged", async () => {
+  const locked: number[] = [];
+  const { issued, run, runner } = rig(
+    [salvageStep],
+    () =>
+      calm({
+        snapshot: space([wreck(70001, 3000), wreck(70002, 4000)]),
+        salvageModuleIDs: [800],
+        lockedTargetIDs: [...locked],
+      }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      if (action.targetID === 70001) return REFUSED_LOCK;
+      locked.push(action.targetID);
+      return null;
+    },
+  );
+  const salvaging = () => issued.some((a) => a.kind === "activate" && a.targetID === 70002);
+  await run(300, salvaging);
+  assert.equal(salvaging(), true, "the salvager runs on the wreck that did lock");
+  assert.ok(locksOn(issued, 70001) <= 2, "the refused wreck did not spend the refusal cap");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home");
+});
+
+test("fight-the-rats: a refused lock reaches 'would not lock' instead of the ten-refusal trip home", async () => {
+  const { issued, said, run, runner } = rig(
+    [fightStep],
+    () => calm({ snapshot: space([rat(6661, 5000)]), weaponModuleIDs: [500] }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the block said so");
+  assert.ok(locksOn(issued, 6661) <= 2, "pressed twice at most on the way there");
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home", "and the ship is still in the fight");
+});
+
+test("fight-the-rats: after a lock that landed, a refused one is believed on the first press", async () => {
+  let rats = [rat(6661, 5000)];
+  const locked: number[] = [];
+  const { issued, said, run } = rig(
+    [fightStep],
+    () => calm({ snapshot: space(rats), weaponModuleIDs: [500], lockedTargetIDs: [...locked] }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      if (action.targetID === 6662) return REFUSED_LOCK;
+      locked.push(action.targetID);
+      return null;
+    },
+  );
+  await run(20, () => issued.some((a) => a.kind === "activate" && a.targetID === 6661));
+  assert.ok(issued.some((a) => a.kind === "activate" && a.targetID === 6661), "the first rat was locked and shot");
+
+  rats = [rat(6662, 5000)]; // it died, and the next one refuses the lock
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.equal(locksOn(issued, 6662), 1);
+});
+
+test("fight-back watch: the borrowed ladder reads the refusal under the WATCH ROW's id", async () => {
+  // The watch is where a working bot actually fights, and the ledger keys its
+  // presses by the row id it hands the ladder as the step id.
+  const fightBack: InterruptRow = { id: "fb", when: { kind: "hostile-on-grid" }, respond: "fight-back" };
+  const { issued, said, run, runner } = rig(
+    [mineStep],
+    () =>
+      calm({
+        snapshot: space([rock(50001, 3000), rat(6661, 5000)]),
+        hostileOnGrid: true,
+        miningModuleIDs: [700],
+        weaponModuleIDs: [500],
+      }),
+    (action) => (action.kind === "lock" ? REFUSED_LOCK : null),
+    undefined,
+    [fightBack],
+  );
+  await run(200, () => said.some((why) => WOULD_NOT_LOCK.test(why)));
+  assert.ok(said.some((why) => WOULD_NOT_LOCK.test(why)), "the timed wait ran out and the watch said so");
+  assert.ok(locksOn(issued, 6661) <= 2);
+  assert.equal(runner.getStatus(), "running");
+  assert.notEqual(runner.snapshot().phase, "Heading home");
 });

@@ -2947,10 +2947,41 @@ function isOwnWreck(wreck: SpaceEntity, obs: ScriptObservation): boolean {
   return (me !== null && wreck.ownerID === me) || (corp !== null && wreck.ownerID === corp);
 }
 
+/**
+ * What the ledger says about this step's lock presses, against the count the
+ * block last committed (`lockRefusalsSeen`).
+ *
+ * ⚠ A REFUSED LOCK COMMITS NOTHING (2fd4a77), so a `lockIssued` written by the
+ * pressing tick is not there to read after a refusal: a block that waits on
+ * that flag to give up presses again on every backoff instead, until the
+ * runner's ten-refusal cap sends the ship home. The ledger is what it can read.
+ *
+ * The record is keyed by step and action with NO target and lives until a lock
+ * in the same step succeeds, so the count a block carries is "the count as of
+ * the last tick that was committed": a press carries 0 (it is committed only
+ * when it succeeded, which is also what clears the record) and a wait tick that
+ * has read a refusal carries the count it read.
+ *
+ * ⚠ NO COUNT CARRIED AND A RECORD ON THE LEDGER IS AMBIGUOUS, AND IT IS READ AS
+ * OLD. It is either left over from an earlier visit (step memory is dropped
+ * when a step is left, the ledger is not) or this visit's very first press,
+ * refused. Reading a leftover as fresh would hold the block off a lock it never
+ * asked for — in a fight, sixteen seconds of not shooting — so `unread` has the
+ * block commit the count with one wait tick and press. A first press that
+ * really was refused costs one more before it is believed; every later one is
+ * believed at once.
+ */
+function readLockRefusals(step: MacroStep, obs: ScriptObservation, mem: MacroMemory) {
+  const count = refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0;
+  const seen = num(mem, "lockRefusalsSeen");
+  return { count, unread: seen === null && count > 0, fresh: seen !== null && count > seen };
+}
+
 // Salvage the grid, nearest wreck first: lock it, send the salvage drones at it,
 // run any fitted salvagers on it. Done (drones home) when no wrecks remain.
 // Salvaging any wreck is legal — only LOOTING is gated.
-const salvageWrecks: MacroDecider = (_step, obs, mem) => {
+const salvageWrecks: MacroDecider = (step, obs, mem) => {
+  const lockRefusals = readLockRefusals(step, obs, mem);
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Salvaging", ACTING, false, mem);
@@ -3079,7 +3110,26 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
   const locked = (obs.lockedTargetIDs ?? []).includes(wreckID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
-      return tick({ kind: "lock", targetID: wreckID }, "Locking the wreck.", "Salvaging", ACTING, true, { ...mem, lockIssued: true, waited: 0 });
+      // See `readLockRefusals`: the flag below is never set by a press that was
+      // refused, so the refusal is read here, before pressing again.
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Salvaging", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
+      if (lockRefusals.fresh) {
+        // The timed wait below, exactly what a refused lock got before 2fd4a77.
+        return tick(WAIT, "Waiting for the lock.", "Salvaging", ACTING, true, {
+          ...mem,
+          lockIssued: true,
+          waited: 0,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      return tick({ kind: "lock", targetID: wreckID }, "Locking the wreck.", "Salvaging", ACTING, true, {
+        ...mem,
+        lockIssued: true,
+        waited: 0,
+        lockRefusalsSeen: 0,
+      });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
     if (waited > MAX_LOCK_WAIT_TICKS) {
@@ -3731,6 +3781,7 @@ function fightRatsLadder(
   role: SquadRoleArg,
   verdict: SiteVerdict,
 ): MacroTick {
+  const lockRefusals = readLockRefusals(step, obs, mem);
   if (hostiles.length === 0) {
     // ⚠ AN EMPTY GRID IS READ THREE TIMES BEFORE IT IS BELIEVED, and the tick
     // this protects is the one right after a warp lands. Caught live on
@@ -3867,13 +3918,30 @@ function fightRatsLadder(
         jammingSourcesOf(obs),
       ) ??
       hostiles[0]!;
+    // ⚠ THE PICK AND THE PRESS ARE ONE TICK, so a refused press leaves no target
+    // in memory either and this branch runs again. See `readLockRefusals`: the
+    // refusal is read here, before pressing again.
+    if (lockRefusals.unread) {
+      return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+    }
+    if (lockRefusals.fresh) {
+      // The timed wait below, exactly what a refused lock got before 2fd4a77.
+      return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
+        ...mem,
+        targetID: primary.itemID,
+        lockIssued: true,
+        waited: 0,
+        dronesOn: null,
+        lockRefusalsSeen: lockRefusals.count,
+      });
+    }
     return tick(
       { kind: "lock", targetID: primary.itemID },
       called !== null ? "Locking what the fleet called." : "Locking the pirate at the top of the list.",
       "Fighting",
       ACTING,
       true,
-      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
+      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null, lockRefusalsSeen: 0 },
     );
   }
   const call = callPrimary(role, mem, targetID, "Calling it for the fleet.", "Fighting");
@@ -3883,11 +3951,31 @@ function fightRatsLadder(
   const locked = (obs.lockedTargetIDs ?? []).includes(targetID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
-      return tick({ kind: "lock", targetID }, "Locking the pirate.", "Fighting", ACTING, true, { ...mem, lockIssued: true, waited: 0 });
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
+      if (lockRefusals.fresh) {
+        return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
+          ...mem,
+          lockIssued: true,
+          waited: 0,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      return tick({ kind: "lock", targetID }, "Locking the pirate.", "Fighting", ACTING, true, {
+        ...mem,
+        lockIssued: true,
+        waited: 0,
+        lockRefusalsSeen: 0,
+      });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
     if (waited > MAX_LOCK_WAIT_TICKS) {
-      return tick(WAIT, "That one would not lock — picking another.", "Fighting", ACTING, true, {});
+      // The count outlives the reset: without it the next pick would find a record
+      // and no count, and spend a tick deciding the refusal it just sat out is old.
+      const seen = num(mem, "lockRefusalsSeen");
+      return tick(WAIT, "That one would not lock — picking another.", "Fighting", ACTING, true,
+        seen === null ? {} : { lockRefusalsSeen: seen });
     }
     return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, { ...mem, waited });
   }

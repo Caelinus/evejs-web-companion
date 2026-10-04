@@ -4619,3 +4619,53 @@ test("mine: a stale lock record does not hold back a rock that was just picked",
   const next = mine(mineStep, stale, picked.nextMem, {});
   assert.deepEqual(next.action, { kind: "lock", targetID: 50001 }, "the old record is not a refusal of a lock never pressed");
 });
+
+// ── A lock record with no committed count ────────────────────────────────────
+//
+// The runner drops a step's memory when the step is left and keeps the ledger,
+// so a block can start a visit facing a lock refusal it did not just cause. The
+// refused-press path itself is only visible through the real runner and is
+// tested in scriptRunnerRefusals.test.ts.
+const leftoverLock = (stepID: string) => ({ ...refusal(stepID, "lock", 0, 2), key: `${stepID}:lock:-` });
+
+test("fight: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([rat]), weaponModuleIDs: [500], refusals: [leftoverLock("f")] });
+
+  const read = fight(s, world, {}, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.equal(read.nextMem["targetID"], undefined, "no target is adopted for a lock that was never asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6661);
+
+  // One more on the ledger than the count carried: that press was refused.
+  const refused = fight(s, obs({ ...world, refusals: [{ ...leftoverLock("f"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["lockIssued"], true);
+  assert.equal(refused.nextMem["lockRefusalsSeen"], 3);
+});
+
+test("salvage: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [800], refusals: [leftoverLock("sv")] });
+  const picked: MacroMemory = { wreckID: 70001, lockIssued: false, waited: 0 };
+
+  const read = salvage(s, world, picked, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+
+  const press = salvage(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 70001);
+
+  const refused = salvage(s, obs({ ...world, refusals: [{ ...leftoverLock("sv"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["lockIssued"], true);
+});
