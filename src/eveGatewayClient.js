@@ -327,7 +327,7 @@ async function getSkills(accountID, characterID) {
   return result.skills || null;
 }
 
-// Offline status/queue and the dedicated, free-pilot Factory authority. These
+// Stock offline status/queue authority. These
 // are deliberately separate from the generic bridge-call allowlist.
 async function getCharacterStatus(accountID, characterID) {
   return getJson("/character-status", { accountID, characterID }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
@@ -335,19 +335,6 @@ async function getCharacterStatus(accountID, characterID) {
 
 async function saveOfflineSkillQueue(accountID, characterID, command) {
   return postJson("/skill-queue", { accountID, characterID, command }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
-}
-
-async function selectFactoryCharacter(accountID, characterID) {
-  const data = await postJson("/factory/session", { args: [characterID, null, true], session: { userid: accountID } }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
-  return data.outcome;
-}
-
-async function quoteFactorySkills(request) {
-  return (await postJson("/factory/quote", request, { timeoutMs: OWNER_CALL_TIMEOUT_MS })).outcome;
-}
-
-async function acquireFactorySkills(request) {
-  return (await postJson("/factory/acquire", request, { timeoutMs: OWNER_CALL_TIMEOUT_MS })).outcome;
 }
 
 // Bridge reads can be heavy on a cold gateway: map.GetStationInfo marshals the
@@ -364,6 +351,8 @@ async function acquireFactorySkills(request) {
  * See docs/bridge-wire-contract.md for the full wire contract.
  */
 async function callMethod(service, method, args = [], kwargs = null, sessionFields = {}, bridgeSessionID = undefined) {
+  if (service === "structureDirectory" && method === "GetMyAccessibleStructureServices" ||
+      service === "officeManager" && method === "RentOffice") require("./stockCompatibility").structureServices();
   const body = {
     service: String(service || ""),
     method: String(method || ""),
@@ -441,7 +430,6 @@ async function releaseBridgeSession(bridgeSessionID, sessionFields = undefined) 
   const data = await postJson("/session/release", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
   return {
     released: data.released === true,
-    offline: data.offline === true,
     characterID: data.characterID === undefined ? null : data.characterID,
   };
 }
@@ -792,11 +780,6 @@ function openSessionEventStream(options = {}) {
 }
 
 module.exports = {
-  async getProvisioningObservation(accountID, characterID = null, source = { kind: "hangar" }) {
-    const result = await getJson("/provisioning-observation", { accountID, characterID, sourceKind: source.kind,
-      corporationID: source.corporationID, division: source.division }, { timeoutMs: 5000 });
-    return result.projection;
-  },
   EveGatewayError,
   openSessionEventStream,
   // Bridge surface (the live path): the retail call tuple, bound objects, the
@@ -824,7 +807,4 @@ module.exports = {
   getSkills,
   getCharacterStatus,
   saveOfflineSkillQueue,
-  selectFactoryCharacter,
-  quoteFactorySkills,
-  acquireFactorySkills,
 };

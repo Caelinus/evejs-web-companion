@@ -1,4 +1,0 @@
-runtime-patches/*.patch whitespace=-blank-at-eol
-runtime-patches/mining-support-services.patch text eol=lf
-runtime-patches/miningSupportProjection.js text eol=lf
-runtime-patches/miningRangeProjection.js text eol=lf

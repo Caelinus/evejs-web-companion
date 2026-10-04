@@ -38,7 +38,7 @@
 
 <main class="center">
   <header><h1>Ship Provisioning Center</h1><p>Account-wide Review and Provision</p><a href="/">Return to pilot workspace</a></header>
-  <p>Review never selects a pilot. Apply temporarily acquires only a free pilot, revalidates the accepted plan, provisions through the shared engine, then releases control.</p>
+  <p>Offline Review and Apply are unavailable on stock EveJS. Select the pilot in its workspace and use Ready Fit, Provision Ship or Replenish. Historical operation records remain readable.</p>
   {#if !token}
     <form onsubmit={e=>{e.preventDefault();void run(login);}}><label>Account<input bind:value={username} autocomplete="username" /></label><label>Password<input type="password" bind:value={password} autocomplete="current-password" /></label><button disabled={busy || !username}>Sign in for read-only Review</button></form>
   {:else}
@@ -84,9 +84,8 @@
           <p>Unsupported: {detail.applyReview.plan.unsupported.join(" · ") || "none"}. Shortages: {detail.applyReview.plan.shortages.join(" · ") || "none"}. Destructive actions: {detail.applyReview.plan.destructiveActions.join(" · ") || "none"}.</p>
         {/if}
         <p>Supplies policy: NEW HULL ONLY. New hull provisioning loads declared deficits; an exact existing ship is a no-op, even when supplies remain LOW. Use the held-pilot Replenish action for a separate top-up.</p>
-        <p>Apply authority: free-only acquisition required; source/Take revalidated after acquisition. Offline FREE and Query visibility do not grant mutation authority.</p>
-        <p>{detail.applyReview.canApply ? "READY FOR APPLY · complete supported plan; selected-session revalidation still required" : detail.applyReview.reasons.join(" · ")}</p>
-        <button disabled={busy || !detail.applyReview.canApply} onclick={()=>void run(apply)}>Apply accepted plan</button>
+        <p>Apply unavailable: stock EveJS does not provide the required offline observation and control authority. Use the selected pilot workspace.</p>
+        <button disabled onclick={()=>void run(apply)}>Apply accepted plan</button>
         {#each detail.pendingApply as operation}<p>Recovery: {operation.state} · {operation.reason || "pending ownership/custody proof"} <button disabled={busy} onclick={()=>void run(()=>recover(operation.operationID))}>Reconcile control without reacquiring</button></p>{/each}
       </section>
     {/if}

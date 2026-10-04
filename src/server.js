@@ -128,7 +128,6 @@ const store = options.eveStore || eveStore;
 let replenishment;
 const mutationFence = createPilotMutationFence({ heldSessions: { values: () => bridgeSessions.values() },
   assertWritable: (pilot, lease) => replenishment?.assertWritable(pilot, lease),
-  assertSelectable: pilot => replenishment.assertSelectable(pilot),
   enterWrite: (pilot, lease) => replenishment.enterWrite(pilot, lease) });
 const gateway = mutationFence.wrap(options.eveGatewayClient || eveGatewayClient);
 const auth = options.webAuth || webAuth;
@@ -804,7 +803,9 @@ for (const action of ["review", "apply", "recover"]) app.post(`/api/pilot-traini
 });
 
 const miningPreparation = options.miningPreparation || require("./miningPreparation").createMiningPreparation({
-  store, readReview: provisioningCenter.readReview, engine: replenishment, data: staticData, bots: () => botHost.listAll(),
+  store, readDefinitions: (accountID,input) => require("./provisioningRoutes").readProvisioningDefinitions({
+    store,gateway,data:staticData,accountID,providerCharacterID:input.providerCharacterID,supplyPolicy:input.supplyPolicy }),
+  engine: replenishment, data: staticData, bots: () => botHost.listAll(),
   readSkills: (accountID, characterID) => gateway.getSkills(accountID, characterID),
   currentRun: operationID => miningOperations.runtimeFor(operationID)?.operationRunID ||
     botHost.listAll().find(b=>b.operationID===operationID && !b.endedAt)?.operationRunID,
@@ -1182,11 +1183,10 @@ async function selectHeldCharacter(webSessionID, account, characterID, { assertC
   assertCurrent();
   const accountID = Number(account.accountID);
   const pendingCustody = replenishment.unresolved(characterID).length > 0;
-  if (pendingCustody && typeof gateway.selectFactoryCharacter !== "function")
+  if (pendingCustody)
     throw Object.assign(new Error("Free-only custody recovery selection is unavailable; pilot control remains fenced."),
       { code: "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE", statusCode: 409 });
-  const outcome = pendingCustody ? await mutationFence.withCustodySelection(characterID,
-    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : await gateway.selectCharacter(
+  const outcome = await gateway.selectCharacter(
     [characterID, null, true], null,
     { userid: Number(account.accountID), userName: String(account.username || "") },
   );
@@ -15207,13 +15207,7 @@ async function assertStructureDockAccess(held, webSessionID, structureID) {
 }
 
 async function assertStructureService(held, webSessionID, structureID, serviceID) {
-  await assertStructureDockAccess(held, webSessionID, structureID);
-  const result = await heldTopLevelCall(held, webSessionID, "structureDirectory",
-    "GetMyAccessibleStructureServices", [structureID], null);
-  if (!structureServiceIDsFromList(result.result).includes(serviceID)) {
-    throw Object.assign(new Error("The required structure service is unavailable."),
-      { code: "STRUCTURE_SERVICE_UNAVAILABLE", statusCode: 409 });
-  }
+  require("./stockCompatibility").structureServices();
 }
 
 async function operationStructureAccessCall(req, method, args, characterID = 0) {
@@ -15292,8 +15286,7 @@ app.get("/api/dockable-structures/:id/services", requireAuth, async (req, res, n
     if (!structureIDsFromList(checked.result).includes(id)) {
       res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
     }
-    const result = await operationStructureAccessCall(req, "GetMyAccessibleStructureServices", [id], characterID);
-    res.json({ ok: true, structureID: id, serviceIDs: structureServiceIDsFromList(result.result) });
+    require("./stockCompatibility").structureServices();
   } catch (error) { next(error); }
 });
 
@@ -15308,7 +15301,7 @@ app.post("/api/bridge/corp-office/rent-at-structure", requireAuth, async (req, r
     }
     let officeID = await readCorpOffice(held, req.webSessionID);
     if (!officeID) {
-      await heldTopLevelCall(held, req.webSessionID, "officeManager", "RentOffice", [], null);
+      require("./stockCompatibility").structureServices();
       officeID = await readCorpOffice(held, req.webSessionID);
     }
     if (!officeID) { res.status(409).json({ ok: false, error: "CORP_OFFICE_RENT_UNCONFIRMED" }); return; }
@@ -19822,7 +19815,7 @@ for (const action of ["review", "acquire"]) {
   app.post(`/api/pilot-training/skills/${action}`, requireTrainingAuth, async (req, res, next) => {
     try {
       const body = req.body || {};
-      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body, await factoryFunding(body));
+      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body);
       res.json({ ok: true, outcome });
     } catch (error) {
       if (error.cleanup?.some((row) => !row.released)) {
@@ -22460,8 +22453,10 @@ app.get("/api/mining-operations/preparation-options", requireAuth, async (req,re
     if (!account || account.banned || !await store.getCharacterForAccount(account.accountID,characterID))
       throw Object.assign(new Error("Account-owned pilot unavailable."),{code:"CHARACTER_NOT_FOUND",statusCode:409});
     const source = req.query.sourceKind==="corp" ? {kind:"corp",corporationID:Number(req.query.corporationID),division:Number(req.query.division)} : {kind:"hangar"};
-    const detail=await provisioningCenter.readReview(account.accountID,{characterID,providerCharacterID,fittingID:0,source});
-    res.json({ok:true,definitions:detail.definitions,pilot:detail.pilot,candidateSource:detail.candidateSource});
+    const definitions=await require("./provisioningRoutes").readProvisioningDefinitions({store,gateway,data:staticData,
+      accountID:account.accountID,providerCharacterID});
+    res.json({ok:true,definitions,pilot:{characterID,control:{state:"UNKNOWN"},quality:"UNAVAILABLE"},
+      candidateSource:{...source,quality:"UNAVAILABLE",query:"UNKNOWN",take:"UNKNOWN",rows:[],revalidateOnApply:true}});
   } catch(error) { next(error); }
 });
 async function withMiningPreparationPlan(definition,plan,req) {
@@ -22537,7 +22532,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
             allianceID: character.allianceID || 0 };
           try {
             const [services, offices] = await Promise.all([
-              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [parkingStructure.id], null, context),
+              require("./stockCompatibility").structureServices(),
               gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
             ]);
             if (!structureIDsFromList(services.result).includes(3) ||
@@ -22584,7 +22579,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
               return;
             }
             const [services, offices] = await Promise.all([
-              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [deliveryStructure.id], null, context),
+              require("./stockCompatibility").structureServices(),
               gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
             ]);
             if (!structureIDsFromList(services.result).includes(3) ||

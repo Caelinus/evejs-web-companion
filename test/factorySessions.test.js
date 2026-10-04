@@ -7,8 +7,8 @@ function harness() {
   const store = { async listCharactersForAccount(id) { return id === 1 ? [{ characterID: 9 }] : [{ characterID: 10 }]; } };
   const gateway = {
     async getCharacterStatus(a, id) { return { characterID: id, online: owner !== "offline", controlState: owner }; },
-    async selectFactoryCharacter(a, id) { calls.push(["select", id]); owner = "retail_client"; return { bridgeSessionID: `handle${id}`, session: { characterID: id } }; },
-    async releaseBridgeSession(id, fields) { calls.push(["release", id, fields.userid]); if (badRelease) throw new Error("timeout"); owner = "offline"; return { released: true, offline: true }; },
+    async selectCharacter(args, _, fields) { const [id]=args;assert.deepEqual(args,[id,null,true]);assert.equal(fields.userid,1);calls.push(["select", id]); owner = "retail_client"; return { bridgeSessionID: `handle${id}`, session: { characterID: id } }; },
+    async releaseBridgeSession(id, fields) { calls.push(["release", id, fields.userid]); if (badRelease) throw new Error("timeout"); owner = "offline"; return { released: true }; },
   };
   const session = createFactorySessions({ store, gateway, operations, heldSessions: held, botHost: { claimedBy: () => claim } });
   return { session, calls, operations, held, gateway, ref: { account: { accountID: 1 }, characterID: 9 },
@@ -45,7 +45,7 @@ test("cross-account pilot refused before selection", async () => {
   const h = harness(); await assert.rejects(h.session.withSessions([{...h.ref, account:{accountID:2}}], () => assert.fail())); assert.deepEqual(h.calls,[]);
 });
 test("released handle with pilot still online never enables offline queue handoff", async () => {
-  const h = harness(); h.gateway.releaseBridgeSession = async () => ({ released:true, offline:false });
+  const h = harness(); h.gateway.releaseBridgeSession = async () => ({ released:true });
   const out = await h.session.withSessions([h.ref], () => "done"); assert.equal(out.cleanup[0].released,false);
   assert.equal((await h.session.status(h.ref.account,9)).owner,"RECOVERY");
 });
@@ -53,4 +53,10 @@ test("same-character reservation prevents overlap", async () => {
   const h = harness(); let done; const first = h.session.withSessions([h.ref], () => new Promise(r => { done=r; }));
   while (!done) await new Promise(r => setImmediate(r));
   await assert.rejects(h.session.withSessions([h.ref], () => assert.fail())); done("done"); await first; assert.equal(h.calls.length,2);
+});
+
+test("offline provisioning is refused before acquisition even if private Factory methods are supplied", async () => {
+  const h=harness();h.gateway.selectFactoryCharacter=()=>assert.fail("Retired private authority");
+  await assert.rejects(h.session.withSessions([h.ref],()=>assert.fail(),{purpose:"PROVISIONING"}),{code:"PROVISIONING_OFFLINE_AUTHORITY_UNAVAILABLE"});
+  assert.deepEqual(h.calls,[]);assert.equal(h.operations.size,0);
 });

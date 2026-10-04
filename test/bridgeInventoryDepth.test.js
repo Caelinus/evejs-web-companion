@@ -1107,7 +1107,7 @@ test("strict route deposit confirms exact source loss and exact corporation divi
     item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 20);
 });
 
-test("strict corporation delivery at a structure binds its office and exact division", async () => {
+test("strict corporation delivery at a structure refuses unavailable services and preserves stock", async () => {
   const structureID = 1_030_000_000_021;
   const gateway = fakeGateway({ structureID, officeRows: [{ officeID: OFFICE_PUBLISHED_ID, stationID: structureID }], items: fixtureItems() });
   const { baseUrl } = await startTestServer({ gateway });
@@ -1116,11 +1116,12 @@ test("strict corporation delivery at a structure binds its office and exact divi
   const moved = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
     itemIDs: [300], qty: 20, from: { kind: "cargo" }, to: { kind: "corp", division: 2 }, haulContract: contract,
   } });
-  assert.equal(moved.response.status, 200, JSON.stringify(moved.payload));
-  assert.equal(moved.payload.transferStatus, "SUCCESS");
-  assert.equal(gateway.world.get(300).quantity, 40);
+  assert.equal(moved.response.status, 409, JSON.stringify(moved.payload));
+  assert.equal(moved.payload.error, "STRUCTURE_SERVICE_AUTHORITY_UNAVAILABLE");
+  assert.equal(gateway.calls.boundCall.some(call => call.method === "Add"), false);
+  assert.equal(gateway.world.get(300).quantity, 60);
   assert.equal([...gateway.world.values()].filter((item) => item.locationID === OFFICE_CONTENT_LOCATION_ID &&
-    item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 20);
+    item.flagID === FLAG_DIVISION_2 && item.typeID === 34).reduce((n, item) => n + item.quantity, 0), 0);
   const wrongKind = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", { method: "POST", body: {
     itemIDs: [300], qty: 10, from: { kind: "cargo" }, to: { kind: "corp", division: 2 },
     haulContract: { ...contract, locationKind: "station", sourceQuantity: 40 },

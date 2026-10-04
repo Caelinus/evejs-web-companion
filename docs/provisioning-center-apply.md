@@ -1,34 +1,7 @@
-# Standalone free-pilot Apply
+# Provisioning Center Apply
 
-Offline FREE is observation, not mutation authority. Server-side accepted intent
-is account-bound and pins definition/equipment/supply identity, pilot/hull/dock
-and exact source stock. Apply acquires a legitimate free-only Factory session,
-pins its generation, re-reads offline and selected evidence, and revalidates
-source/Take before invoking the same `reviewShip`/`applyShip` engine.
+Offline Center Apply and Training Provision Equipment are deliberately unavailable on stock EveJS. They previously required a complete offline projection and private free-only acquisition. A normal snapshot or ordinary retail selection cannot substitute for those contracts.
 
-Busy, changed fitting/stock/authority and unresolved recovery refuse. Strict
-corporation source never falls back. An exact existing ship is ALREADY_SATISFIED:
-zero new hull/module/supply target loading. This policy loads supplies for new
-hulls; separate Replenish handles an existing ship's deficit.
+The selected-session Ready Fit/Provision Ship/Replenish paths remain supported at NPC stations. They retain exact fitting, context, generation, source Query/Take, inventory readback, mutation and custody proofs. MCC uses the same engine under its final hosted owner before the aggregate MAIN barrier.
 
-`provisioning-center-control.json` records invocation/control/release evidence,
-not another ownership registry. Phase5 custody remains mutation authority.
-Unknown release is BLOCKED even when provisioning succeeded. Restart recovery
-only observes; it never blindly reacquires or reprovisions. One writer per
-writable data directory remains required. Factory Training defaults and runtime
-CEO exclusion are preserved.
-
-A memory-only consumer callback may add read-only policy revalidation after the
-shared acquisition/barrier. It cannot replace the engine or authorize restart
-replay. Consumer-bound requests cannot substitute another consumer's intent.
-
-Farmer customs-export ownership probes may recognize only their exact private
-reservation while it remains in both reservation maps. Other reservations,
-unresolved custody, hosted/browser/retail owners and offline proof remain gated.
-No exception is granted by matching an operation-name string.
-
-Accepted live evidence covers offline/corporation Apply, BUSY/race, source/Take
-drift, repeat no-op, controlled acquisition interruption and ambiguous release.
-Exact live selected-fitting drift remains unqualified because existing QA
-mutation plumbing was unavailable; the production-path deterministic refusal
-passes. No new fitting-edit product API was added for QA.
+Existing Center control journals are retained. Their operation endpoint reports historical state; release recovery proves exact character offline and removes only its own recovery reservation. An unresolved transfer remains fenced. No new offline invocation or replay is permitted. See [stock integration policy](stock-evejs-integration-policy.md).

@@ -273,12 +273,12 @@ test("a dock at a NEW station re-targets station-scoped reads (held station sync
   );
 });
 
-test("structure personal hangar uses structureID and verifies both sides of load and unload", async () => {
+test("structure personal hangar stays unknown and load/unload refuse unavailable service authority", async () => {
   const structureID = 1_030_000_000_011;
   const FLAG_HANGAR = 4, FLAG_CARGO = 5;
   const placement = new Map([[100, { flag: FLAG_HANGAR, quantity: 5, typeID: 34 }],
     [101, { flag: FLAG_CARGO, quantity: 3, typeID: 35 }]]);
-  let serviceOnline = true, permitMove = true;
+  let permitMove = true;
   const gateway = fakeGateway();
   const select = gateway.selectCharacter.bind(gateway);
   gateway.selectCharacter = async (...args) => {
@@ -287,8 +287,10 @@ test("structure personal hangar uses structureID and verifies both sides of load
   };
   gateway.readFlightStatus = async () => ({ flight: { docked: true, inSpace: false, stationID: null,
     structureID, solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] });
-  gateway.callMethod = async (_service, method) => ({ result: { type: "list", items:
-    method === "CheckMyDockingAccessToStructures" ? [structureID] : method === "GetMyAccessibleStructureServices" ? (serviceOnline ? [1, 2, 3] : []) : [] }, notifications: [] });
+  gateway.callMethod = async (_service, method) => {
+    if (method === "GetMyAccessibleStructureServices") assert.fail("Private service authority must not be called");
+    return { result: { type: "list", items: method === "CheckMyDockingAccessToStructures" ? [structureID] : [] }, notifications: [] };
+  };
   gateway.callBoundMethod = async (service, method, args, kwargs, sessionFields, bridgeSessionID, boundHandle) => {
     gateway.calls.boundCall.push({ service, method, args, kwargs, sessionFields, bridgeSessionID, boundHandle });
     if (method === "Add") {
@@ -306,29 +308,24 @@ test("structure personal hangar uses structureID and verifies both sides of load
   const { baseUrl } = await startTestServer({ gateway });
   await selectOnServer(baseUrl);
   const panel = await apiRequest(baseUrl, "/api/bridge/inventory");
-  assert.equal(panel.response.status, 200);
-  assert.equal(panel.payload.stationID, null);
-  assert.equal(panel.payload.structureID, structureID);
-  assert.ok(gateway.calls.bind.some((bind) => bind.method === "GetInventory" && bind.args[0] === structureID));
+  assert.equal(panel.response.status, 409);
+  assert.equal(panel.payload.error, "STRUCTURE_SERVICE_AUTHORITY_UNAVAILABLE");
+  assert.equal(gateway.calls.bind.some((bind) => bind.method === "GetInventory" && bind.args[0] === structureID), false);
   const scriptedFit = await apiRequest(baseUrl, "/api/bridge/inventory/fit-fitting", { method: "POST",
     body: { shipID: ACTIVE_SHIP_ID, sourceLocationID: structureID, modulesByFlag: {}, confirm: true } });
   assert.equal(scriptedFit.response.status, 409, "scripted fitting remains station-only");
   assert.equal(gateway.calls.boundCall.some((call) => call.method === "FitFitting"), false);
-  serviceOnline = false;
   const offline = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID: 100, direction: "toCargo" } });
-  assert.equal(offline.response.status, 409, "offline docking/personal-inventory service blocks mutation");
-  serviceOnline = true;
-  permitMove = false;
-  const unconfirmed = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID: 100, direction: "toCargo" } });
-  assert.equal(unconfirmed.response.status, 409, "an Add acknowledgement is not delivery proof");
-  permitMove = true;
-  for (const [itemID, direction, finalFlag] of [[100, "toCargo", FLAG_CARGO], [101, "toHangar", FLAG_HANGAR]]) {
+  assert.equal(offline.response.status, 409);
+  assert.equal(offline.payload.error, "STRUCTURE_SERVICE_AUTHORITY_UNAVAILABLE");
+  for (const [itemID, direction] of [[100, "toCargo"], [101, "toHangar"]]) {
     const moved = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST", body: { itemID, direction } });
-    assert.equal(moved.response.status, 200, JSON.stringify(moved.payload));
-    assert.equal(placement.get(itemID).flag, finalFlag);
+    assert.equal(moved.response.status, 409, JSON.stringify(moved.payload));
+    assert.equal(moved.payload.error, "STRUCTURE_SERVICE_AUTHORITY_UNAVAILABLE");
   }
-  assert.ok(gateway.calls.boundCall.filter((call) => call.method === "List").length >= 8,
-    "source and destination were reread after each mutation");
+  assert.equal(placement.get(100).flag, FLAG_HANGAR);
+  assert.equal(placement.get(101).flag, FLAG_CARGO);
+  assert.equal(gateway.calls.boundCall.some(call => call.method === "Add"), false);
 });
 
 test("ambiguous docked flight cannot reuse the previously held hangar location", async () => {

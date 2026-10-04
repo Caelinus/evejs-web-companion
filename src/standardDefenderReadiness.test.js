@@ -67,12 +67,13 @@ test("skills missing or unreadable fail closed", () => {
 test("incomplete fit observation cannot be classified READY", () => {
   assert.equal(check({...observation,complete:false}).state,"BLOCKED");
 });
-test("Defender participates in ordinary preparation; held/custody pilot is blocked before MAIN", async () => {
-  const detail={selected:contract,status:{equipment:"VERIFIED",supplies:"FULL",targets:[]},pilot:{accountID:1,characterID:11,
-    quality:"COMPLETE",dockState:"DOCKED",observation,control:{state:"RECOVERY"}},
-    candidateSource:{quality:"COMPLETE",query:"ALLOWED",take:"ALLOWED",rows:[]}};
+test("Defender configuration alone cannot claim physical readiness or start productive work", async () => {
+  const detail={status:"READY",corporationID:20,contracts:[{...contract,definition:{fittingID:4},
+    definitionFingerprint:"definition",equipmentFingerprint:"equipment",supplyPolicyFingerprint:"supply"}]};
   const preparation=createMiningPreparation({store:{getAccount:async()=>({accountID:1}),getCharacterForAccount:async()=>true},
-    readReview:async()=>detail,readSkills:async()=>sheet,data,engine:{unresolved:()=>[{}]}});
+    readDefinitions:async()=>detail,readSkills:async()=>{assert.fail("Plan must not fabricate final owner readiness");},data,engine:{unresolved:()=>[{}]}});
   const plan=await preparation.plan({operationID:"op",members:[{role:"DEFENDER",accountName:"owned",characterID:11}]});
-  assert.equal(plan.state,"BLOCKED");assert.equal(plan.members.length,1);assert.match(plan.members[0].reason,/RECOVERY/);
+  assert.equal(plan.state,"READY");assert.equal(plan.members.length,1);
+  assert.equal(plan.members[0].state,"PENDING");assert.equal(plan.members[0].equipment,"UNKNOWN");
+  assert.match(plan.members[0].reason,/final hosted owner must verify/);
 });

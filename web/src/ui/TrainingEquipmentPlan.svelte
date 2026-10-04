@@ -6,7 +6,7 @@
 </script>
 <section aria-label="Equipment provisioning plan">
   <h3>Manual Provision Equipment</h3>
-  <p class="note">Review does not select a pilot. Apply acquires only a free non-CEO pilot, revalidates, uses the shared Provision Ship engine and releases control. Skills, funding, corporation onboarding and Home are separate actions.</p>
+  <p class="note">Offline equipment Review and Provision Equipment are unavailable on stock EveJS. Select the pilot and use Ready Fit, Provision Ship or Replenish in its workspace. Training qualification and queue actions remain available.</p>
   {#if message}<p role="status">{message}</p>{/if}
   {#if review}
     {@const detail = review.detail}
@@ -20,8 +20,8 @@
     <p>Supplies: {detail.status.supplies}. LOW supplies do not invalidate structural readiness.</p>
     <ul>{#each detail.status.targets as target}<li>{target.name}: {target.current ?? "UNKNOWN"} / {target.target} · {target.state}</li>{/each}</ul>
     <details><summary>Observed source stock</summary><ul>{#each detail.candidateSource.rows as row}<li>{row.name} × {row.quantity}</li>{/each}</ul></details>
-    {#if accepted.reasons.length}<p role="status">Apply unavailable: {accepted.reasons.join(" · ")}</p>{:else}<p>Ready for Apply: free-only acquisition and fresh revalidation are still required.</p>{/if}
-    <button type="button" disabled={busy || !accepted.canApply} onclick={onApply}>Provision Equipment</button>
+    <p role="status">Apply unavailable on stock EveJS. {accepted.reasons.join(" · ")}</p>
+    <button type="button" disabled onclick={onApply}>Provision Equipment</button>
   {/if}
   {#if outcome}<p role="status">{outcome.state} · {outcome.reason || ""} · Equipment {outcome.finalReview?.status.equipment || "UNKNOWN"} · Supplies {outcome.finalReview?.status.supplies || "UNKNOWN"} · Control release: {outcome.release.state}</p>
     {#if outcome.state === "BLOCKED"}<button class="minor" disabled={busy} onclick={() => onRecover(outcome.operationID)}>Reconcile control release</button>{/if}

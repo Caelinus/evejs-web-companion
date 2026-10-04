@@ -27,7 +27,12 @@ const grant = { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 10 };
 const idle = { status: "idle", phase: null, why: null, startError: null };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
-async function harness(t, { factory = "forbidden" } = {}) {
+async function harness(t, { factory = "forbidden", mcc = false } = {}) {
+  const botScript=mcc?{...script,doc:{program:[
+    {kind:"macro",macro:"mine-at-belt",args:{belt:{kind:"belt",belt:{mode:"nearest"}}}},
+    {kind:"macro",macro:"deliver-ore",args:{}}]}}:script;
+  const object=fields=>({type:"object",args:{type:"dict",entries:Object.entries(fields)}});
+  const stockRow=(itemID,typeID,quantity,locationID,flagID,singleton=0)=>({type:"packedrow",fields:{itemID,typeID,quantity,locationID,flagID,singleton,ownerID:characterID}});
   const calls = [], sessions = new Map(), probes = [], starts = [];
   const hosted = { token: null, secret: null };
   const startupRuns = require("../src/startupRuns").createStartupRuns();
@@ -41,7 +46,7 @@ async function harness(t, { factory = "forbidden" } = {}) {
       if (behavior.afterStatusHook) await behavior.afterStatusHook();
       return status;
     },
-    async readFlightStatus() { return { flight: { docked: true, inSpace: false, shipID: 9001, stationID: 60000004 } }; },
+    async readFlightStatus() { return { flight: { docked: true, inSpace: false, shipID: 9001, shipTypeID:100, stationID: 60000004 } }; },
     async selectCharacter(args) {
       calls.push(["select", args[0]]);
       if (behavior.selectFailure) throw Object.assign(new Error("Selection refused."), { code: "CALL_REFUSED" });
@@ -52,7 +57,8 @@ async function harness(t, { factory = "forbidden" } = {}) {
         calls.push(["retail-takeover"]); behavior.retailBusy = false;
       }
       const bridgeSessionID = `test-bridge-${++serial}`;
-      const outcome = { bridgeSessionID, session: { characterID: args[0], shipID: 9001, stationID: 60000004, solarSystemID: 30000001 }, notifications: [] };
+      const outcome = { bridgeSessionID, session: { characterID: args[0], shipID: 9001, stationID: 60000004, solarSystemID: 30000001,
+        ...(mcc?{corporationID:900}: {}) }, notifications: [] };
       sessions.set(bridgeSessionID, outcome);
       if (behavior.selectOutcomeHook) await behavior.selectOutcomeHook(outcome);
       return outcome;
@@ -68,7 +74,18 @@ async function harness(t, { factory = "forbidden" } = {}) {
       if (behavior.releaseGone) { sessions.delete(id); throw Object.assign(new Error("Already released."), { code: "SESSION_NOT_FOUND" }); }
       sessions.delete(id); return { released: true, offline: sessions.size === 0 };
     },
-    async callMethod() { return { result: {}, notifications: [] }; },
+    async callMethod(service,method) {
+      if(mcc && service==="corpFittingMgr" && method==="GetFittings") return {result:{type:"dict",entries:[[1,object({
+        fittingID:1,ownerID:900,shipTypeID:100,name:"Stock exact miner",savedDate:{type:"long",value:"123"},
+        fitData:{type:"list",items:[{type:"tuple",items:[200,27,1]}]} })]]}};
+      return { result: {}, notifications: [] };
+    },
+    async bindObject() { return {boundHandle:"stock-inventory"}; },
+    async callBoundMethod(_service,method) {
+      if(method==="ListByFlags") {calls.push(["selected-equipment"]);return {result:{type:"list",items:[stockRow(500,200,1,9001,27,1)]}};}
+      if(method==="List") return {result:{type:"list",items:[]}};
+      throw new Error(`Unexpected stock preparation call ${method}`);
+    },
     openSessionEventStream() { return { close() {} }; },
   };
   if (factory === "absent") delete gateway.selectFactoryCharacter;
@@ -131,8 +148,10 @@ async function harness(t, { factory = "forbidden" } = {}) {
           if (behavior.characterLookupHook) await behavior.characterLookupHook();
           return id === account.accountID && pilot === characterID ? { characterID, characterName: "Test Pilot" } : null;
         },
-        listCharactersForAccount: async () => [{ characterID, characterName: "Test Pilot" }] },
-      botScriptStore: { get: id => id === script.scriptID ? script : null, list: () => [script] } });
+        listCharactersForAccount: async () => [{ characterID, characterName: "Test Pilot",accountID:account.accountID,corporationID:900 }] },
+      ...(mcc?{staticData:{...require("../src/staticData"),getType:id=>({100:{categoryID:6,groupID:25},200:{categoryID:7,groupID:54}})[id],getTypeName:id=>`Type ${id}`,
+        getSolarSystem:id=>({solarSystemID:id,solarSystemName:"Stock system"})}}:{}),
+      botScriptStore: { get: id => id === script.scriptID ? botScript : null, list: () => [botScript] } });
   } finally { hostModule.createBotHost = makeHost; }
   const reservationMap = operations;
   const originalStart = app.locals.botHost.start;
@@ -158,9 +177,31 @@ async function harness(t, { factory = "forbidden" } = {}) {
       assert.equal(ready.status, 200);
     },
     probe: (...args) => ownershipProbe(...args), hook: fn => { probeHook = fn; }, post,
+    get:async route=>{const response=await fetch(baseUrl+route,{headers:{authorization:`Bearer ${token}`}});return {status:response.status,body:await response.json()};},
     start: credential => post("/api/bots/start", { characterID, scriptID: script.scriptID, grant }, credential),
     stop: botID => post(`/api/bots/${botID}/stop`) };
 }
+
+test("public MCC Start uses stock definitions and final selected equipment before real hosted MAIN without private endpoints",async t=>{
+  const h=await harness(t,{mcc:true,factory:"absent"});
+  const saved=await h.post("/api/mining-operations",{name:"Stock operation",unloadPolicy:"SELF_UNLOAD",
+    area:{anchorSystemID:30000001,anchorSystemName:"Stock system",reach:"CURRENT_SYSTEM",targetClasses:["BELT"]},
+    members:[{characterID,characterName:"Test Pilot",accountName:account.username,role:"MINER",routineMode:"CUSTOM",automationID:script.scriptID}]});
+  assert.equal(saved.status,200,JSON.stringify(saved.body));const id=saved.body.definition.operationID;
+  const plan=await h.get(`/api/mining-operations/${id}/launch-plan`);assert.equal(plan.status,200,JSON.stringify(plan.body));
+  assert.equal(plan.body.preparation.members[0].equipment,"UNKNOWN");assert.equal(h.calls.some(([name])=>name==="selected-equipment"),false);
+  const started=await h.post(`/api/mining-operations/${id}/start`,{planHash:plan.body.planHash,grants:{[characterID]:grant}});
+  assert.equal(started.status,200,JSON.stringify(started.body));
+  let bot;const deadline=Date.now()+2000;
+  do { bot=h.app.locals.botHost.listAll().find(b=>b.operationID===id&&!b.endedAt);
+    if(["VERIFIED","BLOCKED","RECOVERY_REQUIRED"].includes(bot?.preparation?.state))break;
+    await new Promise(resolve=>setTimeout(resolve,5));
+  } while(Date.now()<deadline);
+  assert.equal(bot.preparation.state,"VERIFIED",JSON.stringify({started:started.body,bot,calls:h.calls}));assert.equal(bot.preparation.equipment,"VERIFIED");
+  assert.equal(h.calls.some(([name])=>name==="run"),true);assert.equal(h.calls.findIndex(([name])=>name==="selected-equipment")<h.calls.findIndex(([name])=>name==="run"),true);
+  assert.equal((await h.post(`/api/mining-operations/${id}/stop`)).status,200);
+  assert.equal(h.app.locals.botHost.claimedBy(characterID),null);assert.equal(h.sessions.size,0);assert.equal(h.reservations.size,0);
+});
 
 for (const factory of ["absent", "forbidden"])
   test(`stock compatibility: public hosted Start and Stop with Factory ${factory}`, async t => {
@@ -273,8 +314,8 @@ test("public Start permits its exact private reservation through the real host o
   assert.equal(h.sessions.size, 0); assert.equal(h.app.locals.botHost.claimedBy(characterID), null);
 });
 
-for (const changed of [false, true]) test(`Factory custody contract: exact same-run resume, custody changed after probe=${changed}`, async t => {
-  const h = await harness(t, { factory: "allowed" }), operationID = "custody-operation", operationRunID = "custody-run", logicalRunID = "custody-logical";
+for (const changed of [false, true]) test(`stock custody boundary: same-run reacquisition refuses, custody changed after probe=${changed}`, async t => {
+  const h = await harness(t), operationID = "custody-operation", operationRunID = "custody-run", logicalRunID = "custody-logical";
   const operationPreparation = { version: 1, operationID, accountID: account.accountID, characterID, input: { source: { kind: "hangar" } } };
   const scriptHash = require("node:crypto").createHash("sha256")
     .update(JSON.stringify({ format: doc.format, program: doc.program, version: doc.version })).digest("hex");
@@ -291,18 +332,15 @@ for (const changed of [false, true]) test(`Factory custody contract: exact same-
     scriptName: script.name, scriptRev: 1, doc, grant, resumed: true, logicalRunID, operationID, operationRunID,
     operationRole: "MINER", operationPreparation, deferMain: true,
     beforeStart: () => { if (changed) pending = [{ key: "foreign-custody", accountID: account.accountID }]; } });
-  if (changed) {
-    assert.equal(result.ok, false); assert.equal(prepared, 0);
-    assert.equal(h.calls.some(([name]) => name === "free-select" || name === "select"), false);
-    assert.equal(pending[0].key, "foreign-custody");
-    pending = []; await h.app.locals.botHost.stopAll();
-  } else {
-    assert.equal(result.ok, true, JSON.stringify(result));
-    assert.equal(prepared, 1); assert.equal(h.calls.filter(([name]) => name === "free-select").length, 1);
-    assert.equal(h.calls.some(([name]) => name === "run"), false, "MAIN remains behind its aggregate barrier");
-    assert.equal((await h.stop(result.bot.botID)).status, 200);
-    assert.equal(h.sessions.size, 0); assert.equal(h.app.locals.bridgeSessions.size, 0);
-  }
+  assert.equal(result.ok, false); assert.equal(prepared, 0);
+  assert.equal(h.calls.some(([name]) => ["free-select", "select", "forbidden-factory", "run"].includes(name)), false);
+  assert.equal(pending[0].key, changed ? "foreign-custody" : "owned-custody");
+  assert.equal(result.code, changed ? "CHARACTER_IN_USE" : "BOT_START_FAILED");
+  assert.match(result.message, /issued write needs reconciliation/);
+  assert.notEqual(h.app.locals.botHost.claimedBy(characterID), null, "unresolved custody retains its owner fence");
+  pending = []; await h.app.locals.botHost.stopAll();
+  assert.equal(h.sessions.size, 0); assert.equal(h.app.locals.bridgeSessions.size, 0);
+  assert.equal(h.app.locals.botHost.claimedBy(characterID), null);
 });
 
 test("hosted Defender retains exact MCC role/run metadata through public ownership and release", async t => {

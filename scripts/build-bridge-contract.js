@@ -1,12 +1,12 @@
 "use strict";
 
-// One checked contract shared by the two repositories. Each repository can
-// verify the half it owns without requiring the sibling checkout; when both
-// are present this generator updates identical manifests in one operation.
+// Build WC's contract from read-only stock source. Never import or write the
+// EveJS runtime: imports can initialize game stores and require installed deps.
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const WEB_ROOT = path.resolve(__dirname, "..");
 const EVEJS_ROOT = path.resolve(process.env.EVEJS_REPO || path.join(WEB_ROOT, "..", "eve.js"));
@@ -37,10 +37,16 @@ function buildContract() {
   if (!fs.existsSync(GATEWAY_SOURCE)) {
     throw new Error(`EveJS gateway source was not found at ${GATEWAY_SOURCE}`);
   }
-  const gateway = require(GATEWAY_SOURCE);
+  const source = fs.readFileSync(GATEWAY_SOURCE, "utf8");
+  const begin = source.indexOf("const WEB_CALL_ALLOWLIST =");
+  const end = source.indexOf("const WEB_CALL_ALLOWLIST_KEYS =", begin);
+  if (begin < 0 || end <= begin) throw new Error("Stock gateway allowlist declaration could not be isolated.");
+  const allowlist = vm.runInNewContext(`${source.slice(begin,end)}\nWEB_CALL_ALLOWLIST;`, {}, {timeout:1000});
+  if (!Array.isArray(allowlist) || allowlist.some(p=>typeof p.service!=="string" || typeof p.method!=="string"))
+    throw new Error("Stock gateway allowlist is invalid.");
   const policy = require(WEB_POLICY_SOURCE);
   const allowedPairs = sortedUnique(
-    gateway.WEB_CALL_ALLOWLIST.map((pair) => `${pair.service}.${pair.method}`),
+    allowlist.map((pair) => `${pair.service}.${pair.method}`),
     "gateway allowlist",
   );
   const writePairs = sortedUnique(policy.BRIDGE_WRITE_PAIR_KEYS, "BFF write policy");
@@ -79,11 +85,8 @@ function main(argv = process.argv.slice(2)) {
   const contract = buildContract();
   if (argv.includes("--write")) {
     const webPath = path.join(WEB_ROOT, "contracts", FILE_NAME);
-    const evePath = path.join(EVEJS_ROOT, "server", "contracts", FILE_NAME);
     writeJson(webPath, contract);
-    writeJson(evePath, contract);
     console.log(`Wrote ${webPath}`);
-    console.log(`Wrote ${evePath}`);
     return;
   }
   process.stdout.write(`${JSON.stringify(contract, null, 2)}\n`);

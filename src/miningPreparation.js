@@ -1,6 +1,6 @@
 "use strict";
 const { hash, fail, inspectContract } = require("./provisioningContracts");
-const { intent, assertSelected } = require("./provisioningIntent");
+const { selectedIntent, assertSelected } = require("./provisioningIntent");
 const { defenderReadiness } = require("./standardDefenderReadiness");
 const positive = n => Number.isSafeInteger(n) && n > 0;
 const ready = value => ["VERIFIED", "DEGRADED"].includes(value?.state);
@@ -62,7 +62,7 @@ function readiness(status, policy, support = null) {
   if (short.some(t => requiredTarget(t,policy,support))) return { state: "BLOCKED", reason: "Required supply target is not FULL." };
   return short.length ? { state: "DEGRADED", reason: core && short.some(t=>t.typeID===16272) ? "Heavy Water short; Core optional." : "Optional supplies below target." } : { state: "VERIFIED", reason: null };
 }
-function createMiningPreparation({ store, readReview, readSkills, engine, adapterFor, bots, currentRun, data, fault = null, now = Date.now }) {
+function createMiningPreparation({ store, readDefinitions, readSkills, engine, adapterFor, bots, currentRun, data, fault = null, now = Date.now }) {
   const sourceLabel = s => s.kind === "corp" ? `Corporation ${s.corporationID} / division ${s.division}` : "Personal local hangar";
   function view(member, status, policy, support, extra = {}) {
     return { characterID: member.characterID, role: member.role, ...readiness(status,policy,support), equipment: status.equipment,
@@ -80,29 +80,22 @@ function createMiningPreparation({ store, readReview, readSkills, engine, adapte
         const override = normalizePreparation(member.preparation || {},true);
         const input = { characterID: member.characterID, providerCharacterID: override.providerCharacterID || policy.providerCharacterID || member.characterID,
           fittingID: override.fittingID || policy.fittingID || 0, source: policy.source, supplyPolicy: { supplies: policy.supplies || [] } };
-        detail = await readReview(account.accountID,input);
-        const pin = intent(detail);
-        const ownedCaller = caller?.characterID === member.characterID && caller.accountID === account.accountID;
-        if (detail.pilot.control.state !== "FREE" && !ownedCaller) fail("CHARACTER_IN_USE", `Pilot control ${detail.pilot.control.state}.`);
-        if (detail.status.equipment !== "VERIFIED") fail("EQUIPMENT_NOT_READY");
-        if (detail.status.supplies === "UNKNOWN") fail("SUPPLIES_UNKNOWN");
-        if (detail.candidateSource.take === "DENIED") fail("SOURCE_TAKE_DENIED");
-        if (member.role === "DEFENDER") {
-          const combat = defenderReadiness(detail.selected, detail.pilot.observation,
-            await readSkills?.(account.accountID, member.characterID), data, true);
-          if (combat.state !== "VERIFIED") fail("DEFENDER_NOT_READY", combat.reason);
-        }
-        input.fittingID = detail.selected.definition.fittingID; input.corporationID = detail.selected.definition.corporationID;
-        const result = view(member,detail.status,policy,support,{ fittingName: detail.selected.name });
-        // A shortage can be replenished under the final owner. Missing fuel
-        // policy/UNKNOWN observation cannot be silently repaired by a runner.
-        if (support?.useIndustrialCore && !detail.status.targets.some(t=>t.typeID===16272)) fail("CORE_SUPPLY_POLICY_REQUIRED");
-        members.push({ ...result, state: "PENDING", expectedState: result.state,
-          intent: JSON.parse(JSON.stringify({ version: 1, operationID: definition.operationID, accountID: account.accountID, characterID: member.characterID,
-            input, pin, policy, support, role: member.role, fittingName: detail.selected.name,
-            revision: detail.pilot.revision, quality: detail.pilot.quality })) });
+        detail = await readDefinitions(account.accountID,input);
+        if (detail.status !== "READY") fail("FITTING_SOURCE_CHANGED");
+        const contracts = detail.contracts.filter(c=>!input.fittingID || c.definition.fittingID===input.fittingID);
+        if (!contracts.length) fail("INVALID_FIT");
+        input.corporationID = detail.corporationID;
+        const selected = contracts.length === 1 ? contracts[0] : null;
+        const status = selected ? inspectContract(selected,{complete:false},data) : {equipment:"UNKNOWN",supplies:"UNKNOWN",targets:[]};
+        members.push({ ...view(member,status,policy,support), state: "PENDING",
+          reason: "Configuration accepted; the final hosted owner must verify exact equipment and supplies before productive work.",
+          fittingName: selected?.name || null,
+          intent: JSON.parse(JSON.stringify({ version: 2, authority: "SELECTED_SESSION", operationID: definition.operationID,
+            accountID: account.accountID, characterID: member.characterID, input, policy, support, role: member.role,
+            definitionPins: contracts.map(c=>({fittingID:c.definition.fittingID,definitionFingerprint:c.definitionFingerprint,
+              equipmentFingerprint:c.equipmentFingerprint,supplyPolicyFingerprint:c.supplyPolicyFingerprint})) })) });
       } catch (error) {
-        members.push(view(member,detail?.status || {equipment:"UNKNOWN",supplies:"UNKNOWN",targets:[]},policy,support,
+        members.push(view(member,{equipment:"UNKNOWN",supplies:"UNKNOWN",targets:[]},policy,support,
           { state:"BLOCKED", reason: error.message || error.code }));
       }
     }
@@ -113,13 +106,14 @@ function createMiningPreparation({ store, readReview, readSkills, engine, adapte
     logicalRunID:record.logicalRunID, characterID:record.characterID, preparation:record.preparationCheckpoint.snapshot() }); };
   function adjustedPin(record, base, includeSelf = false) {
     const pin = structuredClone(base), ids = new Set();
+    const included = new Set(record.preparationCheckpoint.snapshot()?.evidence?.selectedBaseline?.includedCustodyIDs || []);
     // EveJS offline roots include the boarded hull; selected hangar List may
     // omit it. MCC never withdraws a hull, so it is outside its supply stock.
     pin.source.stock=pin.source.stock.filter(r=>r[0]!==base.shipID);
     for (const b of bots()) if (b.operationID===record.operationID && b.operationRunID===record.operationRunID &&
         (includeSelf || b.characterID!==record.characterID) && (b.preparation?.custodyOperationID || b.preparation?.evidence?.custodyOperationID)) ids.add(b.preparation.custodyOperationID || b.preparation.evidence.custodyOperationID);
     if (includeSelf && record.preparationCheckpoint.snapshot()?.evidence?.custodyOperationID) ids.add(record.preparationCheckpoint.snapshot().evidence.custodyOperationID);
-    for (const row of engine.journal.list().filter(r=>ids.has(r.key)).sort((a,b)=>a.createdAt-b.createdAt)) {
+    for (const row of engine.journal.list().filter(r=>ids.has(r.key) && !included.has(r.key)).sort((a,b)=>a.createdAt-b.createdAt)) {
       const source=row.sourcePin, expected=base.source;
       if (hash(source.descriptor)!==hash(pinSource(base)) || source.ownerID!==(expected.kind==="corp" ? expected.corporationID : base.characterID) ||
           source.locationID!==expected.contentsLocationID || source.dockedLocationID!==expected.dockedLocationID || source.flag!==expected.flag ||
@@ -139,7 +133,8 @@ function createMiningPreparation({ store, readReview, readSkills, engine, adapte
   }
   function pinSource(pin) { return pin.source.kind==="corp" ? {kind:"corp",corporationID:pin.source.corporationID,division:pin.source.division} : {kind:"hangar"}; }
   async function prepare(record) {
-    const accepted=record.operationPreparation, cp=record.preparationCheckpoint;
+    let accepted=record.operationPreparation;
+    const cp=record.preparationCheckpoint;
     const current=()=>{ record.assertPreparationCurrent(); if (currentRun(record.operationID)!==record.operationRunID) fail("OPERATION_RUN_CHANGED"); };
     current();
     const old=cp.snapshot();
@@ -147,8 +142,48 @@ function createMiningPreparation({ store, readReview, readSkills, engine, adapte
     if (old?.state === "BLOCKED" && old.invocation > 0) cp.recover({ operationRunID:record.operationRunID });
     else if (!["PREPARING","RECOVERY_REQUIRED"].includes(old?.state)) cp.begin({ operationRunID:record.operationRunID });
     try {
-      if (accepted?.version!==1 || accepted.accountID!==record.accountID || accepted.characterID!==record.characterID || accepted.operationID!==record.operationID) fail("REVIEW_REQUIRED");
+      if (![1,2].includes(accepted?.version) || accepted.accountID!==record.accountID || accepted.characterID!==record.characterID || accepted.operationID!==record.operationID) fail("REVIEW_REQUIRED");
       const adapter=adapterFor(record), baseRead=adapter.read;
+      let baselineGeneration = null;
+      if (accepted.version === 2) {
+        if (accepted.authority !== "SELECTED_SESSION" || !Array.isArray(accepted.definitionPins)) fail("REVIEW_REQUIRED");
+        let baseline = cp.snapshot()?.evidence?.selectedBaseline;
+        if (!baseline) {
+          // Capture only settled same-run custody. A sibling finishing during
+          // the read can already be reflected in stock; retry once instead of
+          // applying its movement to that baseline a second time. This fences
+          // WC journal evidence, not external inventory changes.
+          const representedCustody = () => {
+            const ids = new Set(bots().filter(b=>b.operationID===record.operationID && b.operationRunID===record.operationRunID)
+              .map(b=>b.preparation?.custodyOperationID || b.preparation?.evidence?.custodyOperationID).filter(Boolean));
+            const rows = engine.journal.list();
+            return [...ids].sort().map(key=>({key,row:rows.find(r=>r.key===key)||null}));
+          };
+          let read, includedCustodyIDs;
+          for (let attempt=0;attempt<2;attempt++) {
+            const before=representedCustody();
+            if(before.some(({row})=>!row || !["COMPLETE","RECONCILED"].includes(row.state) || row.moves.some(m=>m.state!=="VERIFIED")))
+              fail("REPLENISHMENT_CUSTODY");
+            read=await adapter.readPreparation(accepted.input);current();
+            if(hash(before)===hash(representedCustody())) {includedCustodyIDs=before.map(r=>r.key);break;}
+          }
+          if(!includedCustodyIDs)fail("SOURCE_CHANGED");
+          const c=read.contract;
+          if (!accepted.definitionPins.some(p=>p.fittingID===c.definition.fittingID && p.definitionFingerprint===c.definitionFingerprint &&
+            p.equipmentFingerprint===c.equipmentFingerprint && p.supplyPolicyFingerprint===c.supplyPolicyFingerprint)) fail("REVIEW_STALE");
+          const status=inspectContract(c,read.observation,data);
+          if (status.equipment!=="VERIFIED" || status.supplies==="UNKNOWN") fail("EQUIPMENT_NOT_READY");
+          if (accepted.role === "DEFENDER") {
+            const combat=defenderReadiness(c,read.observation,await readSkills?.(record.accountID,record.characterID),data,true);current();
+            if (combat.state!=="VERIFIED") fail("DEFENDER_NOT_READY",combat.reason);
+          }
+          baseline={ pin:selectedIntent(read), input:{...accepted.input,fittingID:c.definition.fittingID},
+            fittingName:c.name, includedCustodyIDs };
+          baselineGeneration=read.context.sessionGeneration;
+          cp.update({selectedBaseline:baseline});
+        }
+        accepted={...accepted,...baseline};
+      }
       const sourcePin={descriptor:pinSource(accepted.pin),ownerID:accepted.pin.source.kind==="corp" ? accepted.pin.source.corporationID : accepted.characterID,
         locationID:accepted.pin.source.contentsLocationID,flag:accepted.pin.source.flag,dockedLocationID:accepted.pin.source.dockedLocationID,
         office:accepted.pin.source.kind==="corp" ? `corpOffice:${accepted.pin.source.officeID}` : null};
@@ -156,7 +191,7 @@ function createMiningPreparation({ store, readReview, readSkills, engine, adapte
       const assertAcceptedRead = read => assertSelected(comparablePin(adjustedPin(record,accepted.pin,!!pending),data),
         {...read,source:{...read.source,rows:read.source.rows.filter(r=>r.itemID!==read.context.shipID)},
           observation:{...read.observation,rows:selectedRows(read.observation.rows,data)},target:{complete:true}});
-      let generation=null, preMutation=false;
+      let generation=baselineGeneration, preMutation=false;
       const guarded={...adapter, context:async()=>{current();const c=await adapter.context();current();if(generation && c.sessionGeneration!==generation)fail("PROVISIONING_GENERATION_CHANGED");return c;},
         dispatch:async (...args)=>{current();preMutation=false;const result=await adapter.dispatch(...args);current();return result;},
         read:async input=>{current();const r=await baseRead(input,sourcePin);current();if(generation && r.context.sessionGeneration!==generation)fail("PROVISIONING_GENERATION_CHANGED");
