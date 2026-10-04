@@ -485,3 +485,153 @@ test("fight free: under the RUNNER's own latch, which names no step, the refusal
   assert.ok(locksOn(issued, 6661) <= 2, "pressed twice at most on the way there");
   assert.equal(runner.getStatus(), "running", "and the ship is still fighting, not paused in space");
 });
+
+test("fight-with-drones: a new primary does not inherit the disappeared spare's refused pre-lock", async () => {
+  let replaced = false;
+  const locked: number[] = [];
+  const { issued, said, run } = rig(
+    [droneStep],
+    () => calm({
+      snapshot: space(replaced ? [rat(6663, 5000)] : [rat(6661, 5000), rat(6662, 6000)]),
+      hostileOnGrid: true, weaponModuleIDs: [500], lockedTargetIDs: [...locked], maxLockedTargets: 3,
+    }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      if (action.targetID === 6662) {
+        replaced = true;
+        locked.length = 0;
+        said.length = 0;
+        return REFUSED_LOCK;
+      }
+      locked.push(action.targetID);
+      return null;
+    },
+  );
+  await run(100, () => locksOn(issued, 6663) > 0);
+  assert.equal(locksOn(issued, 6662), 1);
+  assert.equal(locksOn(issued, 6663), 1);
+  assert.equal(said.some((why) => /Waiting for the lock|would not lock/.test(why)), false,
+    "the new primary receives a lock before any lock timeout can be attributed to it");
+});
+
+test("fight-with-drones: the next spare gets a pre-lock when the refused spare leaves", async () => {
+  let replaced = false;
+  const locked: number[] = [];
+  const { issued, run } = rig(
+    [droneStep],
+    () => calm({
+      snapshot: space([rat(6661, 5000), rat(replaced ? 6663 : 6662, 6000)]),
+      hostileOnGrid: true, weaponModuleIDs: [500], lockedTargetIDs: [...locked], maxLockedTargets: 3,
+    }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      if (action.targetID === 6662) { replaced = true; return REFUSED_LOCK; }
+      locked.push(action.targetID);
+      return null;
+    },
+  );
+  await run(100, () => locksOn(issued, 6663) > 0);
+  assert.equal(locksOn(issued, 6662), 1);
+  assert.equal(locksOn(issued, 6663), 1,
+    "the replacement spare was never pressed and must not be booked as the refused one");
+});
+
+for (const step of [fightStep, droneStep]) {
+  test(`${step.macro}: a new fleet primary gets its own lock after the previous primary refuses`, async () => {
+    let called = 6661;
+    const locked: number[] = [];
+    const { issued, said, run, runner } = rig(
+      [{ ...step, args: { squad: { kind: "squadRole", role: "follow" } } }],
+      () => calm({
+        snapshot: space([rat(6661, 5000), rat(6662, 6000), rat(6663, 7000)]),
+        hostileOnGrid: true, weaponModuleIDs: [500], lockedTargetIDs: [...locked],
+        squadPrimaryTargetID: called,
+      }),
+      (action) => {
+        if (action.kind !== "lock") return null;
+        if (action.targetID === 6662) {
+          called = 6663;
+          said.length = 0;
+          return REFUSED_LOCK;
+        }
+        locked.push(action.targetID);
+        return null;
+      },
+    );
+    await run(30, () => locksOn(issued, 6661) > 0);
+    assert.equal(locksOn(issued, 6661), 1);
+    called = 6662;
+    await run(100, () => locksOn(issued, 6663) > 0);
+    assert.equal(locksOn(issued, 6662), 1);
+    assert.equal(locksOn(issued, 6663), 1);
+    assert.equal(said.some((why) => /Waiting for the lock|would not lock/.test(why)), false,
+      "a changed fleet call cannot spend the rejected primary's lock wait");
+    assert.equal(runner.getStatus(), "running");
+  });
+}
+
+test("lock refusals still exhaust the run budget when every target changes", async () => {
+  let targetID = 6661;
+  const { issued, run, runner } = rig(
+    [fightStep],
+    () => calm({ snapshot: space([rat(targetID, 5000)]), weaponModuleIDs: [500] }),
+    (action) => {
+      if (action.kind !== "lock") return null;
+      targetID += 1;
+      return REFUSED_LOCK;
+    },
+  );
+  await run(500, () => runner.snapshot().phase === "Heading home");
+  const locks = issued.filter((action) => action.kind === "lock");
+  assert.equal(locks.length, 10, "changing targets does not buy a new run refusal budget");
+  assert.equal(new Set(locks.map((action) => action.targetID)).size, 10);
+  assert.equal(runner.snapshot().phase, "Heading home");
+  assert.match(runner.snapshot().why ?? "", /10 refusals in a row/);
+  // The fault transition preserves the prior readout until the Home decision.
+  await run(1);
+  assert.equal(runner.snapshot().refusals[0]?.count, 10);
+  assert.equal(runner.snapshot().refusals[0]?.targetID, targetID - 1);
+});
+
+for (const step of [repStep, capStep]) {
+  test(`${step.macro}: a newly urgent mate does not inherit another mate's refused lock wait`, async () => {
+    let refusedLocks = 0;
+    let changedMate = false;
+    const { issued, said, run, runner } = rig(
+      [step],
+      () => calm({
+        snapshot: space([
+          mate(7001, 3000, { shieldRatio: changedMate ? 1 : 0.4, capacitorRatio: changedMate ? 1 : 0.3 }),
+          mate(7002, 3000, {
+            characterID: MATE_CHARACTER + 1,
+            shieldRatio: changedMate ? 0.4 : 1,
+            capacitorRatio: changedMate ? 0.3 : 1,
+          }),
+        ]),
+        fleetMemberCharacterIDs: [MATE_CHARACTER, MATE_CHARACTER + 1],
+        remoteShieldRepairerIDs: [600],
+        remoteCapModuleIDs: [800],
+      }),
+      (action) => {
+        if (action.kind !== "lock" || action.targetID !== 7001) return null;
+        refusedLocks += 1;
+        if (refusedLocks === 2) {
+          changedMate = true;
+          // Earlier waits may correctly belong to 7001. From here, 7002 needs
+          // assistance but has never had a lock requested.
+          said.length = 0;
+        }
+        return REFUSED_LOCK;
+      },
+    );
+    await run(200, () => locksOn(issued, 7002) > 0);
+    assert.equal(refusedLocks, 2, "the priority changed after the old mate's refused lock");
+    assert.equal(locksOn(issued, 7002), 1, "the newly urgent mate gets its own lock request");
+    assert.equal(
+      said.some((why) => /Waiting for the lock|would not lock/.test(why)),
+      false,
+      "the new mate is not left waiting on a lock that was never requested",
+    );
+    assert.equal(runner.getStatus(), "running");
+  });
+}

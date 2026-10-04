@@ -71,6 +71,8 @@ export function isNoRoomAboard(cause: unknown): boolean {
 export interface RefusalRecord {
   /** stepPath + action kind + target, so one failing can does not mask another. */
   readonly key: string;
+  /** Actual addressed target when known; metadata does not split the streak key. */
+  readonly targetID?: number;
   /** Consecutive failures. Reset by the first success on the same key. */
   readonly count: number;
   readonly firstAt: number;
@@ -168,7 +170,7 @@ export function classifyRefusal(raw: string, stillOnGrid: boolean | null): Refus
 
 export interface RefusalLedger {
   /** Record one failure and return the running record for its key. */
-  note(key: string, raw: string, at: number, stillOnGrid: boolean | null): RefusalRecord;
+  note(key: string, raw: string, at: number, stillOnGrid: boolean | null, targetID?: number): RefusalRecord;
   /** A success on this key: the streak is over. */
   clear(key: string): void;
   /**
@@ -200,10 +202,11 @@ export interface RefusalLedger {
 export function createRefusalLedger(): RefusalLedger {
   const byKey = new Map<string, RefusalRecord>();
   return {
-    note(key, raw, at, stillOnGrid) {
+    note(key, raw, at, stillOnGrid, targetID) {
       const previous = byKey.get(key) ?? null;
       const record: RefusalRecord = {
         key,
+        ...(targetID === undefined ? {} : { targetID }),
         count: (previous?.count ?? 0) + 1,
         firstAt: previous?.firstAt ?? at,
         lastAt: at,
@@ -246,6 +249,14 @@ export function refusalFor(
   }
   const key = refusalKey(stepID, actionKind, targetID);
   return records.find((record) => record.key === key) ?? null;
+}
+
+/** Older observations omit target metadata and retain their existing handling. */
+export function refusalTargets(
+  record: { readonly targetID?: number } | null | undefined,
+  targetID: number,
+): boolean {
+  return record?.targetID === undefined || record.targetID === targetID;
 }
 
 /**

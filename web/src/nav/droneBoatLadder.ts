@@ -103,6 +103,7 @@ import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./target
 import { combatReload, weaponUseful } from "./combatWeapons.ts";
 import { combatOwnership, ownCombatAction, settleCombat } from "./combatOwnership.ts";
 import { combatCapSustain, decideCombatUtilities } from "./combatUtilities.ts";
+import { refusalTargets } from "./refusalLedger.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -245,6 +246,7 @@ export interface LockRefusals {
   readonly count: number;
   readonly unread: boolean;
   readonly fresh: boolean;
+  readonly targetID?: number;
 }
 
 const NO_LOCK_REFUSALS: LockRefusals = { count: 0, unread: false, fresh: false };
@@ -1214,7 +1216,7 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
         lockRefusalsSeen: lockRefusals.count,
       });
     }
-    if (lockRefusals.fresh) {
+    if (lockRefusals.fresh && refusalTargets(lockRefusals, primary.itemID)) {
       // The bounded wait below, exactly what a refused lock got before 2fd4a77.
       return tick(WAIT, "Waiting for the lock.", PHASE_FIGHT, ACTING, true, {
         ...mem,
@@ -1363,6 +1365,16 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
   // not counted is this rung's own: the same pick is made again from the same
   // grid and booked as asked WITHOUT a press. A record with no count carried is
   // read as old, counted, and costs this rung one tick.
+  // Commit the actual refused target before another world call can fail. The
+  // grid or fleet call may have changed during backoff; a new candidate has
+  // never been asked and must still be eligible for a lock.
+  if (lockRefusals.fresh && lockRefusals.targetID !== undefined) {
+    return tick(WAIT, "That lock did not land — continuing the fight.", PHASE_FIGHT, ACTING, true, {
+      ...mem,
+      lockRefusalsSeen: lockRefusals.count,
+      preLocked: [...new Set([...idList(mem, "preLocked"), lockRefusals.targetID])].slice(-MAX_PRELOCK_MEMORY),
+    });
+  }
   const preLockRefused = lockRefusals.fresh;
   const preLockUnread = lockRefusals.unread;
   if (preLockRefused || preLockUnread) {
