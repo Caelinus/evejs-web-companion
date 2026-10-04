@@ -231,8 +231,9 @@ async function isCharacterHeld(characterID, callerSessionID = null, preparationO
     }
   }
   // A public hosted Start may hand off its own cockpit, but may never take an
-  // external retail/browser/Factory pilot. The actual select is also atomic
-  // free-only, so a new external owner after this read still cannot be evicted.
+  // external retail/browser/Factory pilot observed here. A later external
+  // login is arbitrated by stock SelectCharacterID and the server's retail
+  // takeover policy; this WC observation is not an atomic free-only claim.
   if (ownsProbe && preparationOwner?.accountID && Number(bridgeSessions.get(callerSessionID)?.characterID) !== Number(characterID)) {
     const status = await gateway.getCharacterStatus(preparationOwner.accountID, characterID);
     if (status?.characterID !== characterID || status.online !== false || status.controlState !== "offline") return true;
@@ -1177,23 +1178,61 @@ function buildStationStatic(stationID) {
 }
 
 // Shared by ordinary select and the narrowly guarded handoff restoration.
-async function selectHeldCharacter(webSessionID, account, characterID, { freeOnly = false } = {}) {
+async function selectHeldCharacter(webSessionID, account, characterID, { assertCurrent = () => {}, hostedSecret = null } = {}) {
+  assertCurrent();
+  const accountID = Number(account.accountID);
   const pendingCustody = replenishment.unresolved(characterID).length > 0;
   if (pendingCustody && typeof gateway.selectFactoryCharacter !== "function")
     throw Object.assign(new Error("Free-only custody recovery selection is unavailable; pilot control remains fenced."),
       { code: "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE", statusCode: 409 });
-  if (freeOnly && typeof gateway.selectFactoryCharacter !== "function")
-    throw Object.assign(new Error("Atomic free-pilot selection is unavailable; hosted Start cannot take over a pilot."),
-      { code: "CHARACTER_OWNERSHIP_UNVERIFIED", statusCode: 409 });
   const outcome = pendingCustody ? await mutationFence.withCustodySelection(characterID,
-    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : freeOnly
-    ? await gateway.selectFactoryCharacter(Number(account.accountID), characterID) : await gateway.selectCharacter(
+    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : await gateway.selectCharacter(
     [characterID, null, true], null,
     { userid: Number(account.accountID), userName: String(account.username || "") },
   );
-  bridgeSessions.set(webSessionID, makeHeldCharacter(account, characterID, outcome));
+  const held = makeHeldCharacter(account, characterID, outcome);
+  try { assertCurrent(); }
+  catch (error) {
+    // Selection awaited: a retired generation must not install its outcome.
+    // Clean only the returned handle, never the current web-session row.
+    try {
+      const released = await gateway.releaseBridgeSession(outcome.bridgeSessionID, { userid: accountID });
+      if (released?.released !== true) throw new Error("Selection release was not confirmed.");
+    } catch (releaseError) {
+      if (releaseError?.code !== "SESSION_NOT_FOUND") {
+        // Preserve uncertainty in the existing held-session fence, without
+        // replacing a newer row or enabling any productive action.
+        if (!bridgeSessions.has(webSessionID)) {
+          held.selectionReleaseUnverified = true;
+          held.droneRecoveryReady = true;
+          if (hostedSecret !== null) held.botClaimSecret = hostedSecret;
+          bridgeSessions.set(webSessionID, held);
+        }
+        throw Object.assign(new Error("The stale selection's exact session release could not be confirmed. Retry its logout before selecting again."),
+          { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
+      }
+    }
+    throw error;
+  }
+  bridgeSessions.set(webSessionID, held);
   joinHeldChat(bridgeSessions.get(webSessionID));
   return outcome;
+}
+
+async function restoreHeldCaller(webSessionID, account, characterID, reservation) {
+  const current = () => characterOperations.get(characterID) === reservation &&
+    sessionOperations.get(webSessionID) === reservation && !bridgeSessions.has(webSessionID) &&
+    botHost.claimedBy(characterID) === null && !replenishment.unresolved(characterID).length &&
+    ![...bridgeSessions.values()].some(held => Number(held.characterID) === characterID);
+  if (!current() || await isCharacterHeld(characterID, webSessionID,
+    { accountID: Number(account.accountID) }, reservation) || !current()) return false;
+  // The fresh offline observation and exact WC generation checks do not fence
+  // a later external login. Re-selection follows stock retail server policy.
+  await selectHeldCharacter(webSessionID, account, characterID, { assertCurrent: () => {
+    if (!current()) throw Object.assign(new Error("The caller's ownership changed during restoration."),
+      { code: "CHARACTER_IN_USE", statusCode: 409 });
+  } });
+  return true;
 }
 function makeHeldCharacter(account, characterID, outcome) {
   return {
@@ -1259,6 +1298,8 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     // takeover would kick the bot mid-script. Refused with a plain remedy;
     // the bot's OWN select passes because its fetch names it. Tab-vs-tab
     // takeover (desktop to phone) is untouched.
+    const hostedSecret = req.get(botHostModule.BOT_HEADER);
+    const hostedSelection = botHost.authorizesClaim(characterID, hostedSecret);
     const claimingBotID = botHost.claimedBy(characterID);
     if (claimingBotID !== null && !botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
       res.status(409).json({
@@ -1272,8 +1313,15 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       });
       return;
     }
+    if (hostedSecret !== undefined && !hostedSelection)
+      throw Object.assign(new Error("The requesting hosted controller generation is no longer current."),
+        { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+    const existingReservation = characterOperations.get(characterID);
+    const operation = hostedSelection && botHost.operationForClaim?.(characterID, hostedSecret);
+    const ownOperationHandoff = operation?.operationRunID && existingReservation?.kind === "mining-operation-handoff" &&
+      existingReservation.operationID === operation.operationID && existingReservation.operationRunID === operation.operationRunID;
     if (sessionOperations.has(req.webSessionID) ||
-        (characterOperations.has(characterID) && !botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER)))) {
+        (existingReservation && !ownOperationHandoff)) {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is changing sessions. Try again shortly." });
       return;
     }
@@ -1309,14 +1357,35 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     const ownsCharacterReservation = !characterOperations.has(characterID);
     if (ownsCharacterReservation) characterOperations.set(characterID, reservation);
     sessionOperations.set(req.webSessionID, reservation);
+    const expectedCharacterReservation = characterOperations.get(characterID);
     try {
     // One client session per web login: switching characters releases the
     // previous persistent session (retail semantics live on the gateway side;
     // the handler's own refusals pass through as CALL_REFUSED).
     await releaseHeldBridgeSession(req.webSessionID);
-    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID, {
-      freeOnly: botHost.requiresFreeSelection?.(characterID, req.get(botHostModule.BOT_HEADER)) === true,
-    });
+    // The release awaited. Stock takeover policy never authorizes replacing a
+    // newer WC reservation, generation or held owner discovered during that gap.
+    const assertSelectionCurrent = () => {
+      if (hostedSelection && !botHost.authorizesClaim(characterID, hostedSecret))
+        throw Object.assign(new Error("The requesting hosted controller generation is no longer current."),
+          { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+      // Only the current resumed preparation may reconcile its own custody.
+      // A fresh hosted Start has no checkpoint authority and cannot borrow it.
+      const pendingCustody = hostedSelection ? replenishment.unresolved(characterID) : [];
+      const checkpoint = pendingCustody.length && botHost.preparationForClaim?.(characterID, hostedSecret);
+      const custodyID = checkpoint?.custodyOperationID || checkpoint?.evidence?.custodyOperationID;
+      const ownsCustody = checkpoint?.intent?.accountID === Number(req.account.accountID) &&
+        checkpoint.intent.characterID === characterID && custodyID &&
+        pendingCustody.every(row => row.key === custodyID && row.accountID === checkpoint.intent.accountID);
+      if (sessionOperations.get(req.webSessionID) !== reservation || bridgeSessions.has(req.webSessionID) ||
+          characterOperations.get(characterID) !== expectedCharacterReservation ||
+          hostedSelection && (pendingCustody.length && !ownsCustody ||
+            [...bridgeSessions].some(([sessionID, held]) => sessionID !== req.webSessionID && Number(held.characterID) === characterID)))
+        throw Object.assign(new Error("The pilot's WC ownership changed before selection."), { code: "CHARACTER_IN_USE", statusCode: 409 });
+    };
+    assertSelectionCurrent();
+    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID,
+      { assertCurrent: assertSelectionCurrent, hostedSecret: hostedSelection ? hostedSecret : null });
     // Hosted bots already own their claim; browser sessions must complete the
     // nearby lost-flight check before any automation handoff or movement.
     if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
@@ -1420,6 +1489,9 @@ function requireHeldBridgeSession(req, res) {
 }
 
 function assertHeldRequestGeneration(req, held) {
+  if (held.selectionReleaseUnverified && req.path !== "/api/bridge/release")
+    throw Object.assign(new Error("The prior selection's session release is unconfirmed. Retry its logout first."),
+      { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
   const secret = req.get(botHostModule.BOT_HEADER);
   // A cockpit may attach to hosted GET readouts. Writes and requests naming a
   // hosted generation must belong to the generation that selected this session.
@@ -1436,6 +1508,9 @@ function assertCurrentHeldSession(held, webSessionID) {
     throw Object.assign(new Error("The pilot session changed before this call."),
       { code: "NO_LIVE_SESSION", statusCode: 409 });
   }
+  if (held.selectionReleaseUnverified)
+    throw Object.assign(new Error("The prior selection's session release is unconfirmed. Retry its logout first."),
+      { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
   if (held.botClaimSecret && !botHost.authorizesClaim(held.characterID, held.botClaimSecret)) {
     throw Object.assign(new Error("The hosted controller generation changed before this call."),
       { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
@@ -22635,9 +22710,9 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         ) {
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
-            if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID) &&
-                !(await isCharacterHeld(member.characterID, callerSessionID, { accountID: Number(account.accountID) }, reservation))) {
-              await selectHeldCharacter(callerSessionID, account, member.characterID, { freeOnly: true });
+            if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID)) {
+              if (!await restoreHeldCaller(callerSessionID, account, member.characterID, reservation))
+                outcome.message = `${outcome.message || "This member could not start."} Browser ownership was not restored; review the pilot's current owner.`;
             }
           } catch (error) {
             errorLogger(error);
@@ -23312,8 +23387,7 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
         // always supplies its newly minted private claim, never a public botID.
         if (!owner) return;
         assertReservation();
-        if (!botHost.authorizesClaim(characterID, owner.claimSecret) ||
-            botHost.requiresFreeSelection?.(characterID, owner.claimSecret) !== true)
+        if (!botHost.authorizesClaim(characterID, owner.claimSecret))
           throw Object.assign(new Error("The hosted claim did not acquire this Start."), { code: "CHARACTER_IN_USE" });
         characterOperations.delete(characterID);
         transferred = true;
@@ -23389,9 +23463,9 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
           }
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
-            if (restoreReservation !== null && payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)
-              && !(await isCharacterHeld(characterID, req.webSessionID, { accountID: Number(req.account.accountID) }, restoreReservation))) {
-              await selectHeldCharacter(req.webSessionID, req.account, characterID, { freeOnly: true });
+            if (restoreReservation !== null && payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)) {
+              if (!await restoreHeldCaller(req.webSessionID, req.account, characterID, restoreReservation))
+                message = `${message} Browser ownership was not restored; review the pilot's current owner.`;
             }
           } catch (error) {
             errorLogger(error);

@@ -35,13 +35,13 @@ async function fixture(t, ownershipChange = null) {
       if (ownershipChange === "after-offline-proof") retailBusy = true;
       return status;
     },
-    async selectFactoryCharacter(accountID, id) {
-      calls.push(["free-select", accountID, id]);
-      if (retailBusy) throw Object.assign(new Error("A retail client acquired the pilot."), { code: "PILOT_BUSY" });
-      return { bridgeSessionID: "restored-free", session: { characterID: id, characterName: "Fixture miner",
+    async selectFactoryCharacter() { throw new Error("FACTORY ENDPOINT MUST NOT BE USED BY GENERIC HOSTED START"); },
+    async selectCharacter(args, _kwargs, actor) {
+      const id = args[0]; calls.push(["stock-select", actor.userid, id]);
+      if (retailBusy) { calls.push(["retail-takeover"]); retailBusy = false; }
+      return { bridgeSessionID: "restored-stock", session: { characterID: id, characterName: "Fixture miner",
         shipID: 9001, stationID: 60000004, solarSystemID: 30000001 }, notifications: [] };
     },
-    async selectCharacter() { calls.push(["takeover-select"]); throw new Error("Rollback must use free-only selection."); },
     async callMethod() { return { result: {}, notifications: [] }; },
   };
   const host = {
@@ -102,23 +102,22 @@ async function fixture(t, ownershipChange = null) {
   return { calls, errors, heldSessions, started };
 }
 
-test("failed MCC handoff restores its released offline caller through free-only selection", async t => {
+test("failed MCC handoff restores its released offline caller through stock selection", async t => {
   const f = await fixture(t);
-  assert.equal(f.heldSessions.get(sessionID)?.bridgeSessionID, "restored-free");
-  assert.deepEqual(f.calls.filter(c => c[0] === "free-select"), [["free-select", account.accountID, characterID]]);
-  assert.equal(f.calls.some(c => c[0] === "takeover-select"), false);
+  assert.equal(f.heldSessions.get(sessionID)?.bridgeSessionID, "restored-stock");
+  assert.deepEqual(f.calls.filter(c => c[0] === "stock-select"), [["stock-select", account.accountID, characterID]]);
 });
 
 test("failed MCC handoff preserves a retail owner that acquired the released pilot", async t => {
   const f = await fixture(t, "after-release");
   assert.equal(f.heldSessions.has(sessionID), false);
   assert.equal(f.calls.some(c => c[0] === "status"), true, "rollback checks real control status despite its own reservation");
-  assert.equal(f.calls.some(c => c[0] === "free-select" || c[0] === "takeover-select"), false);
+  assert.equal(f.calls.some(c => c[0] === "stock-select"), false);
 });
 
-test("MCC rollback cannot take over a retail login after the offline proof", async t => {
+test("MCC rollback inherits stock retail takeover for an external login after offline proof", async t => {
   const f = await fixture(t, "after-offline-proof");
-  assert.equal(f.heldSessions.has(sessionID), false);
-  assert.equal(f.calls.filter(c => c[0] === "free-select").length, 1, "atomic free-only selection refuses the late owner");
-  assert.equal(f.calls.some(c => c[0] === "takeover-select"), false);
+  assert.equal(f.heldSessions.get(sessionID)?.bridgeSessionID, "restored-stock");
+  assert.equal(f.calls.filter(c => c[0] === "stock-select").length, 1);
+  assert.equal(f.calls.some(c => c[0] === "retail-takeover"), true, "the server's retail policy owns this race");
 });
