@@ -144,6 +144,10 @@ function warpIssuedMem(obs: ScriptObservation, target: string | null = null): Ma
 }
 
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
+// A lock refused for range is pressed again only once the rock is this fraction of the
+// refused distance: each re-press must come with real progress, or the runner's ten-refusal
+// cap is spent standing still (150 km to a 40 km lock range is about six presses).
+const LOCK_REPRESS_PROGRESS = 0.8;
 
 function tick(
   action: MacroTick["action"],
@@ -1673,7 +1677,8 @@ function mineWithRocks(
       return tick(WAIT, "Nothing pickable to mine.", "Picking a rock", ACTING, true, {});
     }
     if (step.macro === "fleet-mine") return tick(WAIT, "Choosing the supported resource.", "Fleet Miner — choosing", ACTING, true,
-      { rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID });
+      { rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID,
+        lockRefusalsSeen: refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0 });
     // Orbit the new rock at 5km to get into mining range; lock next tick.
     return tick(
       { kind: "orbit", targetID: pick.itemID, range: ORBIT_RANGE_M },
@@ -1681,13 +1686,88 @@ function mineWithRocks(
       "Approaching a rock",
       ACTING,
       true,
-      clearCloseInStall({ rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID }),
+      clearCloseInStall({
+        rockID: pick.itemID,
+        lockIssued: false,
+        waited: 0,
+        approachedRockID: pick.itemID,
+        // ⚠ THE BASELINE FOR "A REFUSAL NEWER THAN THIS PICK". A record lives until a
+        // SUCCESS on the same key clears it, so one left over from a rock dropped and
+        // picked again would otherwise be read as a fresh refusal for ever.
+        lockRefusalsSeen: refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0,
+      }),
     );
   }
 
   const locked = (obs.lockedTargetIDs ?? []).includes(rockID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
+      // ⚠ A REFUSED LOCK COMMITS NOTHING (2fd4a77), so `lockIssued` below is never
+      // set by a press that failed and this block would press again on every tick
+      // until the runner's ten-refusal cap sent the ship home. Live: a rock beyond
+      // lock range, a ship closing at 144 m/s, TargetNotWithinRangeGeneric ten
+      // times in four minutes. What it can read instead is the ledger, against
+      // the baseline committed when the rock was picked.
+      const rockDist = measurement?.distances.get(rockID) ?? null;
+      const lockRange = obs.maxTargetRangeM ?? null;
+      const seen = num(mem, "lockRefusalsSeen") ?? 0;
+      const refusedAt = num(mem, "lockRefusedAtM");
+      const refusal = refusalFor(obs.refusals, step.id, "lock", null);
+      const fresh = refusal !== null && refusal.count > seen;
+      // ⚠ THE COUNTERS ARE CARRIED BY HAND, as in the mining-range wait below: this
+      // block REBUILDS its memory on every return.
+      const closingIn = (seenCount: number, atM: number | null): MacroTick => {
+        const stall = closeInStall(measurement?.shipMode ?? null, mem);
+        const closing: MacroMemory = {
+          rockID,
+          lockIssued: false,
+          waited: 0,
+          approachedRockID: num(mem, "approachedRockID"),
+          lockRefusalsSeen: seenCount,
+          ...(atM !== null ? { lockRefusedAtM: atM } : {}),
+          stallTicks: num(stall.mem, "stallTicks") ?? 0,
+          stallStage: num(stall.mem, "stallStage") ?? 0,
+        };
+        if (stall.step === "reorder") {
+          return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, "Approaching a rock", ACTING, true, closing);
+        }
+        if (stall.step === "unstick") {
+          return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Approaching a rock", ACTING, true, closing);
+        }
+        if (stall.step === "stuck") {
+          return tick(WAIT, STALL_STUCK_WHY, "Approaching a rock", { kind: "blocked", reason: STALL_STUCK_REASON });
+        }
+        return tick(WAIT, "Closing in — too far out to lock yet.", "Approaching a rock", ACTING, true, closing);
+      };
+      // A refusal that arrives while the pre-gate holds the press is absorbed, not left
+      // to be read as "new" once the rock is in range.
+      const seenNow = refusal !== null ? Math.max(seen, refusal.count) : seen;
+      // ⚠ NOT FOR FLEET-MINE. That block owns its own movement and only gets here
+      // once it has braked to a stop inside support coverage, so the stall ladder
+      // in `closingIn` would read the stop as a stall and order an orbit it must
+      // never fly. A refused lock there takes the timed path, as it always did.
+      const closes = step.macro !== "fleet-mine";
+      if (closes && rockDist !== null && lockRange !== null && rockDist > lockRange) {
+        return closingIn(seenNow, refusedAt);
+      }
+      // The timed path: exactly what a refused lock did before 2fd4a77.
+      const timed = (seenCount: number): MacroTick => tick(WAIT, "Waiting for the lock.", "Locking on", ACTING, true, {
+        rockID,
+        lockIssued: true,
+        waited: 0,
+        approachedRockID: num(mem, "approachedRockID"),
+        lockRefusalsSeen: seenCount,
+      });
+      if (fresh) {
+        // Far enough that it is a range problem: close in, and press again only after
+        // real progress. Close, or unreadable: not a range problem this block can
+        // measure, so let it time out and move on.
+        return closes && rockDist !== null && rockDist > MINING_RANGE_M ? closingIn(refusal.count, rockDist) : timed(refusal.count);
+      }
+      if (refusedAt !== null) {
+        if (rockDist === null) return timed(seen);
+        if (rockDist > LOCK_REPRESS_PROGRESS * refusedAt) return closingIn(seen, refusedAt);
+      }
       return tick({ kind: "lock", targetID: rockID }, "Locking the rock.", "Locking on", ACTING, true, {
         rockID,
         lockIssued: true,
@@ -4224,57 +4304,9 @@ function warpToAnomalyOfKind(
       if (warpLanded(obs, mem)) {
         return tick(WAIT, `Arrived at the ${flavour.noun}.`, "Arrived", { kind: "done" });
       }
-      // ⚠ A REFUSED WARP IS NOT A SLOW ONE, AND THIS BLOCK USED TO CALL IT ONE.
-      // It issued the warp, never looked at what came back, and waited out
-      // WARP_START_WAIT_TICKS before stopping the bot with "the warp never
-      // started" — a sentence that sends the reader looking at the ship when the
-      // server had already said no, in the log, on the first tick.
-      //
-      // It happened for real: four pilots were parked INSIDE the den they had
-      // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
-      // — already there — and all four stopped rather than fighting the rats in
-      // front of them.
-      // ⚠ ONLY A REFUSAL NEWER THAN THE LAST ONE THIS STEP SAW. The ledger keys
-      // on step and action with no target, and a record lives until a SUCCESS
-      // clears it — so after moving on from a refused site, the warp to the
-      // next one would read the old refusal on its first tick and give up on a
-      // site it never actually asked for.
-      const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
-      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
-        // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
-        // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
-        // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
-        // right now." Standing in the site and the site having gone arrive in the
-        // SAME WORDS, so the wording is no help and the grid has to answer.
-        if (flavour.alreadyHere(obs, label(mem, "target")) === true) {
-          return tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", {
-            kind: "done",
-          });
-        }
-        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
-        // It happened for real: a pilot came back from unloading, read the
-        // scanner while the site the rest of the fleet had just emptied was
-        // still listed, and warped at it. The server had already torn it down
-        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
-        // scanned down"), and the pilot stopped while the others flew on to the
-        // next site. A refused site is set aside for this step and the pick runs
-        // again. The bot only stops when no site of this kind is left to try.
-        const target = label(mem, "target");
-        const refused = [...listOf(mem, "refused"), ...(target === null ? [] : [target])];
-        if (pickSite(obs.anomalies ?? [], board, refused) !== null) {
-          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
-            refused: refused.join(","),
-            refusalsSeen: refusal.count,
-          });
-        }
-        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
-        // the SERVER said, not with a guess about the warp never starting.
-        return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
-          kind: "blocked",
-          reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
-            "If the ship is already sitting in it, there was nothing left to fly to.",
-        });
-      }
+      // A refused warp is read BEFORE the press, from the target committed by the
+      // phase-1 tick below, so there is nothing to read for it on this path: a
+      // refused issue commits nothing, and `issued` therefore never gets set.
       const waited = (num(mem, "waited") ?? 0) + 1;
       if (waited > WARP_START_WAIT_TICKS) {
         return tick(WAIT, "The warp never started.", "Scanning", {
@@ -4302,6 +4334,96 @@ function warpToAnomalyOfKind(
       });
     }
     const ofKind = anomalies.filter((site) => site.kind === wanted);
+    // ── PHASE 2: a site is committed — read what became of the last warp, or press ──
+    //
+    // ⚠ THE TARGET IS COMMITTED BY A WAIT TICK BEFORE THE WARP IS ISSUED, AND THAT
+    // IS THE WHOLE DESIGN. The runner commits a block's memory only when its
+    // action succeeds (2fd4a77), so a refused warp leaves the memory exactly as
+    // the issuing tick found it: anything the block must know AFTER a refusal —
+    // which site it asked for, what the ledger said before — has to be written
+    // by an earlier tick, before the press. Writing it on the issuing tick
+    // (the old `issued` + `target`) is unreachable under the real runner.
+    const target = label(mem, "target");
+    if (target !== null) {
+      const refused = listOf(mem, "refused");
+      // ⚠ A REFUSED WARP IS NOT A SLOW ONE, AND THIS BLOCK USED TO CALL IT ONE.
+      // It issued the warp, never looked at what came back, and waited out
+      // WARP_START_WAIT_TICKS before stopping the bot with "the warp never
+      // started" — a sentence that sends the reader looking at the ship when the
+      // server had already said no, in the log, on the first tick.
+      //
+      // It happened for real: four pilots were parked INSIDE the den they had
+      // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
+      // — already there — and all four stopped rather than fighting the rats in
+      // front of them.
+      // ⚠ ONLY A REFUSAL NEWER THAN THE BASELINE PHASE 1 COMMITTED. The ledger keys
+      // on step and action with no target, and a record lives until a SUCCESS
+      // clears it — so a record left from an earlier visit to this step, or from
+      // a site already set aside, would otherwise be read as a refusal of a warp
+      // that was never issued.
+      const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
+      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
+        // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
+        // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
+        // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
+        // right now." Standing in the site and the site having gone arrive in the
+        // SAME WORDS, so the wording is no help and the grid has to answer.
+        if (flavour.alreadyHere(obs, target) === true) {
+          // The patch rides the done tick: `currentOreSiteLabel` reads the last
+          // visited label, and the block after this one needs it. A refused issue
+          // commits no patch of its own any more.
+          return {
+            ...tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", { kind: "done" }),
+            boardPatch: arrivalPatch(target, board).patch,
+          };
+        }
+        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
+        // It happened for real: a pilot came back from unloading, read the
+        // scanner while the site the rest of the fleet had just emptied was
+        // still listed, and warped at it. The server had already torn it down
+        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
+        // scanned down"), and the pilot stopped while the others flew on to the
+        // next site. A refused site is set aside for this step and the pick runs
+        // again. The bot only stops when no site of this kind is left to try.
+        const setAside = [...refused, target];
+        if (pickSite(anomalies, board, setAside) !== null) {
+          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
+            refused: setAside.join(","),
+            refusalsSeen: refusal.count,
+          });
+        }
+        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
+        // the SERVER said, not with a guess about the warp never starting.
+        return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
+            "If the ship is already sitting in it, there was nothing left to fly to.",
+        });
+      }
+      const carried: MacroMemory = {
+        ...(refused.length > 0 ? { refused: refused.join(",") } : {}),
+        ...(num(mem, "refusalsSeen") !== null ? { refusalsSeen: num(mem, "refusalsSeen") } : {}),
+      };
+      // The scanner moved on under the committed target (a site mined out and
+      // torn down in the meantime): drop it and let phase 1 pick again.
+      if (!ofKind.some((site) => site.label === target)) {
+        return tick(WAIT, `The ${flavour.noun} left the scanner — choosing another.`, "Scanning", ACTING, false, carried);
+      }
+      const { patch, lapRestart } = arrivalPatch(target, board);
+      return {
+        ...tick(
+          { kind: "warpScan", target },
+          lapRestart
+            ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
+            : `Warping to the next ${flavour.noun}.`,
+          flavour.flying,
+          ACTING,
+          false,
+          { ...warpIssuedMem(obs, target), ...carried },
+        ),
+        boardPatch: patch,
+      };
+    }
     // ── §13: the sites this run has given up on ────────────────────────────
     //
     // ⚠ THIS IS WHERE THE ARRIVAL COUNT BELONGS, AND IT IS NOT A STYLE CHOICE.
@@ -4340,24 +4462,28 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
-    const { next, lapRestart, visited, ledger } = pick;
+    // PHASE 1: commit the pick with a wait tick (no press, no board patch). The
+    // baseline is the ledger count RIGHT NOW, so whatever record is already there
+    // is never read as a refusal of the warp phase 2 is about to issue.
+    const stale = refusalFor(obs.refusals, step.id, "warpScan", null)?.count ?? 0;
+    return tick(WAIT, `Choosing the next ${flavour.noun} to warp to.`, "Scanning", ACTING, false, {
+      target: pick.next.label,
+      refusalsSeen: stale,
+      ...(refused.length > 0 ? { refused: refused.join(",") } : {}),
+    });
+  };
+
+  /**
+   * The board patch the warp to `target` writes — on the issuing tick, and on the
+   * done tick of a refused warp the ship turned out to be standing in.
+   */
+  function arrivalPatch(target: string, board: ScriptBoard) {
+    const visited = visitedLabels(board);
+    const lapRestart = visited.includes(target);
+    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
     return {
-      ...tick(
-        { kind: "warpScan", target: next.label },
-        lapRestart
-          ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
-          : `Warping to the next ${flavour.noun}.`,
-        flavour.flying,
-        ACTING,
-        false,
-        {
-          ...warpIssuedMem(obs, next.label),
-          ...(refused.length > 0
-            ? { refused: refused.join(","), refusalsSeen: num(mem, "refusalsSeen") }
-            : {}),
-        },
-      ),
-      boardPatch: {
+      lapRestart,
+      patch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
         // LIST. The two lists answer two different questions — "have I worked
         // this site on THIS lap?" (which is meant to be forgotten, because one
@@ -4371,16 +4497,22 @@ function warpToAnomalyOfKind(
         // given-up list is inside the ledger's own `sites` key, and
         // `encodeLedger` below rewrites that key in full on every arrival —
         // counts and all — whether or not the lap restarted.
-        [flavour.boardKey]: (lapRestart ? [next.label] : [...visited, next.label]).join(","),
+        [flavour.boardKey]: (lapRestart ? [target] : [...visited, target]).join(","),
         // Count the arrival, and publish WHICH SITE THIS IS: the combat block
         // has no other way to know. It reads this same ledger off the board at
         // the top of every tick and takes `siteLabel` from it, which is how a
         // verdict earned on this grid ends up attached to a scanner label
         // rather than to nobody.
-        ...(ledger === null ? {} : encodeLedger(enterSite(ledger, next.label))),
-      },
+        ...(ledger === null ? {} : encodeLedger(enterSite(ledger, target))),
+      } as ScriptBoard,
     };
-  };
+  }
+
+  function visitedLabels(board: ScriptBoard): string[] {
+    return String(board[flavour.boardKey] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0);
+  }
 
   /**
    * The next site to fly to, or null when there is none — skipping any site this
@@ -4391,9 +4523,7 @@ function warpToAnomalyOfKind(
     board: ScriptBoard,
     refused: readonly string[],
   ) {
-    const visited = String(board[flavour.boardKey] ?? "")
-      .split(",")
-      .filter((label) => label.length > 0);
+    const visited = visitedLabels(board);
     const ofKind = anomalies.filter((site) => site.kind === wanted && !refused.includes(site.label));
     const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
     const workable =
