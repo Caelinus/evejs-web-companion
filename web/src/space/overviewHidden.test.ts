@@ -24,16 +24,16 @@ import {
   hiddenEntryFor,
   presetHides,
   presetHidesRow,
-  presetStanceHides,
   stateFor,
   tabShows,
   type TabHiddenState,
 } from "./overviewHidden.ts";
-import { recipeByID, recipeAllows } from "./overviewRecipes.ts";
+import { OVERVIEW_RECIPES, recipeByID, recipeAllows } from "./overviewRecipes.ts";
 import { isHostile } from "./overview.ts";
 import type { OverviewTab } from "./overviewTabs.ts";
 import type { OverviewRecipeID } from "./overviewRecipes.ts";
 import type { SpaceEntity } from "../store/types.ts";
+import { hideCategoriesFor, offeredCategoriesFor } from "./hideCategory.ts";
 import type { StanceContext } from "./stance.ts";
 
 /** One plain tab: `id` as its name, built from a recipe, never fixed. */
@@ -46,7 +46,7 @@ const ALL: OverviewTab = { id: "all", name: "All", recipeId: "all", fixed: true 
 const mining = tab("mining", "mining");
 const travel = tab("travel", "travel");
 const pve = tab("pve", "pve");
-const pvp = tab("pvp", "pvp");
+const pvp = tab("pvp", "pvp" as never);
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
 
@@ -95,13 +95,13 @@ const PLANET = entity({ itemID: 1 });
 const OTHER_PLANET = entity({ itemID: 2, typeID: 14 });
 const MOON = entity({ itemID: 3, groupID: MOON_GROUP, typeID: 15 });
 /** Group 226 is the SDE's "Large Collidable Object" — scenery, and the bug. */
-const DECOR = entity({ itemID: 4, groupID: 226, typeID: 5555, kind: "structure" });
+const DECOR = entity({ itemID: 4, groupID: 226, categoryID: 2, typeID: 5555, kind: "structure" });
 const RAT = entity({ itemID: 5, kind: "ship", groupID: 25, categoryID: 6, isNpc: true, npcEntityType: "npc" });
 /** An ore group is a rock only once the runtime stamps it with a yield. */
 const ASTEROID_GROUP = 450;
 const GATE_GROUP = 10;
-const ROCK = entity({ itemID: 14, groupID: ASTEROID_GROUP, typeID: 1230, kind: "celestial", miningYieldTypeID: 1230 });
-const GATE = entity({ itemID: 15, groupID: GATE_GROUP, typeID: 101, kind: "celestial" });
+const ROCK = entity({ itemID: 14, groupID: ASTEROID_GROUP, categoryID: 25, typeID: 1230, kind: "celestial", miningYieldTypeID: 1230 });
+const GATE = entity({ itemID: 15, groupID: GATE_GROUP, categoryID: 2, typeID: 101, kind: "celestial" });
 const FRIGATE = entity({ itemID: 16, kind: "ship", groupID: 25, typeID: 1232 });
 
 // --- the entry is a category --------------------------------------------------
@@ -288,21 +288,24 @@ test("⚠ a category hide reaches a row with no group — the old axis could not
   assert.equal(tabShows(mining, ungrouped, state), false, "the category hide did not reach it");
 });
 
-test("⚠ `other` is still unreachable by hide, so the lists cannot empty a tab", () => {
-  // The refusal the old no-groupID rule existed to provide, now carried by
-  // `other`: a row nothing could name cannot be hidden by any category entry.
+test("⚠ `other` cannot be WRITTEN, so a tab cannot be emptied by one entry", () => {
+  // ⚠ THE GUARANTEE IS NOW ABOUT ADMISSION, NOT ABOUT MATCHING. A recipe is a
+  // deny-list, so a stored `other` entry would cover every unclassifiable row —
+  // and that is exactly the catch-all that emptied the overview under the old
+  // group-0 rule. So the invariant moved: no code path can produce the entry.
+  //
+  // `hiddenEntryFor` refuses it, and so does the storage sanitizer (pinned in the
+  // storage tests below). The test is here to say the first of those is still true
+  // and to name why it matters now.
   const unknowable = entity({ itemID: 17, groupID: null, kind: null, categoryID: null });
-  assert.deepEqual(hiddenEntryFor(unknowable), null);
-  // And a stored `other` entry covers nothing, because `covers` is what decides.
-  const forged: TabHiddenState = {
-    hidden: [{ kind: "category", category: "other", label: "Other" }],
-    shown: [],
-  };
-  assert.equal(
-    tabShows(mining, unknowable, forged),
-    recipeAllows(recipeByID("mining"), unknowable),
-    "a forged `other` entry reached the lists",
-  );
+  assert.deepEqual(hideCategoriesFor(unknowable), ["other"], "the fixture stopped being unknown");
+  assert.deepEqual(hiddenEntryFor(unknowable), null, "an `other` entry can be built");
+  assert.deepEqual(offeredCategoriesFor(unknowable), [], "`other` is offered as a button");
+
+  // And no default recipe names it either, so a preset cannot empty a tab.
+  for (const recipe of OVERVIEW_RECIPES) {
+    assert.equal(recipe.hides.has("other"), false, `${recipe.id} excludes "other"`);
+  }
 });
 
 // --- the store ----------------------------------------------------------------
@@ -468,40 +471,79 @@ test("a stance hide covers the side, not the whole role", () => {
   assert.equal(tabShows(pve, FRIENDLY_SHIP, state, STANCE_CONTEXT), true, "the friendly side stayed");
 });
 
-test("the PVP preset pre-hides the friendly ships until the tab undoes it", () => {
-  const pvp = tab("pvp", "pvp");
-  assert.equal(tabShows(pvp, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "the preset pre-hid it");
-  assert.equal(tabShows(pvp, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the neutral side stayed");
-  assert.equal(tabShows(pvp, RAT, EMPTY_STATE, STANCE_CONTEXT), true, "a hostile stayed");
-  const undone: TabHiddenState = {
-    hidden: [],
-    shown: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
-  };
-  assert.equal(tabShows(pvp, FRIENDLY_SHIP, undone, STANCE_CONTEXT), true, "Show brought it back on this tab only");
-  // Without a context nothing reads friendly, so the preset pre-hides nothing.
-  assert.equal(tabShows(pvp, FRIENDLY_SHIP, EMPTY_STATE, null), true, "no context, no friendly");
+test("⚠ hiding your own side is the TOGGLE's job, not a preset's", () => {
+  // ⚠ PVP AND PRESET STANCE PRE-HIDES ARE BOTH GONE. A recipe no longer reads
+  // stance, so there is nothing for a preset to pre-hide by side, and "pvp" was
+  // only ever the vehicle for exactly that.
+  const pve = tab("pve", "pve");
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a friendly ship");
+  assert.equal(tabShows(pve, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a neutral ship");
+  // ⚠ AND A RECIPE IGNORES THE CONTEXT ENTIRELY — even one it is handed.
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, EMPTY_STATE, null), true, "no context, different answer");
 });
 
-test("presetStanceHides lists only undecided pairs, and one row earns one word", () => {
-  const pvp = tab("pvp", "pvp");
-  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), true);
-  assert.equal(presetStanceHides(pvp, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "the preset does not name neutral ships");
-  // Decided in either direction, the pair leaves the preset's hands.
-  const hidIt: TabHiddenState = {
-    hidden: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
+test("a hostile ask is recorded, and the resolver still shows it", () => {
+  // ⚠ THE ONE PLACE THE RECORD AND THE VIEW DIVERGE, AND IT IS DELIBERATE. The
+  // tab's list answers "did the player ask to hide this"; `tabShows` answers
+  // "does it show", and refuses to hide a threat on the spot.
+  const store = createTabHiddenStore();
+  store.hide("mining", RAT, "ship");
+  assert.equal(categoryIsHidden("ship", store.stateFor("mining")), true, "the ask was not recorded");
+  assert.equal(tabShows(mining, RAT, store.stateFor("mining")), true, "the threat was hidden");
+  assert.equal(isHostile(RAT), true);
+  // ⚠ THE RELAXED INVARIANT, AS A RULE: a group entry that would cover a
+  // threat does not apply (the test above pins it), while an entry that NAMES
+  // the hostile side does. Hiding "Hostiles" is the explicit choice the
+  // relaxation allows; a blanket group is no one's choice about a threat.
+  const state: TabHiddenState = {
+    hidden: [{ kind: "stance", role: "hostile", stance: "hostile", label: "Hostiles" }],
     shown: [],
   };
-  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, hidIt, STANCE_CONTEXT), false, "the player's entry owns it");
+  assert.equal(tabShows(mining, RAT, state, STANCE_CONTEXT), false, "the player named the side");
+  assert.equal(tabShows(ALL, RAT, state, STANCE_CONTEXT), true, "All is still absolute");
+});
+
+test("a stance hide covers the side, not the whole role", () => {
+  const state: TabHiddenState = {
+    hidden: [{ kind: "stance", role: "ship", stance: "neutral", label: "Ships (Neutral)" }],
+    shown: [],
+  };
+  // PVE allows ships, so only the stance entry can keep them out.
+  assert.equal(tabShows(pve, NEUTRAL_SHIP, state, STANCE_CONTEXT), false, "the neutral side went");
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, state, STANCE_CONTEXT), true, "the friendly side stayed");
+});
+
+test("⚠ hiding your own side is the TOGGLE's job, not a preset's", () => {
+  // ⚠ PVP AND PRESET STANCE PRE-HIDES ARE BOTH GONE. A recipe no longer reads
+  // stance, so there is nothing left for a preset to pre-hide by side — and
+  // "pvp" was only ever the vehicle for exactly that.
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a friendly ship");
+  assert.equal(tabShows(pve, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a neutral ship");
+  // ⚠ AND A RECIPE IGNORES THE CONTEXT ENTIRELY — even when handed one.
+  assert.equal(tabShows(pve, FRIENDLY_SHIP, EMPTY_STATE, null), true, "no context, different answer");
+});
+
+test("a preset's category hides show up as menu rows, one word each", () => {
+  // ⚠ THE MENU IS THE RECIPE'S OWN LIST. Mining excludes ships, and the tab's
+  // Hidden Items menu says so without anything having to scan the grid.
+  assert.equal(presetHidesRow(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true);
+  assert.equal(presetHidesRow(mining, ROCK, EMPTY_STATE, STANCE_CONTEXT), false, "a rock is mining");
+  // Decided in either direction, the row leaves the preset's hands and the tab's
+  // own list owns it.
+  const hidIt: TabHiddenState = {
+    hidden: [{ kind: "category", category: "ship", label: "Ships" }],
+    shown: [],
+  };
+  assert.equal(presetHidesRow(mining, NEUTRAL_SHIP, hidIt, STANCE_CONTEXT), false, "the player's entry owns it");
   const unPreHid: TabHiddenState = {
     hidden: [],
-    shown: [{ kind: "stance", role: "ship", stance: "friendly", label: "Ships (Friendly)" }],
+    shown: [{ kind: "category", category: "ship", label: "Ships" }],
   };
-  assert.equal(presetStanceHides(pvp, FRIENDLY_SHIP, unPreHid, STANCE_CONTEXT), false, "the undo is recorded");
-  // A row the GROUP pre-hides own keeps the group's word: the stance side
-  // stays silent so no row earns two menu entries.
-  assert.equal(presetStanceHides(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "mining owns neutral ships by role");
-  assert.equal(presetHidesRow(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the group word owns it");
-  assert.equal(presetStanceHides(ALL, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "All pre-hides nothing");
+  assert.equal(presetHidesRow(mining, NEUTRAL_SHIP, unPreHid, STANCE_CONTEXT), false, "the undo is recorded");
+  // All pre-hides nothing.
+  assert.equal(presetHidesRow(ALL, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "All pre-hides something");
+  // And a hostile is never a preset's business.
+  assert.equal(presetHidesRow(mining, RAT, EMPTY_STATE, STANCE_CONTEXT), false, "a threat is a pre-hiding");
 });
 
 // --- the stance entries in the store -------------------------------------------

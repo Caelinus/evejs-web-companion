@@ -40,7 +40,7 @@
     covers,
     EMPTY_STATE,
     presetHidesRow,
-    presetStanceHides,
+
     tabHidden,
     tabHiddenMap,
     tabShows,
@@ -236,95 +236,36 @@
   });
 
   /**
-   * The preset's pre-hidings that are still undecided on this tab — the
-   * virtual entries the preset dropped into this tab's hidden list in
-   * advance, now that the preset pre-hides instead of allowing.
+   * ⚠ WHAT THE TAB'S RECIPE EXCLUDES, AS ONE MENU ROW PER CATEGORY — and this is
+   * read STRAIGHT OFF the recipe, not worked out by scanning the grid.
    *
-   * ⚠ DERIVED FROM THE GRID, NEVER FROM A PRECOMPUTED UNIVERSE. Group ids are
-   * the server's taxonomy and grow with it; the only honest list of "what
-   * this tab's preset pre-hides" is "what the grid holds that the preset does
-   * not show".
+   * ⚠ THAT IS THE POINT OF THE MODEL CHANGE. A recipe is a deny-list of the Hide
+   * button's own categories, so a preset's Hidden Items list IS that list. It is
+   * accurate even when nothing of a kind is on the grid right now, which is what
+   * a player asking "what is this tab hiding?" needs to be told.
    *
-   * ⚠ UNDECIDED ONLY. A group the tab hid itself is owned by the tab's
-   * `hidden` list, and one the player already showed is owned by `shown`;
-   * each appears in the menu exactly once, under the list that owns it, so no
-   * row ever sits in the menu doing nothing.
-   *
-   * ⚠ NAMES, NOT IDS. The menu shows the same group word the list's Group
-   * column shows, and the group id travels only as the list's row key.
+   * ⚠ AND IT IS STILL PER-TAB ON UNDO. Show on one of these records the category
+   * in that tab's `shown` list, which `tabShows` consults before the recipe — so
+   * the override is real, and it does not leak onto any other tab.
    */
-  /**
-   * What the tab's RECIPE is hiding right now, as one menu row per CATEGORY.
-   *
-   * ⚠ THIS ROW WAS REMOVED AND IS BACK, BECAUSE IT WAS REMOVED FOR THE WRONG
-   * REASON. There used to be ONE row named after the recipe — so a PVE tab
-   * listed "PVE [Show]" — whose Show called `showEverythingOnTab()`. That
-   * cleared the tab's own hidden list, which is not where a recipe's omissions
-   * live, so the press visibly did nothing. Reported in game as a dead control.
-   *
-   * ⚠ THE FIX IS ONE ROW PER CATEGORY AND A DIFFERENT UNDO. A row now names the
-   * category the recipe is hiding, and Show records that CATEGORY in the tab's
-   * `shown` list. `tabShows` consults `shown` BEFORE the recipe, so that is a
-   * real override and the objects come back — which the single row never was.
-   *
-   * ⚠ AND IT IS STILL PER-TAB. `presetHidesRow` says no to anything the tab
-   * already decided in either direction, so each category owns exactly one row
-   * and no row can ever sit in the menu doing nothing.
-   */
-  const presetGroupRows = $derived.by((): { readonly key: string; readonly label: string; readonly category: HideCategoryID }[] => {
-    if (!snapshot || activeTab.fixed) {
+  const presetGroupRows = $derived.by((): readonly {
+    readonly key: string;
+    readonly label: string;
+    readonly category: HideCategoryID;
+  }[] => {
+    if (activeTab.fixed) {
       return [];
     }
-    const byCategory = new Map<HideCategoryID, string>();
-    for (const entity of snapshot.entities) {
-      if (entity.isSelf) continue;
-      if (!presetHidesRow(activeTab, entity, activeTabState, stanceContext)) continue;
-      for (const category of offeredCategoriesFor(entity)) {
-        if (!byCategory.has(category)) {
-          byCategory.set(category, hideCategoryByID(category).label);
-        }
-      }
-    }
-    return [...byCategory.entries()]
-      .map(([category, label]) => ({ key: "preset:category:" + category, label, category }))
+    return [...recipeByID(activeTab.recipeId).hides]
+      .map((category) => ({
+        key: "preset:category:" + category,
+        label: hideCategoryByID(category).label,
+        category,
+      }))
       .sort((a, b) => a.label.localeCompare(b.label));
   });
 
-  /**
-   * The preset's STANCE pre-hidings still undecided on this tab — the role
-   * and side the recipe named in advance ("the PVP preset hides friendly
-   * ships"), earned as menu rows the same way the group pre-hidings are:
-   * from the grid, one row per pair, owned by no one's list yet.
-   *
-   * ⚠ ONE ROW EARNS ONE WORD. A row the group pre-hides already own keeps the
-   * group's word, so no row appears here — `presetStanceHides` refuses it.
-   * And a pair the tab's own lists already decided is owned by them, not the
-   * preset, so it is refused here too.
-   */
-  const presetStanceRows = $derived.by((): { readonly role: string; readonly stance: Stance; readonly label: string }[] => {
-    if (!snapshot || activeTab.fixed) {
-      return [];
-    }
-    const byPair = new Map<string, string>();
-    for (const entity of snapshot.entities) {
-      if (entity.isSelf) continue;
-      if (!presetStanceHides(activeTab, entity, activeTabState, stanceContext)) continue;
-      const role = bracketRole(entity);
-      const stance = stanceOf(entity, stanceContext);
-      const key = role + ":" + stance;
-      if (!byPair.has(key)) {
-        byPair.set(key, stanceRowLabel(role, stance));
-      }
-    }
-    return [...byPair.entries()]
-      .map(([key, label]) => {
-        const [role, stance] = key.split(":") as [string, Stance];
-        return { role, stance, label };
-      })
-      .sort((a, b) => a.label.localeCompare(b.label));
-  });
-
-  /**
+/**
    * THE MENU'S ONE FLAT LIST: everything hidden on this tab, the preset's
    * pre-hidings and the player's own hides alike — one system, no
    * subcategories. Each row's Show button undoes that one entry, from
@@ -381,17 +322,6 @@
         category: row.category,
         role: null,
         stance: null,
-        label: row.label,
-        preset: true,
-      });
-    }
-    for (const row of presetStanceRows) {
-      rows.push({
-        key: "preset:stance:" + row.role + ":" + row.stance,
-        kind: "stance",
-        category: null,
-        role: row.role,
-        stance: row.stance,
         label: row.label,
         preset: true,
       });
@@ -721,9 +651,6 @@
     // which `tabShows` consults BEFORE the recipe — so this is a real override.
     for (const row of presetGroupRows) {
       tabHidden.addCategory(activeTabID, row.category);
-    }
-    for (const row of presetStanceRows) {
-      tabHidden.addStance(activeTabID, row.role, row.stance);
     }
   }
 

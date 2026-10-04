@@ -57,16 +57,11 @@
 // "Hostiles" hide — never an accident of a group.
 
 import type { SpaceEntity } from "../store/types.ts";
-import { bracketRole, type TacticalRole } from "./tactical.ts";
-import { stanceOf, type Stance, type StanceContext } from "./stance.ts";
+import { hideCategoriesFor, type HideCategoryID } from "./hideCategory.ts";
+import { isHostile } from "./overview.ts";
+import type { StanceContext } from "./stance.ts";
 
-export type OverviewRecipeID = "all" | "system" | "pve" | "pvp" | "mining" | "travel";
-
-/** One role-and-side the preset pre-hides: "hide ships that are friendly". */
-export interface RecipeStancePreHide {
-  readonly role: string;
-  readonly stance: Stance;
-}
+export type OverviewRecipeID = "all" | "system" | "pve" | "mining" | "travel";
 
 export interface OverviewRecipe {
   readonly id: OverviewRecipeID;
@@ -75,19 +70,22 @@ export interface OverviewRecipe {
   /** What the recipe is for, shown as its tooltip. */
   readonly hint: string;
   /**
-   * The roles this recipe shows, or null for "everything". Hostiles are added
-   * on top of this set by `recipeAllows` and never need listing.
+   * ⚠ THE EXCLUSIONS, NOT THE INCLUSIONS. Every tab starts from "everything
+   * visible" and a recipe removes what it does not want — the same direction as
+   * pressing Hide, and for the same reason: the thing a player hides is a thing
+   * they can name, so the thing a preset hides must be nameable too.
+   *
+   * ⚠ THESE ARE THE HIDE BUTTON'S CATEGORIES, so a preset's exclusion list IS
+   * its Hidden Items list. There is one classifier and one vocabulary, and a
+   * tab that hides "Rocks" because its recipe says so is hiding them by exactly
+   * the same rule as a player who pressed Hide on a rock.
+   *
+   * ⚠ EMPTY MEANS "HIDE NOTHING" — `all` is the empty set, not a null.
    */
-  readonly roles: ReadonlySet<TacticalRole> | null;
-  /**
-   * The stance hides the preset pre-selects, when it has any. Consulted
-   * between the tab's own lists and the role allow-list — see
-   * `recipePreHidesStance`.
-   */
-  readonly stancePreHides?: readonly RecipeStancePreHide[];
+  readonly hides: ReadonlySet<HideCategoryID>;
 }
 
-const set = (...roles: TacticalRole[]): ReadonlySet<TacticalRole> => new Set(roles);
+const set = (...ids: HideCategoryID[]): ReadonlySet<HideCategoryID> => new Set(ids);
 
 /** The recipes, in the order they are offered when creating a tab. */
 export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
@@ -95,53 +93,69 @@ export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
     id: "all",
     label: "All",
     hint: "Everything on the grid.",
-    roles: null,
+    hides: set(),
   },
   {
     id: "system",
     label: "System",
     hint: "The whole system: ships, structures, drones, wrecks, gates and celestials.",
     // Everything except the rocks — the retail overview's own first tab.
-    roles: set("ship", "police", "drone", "wreck", "station", "gate", "celestial"),
+    // ⚠ SCENERY STAYS. System is the general "what is around me" view, and the
+    // static clutter is part of that answer; it is the ROCKS a pilot flying past
+    // a belt does not want in the way. The combat tabs below do hide scenery.
+    hides: set("asteroid"),
   },
   {
     id: "pve",
     label: "PVE",
     hint: "Ships, police, drones and wrecks — plus the gates and stations you run to.",
-    // ⚠ STATIONS AND GATES TOO, reported missing in game. A combat filter that
-    // omits them hides the way out of the fight and the way back into it, which
-    // is the opposite of what a combat tab is for.
-    roles: set("ship", "police", "drone", "wreck", "station", "gate"),
-  },
-  {
-    id: "pvp",
-    label: "PVP",
-    hint: "What PVE shows, minus your own side — and the places you escape to.",
-    // Same roles as PVE, plus the STATION and GATE a fight runs to or from. A PvP
-    // filter that hides the station is hiding the escape: reported in game, and
-    // the pilot is left without a way to dock out of the fight they chose.
-    roles: set("ship", "police", "drone", "wreck", "station", "gate"),
-    stancePreHides: [
-      { role: "ship", stance: "friendly" },
-      { role: "drone", stance: "friendly" },
-      { role: "wreck", stance: "friendly" },
-    ],
+    // ⚠ STATIONS AND GATES STAY OUT OF THE EXCLUSIONS, reported missing in game:
+    // a combat filter that hides the dock hides the way out of the fight.
+    hides: set(
+      "asteroid",
+      "scenery",
+      "planet",
+      "moon",
+      "celestial",
+      "container",
+      "turret",
+      "structure",
+    ),
   },
   {
     id: "mining",
     label: "Mining",
     hint: "Rocks, and the places to unload them.",
-    // Stations because a full hold is the other half of a mining trip. A lone
-    // neutral ship near the belt is noise; your logi (friendly) and the rats
-    // (hostile, role-forced) stay.
-    roles: set("asteroid", "station", "drone"),
-    stancePreHides: [{ role: "ship", stance: "neutral" }],
+    // Stations because a full hold is the other half of a mining trip.
+    hides: set(
+      "ship",
+      "police",
+      "wreck",
+      "gate",
+      "celestial",
+      "planet",
+      "moon",
+      "scenery",
+      "container",
+      "turret",
+      "structure",
+    ),
   },
   {
     id: "travel",
     label: "Travel",
     hint: "Gates, stations and celestials — the things you fly to.",
-    roles: set("gate", "station", "celestial"),
+    hides: set(
+      "ship",
+      "police",
+      "drone",
+      "wreck",
+      "asteroid",
+      "scenery",
+      "container",
+      "turret",
+      "structure",
+    ),
   },
 ];
 
@@ -156,6 +170,12 @@ export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
  */
 const RECIPE_ALIASES: Readonly<Record<string, OverviewRecipeID>> = {
   combat: "pve",
+  // ⚠ "pvp" ANSWERS AS PVE RATHER THAN FALLING BACK TO ALL. A saved bar can name
+  // a tab's recipe id, and PVP was one of the five a profile shipped with.
+  // Falling back to All would silently turn that player's PVP tab into a
+  // show-everything tab; answering as PVE keeps it a combat tab. The distinction
+  // it used to carry — hiding your own side — now lives in the toolbar toggles.
+  pvp: "pve",
 };
 
 /**
@@ -166,11 +186,15 @@ const RECIPE_ALIASES: Readonly<Record<string, OverviewRecipeID>> = {
  */
 export const ALL_RECIPE: OverviewRecipeID = "all";
 
-/** The five editable tabs a new profile starts with, in order. */
+/**
+ * ⚠ FIVE TABS, NOT SIX. "PVP" existed only to pre-hide your own side by stance,
+ * and that job now belongs to the two standing toggles on the toolbar, which do
+ * it for every ship on the grid rather than one preset at a time. Left in place
+ * it would have been a second tab with an identical exclusion list.
+ */
 export const DEFAULT_TAB_RECIPES: readonly OverviewRecipeID[] = [
   "system",
   "pve",
-  "pvp",
   "mining",
   "travel",
 ];
@@ -185,44 +209,21 @@ export function recipeByID(id: OverviewRecipeID | string): OverviewRecipe {
 }
 
 /**
- * Does this recipe show this object, by ROLE?
+ * Does this recipe show this object?
  *
- * ⚠ THE HOSTILE CLAUSE IS FIRST AND UNCONDITIONAL. See the note at the top: a
- * filter is a convenience and a threat is not something a convenience removes.
+ * ⚠ AN EXCLUSION TEST ON THE CATEGORY, THE SAME ONE THE HIDE BUTTON USES. The
+ * recipe names categories to remove; this asks whether this object is one of
+ * them. There is no second vocabulary and no second direction.
+ *
+ * ⚠ THE HOSTILE CLAUSE IS FIRST AND UNCONDITIONAL. A filter is a convenience
+ * and a threat is not something a convenience removes — so a recipe naming
+ * "ship" does not reach a rat.
  */
 export function recipeAllows(recipe: OverviewRecipe, entity: SpaceEntity): boolean {
-  const role = bracketRole(entity);
-  if (role === "hostile") {
+  if (isHostile(entity)) {
     return true;
   }
-  if (recipe.roles === null) {
-    return true;
-  }
-  return recipe.roles.has(role);
-}
-
-/**
- * Does this recipe's preset PRE-HIDE this object by stance — "hide the
- * friendly ships", said in advance, the way the retail presets do?
- *
- * ⚠ AN ENTRY NAMES A SIDE, SO IT MAY REACH A HOSTILE IF IT SAYS SO. The role
- * rule above never hides a hostile, and no default recipe pre-hides the
- * hostile stance — but a stance entry that DID would be honoured, because it
- * is the explicit choice the relaxed invariant allows: specificity beats
- * generality.
- */
-export function recipePreHidesStance(
-  recipe: OverviewRecipe,
-  entity: SpaceEntity,
-  context: StanceContext | null,
-): boolean {
-  const preHides = recipe.stancePreHides;
-  if (preHides === undefined || preHides.length === 0) {
-    return false;
-  }
-  const role = bracketRole(entity);
-  const stance = stanceOf(entity, context);
-  return preHides.some((entry) => entry.role === role && entry.stance === stance);
+  return !recipe.hides.has(hideCategoriesFor(entity)[0] ?? "other");
 }
 
 /** Filter a list of objects through a recipe, keeping their order. */
@@ -231,10 +232,13 @@ export function applyRecipe<T extends SpaceEntity>(
   recipe: OverviewRecipe,
   context: StanceContext | null = null,
 ): readonly T[] {
-  if (recipe.roles === null && recipe.stancePreHides === undefined) {
+  // ⚠ `context` IS KEPT IN THE SIGNATURE but no longer read: hiding your own side
+  // is the toolbar toggles' job now, so a recipe no longer looks at stance at
+  // all. The parameter stays so callers keep compiling and so the day a recipe
+  // needs a side again it does not become a breaking change.
+  void context;
+  if (recipe.hides.size === 0) {
     return entities;
   }
-  return entities.filter(
-    (entity) => recipeAllows(recipe, entity) && !recipePreHidesStance(recipe, entity, context),
-  );
+  return entities.filter((entity) => recipeAllows(recipe, entity));
 }

@@ -15,7 +15,6 @@ import {
   applyRecipe,
   recipeAllows,
   recipeByID,
-  recipePreHidesStance,
   type OverviewRecipeID,
 } from "./overviewRecipes.ts";
 import {
@@ -67,13 +66,15 @@ function entity(over: Partial<SpaceEntity> & { itemID: number }): SpaceEntity {
   };
 }
 
-const ROCK = entity({ itemID: 1, kind: "celestial", miningYieldTypeID: 1230 });
-const GATE = entity({ itemID: 2, kind: "celestial", groupID: 10 });
-const STATION = entity({ itemID: 3, kind: "structure" });
-const PLANET = entity({ itemID: 4, kind: "celestial", groupID: 7 });
-const PLAYER_SHIP = entity({ itemID: 5, kind: "ship" });
-const WRECK = entity({ itemID: 6, kind: "wreck" });
-const DRONE = entity({ itemID: 7, kind: "drone" });
+// ⚠ EVERY FIXTURE NOW CARRIES ITS SDE CATEGORY, because a recipe reads the
+// Hide button's classifier and that classifier reads categoryID before kind.
+const ROCK = entity({ itemID: 1, kind: "celestial", groupID: 450, categoryID: 25, miningYieldTypeID: 1230 });
+const GATE = entity({ itemID: 2, kind: "celestial", groupID: 10, categoryID: 2 });
+const STATION = entity({ itemID: 3, kind: "structure", groupID: 15, categoryID: 3 });
+const PLANET = entity({ itemID: 4, kind: "celestial", groupID: 7, categoryID: 2 });
+const PLAYER_SHIP = entity({ itemID: 5, kind: "ship", groupID: 25, categoryID: 6 });
+const WRECK = entity({ itemID: 6, kind: "wreck", groupID: 186, categoryID: 2 });
+const DRONE = entity({ itemID: 7, kind: "drone", groupID: 100, categoryID: 18 });
 const RAT = entity({ itemID: 8, kind: "ship", isNpc: true, npcEntityType: "npc" });
 const POLICE = entity({ itemID: 9, kind: "ship", isNpc: true, npcEntityType: "concord" });
 const EVERYTHING = [ROCK, GATE, STATION, PLANET, PLAYER_SHIP, WRECK, DRONE, RAT, POLICE];
@@ -84,12 +85,13 @@ function idsFor(recipeID: string): number[] {
 
 // --- the six recipes ---------------------------------------------------------
 
-test("there are exactly the six recipes the preset refresh offers", () => {
+test("there are exactly the FIVE recipes the refresh offers, plus All", () => {
+  // ⚠ PVP WAS REMOVED, and the count is pinned so a sixth cannot creep back in
+  // without this failing.
   assert.deepEqual(OVERVIEW_RECIPES.map((recipe) => recipe.id), [
     "all",
     "system",
     "pve",
-    "pvp",
     "mining",
     "travel",
   ]);
@@ -163,7 +165,7 @@ test("the default tabs are the five editable ones — All is not one of them", (
   // ⚠ THE DISTINCTION THE PANEL'S FIXED-TAB RULE TURNS ON. All is a recipe and
   // it is the fixed tab, but it is NOT a default *editable* tab; shipping it in
   // this list would create a second copy of it on first run.
-  assert.deepEqual(DEFAULT_TAB_RECIPES, ["system", "pve", "pvp", "mining", "travel"]);
+  assert.deepEqual(DEFAULT_TAB_RECIPES, ["system", "pve", "mining", "travel"]);
   assert.equal(DEFAULT_TAB_RECIPES.includes(ALL_RECIPE), false);
 });
 
@@ -210,77 +212,73 @@ const ALLIANCE_SHIP = entity({
 });
 const OWNED_DRONE = entity({ itemID: 23, kind: "drone", ownerID: MY_CHARACTER });
 
-test("PVP hides the friendly side by role-and-side, and nothing else", () => {
-  const pvp = recipeByID("pvp");
-  // ⚠ THE REQUEST IT EXISTS FOR. A hostile stays, a friendly one goes —
-  // same role, different side, different answer.
-  assert.equal(recipePreHidesStance(pvp, FRIENDLY_SHIP, CONTEXT), true, "own ship");
-  assert.equal(recipePreHidesStance(pvp, CORP_SHIP, CONTEXT), true, "corp-mate");
-  assert.equal(recipePreHidesStance(pvp, ALLIANCE_SHIP, CONTEXT), true, "alliance-mate");
-  assert.equal(recipePreHidesStance(pvp, OWNED_DRONE, CONTEXT), true, "own drone");
-  assert.equal(recipePreHidesStance(pvp, PLAYER_SHIP, CONTEXT), false, "a neutral ship");
-  assert.equal(recipePreHidesStance(pvp, RAT, CONTEXT), false, "a hostile is never pre-hidden");
-  // And the role allow-list alone still admits them: the HIDE comes from the
-  // stance entry, not from the roles.
-  assert.equal(recipeAllows(pvp, FRIENDLY_SHIP), true);
-});
-
-test("PVP differs from PVE only by its stance pre-hides", () => {
-  // ⚠ THE SPLIT THE PLAN PINNED: PVE and PVP are the same roles; the preset
-  // refresh's whole "PVP" column is stance.
-  const pve = recipeByID("pve");
-  const pvp = recipeByID("pvp");
-  assert.ok(pve.roles, "PVE lost its role set");
-  assert.ok(pvp.roles, "PVP lost its role set");
-  assert.deepEqual([...pve.roles], [...pvp.roles], "the roles changed");
-  assert.equal(pve.stancePreHides, undefined, "PVE names a side");
-  assert.ok(pvp.stancePreHides?.length, "PVP names no side");
-  // Without a context nothing reads as friendly, so the two answer alike.
-  assert.deepEqual(
-    applyRecipe([FRIENDLY_SHIP], pve).length,
-    applyRecipe([FRIENDLY_SHIP], pvp, null).length,
-  );
-  // With one, PVP drops the friendly ship and PVE keeps it.
-  assert.equal(applyRecipe([FRIENDLY_SHIP], pve, CONTEXT).length, 1);
-  assert.equal(applyRecipe([FRIENDLY_SHIP], pvp, CONTEXT).length, 0, "the friendly ship stayed on PVP");
-});
-
-test("Mining pre-hides a lone neutral ship; a logi and a rat both stay", () => {
-  const mining = recipeByID("mining");
-  assert.equal(recipePreHidesStance(mining, PLAYER_SHIP, CONTEXT), true, "neutral noise");
-  assert.equal(recipePreHidesStance(mining, FRIENDLY_SHIP, CONTEXT), false, "your logi is not noise");
-  assert.equal(recipePreHidesStance(mining, RAT, CONTEXT), false, "a threat is not noise");
-  // And a friendly ship is not shown on Mining at all: the role allow-list
-  // (ships are not mining) still governs; the stance axis only refines roles
-  // the recipe shows, it never admits or ejects on its own.
-  assert.equal(recipeAllows(mining, FRIENDLY_SHIP), false, "the role rule still governs");
-});
-
-test("no default recipe pre-hides the hostile stance", () => {
-  // ⚠ THE INVARIANT THAT KEEPS THE RELAXATION SAFE. Hiding a hostile requires
-  // naming it — a recipe entry or the player's own "Hostiles" hide — and no
-  // shipped preset names the hostile side.
+test("⚠ a recipe is a DENY-LIST of the Hide button's own categories", () => {
+  // ⚠ THE MODEL, STATED. Every tab starts from "everything visible" and a
+  // recipe names what it removes, in the same vocabulary and the same direction
+  // as pressing Hide. There is no second classifier and no second axis.
   for (const recipe of OVERVIEW_RECIPES) {
-    assert.equal(
-      recipePreHidesStance(recipe, RAT, CONTEXT),
-      false,
-      `'${recipe.id}' pre-hides a hostile`,
-    );
+    assert.ok(recipe.hides instanceof Set, recipe.id + " has no exclusion list");
+  }
+  // All is the EMPTY set — hide nothing — rather than a null that means "no
+  // filter", so there is exactly one thing a recipe can say.
+  assert.equal(recipeByID("all").hides.size, 0);
+
+  // A Mining tab removes ships, so a ship is not shown on it.
+  assert.equal(recipeAllows(recipeByID("mining"), PLAYER_SHIP), false);
+  // And a rock is, because "asteroid" is not in Mining's exclusions.
+  assert.equal(recipeAllows(recipeByID("mining"), ROCK), true);
+});
+
+test("⚠ a recipe's exclusions ARE its Hidden Items list", () => {
+  // The menu reads the recipe's own list, so what a tab hides is answerable
+  // even when nothing of that kind is on the grid right now.
+  const mining = recipeByID("mining");
+  assert.ok(mining.hides.has("ship"), "Mining should exclude ships");
+  assert.ok(mining.hides.has("wreck"), "Mining should exclude wrecks");
+  // And the escape route is NOT excluded — the bug reported in game.
+  assert.equal(mining.hides.has("station"), false, "Mining hides the station");
+  assert.equal(recipeByID("pve").hides.has("station"), false, "PVE hides the station");
+  assert.equal(recipeByID("pve").hides.has("gate"), false, "PVE hides the stargate");
+});
+
+test("⚠ no recipe can hide a hostile, whatever it excludes", () => {
+  for (const recipe of OVERVIEW_RECIPES) {
+    if (recipe.hides.has("ship")) {
+      assert.equal(recipeAllows(recipe, RAT), true, recipe.id + " hid a threat");
+    }
   }
 });
 
-test("recipes classify through bracketRole, so the list and the picture agree", () => {
-  for (const row of EVERYTHING) {
-    const role = bracketRole(row);
-    const shown = recipeAllows(recipeByID("combat"), row);
-    const expected = role === "hostile" || ["ship", "police", "drone", "wreck", "station", "gate"].includes(role);
-    assert.equal(shown, expected, `'${role}' was classified differently`);
-  }
+test("⚠ hiding your own side is the TOGGLE's job, not a recipe's", () => {
+  // ⚠ PVP USED TO BE EXACTLY THIS. Its only reason to exist was pre-hiding
+  // friendly ships by stance; that is now the "Hide Friendly" toggle on the
+  // toolbar, so the recipe is gone and the old id answers as PVE rather than
+  // falling back to All and silently showing everything.
+  // ⚠ THE ID IS PASSED AS A RAW STRING ON PURPOSE. It is no longer in the
+  // union — that is the point — and this is the only way to exercise the
+  // migration a saved bar actually goes through.
+  const retired = "pvp" as string;
+  assert.equal(recipeByID(retired).id, "pve", "a saved pvp tab fell back to All");
+  assert.deepEqual(recipeByID(retired).hides, recipeByID("pve").hides);
+  assert.equal(
+    OVERVIEW_RECIPES.some((r) => r.id === retired),
+    false,
+    "PVP is still offered",
+  );
+  assert.equal(
+    DEFAULT_TAB_RECIPES.includes(retired as OverviewRecipeID),
+    false,
+    "PVP is still a default tab",
+  );
+  // And a recipe no longer reads stance at all, whatever context it is handed.
+  assert.equal(applyRecipe([FRIENDLY_SHIP], recipeByID("pve"), CONTEXT).length, 1);
 });
 
-test("an unknown recipe id falls back to All rather than hiding everything", () => {
-  assert.equal(recipeByID("not-a-recipe").id, "all");
-  assert.deepEqual(idsFor("not-a-recipe"), EVERYTHING.map((row) => row.itemID));
+test("⚠ the default bar is five tabs and every id is real", () => {
+  assert.deepEqual(DEFAULT_TAB_RECIPES, ["system", "pve", "mining", "travel"]);
+  for (const id of DEFAULT_TAB_RECIPES) {
+    assert.ok(OVERVIEW_RECIPES.some((r) => r.id === id), id + " is not a recipe");
+  }
 });
 
 test("filtering keeps the order it was given", () => {
@@ -290,14 +288,13 @@ test("filtering keeps the order it was given", () => {
 
 // --- the tab bar -------------------------------------------------------------
 
-test("a fresh tab bar is All plus the five defaults, All first", () => {
+test("a fresh tab bar is All plus the four defaults, All first", () => {
   const bar = createTabBar();
   const tabs = bar.tabs.get();
   assert.deepEqual(tabs.map((tab) => tab.name), [
     "All",
     "System",
     "PVE",
-    "PVP",
     "Mining",
     "Travel",
   ]);
@@ -410,18 +407,14 @@ test("deleting some OTHER tab leaves the selection alone", () => {
 test("moving a tab swaps it with its neighbour and never past All", () => {
   const bar = createTabBar();
   const names = (): string[] => bar.tabs.get().map((tab) => tab.name);
-  assert.deepEqual(names(), ["All", "System", "PVE", "PVP", "Mining", "Travel"]);
+  assert.deepEqual(names(), ["All", "System", "PVE", "Mining", "Travel"]);
 
   bar.select("all");
-  // Move the LAST tab left twice: over Mining, then over PVP. It must stop there.
-  const travel = bar.tabs.get()[5];
+  // Move the LAST tab left once: over Mining. It must stop there.
+  const travel = bar.tabs.get()[4];
   assert.ok(travel);
   bar.move(travel.id, -1);
-  assert.deepEqual(names(), ["All", "System", "PVE", "PVP", "Travel", "Mining"]);
-  const moved = bar.tabs.get()[4];
-  assert.ok(moved);
-  bar.move(moved.id, -1);
-  assert.deepEqual(names(), ["All", "System", "PVE", "Travel", "PVP", "Mining"]);
+  assert.deepEqual(names(), ["All", "System", "PVE", "Travel", "Mining"]);
   // ⚠ One more step left would swap with All. It must NOT.
   bar.move(bar.tabs.get()[1]?.id ?? "", -1);
   assert.equal(names()[0], "All", "All was pushed out of its slot");
@@ -437,7 +430,7 @@ test("moving past either end is a no-op, not a wrap-around", () => {
   bar.move(system.id, -1);
   assert.deepEqual(bar.tabs.get().map((tab) => tab.id), before);
   // And the LAST tab moved RIGHT is off the far end: it must not wrap.
-  const travel = bar.tabs.get()[5];
+  const travel = bar.tabs.get()[4];
   assert.ok(travel);
   bar.move(travel.id, 1);
   assert.deepEqual(bar.tabs.get().map((tab) => tab.id), before);
@@ -461,7 +454,7 @@ test("the selected tab and its id never describe different tabs", () => {
   assert.equal(bar.selected.get().id, tab.id, "the rename orphaned the id");
 });
 
-test("reset puts the bar back to All plus the five defaults", () => {
+test("reset puts the bar back to All plus the four defaults", () => {
   const bar = createTabBar();
   bar.create("pve", "Ratting");
   bar.remove(bar.tabs.get()[2]?.id ?? "");
@@ -470,7 +463,6 @@ test("reset puts the bar back to All plus the five defaults", () => {
     "All",
     "System",
     "PVE",
-    "PVP",
     "Mining",
     "Travel",
   ]);
@@ -491,7 +483,7 @@ test("two tab bars built separately never share state", () => {
   const a = createTabBar();
   const b = createTabBar();
   a.create("pve", "Only mine");
-  assert.equal(b.tabs.get().length, 6);
+  assert.equal(b.tabs.get().length, 5);
   assert.equal(b.tabs.get().some((tab) => tab.name === "Only mine"), false);
 });
 

@@ -284,10 +284,10 @@ test("⚠ the per-row Hide control is GONE", () => {
 
 // --- the tab bar -------------------------------------------------------------
 
-test("the bar opens on All plus the five defaults", () => {
+test("the bar opens on All plus the four defaults", () => {
   resetShared();
   const text = visibleText(panel());
-  for (const label of ["All", "System", "PVE", "PVP", "Mining", "Travel"]) {
+  for (const label of ["All", "System", "PVE", "Mining", "Travel"]) {
     assert.ok(text.includes(label), `the '${label}' tab is missing`);
   }
 });
@@ -639,16 +639,19 @@ test("⚠ hiding on one tab does not touch the others, and All keeps everything"
   // next tab over does not, and the fallback tab loses nothing at all.
   resetShared();
   const miningID = tabIDByName("Mining");
-  const travelID = tabIDByName("Travel");
+  // ⚠ SYSTEM IS THE COMPARISON TAB, not Travel. Every preset but System excludes
+  // scenery, so a Travel tab would hide the emitter for its OWN reason and the
+  // test could not tell a per-tab leak from a preset working.
+  const systemID = tabIDByName("System");
   overviewTabs.select(miningID);
   tabHidden.hide(miningID, DECOR as never, "scenery");
   const miningBody = panel();
   assert.equal(tabHidden.stateFor(miningID).hidden.length, 1, "the hiding tab recorded nothing");
   assert.ok(!visibleText(miningBody).includes("An Emitter"), "the hiding tab kept showing the group");
-  overviewTabs.select(travelID);
-  const travelBody = panel();
-  assert.deepEqual(tabHidden.stateFor(travelID).hidden, [], "the other tab saw a hiding of its own");
-  assert.ok(visibleText(travelBody).includes("An Emitter"), "the other tab lost the group");
+  overviewTabs.select(systemID);
+  const systemBody = panel();
+  assert.deepEqual(tabHidden.stateFor(systemID).hidden, [], "the other tab saw a hiding of its own");
+  assert.ok(visibleText(systemBody).includes("An Emitter"), "the other tab lost the group");
   overviewTabs.select("all");
   const allBody = panel();
   assert.ok(visibleText(allBody).includes("An Emitter"), "All lost a group hidden elsewhere");
@@ -716,7 +719,6 @@ test("the preset's pre-hidings sit in the menu, one flat list with the player's 
   // on THIS tab only.
   assert.doesNotMatch(SOURCE, /Not shown on this tab/, "a picker section came back");
   assert.doesNotMatch(SOURCE, /Hidden on this tab/, "a subcategory came back");
-  assert.match(SOURCE, /const presetStanceRows = \$derived/, "the stance pre-hidings have no list to read");
   assert.match(SOURCE, /const hiddenMenuRows = \$derived/, "the menu's flat list has no list to read");
   // ⚠ AND THERE IS NO "WHAT THE PRESET HID" ROW — A REPORTED BUG. It used to be
   // one row named after the recipe (so a PVE tab listed "PVE [Show]") whose Show
@@ -822,7 +824,6 @@ test("reset restores the shipped bar", () => {
     "All",
     "System",
     "PVE",
-    "PVP",
     "Mining",
     "Travel",
   ]);

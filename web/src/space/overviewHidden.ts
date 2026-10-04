@@ -57,7 +57,6 @@ import { createSignal, readonlySignal, type ReadableSignal } from "../store/sign
 import {
   recipeAllows,
   recipeByID,
-  recipePreHidesStance,
 } from "./overviewRecipes.ts";
 import type { OverviewTab } from "./overviewTabs.ts";
 import { isHostile } from "./overview.ts";
@@ -385,41 +384,6 @@ export function presetHidesRow(
 }
 
 /**
- * Does this tab's PRESET pre-hide this row BY STANCE — the role-and-side pairs
- * the preset named in advance ("the PVP tab hides friendly ships")?
- *
- * ⚠ THE SAME DECIDED-ONCE RULE AS THE GROUP SIDE. A pair the tab hid itself or
- * the player already undid is owned by the tab's own lists, not by the
- * preset. And a row the GROUP pre-hides already own keeps the group's word in
- * the menu: one row, one word, one Show.
- */
-export function presetStanceHides(
-  tab: OverviewTab,
-  entity: SpaceEntity,
-  state: TabHiddenState,
-  context: StanceContext | null = null,
-): boolean {
-  if (tab.fixed) {
-    return false;
-  }
-  for (const entry of state.hidden) {
-    if (entryApplies(entry, entity, context)) {
-      return false;
-    }
-  }
-  for (const entry of state.shown) {
-    if (covers(entry, entity, context)) {
-      return false;
-    }
-  }
-  const recipe = recipeByID(tab.recipeId);
-  if (!recipePreHidesStance(recipe, entity, context)) {
-    return false;
-  }
-  return !presetHidesRow(tab, entity, state, context);
-}
-
-/**
  * Does this tab's PRESET pre-hide this row at all — either axis? The union
  * kept for callers that ask the whole question; the menu's two lists use the
  * two halves above so a row never earns two words.
@@ -431,7 +395,7 @@ export function presetHides(
   context: StanceContext | null = null,
 ): boolean {
   return (
-    presetHidesRow(tab, entity, state, context) || presetStanceHides(tab, entity, state, context)
+    presetHidesRow(tab, entity, state, context)
   );
 }
 
@@ -483,9 +447,6 @@ export function tabShows(
     }
   }
   const recipe = recipeByID(tab.recipeId);
-  if (recipePreHidesStance(recipe, entity, context)) {
-    return false;
-  }
   return recipeAllows(recipe, entity);
 }
 
