@@ -710,22 +710,38 @@ const den = (label: string) => ({ label, kind: "combat" as const });
 const EMPTY_READS_DONE = 2;
 const rocks = (label: string) => ({ label, kind: "ore" as const });
 
+// The tour commits its pick with a wait tick and presses the warp on the next
+// one: the runner commits a block's memory only when its action succeeds, so
+// the label has to be on record BEFORE the press for a refusal to be readable.
+// These tests are about WHICH site is flown to, so they step past the commit.
+function warpAfterPick(
+  macro: NonNullable<(typeof SCRIPT_MACROS)["warp-to-anomaly"]>,
+  s: MacroStep,
+  o: ScriptObservation,
+  board: ScriptBoard,
+  mem: MacroMemory = {},
+) {
+  const picked = macro(s, o, mem, board);
+  assert.equal(picked.action.kind, "wait", "the pick is committed before the warp is pressed");
+  return macro(s, o, picked.nextMem, board);
+}
+
 test("warp-to-anomaly: walks the scanner's dens one by one, never repeating one this run", () => {
   const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
   const s = step("warp-to-anomaly" as never);
   const inSpace = flight({ docked: false, inSpace: true, stationID: null });
 
   // First pick: the first unvisited den, remembered on the board.
-  const go = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), {}, NB);
+  const go = warpAfterPick(anom, s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), NB);
   assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
   assert.equal(go.boardPatch?.["anomsVisited"], "QEE-288");
 
   // Already visited QEE-288 -> the NEXT den.
-  const next = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), {}, { anomsVisited: "QEE-288" });
+  const next = warpAfterPick(anom, s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288"), den("ABC-123")] }), { anomsVisited: "QEE-288" });
   assert.ok(next.action.kind === "warpScan" && next.action.target === "ABC-123");
 
   // All visited -> another lap over the same dens, not a stop.
-  const lap = anom(s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), {}, { anomsVisited: "QEE-288" });
+  const lap = warpAfterPick(anom, s, obs({ flightStatus: inSpace, anomalies: [den("QEE-288")] }), { anomsVisited: "QEE-288" });
   assert.ok(lap.action.kind === "warpScan" && lap.action.target === "QEE-288");
   assert.equal(lap.outcome.kind, "acting");
 
@@ -746,7 +762,7 @@ test("warp-to-anomaly: an ore site is not a den — the ratting block skips it",
   const inSpace = flight({ docked: false, inSpace: true, stationID: null });
 
   // Rocks first on the scanner, one den behind them: the den is what it flies to.
-  const go = anom(s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111"), den("QEE-288")] }), {}, NB);
+  const go = warpAfterPick(anom, s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111"), den("QEE-288")] }), NB);
   assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
 
   // Nothing but rocks (and a site whose kind could not be read) -> blocked, not
@@ -767,13 +783,13 @@ test("warp-to-ore-anomaly: flies to ore sites only, on its own visited list", ()
   const sites = [den("QEE-288"), rocks("ORE-111"), rocks("ORE-222")];
 
   // The den is skipped even though it is first on the scanner.
-  const go = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, NB);
+  const go = warpAfterPick(ore, s, obs({ flightStatus: inSpace, anomalies: sites }), NB);
   assert.ok(go.action.kind === "warpScan" && go.action.target === "ORE-111");
   assert.equal(go.boardPatch?.["oreAnomsVisited"], "ORE-111");
 
   // Its visited list is its OWN slot: a ratting tour of this system does not
   // make the mining block think it has been everywhere.
-  const next = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111", anomsVisited: "ORE-222" });
+  const next = warpAfterPick(ore, s, obs({ flightStatus: inSpace, anomalies: sites }), { oreAnomsVisited: "ORE-111", anomsVisited: "ORE-222" });
   assert.ok(next.action.kind === "warpScan" && next.action.target === "ORE-222");
 
   // Every ore site visited -> the lap starts again at the first one, and the
@@ -781,13 +797,13 @@ test("warp-to-ore-anomaly: flies to ore sites only, on its own visited list", ()
   // and not an immediate second restart. One miner does not empty a cluster in
   // one hold; the run should end at Mine-at-a-belt when the rock is gone, not
   // here because the ship has been here before.
-  const lap = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111,ORE-222" });
+  const lap = warpAfterPick(ore, s, obs({ flightStatus: inSpace, anomalies: sites }), { oreAnomsVisited: "ORE-111,ORE-222" });
   assert.ok(lap.action.kind === "warpScan" && lap.action.target === "ORE-111");
   assert.equal(lap.outcome.kind, "acting");
   assert.equal(lap.boardPatch?.["oreAnomsVisited"], "ORE-111");
 
   // The den is still not on the mining block's lap.
-  const lapAgain = ore(s, obs({ flightStatus: inSpace, anomalies: sites }), {}, { oreAnomsVisited: "ORE-111" });
+  const lapAgain = warpAfterPick(ore, s, obs({ flightStatus: inSpace, anomalies: sites }), { oreAnomsVisited: "ORE-111" });
   assert.ok(lapAgain.action.kind === "warpScan" && lapAgain.action.target === "ORE-222");
 });
 
@@ -814,7 +830,7 @@ test("warp-to-ore-anomaly: an empty scanner is re-read before it is believed", (
   assert.ok(third.outcome.kind === "blocked" && third.outcome.reason.includes("lists no cosmic anomaly"));
 
   // A read that ARRIVES full on the second look is flown, not stopped on.
-  const recovered = ore(s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111")] }), first.nextMem, NB);
+  const recovered = warpAfterPick(ore, s, obs({ flightStatus: inSpace, anomalies: [rocks("ORE-111")] }), NB, first.nextMem);
   assert.ok(recovered.action.kind === "warpScan" && recovered.action.target === "ORE-111");
 });
 
