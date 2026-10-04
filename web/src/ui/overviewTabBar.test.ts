@@ -23,6 +23,7 @@ const SpaceOverview = (await import("./SpaceOverview.svelte")).default;
 const { OVERVIEW_RECIPES } = await import("../space/overviewRecipes.ts");
 const { overviewTabs, createTabBar } = await import("../space/overviewTabs.ts");
 const { tabHidden } = await import("../space/overviewHidden.ts");
+const { spaceSelection } = await import("../space/selection.ts");
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(UI_DIR, "SpaceOverview.svelte"), "utf8");
@@ -34,6 +35,8 @@ const DECOR_ID = 60000001;
 const RAT_ID = 70000001;
 const DECOR_TYPE_ID = 5555;
 const ORE_TYPE_ID = 1230;
+/** Group 25 is the frigate group; a belt rat is a frigate-shaped hull. */
+const RAT_TYPE_ID = 1232;
 
 function fakeFlow(): unknown {
   return new Proxy({}, { get: () => async () => {} });
@@ -75,9 +78,13 @@ function entity(over: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-const ROCK = entity({ kind: "asteroid", itemID: ROCK_ID, typeID: ORE_TYPE_ID, groupID: 450, categoryID: 25, name: "Veldspar" });
+const ROCK = entity({ kind: "celestial", itemID: ROCK_ID, typeID: ORE_TYPE_ID, groupID: 450, categoryID: 25, miningYieldTypeID: ORE_TYPE_ID, name: "Veldspar" });
+// ⚠ A RAT IS A HULL. It used to be built with the default `kind: "celestial"`,
+// which classified as `celestial` and so earned a "Hide Celestials" button — a
+// fixture that quietly contradicted the thing under test. Group 25 is the
+// frigate group, so this is what the classifier and the panel will read.
+const RAT = entity({ kind: "ship", itemID: RAT_ID, typeID: RAT_TYPE_ID, groupID: 25, categoryID: 6, isNpc: true, npcEntityType: "npc", name: "Belt Rat" });
 const DECOR = entity({ kind: "structure", itemID: DECOR_ID, typeID: DECOR_TYPE_ID, groupID: 226, name: "An Emitter" });
-const RAT = entity({ itemID: RAT_ID, isNpc: true, npcEntityType: "npc", name: "Belt Rat" });
 
 function storeWith(entities: readonly Record<string, unknown>[]): unknown {
   const store = createClientStore();
@@ -134,6 +141,23 @@ function panel(entities: readonly Record<string, unknown>[] = [ROCK, DECOR, RAT]
   } as never).body;
 }
 
+/**
+ * ⚠ A PANEL WITH SOMETHING PICKED.
+ *
+ * The Hide verbs act on the SELECTION, so a toolbar test that renders nothing
+ * selected sees no named button at all — which is correct (there is nothing to
+ * name) and useless for asserting what the button says. This picks the row
+ * first, so the render is the one a player actually gets after a click.
+ */
+function panelPicking(itemID: number, entities: readonly Record<string, unknown>[]): string {
+  spaceSelection.select(itemID);
+  try {
+    return panel(entities);
+  } finally {
+    spaceSelection.select(null);
+  }
+}
+
 function visibleText(body: string): string {
   return body
     .replace(/<img[^>]*>/g, " ")
@@ -183,16 +207,43 @@ test("the tabs and the overview verbs live on two separate bars", () => {
 
 test("Hide is a real left-click button in the toolbar", () => {
   resetShared();
-  const body = panel([ROCK]);
+  const body = panelPicking(ROCK_ID, [ROCK, DECOR, RAT]);
   assert.match(body, /class="spc-tool"/, "no overview verb is offered");
-  assert.ok(visibleText(body).includes("Hide"), "there is no Hide control");
+  // ⚠ PLAN goal 1b: THE BUTTON NAMES ITS CATEGORY, so a bare "Hide" is not
+  // enough — a player must be able to see WHAT is being hidden before pressing it.
+  assert.ok(visibleText(body).includes("Hide Rocks"), "there is no named Hide control");
   // ⚠ A REAL `<button>`, NOT A CLICKABLE `<div>` OR `<span>`. The whole point of
   // this pass is that every control is an ordinary left click on a button the
   // browser owns, so keyboard reach and focus come for free.
   assert.match(body, /<button[^>]*class="spc-tool"/, "Hide is not a real button element");
   // The wiring itself is not in the SSR output (handlers are not rendered), so
   // it is pinned from the source — see the toolbar-wiring test below.
-  assert.match(SOURCE, /onclick=\{hideSelected\}/, "Hide is not wired to the selection");
+  assert.match(
+    SOURCE,
+    /onclick=\{\(\) => hideSelectedCategory\(category\.id\)\}/,
+    "Hide is not wired to the selection",
+  );
+});
+
+test("⚠ a row is in as many lists as it has categories — one button each (goal 1b)", () => {
+  // ⚠ THE MULTI-BUTTON ROW. A ship carries one category AND a side, so it earns
+  // BOTH "Hide Ships" and "Hide Ships (<side>)" — and each hides something
+  // different. A rock carries no side, so it earns only the plain one: a
+  // "Rocks (Hostile)" button would be a lie about an object with no side.
+  resetShared();
+  overviewTabs.select(tabIDByName("Mining"));
+  const rockText = visibleText(panelPicking(ROCK_ID, [ROCK, DECOR, RAT]));
+  assert.ok(rockText.includes("Hide Rocks"), "no category button");
+  assert.ok(!rockText.includes("Hide Rocks ("), "a rock was offered a stance button");
+
+  resetShared();
+  overviewTabs.select(tabIDByName("Mining"));
+  const ratText = visibleText(panelPicking(RAT_ID, [ROCK, DECOR, RAT]));
+  assert.ok(ratText.includes("Hide Ships"), "no category button for a ship");
+  assert.ok(
+    /Hide Ships \((Hostile|Friendly|Neutral)\)/.test(ratText),
+    "no category-and-side button, so the plan's <Item Category> (Hostile) format is missing",
+  );
 });
 
 test("Hide is disabled with a REASON when nothing is picked", () => {
@@ -200,6 +251,17 @@ test("Hide is disabled with a REASON when nothing is picked", () => {
   // already rejected elsewhere; the reason is carried in the tooltip.
   resetShared();
   assert.match(panel([ROCK]), /Pick something first/, "a disabled Hide offers no reason");
+});
+
+test("⚠ the blank Hide survives an empty category list, so the refusal is still said", () => {
+  // ⚠ GOAL 1b DID NOT SILENTLY REMOVE THE VERB. With nothing picked the
+  // per-category loop renders nothing, so a bare disabled "Hide" stands in —
+  // otherwise the toolbar would simply have no button and the player would be
+  // left wondering where it went rather than told why.
+  resetShared();
+  const body = panel([ROCK, DECOR, RAT]);
+  assert.ok(visibleText(body).includes("Hide"), "the Hide verb vanished when nothing was picked");
+  assert.doesNotMatch(body, /Hide Rocks/, "a category was named with no selection");
 });
 
 test("⚠ the per-row Hide control is GONE", () => {
@@ -397,11 +459,88 @@ test("⚠ the stance hide holds the row in a local BEFORE the write, so it canno
   // ⚠ BOUND TO THE BODY. Everything after the handler is the rest of the panel
   // (the template still legitimately reads `selectedRow.itemID` for the lock
   // badges), so only the body up to the next `function` is checked.
-  const stanceHide = (SOURCE.split("function hideSelectedStance").pop() ?? "").split("\n  function ")[0] ?? "";
+  const stanceHide = (SOURCE.split("function hideSelectedCategoryStance").pop() ?? "").split("\n  function ")[0] ?? "";
   assert.match(stanceHide, /const row = selectedRow;/, "the row is not captured before the write");
-  assert.match(stanceHide, /tabHidden\.hideStance\(activeTabID, row, stanceContext\)/, "the write is not aimed at the held row");
+  assert.match(
+    stanceHide,
+    /tabHidden\.hideCategoryStance\(activeTabID, row, stanceContext\)/,
+    "the write is not aimed at the held row",
+  );
   assert.match(stanceHide, /selectedID === row\.itemID/, "the comparison is not the held row's id");
   assert.doesNotMatch(stanceHide, /selectedRow\.itemID/, "the stance hide still reads selectedRow.itemID");
+
+  // ⚠ AND THE SAME RULE ON THE CATEGORY SIDE, which goal 1b added.
+  const categoryHide = (SOURCE.split("function hideSelectedCategory").pop() ?? "").split("\n  function ")[0] ?? "";
+  assert.match(categoryHide, /const row = selectedRow;/, "the category hide reads selectedRow twice");
+  assert.doesNotMatch(categoryHide, /selectedRow\.itemID/, "the category hide still reads selectedRow.itemID");
+});
+
+test("⚠ Show everything is a FULL reset, and Reset Tab is its gentler half (goals 3 and 4)", () => {
+  // ⚠ TWO WHOLE-TAB ACTIONS THAT ARE NOT INTERCHANGEABLE.
+  //   Show everything → the hidden list is empty, the tab shows EVERYTHING.
+  //   Reset Tab      → both lists gone, the tab's PRESET decides again.
+  // A player who hid a belt of rocks on a Mining tab and wants their mining tab
+  // back has pressed the wrong one for their intent, so the button names the
+  // preset it restores.
+  //
+  // ⚠ PINNED FROM THE SOURCE, NOT THE RENDER. The hidden menu is COLLAPSED on
+  // first paint and SSR strips the handler that opens it, so a render can never
+  // show these two buttons. What is asserted is the wiring and the wording.
+  assert.match(SOURCE, /onclick=\{\(\) => \{\s*showEverythingOnTab\(\);/, "Show everything has no action");
+  assert.match(SOURCE, /onclick=\{\(\) => \{\s*resetTabToPreset\(\);/, "Reset Tab has no action");
+
+  // ⚠ AND THE FORMAT IS THE PLAN'S: "Reset Tab (<Preset Name>)" — the PRESET's
+  // name, interpolated, so a renamed tab still says what it is restoring.
+  assert.match(SOURCE, /Reset Tab \(\{activeRecipeLabel\}\)/, "the reset button does not name its preset");
+  assert.match(
+    SOURCE,
+    /const activeRecipeLabel = \$derived\(recipeByID\(activeTab\.recipeId\)\.label\)/,
+    "the reset button reads something other than the preset's own name",
+  );
+  // ⚠ NOT THE TAB'S NAME. A tab renamed "Belt run" must still restore Mining.
+  assert.doesNotMatch(SOURCE, /Reset Tab \(\{activeTab\.name\}\)/, "the reset button named the tab");
+});
+
+test("⚠ the full-reset button carries a tooltip saying it clears MORE than the list above it (goal 3)", () => {
+  // ⚠ THE MENU ONLY LISTS WHAT IS ON THE GRID, but "Show everything" clears the
+  // WHOLE stored list — including entries whose objects have warped off. A
+  // button that clears more than the list above it looks like a bug, so the
+  // tooltip has to say so rather than leave the player to find out.
+  assert.match(
+    SOURCE,
+    /title="Forget everything hidden on \{activeTab\.name\}, including anything not currently on the grid\./,
+    "the full-reset button has no tooltip, or does not say it is a full reset",
+  );
+});
+
+test("⚠ the hidden menu lists only what is on the GRID right now (goal 3)", () => {
+  // ⚠ THE MENU ANSWERS "what is missing from what I can see". An entry whose
+  // objects have all warped off is not missing from this screen, so it is not
+  // listed — but it is STILL STORED, and comes back when its objects return.
+  resetShared();
+  overviewTabs.select(tabIDByName("Mining"));
+  const miningID = tabIDByName("Mining");
+  tabHidden.hide(miningID, DECOR as never, "scenery");
+
+  // With DECOR on the grid the entry is listed.
+  const withDecor = panel([ROCK, DECOR, RAT]);
+  assert.match(SOURCE, /\.filter\(visibleNow\)/, "the menu is not filtered to the live grid");
+
+  // And the state is untouched by the filtering — the store still holds it.
+  assert.equal(tabHidden.stateFor(miningID).hidden.length, 1, "filtering dropped the stored entry");
+  assert.ok(withDecor.length > 0);
+});
+
+test("⚠ the Hide verbs are RIGHT-ALIGNED (goal 1a)", () => {
+  // ⚠ PURE CSS, PINNED FROM THE STYLESHEET. There is no layout engine in this
+  // suite, so what is checked is that the rule exists — a `justify-content`
+  // left at the default is exactly how the verbs ended up hugging the left.
+  const css = readFileSync(
+    new URL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const rule = css.match(/\.spc-tools-bar\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(rule, /justify-content:\s*flex-end/, "the tools bar is not right-aligned");
 });
 
 test("the hidden menu says 'Hidden Items', whether the tab hides anything or not", () => {

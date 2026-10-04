@@ -46,6 +46,7 @@
 
 import {
   categoryCovers,
+  hideCategoriesFor,
   hideCategoryByID,
   offeredCategoriesFor,
   HIDE_CATEGORY_IDS,
@@ -61,7 +62,9 @@ import type { OverviewTab } from "./overviewTabs.ts";
 import { isHostile } from "./overview.ts";
 import { bracketRole } from "./tactical.ts";
 import {
+  STANCED_CATEGORIES,
   STANCED_ROLES,
+  categoryStanceLabel,
   stanceOf,
   stanceRowLabel,
   type Stance,
@@ -130,8 +133,19 @@ export interface CategoryHiddenEntry {
 
 export interface StanceHiddenEntry {
   readonly kind: "stance";
-  /** The role's own word, from `bracketRole` — "ship", "drone", … "hostile". */
-  readonly role: string;
+  /**
+   * The ROLE's own word, from `bracketRole` — "ship", "drone", … "hostile".
+   *
+   * ⚠ EXACTLY ONE OF `role` AND `category` IS SET. The preset axis speaks
+   * roles (a recipe's `stancePreHides` names roles) and the player's axis
+   * speaks categories (PLAN goal 1b's "Ships (Hostile)"). Two vocabularies, so
+   * two fields rather than one overloaded one: a single `role` holding a
+   * category name would be compared against `bracketRole` by `covers` and
+   * would quietly match nothing.
+   */
+  readonly role?: string;
+  /** The CATEGORY's own word — "ship", "drone" — for a player's own hide. */
+  readonly category?: HideCategoryID;
   /** The side of the grid the hide applies to. */
   readonly stance: Stance;
   /** The menu's word for the pair: "Ships (Friendly)", "Hostiles". */
@@ -191,6 +205,37 @@ export function stanceEntryFor(
   return { kind: "stance", role, stance, label: stanceRowLabel(role, stance) };
 }
 
+/**
+ * The CATEGORY-AND-SIDE entry for an object — the `<Item Category> (<Stance>)`
+ * Hide button goal 1b asks for, e.g. "Ships (Hostile)".
+ *
+ * ⚠ NULL WHEN THE ROW'S CATEGORY CARRIES NO SIDE. Gates, rocks, scenery and
+ * celestials have none, so there is no honest word for their stance and
+ * inventing one would be a menu entry that hides exactly what the plain
+ * category hide already hides.
+ *
+ * ⚠ THE CATEGORY IS THE ROW'S OWN, NOT A CHOICE. A stance entry names one
+ * category AND one side; which category a player means is the one the row is.
+ * (Offering every stanced category for every row would put a "Wrecks
+ * (Friendly)" button on a live frigate, and it would hide nothing.)
+ */
+export function categoryStanceEntryFor(
+  entity: SpaceEntity,
+  context: StanceContext | null,
+): StanceHiddenEntry | null {
+  const category = hideCategoriesFor(entity)[0];
+  if (category === undefined || !STANCED_CATEGORIES.has(category)) {
+    return null;
+  }
+  const stance = stanceOf(entity, context);
+  return {
+    kind: "stance",
+    category,
+    stance,
+    label: categoryStanceLabel(category, stance),
+  };
+}
+
 /** Does this entry cover this object? */
 export function covers(
   entry: HiddenEntry,
@@ -199,6 +244,12 @@ export function covers(
 ): boolean {
   if (entry.kind === "category") {
     return categoryCovers(entry.category, entity);
+  }
+  // ⚠ A STANCE ENTRY IS KEYED BY WHICHEVER AXIS IT WAS BUILT ON. The preset
+  // speaks roles, the player speaks categories (goal 1b), and an entry that
+  // named neither would be a no-op the menu had no honest way to describe.
+  if (entry.category !== undefined) {
+    return categoryCovers(entry.category, entity) && stanceOf(entity, context) === entry.stance;
   }
   return bracketRole(entity) === entry.role && stanceOf(entity, context) === entry.stance;
 }
@@ -268,17 +319,26 @@ export function categoryIsShown(category: HideCategoryID, state: TabHiddenState)
   );
 }
 
-/** Does this tab's `hidden` list hold this role-and-side pair? */
-export function stanceIsHidden(role: string, stance: Stance, state: TabHiddenState): boolean {
+/**
+ * Does this tab's `hidden` list hold this axis-and-side pair?
+ *
+ * ⚠ MATCHES ON WHICHEVER AXIS THE ENTRY WAS BUILT ON — a preset's role-keyed
+ * entry and the player's category-keyed one are distinct entries even when the
+ * word is the same ("ship"), and comparing them as equal would let one hide
+ * report the other as already done and do nothing.
+ */
+export function stanceIsHidden(key: string, stance: Stance, state: TabHiddenState): boolean {
   return state.hidden.some(
-    (entry) => entry.kind === "stance" && entry.role === role && entry.stance === stance,
+    (entry) =>
+      entry.kind === "stance" && (entry.role ?? entry.category) === key && entry.stance === stance,
   );
 }
 
-/** Does this tab's `shown` list hold this role-and-side pair? */
-export function stanceIsShown(role: string, stance: Stance, state: TabHiddenState): boolean {
+/** Does this tab's `shown` list hold this axis-and-side pair? */
+export function stanceIsShown(key: string, stance: Stance, state: TabHiddenState): boolean {
   return state.shown.some(
-    (entry) => entry.kind === "stance" && entry.role === role && entry.stance === stance,
+    (entry) =>
+      entry.kind === "stance" && (entry.role ?? entry.category) === key && entry.stance === stance,
   );
 }
 
@@ -477,22 +537,47 @@ function sanitizeEntries(raw: StoredList): HiddenEntry[] {
       readonly stance?: unknown;
     };
     if (candidate.kind === "stance") {
-      const role = candidate.role;
       const stance = candidate.stance;
-      if (typeof role !== "string" || !STANCED_ROLES.has(role)) continue;
       if (stance !== "friendly" && stance !== "neutral" && stance !== "hostile") continue;
+
+      // ⚠ EITHER AXIS IS ACCEPTED, AND EXACTLY ONE MUST BE NAMED. A record may
+      // be the preset's role-keyed entry or the player's category-keyed one;
+      // a record naming neither — or both — cannot be resolved honestly and is
+      // dropped rather than guessed at.
+      const role = typeof candidate.role === "string" ? candidate.role : undefined;
+      const category =
+        typeof candidate.category === "string" &&
+        HIDE_CATEGORY_IDS.has(candidate.category) &&
+        STANCED_CATEGORIES.has(candidate.category)
+          ? (candidate.category as HideCategoryID)
+          : undefined;
+      if ((role === undefined) === (category === undefined)) continue;
+      if (role !== undefined && !STANCED_ROLES.has(role)) continue;
+
+      const key = role ?? (category as string);
       if (
         entries.some(
           (existing) =>
-            existing.kind === "stance" && existing.role === role && existing.stance === stance,
+            existing.kind === "stance" &&
+            (existing.role ?? existing.category) === key &&
+            existing.stance === stance,
         )
       ) {
         continue;
       }
-      // ⚠ THE CANONICAL WORD, NOT THE STORED ONE. The label is a projection of
-      // role and side; re-deriving it keeps the menu's words honest even if a
-      // record was hand-edited with a stale label.
-      entries.push({ kind: "stance", role, stance, label: stanceRowLabel(role, stance) });
+      // ⚠ THE CANONICAL WORD, NOT THE STORED ONE, on whichever axis. The label
+      // is a projection of the entry and its side; re-deriving it keeps the
+      // menu's words honest even if a record was hand-edited with a stale one.
+      entries.push(
+        role !== undefined
+          ? { kind: "stance", role, stance, label: stanceRowLabel(role, stance) }
+          : {
+              kind: "stance",
+              category: category as HideCategoryID,
+              stance,
+              label: categoryStanceLabel(category as HideCategoryID, stance),
+            },
+      );
       continue;
     }
     // ⚠ AN UNKNOWN CATEGORY NAME IS DROPPED, NOT COERCED. `other` is refused
@@ -597,6 +682,16 @@ export interface TabHiddenStore {
    * null when the row's role carries no stance row at all.
    */
   hideStance(tabID: string, entity: SpaceEntity, context: StanceContext | null): StanceHiddenEntry | null;
+  /**
+   * Hide everything in this row's category AND side — the goal 1b
+   * "Ships (Hostile)" verb. The one entry kind that may reach a hostile,
+   * because pressing it names the side out loud.
+   */
+  hideCategoryStance(
+    tabID: string,
+    entity: SpaceEntity,
+    context: StanceContext | null,
+  ): StanceHiddenEntry | null;
   /** Bring one of THIS tab's hidden categories back. */
   unhideCategory(tabID: string, category: HideCategoryID): void;
   /** Bring one of THIS tab's hidden role-and-side pairs back. */
@@ -613,6 +708,12 @@ export interface TabHiddenStore {
   clearHidden(tabID: string): void;
   /** Drop both of a tab's lists, called when the tab itself is deleted. */
   dropTab(tabID: string): void;
+  /**
+   * Put a tab back to its PRESET alone: both of its lists go, so the tab shows
+   * exactly what its recipe says — nothing the player hid, and none of the
+   * things they added.
+   */
+  resetTab(tabID: string): void;
   /** Forget every tab's lists. */
   clearAll(): void;
 }
@@ -709,10 +810,22 @@ export function createTabHiddenStore(): TabHiddenStore {
     },
     hideStance: (tabID, entity, context) => {
       const entry = stanceEntryFor(entity, context);
-      // ⚠ THE SAME CONTRACT AS THE GROUP HIDE: null when the row's role has no
+      // ⚠ THE SAME CONTRACT AS THE CATEGORY HIDE: null when the row's role has no
       // stance row, and idempotent when the pair is already hidden on this tab.
       if (entry === null) return null;
-      if (stanceIsHidden(entry.role, entry.stance, map.get().get(tabID) ?? EMPTY_STATE)) {
+      if (stanceIsHidden(entry.role ?? "", entry.stance, map.get().get(tabID) ?? EMPTY_STATE)) {
+        return entry;
+      }
+      rewrite(tabID, (state) => ({ hidden: [...state.hidden, entry], shown: state.shown }));
+      return entry;
+    },
+    hideCategoryStance: (tabID, entity, context) => {
+      const entry = categoryStanceEntryFor(entity, context);
+      // ⚠ THE SAME CONTRACT AGAIN, ON THE CATEGORY AXIS: null when the row's
+      // category carries no side (a gate, a rock, scenery), and idempotent when
+      // the pair is already hidden on this tab.
+      if (entry === null || entry.category === undefined) return null;
+      if (stanceIsHidden(entry.category, entry.stance, map.get().get(tabID) ?? EMPTY_STATE)) {
         return entry;
       }
       rewrite(tabID, (state) => ({ hidden: [...state.hidden, entry], shown: state.shown }));
@@ -750,6 +863,19 @@ export function createTabHiddenStore(): TabHiddenStore {
     clearHidden: (tabID) => {
       if (stateFor(map.get(), tabID).hidden.length === 0) return;
       rewrite(tabID, (state) => ({ ...state, hidden: [] }));
+    },
+    resetTab: (tabID) => {
+      // ⚠ BOTH LISTS GO, AND THAT IS THE DIFFERENCE FROM `clearHidden`. A reset
+      // puts the tab back to what its RECIPE alone decides, so it must also drop
+      // the `shown` overrides the player accumulated while expanding the tab —
+      // otherwise a reset tab would still show things its preset hides, and
+      // "reset" would be a word that did not mean what it says.
+      //
+      // ⚠ IT IS NOT `dropTab`'s DELETION CASE, only its shape. `dropTab` fires
+      // because the tab itself is gone; this fires because the player asked, and
+      // the tab is still here afterwards with its name, order and recipe intact.
+      if (!map.get().has(tabID)) return;
+      rewrite(tabID, () => null);
     },
     dropTab: (tabID) => {
       // ⚠ THE TAB'S ARRANGEMENT DIES WITH THE TAB. Keeping a deleted tab's lists

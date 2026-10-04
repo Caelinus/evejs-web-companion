@@ -28,6 +28,7 @@
 // accident, nor the side they would unsee.
 
 import type { CharacterSummary, SpaceEntity } from "../store/types.ts";
+import { hideCategoryByID, type HideCategoryID } from "./hideCategory.ts";
 
 /** The three answers "whose is that" has. */
 export type Stance = "friendly" | "neutral" | "hostile";
@@ -145,3 +146,40 @@ export function stanceRowLabel(role: string, stance: Stance): string {
   const word = stance === "friendly" ? "Friendly" : stance === "neutral" ? "Neutral" : "Hostile";
   return `${roleWord(role)} (${word})`;
 }
+
+/**
+ * ⚠ THE STANCE SIDE'S WORD, ON THE CATEGORY AXIS — "Ships (Hostile)".
+ *
+ * PLAN.txt goal 1b: the player's axis is categories (`hideCategory.ts`), and
+ * the stance entry is the CATEGORY AND a side. This is the exact format the
+ * plan asks for, and it is deliberately the same shape as `stanceRowLabel`
+ * above so the two axes read identically to a player even though one speaks
+ * roles and the other categories.
+ *
+ * ⚠ THE CATEGORY'S OWN LABEL IS USED, NOT A WORD INVENTED HERE. A word written
+ * twice is a word that drifts; `hideCategoryByID` is the single place "Ships"
+ * is spelled.
+ */
+export function categoryStanceLabel(category: string, stance: Stance): string {
+  const word = stance === "friendly" ? "Friendly" : stance === "neutral" ? "Neutral" : "Hostile";
+  return `${hideCategoryByID(category as HideCategoryID).label} (${word})`;
+}
+
+/**
+ * The categories whose rows come in more than one stance, so a player can say
+ * "hide the HOSTILE ships" and mean it.
+ *
+ * ⚠ GATES, ROCKS, SCENERY AND CELESTIALS CARRY NO SIDE. A "Gates (Hostile)"
+ * row would be a lie about an object that has no side at all, and one that
+ * hides exactly what the plain category hide already hides.
+ *
+ * ⚠ STATIONS AND WRECKS QUALIFY. They are only usually-neutral, not
+ * necessarily-neutral, and a player's own wrecked ship is friendly.
+ */
+export const STANCED_CATEGORIES: ReadonlySet<string> = new Set([
+  "ship",
+  "drone",
+  "wreck",
+  "station",
+  "structure",
+]);

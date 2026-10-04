@@ -8968,10 +8968,18 @@
     border-bottom: 1px solid var(--stn-line);
     background: var(--stn-page);
   }
+  /* ⚠ PLAN.txt goal 1a: THE HIDE VERBS ARE RIGHT-ALIGNED, so they sit against
+     the panel's edge with the empty space BEFORE them, not after. A row of
+     verbs hugging the left edge reads as belonging to whatever is above them;
+     pushed right they read as the panel's own controls. It is also where a
+     growing set lands — goal 1b adds one button per category this row
+     carries, and extra buttons should extend leftward, never push the row
+     off the edge. */
   .spc-tools-bar {
     flex: none;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 8px;
@@ -9177,6 +9185,16 @@
     cursor: pointer;
   }
   .spc-hidden-show:hover { color: var(--stn-bright); border-color: var(--stn-accent); }
+  /* ⚠ THE TWO WHOLE-TAB ACTIONS SIT SIDE BY SIDE (goals 3 and 4). They are
+     peers — "clear the hidden list" and "restore the preset" — so they share a
+     row and wrap together, rather than stacking and reading as a primary action
+     with a lesser one beneath it. */
+  .spc-hidden-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 14px;
+  }
   .spc-hidden-menu .spc-link { margin: 0 10px 6px; }
   .spc-search {
     flex: 1 1 130px;

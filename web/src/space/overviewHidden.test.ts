@@ -547,6 +547,45 @@ test("clearHidden forgets the tab's stance hides too", () => {
   assert.deepEqual(store.stateFor("mining").hidden, [], "a stance hide survived the clear");
 });
 
+test("⚠ resetTab puts the tab back to its PRESET alone — both lists go", () => {
+  // ⚠ GOAL 4'S RESET IS NOT `clearHidden`. A reset must also drop the `shown`
+  // overrides the player accumulated while expanding the tab — otherwise a
+  // "reset" Mining tab would still show things Mining hides, and the word would
+  // not mean what it says.
+  const store = createTabHiddenStore();
+  store.hide("mining", PLANET, "planet");
+  store.addCategory("mining", "gate");
+  assert.equal(store.stateFor("mining").hidden.length, 1);
+  assert.equal(store.stateFor("mining").shown.length, 1);
+
+  store.resetTab("mining");
+  assert.deepEqual(store.stateFor("mining"), EMPTY_STATE, "the tab kept its own lists");
+
+  // ⚠ AND THE TAB ITSELF IS UNTOUCHED — name, order and recipe are not the
+  // store's business, and `resetTab` is a different event from `dropTab`.
+  assert.equal(store.stateFor("travel"), EMPTY_STATE, "another tab was disturbed");
+  // A second press is a no-op rather than an error or a new entry.
+  store.resetTab("mining");
+  assert.deepEqual(store.stateFor("mining"), EMPTY_STATE);
+});
+
+test("⚠ resetTab and show-everything are different, and both are per-tab", () => {
+  // The pair is the point of goals 3 and 4: one clears the hidden list (the tab
+  // then shows everything), the other restores the preset. They touch different
+  // state, and neither touches another tab.
+  const store = createTabHiddenStore();
+  store.hide("mining", PLANET, "planet");
+  store.hide("travel", MOON, "moon");
+
+  store.resetTab("mining");
+  assert.deepEqual(store.stateFor("mining"), EMPTY_STATE);
+  assert.equal(store.stateFor("travel").hidden.length, 1, "the other tab was reset too");
+
+  store.clearHidden("travel");
+  assert.deepEqual(store.stateFor("travel").hidden, []);
+  assert.equal(store.stateFor("travel").shown.length, 0);
+});
+
 // --- the storage key -------------------------------------------------------------
 
 /** A localStorage stub the store can read and write against. */
