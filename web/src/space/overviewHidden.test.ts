@@ -45,7 +45,7 @@ function tab(id: string, recipeId: OverviewRecipeID): OverviewTab {
 const ALL: OverviewTab = { id: "all", name: "All", recipeId: "all", fixed: true };
 const mining = tab("mining", "mining");
 const travel = tab("travel", "travel");
-const pve = tab("pve", "pve");
+const pve = tab("combat", "combat");
 const pvp = tab("pvp", "pvp" as never);
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
@@ -475,7 +475,7 @@ test("⚠ hiding your own side is the TOGGLE's job, not a preset's", () => {
   // ⚠ PVP AND PRESET STANCE PRE-HIDES ARE BOTH GONE. A recipe no longer reads
   // stance, so there is nothing for a preset to pre-hide by side, and "pvp" was
   // only ever the vehicle for exactly that.
-  const pve = tab("pve", "pve");
+  const pve = tab("combat", "combat");
   assert.equal(tabShows(pve, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a friendly ship");
   assert.equal(tabShows(pve, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "PVE dropped a neutral ship");
   // ⚠ AND A RECIPE IGNORES THE CONTEXT ENTIRELY — even one it is handed.
@@ -563,7 +563,7 @@ test("the store hides a stance pair, idempotently, per tab", () => {
   store.hideStance("pvp", NEUTRAL_SHIP, STANCE_CONTEXT);
   assert.equal(store.stateFor("pvp").hidden.length, 2, "the other side is the same row, not the same entry");
   // The other tab keeps its own lists.
-  assert.deepEqual(store.stateFor("pve"), EMPTY_STATE, "the hiding leaked to a tab");
+  assert.deepEqual(store.stateFor("combat"), EMPTY_STATE, "the hiding leaked to a tab");
   // A row whose role carries no stance row is refused with null, like the group hide.
   assert.equal(store.hideStance("pvp", GATE, STANCE_CONTEXT), null);
   // And undoing drops exactly the pair.

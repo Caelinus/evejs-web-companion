@@ -61,7 +61,7 @@ import { hideCategoriesFor, type HideCategoryID } from "./hideCategory.ts";
 import { isHostile } from "./overview.ts";
 import type { StanceContext } from "./stance.ts";
 
-export type OverviewRecipeID = "all" | "system" | "pve" | "mining" | "travel";
+export type OverviewRecipeID = "all" | "system" | "combat" | "mining" | "travel";
 
 export interface OverviewRecipe {
   readonly id: OverviewRecipeID;
@@ -106,9 +106,12 @@ export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
     hides: set("asteroid"),
   },
   {
-    id: "pve",
-    label: "PVE",
+    id: "combat",
+    label: "Combat",
     hint: "Ships, police, drones and wrecks — plus the gates and stations you run to.",
+    // RENAMED FROM "PVE" (2026-04-10). PVP is gone, so there was nothing left
+    // for the "P" to distinguish; this tab is now every fight, not one flavour of
+    // it. Hiding your own side is the toolbar's Hide Friendly toggle.
     // ⚠ STATIONS AND GATES STAY OUT OF THE EXCLUSIONS, reported missing in game:
     // a combat filter that hides the dock hides the way out of the fight.
     hides: set(
@@ -161,21 +164,20 @@ export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
 
 /**
  * The ids a saved bar may still hold from earlier versions, answered as the
- * recipe they renamed into. "Combat" became "PVE" in the preset refresh —
- * the same roles, a truer name — and a tab that named it keeps working
- * instead of falling back to All and quietly showing the whole grid.
+ * recipe they renamed into. "PVE" (and the long-retired "PVP") became "Combat"
+ * in 2026-04-10 — the same exclusions, a truer name — and a tab that named
+ * either keeps working instead of falling back to All and quietly showing the
+ * whole grid.
  *
  * ⚠ AN ALIAS, NOT A RECIPE. It is never rendered and never offered; it only
  * keeps the player's saved bar from being rewritten under them.
  */
 const RECIPE_ALIASES: Readonly<Record<string, OverviewRecipeID>> = {
-  combat: "pve",
-  // ⚠ "pvp" ANSWERS AS PVE RATHER THAN FALLING BACK TO ALL. A saved bar can name
-  // a tab's recipe id, and PVP was one of the five a profile shipped with.
-  // Falling back to All would silently turn that player's PVP tab into a
-  // show-everything tab; answering as PVE keeps it a combat tab. The distinction
-  // it used to carry — hiding your own side — now lives in the toolbar toggles.
-  pvp: "pve",
+  // The two retired combat ids both answer as "combat". A saved bar can name a
+  // tab's recipe id, and BOTH "pve" and "pvp" shipped as defaults; falling back
+  // to All would silently turn those players' tabs into show-everything tabs.
+  pve: "combat",
+  pvp: "combat",
 };
 
 /**
@@ -194,7 +196,7 @@ export const ALL_RECIPE: OverviewRecipeID = "all";
  */
 export const DEFAULT_TAB_RECIPES: readonly OverviewRecipeID[] = [
   "system",
-  "pve",
+  "combat",
   "mining",
   "travel",
 ];

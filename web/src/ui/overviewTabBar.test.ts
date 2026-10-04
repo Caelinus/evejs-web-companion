@@ -287,7 +287,7 @@ test("⚠ the per-row Hide control is GONE", () => {
 test("the bar opens on All plus the four defaults", () => {
   resetShared();
   const text = visibleText(panel());
-  for (const label of ["All", "System", "PVE", "Mining", "Travel"]) {
+  for (const label of ["All", "System", "Combat", "Mining", "Travel"]) {
     assert.ok(text.includes(label), `the '${label}' tab is missing`);
   }
 });
@@ -460,6 +460,20 @@ test("⚠ a switched-on toggle reads as inactive: faded AND struck through", () 
   // layer and would otherwise repaint the very control that must look inactive.
   const onHover = css.match(/\.spc-tool-toggle\.on:hover[^{]*\{[^}]*\}/)?.[0] ?? "";
   assert.match(onHover, /opacity/, "hover undoes the active toggle's fade");
+});
+
+test("⚠ `npm start` does NOT rebuild, so a CSS change needs `npm run build:web`", () => {
+  // ⚠ THE CAUSE OF "the toggle shows no indication", reported twice. The rule was
+  // correct in `styles.css` the whole time and correct in the SSR render — but
+  // `npm start` serves the gitignored `public/dist` and never rebuilds it, so a
+  // player testing after a CSS change was loading the PREVIOUS build. This test
+  // cannot catch a stale build by itself; it records why the built CSS is the
+  // thing to check, so the next report starts from the build and not the source.
+  const pkg = JSON.parse(
+    readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
+  ) as { scripts: Record<string, string> };
+  assert.equal(pkg.scripts.start?.includes("vite"), false, "start may rebuild the web assets");
+  assert.ok(pkg.scripts["build:web"], "there is no build:web to rebuild them with");
 });
 
 test("move-left and move-right exist and are disabled while All is selected", () => {
@@ -812,18 +826,18 @@ test("the tab editor offers a picker over the five recipes, All included", () =>
 
 test("the shared bar and a fresh bar never share state", () => {
   const fresh = createTabBar();
-  overviewTabs.create("pve", "Only mine");
+  overviewTabs.create("combat", "Only mine");
   assert.equal(fresh.tabs.get().some((tab) => tab.name === "Only mine"), false);
   resetShared();
 });
 
 test("reset restores the shipped bar", () => {
-  overviewTabs.create("pve", "Temp");
+  overviewTabs.create("combat", "Temp");
   overviewTabs.reset();
   assert.deepEqual(overviewTabs.tabs.get().map((tab) => tab.name), [
     "All",
     "System",
-    "PVE",
+    "Combat",
     "Mining",
     "Travel",
   ]);
