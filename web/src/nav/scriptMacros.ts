@@ -60,7 +60,7 @@ import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
 import { preferredResources } from "./resourcePriority.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
-import { isUnreachable, NO_STEP_ID, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
+import { isUnreachable, NO_STEP_ID, refusalFor, refusalTargets, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
 import {
@@ -1715,7 +1715,7 @@ function mineWithRocks(
       const seen = num(mem, "lockRefusalsSeen") ?? 0;
       const refusedAt = num(mem, "lockRefusedAtM");
       const refusal = refusalFor(obs.refusals, step.id, "lock", null);
-      const fresh = refusal !== null && refusal.count > seen;
+      const fresh = refusal !== null && refusal.count > seen && refusalTargets(refusal, rockID);
       // ⚠ THE COUNTERS ARE CARRIED BY HAND, as in the mining-range wait below: this
       // block REBUILDS its memory on every return.
       const closingIn = (seenCount: number, atM: number | null): MacroTick => {
@@ -2974,9 +2974,11 @@ function isOwnWreck(wreck: SpaceEntity, obs: ScriptObservation): boolean {
  * believed at once.
  */
 function readLockRefusals(step: MacroStep, obs: ScriptObservation, mem: MacroMemory): LockRefusals {
-  const count = refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0;
+  const record = refusalFor(obs.refusals, step.id, "lock", null);
+  const count = record?.count ?? 0;
   const seen = num(mem, "lockRefusalsSeen");
-  return { count, unread: seen === null && count > 0, fresh: seen !== null && count > seen };
+  return { count, unread: seen === null && count > 0, fresh: seen !== null && count > seen,
+    ...(record?.targetID === undefined ? {} : { targetID: record.targetID }) };
 }
 
 // Salvage the grid, nearest wreck first: lock it, send the salvage drones at it,
@@ -3117,7 +3119,7 @@ const salvageWrecks: MacroDecider = (step, obs, mem) => {
       if (lockRefusals.unread) {
         return tick(WAIT, "Checking the last lock.", "Salvaging", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
       }
-      if (lockRefusals.fresh) {
+      if (lockRefusals.fresh && refusalTargets(lockRefusals, wreckID)) {
         // The timed wait below, exactly what a refused lock got before 2fd4a77.
         return tick(WAIT, "Waiting for the lock.", "Salvaging", ACTING, true, {
           ...mem,
@@ -3926,7 +3928,7 @@ function fightRatsLadder(
     if (lockRefusals.unread) {
       return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
     }
-    if (lockRefusals.fresh) {
+    if (lockRefusals.fresh && refusalTargets(lockRefusals, primary.itemID)) {
       // The timed wait below, exactly what a refused lock got before 2fd4a77.
       return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
         ...mem,
@@ -3956,7 +3958,7 @@ function fightRatsLadder(
       if (lockRefusals.unread) {
         return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
       }
-      if (lockRefusals.fresh) {
+      if (lockRefusals.fresh && refusalTargets(lockRefusals, targetID)) {
         return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
           ...mem,
           lockIssued: true,
@@ -5947,7 +5949,7 @@ function repHurtMate(
           lockRefusalsSeen: lockRefusals.count,
         });
       }
-      if (lockRefusals.fresh) {
+      if (lockRefusals.fresh && refusalTargets(lockRefusals, target.itemID)) {
         // The timed wait below, exactly what a refused lock got before 2fd4a77.
         return tick(WAIT, "Waiting for the lock.", phase, ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
       }
@@ -6709,7 +6711,7 @@ const remoteCap: MacroDecider = (step, obs, mem) => {
           lockRefusalsSeen: lockRefusals.count,
         });
       }
-      if (lockRefusals.fresh) {
+      if (lockRefusals.fresh && refusalTargets(lockRefusals, target.itemID)) {
         return tick(WAIT, "Waiting for the lock.", "Feeding cap", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
       }
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the fleet-mate who needs cap.", "Feeding cap", ACTING, true, {

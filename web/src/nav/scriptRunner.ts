@@ -870,7 +870,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           t: now(), kind: "result", run: runID, ok: false, refusal: reason,
           says: describeAction(result.action), stepPath: result.stepPath,
         });
-        const record_ = ledger.note(key, reason, Date.now(), stillOnGrid);
+        const record_ = ledger.note(key, reason, Date.now(), stillOnGrid,
+          result.action.kind === "lock" ? result.action.targetID : undefined);
         if (record_.count >= MAX_CONSECUTIVE_REFUSALS) {
           stopOrHeadHome(
             `Stopped after ${record_.count} refusals in a row. ${record_.words}`,
