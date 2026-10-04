@@ -44,6 +44,13 @@
 // which group would be worse than saying the list moved. Say so if a player
 // loses a list.
 
+import {
+  categoryCovers,
+  hideCategoryByID,
+  offeredCategoriesFor,
+  HIDE_CATEGORY_IDS,
+  type HideCategoryID,
+} from "./hideCategory.ts";
 import { createSignal, readonlySignal, type ReadableSignal } from "../store/signals.ts";
 import {
   recipeAllows,
@@ -79,29 +86,44 @@ import type { SpaceEntity } from "../store/types.ts";
  * hiding it would empty the grid. A group is the level where "Planet" is its
  * own entry rather than one of a dozen things under a heading.
  *
- * ⚠ A STANCE ENTRY HIDES A ROLE AND A SIDE — "Ships (Friendly)" — for the
+ * ⚠ A CATEGORY ENTRY HIDES A CATEGORY, NOT AN OBJECT, A TYPE, OR A GROUP.
+ * Group-based hiding was retired in favour of this axis: the SDE has 1605
+ * groups, and a player hiding scenery should not have to decide between "Large
+ * Collidable Object" and "Agents in Space". `hideCategory.ts` owns the group →
+ * category mapping, and it is the ONLY place a `groupID` is read for hiding.
+ *
+ * ⚠ "Large Collidable Object" IS A REAL GROUP (226) AND IS SCENERY. That entry
+ * was the reason this axis exists: `bracketRole` ends in `return "ship"`, so
+ * scenery the runtime tagged with an unrecognised kind was filed as a hull, and
+ * hiding Ships took the scenery with it.
+ *
+ * ⚠ A STANCE ENTRY HIDES A CATEGORY AND A SIDE — "Ship (Hostile)" — for the
  * rows that come in more than one stance (see `stance.ts`). This is the axis a
  * player means when they say "hide the hostile ships and keep the friendly
- * ones", and it is the ONLY entry kind that may cover a hostile: a group entry
- * names a kind, never a side, and the safety rule keeps it there.
+ * ones", and it is the ONLY entry kind that may cover a hostile: a category
+ * entry names a KIND, never a side, and the safety rule keeps it there.
  *
- * ⚠ ENTRIES WRITE WITH A `kind`; OLD ONES DO NOT. The storage key moved to v4
- * when the stance entries joined, and `load` falls back to the v3 key, whose
- * entries are all group-shaped and carry no `kind` — which is how they are
- * still read.
+ * ⚠ STORED UNDER THE v5 KEY ONLY. The user's call: a hard cut. The v4 and v3
+ * keys hold group-shaped entries, and a group id has no honest translation into
+ * a category — "Planet" could become `planet` or `scenery`, and guessing would
+ * silently hide the wrong things. So the old keys are not read at all: every
+ * saved hide from before this change is gone, with no way back. That is the
+ * deliberate cost of a model that cannot lie.
  */
-export interface GroupHiddenEntry {
-  readonly kind: "group";
-  /** EVE's group id for the thing that was hidden. */
-  readonly groupID: number;
+export interface CategoryHiddenEntry {
+  readonly kind: "category";
   /**
-   * The group's own name, for the restore menu.
+   * The category's own word — "scenery", "ship", "asteroid" — from
+   * `hideCategory.ts`. NOT a group id: this is the player's axis, and the
+   * classifier that produces it is the single place a group id is read.
+   */
+  readonly category: HideCategoryID;
+  /**
+   * The category's display label, for the restore menu.
    *
-   * ⚠ CARRIED, NOT RESOLVED ON DISPLAY. It is stored rather than looked up
-   * because a group name comes from the type cache keyed on `typeID`, and an
-   * entry that no object on the grid can answer for has nothing to look up. A
-   * name is also the only thing in the record that tells the player what they
-   * hid.
+   * ⚠ CARRIED, NOT RESOLVED ON DISPLAY. Re-derived from the id on read, so a
+   * hand-edited record cannot put a stale or alarming word in the menu — but it
+   * is stored so an entry whose object has left the grid still says something.
    */
   readonly label: string;
 }
@@ -116,22 +138,36 @@ export interface StanceHiddenEntry {
   readonly label: string;
 }
 
-export type HiddenEntry = GroupHiddenEntry | StanceHiddenEntry;
+export type HiddenEntry = CategoryHiddenEntry | StanceHiddenEntry;
 
 /**
- * The group entry for an object, as the toolbar's Hide button builds it.
+ * The category entry for an object, as a toolbar Hide button builds it.
  *
- * ⚠ A ROW WITH NO groupID CANNOT BE HIDDEN BY GROUP, and this returns null
- * rather than inventing a key. A `groupID` of 0 would match every ungrouped row
- * in the system, which is how one press could empty the overview — and a row
- * that carries no group is a row the server did not classify, so there is
- * nothing honest for the player to hide.
+ * ⚠ NULL WHEN THE ROW HAS NO CATEGORY WORTH OFFERING, which is exactly one
+ * case: it classified as `other`. Everything else always has a category, so
+ * this returns null far less often than the old group version did — the
+ * classifier's job is to make sure "I cannot classify this" is rare rather than
+ * to make hiding impossible.
+ *
+ * @param category the specific category to hide, when the caller is offering
+ *   several buttons for one row (PLAN goal 1b). Omit for the row's own.
  */
-export function hiddenEntryFor(entity: SpaceEntity, label: string): GroupHiddenEntry | null {
-  if (entity.groupID === null || !Number.isFinite(entity.groupID) || entity.groupID <= 0) {
+export function hiddenEntryFor(
+  entity: SpaceEntity,
+  category?: HideCategoryID,
+): CategoryHiddenEntry | null {
+  const offered = offeredCategoriesFor(entity);
+  const chosen = category ?? offered[0];
+  if (chosen === undefined) {
     return null;
   }
-  return { kind: "group", groupID: entity.groupID, label };
+  // ⚠ A CATEGORY THE ROW DOES NOT CARRY IS REFUSED, NOT ACCEPTED. A button that
+  // hides nothing looks like a broken Hide, and this is the same guard the old
+  // no-groupID refusal existed to provide.
+  if (!offered.includes(chosen)) {
+    return null;
+  }
+  return { kind: "category", category: chosen, label: hideCategoryByID(chosen).label };
 }
 
 /**
@@ -161,8 +197,8 @@ export function covers(
   entity: SpaceEntity,
   context: StanceContext | null = null,
 ): boolean {
-  if (entry.kind === "group") {
-    return entity.groupID !== null && entry.groupID === entity.groupID;
+  if (entry.kind === "category") {
+    return categoryCovers(entry.category, entity);
   }
   return bracketRole(entity) === entry.role && stanceOf(entity, context) === entry.stance;
 }
@@ -170,9 +206,9 @@ export function covers(
 /**
  * Does this entry APPLY to this object — cover it AND be allowed to reach it?
  *
- * ⚠ THE RELAXED INVARIANT, ASKED OF ONE ENTRY. A group entry that would cover
- * a hostile does not apply: hiding the whole "Ship" group is no one's explicit
- * choice about a threat, so the hostile shows through it. A stance entry has
+ * ⚠ THE RELAXED INVARIANT, ASKED OF ONE ENTRY. A category entry that would cover
+ * a hostile does not apply: hiding every "Ship" is no one's explicit choice
+ * about a threat, so the hostile shows through it. A stance entry has
  * named a side, and it applies — that is how "Hostiles" hides a rat and how
  * every other entry kind still refuses it.
  */
@@ -184,7 +220,7 @@ function entryApplies(
   if (!covers(entry, entity, context)) {
     return false;
   }
-  return !(entry.kind === "group" && isHostile(entity));
+  return !(entry.kind === "category" && isHostile(entity));
 }
 
 /**
@@ -218,16 +254,18 @@ export function stateFor(map: TabHiddenMap, tabID: string): TabHiddenState {
   return map.get(tabID) ?? EMPTY_STATE;
 }
 
-/** Does this tab's `hidden` list cover this group? */
-export function groupIsHidden(groupID: number, state: TabHiddenState): boolean {
+/** Does this tab's `hidden` list cover this category? */
+export function categoryIsHidden(category: HideCategoryID, state: TabHiddenState): boolean {
   return state.hidden.some(
-    (entry) => entry.kind === "group" && entry.groupID === groupID,
+    (entry) => entry.kind === "category" && entry.category === category,
   );
 }
 
-/** Does this tab's `shown` list cover this group? */
-export function groupIsShown(groupID: number, state: TabHiddenState): boolean {
-  return state.shown.some((entry) => entry.kind === "group" && entry.groupID === groupID);
+/** Does this tab's `shown` list cover this category? */
+export function categoryIsShown(category: HideCategoryID, state: TabHiddenState): boolean {
+  return state.shown.some(
+    (entry) => entry.kind === "category" && entry.category === category,
+  );
 }
 
 /** Does this tab's `hidden` list hold this role-and-side pair? */
@@ -245,9 +283,15 @@ export function stanceIsShown(role: string, stance: Stance, state: TabHiddenStat
 }
 
 /**
- * Does this tab's PRESET pre-hide this row BY GROUP — the groups a preset
- * hides are pre-selected the same way the player's own hides do, just in
- * advance?
+ * Does this tab's PRESET pre-hide this row — everything the preset's recipe
+ * does not admit is pre-selected the same way the player's own hides are, just
+ * in advance?
+ *
+ * ⚠ THE RECIPE STILL FILTERS BY ROLE, NOT BY CATEGORY. The player's own hides
+ * moved to categories (goal 2) but the preset recipes are a separate axis and
+ * were left on `bracketRole` deliberately: changing them would move what every
+ * existing tab SHOWS, which is a much larger change than what it hides. This is
+ * the one place the two axes meet, and it is a deliberate seam.
  *
  * ⚠ ONLY THE UNDECIDED PRE-HIDINGS COUNT. A row the tab hid itself is owned
  * by the tab's `hidden` list (Show undoes THAT entry), and one the player
@@ -257,7 +301,7 @@ export function stanceIsShown(role: string, stance: Stance, state: TabHiddenStat
  * and a row the stance pre-hides own is listed under the stance word instead,
  * once, not twice.
  */
-export function presetGroupHides(
+export function presetHidesRow(
   tab: OverviewTab,
   entity: SpaceEntity,
   state: TabHiddenState,
@@ -311,7 +355,7 @@ export function presetStanceHides(
   if (!recipePreHidesStance(recipe, entity, context)) {
     return false;
   }
-  return !presetGroupHides(tab, entity, state, context);
+  return !presetHidesRow(tab, entity, state, context);
 }
 
 /**
@@ -326,7 +370,7 @@ export function presetHides(
   context: StanceContext | null = null,
 ): boolean {
   return (
-    presetGroupHides(tab, entity, state, context) || presetStanceHides(tab, entity, state, context)
+    presetHidesRow(tab, entity, state, context) || presetStanceHides(tab, entity, state, context)
   );
 }
 
@@ -384,16 +428,22 @@ export function tabShows(
   return recipeAllows(recipe, entity);
 }
 
-const STORAGE_KEY = "evejs-web:overview-hidden:v4";
+const STORAGE_KEY = "evejs-web:overview-hidden:v5";
 
 /**
- * ⚠ THE PREVIOUS KEY IS STILL READ, AS A FALLBACK. v3 held group entries
- * without a `kind` marker — exactly the shape `sanitizeEntries` still accepts,
- * so a player's existing per-tab hides survive the stance era untouched.
+ * ⚠ THE v4 AND v3 KEYS ARE NOT READ, AND THAT IS THE POINT. Both held group-shaped
+ * entries, and a group id has no honest translation into a category: group 7
+ * could mean `planet` or, read loosely, `scenery`, and guessing would silently
+ * hide a different set of objects than the player chose. The user's call was a
+ * hard cut — saved hides from before the category era are discarded rather than
+ * guessed at.
+ *
+ * ⚠ A GROUP ID IS STILL IN THE STORE UNTIL THE PLAYER CLEARS IT. Nothing reads
+ * it and nothing writes it; it is simply dead weight in the player's browser.
  */
-const LEGACY_STORAGE_KEY = "evejs-web:overview-hidden:v3";
+const DEAD_STORAGE_KEYS = ["evejs-web:overview-hidden:v4", "evejs-web:overview-hidden:v3"];
 
-/** One stored list: an array of group or stance records, all untrusted. */
+/** One stored list: an array of category or stance records, all untrusted. */
 type StoredList = unknown;
 
 /**
@@ -421,7 +471,7 @@ function sanitizeEntries(raw: StoredList): HiddenEntry[] {
     if (typeof item !== "object" || item === null) continue;
     const candidate = item as {
       readonly kind?: unknown;
-      readonly groupID?: unknown;
+      readonly category?: unknown;
       readonly label?: unknown;
       readonly role?: unknown;
       readonly stance?: unknown;
@@ -445,27 +495,35 @@ function sanitizeEntries(raw: StoredList): HiddenEntry[] {
       entries.push({ kind: "stance", role, stance, label: stanceRowLabel(role, stance) });
       continue;
     }
-    if (
-      typeof candidate.groupID !== "number" ||
-      !Number.isFinite(candidate.groupID) ||
-      candidate.groupID <= 0
-    ) {
+    // ⚠ AN UNKNOWN CATEGORY NAME IS DROPPED, NOT COERCED. `other` is refused
+    // here as well as in the classifier: an entry that hides "everything I
+    // could not name" is exactly the catch-all that emptied the overview under
+    // the old group-0 rule, and it would be reachable by hand-editing the
+    // store.
+    if (typeof candidate.category !== "string") {
+      continue;
+    }
+    if (!HIDE_CATEGORY_IDS.has(candidate.category)) {
+      continue;
+    }
+    const category = candidate.category as HideCategoryID;
+    if (category === "other") {
       continue;
     }
     if (
       entries.some(
-        (existing) => existing.kind === "group" && existing.groupID === candidate.groupID,
+        (existing) => existing.kind === "category" && existing.category === category,
       )
     ) {
       continue;
     }
+    // ⚠ THE CANONICAL WORD, NOT THE STORED ONE. Same rule as the stance branch:
+    // the label is a projection of the id, so re-deriving it keeps the menu's
+    // words honest even if a record was hand-edited with a stale label.
     entries.push({
-      kind: "group",
-      groupID: candidate.groupID,
-      label:
-        typeof candidate.label === "string" && candidate.label.length > 0
-          ? candidate.label
-          : "Hidden group",
+      kind: "category",
+      category,
+      label: hideCategoryByID(category).label,
     });
   }
   return entries;
@@ -475,10 +533,8 @@ function sanitizeEntries(raw: StoredList): HiddenEntry[] {
 function load(): TabHiddenMap {
   if (typeof localStorage === "undefined") return new Map();
   try {
-    // ⚠ THE v3 FALLBACK IS A READ, NOT A MIGRATION WRITE. The player's groups
-    // come through untouched, and the first change to any tab rewrites the map
-    // under the v4 key — from then on the old key is simply no longer needed.
-    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
+    // ⚠ ONLY THE v5 KEY IS READ. No fallback, on purpose — see DEAD_STORAGE_KEYS.
+    const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return new Map();
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return new Map();
@@ -519,30 +575,38 @@ export interface TabHiddenStore {
   /** The one tab's state, or `EMPTY_STATE` when it has never been touched. */
   stateFor(tabID: string): TabHiddenState;
   /**
-   * Hide everything in this row's group, ON THIS TAB ONLY. `label` is the
-   * GROUP's name, which is what the restore menu will say.
+   * Hide everything in this row's CATEGORY, ON THIS TAB ONLY.
    *
-   * ⚠ RETURNS THE ENTRY, OR null WHEN THERE WAS NOTHING TO HIDE — a row with no
-   * usable group. The caller needs to know: a silent no-op is the one case
-   * where the player pressed a button and nothing happened.
+   * ⚠ `category` IS OPTIONAL, and when given it must be one this row actually
+   * carries — that is what lets goal 1b put one button per category on a row
+   * and still have every one of them do something. Omitted, it hides the row's
+   * own category.
+   *
+   * ⚠ RETURNS THE ENTRY, OR null WHEN THERE WAS NOTHING TO HIDE — a row that
+   * classified as `other`. The caller needs to know: a silent no-op is the one
+   * case where the player pressed a button and nothing happened.
    */
-  hide(tabID: string, entity: SpaceEntity, label: string): GroupHiddenEntry | null;
+  hide(
+    tabID: string,
+    entity: SpaceEntity,
+    category?: HideCategoryID,
+  ): CategoryHiddenEntry | null;
   /**
    * Hide everything this row's role-and-side names, ON THIS TAB ONLY — the
    * "Hide Ships (Friendly)" verb. Same contract as `hide`: idempotent, and
    * null when the row's role carries no stance row at all.
    */
   hideStance(tabID: string, entity: SpaceEntity, context: StanceContext | null): StanceHiddenEntry | null;
-  /** Bring one of THIS tab's hidden groups back. */
-  unhideGroup(tabID: string, groupID: number): void;
+  /** Bring one of THIS tab's hidden categories back. */
+  unhideCategory(tabID: string, category: HideCategoryID): void;
   /** Bring one of THIS tab's hidden role-and-side pairs back. */
   unhideStance(tabID: string, role: string, stance: Stance): void;
-  /** Add one group to THIS tab beyond what its preset shows. */
-  addGroup(tabID: string, groupID: number, label: string): void;
+  /** Add one category to THIS tab beyond what its preset shows. */
+  addCategory(tabID: string, category: HideCategoryID): void;
   /** Add one role-and-side pair to THIS tab beyond what its preset shows. */
   addStance(tabID: string, role: string, stance: Stance): void;
-  /** Remove one group from THIS tab's added list. */
-  removeGroup(tabID: string, groupID: number): void;
+  /** Remove one category from THIS tab's added list. */
+  removeCategory(tabID: string, category: HideCategoryID): void;
   /** Remove one role-and-side pair from THIS tab's added list. */
   removeStance(tabID: string, role: string, stance: Stance): void;
   /** Forget everything THIS tab hides, for its "show everything" control. */
@@ -591,51 +655,55 @@ export function createTabHiddenStore(): TabHiddenStore {
   return {
     map: readable,
     stateFor: (tabID) => map.get().get(tabID) ?? EMPTY_STATE,
-    hide: (tabID, entity, label) => {
-      const entry = hiddenEntryFor(entity, label);
-      // ⚠ THE PLAYER IS TOLD WHEN THERE WAS NOTHING TO HIDE. A row with no usable
-      // group is one the server did not classify, and pressing Hide on it and
-      // watching nothing happen is the silent decline this panel rejects
-      // everywhere else — so `null` goes back to the caller to be stated in the
-      // button's tooltip, not left unsaid.
+    hide: (tabID, entity, category) => {
+      const entry = hiddenEntryFor(entity, category);
+      // ⚠ THE PLAYER IS TOLD WHEN THERE WAS NOTHING TO HIDE. A row that
+      // classified as `other` is one the server did not describe, and pressing
+      // Hide on it and watching nothing happen is the silent decline this panel
+      // rejects everywhere else — so `null` goes back to the caller to be
+      // stated in the button's tooltip, not left unsaid.
       if (entry === null) return null;
-      // ⚠ IDEMPOTENT. Hiding the same group twice on this tab would otherwise
+      // ⚠ IDEMPOTENT. Hiding the same category twice on this tab would otherwise
       // leave two identical entries, and the restore menu would show the same
       // name twice with one of them doing nothing.
-      if (groupIsHidden(entry.groupID, map.get().get(tabID) ?? EMPTY_STATE)) {
+      if (categoryIsHidden(entry.category, map.get().get(tabID) ?? EMPTY_STATE)) {
         return entry;
       }
       rewrite(tabID, (state) => ({ hidden: [...state.hidden, entry], shown: state.shown }));
       return entry;
     },
-    unhideGroup: (tabID, groupID) => {
-      // ⚠ A NO-OP THAT DOES NOT REWRITE. Bringing back a group this tab never
+    unhideCategory: (tabID, category) => {
+      // ⚠ A NO-OP THAT DOES NOT REWRITE. Bringing back a category this tab never
       // hid must not create an entry for it, and a double press on Show must
       // not leave a trace.
-      if (!groupIsHidden(groupID, map.get().get(tabID) ?? EMPTY_STATE)) return;
+      if (!categoryIsHidden(category, map.get().get(tabID) ?? EMPTY_STATE)) return;
       rewrite(tabID, (state) => ({
         ...state,
         hidden: state.hidden.filter(
-          (entry) => !(entry.kind === "group" && entry.groupID === groupID),
+          (entry) => !(entry.kind === "category" && entry.category === category),
         ),
       }));
     },
-    addGroup: (tabID, groupID, label) => {
-      // ⚠ THE SAME ADMISSION RULE AS HIDING. A group that cannot be named is
-      // nothing to add, and one already added is already expanded.
-      if (groupID <= 0) return;
-      if (groupIsShown(groupID, map.get().get(tabID) ?? EMPTY_STATE)) return;
+    addCategory: (tabID, category) => {
+      // ⚠ THE SAME ADMISSION RULE AS HIDING. `other` is not something to add —
+      // it is the bucket for objects nothing could name, and a button that adds
+      // it would widen a tab to everything at once.
+      if (category === "other") return;
+      if (categoryIsShown(category, map.get().get(tabID) ?? EMPTY_STATE)) return;
       rewrite(tabID, (state) => ({
         hidden: state.hidden,
-        shown: [...state.shown, { kind: "group", groupID, label }],
+        shown: [
+          ...state.shown,
+          { kind: "category", category, label: hideCategoryByID(category).label },
+        ],
       }));
     },
-    removeGroup: (tabID, groupID) => {
-      if (!groupIsShown(groupID, map.get().get(tabID) ?? EMPTY_STATE)) return;
+    removeCategory: (tabID, category) => {
+      if (!categoryIsShown(category, map.get().get(tabID) ?? EMPTY_STATE)) return;
       rewrite(tabID, (state) => ({
         ...state,
         shown: state.shown.filter(
-          (entry) => !(entry.kind === "group" && entry.groupID === groupID),
+          (entry) => !(entry.kind === "category" && entry.category === category),
         ),
       }));
     },

@@ -35,13 +35,18 @@
   } from "../space/overviewRecipes.ts";
   import {
     EMPTY_STATE,
-    presetGroupHides,
+    presetHidesRow,
     presetStanceHides,
     stanceEntryFor,
     tabHidden,
     tabHiddenMap,
     tabShows,
   } from "../space/overviewHidden.ts";
+  import {
+    hideCategoryByID,
+    offeredCategoriesFor,
+    type HideCategoryID,
+  } from "../space/hideCategory.ts";
   import {
     buildOverviewRows,
     formatDistance,
@@ -235,23 +240,28 @@
    * ⚠ NAMES, NOT IDS. The menu shows the same group word the list's Group
    * column shows, and the group id travels only as the list's row key.
    */
-  const presetGroupRows = $derived.by((): { readonly groupID: number; readonly label: string }[] => {
+  /**
+   * The preset's PRE-HIDINGS still undecided on this tab, as menu rows.
+   *
+   * ⚠ KEYED BY THE PRESET'S OWN RECIPE, NOT BY GROUP. The preset still filters
+   * by `bracketRole` (a deliberate seam — see `presetHidesRow`), but the menu's
+   * unit is now the CATEGORY, so what each row undoes is "everything this
+   * preset omits", not "one group". Collapsing that to a single row is what
+   * keeps the restore menu one flat list with no subcategories: a player who
+   * pressed Show once wants the preset's omissions back, and offering them as
+   * forty separate category rows would be a worse menu than the one it replaced.
+   */
+  const presetGroupRows = $derived.by((): { readonly key: string; readonly label: string }[] => {
     if (!snapshot || activeTab.fixed) {
       return [];
     }
-    const byGroup = new Map<number, string>();
     for (const entity of snapshot.entities) {
       if (entity.isSelf) continue;
-      if (entity.groupID === null || entity.groupID <= 0) continue;
-      if (!presetGroupHides(activeTab, entity, activeTabState, stanceContext)) continue;
-      if (!byGroup.has(entity.groupID)) {
-        const group = groupName(entity);
-        byGroup.set(entity.groupID, group === "—" ? typeName(entity) : group);
-      }
+      if (!presetHidesRow(activeTab, entity, activeTabState, stanceContext)) continue;
+      const recipe = recipeByID(activeTab.recipeId);
+      return [{ key: "preset:omissions", label: recipe.label }];
     }
-    return [...byGroup.entries()]
-      .map(([groupID, label]) => ({ groupID, label }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    return [];
   });
 
   /**
@@ -297,18 +307,18 @@
   const hiddenMenuRows = $derived.by(() => {
     const rows: {
       readonly key: string;
-      readonly kind: "group" | "stance";
-      readonly groupID: number | null;
+      readonly kind: "category" | "stance" | "preset";
+      readonly category: HideCategoryID | null;
       readonly role: string | null;
       readonly stance: Stance | null;
       readonly label: string;
       readonly preset: boolean;
     }[] = activeTabState.hidden.map((entry) =>
-      entry.kind === "group"
+      entry.kind === "category"
         ? {
-            key: "player:group:" + entry.groupID,
-            kind: "group" as const,
-            groupID: entry.groupID,
+            key: "player:category:" + entry.category,
+            kind: "category" as const,
+            category: entry.category,
             role: null,
             stance: null,
             label: entry.label,
@@ -317,7 +327,7 @@
         : {
             key: "player:stance:" + entry.role + ":" + entry.stance,
             kind: "stance" as const,
-            groupID: null,
+            category: null,
             role: entry.role,
             stance: entry.stance,
             label: entry.label,
@@ -326,9 +336,9 @@
     );
     for (const row of presetGroupRows) {
       rows.push({
-        key: "preset:group:" + row.groupID,
-        kind: "group",
-        groupID: row.groupID,
+        key: row.key,
+        kind: "preset",
+        category: null,
         role: null,
         stance: null,
         label: row.label,
@@ -339,7 +349,7 @@
       rows.push({
         key: "preset:stance:" + row.role + ":" + row.stance,
         kind: "stance",
-        groupID: null,
+        category: null,
         role: row.role,
         stance: row.stance,
         label: row.label,
@@ -480,17 +490,16 @@
   // player gets "Save image as…" or nothing at all. Everything here is an
   // ordinary left click on a real button.
   function hideRow(row: OverviewRow): void {
-    // ⚠ THE GROUP, NOT THE OBJECT, AND NOT ITS OWN NAME. Pressing Hide on a
-    // planet hides every planet, and the restore menu says "Planet" rather than
-    // naming whichever rock was under the cursor. `groupName` is the same lookup
-    // the list's Group column uses, so the menu and the grid agree on the word.
-    const group = groupName(row);
-    const label = group === "—" ? typeName(row) : group;
+    // ⚠ THE CATEGORY, NOT THE OBJECT, AND NOT ITS OWN NAME. Pressing Hide on a
+    // planet hides every planet, and the restore menu says "Planets" rather than
+    // naming whichever planet was under the cursor. The word comes from
+    // `hideCategory.ts`, which is also what the classifier read the group
+    // through, so the menu and the grid cannot disagree about the word.
     // ⚠ PER-TAB, AND SILENT. The entry goes into the active tab's own list only,
     // and the player is told nothing here: the entry is one line in this tab's
-    // hidden menu, every other tab still shows the group, and All shows it too.
-    // A row with no usable group is already refused by the button itself.
-    if (tabHidden.hide(activeTabID, row, label) !== null && selectedID === row.itemID) {
+    // hidden menu, every other tab still shows the category, and All shows it
+    // too. A row that classified as `other` is already refused by the button.
+    if (tabHidden.hide(activeTabID, row) !== null && selectedID === row.itemID) {
       spaceSelection.dropWithNotice(SELECTION_GONE);
     }
   }
@@ -522,11 +531,11 @@
     if (isHostile(selectedRow)) {
       return "A threat is never hidden";
     }
-    // ⚠ A ROW WITH NO GROUP IS REFUSED HERE, not accepted and ignored. Hiding is
-    // by group, so there is genuinely nothing to hide, and the button says
-    // so rather than taking the press.
-    if (selectedRow.groupID === null || selectedRow.groupID <= 0) {
-      return "That one has no group to hide it by";
+    // ⚠ A ROW THAT CLASSIFIED AS `other` IS REFUSED HERE, not accepted and
+    // ignored. There is genuinely nothing to hide, and the button says so
+    // rather than taking the press.
+    if (offeredCategoriesFor(selectedRow).length === 0) {
+      return "That one has no category to hide it by";
     }
     return null;
   });
@@ -593,8 +602,8 @@
    * preset.
    */
   function showEntry(row: {
-    readonly kind: "group" | "stance";
-    readonly groupID: number | null;
+    readonly kind: "category" | "stance" | "preset";
+    readonly category: HideCategoryID | null;
     readonly role: string | null;
     readonly stance: Stance | null;
     readonly label: string;
@@ -610,27 +619,31 @@
       }
       return;
     }
-    if (row.groupID !== null) {
+    if (row.kind === "category" && row.category !== null) {
       if (row.preset) {
-        tabHidden.addGroup(activeTabID, row.groupID, row.label);
+        tabHidden.addCategory(activeTabID, row.category);
       } else {
-        tabHidden.unhideGroup(activeTabID, row.groupID);
+        tabHidden.unhideCategory(activeTabID, row.category);
       }
+      return;
+    }
+    // ⚠ THE PRESET'S OWN OMISSIONS, AS ONE ROW. See `presetGroupRows`: the
+    // preset is a recipe, so "show what it hid" is the whole of the preset's
+    // omissions recorded as shown, and nothing in the tab's own lists moves.
+    if (row.kind === "preset" && row.preset) {
+      showEverythingOnTab();
     }
   }
 
   /**
    * "Show everything": undo this tab's hiding wholesale — the player's own
-   * hides AND the preset's pre-hidings, for every group the grid holds now.
+   * hides AND the preset's pre-hidings, for whatever the grid holds now.
    * (A group the preset pre-hides later flies in is pre-hidden again: the
    * preset's advance list applies to what the grid has not shown yet.)
    */
   function showEverythingOnTab(): void {
     if (activeTabState.hidden.length > 0) {
       tabHidden.clearHidden(activeTabID);
-    }
-    for (const row of presetGroupRows) {
-      tabHidden.addGroup(activeTabID, row.groupID, row.label);
     }
     for (const row of presetStanceRows) {
       tabHidden.addStance(activeTabID, row.role, row.stance);
@@ -712,15 +725,19 @@
   }
 
   /**
-   * ⚠ THE GROUP'S OWN NAME, WHICH IS WHAT THE RESTORE MENU WILL SAY.
+   * ⚠ THE CATEGORY'S OWN LABEL, WHICH IS WHAT THE RESTORE MENU WILL SAY.
    *
-   * `groupName` resolves through the type cache keyed on `typeID`, which is how
-   * the list's Group column already reads. Falling back to the TYPE name when the
-   * group is unresolved keeps the toolbar honest — it says "hide everything in
-   * the Merlina Rebel group" rather than a dash, and never shows a bare id.
+   * Read from `hideCategory.ts` rather than from the resolved group name: the
+   * classifier is what the entry was built from, so asking it again guarantees
+   * the toolbar and the menu name the same thing. Falls back to the type name if
+   * the row classified as `other`, and never shows a bare id.
    */
   const hideGroupLabel = $derived(
-    selectedRow ? (groupName(selectedRow) === "—" ? typeName(selectedRow) : groupName(selectedRow)) : "",
+    selectedRow
+      ? (offeredCategoriesFor(selectedRow)[0] !== undefined
+          ? hideCategoryByID(offeredCategoriesFor(selectedRow)[0] as HideCategoryID).label
+          : typeName(selectedRow))
+      : "",
   );
 
   // --- doing things -----------------------------------------------------------
@@ -1416,7 +1433,7 @@
       type="button"
       class="spc-tool"
       disabled={hideRefusalReason !== null}
-      title={hideRefusalReason ?? `Hide everything in the ${hideGroupLabel} group from ${activeTab.name}`}
+      title={hideRefusalReason ?? `Hide everything in the ${hideGroupLabel} category from ${activeTab.name}`}
       onclick={hideSelected}
     >Hide</button>
     <!--

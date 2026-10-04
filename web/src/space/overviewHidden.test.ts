@@ -1,24 +1,26 @@
-// The per-tab hidden state (goal R90, refined): EACH tab's two lists — the
-// GROUPS the player hid on that tab, and the GROUPS the player added to that
-// tab beyond its preset — plus the one rule that outranks their choice.
+// The per-tab hidden state (goal R90, refined; re-based on categories in
+// PLAN.txt goal 2): EACH tab's two lists — the CATEGORIES the player hid on
+// that tab, and the CATEGORIES the player added to that tab beyond its preset —
+// plus the one rule that outranks their choice.
 //
-// Hiding is BY GROUP, not by object and not by type, and BY TAB: pressing Hide
-// on a planet hides every planet ON THAT TAB, and the tab's restore menu says
-// "Planet". Every other tab keeps showing the planets, and All shows them all —
-// it is the fallback and hides nothing at all.
+// Hiding is BY CATEGORY, not by object, not by type and no longer by group
+// (the SDE has 1605 groups; `hideCategory.ts` is the single place a group id is
+// read). Pressing Hide on a planet hides every planet ON THAT TAB, and the
+// tab's restore menu says "Planets". Every other tab keeps showing the planets,
+// and All shows them all — it is the fallback and hides nothing at all.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  categoryIsHidden,
+  categoryIsShown,
   covers,
   createTabHiddenStore,
   EMPTY_STATE,
-  groupIsHidden,
-  groupIsShown,
   hiddenEntryFor,
-  presetGroupHides,
   presetHides,
+  presetHidesRow,
   presetStanceHides,
   stateFor,
   tabShows,
@@ -88,68 +90,85 @@ function entity(over: Partial<SpaceEntity> & { itemID: number }): SpaceEntity {
 const PLANET = entity({ itemID: 1 });
 const OTHER_PLANET = entity({ itemID: 2, typeID: 14 });
 const MOON = entity({ itemID: 3, groupID: MOON_GROUP, typeID: 15 });
-const DECOR = entity({ itemID: 4, groupID: 1250, typeID: 5555, kind: "structure" });
+/** Group 226 is the SDE's "Large Collidable Object" — scenery, and the bug. */
+const DECOR = entity({ itemID: 4, groupID: 226, typeID: 5555, kind: "structure" });
 const RAT = entity({ itemID: 5, kind: "ship", groupID: 25, isNpc: true, npcEntityType: "npc" });
-/** Group 450 holds the asteroids; group 10 the stargates (the classifier's own id). */
+/** An ore group is a rock only once the runtime stamps it with a yield. */
 const ASTEROID_GROUP = 450;
 const GATE_GROUP = 10;
-/** A rock (asteroid group) and a gate — the two presets' stock examples. */
 const ROCK = entity({ itemID: 14, groupID: ASTEROID_GROUP, typeID: 1230, kind: "celestial", miningYieldTypeID: 1230 });
 const GATE = entity({ itemID: 15, groupID: GATE_GROUP, typeID: 101, kind: "celestial" });
+const FRIGATE = entity({ itemID: 16, kind: "ship", groupID: 25, typeID: 1232 });
 
-// --- the entry is a group ----------------------------------------------------
+// --- the entry is a category --------------------------------------------------
 
 test("⚠ hiding a planet hides EVERY planet, not just that one", () => {
-  // ⚠ THE WHOLE OF THE CHANGE. Two different planet TYPES, one group, both gone —
-  // which is what "hide the planets" means and what a type-keyed list could not do.
-  const entry = hiddenEntryFor(PLANET, "Planet");
-  assert.ok(entry, "a grouped row should produce an entry");
-  assert.equal(entry.groupID, PLANET_GROUP);
-  assert.equal(entry.label, "Planet", "the entry is named for the GROUP, not the object");
+  // ⚠ THE WHOLE OF THE AXIS. Two different planet TYPES, one category, both
+  // gone — which is what "hide the planets" means and what a type-keyed list
+  // could not do.
+  const entry = hiddenEntryFor(PLANET, "planet");
+  assert.ok(entry, "a classifiable row should produce an entry");
+  assert.equal(entry.category, "planet");
+  assert.equal(entry.label, "Planets", "the entry is named for the CATEGORY, not the object");
   assert.equal(covers(entry, PLANET), true);
   assert.equal(covers(entry, OTHER_PLANET), true, "a different planet type matched too");
 });
 
-test("hiding one group does not hide another", () => {
-  const entry = hiddenEntryFor(PLANET, "Planet");
+test("hiding one category does not hide another", () => {
+  const entry = hiddenEntryFor(PLANET, "planet");
   assert.ok(entry);
   assert.equal(covers(entry, MOON), false, "a moon went missing with the planets");
   assert.equal(covers(entry, DECOR), false);
 });
 
-test("the entry carries the GROUP's name, never the object's own name", () => {
+test("the entry carries the CATEGORY's name, never the object's own name", () => {
   // ⚠ THE MENU READS THIS. A named rock ("Veldspar") would put a specific object
-  // in a list whose unit is the group, and the player could not tell what
+  // in a list whose unit is the category, and the player could not tell what
   // pressing Show would bring back.
-  const namedRock = entity({ itemID: 6, name: "Veldspar", groupID: 450, kind: "asteroid" });
-  const entry = hiddenEntryFor(namedRock, "Asteroid");
+  const namedRock = entity({ itemID: 6, name: "Veldspar", groupID: 450, kind: "asteroid", miningYieldTypeID: 450 });
+  const entry = hiddenEntryFor(namedRock, "asteroid");
   assert.ok(entry);
-  assert.equal(entry.label, "Asteroid");
+  assert.equal(entry.label, "Rocks");
   assert.ok(!entry.label.includes("Veldspar"));
 });
 
-test("⚠ a row with no group cannot be hidden at all", () => {
-  // ⚠ RETURNS null RATHER THAN INVENTING A KEY. A groupID of 0 would match every
-  // ungrouped row in the system, so one press could empty the overview.
-  assert.equal(hiddenEntryFor(entity({ itemID: 7, groupID: null }), "Mystery"), null);
-  assert.equal(hiddenEntryFor(entity({ itemID: 8, groupID: 0 }), "Zero"), null);
-  assert.equal(hiddenEntryFor(entity({ itemID: 9, groupID: -3 }), "Negative"), null);
+test("⚠ a row that classifies as `other` cannot be hidden at all", () => {
+  // ⚠ RETURNS null RATHER THAN INVENTING A KEY. An `other` entry would match
+  // every unclassified row in the system, so one press could empty the
+  // overview — the same failure the old groupID-of-0 rule existed to prevent.
+  const other = entity({ itemID: 7, groupID: null, kind: null, categoryID: null });
+  assert.equal(hiddenEntryFor(other), null);
 });
 
-test("a row with a group is always matched by that group, whatever its type", () => {
-  const shared = entity({ itemID: 10, groupID: 450 });
-  const other = entity({ itemID: 11, groupID: 450, typeID: 1230, kind: "asteroid" });
-  const entry = hiddenEntryFor(shared, "Asteroid");
+test("a row with a bad group still classifies by kind, and hides on that", () => {
+  // The new axis is more forgiving than the old one by design: an absent or
+  // nonsense group is no longer automatically un-hideable.
+  assert.equal(hiddenEntryFor(entity({ itemID: 8, groupID: 0, kind: "ship", categoryID: 6 }))?.category, "ship");
+  assert.equal(hiddenEntryFor(entity({ itemID: 9, groupID: -3, kind: "ship", categoryID: 6 }))?.category, "ship");
+});
+
+test("⚠ a category the row does NOT carry is refused, not accepted", () => {
+  // ⚠ THE GUARD BEHIND THE MULTI-BUTTON UI. Goal 1b puts one Hide button per
+  // category on a row; if the store accepted a category the row lacks, that
+  // button would hide nothing while looking like it worked.
+  assert.equal(hiddenEntryFor(PLANET, "scenery"), null, "a planet is not scenery");
+  assert.equal(hiddenEntryFor(PLANET, "ship"), null);
+});
+
+test("a row with a category is always matched by it, whatever its type", () => {
+  const shared = entity({ itemID: 10, groupID: 450, miningYieldTypeID: 450 });
+  const other = entity({ itemID: 11, groupID: 450, typeID: 1230, kind: "asteroid", miningYieldTypeID: 450 });
+  const entry = hiddenEntryFor(shared, "asteroid");
   assert.ok(entry);
-  assert.equal(covers(entry, other), true, "a different type in the same group stayed");
+  assert.equal(covers(entry, other), true, "a different type in the same category stayed");
 });
 
 test("covers is the whole of the matching rule", () => {
-  const entry = { kind: "group" as const, groupID: PLANET_GROUP, label: "Planet" };
+  const entry = { kind: "category" as const, category: "planet" as const, label: "Planets" };
   assert.equal(covers(entry, PLANET), true);
   assert.equal(covers(entry, OTHER_PLANET), true);
   assert.equal(covers(entry, MOON), false);
-  assert.equal(covers(entry, entity({ itemID: 12, groupID: null })), false);
+  assert.equal(covers(entry, FRIGATE), false);
 });
 
 // --- the resolver: the order hostile, all, hidden, shown, preset --------------
@@ -159,9 +178,9 @@ test("⚠ a HOSTILE is never hidden, even when its group is hidden", () => {
   // not one object — so a group that happens to contain a threat is a far easier
   // accident. A rat is `kind: "ship"`, and a group covering player hulls would
   // otherwise take the contents of the threat strip out of the list.
-  const state: TabHiddenState = { hidden: [{ kind: "group", groupID: 25, label: "Pirate" }], shown: [] };
-  assert.equal(tabShows(mining, RAT, state), true, "a threat was hidden by group");
-  assert.equal(groupIsHidden(25, state), true, "the list still records the ask");
+  const state: TabHiddenState = { hidden: [{ kind: "category", category: "ship", label: "Ships" }], shown: [] };
+  assert.equal(tabShows(mining, RAT, state), true, "a threat was hidden by category");
+  assert.equal(categoryIsHidden("ship", state), true, "the list still records the ask");
   assert.equal(isHostile(RAT), true);
 });
 
@@ -170,9 +189,9 @@ test("⚠ ALL IS ABSOLUTE, EVEN WITH FULL LISTS LOADED FOR IT", () => {
   // able to empty the tab that is the way back to seeing everything.
   const state: TabHiddenState = {
     hidden: [
-      { kind: "group", groupID: PLANET_GROUP, label: "Planet" },
-      { kind: "group", groupID: 25, label: "Pirate" },
-      { kind: "group", groupID: ASTEROID_GROUP, label: "Asteroid" },
+      { kind: "category", category: "planet", label: "Planets" },
+      { kind: "category", category: "ship", label: "Ships" },
+      { kind: "category", category: "asteroid", label: "Rocks" },
     ],
     shown: [],
   };
@@ -187,7 +206,7 @@ test("⚠ hiding on one tab hides it NOWHERE ELSE", () => {
   // tab: the tab that never hid the group keeps showing it, because it has its
   // own state — not because the group is special.
   const hiddenHere: TabHiddenState = {
-    hidden: [{ kind: "group", groupID: PLANET_GROUP, label: "Planet" }],
+    hidden: [{ kind: "category", category: "planet", label: "Planets" }],
     shown: [],
   };
   assert.equal(tabShows(mining, PLANET, hiddenHere), false, "the tab that hid it lost it");
@@ -217,10 +236,10 @@ test("the preset PRE-HIDES what it does not name — and only while undecided", 
   // What the preset names is never a hiding candidate.
   assert.equal(presetHides(mining, ROCK, EMPTY_STATE), false, "a rock pre-hidden on the rocks tab");
   // The tab hid it itself: the player's entry owns the row, not the preset's.
-  const hidIt: TabHiddenState = { hidden: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }], shown: [] };
+  const hidIt: TabHiddenState = { hidden: [{ kind: "category", category: "gate", label: "Gates" }], shown: [] };
   assert.equal(presetHides(mining, GATE, hidIt), false, "the hiding is listed twice");
   // The player undid the pre-hiding: the `shown` entry owns it.
-  const unPreHid: TabHiddenState = { hidden: [], shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }] };
+  const unPreHid: TabHiddenState = { hidden: [], shown: [{ kind: "category", category: "gate", label: "Gates" }] };
   assert.equal(presetHides(mining, GATE, unPreHid), false, "the undo was not recorded");
   // Hostiles and the fixed All tab never count: the rules that outrank the
   // preset sit in one place, and All pre-hides nothing.
@@ -234,7 +253,7 @@ test("the preset PRE-HIDES what it does not name — and only while undecided", 
 test("⚠ adding a group expands the tab beyond its preset", () => {
   // ⚠ THE EXPANSION THE PLAYER ASKED FOR. The preset hides the gate by omission;
   // one entry in the tab's `shown` list puts it back — on that tab only.
-  const state: TabHiddenState = { hidden: [], shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }] };
+  const state: TabHiddenState = { hidden: [], shown: [{ kind: "category", category: "gate", label: "Gates" }] };
   assert.ok(!recipeAllows(recipeByID("mining"), GATE), "the premise: gates are not mining");
   assert.equal(tabShows(mining, GATE, EMPTY_STATE), false, "before: the preset did not show it");
   assert.equal(tabShows(mining, GATE, state), true, "after: the tab was expanded");
@@ -245,21 +264,40 @@ test("⚠ a group the tab hid beats a group the tab added", () => {
   // ⚠ THE ORDER MATTERS AND IT IS FIXED: hidden beats shown. A group that is in
   // both of one tab's lists is the player's last word winning, not the first.
   const state: TabHiddenState = {
-    hidden: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }],
-    shown: [{ kind: "group", groupID: GATE_GROUP, label: "Stargate" }],
+    hidden: [{ kind: "category", category: "gate", label: "Gates" }],
+    shown: [{ kind: "category", category: "gate", label: "Gates" }],
   };
   assert.equal(tabShows(mining, GATE, state), false, "the hidden word came first");
 });
 
-test("a row with no group is decided by the preset alone", () => {
-  // ⚠ THE LISTS CANNOT REACH IT. An ungrouped row has no group to hide or add,
-  // so it answers to the recipe and nothing else.
-  const ungrouped = entity({ itemID: 16, groupID: null, kind: "asteroid" });
-  const state: TabHiddenState = { hidden: [{ kind: "group", groupID: 0, label: "None" }], shown: [] };
+test("⚠ a category hide reaches a row with no group — the old axis could not", () => {
+  // ⚠ WHAT CHANGED, ASSERTED. This row has no group at all, so under the old
+  // group-based axis it was UNHIDEABLE: `hiddenEntryFor` refused it and the
+  // player could do nothing with it. The category axis classifies it by kind
+  // and hides it like anything else.
+  const ungrouped = entity({ itemID: 16, groupID: null, kind: "asteroid", miningYieldTypeID: 1230 });
+  const entry = hiddenEntryFor(ungrouped, "asteroid");
+  assert.ok(entry, "an ungrouped rock is hideable now");
+  assert.equal(entry.category, "asteroid");
+
+  const state: TabHiddenState = { hidden: [entry], shown: [] };
+  assert.equal(tabShows(mining, ungrouped, state), false, "the category hide did not reach it");
+});
+
+test("⚠ `other` is still unreachable by hide, so the lists cannot empty a tab", () => {
+  // The refusal the old no-groupID rule existed to provide, now carried by
+  // `other`: a row nothing could name cannot be hidden by any category entry.
+  const unknowable = entity({ itemID: 17, groupID: null, kind: null, categoryID: null });
+  assert.deepEqual(hiddenEntryFor(unknowable), null);
+  // And a stored `other` entry covers nothing, because `covers` is what decides.
+  const forged: TabHiddenState = {
+    hidden: [{ kind: "category", category: "other", label: "Other" }],
+    shown: [],
+  };
   assert.equal(
-    tabShows(mining, ungrouped, state),
-    recipeAllows(recipeByID("mining"), ungrouped),
-    "the lists reached an ungrouped row",
+    tabShows(mining, unknowable, forged),
+    recipeAllows(recipeByID("mining"), unknowable),
+    "a forged `other` entry reached the lists",
   );
 });
 
@@ -267,18 +305,18 @@ test("a row with no group is decided by the preset alone", () => {
 
 test("hiding the same group twice on a tab is one entry", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.hide("mining", OTHER_PLANET, "Planet");
+  store.hide("mining", PLANET, "planet");
+  store.hide("mining", OTHER_PLANET, "planet");
   assert.equal(store.stateFor("mining").hidden.length, 1, "the restore menu would show a duplicate");
 });
 
-test("hiding two groups gives two entries, named for their groups", () => {
+test("hiding two categories gives two entries, named for their categories", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.hide("mining", DECOR, "Emitter");
+  store.hide("mining", PLANET, "planet");
+  store.hide("mining", DECOR, "scenery");
   assert.deepEqual(
     store.stateFor("mining").hidden.map((entry) => entry.label),
-    ["Planet", "Emitter"],
+    ["Planets", "Scenery"],
   );
 });
 
@@ -286,53 +324,54 @@ test("hiding tells the caller when there was nothing to hide", () => {
   // ⚠ THE ONLY CASE WHERE A PRESS DOES NOTHING, so the caller has to be able to
   // SAY so in the tooltip rather than leave the player watching an inert button.
   const store = createTabHiddenStore();
-  assert.equal(store.hide("mining", PLANET, "Planet")?.groupID, PLANET_GROUP);
-  assert.equal(store.hide("mining", entity({ itemID: 17, groupID: null }), "Mystery"), null);
+  assert.equal(store.hide("mining", PLANET, "planet")?.category, "planet");
+  assert.equal(store.hide("mining", entity({ itemID: 17, groupID: null, kind: null, categoryID: null })), null);
   assert.equal(store.stateFor("mining").hidden.length, 1, "a refused hide still added an entry");
 });
 
 test("⚠ the two tabs' states never touch each other", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.addGroup("travel", GATE_GROUP, "Stargate");
+  store.hide("mining", PLANET, "planet");
+  store.addCategory("travel", "gate");
   assert.equal(store.stateFor("mining").hidden.length, 1);
   assert.deepEqual(store.stateFor("travel").hidden, [], "the other tab gained a hiding");
   assert.equal(store.stateFor("travel").shown.length, 1);
   assert.deepEqual(stateFor(store.map.get(), "combat"), EMPTY_STATE);
 });
 
-test("unhideGroup removes exactly one group, by id, on its own tab", () => {
+test("unhideCategory removes exactly one category, on its own tab", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.hide("mining", DECOR, "Emitter");
-  store.unhideGroup("mining", PLANET_GROUP);
-  assert.deepEqual(store.stateFor("mining").hidden.map((entry) => entry.label), ["Emitter"]);
-  // Bringing back a group the tab never hid is a no-op, not a creation.
-  store.unhideGroup("mining", PLANET_GROUP);
+  store.hide("mining", PLANET, "planet");
+  store.hide("mining", DECOR, "scenery");
+  store.unhideCategory("mining", "planet");
+  assert.deepEqual(store.stateFor("mining").hidden.map((entry) => entry.label), ["Scenery"]);
+  // Bringing back a category the tab never hid is a no-op, not a creation.
+  store.unhideCategory("mining", "gate");
   assert.equal(store.stateFor("mining").hidden.length, 1);
 });
 
-test("addGroup expands the tab; removeGroup takes it off again", () => {
+test("addCategory expands the tab; removeCategory takes it off again", () => {
   const store = createTabHiddenStore();
-  store.addGroup("mining", GATE_GROUP, "Stargate");
+  store.addCategory("mining", "gate");
   assert.equal(store.stateFor("mining").shown.length, 1, "the tab was not expanded");
-  // Adding the same group twice is one entry.
-  store.addGroup("mining", GATE_GROUP, "Stargate");
+  // Adding the same category twice is one entry.
+  store.addCategory("mining", "gate");
   assert.equal(store.stateFor("mining").shown.length, 1, "the expansion was doubled");
-  // And a group that cannot be named is refused, like a hide.
-  store.addGroup("mining", 0, "Nothing");
+  // ⚠ `other` IS REFUSED, LIKE A HIDE. It is the bucket for objects nothing
+  // could name, and adding it would widen a tab to every unclassified row.
+  store.addCategory("mining", "other");
   assert.equal(store.stateFor("mining").shown.length, 1);
-  store.removeGroup("mining", GATE_GROUP);
+  store.removeCategory("mining", "gate");
   assert.deepEqual(store.stateFor("mining").shown, []);
-  // A group never added is a no-op, not an error or a hole.
-  store.removeGroup("mining", GATE_GROUP);
+  // A category never added is a no-op, not an error or a hole.
+  store.removeCategory("mining", "gate");
   assert.deepEqual(store.stateFor("mining").shown, []);
 });
 
 test("clearHidden forgets the tab's hiding, and the tab's additions only", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.addGroup("mining", GATE_GROUP, "Stargate");
+  store.hide("mining", PLANET, "planet");
+  store.addCategory("mining", "gate");
   store.clearHidden("mining");
   assert.deepEqual(store.stateFor("mining").hidden, [], "the hiding was not cleared");
   assert.equal(store.stateFor("mining").shown.length, 1, "clear dragged in the additions");
@@ -343,8 +382,8 @@ test("clearHidden forgets the tab's hiding, and the tab's additions only", () =>
 
 test("dropTab takes both lists with the tab", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.addGroup("mining", GATE_GROUP, "Stargate");
+  store.hide("mining", PLANET, "planet");
+  store.addCategory("mining", "gate");
   store.dropTab("mining");
   assert.equal(store.map.get().has("mining"), false, "the deleted tab's lists outlived it");
   store.dropTab("mining");
@@ -353,8 +392,8 @@ test("dropTab takes both lists with the tab", () => {
 
 test("clearAll forgets every tab's lists", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
-  store.addGroup("travel", GATE_GROUP, "Stargate");
+  store.hide("mining", PLANET, "planet");
+  store.addCategory("travel", "gate");
   store.clearAll();
   assert.equal(store.map.get().size, 0);
 });
@@ -362,7 +401,7 @@ test("clearAll forgets every tab's lists", () => {
 test("two stores built separately never share state", () => {
   const a = createTabHiddenStore();
   const b = createTabHiddenStore();
-  a.hide("mining", PLANET, "Planet");
+  a.hide("mining", PLANET, "planet");
   assert.equal(a.stateFor("mining").hidden.length, 1);
   assert.deepEqual(b.stateFor("mining"), EMPTY_STATE);
 });
@@ -371,8 +410,8 @@ test("a subscriber is told when a tab's lists change", () => {
   const store = createTabHiddenStore();
   const seen: number[] = [];
   const stop = store.map.subscribe((map) => seen.push(map.get("mining")?.hidden.length ?? 0));
-  store.hide("mining", PLANET, "Planet");
-  store.unhideGroup("mining", PLANET_GROUP);
+  store.hide("mining", PLANET, "planet");
+  store.unhideCategory("mining", "planet");
   stop();
   assert.deepEqual(seen, [0, 1, 0]);
 });
@@ -382,8 +421,8 @@ test("a hostile ask is recorded, and the resolver still shows it", () => {
   // tab's list answers "did the player ask to hide this"; `tabShows` answers
   // "does it show", and refuses to hide a threat on the spot.
   const store = createTabHiddenStore();
-  store.hide("mining", RAT, "Pirate");
-  assert.equal(groupIsHidden(25, store.stateFor("mining")), true, "the ask was not recorded");
+  store.hide("mining", RAT, "ship");
+  assert.equal(categoryIsHidden("ship", store.stateFor("mining")), true, "the ask was not recorded");
   assert.equal(tabShows(mining, RAT, store.stateFor("mining")), true, "the threat was hidden");
   assert.equal(isHostile(RAT), true);
 });
@@ -457,7 +496,7 @@ test("presetStanceHides lists only undecided pairs, and one row earns one word",
   // A row the GROUP pre-hides own keeps the group's word: the stance side
   // stays silent so no row earns two menu entries.
   assert.equal(presetStanceHides(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "mining owns neutral ships by role");
-  assert.equal(presetGroupHides(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the group word owns it");
+  assert.equal(presetHidesRow(mining, NEUTRAL_SHIP, EMPTY_STATE, STANCE_CONTEXT), true, "the group word owns it");
   assert.equal(presetStanceHides(ALL, FRIENDLY_SHIP, EMPTY_STATE, STANCE_CONTEXT), false, "All pre-hides nothing");
 });
 
@@ -502,7 +541,7 @@ test("addStance / removeStance are the stance mirror of the group side", () => {
 
 test("clearHidden forgets the tab's stance hides too", () => {
   const store = createTabHiddenStore();
-  store.hide("mining", PLANET, "Planet");
+  store.hide("mining", PLANET, "planet");
   store.hideStance("mining", FRIENDLY_SHIP, STANCE_CONTEXT);
   store.clearHidden("mining");
   assert.deepEqual(store.stateFor("mining").hidden, [], "a stance hide survived the clear");
@@ -510,45 +549,111 @@ test("clearHidden forgets the tab's stance hides too", () => {
 
 // --- the storage key -------------------------------------------------------------
 
-test("⚠ a v3 store is read whole into the stance era, and rewrites go to v4", () => {
-  // ⚠ THE MIGRATION THE PLAYER DOES NOT SEE. Their per-tab group hides are a
-  // shape the sanitizer still accepts, so they come through untouched — and the
-  // first change rewrites the map under the new key.
-  const storage = new Map<string, string>([
-    [
-      "evejs-web:overview-hidden:v3",
-      JSON.stringify({
-        mining: {
-          hidden: [{ groupID: 7, label: "Planet" }],
-          shown: [{ groupID: 10, label: "Stargate" }],
-        },
-      }),
-    ],
-  ]);
-  const stub = {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      storage.set(key, value);
-    },
-    removeItem: (key: string) => {
-      storage.delete(key);
+/** A localStorage stub the store can read and write against. */
+function storageStub(seed: Record<string, string>): {
+  readonly store: Map<string, string>;
+  readonly api: unknown;
+} {
+  const store = new Map<string, string>(Object.entries(seed));
+  return {
+    store,
+    api: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+      removeItem: (key: string) => {
+        store.delete(key);
+      },
     },
   };
+}
+
+/** Run a body with a stubbed localStorage, restoring whatever was there. */
+function withStorage<T>(seed: Record<string, string>, body: (store: Map<string, string>) => T): T {
+  const stub = storageStub(seed);
   const original = (globalThis as { localStorage?: unknown }).localStorage;
-  (globalThis as { localStorage?: unknown }).localStorage = stub;
+  (globalThis as { localStorage?: unknown }).localStorage = stub.api;
   try {
-    const store = createTabHiddenStore();
-    const state = store.stateFor("mining");
-    assert.equal(state.hidden.length, 1, "the v3 hide was lost");
-    assert.equal(state.hidden[0]?.kind, "group", "the old entry did not read as a group");
-    assert.equal(state.shown.length, 1, "the v3 expansion was lost");
-    store.hide("mining", MOON, "Moon");
-    assert.ok(storage.has("evejs-web:overview-hidden:v4"), "the rewrite went to the old key");
-    assert.ok(
-      storage.get("evejs-web:overview-hidden:v4")?.includes('"kind":"group"') === true,
-      "the v4 record does not name its kind",
-    );
+    return body(stub.store);
   } finally {
     (globalThis as { localStorage?: unknown }).localStorage = original;
   }
+}
+
+test("a v5 store round-trips through storage", () => {
+  withStorage({}, (store) => {
+    const hidden = createTabHiddenStore();
+    hidden.hide("mining", PLANET, "planet");
+    hidden.addCategory("mining", "gate");
+
+    assert.ok(store.has("evejs-web:overview-hidden:v5"), "the write went to the wrong key");
+
+    // A fresh store must read back exactly what the first one wrote.
+    const reloaded = createTabHiddenStore();
+    const state = reloaded.stateFor("mining");
+    assert.equal(state.hidden.length, 1);
+    assert.equal(state.hidden[0]?.kind, "category");
+    assert.equal(state.hidden[0]?.label, "Planets");
+    assert.equal(state.shown.length, 1);
+    assert.equal(state.shown[0]?.kind, "category");
+  });
 });
+
+test("⚠ v3 and v4 group stores are NOT read — the hard cut, asserted", () => {
+  // ⚠ THE USER'S CALL, AND IT LOSES DATA ON PURPOSE. Group ids have no honest
+  // translation into categories — group 7 could be `planet` or `scenery`, and
+  // guessing would silently hide a different set of objects. So the old keys are
+  // not read, and a player's pre-category hides are gone rather than mistranslated.
+  const legacy = JSON.stringify({
+    mining: {
+      hidden: [{ groupID: 7, label: "Planet" }],
+      shown: [{ groupID: 10, label: "Stargate" }],
+    },
+  });
+
+  withStorage({ "evejs-web:overview-hidden:v4": legacy }, (store) => {
+    const reloaded = createTabHiddenStore();
+    assert.deepEqual(reloaded.stateFor("mining"), EMPTY_STATE, "a v4 store leaked through");
+  });
+
+  withStorage({ "evejs-web:overview-hidden:v3": legacy }, (store) => {
+    const reloaded = createTabHiddenStore();
+    assert.deepEqual(reloaded.stateFor("mining"), EMPTY_STATE, "a v3 store leaked through");
+  });
+
+  // ⚠ AND THE DEAD KEYS ARE LEFT ALONE, not deleted. Nothing reads them and
+  // nothing writes them, but they are the player's browser and this module does
+  // not get to decide to destroy data it merely no longer understands.
+  withStorage({ "evejs-web:overview-hidden:v4": legacy }, (store) => {
+    createTabHiddenStore();
+    assert.ok(store.has("evejs-web:overview-hidden:v4"), "the v4 record was destroyed");
+  });
+});
+
+test("a stored record naming an unknown category is dropped, not coerced", () => {
+  // ⚠ THE SANITIZER IS THE TRUST BOUNDARY. A hand-edited or corrupt record must
+  // not be able to install a category the classifier would never produce, and
+  // `other` in particular is refused: it is the bucket for objects nothing could
+  // name, and a stored `other` entry would hide all of them at once.
+  const hostile = JSON.stringify({
+    mining: {
+      hidden: [
+        { kind: "category", category: "not-a-category", label: "Nonsense" },
+        { kind: "category", category: "other", label: "Other" },
+        { kind: "category", category: "planet", label: "STALE LABEL" },
+      ],
+      shown: [],
+    },
+  });
+
+  withStorage({ "evejs-web:overview-hidden:v5": hostile }, () => {
+    const reloaded = createTabHiddenStore();
+    const state = reloaded.stateFor("mining");
+    assert.equal(state.hidden.length, 1, "a forged category survived the sanitizer");
+    // ⚠ AND THE LABEL IS RE-DERIVED, not trusted, so a stale word cannot reach
+    // the restore menu.
+    assert.equal(state.hidden[0]?.label, "Planets");
+  });
+});
+

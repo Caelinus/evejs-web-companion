@@ -264,6 +264,16 @@ const BY_ID: ReadonlyMap<HideCategoryID, HideCategory> = new Map(
   HIDE_CATEGORIES.map((category) => [category.id, category]),
 );
 
+/**
+ * Every valid category id, for validating STORED state.
+ *
+ * ⚠ THE STORAGE SANITIZER NEEDS THIS, AND NEEDS IT TO BE COMPLETE. A stored
+ * entry naming anything outside this set is dropped on read rather than coerced,
+ * so a hand-edited or stale record can never install a category the classifier
+ * would never produce.
+ */
+export const HIDE_CATEGORY_IDS: ReadonlySet<string> = new Set(HIDE_CATEGORIES.map((c) => c.id));
+
 /** The category's own record, falling back to `other` for anything unknown. */
 export function hideCategoryByID(id: HideCategoryID | string): HideCategory {
   return BY_ID.get(id as HideCategoryID) ?? (BY_ID.get("other") as HideCategory);

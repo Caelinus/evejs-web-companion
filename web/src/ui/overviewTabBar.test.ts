@@ -76,7 +76,7 @@ function entity(over: Record<string, unknown>): Record<string, unknown> {
 }
 
 const ROCK = entity({ kind: "asteroid", itemID: ROCK_ID, typeID: ORE_TYPE_ID, groupID: 450, categoryID: 25, name: "Veldspar" });
-const DECOR = entity({ kind: "structure", itemID: DECOR_ID, typeID: DECOR_TYPE_ID, groupID: 1250, name: "An Emitter" });
+const DECOR = entity({ kind: "structure", itemID: DECOR_ID, typeID: DECOR_TYPE_ID, groupID: 226, name: "An Emitter" });
 const RAT = entity({ itemID: RAT_ID, isNpc: true, npcEntityType: "npc", name: "Belt Rat" });
 
 function storeWith(entities: readonly Record<string, unknown>[]): unknown {
@@ -414,7 +414,7 @@ test("the hidden menu says 'Hidden Items', whether the tab hides anything or not
   assert.ok(emptyText.includes("Hidden Items"), "the menu does not name itself");
   assert.doesNotMatch(emptyText, /Nothing hidden/, "the old empty state came back");
   const miningID = tabIDByName("Mining");
-  tabHidden.hide(miningID, DECOR as never, "Emitter");
+  tabHidden.hide(miningID, DECOR as never, "scenery");
   const busyText = visibleText(panel());
   assert.ok(busyText.includes("Hidden Items"), "the label changed with the content");
   assert.doesNotMatch(busyText, /1 hidden/, "the label started counting again");
@@ -429,7 +429,7 @@ test("⚠ hiding on one tab does not touch the others, and All keeps everything"
   const miningID = tabIDByName("Mining");
   const travelID = tabIDByName("Travel");
   overviewTabs.select(miningID);
-  tabHidden.hide(miningID, DECOR as never, "Emitter");
+  tabHidden.hide(miningID, DECOR as never, "scenery");
   const miningBody = panel();
   assert.equal(tabHidden.stateFor(miningID).hidden.length, 1, "the hiding tab recorded nothing");
   assert.ok(!visibleText(miningBody).includes("An Emitter"), "the hiding tab kept showing the group");
@@ -443,32 +443,39 @@ test("⚠ hiding on one tab does not touch the others, and All keeps everything"
   assert.doesNotMatch(allBody, /spc-hidden-menu/, "the fallback tab carries a hidden menu");
 });
 
-test("the hidden menu can show this tab's groups back, one or all at once", () => {
-  // ⚠ ENTRIES ARE GROUPS: one entry is one GROUP, so 200 emitters are one row,
-  // and Show undoes that one entry — the player's own hides get unhidden, and
-  // the preset's pre-hidings get their override recorded. The label no longer
-  // counts.
+test("the hidden menu can show this tab's categories back, one or all at once", () => {
+  // ⚠ ENTRIES ARE CATEGORIES: one entry is one CATEGORY, so 200 emitters are
+  // one row, and Show undoes that one entry — the player's own hides get
+  // unhidden, and the preset's pre-hidings get their override recorded. The
+  // label no longer counts.
   resetShared();
   const miningID = tabIDByName("Mining");
   overviewTabs.select(miningID);
-  tabHidden.hide(miningID, DECOR as never, "Emitter");
+  tabHidden.hide(miningID, DECOR as never, "scenery");
   // ⚠ The per-entry "Show" button only EXISTS while the menu is open, so its
   // presence is a source-level check — an SSR render always starts collapsed.
   assert.match(SOURCE, /class="spc-hidden-show"/, "no way to bring one back");
   assert.match(SOURCE, /showEntry\(row\)/, "Show is not wired to the row");
-  assert.match(SOURCE, /tabHidden\.unhideGroup\(activeTabID, row\.groupID\)/, "Show is not per-tab");
+  assert.match(
+    SOURCE,
+    /tabHidden\.unhideCategory\(activeTabID, row\.category\)/,
+    "Show is not per-tab",
+  );
   assert.match(SOURCE, /Show everything/, "no way to unhide the tab's hiding at once");
   assert.match(SOURCE, /showEverythingOnTab\(\);/, "Show everything has no action");
   assert.match(SOURCE, /tabHidden\.clearHidden\(activeTabID\)/, "Show everything wipes the wrong tab");
 });
 
-test("⚠ the hidden menu names the GROUP, and the press lands in the ACTIVE TAB's list", () => {
-  // ⚠ THE ENTRY'S LABEL IS THE GROUP'S OWN NAME. The menu says "Planet" rather
-  // than whichever rock was under the cursor when Hide was pressed, and the
-  // press goes to the tab the player is on — the same lookup the list's Group
-  // column uses, so the menu and the grid agree on the word.
-  assert.match(SOURCE, /const label = group === "—" \? typeName\(row\) : group;/);
-  assert.match(SOURCE, /tabHidden\.hide\(activeTabID, row, label\)/, "the hide is not per-tab");
+test("⚠ the hidden menu names the CATEGORY, and the press lands in the ACTIVE TAB's list", () => {
+  // ⚠ THE ENTRY'S LABEL IS THE CATEGORY'S OWN NAME, read from the classifier
+  // that built the entry — so the menu and the grid cannot disagree about the
+  // word — and the press goes to the tab the player is on.
+  assert.match(SOURCE, /tabHidden\.hide\(activeTabID, row\)/, "the hide is not per-tab");
+  assert.match(SOURCE, /hideCategoryByID/, "the menu does not ask the classifier for its word");
+  // ⚠ AND NO RESOLVED GROUP NAME IS USED FOR THE HIDE ANY MORE. The old code
+  // resolved a group label here; the category axis replaced it, and a leftover
+  // would mean two sources of truth for the same word.
+  assert.doesNotMatch(SOURCE, /const label = group === "—" \? typeName\(row\) : group;/);
   assert.match(SOURCE, /class="spc-hidden-menu"/);
 });
 
@@ -497,26 +504,30 @@ test("the preset's pre-hidings sit in the menu, one flat list with the player's 
   // on THIS tab only.
   assert.doesNotMatch(SOURCE, /Not shown on this tab/, "a picker section came back");
   assert.doesNotMatch(SOURCE, /Hidden on this tab/, "a subcategory came back");
-  assert.match(SOURCE, /const presetGroupRows = \$derived/, "the group pre-hidings have no list to read");
+  assert.match(SOURCE, /const presetGroupRows = \$derived/, "the preset pre-hidings have no list to read");
   assert.match(SOURCE, /const presetStanceRows = \$derived/, "the stance pre-hidings have no list to read");
   assert.match(SOURCE, /const hiddenMenuRows = \$derived/, "the menu's flat list has no list to read");
   assert.match(
     SOURCE,
-    /presetGroupHides\(activeTab, entity, activeTabState, stanceContext\)/,
+    /presetHidesRow\(activeTab, entity, activeTabState, stanceContext\)/,
     "the preset rows are not derived from the shared rule",
   );
-  assert.match(SOURCE, /tabHidden\.addGroup\(activeTabID, row\.groupID, row\.label\)/, "Show is not per-tab");
+  assert.match(
+    SOURCE,
+    /tabHidden\.addCategory\(activeTabID, row\.category\)/,
+    "Show on a preset row is not per-tab",
+  );
 });
 
-test("the menu's flat list never repeats a group the tab already decided", () => {
-  // ⚠ THE "IT STAYS" BUG, FORBIDDEN. A group the tab hid itself is owned by
-  // the tab's hidden list, and one the player already showed is owned by its
-  // `shown` list — `presetHides` says no to both, so each group appears once,
-  // under the list that owns it, and no row ever sits in the menu doing
+test("the menu's flat list never repeats a hiding the tab already decided", () => {
+  // ⚠ THE "IT STAYS" BUG, FORBIDDEN. A row the tab hid itself is owned by the
+  // tab's hidden list, and one the player already showed is owned by its
+  // `shown` list — `presetHides` says no to both, so each category appears
+  // once, under the list that owns it, and no row ever sits in the menu doing
   // nothing.
   assert.match(
     SOURCE,
-    /if \(!presetGroupHides\(activeTab, entity, activeTabState, stanceContext\)\) continue;/,
+    /if \(!presetHidesRow\(activeTab, entity, activeTabState, stanceContext\)\) continue;/,
     "the preset rows ignore the shared undecided-only rule",
   );
 });
