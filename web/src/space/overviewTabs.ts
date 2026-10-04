@@ -78,10 +78,14 @@ export function normalizeTabName(raw: string, recipeId: OverviewRecipeID): strin
 
 let minted = 0;
 
-/** An id that cannot collide with a stored one: monotonic within this session. */
-function mintTabID(): string {
-  minted += 1;
-  return `t${minted}-${Math.floor(Date.now() % 1_000_000)}`;
+/** Monotonic in this session, and distinct from any tabs loaded from storage. */
+function mintTabID(existing: readonly OverviewTab[] = []): string {
+  let id: string;
+  do {
+    minted += 1;
+    id = `t${minted}-${Math.floor(Date.now() % 1_000_000)}`;
+  } while (existing.some(tab => tab.id === id));
+  return id;
 }
 
 /** The starting tab bar: All, fixed, plus the five that ship as editable. */
@@ -232,7 +236,7 @@ export function createTabBar(): TabBar {
     create: (recipeId, name) => {
       const recipe = recipeByID(recipeId);
       const tab: OverviewTab = {
-        id: mintTabID(),
+        id: mintTabID(tabs.get()),
         name: normalizeTabName(name ?? "", recipe.id),
         recipeId: recipe.id,
         fixed: false,

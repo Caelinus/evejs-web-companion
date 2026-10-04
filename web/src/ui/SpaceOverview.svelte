@@ -1470,14 +1470,16 @@
             bind:value={draftName}
           />
         </label>
-        <label class="spc-editor-field">
-          <span class="spc-editor-label">Show</span>
-          <select aria-label="What this tab shows" bind:value={draftRecipe}>
-            {#each OVERVIEW_RECIPES as recipe (recipe.id)}
-              <option value={recipe.id}>{recipe.label} — {recipe.hint}</option>
-            {/each}
-          </select>
-        </label>
+        {#if tabEditor.mode === "create"}
+          <label class="spc-editor-field">
+            <span class="spc-editor-label">Show</span>
+            <select aria-label="What this tab shows" bind:value={draftRecipe}>
+              {#each OVERVIEW_RECIPES as recipe (recipe.id)}
+                <option value={recipe.id}>{recipe.label} — {recipe.hint}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         {#if draftError}<p class="spc-note bad">{draftError}</p>{/if}
         <div class="spc-editor-actions">
           <button type="button" class="spc-tool" onclick={submitEditor}>
