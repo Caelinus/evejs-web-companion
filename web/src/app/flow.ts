@@ -11889,15 +11889,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
     supportScript = options.miningOperationID && doc.program.some(step => step.kind === "macro" && step.macro === "mining-support") ? freshSupportScript() : null;
     classifySiteMiners = scriptMinesScannerSites(doc);
-    store.apply({ type: "custom-bot/started", name: doc.name });
     // Seed the fitted-module cache. The runner refreshes it after a refit or
     // active-hull change; this first read only keeps tick one honest.
     const initialCapabilities = await resolveScriptModuleCapabilities();
     if (options.miningOperationID || classifySiteMiners) {
-      const refusal = siteMiningFitRefusal(doc, initialCapabilities.oreMining, initialCapabilities.iceMining);
+      const refusal = siteMiningFitRefusal(doc, initialCapabilities.oreMining, initialCapabilities.iceMining,
+        { requireOre: !!options.miningOperationID });
       // Without an operation only the ice check refuses Start: an ore site
       // script ran on `mining` before ore lasers were told apart, and still does.
-      if (refusal && (options.miningOperationID || refusal.startsWith("ICE_"))) {
+      if (refusal) {
         throw Object.assign(new Error(refusal), { code: refusal.split(":")[0] });
       }
     }
@@ -11925,6 +11925,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // Forgotten per RUN: an application belongs to the run that made it, and a
     // fresh run must apply for itself rather than believe an old answer.
     fleetApplication = null;
+    store.apply({ type: "custom-bot/started", name: doc.name });
     scriptRunner = createScriptRunner(
       { ...makeScriptRunnerDeps(initialCapabilities, startingStationID, doc.home, watchedKinds), startup: options.hostedStartup },
     );
