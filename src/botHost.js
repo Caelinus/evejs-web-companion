@@ -1024,10 +1024,6 @@ function createBotHost(options) {
       store: null,
       unsubscribe: null,
       claimSecret: createClaimSecret(),
-      // A public Start carries only its in-process reservation capability.
-      // Its first select must use the runtime's existing atomic free-only seam.
-      // Neither this flag nor the capability is persisted as resume authority.
-      freePilotOnly: probeReservation !== null,
       // The web session the bot's own token names -- the key its held game
       // session sits under in the server's bridgeSessions. Only ever handed
       // out by readableSessionOf below, and never serialized.
@@ -1667,7 +1663,20 @@ function createBotHost(options) {
   function operationForClaim(characterID, secret) {
     if (!authorizesClaim(characterID, secret)) return null;
     const record = records.get(claims.get(Number(characterID)));
-    return record?.operationID ? { operationID: record.operationID, operationRole: record.operationRole } : null;
+    return record?.operationID ? { operationID: record.operationID, operationRole: record.operationRole,
+      operationRunID: record.operationRunID } : null;
+  }
+
+  function preparationForClaim(characterID, secret) {
+    if (!authorizesClaim(characterID, secret)) return null;
+    const record = records.get(claims.get(Number(characterID)));
+    if (!record?.operationPreparation || !(record.resumedAt || record.recovering)) return null;
+    preparationOwner(record, secret);
+    const checkpoint = record.preparationCheckpoint?.snapshot();
+    if (!checkpoint || checkpoint.mainEntered !== false || checkpoint.operationID !== record.operationID ||
+        checkpoint.operationRunID !== record.operationRunID ||
+        JSON.stringify(checkpoint.intent) !== JSON.stringify(record.operationPreparation)) return null;
+    return checkpoint;
   }
 
   function jettisonOwnerForClaim(characterID, secret) {
@@ -2086,12 +2095,11 @@ function createBotHost(options) {
     endOperationDeadline,
     listAll,
     operationForClaim,
+    preparationForClaim,
     jettisonOwnerForClaim,
     list,
     claimedBy,
     authorizesClaim,
-    requiresFreeSelection: (characterID, secret) => authorizesClaim(characterID, secret) &&
-      records.get(claims.get(Number(characterID)))?.freePilotOnly === true,
     readableSessionOf,
     activeCharacterIDs,
     activeBots,

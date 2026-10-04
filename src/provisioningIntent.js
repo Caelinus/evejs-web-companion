@@ -21,7 +21,7 @@ function intent(detail) {
       officeID: s.officeID, contentsLocationID: s.contentsLocationID, dockedLocationID: s.dockedLocationID, flag: s.flag,
       stock: rows(s.rows) }, suppliesPolicy: "NEW_HULL_ONLY" };
 }
-function assertSelected(pin, read, data = null) {
+function assertSelected(pin, read, data = null, { requireTake = true } = {}) {
   const c = read.context, s = read.source;
   if (!read.observation.complete || !read.target.complete) fail("REVIEW_STALE");
   const observed = data ? selectedObservation(read.observation.rows, data) : rows(read.observation.rows);
@@ -36,7 +36,21 @@ function assertSelected(pin, read, data = null) {
       s.pin.ownerID !== (source.kind === "corp" ? source.corporationID : pin.characterID) || s.pin.locationID !== source.contentsLocationID ||
       s.pin.flag !== source.flag || s.pin.dockedLocationID !== source.dockedLocationID || hash(rows(s.rows)) !== hash(source.stock)) fail("SOURCE_CHANGED");
   if (s.access.query !== true) fail("SOURCE_QUERY_DENIED");
-  if (s.access.take !== true) fail(s.access.take === false ? "SOURCE_TAKE_DENIED" : "SOURCE_TAKE_UNKNOWN");
+  if (requireTake && s.access.take !== true) fail(s.access.take === false ? "SOURCE_TAKE_DENIED" : "SOURCE_TAKE_UNKNOWN");
 }
 
-module.exports = { intent, assertSelected, rows };
+// Capture physical facts only under the final selected owner. This is never an
+// offline observation or a promise that equipment was ready during planning.
+function selectedIntent(read, { requireTake = true } = {}) {
+  const c = read.context, d = read.contract, s = read.source.pin;
+  if (!read.observation.complete || !read.target?.complete) fail("REVIEW_STALE");
+  const pin = { ...Object.fromEntries(["accountID","characterID","corporationID","locationID","shipID","shipTypeID"].map(k=>[k,c[k]])),
+    definition: d.definition, definitionFingerprint: d.definitionFingerprint, equipmentFingerprint: d.equipmentFingerprint,
+    supplyPolicyFingerprint: d.supplyPolicyFingerprint, observed: rows(read.observation.rows),
+    source: { ...s.descriptor, contentsLocationID: s.locationID, dockedLocationID: s.dockedLocationID, flag: s.flag,
+      officeID: s.descriptor.kind === "corp" ? Number(String(s.office).split(":")[1]) : null, stock: rows(read.source.rows) } };
+  assertSelected(pin, read, null, { requireTake });
+  return pin;
+}
+
+module.exports = { intent, assertSelected, selectedIntent, rows };

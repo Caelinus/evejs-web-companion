@@ -76,8 +76,8 @@
       {#each divisions as division}<option value={String(division.accountKey)}>{division.name}</option>{/each}
     </select></label>
   </div>
-  <p>Full access grants ordinary corporation rights and delegation. It does not transfer CEO ownership or promote the trainee to Director. The authority must be a dedicated non-CEO Director; busy pilots are never taken over.</p>
-  <p>Funding is opt-in and covers only the reviewed shortfall. Wallet permissions and balances are checked again before any transfer.</p>
+  <p>Full access grants ordinary corporation rights and delegation. It does not transfer CEO ownership or promote the trainee to Director. Use a dedicated non-CEO Director. Observed busy pilots are refused; temporary onboarding login follows the server's retail duplicate-login policy.</p>
+  <p>Direct skill purchase and its automatic funding are unavailable on stock EveJS web gateway. Saved wallet configuration is retained.</p>
   {#if differentWalletCorp}<p class="notice">A different wallet corporation is saved. Review it under Advanced details; funding still requires matching trainee membership.</p>{/if}
   <label>Check structure access as pilot
     <select bind:value={homeAccessPilot} disabled={busy || searching}>

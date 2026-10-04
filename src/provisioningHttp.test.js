@@ -32,13 +32,8 @@ test("authenticated HTTP Review/Replenish uses real parsers, bindings and pilot 
   const row = (itemID, typeID, qty, locationID, flagID, singleton = 0) => ({ type: "packedrow",
     fields: { itemID, typeID, quantity: qty, ownerID: 10, locationID, flagID, singleton } });
   const gateway = {
-    async selectFactoryCharacter(accountID, characterID) {
-      assert.equal(accountID, 7); assert.equal(characterID, 10); state.guardedSelections++;
-      if (!state.free) throw Object.assign(new Error("busy pilot; no takeover"), { code: "CHARACTER_IN_USE", statusCode: 409 });
-      return { bridgeSessionID: "restored-generation", session: { characterID: 10, characterName: "Pilot 10", corporationID: 20,
-        stationID: 60, shipID: 50 }, notifications: [] };
-    },
-    selectCharacter() { throw new Error("Custody recovery must never fall back to takeover selection."); },
+    selectFactoryCharacter() { state.guardedSelections++; throw new Error("PRIVATE FACTORY AUTHORITY MUST NOT BE USED"); },
+    selectCharacter() { throw new Error("Unresolved custody must not use retail takeover selection."); },
     async readFlightStatus() { return { flight: { shipID: 50, shipTypeID: 1, docked: true, stationID: 60, structureID: null }, notifications: [] }; },
     async callMethod(service, method, args, kwargs, fields, bridgeSessionID) {
       assert.equal(service, "corpFittingMgr"); assert.equal(method, "GetFittings"); assert.equal(fields.characterID, 11);
@@ -107,24 +102,23 @@ test("authenticated HTTP Review/Replenish uses real parsers, bindings and pilot 
   assert.equal((await request("/api/bridge/provisioning/replenish", applyBody)).status, 200); assert.equal(state.writes, 1);
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   // Simulate process death after commit, before observation/persistence of its
-  // result. A fresh app has no held pilot and must reopen only a free one.
+  // result. Stock has no atomic free-only custody acquisition. A fresh app
+  // must preserve the journal and refuse acquisition, including an offline pilot.
   const disk = JSON.parse(fs.readFileSync(journalFile));
   const custody = disk.records[review.body.reviewID]; custody.state = "PENDING"; delete custody.result;
   custody.moves[0].state = "PENDING"; delete custody.moves[0].after;
   fs.writeFileSync(journalFile, JSON.stringify(disk));
   const restored = createApp({ ...appOptions, bridgeSessionStore: new Map() });
   server = http.createServer(restored); await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
-  assert.equal((await request("/api/bridge/select", { characterID: 10 })).body.error, "CHARACTER_IN_USE");
+  assert.equal((await request("/api/bridge/select", { characterID: 10 })).body.error, "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE");
   state.free = true;
   const selected = await request("/api/bridge/select", { characterID: 10 });
-  assert.equal(selected.status, 200);
-  assert.equal((await request("/api/bridge/drone-recovery/ready", { checkID: selected.body.droneRecoveryCheckID })).status, 200);
-  const recoveryOptions = await request("/api/bridge/provisioning/options?providerCharacterID=11");
-  assert.equal(recoveryOptions.body.pending[0].operationID, review.body.reviewID);
-  assert.equal((await request("/api/bridge/inventory/stack", { target: "hangar" })).body.error, "REPLENISHMENT_CUSTODY");
-  const reconciled = await request("/api/bridge/provisioning/reconcile", { operationID: review.body.reviewID });
-  assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body)); assert.equal(reconciled.body.state, "RECONCILED");
-  assert.equal(state.writes, 1); assert.equal(state.guardedSelections, 2);
+  assert.equal(selected.status, 409, JSON.stringify(selected.body));
+  assert.equal(selected.body.error, "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE");
+  assert.equal(restored.locals.bridgeSessions.size, 0);
+  assert.equal(JSON.parse(fs.readFileSync(journalFile)).records[review.body.reviewID].state, "PENDING");
+  assert.equal(state.writes, 1); assert.equal(state.guardedSelections, 0);
+  assert.equal(state.releases, 0, "foreign ownership is never released for recovery");
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await new Promise((resolve, reject) => {
     const probe = net.connect({ host: "127.0.0.1", port });

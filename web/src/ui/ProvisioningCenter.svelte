@@ -38,7 +38,7 @@
 
 <main class="center">
   <header><h1>Ship Provisioning Center</h1><p>Account-wide Review and Provision</p><a href="/">Return to pilot workspace</a></header>
-  <p>Review never selects a pilot. Apply temporarily acquires only a free pilot, revalidates the accepted plan, provisions through the shared engine, then releases control.</p>
+  <p>Choose an offline pilot and fitting, then confirm Apply. The server briefly selects the pilot, reviews its actual equipment and source, provisions a supported NPC-station plan, verifies the result and releases control. Opening this Center selects nobody.</p>
   {#if !token}
     <form onsubmit={e=>{e.preventDefault();void run(login);}}><label>Account<input bind:value={username} autocomplete="username" /></label><label>Password<input type="password" bind:value={password} autocomplete="current-password" /></label><button disabled={busy || !username}>Sign in for read-only Review</button></form>
   {:else}
@@ -63,7 +63,7 @@
         <p>Hull: {detail.pilot.hullName || "UNKNOWN"} · ship {detail.pilot.shipID ?? "UNKNOWN"} · location {detail.pilot.locationID ?? "UNKNOWN"} · {detail.pilot.dockState}</p>
         <p>Control: {detail.pilot.control.state} · {detail.pilot.control.owner}. Observation: <strong>{detail.pilot.quality}</strong> · {detail.pilot.reasons.join(" · ")}</p>
         <p>Fit: <strong>{matchLabel(detail.matches)}</strong></p>
-        <label>Saved fitting<select bind:value={fittingID} disabled={busy} onchange={()=>void run(review)}><option value={0}>Unique exact match, otherwise no selection</option>{#each detail.definitions.contracts as c}<option value={c.definition.fittingID}>{c.name} · {c.definition.fittingID}</option>{/each}</select></label>
+        <label>Saved fitting<select bind:value={fittingID} disabled={busy} onchange={()=>void run(review)}><option value={0}>Choose a fitting explicitly</option>{#each detail.definitions.contracts as c}<option value={c.definition.fittingID}>{c.name} · {c.definition.fittingID}</option>{/each}</select></label>
         <p>Definition provider: {detail.definitions.providerCharacterID} · corporation {detail.definitions.corporationID ?? "UNKNOWN"} · {detail.definitions.status}</p>
         {#if detail.selected}<p>Selected definition: {detail.selected.name} · ID {detail.selected.definition.fittingID} · saved {detail.selected.definition.savedDate}</p><small>Definition fingerprint: {detail.selected.definitionFingerprint}<br />Full fitting fingerprint: {detail.selected.definition.fullFingerprint}<br />Equipment: {detail.selected.equipmentFingerprint}<br />Supply policy: {detail.selected.supplyPolicyFingerprint}</small>{/if}
         <p>Equipment: <strong>{detail.status.equipment}</strong> · Supplies: <strong>{detail.status.supplies}</strong></p>
@@ -79,14 +79,13 @@
         <p>Target pilot: {detail.pilot.name} · {detail.pilot.characterID}. Current hull: {detail.pilot.hullName || "UNKNOWN"}. Fitting: {detail.selected?.name || "Select a definition"}.</p>
         <p>Provider corporation: {detail.definitions.corporationID ?? "UNKNOWN"}. Physical source: {detail.candidateSource.kind} · corporation {detail.candidateSource.corporationID ?? "personal"} · division {detail.candidateSource.division ?? "—"}.</p>
         {#if detail.applyReview.plan}
-          <p>Target hull: {detail.applyReview.plan.targetHullName}. Hull acquisition: <strong>{detail.applyReview.plan.hullQuantity}</strong> · {detail.applyReview.plan.mode}.</p>
+          <p>Target fitting: {detail.applyReview.plan.targetHullName}. Hull acquisition: <strong>{detail.applyReview.plan.hullQuantity ?? "PENDING SELECTED REVIEW"}</strong> · {detail.applyReview.plan.mode}.</p>
           <p>{detail.applyReview.plan.steps.join(" → ") || "ALREADY SATISFIED / NO HULL ACQUISITION"}</p>
-          <p>Unsupported: {detail.applyReview.plan.unsupported.join(" · ") || "none"}. Shortages: {detail.applyReview.plan.shortages.join(" · ") || "none"}. Destructive actions: {detail.applyReview.plan.destructiveActions.join(" · ") || "none"}.</p>
+          <p>Support, shortages and permission checks: PENDING SELECTED REVIEW. Destructive fitting changes are unavailable.</p>
         {/if}
         <p>Supplies policy: NEW HULL ONLY. New hull provisioning loads declared deficits; an exact existing ship is a no-op, even when supplies remain LOW. Use the held-pilot Replenish action for a separate top-up.</p>
-        <p>Apply authority: free-only acquisition required; source/Take revalidated after acquisition. Offline FREE and Query visibility do not grant mutation authority.</p>
-        <p>{detail.applyReview.canApply ? "READY FOR APPLY · complete supported plan; selected-session revalidation still required" : detail.applyReview.reasons.join(" · ")}</p>
-        <button disabled={busy || !detail.applyReview.canApply} onclick={()=>void run(apply)}>Apply accepted plan</button>
+        <p>Equipment, stock, location and Take permission remain UNKNOWN until Apply acquires maintenance control. {detail.applyReview.reasons.join(" · ")}</p>
+        <button disabled={busy || !detail.applyReview.canApply} onclick={()=>void run(apply)}>Confirm Apply with temporary control</button>
         {#each detail.pendingApply as operation}<p>Recovery: {operation.state} · {operation.reason || "pending ownership/custody proof"} <button disabled={busy} onclick={()=>void run(()=>recover(operation.operationID))}>Reconcile control without reacquiring</button></p>{/each}
       </section>
     {/if}

@@ -71,6 +71,8 @@ export function isNoRoomAboard(cause: unknown): boolean {
 export interface RefusalRecord {
   /** stepPath + action kind + target, so one failing can does not mask another. */
   readonly key: string;
+  /** Actual addressed target when known; metadata does not split the streak key. */
+  readonly targetID?: number;
   /** Consecutive failures. Reset by the first success on the same key. */
   readonly count: number;
   readonly firstAt: number;
@@ -121,6 +123,16 @@ export function settleTicksForRefusals(count: number): number {
 }
 
 /**
+ * The step id a call with NO step is booked under.
+ *
+ * Exported because a decider can BORROW a block for such a call — the trip home
+ * the runner latches itself is the case — and the block reads the ledger by the
+ * id of the step it is handed. Handing it this one is how it finds its own
+ * records.
+ */
+export const NO_STEP_ID = "-";
+
+/**
  * The identity of a failure. A target id is part of it on purpose: one jetcan
  * that will not give up its contents must not spend the budget that belongs to
  * the next one, and must not be masked by it either.
@@ -130,7 +142,7 @@ export function refusalKey(
   actionKind: string,
   targetID: number | null,
 ): string {
-  return `${stepPath ?? "-"}:${actionKind}:${targetID ?? "-"}`;
+  return `${stepPath ?? NO_STEP_ID}:${actionKind}:${targetID ?? "-"}`;
 }
 
 /** Classify a raw wire refusal. `stillOnGrid` is only consulted for a bind miss. */
@@ -158,7 +170,7 @@ export function classifyRefusal(raw: string, stillOnGrid: boolean | null): Refus
 
 export interface RefusalLedger {
   /** Record one failure and return the running record for its key. */
-  note(key: string, raw: string, at: number, stillOnGrid: boolean | null): RefusalRecord;
+  note(key: string, raw: string, at: number, stillOnGrid: boolean | null, targetID?: number): RefusalRecord;
   /** A success on this key: the streak is over. */
   clear(key: string): void;
   /**
@@ -190,10 +202,11 @@ export interface RefusalLedger {
 export function createRefusalLedger(): RefusalLedger {
   const byKey = new Map<string, RefusalRecord>();
   return {
-    note(key, raw, at, stillOnGrid) {
+    note(key, raw, at, stillOnGrid, targetID) {
       const previous = byKey.get(key) ?? null;
       const record: RefusalRecord = {
         key,
+        ...(targetID === undefined ? {} : { targetID }),
         count: (previous?.count ?? 0) + 1,
         firstAt: previous?.firstAt ?? at,
         lastAt: at,
@@ -236,6 +249,14 @@ export function refusalFor(
   }
   const key = refusalKey(stepID, actionKind, targetID);
   return records.find((record) => record.key === key) ?? null;
+}
+
+/** Older observations omit target metadata and retain their existing handling. */
+export function refusalTargets(
+  record: { readonly targetID?: number } | null | undefined,
+  targetID: number,
+): boolean {
+  return record?.targetID === undefined || record.targetID === targetID;
 }
 
 /**
@@ -300,6 +321,6 @@ export function shipHasNoRoom(
   if (!records) {
     return false;
   }
-  const prefix = `${stepID ?? "-"}:${actionKind}:`;
+  const prefix = `${stepID ?? NO_STEP_ID}:${actionKind}:`;
   return records.some((record) => record.kind === "no-room" && record.key.startsWith(prefix));
 }

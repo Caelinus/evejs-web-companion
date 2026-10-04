@@ -3770,6 +3770,7 @@ test("⚠ warp-to-anomaly: it arrives even though it is never called during the 
     return r;
   };
 
+  assert.equal(fly(false)?.action.kind, "wait", "the first tick only commits which site it picked");
   const issued = fly(false);
   assert.equal(issued?.action.kind, "warpScan", "it issues the warp");
 
@@ -3792,6 +3793,7 @@ test("⚠ warp-to-anomaly: a warp that truly never starts is still reported, not
     mem = r.nextMem;
     return r;
   };
+  assert.equal(still().action.kind, "wait", "commits the pick");
   assert.equal(still().action.kind, "warpScan");
   let last = still();
   for (let i = 0; i < 20 && last.outcome.kind === "acting"; i += 1) {
@@ -3808,6 +3810,7 @@ test("an unreadable warp count is never an arrival — the block waits its budge
     mem = r.nextMem;
     return r;
   };
+  assert.equal(blind().action.kind, "wait", "commits the pick");
   assert.equal(blind().action.kind, "warpScan");
   const next = blind();
   assert.equal(next.outcome.kind, "acting", "a null count decides nothing");
@@ -3834,11 +3837,34 @@ const warpRefused = (words: string) => [{
 
 const CANNOT_WARP = "You cannot warp there right now.";
 
+/**
+ * Drive a warp block to the tick that issues the warp, the way the runner does.
+ *
+ * ⚠ UNDER THE REAL RUNNER A REFUSED ISSUE COMMITS NOTHING (2fd4a77: a world-call
+ * action's memory and board patch are kept only if it succeeds). So a refusal
+ * test must feed the memory of the phase-1 tick, which is a WAIT and is
+ * committed, and never `issued.nextMem`, which the runner throws away on a
+ * refusal. Feeding `issued.nextMem` is the test that passed while the block
+ * was unreachable live.
+ */
+function pickThenIssue(
+  macro: (typeof SCRIPT_MACROS)["warp-to-anomaly"],
+  step: MacroStep,
+  observation: ScriptObservation,
+  board: ScriptBoard = {},
+): { readonly committed: MacroTick; readonly issued: MacroTick } {
+  const committed = macro!(step, observation, {}, board);
+  assert.equal(committed.action.kind, "wait", "phase 1 commits the pick and presses nothing");
+  assert.equal(committed.boardPatch, undefined, "and writes no board patch");
+  return { committed, issued: macro!(step, observation, committed.nextMem, board) };
+}
+
 test("warp-to-anomaly: refused with rats already on the grid is an ARRIVAL, not a stop", () => {
   const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  const { committed, issued } = pickThenIssue(anomMacro, ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }));
   assert.equal(issued.action.kind, "warpScan", "it still issues the warp");
 
+  // The refused issue committed nothing, so the next tick sees phase 1's memory.
   const out = anomMacro(
     ANOM_STEP,
     obs({
@@ -3847,17 +3873,19 @@ test("warp-to-anomaly: refused with rats already on the grid is an ARRIVAL, not 
       refusals: warpRefused(CANNOT_WARP),
       hostileOnGrid: true,        // ...because the den is already underfoot
     }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
 
   assert.deepEqual(out.outcome, { kind: "done" }, "standing in the den is arriving at it");
   assert.equal(out.phase, "Arrived");
+  // The refused issue's patch was lost with it, so the done tick has to carry it.
+  assert.equal(out.boardPatch?.["anomsVisited"], "QEE-288", "the site is on the board for the block after this one");
 });
 
 test("warp-to-anomaly: refused with nothing on the grid stops, carrying the SERVER's words", () => {
   const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  const { committed } = pickThenIssue(anomMacro, ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }));
 
   const out = anomMacro(
     ANOM_STEP,
@@ -3867,7 +3895,7 @@ test("warp-to-anomaly: refused with nothing on the grid stops, carrying the SERV
       refusals: warpRefused(CANNOT_WARP),
       hostileOnGrid: false,
     }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
 
@@ -3880,14 +3908,46 @@ test("warp-to-anomaly: refused with nothing on the grid stops, carrying the SERV
 test("warp-to-anomaly: a refusal is read on the NEXT tick, not after the whole wait budget", () => {
   // The point of reading the ledger at all: the answer was already on the wire.
   const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const issued = anomMacro(ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }), {}, {});
+  const { committed } = pickThenIssue(anomMacro, ANOM_STEP, obs({ anomalies: [den("QEE-288")], completedWarps: 3 }));
   const out = anomMacro(
     ANOM_STEP,
     obs({ anomalies: [den("QEE-288")], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), hostileOnGrid: null }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
   assert.notEqual(out.outcome.kind, "acting", "one tick, not WARP_START_WAIT_TICKS of them");
+});
+
+test("warp-to-anomaly: a ledger record left from an earlier visit is NOT a refusal of a warp never issued", () => {
+  // The record lives until a SUCCESS clears it, so one can be sitting there when
+  // the step is entered. Phase 1 commits the count it found as the baseline.
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const stale = obs({ anomalies: [den("QEE-288")], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), hostileOnGrid: false });
+  const committed = anomMacro(ANOM_STEP, stale, {}, {});
+  assert.equal(committed.action.kind, "wait");
+  assert.equal(committed.nextMem["target"], "QEE-288");
+  assert.equal(committed.nextMem["refusalsSeen"], 1, "the baseline is the stale count");
+  const issued = anomMacro(ANOM_STEP, stale, committed.nextMem, {});
+  assert.deepEqual(issued.action, { kind: "warpScan", target: "QEE-288" }, "it presses; it does not stop on the old record");
+  // ...and a refusal NEWER than the baseline is read.
+  const fresh = obs({
+    anomalies: [den("QEE-288")], completedWarps: 3, hostileOnGrid: false,
+    refusals: [{ ...warpRefused(CANNOT_WARP)[0]!, count: 2 }],
+  });
+  assert.equal(anomMacro(ANOM_STEP, fresh, committed.nextMem, {}).outcome.kind, "blocked");
+});
+
+test("warp-to-anomaly: a committed target that has left the scanner is dropped and re-picked", () => {
+  const anomMacro = SCRIPT_MACROS["warp-to-anomaly"]!;
+  const both = obs({ anomalies: [den("QEE-288"), den("ABC-123")], completedWarps: 3 });
+  const { committed } = pickThenIssue(anomMacro, ANOM_STEP, both);
+  assert.equal(committed.nextMem["target"], "QEE-288");
+  const gone = obs({ anomalies: [den("ABC-123")], completedWarps: 3 });
+  const dropped = anomMacro(ANOM_STEP, gone, committed.nextMem, {});
+  assert.equal(dropped.action.kind, "wait", "it does not warp at a site that is no longer listed");
+  assert.equal(dropped.nextMem["target"], undefined);
+  const repick = anomMacro(ANOM_STEP, gone, dropped.nextMem, {});
+  assert.equal(repick.nextMem["target"], "ABC-123");
 });
 
 test("warp-to-ore-anomaly: rock (or rats) on the grid is still not evidence of an ore site", () => {
@@ -3897,7 +3957,7 @@ test("warp-to-ore-anomaly: rock (or rats) on the grid is still not evidence of a
   // from the two positions (see the two tests below); with no position on the
   // scanner row it is back to "cannot tell", whatever is floating outside.
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [rocks("ABC-123")], completedWarps: 3 }), {}, {});
+  const { committed } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [rocks("ABC-123")], completedWarps: 3 }));
 
   const out = oreMacro(
     ORE_ANOM_STEP,
@@ -3907,7 +3967,7 @@ test("warp-to-ore-anomaly: rock (or rats) on the grid is still not evidence of a
       refusals: warpRefused(CANNOT_WARP),
       hostileOnGrid: true,   // even this must not be read as "in the ore site"
     }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
 
@@ -3959,10 +4019,10 @@ test("the belt short-warp rule does not turn a nearby scanner ore site into an a
   assert.equal(travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([belt]) }), NM, {}).action.kind, "approach");
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   const nearbySite = rocksAt("ABC-123", 100_000);
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [nearbySite], completedWarps: 3 }), {}, {});
+  const { committed, issued } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [nearbySite], completedWarps: 3 }));
   assert.equal(issued.action.kind, "warpScan", "site point distance alone never implies arrival");
   const refused = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [nearbySite], completedWarps: 3,
-    refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]), hostileOnGrid: false }), issued.nextMem, {});
+    refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]), hostileOnGrid: false }), committed.nextMem, {});
   assert.equal(refused.outcome.kind, "done", "only the targeted scanner refusal proves already-at-site");
 });
 test("generic travel treats an Upwell as arrived only at its authoritative structureID", () => {
@@ -3981,9 +4041,10 @@ test("warp-to-ore-anomaly: a refusal with the ship INSIDE the site it aimed at i
   // 100 km out — under the server's own 150 km warp floor, which is the exact
   // condition it refused on (MIN_WARP_DISTANCE_METERS in space/runtime.js).
   const site = rocksAt("ABC-123", 100_000);
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }), {}, {});
+  const { committed, issued } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }));
   assert.equal(issued.action.kind, "warpScan", "it still issues the warp");
 
+  // The refused issue committed nothing: the next tick sees phase 1's memory.
   const out = oreMacro(
     ORE_ANOM_STEP,
     obs({
@@ -3993,19 +4054,22 @@ test("warp-to-ore-anomaly: a refusal with the ship INSIDE the site it aimed at i
       snapshot: snapshot([]),          // ship at the origin
       hostileOnGrid: false,            // and NOT because of anything on the grid
     }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
 
   assert.deepEqual(out.outcome, { kind: "done" }, "standing in the ore site is arriving at it");
   assert.equal(out.phase, "Arrived");
+  // `currentOreSiteLabel` is what mine-at-a-belt reads; the refused issue's patch
+  // was lost, so the done tick carries it.
+  assert.equal(out.boardPatch?.["oreAnomsVisited"], "ABC-123", "the site is named on the board for the miner");
 });
 
 test("warp-to-ore-anomaly: a refusal with the site a real warp away still stops, in the server's words", () => {
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   // 4 AU out: whatever the server refused for, it was not that the ship is there.
   const site = rocksAt("ABC-123", 4 * 149_597_870_700);
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }), {}, {});
+  const { committed } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [site], completedWarps: 3 }));
 
   const out = oreMacro(
     ORE_ANOM_STEP,
@@ -4015,7 +4079,7 @@ test("warp-to-ore-anomaly: a refusal with the site a real warp away still stops,
       refusals: warpRefused(CANNOT_WARP),
       snapshot: snapshot([]),
     }),
-    issued.nextMem,
+    committed.nextMem,
     {},
   );
 
@@ -4033,9 +4097,10 @@ test("warp-to-ore-anomaly: the position read is of the TARGETED site, not of whi
   const far = rocksAt("XYZ-789", 4 * 149_597_870_700);
   // Already visited the one underfoot, so the tour aims at the far one.
   const board = { oreAnomsVisited: "ABC-123" };
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [here, far], completedWarps: 3 }), {}, board);
+  const { committed, issued } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [here, far], completedWarps: 3 }), board);
   assert.deepEqual(issued.action, { kind: "warpScan", target: "XYZ-789" }, "it aims at the unvisited site");
 
+  // The refused issue committed nothing: the next tick sees phase 1's memory.
   const out = oreMacro(
     ORE_ANOM_STEP,
     obs({
@@ -4044,17 +4109,14 @@ test("warp-to-ore-anomaly: the position read is of the TARGETED site, not of whi
       refusals: warpRefused(CANNOT_WARP),
       snapshot: snapshot([]),
     }),
-    issued.nextMem,
+    committed.nextMem,
     board,
   );
 
   assert.notEqual(out.phase, "Arrived", "the site underfoot is not the site it was refused for");
-  const retry = oreMacro(
-    ORE_ANOM_STEP,
-    obs({ anomalies: [here, far], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]) }),
-    out.nextMem,
-    board,
-  );
+  const refusedObs = obs({ anomalies: [here, far], completedWarps: 3, refusals: warpRefused(CANNOT_WARP), snapshot: snapshot([]) });
+  const repick = oreMacro(ORE_ANOM_STEP, refusedObs, out.nextMem, board);
+  const retry = oreMacro(ORE_ANOM_STEP, refusedObs, repick.nextMem, board);
   assert.deepEqual(retry.action, { kind: "warpScan", target: "ABC-123" }, "it tries the other site instead");
 });
 
@@ -4071,7 +4133,7 @@ test("warp-to-ore-anomaly: a refused site is set aside and the next one is tried
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   const dying = rocksAt("GUN-001", 4 * 149_597_870_700);
   const fresh = rocksAt("GUV-002", 6 * 149_597_870_700);
-  const issued = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [dying, fresh], completedWarps: 3 }), {}, {});
+  const { committed, issued } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [dying, fresh], completedWarps: 3 }));
   assert.deepEqual(issued.action, { kind: "warpScan", target: "GUN-001" });
 
   const refusedObs = obs({
@@ -4080,10 +4142,13 @@ test("warp-to-ore-anomaly: a refused site is set aside and the next one is tried
     refusals: warpRefused(NOT_SCANNED),
     snapshot: snapshot([]),
   });
-  const out = oreMacro(ORE_ANOM_STEP, refusedObs, issued.nextMem, issued.boardPatch ?? {});
+  // The refused issue committed nothing (and neither did its board patch), so the
+  // next tick sees phase 1's memory and the unpatched board.
+  const out = oreMacro(ORE_ANOM_STEP, refusedObs, committed.nextMem, {});
   assert.equal(out.outcome.kind, "acting", "a refused site is not a reason to stop the bot");
 
-  const retry = oreMacro(ORE_ANOM_STEP, refusedObs, out.nextMem, issued.boardPatch ?? {});
+  const repick = oreMacro(ORE_ANOM_STEP, refusedObs, out.nextMem, {});
+  const retry = oreMacro(ORE_ANOM_STEP, refusedObs, repick.nextMem, {});
   assert.deepEqual(retry.action, { kind: "warpScan", target: "GUV-002" });
 
   // The old refusal is still in the ledger — no success has cleared it yet — and
@@ -4097,10 +4162,13 @@ test("warp-to-ore-anomaly: when every ore site has refused, it stops with the se
   const oreMacro = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   const a = rocksAt("GUN-001", 4 * 149_597_870_700);
   const b = rocksAt("GUV-002", 6 * 149_597_870_700);
-  const first = oreMacro(ORE_ANOM_STEP, obs({ anomalies: [a, b], completedWarps: 3 }), {}, {});
+  // Each refused issue commits nothing: every refusal is read from the memory of
+  // the phase-1 tick that committed the target, never from an issuing tick.
+  const { committed: first } = pickThenIssue(oreMacro, ORE_ANOM_STEP, obs({ anomalies: [a, b], completedWarps: 3 }));
   const once = obs({ anomalies: [a, b], completedWarps: 3, refusals: warpRefused(NOT_SCANNED), snapshot: snapshot([]) });
   const skip = oreMacro(ORE_ANOM_STEP, once, first.nextMem, {});
-  const second = oreMacro(ORE_ANOM_STEP, once, skip.nextMem, {});
+  const picked = oreMacro(ORE_ANOM_STEP, once, skip.nextMem, {});
+  const second = oreMacro(ORE_ANOM_STEP, once, picked.nextMem, {});
   assert.deepEqual(second.action, { kind: "warpScan", target: "GUV-002" });
 
   const twice = obs({
@@ -4109,7 +4177,7 @@ test("warp-to-ore-anomaly: when every ore site has refused, it stops with the se
     refusals: [{ ...warpRefused(NOT_SCANNED)[0]!, count: 2 }],
     snapshot: snapshot([]),
   });
-  const out = oreMacro(ORE_ANOM_STEP, twice, second.nextMem, {});
+  const out = oreMacro(ORE_ANOM_STEP, twice, picked.nextMem, {});
   assert.equal(out.outcome.kind, "blocked");
   const reason = out.outcome.kind === "blocked" ? out.outcome.reason : "";
   assert.match(reason, /not scanned that site down/i);
@@ -4327,7 +4395,7 @@ test("fight: a den the bot keeps CLEARING is never given up on, however many tim
   let board: ScriptBoard = {};
 
   for (let visit = 1; visit <= MAX_SITE_RETURNS + 2; visit += 1) {
-    const go = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+    const go = pickThenIssue(anom, ANOM_STEP, obs({ anomalies: sites }), board).issued;
     assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288", `visit ${visit} is still flown to`);
     board = { ...board, ...(go.boardPatch ?? {}) };
     assert.equal(board[LEDGER_KEYS.sites], "QEE-288:1", `visit ${visit} arrives with a clean sheet`);
@@ -4350,13 +4418,13 @@ test("fight: clears buy no extra allowance — three CONSECUTIVE bad visits stil
   // history: the count that matters starts again at the first bad visit.
   let board: ScriptBoard = {};
   for (let good = 0; good < 2; good += 1) {
-    board = { ...board, ...(anom(ANOM_STEP, obs({ anomalies: sites }), {}, board).boardPatch ?? {}) };
+    board = { ...board, ...(pickThenIssue(anom, ANOM_STEP, obs({ anomalies: sites }), board).issued.boardPatch ?? {}) };
     board = { ...board, ...(fight(GIVE_UP_STEP, obs({ snapshot: snapshot([]) }), {}, board).boardPatch ?? {}) };
   }
 
   let gaveUp: MacroTick | null = null;
   for (let bad = 1; bad <= MAX_SITE_RETURNS + 1; bad += 1) {
-    const go = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+    const go = pickThenIssue(anom, ANOM_STEP, obs({ anomalies: sites }), board).issued;
     assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288", `bad visit ${bad} is still flown to`);
     board = { ...board, ...(go.boardPatch ?? {}) };
     // Driven off: the ship leaves with the rats still on the grid, so nothing
@@ -4394,7 +4462,7 @@ test("⚠ fight: a grid that clears with a stall already pending -> the clear wi
 
 test("warp-to-anomaly: the arrival is counted on the BOARD, where a repair trip cannot wipe it", () => {
   const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const go = anom(ANOM_STEP, obs({ anomalies: [den("QEE-288"), den("ABC-123")] }), {}, {});
+  const go = pickThenIssue(anom, ANOM_STEP, obs({ anomalies: [den("QEE-288"), den("ABC-123")] })).issued;
   assert.ok(go.action.kind === "warpScan" && go.action.target === "QEE-288");
   assert.equal(go.boardPatch?.["anomsVisited"], "QEE-288", "the lap list still works exactly as it always did");
   assert.equal(go.boardPatch?.[LEDGER_KEYS.sites], "QEE-288:1", "and the arrival is counted beside it");
@@ -4410,12 +4478,12 @@ test("warp-to-anomaly: the arrival is counted on the BOARD, where a repair trip 
 
 test("warp-to-anomaly: a den the run has given up on is skipped the way a visited one is", () => {
   const anom = SCRIPT_MACROS["warp-to-anomaly"]!;
-  const t = anom(
+  const t = pickThenIssue(
+    anom,
     ANOM_STEP,
     obs({ anomalies: [den("QEE-288"), den("ABC-123")] }),
-    {},
     ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1),
-  );
+  ).issued;
   assert.ok(t.action.kind === "warpScan" && t.action.target === "ABC-123");
 });
 
@@ -4428,7 +4496,7 @@ test("⚠ warp-to-anomaly: the lap restart wipes the VISITED list and never the 
     ...ledgerBoard("QEE-288", MAX_SITE_RETURNS + 1),
     anomsVisited: "QEE-288,ABC-123",
   };
-  const lap = anom(ANOM_STEP, obs({ anomalies: sites }), {}, board);
+  const lap = pickThenIssue(anom, ANOM_STEP, obs({ anomalies: sites }), board).issued;
   assert.ok(lap.action.kind === "warpScan" && lap.action.target === "ABC-123", "the new lap starts at the den that has NOT beaten it");
   assert.equal(lap.boardPatch?.["anomsVisited"], "ABC-123", "the lap list is replaced, as it always was");
   // The whole point: the count that says "this den has beaten me" survives the
@@ -4437,7 +4505,7 @@ test("⚠ warp-to-anomaly: the lap restart wipes the VISITED list and never the 
   // the den it walked out of an hour ago.
   assert.match(String(lap.boardPatch?.[LEDGER_KEYS.sites]), /QEE-288:3/);
   const after: ScriptBoard = { ...board, ...lap.boardPatch };
-  const nextLap = anom(ANOM_STEP, obs({ anomalies: sites }), {}, after);
+  const nextLap = pickThenIssue(anom, ANOM_STEP, obs({ anomalies: sites }), after).issued;
   assert.ok(nextLap.action.kind === "warpScan" && nextLap.action.target === "ABC-123", "still skipped on the lap after that");
 });
 
@@ -4463,9 +4531,221 @@ test("warp-to-ore-anomaly: the ore tour never gives up on a site — the miner d
   const ore = SCRIPT_MACROS["warp-to-ore-anomaly"]!;
   let board: ScriptBoard = {};
   for (let lap = 0; lap < MAX_SITE_RETURNS + 3; lap += 1) {
-    const t = ore(ORE_ANOM_STEP, obs({ anomalies: [rocks("ORE-111")] }), {}, board);
+    const t = pickThenIssue(ore, ORE_ANOM_STEP, obs({ anomalies: [rocks("ORE-111")] }), board).issued;
     assert.ok(t.action.kind === "warpScan" && t.action.target === "ORE-111", `lap ${lap} still flies to the ore site`);
     board = { ...board, ...(t.boardPatch ?? {}) };
   }
   assert.equal(board[LEDGER_KEYS.sites], undefined, "the ore tour writes no site ledger at all");
+});
+
+// ─── A lock the server refused is not pressed again until something changed ───
+//
+// Under the real runner a refused lock commits nothing, so `lockIssued` is never
+// set by it and the block used to press again on every backoff until the runner's
+// ten-refusal cap sent the ship home (a rock beyond lock range, the ship closing
+// under an accepted orbit, TargetNotWithinRangeGeneric ten times in four
+// minutes). The ledger is keyed by step + action kind with NO target id for a
+// lock, and the block reads it against a baseline committed when it picked the
+// rock. scriptRunnerRefusals.test.ts drives the same thing through the runner.
+
+/** The ledger row the runner leaves after the server refuses a lock for this step. */
+const lockRefused = (count: number) => [{
+  key: "m:lock:-",
+  count,
+  firstAt: 0,
+  lastAt: 0,
+  words: "TargetNotWithinRangeGeneric",
+  kind: "refused" as const,
+}];
+
+const unlockedMem = (over: MacroMemory = {}): MacroMemory =>
+  ({ rockID: 50001, lockIssued: false, waited: 0, approachedRockID: 50001, lockRefusalsSeen: 0, ...over });
+
+const rockAtX = (x: number) => entity({ itemID: 50001, name: "Veldspar", miningYieldTypeID: 1230, position: { x, y: 0, z: 0 } });
+
+test("mine: a known lock range is a pre-gate — nothing is pressed beyond it, the lock goes out inside it", () => {
+  const far = mine(mineStep, obs({ snapshot: snapshot([rockAtX(60_000)]), miningModuleIDs: [700], maxTargetRangeM: 40_000 }), unlockedMem(), {});
+  assert.equal(far.action.kind, "wait", "no lock beyond range");
+  assert.equal(far.why, "Closing in — too far out to lock yet.");
+  assert.equal(far.phase, "Approaching a rock");
+  assert.equal(far.nextMem["rockID"], 50001, "the hand-built memory still names the rock");
+  assert.equal(far.nextMem["lockIssued"], false);
+
+  const near = mine(mineStep, obs({ snapshot: snapshot([rockAtX(39_000)]), miningModuleIDs: [700], maxTargetRangeM: 40_000 }), far.nextMem, {});
+  assert.deepEqual(near.action, { kind: "lock", targetID: 50001 });
+});
+
+test("mine: an unknown lock range does not gate the press", () => {
+  const t = mine(mineStep, obs({ snapshot: snapshot([rockAtX(60_000)]), miningModuleIDs: [700], maxTargetRangeM: null }), unlockedMem(), {});
+  assert.deepEqual(t.action, { kind: "lock", targetID: 50001 });
+});
+
+test("mine: a lock refused FAR out is not pressed again until the rock is 20% closer", () => {
+  const world = (x: number, count = 1) =>
+    obs({ snapshot: snapshot([rockAtX(x)]), miningModuleIDs: [700], refusals: lockRefused(count) });
+  const refused = mine(mineStep, world(60_000), unlockedMem(), {});
+  assert.equal(refused.action.kind, "wait", "a refusal newer than the baseline is not answered with another press");
+  assert.equal(refused.nextMem["lockRefusalsSeen"], 1);
+  assert.equal(refused.nextMem["lockIssued"], false, "far: a range problem, so no timed path");
+  assert.ok(typeof refused.nextMem["lockRefusedAtM"] === "number");
+
+  const holding = mine(mineStep, world(59_000), refused.nextMem, {});
+  assert.equal(holding.action.kind, "wait", "barely closer is not progress");
+  assert.equal(holding.nextMem["lockRefusedAtM"], refused.nextMem["lockRefusedAtM"], "the hold remembers where it was refused");
+
+  const closer = mine(mineStep, world(47_000), holding.nextMem, {});
+  assert.deepEqual(closer.action, { kind: "lock", targetID: 50001 }, "real progress buys another press");
+});
+
+test("mine: a lock refused CLOSE in takes the timed path and moves on, as it did before the runner change", () => {
+  const world = obs({ snapshot: snapshot([rockAtX(8_000)]), miningModuleIDs: [700], refusals: lockRefused(1) });
+  let t = mine(mineStep, world, unlockedMem(), {});
+  assert.equal(t.why, "Waiting for the lock.");
+  assert.equal(t.nextMem["lockIssued"], true);
+  assert.equal(t.nextMem["waited"], 0);
+  let moved = false;
+  for (let i = 0; i < 12 && !moved; i += 1) {
+    t = mine(mineStep, world, t.nextMem, {});
+    moved = t.why === "That rock would not lock, so moving on.";
+  }
+  assert.ok(moved, "the rock is given up on after the lock wait budget");
+});
+
+test("mine: a stale lock record does not hold back a rock that was just picked", () => {
+  const stale = obs({ snapshot: snapshot([rockAtX(8_000)]), miningModuleIDs: [700], refusals: lockRefused(3) });
+  const picked = mine(mineStep, stale, NM, {});
+  assert.equal(picked.action.kind, "orbit");
+  assert.equal(picked.nextMem["lockRefusalsSeen"], 3, "the count found at pick time is the baseline");
+  const next = mine(mineStep, stale, picked.nextMem, {});
+  assert.deepEqual(next.action, { kind: "lock", targetID: 50001 }, "the old record is not a refusal of a lock never pressed");
+});
+
+// ── A lock record with no committed count ────────────────────────────────────
+//
+// The runner drops a step's memory when the step is left and keeps the ledger,
+// so a block can start a visit facing a lock refusal it did not just cause. The
+// refused-press path itself is only visible through the real runner and is
+// tested in scriptRunnerRefusals.test.ts.
+const leftoverLock = (stepID: string) => ({ ...refusal(stepID, "lock", 0, 2), key: `${stepID}:lock:-` });
+
+test("fight: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const fight = SCRIPT_MACROS["fight-the-rats"]!;
+  const s = { id: "f", kind: "macro", macro: "fight-the-rats", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([rat]), weaponModuleIDs: [500], refusals: [leftoverLock("f")] });
+
+  const read = fight(s, world, {}, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.equal(read.nextMem["targetID"], undefined, "no target is adopted for a lock that was never asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6661);
+
+  // One more on the ledger than the count carried: that press was refused.
+  const refused = fight(s, obs({ ...world, refusals: [{ ...leftoverLock("f"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["lockIssued"], true);
+  assert.equal(refused.nextMem["lockRefusalsSeen"], 3);
+});
+
+test("salvage: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const salvage = SCRIPT_MACROS["salvage-wrecks"]!;
+  const s = { id: "sv", kind: "macro", macro: "salvage-wrecks", args: {} } as const;
+  const wreck = entity({ itemID: 70001, kind: "wreck", position: { x: 3000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([wreck]), salvageModuleIDs: [800], refusals: [leftoverLock("sv")] });
+  const picked: MacroMemory = { wreckID: 70001, lockIssued: false, waited: 0 };
+
+  const read = salvage(s, world, picked, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+
+  const press = salvage(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 70001);
+
+  const refused = salvage(s, obs({ ...world, refusals: [{ ...leftoverLock("sv"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["lockIssued"], true);
+});
+
+test("fight-with-drones: a lock record left from an earlier visit costs one tick, not the timed wait", () => {
+  const fight = SCRIPT_MACROS["fight-with-drones"]!;
+  const s = { id: "d", kind: "macro", macro: "fight-with-drones", args: {} } as const;
+  const rat = entity({ itemID: 6661, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x: 5000, y: 0, z: 0 } });
+  const world = obs({ snapshot: snapshot([rat]), weaponModuleIDs: [500], refusals: [leftoverLock("d")] });
+  // The hold comes first on this ladder; the lock rung is what is under test.
+  const holding = fight(s, world, {}, {});
+  assert.equal(holding.action.kind, "keepAtRange");
+
+  const read = fight(s, world, holding.nextMem, {});
+  assert.equal(read.action.kind, "wait");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.equal(read.nextMem["targetID"], undefined, "no target is adopted for a lock that was never asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6661);
+
+  const refused = fight(s, obs({ ...world, refusals: [{ ...leftoverLock("d"), count: 3 }] }), read.nextMem, {});
+  assert.equal(refused.action.kind, "wait");
+  assert.equal(refused.why, "Waiting for the lock.");
+  assert.equal(refused.nextMem["targetID"], 6661);
+  assert.equal(refused.nextMem["lockRefusalsSeen"], 3);
+});
+
+test("fight-with-drones: a leftover lock record is not booked against a pre-lock that was never pressed", () => {
+  const fight = SCRIPT_MACROS["fight-with-drones"]!;
+  const s = { id: "d", kind: "macro", macro: "fight-with-drones", args: {} } as const;
+  const at = (itemID: number, x: number) =>
+    entity({ itemID, kind: "ship", isNpc: true, npcEntityType: "npc", position: { x, y: 0, z: 0 } });
+  // The primary is already locked on arrival, so no press of this visit has
+  // committed a count and the record on the ledger is somebody else's.
+  const world = obs({
+    snapshot: snapshot([at(6661, 5000), at(6662, 6000)]),
+    weaponModuleIDs: [500],
+    lockedTargetIDs: [6661],
+    maxLockedTargets: 3,
+    refusals: [leftoverLock("d")],
+  });
+  const holding = fight(s, world, {}, {});
+  assert.equal(holding.action.kind, "keepAtRange");
+  const held: MacroMemory = { ...holding.nextMem, targetID: 6661, lockIssued: true, waited: 0 };
+
+  const read = fight(s, world, held, {});
+  assert.notEqual(read.action.kind, "lock");
+  assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+  assert.deepEqual(read.nextMem["preLocked"] ?? [], [], "nothing is marked as asked for");
+
+  const press = fight(s, world, read.nextMem, {});
+  assert.ok(press.action.kind === "lock" && press.action.targetID === 6662, "and the pre-lock goes out on the next tick");
+});
+
+test("remote-rep / remote-cap: a leftover lock record costs one tick and does not adopt the mate", () => {
+  const hurt = entity({ itemID: 7001, kind: "ship", characterID: 5001, shieldRatio: 0.4, armorRatio: 1, hullRatio: 1, capacitorRatio: 0.2, position: { x: 3000, y: 0, z: 0 } });
+  const cases = [
+    { block: remoteRep, s: repStep, fit: { remoteShieldRepairerIDs: [600] }, lockOn: "repLockOn" },
+    {
+      block: remoteCapBlock,
+      s: { id: "rc", kind: "macro", macro: "remote-cap", args: {} } as MacroStep,
+      fit: { remoteCapModuleIDs: [640] },
+      lockOn: "capLockOn",
+    },
+  ];
+  for (const { block, s, fit, lockOn } of cases) {
+    const world = obs({ snapshot: snapshot([hurt], { activeModuleIDs: [] }), fleetMemberCharacterIDs: [5001], ...fit, refusals: [leftoverLock(s.id)] });
+
+    const read = block(s, world, {}, {});
+    assert.equal(read.action.kind, "wait", s.macro);
+    assert.equal(read.nextMem["lockRefusalsSeen"], 2);
+    assert.equal(read.nextMem[lockOn], null, "the mate is not adopted, so the next tick still presses");
+
+    const press = block(s, world, read.nextMem, {});
+    assert.ok(press.action.kind === "lock" && press.action.targetID === 7001, s.macro);
+
+    const refused = block(s, obs({ ...world, refusals: [{ ...leftoverLock(s.id), count: 3 }] }), read.nextMem, {});
+    assert.equal(refused.action.kind, "wait");
+    assert.equal(refused.why, "Waiting for the lock.");
+    assert.equal(refused.nextMem[lockOn], 7001, "a refused press is waited out against the mate it was for");
+  }
 });

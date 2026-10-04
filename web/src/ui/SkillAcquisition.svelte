@@ -11,7 +11,7 @@
 </script>
 <section class="acquisition" aria-label="Skill acquisition">
   <h3>Direct skill acquisition · {mode} → {stage ?? "Unknown"}</h3>
-  <p>Review temporarily logs free pilots in, reads prices and wallets, then releases them. Money moves only after Acquire. The queue is a separate action.</p>
+  <p>Direct purchase is unavailable on stock EveJS web gateway. Inject skillbooks in the game client, then refresh Training and review the queue.</p>
   <label>Funding policy <select bind:value={policy} disabled={busy} onchange={onChange}>
     <option value="CHARACTER_WALLET_ONLY">Character wallet only</option>
     <option value="CHARACTER_PLUS_CORPORATION_SHORTFALL">Character wallet + corporation shortfall</option>
@@ -24,7 +24,7 @@
     <p>Training wallet: {trainingWallet ? `Corporation ${trainingWallet.corporationID} · Division ${trainingWallet.accountKey - 999} (${trainingWallet.accountKey})` : "UNCONFIGURED — save a training wallet in settings first."}</p>
     <p>Review verifies Account Take permission and corporation. Fallback requires an explicitly selected non-CEO officer; no CEO is acquired.</p>
   {/if}
-  <button type="button" disabled={busy || !stage || (policy !== "CHARACTER_WALLET_ONLY" && (!officer || !trainingWallet))} onclick={() => onReview(policy, officer, trainingWallet?.accountKey || 0)}>Review missing skill acquisition</button>
+  <button type="button" disabled title="Stock web gateway purchase authority is unavailable">Review missing skill acquisition</button>
   {#if message}<p role="status">{message}</p>{/if}
   {#if review}
     <h4>Reviewed {review.mode} → {targetName(review.stage)}</h4>
@@ -42,7 +42,7 @@
     <p>Purchase and funding are separate server operations. If purchase fails after funding, remaining ISK stays with the trainee. No automatic retry or rollback.</p>
     {#each review.blockers as blocker}<p class="error">{blocker}</p>{/each}
     {#each review.cleanup.filter((row) => !row.released) as row}<p class="error">{row.code}: pilot {row.characterID}</p>{/each}
-    <button type="button" disabled={busy || !review.canAcquire || !review.reviewID} onclick={onAcquire}>Acquire missing skills · {review.mode} → {targetName(review.stage)}</button>
+    <button type="button" disabled title="Stock web gateway purchase authority is unavailable">Acquire missing skills · {review.mode} → {targetName(review.stage)}</button>
   {/if}
   {#if outcome}
     <h4>Last acquisition · {outcome.mode} → {targetName(outcome.stage)}</h4>

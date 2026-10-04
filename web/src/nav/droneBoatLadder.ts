@@ -103,6 +103,7 @@ import { DEFAULT_TARGET_PRIORITY, pickPrimary, type TargetClass } from "./target
 import { combatReload, weaponUseful } from "./combatWeapons.ts";
 import { combatOwnership, ownCombatAction, settleCombat } from "./combatOwnership.ts";
 import { combatCapSustain, decideCombatUtilities } from "./combatUtilities.ts";
+import { refusalTargets } from "./refusalLedger.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -226,7 +227,29 @@ export interface DroneBoatInputs {
    * working bot rather than a stopped one.
    */
   readonly calledTargetID?: number | null;
+  /**
+   * What the ledger says about this step's lock presses. Resolved by the adapter
+   * for the same reason as the called ship: the ledger is keyed by the STEP, and
+   * `readLockRefusals` in `scriptMacros.ts` already owns the reading. Absent
+   * means nothing has been refused.
+   */
+  readonly lockRefusals?: LockRefusals;
 }
+
+/**
+ * A step's lock refusals against the count its memory last committed
+ * (`lockRefusalsSeen`). `unread`: a record and no count carried, read as old.
+ * `fresh`: more on the ledger than the count carried, so the last press was
+ * refused. The whole argument is on `readLockRefusals` in `scriptMacros.ts`.
+ */
+export interface LockRefusals {
+  readonly count: number;
+  readonly unread: boolean;
+  readonly fresh: boolean;
+  readonly targetID?: number;
+}
+
+const NO_LOCK_REFUSALS: LockRefusals = { count: 0, unread: false, fresh: false };
 
 // ─── Tick plumbing (the shape every block in this tree returns) ──────────────
 
@@ -673,6 +696,7 @@ function decideDroneBoatCore(inputs: DroneBoatInputs): MacroTick {
     propMode,
     squad,
     calledTargetID: inputs.calledTargetID ?? null,
+    lockRefusals: inputs.lockRefusals ?? NO_LOCK_REFUSALS,
     verdict,
   });
   return patch === null ? decided : { ...decided, boardPatch: patch };
@@ -691,6 +715,7 @@ type LadderInputs = {
   readonly propMode: "auto" | "off";
   readonly squad: SquadRoleArg;
   readonly calledTargetID: number | null;
+  readonly lockRefusals: LockRefusals;
   readonly verdict: SiteVerdict;
 };
 
@@ -700,7 +725,7 @@ type LadderInputs = {
  * exists.
  */
 function droneBoatLadder(input: LadderInputs): MacroTick {
-  const { obs, snapshot, onGrid, inReach, roster, threat, squad, verdict } = input;
+  const { obs, snapshot, onGrid, inReach, roster, threat, squad, verdict, lockRefusals } = input;
   let mem = input.mem;
   const role = squad;
 
@@ -1179,13 +1204,36 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
         jamSources(obs),
       ) ??
       inReach[0]!;
+    // ⚠ THE PICK AND THE PRESS ARE ONE TICK, AND A REFUSED PRESS COMMITS NOTHING
+    // (2fd4a77): no target and no `lockIssued`, so this branch ran again on every
+    // backoff until the runner's ten-refusal cap sent the ship home, and the
+    // bounded wait below was never reached. The refusal is read off the ledger
+    // here instead, before pressing again — the same answer `fight-the-rats`
+    // gives, for the reason `MAX_LOCK_WAIT_TICKS` gives.
+    if (lockRefusals.unread) {
+      return tick(WAIT, "Checking the last lock.", PHASE_FIGHT, ACTING, true, {
+        ...mem,
+        lockRefusalsSeen: lockRefusals.count,
+      });
+    }
+    if (lockRefusals.fresh && refusalTargets(lockRefusals, primary.itemID)) {
+      // The bounded wait below, exactly what a refused lock got before 2fd4a77.
+      return tick(WAIT, "Waiting for the lock.", PHASE_FIGHT, ACTING, true, {
+        ...mem,
+        targetID: primary.itemID,
+        lockIssued: true,
+        waited: 0,
+        dronesOn: null,
+        lockRefusalsSeen: lockRefusals.count,
+      });
+    }
     return tick(
       { kind: "lock", targetID: primary.itemID },
       called !== null ? "Locking what the fleet called." : "Locking the one at the top of the list.",
       PHASE_FIGHT,
       ACTING,
       true,
-      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
+      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null, lockRefusalsSeen: 0 },
     );
   }
   const call = callPrimary(role, mem, targetID, "Calling it for the fleet.", PHASE_FIGHT);
@@ -1206,7 +1254,13 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
       // standing hold and the rotation record all belong to a fight that is
       // being restarted, and carrying a spent lock wait into the next pick is
       // how a block gives up on every target in turn after the first bad one.
-      return tick(WAIT, "That one would not lock — picking another.", PHASE_FIGHT, ACTING, true, {});
+      //
+      // The refusal count is the one thing that outlives it: without it the next
+      // pick would find a record and no count, and spend a tick deciding the
+      // refusal it has just sat out is old.
+      const seen = num(mem, "lockRefusalsSeen");
+      return tick(WAIT, "That one would not lock — picking another.", PHASE_FIGHT, ACTING, true,
+        seen === null ? {} : { lockRefusalsSeen: seen });
     }
     return tick(WAIT, "Waiting for the lock.", PHASE_FIGHT, ACTING, true, { ...mem, waited });
   }
@@ -1302,9 +1356,33 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
   // entire stop condition. A pre-lock that does not land is simply not retried:
   // it is an optimisation, and the target gets a proper bounded lock the moment
   // it becomes the primary.
+  //
+  // ⚠ "ALREADY ASKED" IS WRITTEN BY THE PRESS, AND A REFUSED PRESS COMMITS
+  // NOTHING (2fd4a77). So the one pre-lock the server turned down was the one
+  // asked for again on every backoff, until the runner's ten-refusal cap sent a
+  // ship home from a fight it was winning — over an optimisation. The primary is
+  // locked by the time this rung runs, so a refusal on the ledger that memory has
+  // not counted is this rung's own: the same pick is made again from the same
+  // grid and booked as asked WITHOUT a press. A record with no count carried is
+  // read as old, counted, and costs this rung one tick.
+  // Commit the actual refused target before another world call can fail. The
+  // grid or fleet call may have changed during backoff; a new candidate has
+  // never been asked and must still be eligible for a lock.
+  if (lockRefusals.fresh && lockRefusals.targetID !== undefined) {
+    return tick(WAIT, "That lock did not land — continuing the fight.", PHASE_FIGHT, ACTING, true, {
+      ...mem,
+      lockRefusalsSeen: lockRefusals.count,
+      preLocked: [...new Set([...idList(mem, "preLocked"), lockRefusals.targetID])].slice(-MAX_PRELOCK_MEMORY),
+    });
+  }
+  const preLockRefused = lockRefusals.fresh;
+  const preLockUnread = lockRefusals.unread;
+  if (preLockRefused || preLockUnread) {
+    mem = { ...mem, lockRefusalsSeen: lockRefusals.count };
+  }
   const maxLocks = maxLocksOf(obs);
   const locksReadable = obs.lockedTargetIDs !== undefined && obs.lockedTargetIDs !== null;
-  if (maxLocks !== null && locksReadable && lockedIDs.length < maxLocks) {
+  if (!preLockUnread && maxLocks !== null && locksReadable && lockedIDs.length < maxLocks) {
     const asked = idList(mem, "preLocked");
     const spare = inReach.filter((row) => !lockedIDs.includes(row.itemID) && !asked.includes(row.itemID));
     if (spare.length > 0) {
@@ -1319,14 +1397,18 @@ function droneBoatLadder(input: LadderInputs): MacroTick {
           threat,
           jamSources(obs),
         ) ?? spare[0]!;
-      return tick(
-        { kind: "lock", targetID: next.itemID },
-        "Locking the next one up while this one dies.",
-        PHASE_FIGHT,
-        ACTING,
-        true,
-        { ...mem, preLocked: [...asked, next.itemID].slice(-MAX_PRELOCK_MEMORY) },
-      );
+      const preLocked = [...asked, next.itemID].slice(-MAX_PRELOCK_MEMORY);
+      if (!preLockRefused) {
+        return tick(
+          { kind: "lock", targetID: next.itemID },
+          "Locking the next one up while this one dies.",
+          PHASE_FIGHT,
+          ACTING,
+          true,
+          { ...mem, preLocked, lockRefusalsSeen: 0 },
+        );
+      }
+      mem = { ...mem, preLocked };
     }
   }
 

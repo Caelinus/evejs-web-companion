@@ -128,7 +128,6 @@ const store = options.eveStore || eveStore;
 let replenishment;
 const mutationFence = createPilotMutationFence({ heldSessions: { values: () => bridgeSessions.values() },
   assertWritable: (pilot, lease) => replenishment?.assertWritable(pilot, lease),
-  assertSelectable: pilot => replenishment.assertSelectable(pilot),
   enterWrite: (pilot, lease) => replenishment.enterWrite(pilot, lease) });
 const gateway = mutationFence.wrap(options.eveGatewayClient || eveGatewayClient);
 const auth = options.webAuth || webAuth;
@@ -231,8 +230,9 @@ async function isCharacterHeld(characterID, callerSessionID = null, preparationO
     }
   }
   // A public hosted Start may hand off its own cockpit, but may never take an
-  // external retail/browser/Factory pilot. The actual select is also atomic
-  // free-only, so a new external owner after this read still cannot be evicted.
+  // external retail/browser/Factory pilot observed here. A later external
+  // login is arbitrated by stock SelectCharacterID and the server's retail
+  // takeover policy; this WC observation is not an atomic free-only claim.
   if (ownsProbe && preparationOwner?.accountID && Number(bridgeSessions.get(callerSessionID)?.characterID) !== Number(characterID)) {
     const status = await gateway.getCharacterStatus(preparationOwner.accountID, characterID);
     if (status?.characterID !== characterID || status.online !== false || status.controlState !== "offline") return true;
@@ -776,7 +776,11 @@ const provisioningRoutes = registerProvisioningRoutes({ app, requireAuth, requir
   } });
 
 const provisioningCenter = require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
-  operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment, sessions: factorySessions,
+  store, operations: characterOperations, sessionOperations, heldSessions: bridgeSessions, botHost, engine: replenishment,
+  withLease: mutationFence.withLease,
+  // Exact administrative release remains available while shared custody blocks
+  // inventory writes. Only the bounded service's acquired handle reaches here.
+  releaseSession: (handle, fields) => (options.eveGatewayClient || eveGatewayClient).releaseBridgeSession(handle, fields),
   selectedAdapter: provisioningRoutes.adapter,
   filePath: options.provisioningCenterJournalPath || (options.eveStore ? null : path.join(config.dataDir, "provisioning-center-control.json")),
   fault: options.provisioningCenterFault || null,
@@ -798,12 +802,14 @@ const trainingEquipment = require("./trainingEquipment").createTrainingEquipment
     return (await readMinerPilot({ store, gateway, data: staticData, account, ...input })).read;
   } });
 for (const action of ["review", "apply", "recover"]) app.post(`/api/pilot-training/equipment/${action}`, requireTrainingAuth, async (req, res, next) => {
-  try { res.json({ ok: true, [action === "review" ? "review" : "outcome"]: await trainingEquipment[action](req.account, req.body || {}) }); }
+  try { res.json({ ok: true, [action === "review" ? "review" : "outcome"]: await trainingEquipment[action](req.account, req.body || {}, req.webSessionID) }); }
   catch (error) { next(error); }
 });
 
 const miningPreparation = options.miningPreparation || require("./miningPreparation").createMiningPreparation({
-  store, readReview: provisioningCenter.readReview, engine: replenishment, data: staticData, bots: () => botHost.listAll(),
+  store, readDefinitions: (accountID,input) => require("./provisioningRoutes").readProvisioningDefinitions({
+    store,gateway,data:staticData,accountID,providerCharacterID:input.providerCharacterID,supplyPolicy:input.supplyPolicy }),
+  engine: replenishment, data: staticData, bots: () => botHost.listAll(),
   readSkills: (accountID, characterID) => gateway.getSkills(accountID, characterID),
   currentRun: operationID => miningOperations.runtimeFor(operationID)?.operationRunID ||
     botHost.listAll().find(b=>b.operationID===operationID && !b.endedAt)?.operationRunID,
@@ -1177,23 +1183,60 @@ function buildStationStatic(stationID) {
 }
 
 // Shared by ordinary select and the narrowly guarded handoff restoration.
-async function selectHeldCharacter(webSessionID, account, characterID, { freeOnly = false } = {}) {
+async function selectHeldCharacter(webSessionID, account, characterID, { assertCurrent = () => {}, hostedSecret = null } = {}) {
+  assertCurrent();
+  const accountID = Number(account.accountID);
   const pendingCustody = replenishment.unresolved(characterID).length > 0;
-  if (pendingCustody && typeof gateway.selectFactoryCharacter !== "function")
+  if (pendingCustody)
     throw Object.assign(new Error("Free-only custody recovery selection is unavailable; pilot control remains fenced."),
       { code: "PROVISIONING_RECOVERY_AUTHORITY_UNAVAILABLE", statusCode: 409 });
-  if (freeOnly && typeof gateway.selectFactoryCharacter !== "function")
-    throw Object.assign(new Error("Atomic free-pilot selection is unavailable; hosted Start cannot take over a pilot."),
-      { code: "CHARACTER_OWNERSHIP_UNVERIFIED", statusCode: 409 });
-  const outcome = pendingCustody ? await mutationFence.withCustodySelection(characterID,
-    () => gateway.selectFactoryCharacter(Number(account.accountID), characterID)) : freeOnly
-    ? await gateway.selectFactoryCharacter(Number(account.accountID), characterID) : await gateway.selectCharacter(
+  const outcome = await gateway.selectCharacter(
     [characterID, null, true], null,
     { userid: Number(account.accountID), userName: String(account.username || "") },
   );
-  bridgeSessions.set(webSessionID, makeHeldCharacter(account, characterID, outcome));
+  const held = makeHeldCharacter(account, characterID, outcome);
+  try { assertCurrent(); }
+  catch (error) {
+    // Selection awaited: a retired generation must not install its outcome.
+    // Clean only the returned handle, never the current web-session row.
+    try {
+      const released = await gateway.releaseBridgeSession(outcome.bridgeSessionID, { userid: accountID });
+      if (released?.released !== true) throw new Error("Selection release was not confirmed.");
+    } catch (releaseError) {
+      if (releaseError?.code !== "SESSION_NOT_FOUND") {
+        // Preserve uncertainty in the existing held-session fence, without
+        // replacing a newer row or enabling any productive action.
+        if (!bridgeSessions.has(webSessionID)) {
+          held.selectionReleaseUnverified = true;
+          held.droneRecoveryReady = true;
+          if (hostedSecret !== null) held.botClaimSecret = hostedSecret;
+          bridgeSessions.set(webSessionID, held);
+        }
+        throw Object.assign(new Error("The stale selection's exact session release could not be confirmed. Retry its logout before selecting again."),
+          { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
+      }
+    }
+    throw error;
+  }
+  bridgeSessions.set(webSessionID, held);
   joinHeldChat(bridgeSessions.get(webSessionID));
   return outcome;
+}
+
+async function restoreHeldCaller(webSessionID, account, characterID, reservation) {
+  const current = () => characterOperations.get(characterID) === reservation &&
+    sessionOperations.get(webSessionID) === reservation && !bridgeSessions.has(webSessionID) &&
+    botHost.claimedBy(characterID) === null && !replenishment.unresolved(characterID).length &&
+    ![...bridgeSessions.values()].some(held => Number(held.characterID) === characterID);
+  if (!current() || await isCharacterHeld(characterID, webSessionID,
+    { accountID: Number(account.accountID) }, reservation) || !current()) return false;
+  // The fresh offline observation and exact WC generation checks do not fence
+  // a later external login. Re-selection follows stock retail server policy.
+  await selectHeldCharacter(webSessionID, account, characterID, { assertCurrent: () => {
+    if (!current()) throw Object.assign(new Error("The caller's ownership changed during restoration."),
+      { code: "CHARACTER_IN_USE", statusCode: 409 });
+  } });
+  return true;
 }
 function makeHeldCharacter(account, characterID, outcome) {
   return {
@@ -1259,6 +1302,8 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     // takeover would kick the bot mid-script. Refused with a plain remedy;
     // the bot's OWN select passes because its fetch names it. Tab-vs-tab
     // takeover (desktop to phone) is untouched.
+    const hostedSecret = req.get(botHostModule.BOT_HEADER);
+    const hostedSelection = botHost.authorizesClaim(characterID, hostedSecret);
     const claimingBotID = botHost.claimedBy(characterID);
     if (claimingBotID !== null && !botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
       res.status(409).json({
@@ -1272,8 +1317,15 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       });
       return;
     }
+    if (hostedSecret !== undefined && !hostedSelection)
+      throw Object.assign(new Error("The requesting hosted controller generation is no longer current."),
+        { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+    const existingReservation = characterOperations.get(characterID);
+    const operation = hostedSelection && botHost.operationForClaim?.(characterID, hostedSecret);
+    const ownOperationHandoff = operation?.operationRunID && existingReservation?.kind === "mining-operation-handoff" &&
+      existingReservation.operationID === operation.operationID && existingReservation.operationRunID === operation.operationRunID;
     if (sessionOperations.has(req.webSessionID) ||
-        (characterOperations.has(characterID) && !botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER)))) {
+        (existingReservation && !ownOperationHandoff)) {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This pilot is changing sessions. Try again shortly." });
       return;
     }
@@ -1309,14 +1361,35 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     const ownsCharacterReservation = !characterOperations.has(characterID);
     if (ownsCharacterReservation) characterOperations.set(characterID, reservation);
     sessionOperations.set(req.webSessionID, reservation);
+    const expectedCharacterReservation = characterOperations.get(characterID);
     try {
     // One client session per web login: switching characters releases the
     // previous persistent session (retail semantics live on the gateway side;
     // the handler's own refusals pass through as CALL_REFUSED).
     await releaseHeldBridgeSession(req.webSessionID);
-    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID, {
-      freeOnly: botHost.requiresFreeSelection?.(characterID, req.get(botHostModule.BOT_HEADER)) === true,
-    });
+    // The release awaited. Stock takeover policy never authorizes replacing a
+    // newer WC reservation, generation or held owner discovered during that gap.
+    const assertSelectionCurrent = () => {
+      if (hostedSelection && !botHost.authorizesClaim(characterID, hostedSecret))
+        throw Object.assign(new Error("The requesting hosted controller generation is no longer current."),
+          { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
+      // Only the current resumed preparation may reconcile its own custody.
+      // A fresh hosted Start has no checkpoint authority and cannot borrow it.
+      const pendingCustody = hostedSelection ? replenishment.unresolved(characterID) : [];
+      const checkpoint = pendingCustody.length && botHost.preparationForClaim?.(characterID, hostedSecret);
+      const custodyID = checkpoint?.custodyOperationID || checkpoint?.evidence?.custodyOperationID;
+      const ownsCustody = checkpoint?.intent?.accountID === Number(req.account.accountID) &&
+        checkpoint.intent.characterID === characterID && custodyID &&
+        pendingCustody.every(row => row.key === custodyID && row.accountID === checkpoint.intent.accountID);
+      if (sessionOperations.get(req.webSessionID) !== reservation || bridgeSessions.has(req.webSessionID) ||
+          characterOperations.get(characterID) !== expectedCharacterReservation ||
+          hostedSelection && (pendingCustody.length && !ownsCustody ||
+            [...bridgeSessions].some(([sessionID, held]) => sessionID !== req.webSessionID && Number(held.characterID) === characterID)))
+        throw Object.assign(new Error("The pilot's WC ownership changed before selection."), { code: "CHARACTER_IN_USE", statusCode: 409 });
+    };
+    assertSelectionCurrent();
+    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID,
+      { assertCurrent: assertSelectionCurrent, hostedSecret: hostedSelection ? hostedSecret : null });
     // Hosted bots already own their claim; browser sessions must complete the
     // nearby lost-flight check before any automation handoff or movement.
     if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
@@ -1420,6 +1493,9 @@ function requireHeldBridgeSession(req, res) {
 }
 
 function assertHeldRequestGeneration(req, held) {
+  if (held.selectionReleaseUnverified && req.path !== "/api/bridge/release")
+    throw Object.assign(new Error("The prior selection's session release is unconfirmed. Retry its logout first."),
+      { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
   const secret = req.get(botHostModule.BOT_HEADER);
   // A cockpit may attach to hosted GET readouts. Writes and requests naming a
   // hosted generation must belong to the generation that selected this session.
@@ -1436,10 +1512,14 @@ function assertCurrentHeldSession(held, webSessionID) {
     throw Object.assign(new Error("The pilot session changed before this call."),
       { code: "NO_LIVE_SESSION", statusCode: 409 });
   }
+  if (held.selectionReleaseUnverified)
+    throw Object.assign(new Error("The prior selection's session release is unconfirmed. Retry its logout first."),
+      { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
   if (held.botClaimSecret && !botHost.authorizesClaim(held.characterID, held.botClaimSecret)) {
     throw Object.assign(new Error("The hosted controller generation changed before this call."),
       { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
   }
+  held.maintenanceCurrent?.();
 }
 
 // The browser cannot leave the recovery grid while its login check is
@@ -15132,13 +15212,7 @@ async function assertStructureDockAccess(held, webSessionID, structureID) {
 }
 
 async function assertStructureService(held, webSessionID, structureID, serviceID) {
-  await assertStructureDockAccess(held, webSessionID, structureID);
-  const result = await heldTopLevelCall(held, webSessionID, "structureDirectory",
-    "GetMyAccessibleStructureServices", [structureID], null);
-  if (!structureServiceIDsFromList(result.result).includes(serviceID)) {
-    throw Object.assign(new Error("The required structure service is unavailable."),
-      { code: "STRUCTURE_SERVICE_UNAVAILABLE", statusCode: 409 });
-  }
+  require("./stockCompatibility").structureServices();
 }
 
 async function operationStructureAccessCall(req, method, args, characterID = 0) {
@@ -15217,8 +15291,7 @@ app.get("/api/dockable-structures/:id/services", requireAuth, async (req, res, n
     if (!structureIDsFromList(checked.result).includes(id)) {
       res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
     }
-    const result = await operationStructureAccessCall(req, "GetMyAccessibleStructureServices", [id], characterID);
-    res.json({ ok: true, structureID: id, serviceIDs: structureServiceIDsFromList(result.result) });
+    require("./stockCompatibility").structureServices();
   } catch (error) { next(error); }
 });
 
@@ -15233,7 +15306,7 @@ app.post("/api/bridge/corp-office/rent-at-structure", requireAuth, async (req, r
     }
     let officeID = await readCorpOffice(held, req.webSessionID);
     if (!officeID) {
-      await heldTopLevelCall(held, req.webSessionID, "officeManager", "RentOffice", [], null);
+      require("./stockCompatibility").structureServices();
       officeID = await readCorpOffice(held, req.webSessionID);
     }
     if (!officeID) { res.status(409).json({ ok: false, error: "CORP_OFFICE_RENT_UNCONFIRMED" }); return; }
@@ -19747,7 +19820,7 @@ for (const action of ["review", "acquire"]) {
   app.post(`/api/pilot-training/skills/${action}`, requireTrainingAuth, async (req, res, next) => {
     try {
       const body = req.body || {};
-      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body, await factoryFunding(body));
+      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body);
       res.json({ ok: true, outcome });
     } catch (error) {
       if (error.cleanup?.some((row) => !row.released)) {
@@ -22385,8 +22458,10 @@ app.get("/api/mining-operations/preparation-options", requireAuth, async (req,re
     if (!account || account.banned || !await store.getCharacterForAccount(account.accountID,characterID))
       throw Object.assign(new Error("Account-owned pilot unavailable."),{code:"CHARACTER_NOT_FOUND",statusCode:409});
     const source = req.query.sourceKind==="corp" ? {kind:"corp",corporationID:Number(req.query.corporationID),division:Number(req.query.division)} : {kind:"hangar"};
-    const detail=await provisioningCenter.readReview(account.accountID,{characterID,providerCharacterID,fittingID:0,source});
-    res.json({ok:true,definitions:detail.definitions,pilot:detail.pilot,candidateSource:detail.candidateSource});
+    const definitions=await require("./provisioningRoutes").readProvisioningDefinitions({store,gateway,data:staticData,
+      accountID:account.accountID,providerCharacterID});
+    res.json({ok:true,definitions,pilot:{characterID,control:{state:"UNKNOWN"},quality:"UNAVAILABLE"},
+      candidateSource:{...source,quality:"UNAVAILABLE",query:"UNKNOWN",take:"UNKNOWN",rows:[],revalidateOnApply:true}});
   } catch(error) { next(error); }
 });
 async function withMiningPreparationPlan(definition,plan,req) {
@@ -22462,7 +22537,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
             allianceID: character.allianceID || 0 };
           try {
             const [services, offices] = await Promise.all([
-              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [parkingStructure.id], null, context),
+              require("./stockCompatibility").structureServices(),
               gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
             ]);
             if (!structureIDsFromList(services.result).includes(3) ||
@@ -22509,7 +22584,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
               return;
             }
             const [services, offices] = await Promise.all([
-              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [deliveryStructure.id], null, context),
+              require("./stockCompatibility").structureServices(),
               gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
             ]);
             if (!structureIDsFromList(services.result).includes(3) ||
@@ -22635,9 +22710,9 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         ) {
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
-            if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID) &&
-                !(await isCharacterHeld(member.characterID, callerSessionID, { accountID: Number(account.accountID) }, reservation))) {
-              await selectHeldCharacter(callerSessionID, account, member.characterID, { freeOnly: true });
+            if (payload?.sessionID === callerSessionID && Number(payload.accountID) === Number(account.accountID)) {
+              if (!await restoreHeldCaller(callerSessionID, account, member.characterID, reservation))
+                outcome.message = `${outcome.message || "This member could not start."} Browser ownership was not restored; review the pilot's current owner.`;
             }
           } catch (error) {
             errorLogger(error);
@@ -23312,8 +23387,7 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
         // always supplies its newly minted private claim, never a public botID.
         if (!owner) return;
         assertReservation();
-        if (!botHost.authorizesClaim(characterID, owner.claimSecret) ||
-            botHost.requiresFreeSelection?.(characterID, owner.claimSecret) !== true)
+        if (!botHost.authorizesClaim(characterID, owner.claimSecret))
           throw Object.assign(new Error("The hosted claim did not acquire this Start."), { code: "CHARACTER_IN_USE" });
         characterOperations.delete(characterID);
         transferred = true;
@@ -23389,9 +23463,9 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
           }
           try {
             const payload = auth.verifySessionToken(readSessionToken(req));
-            if (restoreReservation !== null && payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)
-              && !(await isCharacterHeld(characterID, req.webSessionID, { accountID: Number(req.account.accountID) }, restoreReservation))) {
-              await selectHeldCharacter(req.webSessionID, req.account, characterID, { freeOnly: true });
+            if (restoreReservation !== null && payload.sessionID === req.webSessionID && Number(payload.accountID) === Number(req.account.accountID)) {
+              if (!await restoreHeldCaller(req.webSessionID, req.account, characterID, restoreReservation))
+                message = `${message} Browser ownership was not restored; review the pilot's current owner.`;
             }
           } catch (error) {
             errorLogger(error);

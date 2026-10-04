@@ -2,7 +2,7 @@
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isBridgeWritePair } = require("./bridgeCallPolicy");
 
-function createPilotMutationFence({ heldSessions, assertWritable, assertSelectable, enterWrite }) {
+function createPilotMutationFence({ heldSessions, assertWritable, enterWrite }) {
   const scope = new AsyncLocalStorage();
   function wrap(gateway) {
     return new Proxy(gateway, { get(target, name) {
@@ -20,16 +20,11 @@ function createPilotMutationFence({ heldSessions, assertWritable, assertSelectab
             const pilots = new Set();
             for (const held of heldSessions.values()) if (args.includes(held.bridgeSessionID)) pilots.add(held.characterID);
             if (name === "selectCharacter") pilots.add(Number(args[0]?.[0]));
-            if (name === "selectFactoryCharacter") pilots.add(Number(args[1]));
             for (const arg of args) if (arg && typeof arg === "object" && Number.isSafeInteger(arg.characterID)) pilots.add(arg.characterID);
             for (const pilot of pilots) {
               const capability = scope.getStore();
-              if (name === "selectFactoryCharacter" && capability?.purpose === "custody-selection" && capability.pilot === pilot) {
-                assertSelectable(pilot); // Runtime atomically enforces free-only selection.
-              } else {
-                assertWritable(pilot, capability || null);
-                if (enterWrite) releases.push(enterWrite(pilot, capability || null));
-              }
+              assertWritable(pilot, capability || null);
+              if (enterWrite) releases.push(enterWrite(pilot, capability || null));
             }
           }
           const result = fn.apply(target, args);
@@ -39,7 +34,6 @@ function createPilotMutationFence({ heldSessions, assertWritable, assertSelectab
       };
     } });
   }
-  return { wrap, withLease: (lease, action) => scope.run(lease, action),
-    withCustodySelection: (pilot, action) => scope.run({ purpose: "custody-selection", pilot }, action) };
+  return { wrap, withLease: (lease, action) => scope.run(lease, action) };
 }
 module.exports = { createPilotMutationFence };

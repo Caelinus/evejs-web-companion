@@ -1,8 +1,0 @@
-runtime-patches/*.patch whitespace=-blank-at-eol
-runtime-patches/mining-support-services.patch text eol=lf
-runtime-patches/miningSupportProjection.js text eol=lf
-runtime-patches/miningRangeProjection.js text eol=lf
-
-# Normalize line endings repo-wide to LF so Windows checkouts/commits cannot
-# reintroduce CRLF-only diffs (which show up as whole-file rewrites).
-* text=auto eol=lf

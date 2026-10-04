@@ -722,8 +722,16 @@ export type MacroRegistry = Readonly<Partial<Record<MacroID, MacroDecider>>>;
 /** The production registry must implement EVERY format-level MacroID. */
 export type CompleteMacroRegistry = Readonly<Record<MacroID, MacroDecider>>;
 
-/** Flies the ship to `home` for a latched dock-and-pause. `done` == docked home. */
-export type HomeTravelDecider = (obs: ScriptObservation, mem: MacroMemory) => MacroTick;
+/**
+ * Flies the ship to `home` for a latched dock-and-pause. `done` == docked home.
+ *
+ * `bookedUnder` is the `stepPath` this file stamps on the trip's ticks, which is
+ * what the runner keys the refusal ledger by: the watch row that latched the
+ * trip, or null when the runner latched it itself. The trip is not a step and
+ * has no id of its own, so a block it borrows can only find its own refusals if
+ * it is told this one.
+ */
+export type HomeTravelDecider = (obs: ScriptObservation, mem: MacroMemory, bookedUnder?: string | null) => MacroTick;
 
 // ─── Memory ──────────────────────────────────────────────────────────────────
 
@@ -1029,6 +1037,15 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
   }
   const belt = step.args["belt"];
   return belt !== undefined && belt.kind === "belt" && ["site", "ice-site"].includes(belt.belt.mode);
+}
+
+/** Is the active block working the scanner's ICE sites? Its hold is the ice hold, not the ore hold. */
+export function activeStepMinesIce(script: BotScript, mem: ScriptMemory): boolean {
+  if (!activeStepToursOreSites(script, mem)) {
+    return false;
+  }
+  const belt = activeStep(script, mem.position)?.args["belt"];
+  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "ice-site";
 }
 
 /**
@@ -1999,7 +2016,7 @@ function continueHeadingHome(
     return paused(SAY.headingHome, mem, null);
   }
   const homeMem = mem.macroMem[HOME_MEM_KEY] ?? {};
-  const tick = travelHome(obs, homeMem);
+  const tick = travelHome(obs, homeMem, latched.interruptID);
   const macroMem = { ...mem.macroMem, [HOME_MEM_KEY]: tick.nextMem };
 
   if (tick.outcome.kind === "done") {
@@ -2063,7 +2080,7 @@ function continueRecovering(
   // fight-your-way-out included. `done` means docked (anywhere: a station in
   // reach beats a commute), which is the only place the rest of this can happen.
   const homeMem = mem.macroMem[HOME_MEM_KEY] ?? {};
-  const trip = travelHome(obs, homeMem);
+  const trip = travelHome(obs, homeMem, rowID);
   const macroMem = { ...mem.macroMem, [HOME_MEM_KEY]: trip.nextMem };
   if (trip.outcome.kind === "blocked") {
     // No home to fly to, or no way to reach it. A trip that cannot start is a

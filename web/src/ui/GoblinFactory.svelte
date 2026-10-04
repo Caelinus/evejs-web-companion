@@ -247,7 +247,7 @@
     const accepted = row.equipmentReview?.applyReview, options = credentials.get(row.account);
     if (busy || !accepted?.canApply || !accepted.reviewHash || !options) return;
     busy = true; const ticket = ++generation;
-    update(row.key, { equipmentReview: null, result: null, equipmentMessage: "Acquiring free-only control → revalidating → provisioning → verifying → releasing…" });
+    update(row.key, { equipmentReview: null, result: null, equipmentMessage: "Acquiring maintenance control; selected Review, provisioning, verification and release are pending…" });
     try {
       assertLocalPlan(row);
       if (equipmentIntent(row) !== row.equipmentIntent || JSON.stringify(readEquipmentSource(localStorage, row.account, row.pilot.characterID)) !== JSON.stringify(row.equipmentSource)) throw new Error("PLAN_CHANGED: physical source changed; Review again.");
@@ -453,7 +453,7 @@
     <button type="button" class="minor" disabled={busy || !ready || !!creatingAccount} onclick={() => accountPanel = accountPanel === "EXISTING" ? null : "EXISTING"}>Use existing account</button>
   </div>
   {#if accountPanel === "NEW"}<NewTrainee externalBusy={busy} onContinue={newAccountReady} onBusy={(value) => busy = value} onCancel={() => accountPanel = null} />{/if}
-  <p class="note">Skill qualification does not establish equipment readiness. Qualification and queue reads stay offline. Skill acquisition explicitly opens temporary live sessions for free pilots and releases them afterward.</p>
+  <p class="note">Qualification and queue reads select nobody. Explicit Provision Equipment uses bounded maintenance control and selected verification, then releases the pilot. Qualification alone does not prove equipment readiness. Direct skill purchase remains unavailable.</p>
   <TrainingSettingsPanel {settings} {busy} {corporations} authorities={settingsAuthorities} {homeAccessPilots} bind:homeAccessPilot contextError={Object.values(settingsErrors).filter(Boolean).join(" ")} onSave={saveSettings} onResolve={resolveHome} onSearch={searchHomes} />
   {#if onboardingMessage}<p role="status">{onboardingMessage}</p>{/if}
   {#if onboardingReview}

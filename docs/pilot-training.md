@@ -12,16 +12,12 @@ The older `factory*` modules and login alias remain compatibility implementation
    saved fittings. Fresh roles have no predefined ships. Choose the target contract.
 3. Review FAST requirements derived from the actual hull and fitting. A changed
    fitting must be accepted again; qualification does not prove equipment ownership.
-4. Optionally configure onboarding, its dedicated non-CEO authority, **Full access
-   (except CEO)**, and a training wallet. Corporation funding covers only the exact
-   personal-wallet shortfall, subject to authoritative permissions.
-5. Review and directly purchase missing skills, then separately review/apply the
-   append-only training queue. Existing queue entries are preserved.
+4. Optionally configure onboarding with its dedicated non-CEO authority and reviewed ordinary rights. Temporary login follows stock retail server policy.
+5. Inject missing skillbooks in the game client, then review/apply the stock append-only queue. Direct purchase and automatic funding are unavailable.
 6. Set an NPC station or accessible player-structure training/provisioning home if useful. This records the intended home;
    it does not move the pilot, buy equipment or provision a ship.
 
-Install the [supported runtime patches](pilot-training-runtime-setup.md) before using
-live acquisition/onboarding. New accounts retain EveJS development password semantics.
+Use stock EveJS and the [stock integration policy](stock-evejs-integration-policy.md). New accounts retain EveJS development password semantics.
 
 ## Qualification contracts
 
@@ -96,16 +92,7 @@ explicitly enabled; existing pilots require review and confirmation.
 
 ## Funding, home and wallets
 
-Corporation funding remains opt-in. An explicit corporation/accountKey is required.
-Preferred SELF funding uses the trainee's own Factory session and authoritative
-Account Take permission to transfer exactly `max(price - personal wallet, 0)` to
-itself through GiveCashFromCorpAccount. Both wallet journals are verified before
-PurchaseSkills. Optional fallback is a separately authenticated, explicitly selected
-non-CEO officer. There is no automatic CEO fallback.
-
-Prices, permissions, balances, membership and selected division are revalidated.
-Changes require rereview. A transfer followed by purchase failure stays reported as
-partial completion; no clawback, skill rollback or automatic queue application occurs.
+Saved wallet configuration is retained. Direct skill purchase and automatic funding are unavailable on stock web gateway. No financial transfer occurs through this unsupported action.
 Queue review/apply retains account ownership, offline state/version, fitting/plan
 fingerprint, append-only behavior and authoritative post-write verification.
 
@@ -115,14 +102,6 @@ retains `MANUAL_GM_ONLY`; structure Home records `CONFIG_ONLY` for future provis
 Saving either Home does not move a pilot. Player-structure relocation is not implemented.
 Financial decisions read live wallet authority, never roster display values.
 
-## Runtime patch and validation
+## Stock integration and validation
 
-Follow the [runtime setup guide](pilot-training-runtime-setup.md) for a fresh install
-or an update from the earlier live-session patch. It explains patch order, the complete
-helper file, expected hashes and line-ending differences. Preserve local mods and use
-the normal launcher/mod-loader startup path. Do not patch a clean upstream reference.
-
-Focused tests cover generic contracts/migration, recursive fitting requirements,
-explicit target binding across review/apply, authority/ownership, onboarding partial
-failure, self-funding/journals, CEO races, sessions/release, queue append and UI labels.
-The Farmer forward-port has mechanical verification only. Live acquisition, onboarding, queue and structure Home require isolated gameplay QA after installing and verifying the runtime patches.
+No WC core runtime patch is supported. Qualification, queue, creation and onboarding ownership tests cover stock interfaces; unsupported purchase/equipment actions refuse before acquisition. See [stock integration policy](stock-evejs-integration-policy.md).

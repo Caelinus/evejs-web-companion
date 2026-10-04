@@ -3,8 +3,20 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { readAccountCorpFittings } = require("./pilotTrainingFittings");
 const { row: serviceRow } = require("./trainingOnboarding");
-const { hash, fail, inventoryRows, buildContract } = require("./provisioningContracts");
+const { hash, fail, inventoryRows, buildContract, matchFittings } = require("./provisioningContracts");
 const containerGroups = new Set([12, 340, 448, 649]); // EveJS itemStore's cargo-container groups.
+
+async function readProvisioningDefinitions({ store, gateway, data, accountID, providerCharacterID, supplyPolicy }) {
+  const value = await readAccountCorpFittings({ store, gateway, data, accountID, characterID: providerCharacterID });
+  const contracts = [], invalid = [];
+  for (const fit of value.fittings || []) {
+    try {
+      contracts.push(buildContract(fit, { scope: "CORPORATION", accountID, characterID: providerCharacterID,
+        corporationID: value.corporationID }, data, supplyPolicy));
+    } catch { invalid.push({ fittingID: fit.fittingID, reason: "INVALID_FIT" }); }
+  }
+  return { status: value.status, corporationID: value.corporationID || null, providerCharacterID, contracts, invalid };
+}
 
 // Keep browser additions (including credentials) out of the durable contract.
 function reviewInput(value) {
@@ -51,6 +63,7 @@ function registerProvisioningRoutes(d) {
   routerPromise.catch(() => {});
   const strictList = async (held, sessionID, place) => {
     const result = await boundCall(held, sessionID, place.spec, "List", place.flag === 0 ? [] : [place.flag], null);
+    currentHeld(held, sessionID);
     return inventoryRows(result.result).sort((a, b) => a.identity.localeCompare(b.identity));
   };
   function adapter(req, held) {
@@ -59,42 +72,43 @@ function registerProvisioningRoutes(d) {
     async function context() {
       currentHeld(held, sessionID);
       const current = (await flight(held, sessionID)).flight;
+      currentHeld(held, sessionID);
       if (held.transition && held.transition.phase !== "ready") fail("PROVISIONING_CONTEXT_UNAVAILABLE");
       if (current.docked !== true || !current.shipID || current.shipID !== held.activeShipID ||
           !current.shipTypeID || !inventoryLocation(held)) fail("PROVISIONING_CONTEXT_UNAVAILABLE");
       if (held.structureID) fail("PROVISIONING_STATION_ONLY", "Initial replenishment supports docked NPC stations; structure qualification is pending.");
       const pilot = (await store.listCharactersForAccount(req.account.accountID)).find(c => c.characterID === held.characterID);
+      currentHeld(held, sessionID);
       if (!pilot || pilot.accountID !== req.account.accountID || pilot.corporationID !== held.corporationID) fail("PILOT_AUTHORITY_CHANGED");
       return { accountID: Number(req.account.accountID), characterID: held.characterID, corporationID: held.corporationID,
         shipID: current.shipID, shipTypeID: current.shipTypeID, locationID: inventoryLocation(held),
         recoveryReady: !pendingRecovery(held),
         sessionGeneration: hash([held.bridgeSessionID, held.botClaimSecret || null]) };
     }
-    async function library(input) {
+    async function library(input, allowMatch = false) {
       if (!Number.isSafeInteger(input.providerCharacterID) || !Number.isSafeInteger(input.corporationID)) fail("INVALID_DEFINITION_SOURCE");
-      const result = await readAccountCorpFittings({ store, gateway, data, accountID: Number(req.account.accountID), characterID: input.providerCharacterID });
+      const result = await readProvisioningDefinitions({ store, gateway, data, accountID: Number(req.account.accountID),
+        providerCharacterID: input.providerCharacterID, supplyPolicy: input.supplyPolicy });
+      currentHeld(held, sessionID);
       if (result.status !== "READY" || result.corporationID !== input.corporationID) fail("FITTING_SOURCE_CHANGED");
-      const provider = { scope: "CORPORATION", accountID: Number(req.account.accountID), characterID: input.providerCharacterID,
-        corporationID: result.corporationID };
-      const contracts = [];
-      for (const fit of result.fittings.filter(f => !f.invalid)) {
-        try { contracts.push(buildContract(fit, provider, data, input.supplyPolicy)); }
-        catch (error) { if (fit.fittingID === input.fittingID) throw error; }
-      }
+      const contracts = result.contracts;
       const contract = contracts.find(c => c.definition.fittingID === input.fittingID);
-      if (!contract) fail("INVALID_FIT");
+      if (!contract && !(allowMatch && input.fittingID === 0)) fail("INVALID_FIT");
       return { contract, contracts };
     }
     async function source(input, scope, recoveryPin = null) {
       const descriptor = input.source;
       if (!descriptor || !["hangar", "corp", "container"].includes(descriptor.kind)) fail("INVALID_SOURCE");
       const place = await resolvePlace(held, sessionID, descriptor);
+      currentHeld(held, sessionID);
       let access = { query: true, take: true }, ownerID = held.characterID;
       if (descriptor.kind === "corp") {
         if (descriptor.corporationID !== scope.corporationID) fail("CORPORATION_SOURCE_CHANGED");
         ownerID = scope.corporationID;
         const member = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetMember", [held.characterID], null)).result);
+        currentHeld(held, sessionID);
         const corp = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetCorporation", [], null)).result);
+        currentHeld(held, sessionID);
         if (Number(member.characterID) !== held.characterID || Number(member.corporationID) !== ownerID ||
             Number(corp.corporationID) !== ownerID) fail("CORPORATION_ACCESS_UNKNOWN");
         access = corporationAccess(member, corp, scope.locationID, descriptor.division);
@@ -124,6 +138,7 @@ function registerProvisioningRoutes(d) {
       try {
         const flags = [...new Set([...slots(), 5, 87, 158, 133, 143])];
         const listed = await boundCall(held, sessionID, cargoBindSpec(held, scope.shipID), "ListByFlags", [flags], null);
+        currentHeld(held, sessionID);
         const rows = inventoryRows(listed.result).sort((a, b) => a.identity.localeCompare(b.identity));
         if (rows.some(r => r.locationID !== scope.shipID || r.ownerID !== scope.characterID || !data.getType(r.typeID))) fail("OBSERVATION_INCOMPLETE");
         return { complete: true, shipTypeID: scope.shipTypeID, rows };
@@ -137,6 +152,18 @@ function registerProvisioningRoutes(d) {
       const observed = await observation(scope), origin = await source(input, scope, sourcePin);
       if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
       return { context: scope, ...definitions, observation: observed, source: origin };
+    }
+    async function readPreparation(input, sourcePin = null) {
+      const scope = await context(), definitions = await library(input, true);
+      const observed = await observation(scope), origin = await source(input, scope, sourcePin);
+      let contract = definitions.contract;
+      if (!contract) {
+        const matches = matchFittings(definitions.contracts, observed, data);
+        if (matches.state !== "MATCH") fail("EQUIPMENT_NOT_READY", `Selected equipment match ${matches.state}; choose an exact fitting.`);
+        contract = definitions.contracts.find(c => c.definition.fittingID === matches.alternatives[0].definition.fittingID);
+      }
+      if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
+      return { context: scope, ...definitions, contract, observation: observed, source: origin, target: { complete: observed.complete } };
     }
     async function readShip(input, targetHullID = null, sourcePin = null) {
       const scope = await context(), definitions = await library(input);
@@ -211,7 +238,7 @@ function registerProvisioningRoutes(d) {
       return mutationFence.withLease(lease, () => boundCall(held, sessionID, spec, "Add",
         [move.itemID, move.sourceLocationID], { flag: to.flag, qty: move.quantity }));
     }
-    return { context, read, readShip, plan, readMovement, dispatch,
+    return { context, read, readPreparation, readShip, plan, readMovement, dispatch,
       async dispatchShip(action, current, lease) {
         engine.assertWritable(held.characterID, lease);
         const revalidate = async () => {
@@ -283,4 +310,4 @@ function registerProvisioningRoutes(d) {
   // Authorized consumers share this selected-session adapter and engine.
   return { adapter };
 }
-module.exports = { registerProvisioningRoutes, corporationAccess };
+module.exports = { registerProvisioningRoutes, corporationAccess, readProvisioningDefinitions };

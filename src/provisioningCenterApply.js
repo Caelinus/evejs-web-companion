@@ -1,166 +1,233 @@
 "use strict";
-const { randomUUID } = require("node:crypto");
 const { createOperationJournal } = require("./operationJournal");
-const { hash, fail } = require("./provisioningContracts");
-const { shipPlan } = require("./shipProvisioning");
+const { hash, fail, inspectContract } = require("./provisioningContracts");
+const { randomUUID } = require("node:crypto");
+const { selectedIntent, assertSelected } = require("./provisioningIntent");
 const terminal = new Set(["COMPLETE", "ALREADY_SATISFIED", "REFUSED"]);
-const states = new Set([...terminal, "PREPARED", "ACQUIRING_CONTROL", "REVALIDATING", "PROVISIONING", "VERIFYING", "RELEASING", "BLOCKED"]);
+const states = new Set([...terminal, "PREPARED", "ACQUIRING_CONTROL", "READING", "REVALIDATING", "PROVISIONING", "VERIFYING", "RELEASING", "BLOCKED", "UNCERTAIN"]);
 const positive = n => Number.isSafeInteger(n) && n > 0;
-const { intent, assertSelected, rows } = require("./provisioningIntent");
-
-// Invocation evidence, not a second pilot ownership registry. Runtime/Factory
-// owns sessions; characterOperations owns reservations; Phase 5 owns mutations.
-// Opaque session handles remain only in memory. Restart recovery observes and
-// blocks until offline release is proven; it never selects or sends a mutation.
-function createProvisioningCenterApply({ sessions, gateway, engine, operations, data, readReview, selectedAdapter,
-  attach, detach, filePath = null, fault = null, now = Date.now }) {
-  const journal = createOperationJournal({ filePath }), reviews = new Map(), inFlight = new Set(), interruptions = new WeakSet();
+// One bounded consumer of the existing selected provisioning engine. The outer
+// journal records control/invocation evidence; inventory custody stays in engine.
+function createProvisioningCenterApply({ gateway, engine, operations, data, sessionOperations = new Map(), heldSessions = new Map(),
+  botHost, store, selectedAdapter, attach, detach, releaseSession = (...args) => gateway.releaseBridgeSession(...args),
+  withLease = (_lease, action) => action(), fault = null, filePath = null, now = Date.now }) {
+  const journal = createOperationJournal({ filePath });
+  const reviews = new Map(), active = new Map(), recoveryReservations = new Map(), recovering = new Map();
   for (const r of journal.list()) {
     if (r.kind !== "CENTER_APPLY" || !positive(r.accountID) || !positive(r.characterID) || !states.has(r.state) ||
         !r.pin || r.pin.accountID !== r.accountID || r.pin.characterID !== r.characterID || hash(r.pin) !== r.reviewHash ||
         !r.input || r.release?.state === undefined || Object.hasOwn(r, "bridgeSessionID")) fail("CENTER_CONTROL_JOURNAL_INVALID");
-    if (!terminal.has(r.state) && r.release.state !== "VERIFIED_OFFLINE" && !operations.has(r.characterID))
-      operations.set(r.characterID, { kind: "temporary-provisioning-recovery", id: r.key });
+    if (!terminal.has(r.state) && !operations.has(r.characterID)) {
+      const reservation={kind:"temporary-provisioning-recovery",id:r.key};
+      operations.set(r.characterID,reservation);recoveryReservations.set(r.key,reservation);
+    }
   }
   const pending = pilot => journal.list().filter(r => r.characterID === pilot && !terminal.has(r.state))
-    .map(r => ({ ...r, active: inFlight.has(r.key) }));
-  function save(row, state = row.state) { row.state = state; row.updatedAt = now(); const { key, ...record } = row; journal.put(key, record); }
-  function publicResult(r) { return { operationID: r.key, state: r.state, reason: r.reason || null, control: r.control || null,
-    revalidation: r.revalidation || null, provisioning: r.provisioning || null, release: r.release, finalReview: r.finalReview || null }; }
-  async function boundary(name, row) {
-    if (!fault) return;
-    try { await fault(name, publicResult(row)); } catch (e) { interruptions.add(e); throw e; }
-  }
+    .map(r => ({ operationID:r.key,state:r.state,reason:r.reason||null,active:active.get(r.key)?.running === true }));
+  const publicResult = r => ({ operationID:r.key,state:r.state,reason:r.reason||null,control:r.control||null,
+    revalidation:r.revalidation||null,provisioning:r.provisioning||null,release:r.release,finalReview:r.finalReview||null,
+    selectedReview:r.selectedReview||null,custodyOperationID:r.custodyOperationID||null,finalObservedAt:r.finalObservedAt||null });
+  const owned = (account,key) => {const r=journal.get(key);if(!r||r.accountID!==account.accountID)fail("OPERATION_NOT_OWNED");return {...r,key};};
+  const save = row => { const {key,...record}=row;journal.put(key,{...record,updatedAt:now()}); };
   function prepare(detail, input, { revalidate = null } = {}) {
-    const reasons = [], p = detail.pilot, s = detail.candidateSource;
-    let pin = null, plan = null;
-    try {
-      pin = intent(detail);
-      plan = shipPlan({ contract: detail.selected, observation: p.observation, context: { ...pin, recoveryReady: true },
-        source: { rows: s.rows, access: { take: true }, pin: { descriptor: input.source } }, target: { complete: true, rows: [] } }, data);
-      if (plan.mode !== "ALREADY_SATISFIED") reasons.push(...plan.unsupported, ...plan.shortages);
-      if (!plan.canApply) reasons.push("Unsupported or incomplete provisioning plan.");
-    } catch (e) { reasons.push(e.code || "REVIEW_REQUIRED"); }
-    if (p.control.state !== "FREE") reasons.push(`Pilot control is ${p.control.state}; FREE observation still requires free-only acquisition.`);
-    if (pending(p.characterID).length || engine.unresolved(p.characterID).length) reasons.push("RECOVERY_REQUIRED");
-    const reviewID = randomUUID(), reviewHash = pin ? hash(pin) : null, expiresAt = now() + 300000;
-    const canApply = !!pin && !!plan?.canApply && !reasons.length;
-    if (canApply) reviews.set(reviewID, { input, pin, reviewHash, expiresAt, revalidate, evidence: { revision: p.revision, quality: p.quality, sourceRevision: hash(s), read: detail.evidence } });
-    for (const [key, r] of reviews) if (r.expiresAt < now()) reviews.delete(key);
-    return { reviewID, reviewHash, expiresAt, canApply, reasons, plan, authority: "FREE_ONLY_ACQUISITION_AND_FRESH_REVALIDATION_REQUIRED", suppliesPolicy: "NEW_HULL_ONLY" };
+    const p=detail.pilot,c=detail.selected,source=input.source,consumer=input.consumer||"CENTER";
+    const reasons=[];
+    if (!c) reasons.push("Choose an explicit saved fitting; physical matching is pending.");
+    if (p.control?.owner!=="OFF" || p.control?.online!==false) reasons.push("Pilot must be offline and free of known owners.");
+    if (pending(p.characterID).length || engine.unresolved(p.characterID).length) reasons.push("Recovery required before a new invocation.");
+    if (!positive(p.accountID) || !positive(p.characterID) || !["hangar","corp"].includes(source?.kind)) fail("REVIEW_REQUIRED");
+    const pin={version:2,authority:"SELECTED_MAINTENANCE",accountID:p.accountID,characterID:p.characterID,corporationID:p.corporationID,
+      definition:c?.definition||null,definitionFingerprint:c?.definitionFingerprint||null,source,
+      consumer,training:input.training||null,suppliesPolicy:"NEW_HULL_ONLY"};
+    const cleanInput={characterID:p.characterID,providerCharacterID:input.providerCharacterID,corporationID:c?.definition.corporationID||input.corporationID,
+      fittingID:input.fittingID,source,consumer,...(input.training?{training:input.training}:{})};
+    const reviewID=randomUUID(),expiresAt=now()+300000;
+    for(const [key,value] of reviews) if(value.expiresAt<now()) reviews.delete(key);
+    // Clone accepted intent so neither caller mutation nor subsequent Center
+    // reads can substitute another Training configuration/source.
+    reviews.set(reviewID,{pin:JSON.parse(JSON.stringify(pin)),input:JSON.parse(JSON.stringify(cleanInput)),revalidate,expiresAt,canApply:!reasons.length});
+    return {reviewID,reviewHash:hash(pin),expiresAt,canApply:!reasons.length,reasons,suppliesPolicy:"NEW_HULL_ONLY",
+      plan:c?{mode:"PENDING_SELECTED_REVIEW",hullQuantity:null,targetHullName:c.name,steps:["Acquire maintenance control","Authoritative selected Review","Apply supported plan","Verify and release"],
+        unsupported:[],shortages:[],destructiveActions:[]}:null};
   }
-  async function apply(account, request, consumer = null) {
-    if (request?.confirm !== true || typeof request.reviewID !== "string" || typeof request.reviewHash !== "string") fail("CONFIRMATION_REQUIRED");
-    const key = request.reviewID, prior = journal.get(key);
-    if (prior) {
-      if (prior.accountID !== account.accountID || prior.reviewHash !== request.reviewHash || (consumer && prior.input.consumer !== consumer)) fail("OPERATION_NOT_OWNED");
-      return publicResult({ key, ...prior }); // Historical invocation: never reacquire/replay.
+  const isOffline = (s,pilot) => s?.characterID===pilot && s.online===false && s.controlState==="offline";
+  function clearReservation(run) {
+    if(operations.get(run.row.characterID)===run.reservation) operations.delete(run.row.characterID);
+    for(const key of run.sessionKeys) if(sessionOperations.get(key)===run.reservation) sessionOperations.delete(key);
+  }
+  async function cleanup(run) {
+    const row=run.row;
+    row.state="RELEASING";
+    let persistenceError=null;
+    try { save(row);persistenceError=null; } catch(error) { persistenceError=error; }
+    // A refusal before the selection call acquired no control to release.
+    // Persist that fact before removing only this invocation's exact fences.
+    if(!run.selectionRequested) {
+      row.release={state:"NOT_ACQUIRED",checkedAt:now(),exactSessionReleased:false,evidence:"NO_SELECTION_DISPATCH"};
+      row.state="REFUSED";save(row);
+      clearReservation(run);active.delete(row.key);return;
     }
-    const accepted = reviews.get(key);
-    if (!accepted || accepted.pin.accountID !== account.accountID || accepted.reviewHash !== request.reviewHash || accepted.expiresAt < now() ||
-        (consumer && accepted.input.consumer !== consumer)) fail("REVIEW_REQUIRED");
-    if (pending(accepted.pin.characterID).length || engine.unresolved(accepted.pin.characterID).length) fail("RECOVERY_REQUIRED");
-    const row = { key, kind: "CENTER_APPLY", accountID: account.accountID, characterID: accepted.pin.characterID,
-      input: accepted.input, pin: accepted.pin, reviewHash: accepted.reviewHash, observation: accepted.evidence,
-      state: "PREPARED", createdAt: now(), release: { state: "NOT_ACQUIRED" } };
-    save(row); reviews.delete(key); inFlight.add(key);
-    let binding = null;
+    let acknowledged=false;
+    if(run.selected?.bridgeSessionID) {
+      try {
+        // Administrative cleanup targets ONLY the returned opaque handle. It
+        // must remain possible while the inventory journal fences all writes.
+        const r=await releaseSession(run.selected.bridgeSessionID,{userid:row.accountID});
+        acknowledged=r?.released===true && (r.characterID==null || r.characterID===row.characterID);
+      } catch(error) { acknowledged=error.code==="SESSION_NOT_FOUND"; }
+    }
+    let offline=false;
+    try { offline=isOffline(await gateway.getCharacterStatus(row.accountID,row.characterID),row.characterID); } catch { /* Preserve uncertainty. */ }
+    row.release={state:offline?"VERIFIED_OFFLINE":acknowledged?"SESSION_RELEASED_OFFLINE_UNPROVEN":"UNVERIFIED",checkedAt:now(),
+      exactSessionReleased:acknowledged,evidence:offline?"AUTHORITATIVE_CHARACTER_STATUS":null};
+    if(acknowledged||offline) { if(run.binding) detach(run.binding); }
+    else if(run.binding) run.binding.held.selectionReleaseUnverified=true;
+    const custody=engine.unresolved(row.characterID).length>0;
+    row.state=!offline?"UNCERTAIN":custody?"BLOCKED":row.completion||"REFUSED";
+    if(!offline) row.reason="CONTROL_RELEASE_UNPROVEN";
+    else if(custody) row.reason="PROVISIONING_RECOVERY_REQUIRED";
+    // A journal failure cannot strand the session. Keep the original durable
+    // invocation/recovery fence if the final evidence cannot be persisted.
+    try { save(row);persistenceError=null; } catch(error) { persistenceError=error; }
+    if(offline&&!custody&&!persistenceError) { clearReservation(run);active.delete(row.key); }
+    else if(acknowledged) { for(const key of run.sessionKeys) if(sessionOperations.get(key)===run.reservation) sessionOperations.delete(key); }
+    if(persistenceError) throw persistenceError;
+  }
+  async function apply(account, request, consumer="CENTER", callerSessionID=null) {
+    if(request?.confirm!==true) fail("CONFIRMATION_REQUIRED");
+    const prior=journal.get(request.reviewID);
+    if(prior) {
+      const row=owned(account,request.reviewID);
+      if(row.reviewHash!==request.reviewHash || (row.pin.version===2 && row.pin.consumer!==consumer)) fail("REVIEW_REQUIRED");
+      return publicResult(row); // Never reacquire or replay a persisted invocation.
+    }
+    const accepted=reviews.get(request.reviewID);
+    if(!accepted || !accepted.canApply || accepted.expiresAt<now() || hash(accepted.pin)!==request.reviewHash ||
+        accepted.pin.accountID!==account.accountID || accepted.pin.consumer!==consumer) fail("REVIEW_REQUIRED");
+    if(request.source && hash(request.source)!==hash(accepted.input.source) ||
+        request.training && hash(request.training)!==hash(accepted.input.training)) fail("REVIEW_STALE");
+    const pilot=accepted.pin.characterID,sessionID=`provisioning-center:${request.reviewID}`;
+    const sessionKeys=[...new Set([sessionID,...(callerSessionID?[callerSessionID]:[])])];
+    if(operations.has(pilot) || sessionKeys.some(k=>sessionOperations.has(k)) || engine.unresolved(pilot).length ||
+        botHost.claimedBy(pilot)!==null || [...heldSessions.values()].some(h=>h.characterID===pilot)) fail("PILOT_BUSY");
+    const row={key:request.reviewID,kind:"CENTER_APPLY",accountID:account.accountID,characterID:pilot,
+      pin:accepted.pin,input:accepted.input,reviewHash:request.reviewHash,runID:randomUUID(),state:"ACQUIRING_CONTROL",
+      release:{state:"NOT_ACQUIRED"},createdAt:now()};
+    const reservation={kind:"temporary-provisioning",id:row.key,characterID:pilot,runID:row.runID};
+    const run={row,reservation,sessionKeys,running:true,selectionRequested:false,selected:null,binding:null};
+    // Persist before acquiring. If persistence fails, no reservation or session
+    // is installed and no mutation is sent.
+    save(row);operations.set(pilot,reservation);for(const key of sessionKeys) sessionOperations.set(key,reservation);active.set(row.key,run);
+    function current() {
+      const owner=operations.get(pilot);
+      if(active.get(row.key)!==run || !(owner===reservation || owner?.kind==="replenishment" && owner.parent===reservation && owner.id===row.custodyOperationID) ||
+          sessionKeys.some(k=>sessionOperations.get(k)!==reservation) || botHost.claimedBy(pilot)!==null ||
+          [...heldSessions.values()].some(h=>h.characterID===pilot && h!==run.binding?.held) ||
+          run.binding && heldSessions.get(sessionID)!==run.binding.held ||
+          engine.unresolved(pilot).some(r=>r.key!==row.custodyOperationID || r.accountID!==row.accountID)) fail("PROVISIONING_GENERATION_CHANGED");
+    }
+    async function boundary(state) { row.state=state;save(row);if(fault)await fault(state,row);current(); }
     try {
-      const outcome = await sessions.withSessions([{ account, characterID: row.characterID }], async ([lease]) => {
-        binding = attach(account, row.characterID, lease.selected, key);
-        const generation = row.control.generation;
-        const base = selectedAdapter(binding.req, binding.held);
-        let planning = true;
-        const guard = async action => {
-          if (hash([binding.held.bridgeSessionID, null]) !== generation) fail("PROVISIONING_GENERATION_CHANGED");
-          const value = await action();
-          if (hash([binding.held.bridgeSessionID, null]) !== generation ||
-              (value?.context && value.context.sessionGeneration !== generation) || (value?.sessionGeneration && value.sessionGeneration !== generation)) fail("PROVISIONING_GENERATION_CHANGED");
-          if (planning && value?.source) assertSelected(row.pin, value, data);
-          if (value?.contract && value.contract.definitionFingerprint !== row.pin.definitionFingerprint) fail("REVIEW_STALE");
-          return value;
-        };
-        const adapter = { ...base, context: () => guard(() => base.context()),
-          readShip: (...args) => guard(() => base.readShip(...args)) };
-        let freshOffline;
-        try { freshOffline = await readReview(account.accountID, row.input); }
-        catch (e) { if (["FITTING_UNAVAILABLE", "FITTING_SOURCE_CHANGED", "INVALID_FIT", "PROVIDER_NOT_OWNED"].includes(e.code)) fail("REVIEW_STALE"); throw e; }
-        if (hash(intent(freshOffline)) !== row.reviewHash) fail("REVIEW_STALE");
-        const fresh = await adapter.readShip(row.input);
-        assertSelected(row.pin, fresh, data);
-        // A consumer may impose an additional read-only policy (e.g. Training
-        // skills). It cannot replace acquisition, the shared barrier or engine.
-        // The callback is memory-only; restart recovery never repeats Apply.
-        await accepted.revalidate?.(account, freshOffline);
-        row.revalidation = { state: "VERIFIED", at: now(), generation, context: fresh.context, source: { pin: fresh.source.pin, access: fresh.source.access, stock: rows(fresh.source.rows) },
-          definitionFingerprint: fresh.contract.definitionFingerprint, observed: rows(fresh.observation.rows) };
-        save(row, "REVALIDATING");
-        await boundary("REVALIDATED", row);
-        return engine.withTemporaryControl(lease.reservation, async () => {
-          const reviewed = await engine.reviewShip(adapter, row.input);
-          if (!reviewed.canApply) fail("REVIEW_REQUIRED");
-          row.provisioning = { operationID: reviewed.reviewID, reviewHash: reviewed.reviewHash, state: "PENDING", mode: reviewed.plan.mode };
-          save(row, "PROVISIONING");
-          await boundary("BEFORE_ENGINE", row);
-          planning = false; // The accepted engine now pins every resulting mutation state.
-          const result = await engine.applyShip(adapter, { reviewID: reviewed.reviewID, reviewHash: reviewed.reviewHash });
-          row.provisioning = { ...row.provisioning, ...result }; save(row, "VERIFYING");
-          if (result.state !== "COMPLETE") fail("PROVISIONING_RECOVERY_REQUIRED");
-          const final = await engine.reviewShip(adapter, row.input);
-          if (final.status.equipment !== "VERIFIED" || final.context.sessionGeneration !== generation ||
-              final.contract.definitionFingerprint !== row.pin.definitionFingerprint) fail("FINAL_EQUIPMENT_NOT_VERIFIED");
-          row.finalReview = { context: final.context, status: final.status, contract: final.contract, at: now() };
-          row.completion = result.result?.alreadySatisfied ? "ALREADY_SATISFIED" : "COMPLETE";
-          save(row, "VERIFYING");
-          await boundary("VERIFIED", row);
+      current();
+      const chars=await store.listCharactersForAccount(account.accountID);current();
+      if(!chars.some(p=>p.characterID===pilot && p.accountID===account.accountID && p.corporationID===row.pin.corporationID)) fail("PILOT_AUTHORITY_CHANGED");
+      const status=await gateway.getCharacterStatus(account.accountID,pilot);current();
+      if(!isOffline(status,pilot)) fail("PILOT_BUSY");
+      await boundary("ACQUIRING_CONTROL");
+      row.release={state:"UNVERIFIED"};save(row);
+      run.selected=await withLease(reservation,()=>{
+        run.selectionRequested=true;
+        return gateway.selectCharacter([pilot,null,true],null,{userid:account.accountID,userName:String(account.username||"")});
+      });
+      current();
+      if(typeof run.selected?.bridgeSessionID!=="string" || !run.selected.bridgeSessionID || run.selected.session?.characterID!==pilot) fail("PROVISIONING_SESSION_MISMATCH");
+      run.binding=attach(account,pilot,run.selected,row.key);current();
+      run.binding.held.maintenanceCurrent=current;
+      const adapter=selectedAdapter(run.binding.req,run.binding.held);
+      let generation=null,baseline=null,preMutation=true,requireTake=true;
+      const guarded=new Proxy(adapter,{get(target,key) {
+        const fn=target[key];if(typeof fn!=="function")return fn;
+        return async(...args)=>{
+          current();if(key==="dispatch"||key==="dispatchShip")preMutation=false;
+          const result=await fn.apply(target,args);current();
+          const context=key==="context"?result:result?.context;
+          if(context && generation && context.sessionGeneration!==generation) fail("PROVISIONING_GENERATION_CHANGED");
+          if(key==="readShip") {
+            if(result.contract.definitionFingerprint!==row.pin.definitionFingerprint)fail("REVIEW_STALE");
+            if(baseline&&preMutation)assertSelected(baseline,result,data,{requireTake});
+          }
           return result;
-        });
-      }, { purpose: "PROVISIONING", operationID: key, lifecycle: {
-        async acquiring() { row.control = { state: "ACQUISITION_PENDING", generation: null, invocationID: randomUUID() }; save(row, "ACQUIRING_CONTROL"); },
-        async acquired(lease) { row.control = { ...row.control, state: "ACQUIRED", generation: hash([lease.bridgeSessionID, null]),
-          accountID: account.accountID, characterID: row.characterID, acquiredAt: now() }; row.release = { state: "REQUIRED" }; save(row, "REVALIDATING"); await boundary("ACQUIRED", row); },
-        async releasing() { row.release = { state: "PENDING", invocationID: randomUUID(), at: now() }; save(row, "RELEASING"); await boundary("RELEASE_PENDING", row); },
-        async released(lease, released) { row.release = { ...row.release, state: !lease.attempted ? "NOT_ACQUIRED" : released ? "VERIFIED_OFFLINE" : "UNKNOWN", checkedAt: now() }; save(row, released ? row.state : "BLOCKED"); },
-        interrupted: e => interruptions.has(e),
-      } });
-      if (outcome.cleanup.some(r => !r.released) || row.release.state !== "VERIFIED_OFFLINE") { row.reason = "RELEASE_UNPROVEN"; save(row, "BLOCKED"); }
-      else save(row, row.completion || "REFUSED");
-    } catch (e) {
-      row.reason = String(e.code || "APPLY_FAILED");
-      if (interruptions.has(e) || row.release.state === "UNKNOWN" || engine.unresolved(row.characterID).length ||
-          (row.control?.state === "ACQUIRED" && row.release.state !== "VERIFIED_OFFLINE")) save(row, "BLOCKED");
-      else save(row, "REFUSED");
+        };
+      }});
+      await boundary("READING");
+      const first=await guarded.readShip(row.input);current();generation=first.context.sessionGeneration;
+      if(["accountID","characterID","corporationID"].some(k=>first.context[k]!==row.pin[k]) ||
+          hash(first.source.pin.descriptor)!==hash(row.pin.source))fail("PILOT_AUTHORITY_CHANGED");
+      // Query-only source authority is enough for a proven zero-mutation
+      // result. Shared shipPlan still requires Take before any new hull action.
+      requireTake=inspectContract(first.contract,first.observation,data).equipment!=="VERIFIED";
+      baseline=selectedIntent(first,{requireTake});row.selectedBaseline=baseline;
+      row.control={state:"MAINTENANCE",generation,characterID:pilot};save(row);
+      await boundary("REVALIDATING");
+      if(accepted.revalidate) { await accepted.revalidate(account,{selected:first.contract,pilot:{quality:"COMPLETE",observation:first.observation}});current(); }
+      const review=await engine.reviewShip(guarded,row.input);current();
+      row.selectedReview=review;row.revalidation={state:"VERIFIED_SELECTED",generation};save(row);
+      if(!review.canApply) fail("PROVISIONING_PLAN_BLOCKED",review.plan.unsupported.concat(review.plan.shortages).join("; "));
+      await boundary("PROVISIONING");
+      if(accepted.revalidate) { await accepted.revalidate(account,{selected:first.contract,pilot:{quality:"COMPLETE",observation:first.observation}});current(); }
+      // Persist the exact child ID before engine can dispatch. Retrying the
+      // outer invocation returns evidence, never creates another child.
+      row.custodyOperationID=review.reviewID;save(row);
+      row.provisioning=await engine.withTemporaryControl(reservation,()=>engine.applyShip(guarded,{reviewID:review.reviewID,reviewHash:review.reviewHash}));current();save(row);
+      if(row.provisioning.state!=="COMPLETE")fail("PROVISIONING_RECOVERY_REQUIRED");
+      await boundary("VERIFYING");
+      row.finalReview=await engine.reviewShip(guarded,row.input);current();
+      row.finalObservedAt=now();
+      if(row.finalReview.status.equipment!=="VERIFIED")fail("FINAL_EQUIPMENT_NOT_VERIFIED");
+      row.completion=row.provisioning.result?.alreadySatisfied?"ALREADY_SATISFIED":"COMPLETE";row.reason=null;save(row);
+    } catch(error) {
+      row.reason=String(error.code||"MAINTENANCE_FAILED");row.completion="REFUSED";
+      // Reconciliation is observation only and uses the original selected
+      // owner. Ownership loss never authorizes reacquisition or another send.
+      if(row.custodyOperationID && engine.unresolved(pilot).some(r=>r.key===row.custodyOperationID) && run.binding) {
+        try { current();const adapter=selectedAdapter(run.binding.req,run.binding.held);
+          await engine.withTemporaryControl(reservation,()=>engine.reconcile(adapter,row.custodyOperationID));current();
+        } catch { /* Durable custody remains blocked. */ }
+      }
+      save(row);
     } finally {
-      inFlight.delete(key);
-      if (binding) detach(binding);
-      if (!terminal.has(row.state) && row.release.state !== "VERIFIED_OFFLINE" && !operations.has(row.characterID))
-        operations.set(row.characterID, { kind: "temporary-provisioning-recovery", id: key });
+      try { await cleanup(run); } finally { run.running=false; }
     }
     return publicResult(row);
   }
-  async function recover(account, operationID) {
-    const row = journal.get(operationID);
-    if (!row || row.accountID !== account.accountID) fail("OPERATION_NOT_OWNED"); row.key = operationID;
-    if (inFlight.has(operationID)) fail("APPLY_IN_PROGRESS");
-    if (terminal.has(row.state)) return publicResult(row);
-    const s = await gateway.getCharacterStatus(account.accountID, row.characterID);
-    if (s?.characterID !== row.characterID || s.online !== false || s.controlState !== "offline") {
-      row.reason = "CONTROL_RELEASE_UNPROVEN"; save(row, "BLOCKED"); return publicResult(row);
+  async function recoverOnce(account, operationID) {
+    const row=owned(account,operationID);
+    if(terminal.has(row.state))return publicResult(row);
+    const run=active.get(operationID);
+    if(run?.running) return publicResult(row);
+    if(run) { run.running=true;try { await cleanup(run);return publicResult(run.row); } finally { run.running=false; } }
+    const expectedReservation=recoveryReservations.get(operationID);
+    const s=await gateway.getCharacterStatus(account.accountID,row.characterID);
+    if(s?.characterID!==row.characterID||s.online!==false||s.controlState!=="offline") {
+      row.state="BLOCKED";row.reason="CONTROL_RELEASE_UNPROVEN";save(row);return publicResult(row);
     }
-    row.release = { ...row.release, state: "VERIFIED_OFFLINE", checkedAt: now(), evidence: "AUTHORITATIVE_CHARACTER_STATUS" };
-    const active = operations.get(row.characterID);
-    if (["temporary-provisioning", "temporary-provisioning-recovery"].includes(active?.kind) && active.id === operationID) operations.delete(row.characterID);
-    await sessions.status(account, row.characterID);
-    if (engine.unresolved(row.characterID).length) { row.reason = "PROVISIONING_RECOVERY_REQUIRED"; save(row, "BLOCKED"); }
-    else { row.reason = row.completion ? null : "INTERRUPTED_REVIEW_REQUIRED"; save(row, row.completion || "REFUSED");
+    row.release={...row.release,state:"VERIFIED_OFFLINE",checkedAt:now(),evidence:"AUTHORITATIVE_CHARACTER_STATUS"};
+    if(engine.unresolved(row.characterID).length){row.state="BLOCKED";row.reason="PROVISIONING_RECOVERY_REQUIRED";}
+    else {row.state=row.completion||"REFUSED";row.reason=["COMPLETE","ALREADY_SATISFIED"].includes(row.completion)?null:row.reason||"INTERRUPTED_REVIEW_REQUIRED";}
+    save(row); // Persist terminal evidence before removing its exact fence.
+    const reservation=operations.get(row.characterID);
+    if(terminal.has(row.state)&&expectedReservation && reservation===expectedReservation) {
+      operations.delete(row.characterID);recoveryReservations.delete(operationID);
     }
     return publicResult(row);
   }
-  function status(account, operationID) {
-    const row = journal.get(operationID);
-    if (!row || row.accountID !== account.accountID) fail("OPERATION_NOT_OWNED");
-    return publicResult({ key: operationID, ...row });
+  function recover(account,operationID) {
+    try { owned(account,operationID); } catch(error) { return Promise.reject(error); }
+    if(recovering.has(operationID))return recovering.get(operationID);
+    const promise=recoverOnce(account,operationID).finally(()=>{if(recovering.get(operationID)===promise)recovering.delete(operationID);});
+    recovering.set(operationID,promise);return promise;
   }
-  return { prepare, apply, recover, status, pending, journal };
+  return { pending, status:(account,key)=>publicResult(owned(account,key)), recover, journal,
+    prepare,apply };
 }
-module.exports = { createProvisioningCenterApply, intent, assertSelected };
+module.exports={createProvisioningCenterApply};

@@ -65,15 +65,23 @@ function world(t, options = {}) {
     engine=createReplenishment({filePath:custodyFile,operations:new Map(),data,now:()=>now++});
     startup=createStartupRuns({filePath:startupFile,now:()=>now++});
     preparation=createMiningPreparation({store:{getAccount:async()=>({accountID:1}),getCharacterForAccount:async(_,id)=>states.has(id)},
-      readReview:async(_,input)=>{
+      readDefinitions:options.readDefinitions || (async(_,input)=>({status:"READY",corporationID:900,contracts:[contract(input)]})),
+      readSkills:options.readSkills || (async()=>({serverNowMs:1000,skills:[],queue:{active:false,entries:[]}})),engine,
+      adapterFor:record=>{const a=adapterFor(record);return {...a,readPreparation:a.read};},
+      bots:()=>bots,currentRun:()=>run,data,now:()=>now++,fault:options.fault});
+  }
+  async function legacyIntent() {
+        const plan=await preparation.plan(definition), input=plan.members[0].intent.input;
         const read=await adapterFor(input).read(input);
         const observed={...read.observation,complete:options.offlineComplete !== false,rows:read.observation.rows.map(r=>options.offlineLoadedReal && r.loaded?{...r,itemID:6000+input.characterID,loaded:false,identity:String(6000+input.characterID)}:r).concat(options.offlineRows || [])};
         const sourceStock=[...read.source.rows];
         if(options.offlineCurrentHull)sourceStock.push(row(read.context.shipID,100,options.personalSource?input.characterID:900,read.source.pin.locationID,read.source.pin.flag,1,true));
         if(options.offlineOtherHull)sourceStock.push(row(99001,100,options.personalSource?input.characterID:900,read.source.pin.locationID,read.source.pin.flag,1,true));
-        return {selected:read.contract,status:inspectContract(read.contract,observed,data),pilot:{...read.context,quality:"COMPLETE",dockState:"DOCKED",observation:observed,control:{state:"FREE"},revision:"world-1"},
+        const detail={selected:read.contract,status:inspectContract(read.contract,observed,data),pilot:{...read.context,quality:"COMPLETE",dockState:"DOCKED",observation:observed,control:{state:"FREE"},revision:"world-1"},
           candidateSource:{...source,quality:"COMPLETE",query:"ALLOWED",take:options.take===false?"DENIED":"ALLOWED",officeID:options.personalSource?null:separate(input.characterID)?703:701,contentsLocationID:separate(input.characterID)?702:700,dockedLocationID:600,flag:options.personalSource?4:116,rows:sourceStock}};
-      },readSkills:options.readSkills || (async()=>({serverNowMs:1000,skills:[],queue:{active:false,entries:[]}})),engine,adapterFor,bots:()=>bots,currentRun:()=>run,data,now:()=>now++,fault:options.fault});
+        return JSON.parse(JSON.stringify({...plan.members[0].intent,version:1,
+          input:{...input,fittingID:detail.selected.definition.fittingID},
+          pin:require("./provisioningIntent").intent(detail),fittingName:detail.selected.name}));
   }
   function record(intent,resumed=false) {
     const value={accountID:1,characterID:intent.characterID,operationID:"operation-1",operationRunID:"operation-run-1",logicalRunID:`logical-${intent.characterID}`,operationPreparation:intent,
@@ -82,9 +90,19 @@ function world(t, options = {}) {
     return value;
   }
   restart();
-  return {definition,states,bots,record,restart,get preparation(){return preparation;},get engine(){return engine;},get startup(){return startup;},get dispatches(){return dispatches;},get stock(){return stock;},setStock:value=>{stock=value;},setRun:value=>{run=value;},fit};
+  return {definition,states,bots,record,restart,legacyIntent,get preparation(){return preparation;},get engine(){return engine;},get startup(){return startup;},get dispatches(){return dispatches;},get stock(){return stock;},setStock:value=>{stock=value;},setRun:value=>{run=value;},fit};
 }
-async function accepted(w) { const plan=await w.preparation.plan(w.definition);assert.equal(plan.state,"READY");return plan.members[0].intent; }
+async function accepted(w, legacy=false) { if(legacy)return w.legacyIntent();const plan=await w.preparation.plan(w.definition);assert.equal(plan.state,"READY");return plan.members[0].intent; }
+
+test("stock plan reads definitions only, pins no physical readiness and accepts a changed pre-acquisition stock baseline",async t=>{
+  let reads=0;const w=world(t,{onRead:()=>{reads++;}}),plan=await w.preparation.plan(w.definition);
+  assert.equal(reads,0);assert.equal(plan.state,"READY");assert.equal(plan.members[0].state,"PENDING");
+  assert.equal(plan.members[0].equipment,"UNKNOWN");assert.equal(plan.members[0].supplies,"UNKNOWN");
+  assert.equal(plan.members[0].intent.version,2);assert.equal(plan.members[0].intent.pin,undefined);
+  w.setStock(12);const r=w.record(plan.members[0].intent);
+  assert.equal((await w.preparation.prepare(r)).state,"VERIFIED");assert.equal(w.stock,2);
+  assert.equal(r.preparationCheckpoint.snapshot().evidence.selectedBaseline.pin.source.stock[0][5],12);
+});
 
 test("Standard Defender uses shared replenishment then verifies damage/ammo under final hosted owner",async t=>{
   const w=world(t,{defender:true,cargo:0,stock:20}),r=w.record(await accepted(w));
@@ -117,14 +135,14 @@ test("deficit replenishes then proves final full equipment and supply observatio
   const result=await w.preparation.prepare(r);assert.equal(result.state,"VERIFIED");assert.equal(result.targets[0].current,10);
   assert.equal(w.stock,2);assert.equal(w.dispatches,1);assert.equal(w.engine.journal.list()[0].moves[0].state,"VERIFIED");
 });
-test("wrong equipment blocks read-only plan and mutation after accepted equipment drifts",async t=>{
+test("planning reports UNKNOWN equipment; wrong equipment blocks final owner without mutation",async t=>{
   const w=world(t),intent=await accepted(w);w.states.get(11).equipment=300;
-  assert.equal((await w.preparation.plan(w.definition)).state,"BLOCKED");
+  const plan=await w.preparation.plan(w.definition);assert.equal(plan.state,"READY");assert.equal(plan.members[0].equipment,"UNKNOWN");
   assert.equal((await w.preparation.prepare(w.record(intent))).state,"BLOCKED");assert.equal(w.dispatches,0);
 });
 test("corporation Take refusal never falls back to personal stock",async t=>{
   const w=world(t,{take:false}),plan=await w.preparation.plan(w.definition);
-  assert.equal(plan.state,"BLOCKED");assert.equal(plan.members[0].state,"BLOCKED");
+  assert.equal(plan.state,"READY");assert.equal((await w.preparation.prepare(w.record(plan.members[0].intent))).reason,"SOURCE_TAKE_DENIED");
   assert.equal(w.dispatches,0);assert.equal(w.stock,30);
 });
 test("Take authority drift is refused under final owner without transfer",async t=>{
@@ -157,7 +175,7 @@ test("definition drift refuses final-owner preparation before dispatch",async t=
   assert.equal((await w.preparation.prepare(w.record(intent))).reason,"REVIEW_STALE");assert.equal(w.dispatches,0);
 });
 test("unrelated source depletion refuses accepted stock pin",async t=>{
-  const w=world(t),intent=await accepted(w);w.setStock(29);
+  const w=world(t),intent=await accepted(w,true);w.setStock(29);
   assert.equal((await w.preparation.prepare(w.record(intent))).reason,"SOURCE_CHANGED");assert.equal(w.dispatches,0);
 });
 for(const [change,reason] of [["source","SOURCE_CHANGED"],["cargo","REVIEW_STALE"]])
@@ -206,12 +224,11 @@ test("existing Core requirement makes Heavy Water critical only when requireCore
   assert.equal(readiness(status,{suppliesRequired:false},{useIndustrialCore:true,coreRequirement:"requireCore"}).state,"BLOCKED");
   assert.equal(readiness({...status,targets:[]},{},{useIndustrialCore:true,coreRequirement:"continueWithoutCore"}).state,"BLOCKED");
 });
-test("required Core fuel keeps its effective required label when Take denial blocks preflight",async t=>{
+test("required Core fuel keeps its effective required label when final-owner Take is denied",async t=>{
   const w=world(t,{take:false,cargo:10,supplies:[{typeID:16272,target:100,mode:"TOTAL_ABOARD",eligibleFlags:[5],required:false}],
     support:{characterID:11,useIndustrialCore:true,coreRequirement:"requireCore"}});
   const plan=await w.preparation.plan(w.definition);
-  assert.equal(plan.state,"BLOCKED");assert.equal(plan.members[0].state,"BLOCKED");
-  assert.equal(plan.members[0].reason,"SOURCE_TAKE_DENIED");
+  assert.equal(plan.state,"READY");assert.equal((await w.preparation.prepare(w.record(plan.members[0].intent))).reason,"SOURCE_TAKE_DENIED");
   assert.equal(plan.members[0].targets.find(target=>target.typeID===16272).required,true);
   assert.equal(w.dispatches,0);
 });
@@ -228,39 +245,72 @@ test("same corporation division at distinct physical offices does not adjust ano
   w.bots.push({characterID:11,operationID:first.operationID,operationRunID:first.operationRunID,preparation:first.preparationCheckpoint.snapshot()});
   assert.equal((await w.preparation.prepare(w.record(plan.members[1].intent))).state,"VERIFIED");assert.equal(w.dispatches,2);
 });
+
+for(const detail of [{status:"READY",corporationID:900,contracts:[]},{status:"CORP_UNAVAILABLE",contracts:[]}])
+test(`failed ${detail.status} definition planning returns BLOCKED UNKNOWN without an escaping TypeError`,async t=>{
+  const w=world(t,{readDefinitions:async()=>detail}),plan=await w.preparation.plan(w.definition);
+  assert.equal(plan.state,"BLOCKED");assert.equal(plan.members[0].state,"BLOCKED");
+  assert.equal(plan.members[0].equipment,"UNKNOWN");assert.equal(plan.members[0].supplies,"UNKNOWN");
+  assert.deepEqual(plan.members[0].targets,[]);assert.equal(w.dispatches,0);
+});
+
+test("sibling completion during selected baseline read retries instead of double-counting depletion",async t=>{
+  const options={},w=world(t,options);w.definition.members.push({characterID:12,accountName:"owned",role:"MINER"});
+  const plan=await w.preparation.plan(w.definition),first=w.record(plan.members[0].intent),second=w.record(plan.members[1].intent);
+  let ran=false;
+  options.onRead=async({id})=>{
+    if(id!==12 || ran)return;ran=true;
+    assert.equal((await w.preparation.prepare(first)).state,"VERIFIED");
+    w.bots.push({characterID:11,operationID:first.operationID,operationRunID:first.operationRunID,preparation:first.preparationCheckpoint.snapshot()});
+  };
+  const result=await w.preparation.prepare(second);
+  assert.equal(result.state,"VERIFIED",JSON.stringify(result));assert.equal(w.dispatches,2);
+  assert.deepEqual(second.preparationCheckpoint.snapshot().evidence.selectedBaseline.includedCustodyIDs,
+    [first.preparationCheckpoint.snapshot().custodyOperationID]);
+});
+
+test("unsettled sibling custody cannot enter a new physical baseline or send another transfer",async t=>{
+  const w=world(t),intent=await accepted(w);
+  w.bots.push({characterID:12,operationID:"operation-1",operationRunID:"operation-run-1",preparation:{custodyOperationID:"pending-sibling"}});
+  w.engine.journal.put("pending-sibling",{characterID:12,state:"PENDING",moves:[]});
+  const record=w.record(intent),result=await w.preparation.prepare(record);
+  assert.equal(result.state,"BLOCKED");assert.equal(result.reason,"REPLENISHMENT_CUSTODY");
+  assert.equal(record.preparationCheckpoint.snapshot().evidence?.selectedBaseline,undefined);assert.equal(w.dispatches,0);
+  assert.equal(w.engine.journal.get("pending-sibling").state,"PENDING");
+});
 test("offline unrelated ore and other excluded holds do not create false selected-observation drift",async t=>{
   const w=world(t,{cargo:10,offlineRows:[
     {itemID:7001,typeID:16272,ownerID:11,locationID:1011,flagID:134,quantity:42,singleton:false},
     {itemID:7002,typeID:16272,ownerID:11,locationID:1011,flagID:146,quantity:7,singleton:false},
-  ]}),intent=await accepted(w);
+  ]}),intent=await accepted(w,true);
   const result=await w.preparation.prepare(w.record(intent));
   assert.equal(result.state,"VERIFIED");assert.equal(result.targets[0].current,10);assert.equal(w.dispatches,0);
 });
 test("loaded charges with offline real IDs and selected virtual identities have equal semantic quantities",async t=>{
-  const w=world(t,{loadedQuantity:10,offlineLoadedReal:true}),intent=await accepted(w),result=await w.preparation.prepare(w.record(intent));
+  const w=world(t,{loadedQuantity:10,offlineLoadedReal:true}),intent=await accepted(w,true),result=await w.preparation.prepare(w.record(intent));
   assert.equal(result.state,"VERIFIED");assert.equal(result.targets[0].current,10);assert.equal(w.dispatches,0);
 });
 test("loaded charge quantity drift still refuses accepted observation without replenishment",async t=>{
-  const w=world(t,{loadedQuantity:10,offlineLoadedReal:true}),intent=await accepted(w);w.states.get(11).loaded=9;
+  const w=world(t,{loadedQuantity:10,offlineLoadedReal:true}),intent=await accepted(w,true);w.states.get(11).loaded=9;
   assert.equal((await w.preparation.prepare(w.record(intent))).reason,"REVIEW_STALE");assert.equal(w.dispatches,0);
 });
 test("incomplete offline observation is refused even when equipment rows look exact",async t=>{
-  const w=world(t,{cargo:10,offlineComplete:false});assert.equal((await w.preparation.plan(w.definition)).state,"BLOCKED");assert.equal(w.dispatches,0);
+  const w=world(t,{cargo:10,offlineComplete:false});await assert.rejects(w.legacyIntent(),{code:"REVIEW_REQUIRED"});assert.equal(w.dispatches,0);
 });
 test("incomplete selected observation stays refused rather than becoming normalized complete",async t=>{
   const options={cargo:10},w=world(t,options),intent=await accepted(w);options.selectedComplete=false;
-  assert.equal((await w.preparation.prepare(w.record(intent))).reason,"REVIEW_STALE");assert.equal(w.dispatches,0);
+  assert.equal((await w.preparation.prepare(w.record(intent))).reason,"EQUIPMENT_NOT_READY");assert.equal(w.dispatches,0);
 });
 test("current held hull appearing only in offline personal hangar is not consumable-source drift",async t=>{
-  const w=world(t,{cargo:10,personalSource:true,offlineCurrentHull:true}),intent=await accepted(w);
+  const w=world(t,{cargo:10,personalSource:true,offlineCurrentHull:true}),intent=await accepted(w,true);
   assert.equal((await w.preparation.prepare(w.record(intent))).state,"VERIFIED");assert.equal(w.dispatches,0);
 });
 test("another hull disappearing from physical source remains genuine stock drift",async t=>{
-  const w=world(t,{cargo:10,personalSource:true,offlineOtherHull:true}),intent=await accepted(w);
+  const w=world(t,{cargo:10,personalSource:true,offlineOtherHull:true}),intent=await accepted(w,true);
   assert.equal((await w.preparation.prepare(w.record(intent))).reason,"SOURCE_CHANGED");assert.equal(w.dispatches,0);
 });
 test("personal-source custody restart also excludes offline active hull before movement-pin adjustment",async t=>{
-  let unreadable=true;const w=world(t,{personalSource:true,offlineCurrentHull:true,movementReadFailure:count=>unreadable && count>0}),intent=await accepted(w);
+  let unreadable=true;const w=world(t,{personalSource:true,offlineCurrentHull:true,movementReadFailure:count=>unreadable && count>0}),intent=await accepted(w,true);
   assert.equal((await w.preparation.prepare(w.record(intent))).state,"RECOVERY_REQUIRED");assert.equal(w.dispatches,1);
   unreadable=false;w.restart();assert.equal((await w.preparation.prepare(w.record(intent,true))).state,"VERIFIED");assert.equal(w.dispatches,1);
 });
