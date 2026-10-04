@@ -208,14 +208,13 @@ test("the tabs and the overview verbs live on two separate bars", () => {
 test("Hide is a real left-click button in the toolbar", () => {
   resetShared();
   const body = panelPicking(ROCK_ID, [ROCK, DECOR, RAT]);
-  assert.match(body, /class="spc-tool"/, "no overview verb is offered");
   // ⚠ PLAN goal 1b: THE BUTTON NAMES ITS CATEGORY, so a bare "Hide" is not
   // enough — a player must be able to see WHAT is being hidden before pressing it.
   assert.ok(visibleText(body).includes("Hide Rocks"), "there is no named Hide control");
   // ⚠ A REAL `<button>`, NOT A CLICKABLE `<div>` OR `<span>`. The whole point of
   // this pass is that every control is an ordinary left click on a button the
   // browser owns, so keyboard reach and focus come for free.
-  assert.match(body, /<button[^>]*class="spc-tool"/, "Hide is not a real button element");
+  assert.match(body, /<button[^>]*class="spc-tool/, "Hide is not a real button element");
   // The wiring itself is not in the SSR output (handlers are not rendered), so
   // it is pinned from the source — see the toolbar-wiring test below.
   assert.match(
@@ -225,25 +224,37 @@ test("Hide is a real left-click button in the toolbar", () => {
   );
 });
 
-test("⚠ a row is in as many lists as it has categories — one button each (goal 1b)", () => {
-  // ⚠ THE MULTI-BUTTON ROW. A ship carries one category AND a side, so it earns
-  // BOTH "Hide Ships" and "Hide Ships (<side>)" — and each hides something
-  // different. A rock carries no side, so it earns only the plain one: a
-  // "Rocks (Hostile)" button would be a lie about an object with no side.
+test("⚠ a row earns one Hide button per category it carries (goal 1b)", () => {
   resetShared();
   overviewTabs.select(tabIDByName("Mining"));
   const rockText = visibleText(panelPicking(ROCK_ID, [ROCK, DECOR, RAT]));
   assert.ok(rockText.includes("Hide Rocks"), "no category button");
-  assert.ok(!rockText.includes("Hide Rocks ("), "a rock was offered a stance button");
 
   resetShared();
   overviewTabs.select(tabIDByName("Mining"));
   const ratText = visibleText(panelPicking(RAT_ID, [ROCK, DECOR, RAT]));
   assert.ok(ratText.includes("Hide Ships"), "no category button for a ship");
-  assert.ok(
-    /Hide Ships \((Hostile|Friendly|Neutral)\)/.test(ratText),
-    "no category-and-side button, so the plan's <Item Category> (Hostile) format is missing",
-  );
+  // ⚠ AND NO PER-ROW STANCE BUTTON — THE 2026-04-10 PIVOT REPLACED IT. The two
+  // standing toggles do this job for the whole grid instead of one row at a
+  // time, so a "Hide Ships (Friendly)" verb must NOT come back.
+  assert.doesNotMatch(ratText, /Hide Ships \(/, "the per-row stance hide came back");
+});
+
+test("⚠ the two standing toggles are present, and neither offers a hostile side", () => {
+  // ⚠ PLAN PIVOT: "Hide Friendly" / "Hide Neutral" clear a whole side's
+  // combat-capable traffic off the grid at once. They are TOGGLES, so their
+  // state is the struck-through button rather than a Hidden Items row.
+  resetShared();
+  overviewTabs.select(tabIDByName("Mining"));
+  const text = visibleText(panel([ROCK, DECOR, RAT]));
+
+  assert.ok(text.includes("Hide Friendly"), "no friendly toggle");
+  assert.ok(text.includes("Hide Neutral"), "no neutral toggle");
+  // ⚠ NO HOSTILE TOGGLE, AND IT CANNOT EXIST: a threat is never hidden, so a
+  // button offering it would either lie or be refused.
+  assert.doesNotMatch(text, /Hide Hostile/, "a hostile toggle was offered");
+  // ⚠ AND THEY ARE TAGGED AS PRESSABLE TOGGLES for assistive tech, not as verbs.
+  assert.match(panel([ROCK, DECOR, RAT]), /aria-pressed="false"/);
 });
 
 test("Hide is disabled with a REASON when nothing is picked", () => {
@@ -300,7 +311,7 @@ test("the controls are real buttons, not clickable divs", () => {
   const body = panel();
   assert.match(body, /<button[^>]*class="spc-tab-add"/);
   assert.match(body, /<button[^>]*class="spc-tab-tool"/);
-  assert.match(body, /<button[^>]*class="spc-tool"/);
+  assert.match(body, /<button[^>]*class="spc-tool/);
   assert.match(body, /<button[^>]*class="spc-hidden-toggle"/);
 });
 
@@ -531,16 +542,23 @@ test("⚠ the hidden menu lists only what is on the GRID right now (goal 3)", ()
   assert.ok(withDecor.length > 0);
 });
 
-test("⚠ the Hide verbs are RIGHT-ALIGNED (goal 1a)", () => {
+test("⚠ the toggles sit LEFT and the per-object Hide is pushed RIGHT (goals 1a + pivot)", () => {
   // ⚠ PURE CSS, PINNED FROM THE STYLESHEET. There is no layout engine in this
-  // suite, so what is checked is that the rule exists — a `justify-content`
-  // left at the default is exactly how the verbs ended up hugging the left.
-  const css = readFileSync(
-    new URL("../styles.css", import.meta.url),
-    "utf8",
-  );
-  const rule = css.match(/\.spc-tools-bar\s*\{[^}]*\}/)?.[0] ?? "";
-  assert.match(rule, /justify-content:\s*flex-end/, "the tools bar is not right-aligned");
+  // suite, so what is checked is that the rules exist: the standing toggles are
+  // ordinary flow items on the left, and only the Hide is pushed to the edge by
+  // `margin-left: auto` — so a third button extends leftward and never pushes
+  // the Hide off a narrow panel.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  const bar = css.match(/\.spc-tools-bar\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.doesNotMatch(bar, /justify-content/, "the bar is right-aligning everything");
+
+  const push = css.match(/\.spc-tools-bar \.spc-tool-hide\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(push, /margin-left:\s*auto/, "the Hide is not pushed to the right edge");
+
+  // ⚠ AND A SWITCHED-ON TOGGLE IS STRUCK THROUGH, which is how the plan says a
+  // hidden side should read without adding a row to the Hidden Items menu.
+  const strike = css.match(/\.spc-tool-toggle\.on\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(strike, /line-through/, "an active toggle has no crossed-out state");
 });
 
 test("the hidden menu says 'Hidden Items', whether the tab hides anything or not", () => {
@@ -643,32 +661,30 @@ test("the preset's pre-hidings sit in the menu, one flat list with the player's 
   // on THIS tab only.
   assert.doesNotMatch(SOURCE, /Not shown on this tab/, "a picker section came back");
   assert.doesNotMatch(SOURCE, /Hidden on this tab/, "a subcategory came back");
-  assert.match(SOURCE, /const presetGroupRows = \$derived/, "the preset pre-hidings have no list to read");
   assert.match(SOURCE, /const presetStanceRows = \$derived/, "the stance pre-hidings have no list to read");
   assert.match(SOURCE, /const hiddenMenuRows = \$derived/, "the menu's flat list has no list to read");
-  assert.match(
-    SOURCE,
-    /presetHidesRow\(activeTab, entity, activeTabState, stanceContext\)/,
-    "the preset rows are not derived from the shared rule",
-  );
+  // ⚠ AND THERE IS NO "WHAT THE PRESET HID" ROW — A REPORTED BUG. It used to be
+  // one row named after the recipe (so a PVE tab listed "PVE [Show]") whose Show
+  // cleared the tab's own hidden list. A recipe's omissions are decided by the
+  // RECIPE and come straight back, so the press visibly did nothing: a menu row
+  // that cannot undo itself is the one control that lies about its own effect.
+  assert.doesNotMatch(SOURCE, /preset:omissions/, "the preset row came back");
   assert.match(
     SOURCE,
     /tabHidden\.addCategory\(activeTabID, row\.category\)/,
-    "Show on a preset row is not per-tab",
+    "Show on a category row is not per-tab",
   );
 });
 
-test("the menu's flat list never repeats a hiding the tab already decided", () => {
-  // ⚠ THE "IT STAYS" BUG, FORBIDDEN. A row the tab hid itself is owned by the
-  // tab's hidden list, and one the player already showed is owned by its
-  // `shown` list — `presetHides` says no to both, so each category appears
-  // once, under the list that owns it, and no row ever sits in the menu doing
-  // nothing.
-  assert.match(
-    SOURCE,
-    /if \(!presetHidesRow\(activeTab, entity, activeTabState, stanceContext\)\) continue;/,
-    "the preset rows ignore the shared undecided-only rule",
-  );
+test("⚠ the menu's flat list never repeats a hiding the tab already decided", () => {
+  // ⚠ THE MENU LISTS ONLY WHAT IS ON THE GRID (goal 3), and a hiding the tab
+  // already decided is owned by exactly one of its two lists — so each category
+  // appears once, and no row ever sits in the menu doing nothing.
+  assert.match(SOURCE, /\.filter\(visibleNow\)/, "the menu is not filtered to the live grid");
+  // ⚠ AND THE COMBAT TOGGLES ARE NOT IN THE LIST AT ALL. They are not hidden
+  // entries, so a row for one would be a way to undo a toggle from a place that
+  // is meant to list things deliberately removed.
+  assert.doesNotMatch(SOURCE, /kind: "combat"/, "a combat toggle reached the hidden menu");
 });
 
 test("the hidden menu expands on a real button", () => {

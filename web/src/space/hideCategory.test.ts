@@ -15,6 +15,7 @@ import { readFileSync, existsSync } from "node:fs";
 import {
   HIDE_CATEGORIES,
   categoryCovers,
+  entityIsCombatCapable,
   hideCategoriesFor,
   hideCategoryByID,
   offeredCategoriesFor,
@@ -130,11 +131,13 @@ test("the everyday kinds each land in their own category", () => {
     assert.deepEqual(hideCategoriesFor(row), [expected], what);
   }
 
-  // ⚠ AN ORE GROUP ALONE IS NOT A ROCK. Group 450 is "Arkonor" — the ore, not
-  // an asteroid of it. The runtime tells them apart by stamping the ROW with a
-  // yield, which is why the ore stamp is checked below rather than here.
+  // ⚠ AN ORE GROUP IS AN ASTEROID, WITH OR WITHOUT THE ORE STAMP. Group 450 is
+  // "Arkonor" and its SDE category is 25 (Asteroid), so it lands on `asteroid`
+  // — which used to require the runtime's yield stamp. The category fallback
+  // reads the category the server sent, which is a better answer than a stamp
+  // the server may omit.
   const oreType = entity({ itemID: 1450, groupID: 450, categoryID: 25, kind: "celestial" });
-  assert.deepEqual(hideCategoriesFor(oreType), ["celestial"]);
+  assert.deepEqual(hideCategoriesFor(oreType), ["asteroid"]);
 
   const oreRock = entity({
     itemID: 1451,
@@ -170,6 +173,96 @@ test("a rock is a rock by the runtime's stamp, not by its group", () => {
     miningYieldTypeID: 755,
   });
   assert.deepEqual(hideCategoriesFor(rock), ["asteroid"]);
+});
+
+// --- the in-game reports (2026-04-10) ----------------------------------------
+
+test("⚠ a Sentry Gun is hideable — reported unhidable in game", () => {
+  // Group 99 is literally "Sentry Gun", category 11 ("Entity"). The runtime sent
+  // no `kind` this module could read, so it used to fall through to `other`,
+  // which is never offered as a button — which is exactly "cannot be hidden".
+  for (const kind of [null, "turret", "somethingunknown"]) {
+    const sentry = entity({ itemID: 1, groupID: 99, categoryID: 11, kind });
+    assert.deepEqual(hideCategoriesFor(sentry), ["turret"], `sentry tagged ${kind}`);
+    assert.deepEqual(offeredCategoriesFor(sentry), ["turret"], `sentry tagged ${kind} offers nothing`);
+  }
+});
+
+test("⚠ a Customs Office is hideable — reported unhidable in game", () => {
+  // Group 1025 is "Orbital Infrastructure", category 46 ("Orbitals").
+  const customs = entity({ itemID: 2, groupID: 1025, categoryID: 46, kind: null });
+  assert.deepEqual(hideCategoriesFor(customs), ["structure"]);
+  assert.deepEqual(offeredCategoriesFor(customs), ["structure"]);
+});
+
+test("⚠ NOTHING with a known SDE category is un-hideable", () => {
+  // ⚠ THE GENERAL RULE THE TWO REPORTS WERE INSTANCES OF. An unfamiliar group
+  // is not a reason to refuse: the category the server sent still says what
+  // kind of thing it is. `other` — the only answer that produces no button —
+  // must now be reachable only when the server said nothing at all.
+  for (const categoryID of [1, 2, 3, 6, 11, 16, 18, 23, 25, 46, 65, 87]) {
+    const row = entity({ itemID: categoryID, groupID: 999999, categoryID, kind: null });
+    assert.notDeepEqual(
+      hideCategoriesFor(row),
+      ["other"],
+      `SDE category ${categoryID} classified as unhidable`,
+    );
+  }
+});
+
+test("⚠ combat-capable is decided by the SDE category, not by movement", () => {
+  // ⚠ SENTRY GUNS NEVER MOVE AND MUST STILL COUNT. They are the case the plan
+  // names explicitly, and they are why the axis is "can shoot at you" rather
+  // than "can move".
+  const sentry = entity({ itemID: 3, groupID: 99, categoryID: 11, kind: null });
+  assert.equal(entityIsCombatCapable(sentry), true);
+
+  for (const [groupID, categoryID, what] of [
+    [25, 6, "a frigate"],
+    [100, 18, "a drone"],
+    [999, 23, "a starbase battery"],
+    [999, 65, "a player structure"],
+  ] as const) {
+    assert.equal(
+      entityIsCombatCapable(entity({ itemID: 4, groupID, categoryID, kind: null })),
+      true,
+      `${what} is not combat capable`,
+    );
+  }
+});
+
+test("⚠ combat-capable EXCLUDES the furniture, even the neutral-looking kinds", () => {
+  // ⚠ PLAN: "not things that are locked in place like planets, stations, moons,
+  // asteroids. Those things are almost always neutral." Each of these is neutral
+  // in practice, so a side-hide would take the system with the traffic.
+  for (const [groupID, categoryID, what] of [
+    [7, 2, "a planet"],
+    [8, 2, "a moon"],
+    [15, 3, "a station"],
+    [450, 25, "an asteroid"],
+    [10, 2, "a stargate"],
+    [226, 2, "Large Collidable Object scenery"],
+  ] as const) {
+    assert.equal(
+      entityIsCombatCapable(entity({ itemID: 5, groupID, categoryID, kind: null })),
+      false,
+      `${what} is wrongly combat capable`,
+    );
+  }
+});
+
+test("⚠ a Customs Office is hideable but NOT combat capable", () => {
+  // ⚠ THE DISTINCTION THAT MATTERS, and the reason combat-capable is decided on
+  // the SDE category id rather than the player-facing one: player structures
+  // (cat 65) and orbitals (cat 46) both file as `structure`, and only the SDE
+  // id tells them apart. A Customs Office is something you can hide by category
+  // — it is just something that never shoots at you.
+  const customs = entity({ itemID: 6, groupID: 1025, categoryID: 46, kind: null });
+  assert.equal(entityIsCombatCapable(customs), false);
+
+  const citadel = entity({ itemID: 7, groupID: 1000000, categoryID: 65, kind: null });
+  assert.deepEqual(hideCategoriesFor(citadel), hideCategoriesFor(customs));
+  assert.equal(entityIsCombatCapable(citadel), true, "a player structure is combat capable");
 });
 
 // --- fallbacks ---------------------------------------------------------------

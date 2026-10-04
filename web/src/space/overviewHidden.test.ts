@@ -15,8 +15,11 @@ import assert from "node:assert/strict";
 import {
   categoryIsHidden,
   categoryIsShown,
+  combatStanceHides,
   covers,
+  createCombatToggleStore,
   createTabHiddenStore,
+  type CombatStance,
   EMPTY_STATE,
   hiddenEntryFor,
   presetHides,
@@ -31,6 +34,7 @@ import { isHostile } from "./overview.ts";
 import type { OverviewTab } from "./overviewTabs.ts";
 import type { OverviewRecipeID } from "./overviewRecipes.ts";
 import type { SpaceEntity } from "../store/types.ts";
+import type { StanceContext } from "./stance.ts";
 
 /** One plain tab: `id` as its name, built from a recipe, never fixed. */
 function tab(id: string, recipeId: OverviewRecipeID): OverviewTab {
@@ -92,7 +96,7 @@ const OTHER_PLANET = entity({ itemID: 2, typeID: 14 });
 const MOON = entity({ itemID: 3, groupID: MOON_GROUP, typeID: 15 });
 /** Group 226 is the SDE's "Large Collidable Object" — scenery, and the bug. */
 const DECOR = entity({ itemID: 4, groupID: 226, typeID: 5555, kind: "structure" });
-const RAT = entity({ itemID: 5, kind: "ship", groupID: 25, isNpc: true, npcEntityType: "npc" });
+const RAT = entity({ itemID: 5, kind: "ship", groupID: 25, categoryID: 6, isNpc: true, npcEntityType: "npc" });
 /** An ore group is a rock only once the runtime stamps it with a yield. */
 const ASTEROID_GROUP = 450;
 const GATE_GROUP = 10;
@@ -125,7 +129,7 @@ test("the entry carries the CATEGORY's name, never the object's own name", () =>
   // ⚠ THE MENU READS THIS. A named rock ("Veldspar") would put a specific object
   // in a list whose unit is the category, and the player could not tell what
   // pressing Show would bring back.
-  const namedRock = entity({ itemID: 6, name: "Veldspar", groupID: 450, kind: "asteroid", miningYieldTypeID: 450 });
+  const namedRock = entity({ itemID: 6, name: "Veldspar", groupID: 450, categoryID: 25, kind: "celestial", miningYieldTypeID: 450 });
   const entry = hiddenEntryFor(namedRock, "asteroid");
   assert.ok(entry);
   assert.equal(entry.label, "Rocks");
@@ -156,8 +160,8 @@ test("⚠ a category the row does NOT carry is refused, not accepted", () => {
 });
 
 test("a row with a category is always matched by it, whatever its type", () => {
-  const shared = entity({ itemID: 10, groupID: 450, miningYieldTypeID: 450 });
-  const other = entity({ itemID: 11, groupID: 450, typeID: 1230, kind: "asteroid", miningYieldTypeID: 450 });
+  const shared = entity({ itemID: 10, groupID: 450, categoryID: 25, miningYieldTypeID: 450 });
+  const other = entity({ itemID: 11, groupID: 450, categoryID: 25, typeID: 1230, kind: "celestial", miningYieldTypeID: 450 });
   const entry = hiddenEntryFor(shared, "asteroid");
   assert.ok(entry);
   assert.equal(covers(entry, other), true, "a different type in the same category stayed");
@@ -438,8 +442,8 @@ const STANCE_CONTEXT = {
   allianceID: MY_ALLIANCE,
 };
 
-const FRIENDLY_SHIP = entity({ itemID: 30, kind: "ship", characterID: MY_CHARACTER });
-const NEUTRAL_SHIP = entity({ itemID: 31, kind: "ship" });
+const FRIENDLY_SHIP = entity({ itemID: 30, kind: "ship", groupID: 25, categoryID: 6, characterID: MY_CHARACTER });
+const NEUTRAL_SHIP = entity({ itemID: 31, kind: "ship", groupID: 25, categoryID: 6, characterID: 999 });
 
 test("⚠ a STANCE entry is the only entry that may hide a hostile", () => {
   // ⚠ THE RELAXED INVARIANT, AS A RULE: a group entry that would cover a
@@ -584,6 +588,80 @@ test("⚠ resetTab and show-everything are different, and both are per-tab", () 
   store.clearHidden("travel");
   assert.deepEqual(store.stateFor("travel").hidden, []);
   assert.equal(store.stateFor("travel").shown.length, 0);
+});
+
+// --- the friendly / neutral combat toggles (PLAN pivot, 2026-04-10) -----------
+//
+// ⚠ REUSES `FRIENDLY_SHIP` / `NEUTRAL_SHIP` from the stance section above, now
+// carrying the SDE hull category. The sentry and the orbital are new, and are
+// the two objects the in-game report and the plan's carve-out turn on.
+const SENTRY = entity({ itemID: 32, groupID: 99, categoryID: 11, kind: null, characterID: MY_CHARACTER });
+const CUSTOMS = entity({ itemID: 33, groupID: 1025, categoryID: 46, kind: null });
+const PLANET_ROW = entity({ itemID: 34, groupID: PLANET_GROUP, categoryID: 2 });
+// ⚠ THE SAME CONTEXT THE STANCE SECTION USES, so a fixture that is friendly
+// there is friendly here — two contexts would silently test different ships.
+const CTX: StanceContext = { characterID: MY_CHARACTER, corporationID: null, allianceID: null };
+
+test("⚠ the friendly toggle hides friendly COMBAT-CAPABLE things and nothing else", () => {
+  const on = new Set<CombatStance>(["friendly"]);
+
+  assert.equal(combatStanceHides(FRIENDLY_SHIP, on, CTX), true, "a friendly ship stayed");
+  assert.equal(combatStanceHides(SENTRY, on, CTX), true, "a friendly sentry stayed");
+  assert.equal(combatStanceHides(NEUTRAL_SHIP, on, CTX), false, "a neutral ship was hidden too");
+  // ⚠ AND THE FURNISHING IS NOT REACHED, which is the plan's own carve-out.
+  assert.equal(combatStanceHides(PLANET_ROW, on, CTX), false, "a planet was hidden by side");
+  assert.equal(combatStanceHides(CUSTOMS, on, CTX), false, "an orbital was hidden by side");
+  // ⚠ AND NEITHER TOGGLE REACHES A HOSTILE.
+  assert.equal(combatStanceHides(RAT, on, CTX), false, "a threat was hidden by the friendly toggle");
+  assert.equal(
+    combatStanceHides(RAT, new Set<CombatStance>(["neutral"]), CTX),
+    false,
+    "a threat was hidden by the neutral toggle",
+  );
+});
+
+test("⚠ the neutral toggle hides neutral combat-capable things, and only those", () => {
+  const on = new Set<CombatStance>(["neutral"]);
+  assert.equal(combatStanceHides(NEUTRAL_SHIP, on, CTX), true);
+  assert.equal(combatStanceHides(FRIENDLY_SHIP, on, CTX), false);
+  assert.equal(combatStanceHides(PLANET_ROW, on, CTX), false, "a neutral planet was hidden");
+});
+
+test("⚠ no toggle on, nothing hidden", () => {
+  const none = new Set<CombatStance>();
+  for (const row of [FRIENDLY_SHIP, NEUTRAL_SHIP, SENTRY, CUSTOMS, PLANET_ROW]) {
+    assert.equal(combatStanceHides(row, none, CTX), false);
+  }
+});
+
+test("⚠ the toggles are per-tab and are NOT hidden entries", () => {
+  // ⚠ THE WHOLE POINT OF MAKING THEM SEPARATE. They never reach `hidden`, so
+  // they cannot appear in the Hidden Items menu — their state is the struck-
+  // through button, and retoggling undoes them.
+  const store = createTabHiddenStore();
+  const toggles = createCombatToggleStore();
+
+  assert.equal(toggles.toggle("mining", "friendly"), true, "the toggle did not switch on");
+  assert.equal(toggles.forTab("mining").has("friendly"), true);
+  assert.deepEqual(store.stateFor("mining"), EMPTY_STATE, "a toggle wrote a hidden entry");
+  assert.equal(toggles.forTab("travel").size, 0, "another tab was touched");
+
+  // A second press turns it back off, and the entry is dropped rather than
+  // left behind empty.
+  assert.equal(toggles.toggle("mining", "friendly"), false);
+  assert.equal(toggles.forTab("mining").has("friendly"), false);
+  assert.equal(toggles.map.get().has("mining"), false, "an empty toggle entry was left behind");
+});
+
+test("⚠ clear() puts both sides back for one tab only", () => {
+  const toggles = createCombatToggleStore();
+  toggles.toggle("mining", "friendly");
+  toggles.toggle("mining", "neutral");
+  toggles.toggle("travel", "neutral");
+
+  toggles.clear("mining");
+  assert.equal(toggles.map.get().has("mining"), false);
+  assert.equal(toggles.forTab("travel").has("neutral"), true, "another tab was cleared");
 });
 
 // --- the storage key -------------------------------------------------------------

@@ -8968,24 +8968,34 @@
     border-bottom: 1px solid var(--stn-line);
     background: var(--stn-page);
   }
-  /* ⚠ PLAN.txt goal 1a: THE HIDE VERBS ARE RIGHT-ALIGNED, so they sit against
-     the panel's edge with the empty space BEFORE them, not after. A row of
-     verbs hugging the left edge reads as belonging to whatever is above them;
-     pushed right they read as the panel's own controls. It is also where a
-     growing set lands — goal 1b adds one button per category this row
-     carries, and extra buttons should extend leftward, never push the row
-     off the edge. */
+  /* ⚠ PLAN.txt goal 1a + the 2026-04-10 pivot: THE STANDING TOGGLES SIT LEFT,
+     THE PER-OBJECT HIDE SITS RIGHT. The two are different in kind — the toggles
+     are persistent modes for the whole tab, the Hide acts on one picked row —
+     so they are placed apart and `margin-left: auto` pushes only the Hide to
+     the edge. New buttons therefore extend leftward and never push the Hide off
+     a narrow panel. */
   .spc-tools-bar {
     flex: none;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 8px;
     border-bottom: 1px solid var(--stn-line);
     background: var(--stn-page);
   }
+  /* ⚠ A SWITCHED-ON TOGGLE IS STRUCK THROUGH, NOT FILLED. The plan asks for the
+     button to read as "these are hidden" while it is active, and a strike is
+     the same word the player already reads on a hidden row in the menu — so
+     the two places that say "hidden" look the same. It is also the honest
+     signal for a toggle: the label never changes, only its state does. */
+  .spc-tool-toggle.on {
+    color: var(--stn-muted);
+    text-decoration: line-through;
+    border-color: var(--stn-line);
+  }
+  /* The per-object Hide is the one control pushed to the panel's right edge. */
+  .spc-tools-bar .spc-tool-hide { margin-left: auto; }
   /* ⚠ The tab list scrolls HORIZONTALLY on its own. Without this a player with
      eight tabs pushes their own tools off the right edge of the tab line. */
   .spc-tabs {

@@ -46,6 +46,7 @@
 
 import {
   categoryCovers,
+  entityIsCombatCapable,
   hideCategoriesFor,
   hideCategoryByID,
   offeredCategoriesFor,
@@ -488,6 +489,32 @@ export function tabShows(
   return recipeAllows(recipe, entity);
 }
 
+/**
+ * Does this row go because the FRIENDLY / NEUTRAL COMBAT TOGGLE is on?
+ *
+ * ⚠ SEPARATE FROM `tabShows` ON PURPOSE. The toggle is not a hidden entry, so
+ * folding it into the resolver would make it reach the Hidden Items menu and the
+ * All tab's guarantees by accident. The caller asks this question alongside
+ * `tabShows`, and it is deliberately a smaller question: only a COMBAT-CAPABLE
+ * object, only the switched-on side, and never a hostile.
+ *
+ * ⚠ THE ORDER IS FIXED, AND THE HOSTILE CHECK IS FIRST. A rat must not be
+ * reachable through the neutral toggle even when it is nominally neutral to
+ * nobody — the same absolute rule the category axis obeys, and it is stated here
+ * rather than inherited so it cannot drift.
+ */
+export function combatStanceHides(
+  entity: SpaceEntity,
+  toggles: ReadonlySet<CombatStance>,
+  context: StanceContext | null,
+): boolean {
+  if (toggles.size === 0) return false;
+  if (isHostile(entity)) return false;
+  if (!entityIsCombatCapable(entity)) return false;
+  const stance = stanceOf(entity, context);
+  return stance === "friendly" || stance === "neutral" ? toggles.has(stance) : false;
+}
+
 const STORAGE_KEY = "evejs-web:overview-hidden:v5";
 
 /**
@@ -890,6 +917,119 @@ export function createTabHiddenStore(): TabHiddenStore {
     },
   };
 }
+
+/**
+ * ⚠ THE FRIENDLY / NEUTRAL COMBAT TOGGLES (PLAN pivot, 2026-04-10).
+ *
+ * Per tab, per side: when on, every FRIENDLY (or NEUTRAL) object that can shoot
+ * at you is off the list. Two properties are deliberate and both were asked for.
+ *
+ * ⚠ THEY ARE NOT HIDDEN ENTRIES. They live here, in their own map, and never
+ * reach `TabHiddenState.hidden` — so they never appear in the Hidden Items menu.
+ * Their state is shown by the button being struck through, and retoggling undoes
+ * them. A tab's hidden list stays a list of things the player chose to remove;
+ * "I want the friendlies out of my way for now" is not that.
+ *
+ * ⚠ A HOSTILE IS NEVER REACHED. There is no hostile toggle at all, and a hostile
+ * is force-shown below even when the category list would otherwise cover it — the
+ * same absolute rule the category axis obeys.
+ *
+ * ⚠ AND ONLY COMBAT-CAPABLE THINGS. `entityIsCombatCapable` decides, off the
+ * SDE category, so planets, moons, stations, asteroids, gates and orbitals are
+ * untouched: those are almost always neutral, and hiding them by side would
+ * remove the furniture of the system along with the traffic.
+ */
+export type CombatStance = "friendly" | "neutral";
+
+const TOGGLE_STORAGE_KEY = "evejs-web:overview-combat-toggles:v1";
+
+export type CombatToggleMap = ReadonlyMap<string, ReadonlySet<CombatStance>>;
+
+const EMPTY_TOGGLES: ReadonlySet<CombatStance> = new Set<CombatStance>();
+
+function loadToggles(): CombatToggleMap {
+  if (typeof localStorage === "undefined") return new Map();
+  try {
+    const raw = localStorage.getItem(TOGGLE_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return new Map();
+    const map = new Map<string, ReadonlySet<CombatStance>>();
+    for (const [tabID, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!Array.isArray(value)) continue;
+      const stances = value.filter(
+        (item): item is CombatStance => item === "friendly" || item === "neutral",
+      );
+      if (stances.length > 0) map.set(tabID, new Set(stances));
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+export interface CombatToggleStore {
+  readonly map: ReadableSignal<CombatToggleMap>;
+  /** The sides switched on for one tab, or none. */
+  forTab(tabID: string): ReadonlySet<CombatStance>;
+  /** Flip one side and answer with the new state of that side. */
+  toggle(tabID: string, stance: CombatStance): boolean;
+  /** Put both sides back, for `resetTab`. */
+  clear(tabID: string): void;
+}
+
+export function createCombatToggleStore(): CombatToggleStore {
+  const map = createSignal<CombatToggleMap>(loadToggles());
+  const readable = readonlySignal(map);
+
+  map.subscribe((value) => {
+    if (typeof localStorage === "undefined") return;
+    try {
+      // ⚠ AN EMPTY TAB IS NO ENTRY. Storing it would grow the map one dead key
+      // per deleted tab, the same rule `load` applies to the hidden lists.
+      const out: Record<string, CombatStance[]> = {};
+      for (const [tabID, stances] of value) {
+        if (stances.size > 0) out[tabID] = [...stances];
+      }
+      localStorage.setItem(TOGGLE_STORAGE_KEY, JSON.stringify(out));
+    } catch {
+      // A full or blocked store costs persistence across reloads, not the setting.
+    }
+  });
+
+  return {
+    map: readable,
+    forTab: (tabID) => map.get().get(tabID) ?? EMPTY_TOGGLES,
+    toggle: (tabID, stance) => {
+      const next = new Map(map.get());
+      const stances = new Set(next.get(tabID) ?? EMPTY_TOGGLES);
+      if (stances.has(stance)) {
+        stances.delete(stance);
+      } else {
+        stances.add(stance);
+      }
+      if (stances.size === 0) {
+        next.delete(tabID);
+      } else {
+        next.set(tabID, stances);
+      }
+      map.set(next);
+      return stances.has(stance);
+    },
+    clear: (tabID) => {
+      if (!map.get().has(tabID)) return;
+      const next = new Map(map.get());
+      next.delete(tabID);
+      map.set(next);
+    },
+  };
+}
+
+/** The app's one per-tab combat-stance toggle state. */
+export const combatToggles: CombatToggleStore = createCombatToggleStore();
+
+/** The app's toggles as a bare signal, for a component to bind to. */
+export const combatToggleMap: ReadableSignal<CombatToggleMap> = combatToggles.map;
 
 /** The app's one per-tab hidden state. */
 export const tabHidden: TabHiddenStore = createTabHiddenStore();

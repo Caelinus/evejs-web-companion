@@ -35,6 +35,8 @@
   } from "../space/overviewRecipes.ts";
   import {
     categoryStanceEntryFor,
+    combatStanceHides,
+    combatToggles,
     covers,
     EMPTY_STATE,
     presetHidesRow,
@@ -42,6 +44,7 @@
     tabHidden,
     tabHiddenMap,
     tabShows,
+    type CombatStance,
   } from "../space/overviewHidden.ts";
   import {
     hideCategoryByID,
@@ -215,10 +218,19 @@
     if (!snapshot) {
       return snapshot;
     }
+    // ⚠ THE FRIENDLY / NEUTRAL TOGGLES ARE FILTERED HERE, BESIDE `tabShows` AND
+    // NOT INSIDE IT. They are not hidden entries, so folding them into the
+    // resolver would let them reach the Hidden Items menu and the All tab's
+    // guarantees by accident. `combatStanceHides` is also what keeps them off
+    // the furniture: only combat-capable things qualify, and a hostile is
+    // refused outright.
+    const toggles = combatToggles.forTab(activeTabID);
     return {
       ...snapshot,
-      entities: snapshot.entities.filter((entity) =>
-        tabShows(activeTab, entity, activeTabState, stanceContext),
+      entities: snapshot.entities.filter(
+        (entity) =>
+          tabShows(activeTab, entity, activeTabState, stanceContext) &&
+          !combatStanceHides(entity, toggles, stanceContext),
       ),
     };
   });
@@ -244,26 +256,15 @@
   /**
    * The preset's PRE-HIDINGS still undecided on this tab, as menu rows.
    *
-   * ⚠ KEYED BY THE PRESET'S OWN RECIPE, NOT BY GROUP. The preset still filters
-   * by `bracketRole` (a deliberate seam — see `presetHidesRow`), but the menu's
-   * unit is now the CATEGORY, so what each row undoes is "everything this
-   * preset omits", not "one group". Collapsing that to a single row is what
-   * keeps the restore menu one flat list with no subcategories: a player who
-   * pressed Show once wants the preset's omissions back, and offering them as
-   * forty separate category rows would be a worse menu than the one it replaced.
+   * ⚠ GONE, AND IT WAS A REPORTED BUG. There used to be one row named after the
+   * recipe — so a PVE tab listed "PVE [Show]" — whose Show cleared the tab's own
+   * hidden list. A recipe's omissions are decided by the RECIPE and come straight
+   * back, so the press visibly did nothing. A menu row that cannot undo itself is
+   * worse than no row: it is the one control in the panel that lies about its own
+   * effect. "Show everything" and "Reset Tab" undo the preset properly and both
+   * say which they are.
    */
-  const presetGroupRows = $derived.by((): { readonly key: string; readonly label: string }[] => {
-    if (!snapshot || activeTab.fixed) {
-      return [];
-    }
-    for (const entity of snapshot.entities) {
-      if (entity.isSelf) continue;
-      if (!presetHidesRow(activeTab, entity, activeTabState, stanceContext)) continue;
-      const recipe = recipeByID(activeTab.recipeId);
-      return [{ key: "preset:omissions", label: recipe.label }];
-    }
-    return [];
-  });
+  const presetGroupRows = $derived.by((): readonly never[] => []);
 
   /**
    * The preset's STANCE pre-hidings still undecided on this tab — the role
@@ -349,17 +350,6 @@
               preset: false,
             },
       );
-    for (const row of presetGroupRows) {
-      rows.push({
-        key: row.key,
-        kind: "preset",
-        category: null,
-        role: null,
-        stance: null,
-        label: row.label,
-        preset: true,
-      });
-    }
     for (const row of presetStanceRows) {
       rows.push({
         key: "preset:stance:" + row.role + ":" + row.stance,
@@ -545,6 +535,27 @@
   }
 
   /**
+   * ⚠ THE TWO SIDES THE STANDING TOGGLES COVER. Hostile is absent on purpose
+   * and cannot be added: a threat is never hidden, so a button that claimed to
+   * hide it would be a control that either lies or is refused.
+   */
+  const COMBAT_TOGGLES = ["friendly", "neutral"] as const;
+  const COMBAT_TOGGLE_LABELS: Readonly<Record<(typeof COMBAT_TOGGLES)[number], string>> = {
+    friendly: "Friendly",
+    neutral: "Neutral",
+  };
+
+  /** Is this side currently switched on for this tab? */
+  function combatTogglesOn(tabID: string, side: CombatStance): boolean {
+    return combatToggles.forTab(tabID).has(side);
+  }
+
+  /** Flip one side on this tab. It never writes a hidden entry. */
+  function toggleCombatStance(side: CombatStance): void {
+    combatToggles.toggle(activeTabID, side);
+  }
+
+  /**
    * The CATEGORY-AND-SIDE entry the picked row would earn — "Ships
    * (Friendly)" for a friendly frigate, "Ships (Hostile)" for a rat — or null
    * when the row's category carries no side at all: gates, rocks, scenery and
@@ -655,12 +666,6 @@
         tabHidden.unhideCategory(activeTabID, row.category);
       }
       return;
-    }
-    // ⚠ THE PRESET'S OWN OMISSIONS, AS ONE ROW. See `presetGroupRows`: the
-    // preset is a recipe, so "show what it hid" is the whole of the preset's
-    // omissions recorded as shown, and nothing in the tab's own lists moves.
-    if (row.kind === "preset" && row.preset) {
-      showEverythingOnTab();
     }
   }
 
@@ -1458,6 +1463,30 @@
   -->
   <div class="spc-tools-bar">
     <!--
+      ⚠ THE TWO STANDING TOGGLES, ON THE LEFT (PLAN pivot, 2026-04-10).
+      "Hide Friendly" / "Hide Neutral" clear the whole side's combat-capable
+      traffic off the list, which is the thing a pilot wants when the grid is
+      full of friendlies and one rat. They are TOGGLES, not verbs: pressing one
+      again puts everything back, so they show their state by being struck
+      through rather than by adding a row to the Hidden Items menu — the menu
+      stays a list of things deliberately removed, not of transient modes.
+      ⚠ NO HOSTILE TOGGLE EXISTS, and cannot: a threat is never hidden.
+      ⚠ AND ONLY COMBAT-CAPABLE THINGS. Planets, moons, stations, asteroids,
+      gates and orbitals are almost always neutral, and are left alone.
+    -->
+    {#each COMBAT_TOGGLES as side (side)}
+      <button
+        type="button"
+        class="spc-tool spc-tool-toggle"
+        class:on={combatTogglesOn(activeTabID, side)}
+        aria-pressed={combatTogglesOn(activeTabID, side)}
+        title={combatTogglesOn(activeTabID, side)
+          ? `Stop hiding ${side} things that can shoot at you on ${activeTab.name}`
+          : `Hide every ${side} thing that can shoot at you on ${activeTab.name} — ships, drones, turrets and player structures. Planets, stations, moons and asteroids are not affected.`}
+        onclick={() => toggleCombatStance(side)}
+      >Hide {COMBAT_TOGGLE_LABELS[side]}</button>
+    {/each}
+    <!--
       ⚠ HIDDEN IS REFUSED, NOT SILENT, WHEN NOTHING IS PICKED. A live button
       that does nothing is worse than one that says why it cannot act — and it
       is only disabled here because there is a REAL reason (no selection), not
@@ -1473,9 +1502,10 @@
     {#each selectedCategories as category (category.id)}
       <button
         type="button"
-        class="spc-tool"
+        class="spc-tool spc-tool-hide"
         disabled={hideRefusalReason !== null}
-        title={hideRefusalReason ?? `Hide everything in ${category.label} from ${activeTab.name}`}
+        title={hideRefusalReason ??
+          `Hide everything of this sort — every ${category.label.toLowerCase()} on ${activeTab.name}, not just this one.`}
         onclick={() => hideSelectedCategory(category.id)}
       >Hide {category.label}</button>
     {/each}
@@ -1490,29 +1520,19 @@
     {#if selectedCategories.length === 0}
       <button
         type="button"
-        class="spc-tool"
+        class="spc-tool spc-tool-hide"
         disabled={hideRefusalReason !== null}
         title={hideRefusalReason ?? "Nothing to hide"}
         onclick={() => {}}
       >Hide</button>
     {/if}
     <!--
-      ⚠ THE STANCE HIDE ONLY EXISTS WHEN THE PICKED ROW CARRIES A SIDE. Its
-      word names the category AND the side — "Hide Ships (Friendly)", "Hide
-      Ships (Hostile)" — which is the whole point: this is the one verb that may
-      reach a hostile, because pressing it names the side out loud.
+      ⚠ THERE IS NO PER-ROW STANCE HIDE ANY MORE (PLAN pivot, 2026-04-10).
+      A "Hide Ships (Friendly)" button on one picked row was replaced by the two
+      standing toggles above, which do the same job for every ship on the grid
+      instead of one at a time — and which can reach a hostile no more than this
+      button could, because neither offers a hostile toggle.
     -->
-    {#if categoryStanceHideEntry !== null}
-      <button
-        type="button"
-        class="spc-tool"
-        disabled={stanceHideRefusalReason !== null}
-        title={
-          stanceHideRefusalReason ?? `Hide ${categoryStanceHideEntry.label} from ${activeTab.name}`
-        }
-        onclick={hideSelectedCategoryStance}
-      >Hide {categoryStanceHideEntry.label}</button>
-    {/if}
   </div>
 
   <!-- ========================================================= the editor -->

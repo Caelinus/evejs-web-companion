@@ -42,6 +42,7 @@ import type { SpaceEntity } from "../store/types.ts";
 export type HideCategoryID =
   | "ship"
   | "drone"
+  | "turret"
   | "wreck"
   | "gate"
   | "station"
@@ -66,6 +67,11 @@ export interface HideCategory {
 export const HIDE_CATEGORIES: readonly HideCategory[] = [
   { id: "ship", label: "Ships", hint: "Every hull on the grid, yours and theirs." },
   { id: "drone", label: "Drones", hint: "Drones and fighters in flight." },
+  {
+    id: "turret",
+    label: "Turrets",
+    hint: "Sentry guns and batteries — things that shoot at you without moving.",
+  },
   { id: "wreck", label: "Wrecks", hint: "Wrecks and hulks worth looting." },
   { id: "gate", label: "Gates", hint: "Stargates and warp gates." },
   { id: "station", label: "Stations", hint: "NPC stations you can dock at." },
@@ -128,6 +134,35 @@ const GROUP_CATEGORY: ReadonlyMap<number, HideCategoryID> = new Map([
   // Police.
   [182, "police"],
   [301, "police"],
+  // ⚠ SENTRY GUNS AND BATTERIES. Reported unhidable in game: a "Caldari Sentry
+  // Gun" carries group 99 ("Sentry Gun") and the runtime gave it no kind this
+  // module could read, so it classified as `other` — and `other` is never
+  // offered as a button, which is exactly "cannot be hidden". Named here, and
+  // backed up by the category fallback below.
+  [99, "turret"],
+  [180, "turret"],
+  [383, "turret"],
+  [495, "turret"],
+  [417, "turret"],
+  [426, "turret"],
+  [430, "turret"],
+  [449, "turret"],
+  [439, "turret"],
+  [440, "turret"],
+  [441, "turret"],
+  [443, "turret"],
+  [837, "turret"],
+  [877, "turret"],
+  [418, "turret"],
+  // ⚠ ORBITALS. Also reported unhidable: "Customs Office (<planet>)" carries
+  // group 1025 ("Orbital Infrastructure"). These are STATIC and not
+  // combat-capable, so they are hideable individually by category but are never
+  // reached by the Friendly/Neutral combat toggle — which is the distinction
+  // the plan draws.
+  [1025, "structure"],
+  [1073, "structure"],
+  [1106, "structure"],
+  [4736, "structure"],
   // Containers.
   [12, "container"],
   [340, "container"],
@@ -169,6 +204,81 @@ const GROUP_CATEGORY: ReadonlyMap<number, HideCategoryID> = new Map([
   [287, "scenery"],
   [298, "scenery"],
 ]);
+
+// ⚠ THE CATEGORY FALLBACK, AND IT IS WHY NOTHING IS UN-HIDEABLE. A group this
+// table has never heard of is not a reason to give up: its `categoryID` still
+// says what KIND of thing it is. This is the fix for the in-game report that a
+// Sentry Gun and a Customs Office "cannot be hidden" — both reached `other`,
+// and `other` is never offered as a button. An unfamiliar group now lands on the
+// right broad word instead of on nothing.
+const CATEGORY_FALLBACK: Readonly<Record<number, HideCategoryID>> = {
+  6: "ship", // Ship
+  11: "turret", // Entity — NPCs: sentries, rats, officers, overseers
+  18: "drone", // Drone
+  16: "drone", // Skill — a drone bucket the client still uses
+  87: "drone", // Fighter
+  23: "turret", // Starbase — sentries, batteries, mobile arrays
+  65: "structure", // Structure
+  46: "structure", // Orbitals
+  25: "asteroid", // Asteroid
+  3: "station", // Station
+  2: "celestial", // Celestial
+  1: "celestial", // Celestial
+};
+
+/**
+ * Does this category describe something that can SHOOT AT YOU?
+ *
+ * PLAN pivot (2026-04-10), and this is the axis the Friendly/Neutral toggles
+ * hide on. It is deliberately NOT "mobile": a sentry gun never moves, and it is
+ * one of the things a pilot most wants off the screen.
+ */
+export function isCombatCapable(category: HideCategoryID): boolean {
+  return COMBAT_CAPABLE_CATEGORIES.has(category);
+}
+
+/** ⚠ THE PLAYER-FACING CATEGORIES THAT CAN SHOOT BACK. */
+export const COMBAT_CAPABLE_CATEGORIES: ReadonlySet<HideCategoryID> = new Set<HideCategoryID>([
+  "ship",
+  "drone",
+  "turret",
+  "police",
+  "wreck",
+]);
+
+/**
+ * ⚠ THE SDE CATEGORIES THAT CAN SHOOT BACK — read off build 3396210's
+ * `categories.jsonl`:
+ *   6 Ship (50 groups) · 11 Entity/NPC (410) · 18 Drone (13) · 16 (25)
+ *   87 Fighter (6) · 23 Starbase/turrets (34) · 65 Structure (15)
+ *
+ * ⚠ AND THE ONES DELIBERATELY EXCLUDED, because "not locked in place" is half
+ * the rule the plan states: 25 Asteroid, 2/1 Celestial, 3 Station, and
+ * **46 Orbitals** — a Customs Office is a structure and IS hideable by
+ * category, but it never shoots at you and never moves, so the Friendly/Neutral
+ * toggles must not reach it. That distinction is LOST if combat-capable is
+ * decided on the player-facing category alone, because player structures (65)
+ * and orbitals (46) both file as `structure` — hence this set is on the SDE id.
+ */
+export const COMBAT_CAPABLE_SDE_CATEGORIES: ReadonlySet<number> = new Set([
+  6, 11, 16, 18, 23, 65, 87,
+]);
+
+/**
+ * Is this OBJECT combat-capable?
+ *
+ * ⚠ THE SDE CATEGORY WINS WHEN IT IS THERE. It is the only signal that tells a
+ * player structure from an orbital, and it is a fact about the type rather than
+ * a guess from the runtime. The player-facing category is the fallback, for a row
+ * the server sent no category for at all.
+ */
+export function entityIsCombatCapable(entity: SpaceEntity): boolean {
+  const categoryID = entity.categoryID;
+  if (typeof categoryID === "number" && categoryID > 0) {
+    return COMBAT_CAPABLE_SDE_CATEGORIES.has(categoryID);
+  }
+  return hideCategoriesFor(entity).some(isCombatCapable);
+}
 
 /**
  * The category a runtime `kind` implies, for a row whose group we cannot read.
@@ -218,6 +328,18 @@ export function hideCategoriesFor(entity: SpaceEntity): readonly HideCategoryID[
     // "scenery by elimination" that made this module necessary.
     if (entity.categoryID === 6) {
       return ["ship"];
+    }
+    // ⚠ AND THEN THE BROADER FALLBACK, BEFORE `kind`. The SDE category says what
+    // KIND of thing this is even when the group is unfamiliar and the runtime
+    // kind is missing or nonsense — which is exactly how a Sentry Gun ended up
+    // un-hideable. `kind` is consulted only once this has failed, because a
+    // coarse runtime string is a worse answer than a category the server sent.
+    const categoryID = entity.categoryID;
+    if (typeof categoryID === "number" && categoryID > 0) {
+      const fallback = CATEGORY_FALLBACK[categoryID];
+      if (fallback !== undefined) {
+        return [fallback];
+      }
     }
   }
 
