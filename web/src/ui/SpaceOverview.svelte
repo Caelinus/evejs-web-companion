@@ -254,17 +254,41 @@
    * column shows, and the group id travels only as the list's row key.
    */
   /**
-   * The preset's PRE-HIDINGS still undecided on this tab, as menu rows.
+   * What the tab's RECIPE is hiding right now, as one menu row per CATEGORY.
    *
-   * ⚠ GONE, AND IT WAS A REPORTED BUG. There used to be one row named after the
-   * recipe — so a PVE tab listed "PVE [Show]" — whose Show cleared the tab's own
-   * hidden list. A recipe's omissions are decided by the RECIPE and come straight
-   * back, so the press visibly did nothing. A menu row that cannot undo itself is
-   * worse than no row: it is the one control in the panel that lies about its own
-   * effect. "Show everything" and "Reset Tab" undo the preset properly and both
-   * say which they are.
+   * ⚠ THIS ROW WAS REMOVED AND IS BACK, BECAUSE IT WAS REMOVED FOR THE WRONG
+   * REASON. There used to be ONE row named after the recipe — so a PVE tab
+   * listed "PVE [Show]" — whose Show called `showEverythingOnTab()`. That
+   * cleared the tab's own hidden list, which is not where a recipe's omissions
+   * live, so the press visibly did nothing. Reported in game as a dead control.
+   *
+   * ⚠ THE FIX IS ONE ROW PER CATEGORY AND A DIFFERENT UNDO. A row now names the
+   * category the recipe is hiding, and Show records that CATEGORY in the tab's
+   * `shown` list. `tabShows` consults `shown` BEFORE the recipe, so that is a
+   * real override and the objects come back — which the single row never was.
+   *
+   * ⚠ AND IT IS STILL PER-TAB. `presetHidesRow` says no to anything the tab
+   * already decided in either direction, so each category owns exactly one row
+   * and no row can ever sit in the menu doing nothing.
    */
-  const presetGroupRows = $derived.by((): readonly never[] => []);
+  const presetGroupRows = $derived.by((): { readonly key: string; readonly label: string; readonly category: HideCategoryID }[] => {
+    if (!snapshot || activeTab.fixed) {
+      return [];
+    }
+    const byCategory = new Map<HideCategoryID, string>();
+    for (const entity of snapshot.entities) {
+      if (entity.isSelf) continue;
+      if (!presetHidesRow(activeTab, entity, activeTabState, stanceContext)) continue;
+      for (const category of offeredCategoriesFor(entity)) {
+        if (!byCategory.has(category)) {
+          byCategory.set(category, hideCategoryByID(category).label);
+        }
+      }
+    }
+    return [...byCategory.entries()]
+      .map(([category, label]) => ({ key: "preset:category:" + category, label, category }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  });
 
   /**
    * The preset's STANCE pre-hidings still undecided on this tab — the role
@@ -350,6 +374,17 @@
               preset: false,
             },
       );
+    for (const row of presetGroupRows) {
+      rows.push({
+        key: row.key,
+        kind: "category",
+        category: row.category,
+        role: null,
+        stance: null,
+        label: row.label,
+        preset: true,
+      });
+    }
     for (const row of presetStanceRows) {
       rows.push({
         key: "preset:stance:" + row.role + ":" + row.stance,
@@ -678,6 +713,14 @@
   function showEverythingOnTab(): void {
     if (activeTabState.hidden.length > 0) {
       tabHidden.clearHidden(activeTabID);
+    }
+    // ⚠ AND THE RECIPE'S OWN OMISSIONS, AS CATEGORIES. Clearing `hidden` alone
+    // leaves the preset's hiding in place, which is why the old single-row
+    // version of this looked like a button that did nothing: the rows came
+    // straight back. Each category the recipe hides is recorded in `shown`,
+    // which `tabShows` consults BEFORE the recipe — so this is a real override.
+    for (const row of presetGroupRows) {
+      tabHidden.addCategory(activeTabID, row.category);
     }
     for (const row of presetStanceRows) {
       tabHidden.addStance(activeTabID, row.role, row.stance);
@@ -1548,11 +1591,10 @@
       {#if tabEditor.mode === "delete"}
         <p class="spc-editor-confirm">
           Delete the tab <strong>{allTabs.find((tab) => tab.id === tabEditor.id)?.name}</strong>?
-          It goes back to being one of the built-in filters.
         </p>
         <div class="spc-editor-actions">
-          <button type="button" class="spc-tool bad" onclick={confirmDelete}>Yes, delete it</button>
-          <button type="button" class="spc-tool" onclick={closeEditor}>Keep it</button>
+          <button type="button" class="spc-tool bad" onclick={confirmDelete}>Yes</button>
+          <button type="button" class="spc-tool" onclick={closeEditor}>No</button>
         </div>
       {:else}
         <label class="spc-editor-field">

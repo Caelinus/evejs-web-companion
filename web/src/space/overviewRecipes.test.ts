@@ -135,6 +135,20 @@ test("PVE shows ships, drones and wrecks", () => {
   assert.equal(ids.includes(ROCK.itemID), false);
 });
 
+test("⚠ the combat presets keep the STATION and the GATE — the way out of a fight", () => {
+  // ⚠ REPORTED IN GAME: "PvP hides stations for some reason, despite them
+  // being important to escape to in PvP". Both combat recipes admitted only
+  // ship/police/drone/wreck, so a combat tab removed the dock and the stargate
+  // — the two things a fight is ended at.
+  for (const id of ["pve", "pvp"] as const) {
+    const ids = idsFor(id);
+    assert.ok(ids.includes(STATION.itemID), `${id} hides the station`);
+    assert.ok(ids.includes(GATE.itemID), `${id} hides the stargate`);
+    // ⚠ AND THE ROCKS ARE STILL OUT — this widens the escape, not the clutter.
+    assert.equal(ids.includes(ROCK.itemID), false, `${id} now shows rocks`);
+  }
+});
+
 test("⚠ the old 'combat' id still answers as PVE, so a saved bar keeps working", () => {
   // ⚠ THE RENAME MIGRATION. A bar that shipped before the refresh names its
   // combat tab 'combat'; it must resolve to the renamed recipe, not fall back
@@ -259,7 +273,7 @@ test("recipes classify through bracketRole, so the list and the picture agree", 
   for (const row of EVERYTHING) {
     const role = bracketRole(row);
     const shown = recipeAllows(recipeByID("combat"), row);
-    const expected = role === "hostile" || ["ship", "police", "drone", "wreck"].includes(role);
+    const expected = role === "hostile" || ["ship", "police", "drone", "wreck", "station", "gate"].includes(role);
     assert.equal(shown, expected, `'${role}' was classified differently`);
   }
 });

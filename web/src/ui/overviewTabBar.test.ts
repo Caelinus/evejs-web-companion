@@ -384,9 +384,9 @@ test("⚠ deleting a tab asks first, in the same submenu style", () => {
   // editor panel so there is one place a submenu appears from.
   resetShared();
   const body = panel();
-  assert.doesNotMatch(body, /Yes, delete it/, "the confirmation is showing when nothing was pressed");
+  assert.doesNotMatch(body, />Yes</, "the confirmation is showing when nothing was pressed");
   assert.match(SOURCE, /class="spc-editor" class:danger=\{tabEditor\.mode === "delete"\}/);
-  assert.match(SOURCE, /Yes, delete it/, "no confirmation button exists");
+  assert.match(SOURCE, />Yes</, "no confirmation button exists");
   assert.match(SOURCE, /openDelete\(activeTab\.id\)/, "delete does not go through the confirmation");
   assert.match(SOURCE, /onclick=\{confirmDelete\}/, "the confirmation is not wired");
 });
@@ -404,7 +404,62 @@ test("the confirmation is styled differently from the create/rename form", () =>
   // misclick becomes a lost tab, so the panel flips to a danger treatment.
   assert.match(SOURCE, /class:danger=\{tabEditor\.mode === "delete"\}/);
   assert.match(SOURCE, /spc-editor-confirm/);
-  assert.match(SOURCE, /Keep it/, "there is no way to back out of the confirmation");
+  assert.match(SOURCE, />No</, "there is no way to back out of the confirmation");
+});
+
+// --- in-game reports, 2026-04-10 (second round) -------------------------------
+
+test("⚠ --stn-warn is DEFINED, so the Yes button cannot vanish on hover", () => {
+  // ⚠ THE ROOT CAUSE OF "hovering 'Yes, delete it' makes it disappear". Eight
+  // rules referenced `var(--stn-warn)` and NOTHING DEFINED IT. An undefined
+  // custom property invalidates the whole declaration, so
+  // `.spc-tool.bad:hover` fell back to `color: var(--stn-page)` (#0a1119,
+  // near-black) over a background that was never painted — dark text on a dark
+  // button. The press looked like the button had gone.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(css, /--stn-warn:\s*#/, "--stn-warn is referenced but never defined");
+
+  // ⚠ AND EVERY reference resolves inside the block that defines it, so the
+  // hover rule inherits the variable rather than dropping it.
+  const uses = css.match(/var\(--stn-warn\)/g)?.length ?? 0;
+  assert.ok(uses > 0, "no rule references the warn colour, so the definition is dead");
+});
+
+test("⚠ the delete confirmation is terse: one question, and Yes / No", () => {
+  // ⚠ REPORTED AS OVEREXPLAINED. The question is the whole of it; the extra
+  // sentence about going back to a built-in filter is what made it read as a
+  // dialog rather than a confirmation.
+  assert.match(SOURCE, /Delete the tab <strong>/, "the question does not name the tab");
+  assert.match(SOURCE, /onclick=\{confirmDelete\}>Yes</, "the confirm button is not just 'Yes'");
+  assert.match(SOURCE, /onclick=\{closeEditor\}>No</, "the cancel button is not just 'No'");
+  assert.doesNotMatch(SOURCE, /Yes, delete it/, "the old verbose label came back");
+  assert.doesNotMatch(SOURCE, /Keep it/, "the old verbose label came back");
+  assert.doesNotMatch(SOURCE, /built-in filters/, "the over-explaining sentence came back");
+});
+
+test("⚠ the delete confirmation is right-aligned under the delete button", () => {
+  // ⚠ THE DELETE VERB IS THE RIGHTMOST CONTROL, so a confirmation that opened
+  // left put its buttons nowhere near the thing being confirmed.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  const danger = css.match(/\.spc-editor\.danger\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(danger, /justify-content:\s*flex-end/, "the confirmation is not right-aligned");
+  const confirm = css.match(/\.spc-editor\.danger \.spc-editor-confirm\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(confirm, /text-align:\s*right/, "the question is not right-aligned");
+});
+
+test("⚠ a switched-on toggle reads as inactive: faded AND struck through", () => {
+  // ⚠ REPORTED AS "no indicator at all". The class was rendering all along, so
+  // the strike was too quiet on its own at 10px. Three signals now: the strike,
+  // a dimmed colour, and reduced opacity.
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  const on = css.match(/\.spc-tool-toggle\.on\s*(,\s*\n\s*\.[\w-]+\s*)*\{[^}]*\}/)?.[0]
+    ?? css.match(/\.spc-tool-toggle\.on[^{]*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(on, /line-through/, "an active toggle is not struck through");
+  assert.match(on, /opacity/, "an active toggle does not fade");
+  // ⚠ AND HOVER MUST NOT BRING IT BACK — `.spc-tool:hover` is later in the same
+  // layer and would otherwise repaint the very control that must look inactive.
+  const onHover = css.match(/\.spc-tool-toggle\.on:hover[^{]*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(onHover, /opacity/, "hover undoes the active toggle's fade");
 });
 
 test("move-left and move-right exist and are disabled while All is selected", () => {

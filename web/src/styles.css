@@ -7858,6 +7858,14 @@
     --stn-accent: #8ec5ee;
     --stn-accent-strong: #5aa9e6;
     --stn-btn-text: #a9c8e2;
+    /* ⚠ `--stn-warn` WAS NEVER DEFINED, and eight rules referenced it. An
+       undefined custom property makes the whole declaration invalid, so
+       `.spc-tool.bad:hover` fell back to `color: var(--stn-page)` (#0a1119,
+       near-black) over a background that was never painted — which is why the
+       "Yes" button VANISHED on hover instead of highlighting. A destructive
+       amber that reads as a warning against this panel's blue. */
+    --stn-warn: #e8a33d;
+    --stn-warn-strong: #f0b256;
     --stn-danger-text: #e0a39a;
     --stn-danger-line: #4a2c2c;
     --stn-danger-bg: #1b1113;
@@ -8984,15 +8992,33 @@
     border-bottom: 1px solid var(--stn-line);
     background: var(--stn-page);
   }
-  /* ⚠ A SWITCHED-ON TOGGLE IS STRUCK THROUGH, NOT FILLED. The plan asks for the
+  /* ⚠ A SWITCHED-ON TOGGLE FADES AND IS STRUCK THROUGH. The plan asks for the
      button to read as "these are hidden" while it is active, and a strike is
-     the same word the player already reads on a hidden row in the menu — so
-     the two places that say "hidden" look the same. It is also the honest
-     signal for a toggle: the label never changes, only its state does. */
+     the same word the player already reads on a hidden row in the menu — so the
+     two places that say "hidden" look the same. It is also the honest signal
+     for a toggle: the label never changes, only its state does.
+
+     ⚠ THE STATE IS CARRIED BY THREE THINGS, because one was not enough: the
+     strike alone is easy to miss on a 10px uppercase label, and the colour
+     alone is invisible to a player who cannot tell amber from grey. Opacity
+     fades it back, the strike crosses it, and the dimmed colour reads as
+     inactive. `aria-pressed` carries the same fact to assistive tech. */
+  .spc-tools-bar .spc-tool-toggle.on,
   .spc-tool-toggle.on {
-    color: var(--stn-muted);
-    text-decoration: line-through;
+    color: var(--stn-disabled);
     border-color: var(--stn-line);
+    background: transparent;
+    text-decoration: line-through;
+    opacity: 0.55;
+  }
+  /* ⚠ AND HOVER MUST NOT UNDO ANY OF IT. `.spc-tool:hover` is defined later in
+     this layer and would otherwise restore the bright accent colour on the very
+     control whose whole job is to look inactive — which is what the in-game
+     report saw. */
+  .spc-tool-toggle.on:hover:not(:disabled) {
+    color: var(--stn-disabled);
+    border-color: var(--stn-line);
+    opacity: 0.55;
   }
   /* The per-object Hide is the one control pushed to the panel's right edge. */
   .spc-tools-bar .spc-tool-hide { margin-left: auto; }
@@ -9106,6 +9132,13 @@
     font-family: var(--font-body);
     font-size: 12px;
   }
+  /* ⚠ THE CONFIRMATION SITS UNDER THE DELETE BUTTON IT CAME FROM. The delete
+     verb is the rightmost control on the tab bar, so a confirmation that
+     opened left-aligned put its Yes/No nowhere near the thing being confirmed.
+     `flex-end` right-aligns both the question (which keeps its own full-width
+     line, so it stays ABOVE the buttons) and the button row under it. */
+  .spc-editor.danger { justify-content: flex-end; }
+  .spc-editor.danger .spc-editor-confirm { text-align: right; }
   .spc-editor-actions { display: flex; gap: 6px; }
   /* ⚠ THE DELETE CONFIRMATION IS NOT A FORM. It reuses the editor panel so there
      is one place a submenu can appear from, but it wears a warning edge and a

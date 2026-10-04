@@ -107,17 +107,20 @@ export const OVERVIEW_RECIPES: readonly OverviewRecipe[] = [
   {
     id: "pve",
     label: "PVE",
-    hint: "Ships, police, drones and wrecks — the things that fight the things you fight.",
-    roles: set("ship", "police", "drone", "wreck"),
+    hint: "Ships, police, drones and wrecks — plus the gates and stations you run to.",
+    // ⚠ STATIONS AND GATES TOO, reported missing in game. A combat filter that
+    // omits them hides the way out of the fight and the way back into it, which
+    // is the opposite of what a combat tab is for.
+    roles: set("ship", "police", "drone", "wreck", "station", "gate"),
   },
   {
     id: "pvp",
     label: "PVP",
-    hint: "What PVE shows, minus your own side.",
-    // Same roles as PVE; the two presets differ ONLY by stance, which is what
-    // the stance axis is for. Your logi and your drones stop cluttering the
-    // fight; everything that is not yours stays.
-    roles: set("ship", "police", "drone", "wreck"),
+    hint: "What PVE shows, minus your own side — and the places you escape to.",
+    // Same roles as PVE, plus the STATION and GATE a fight runs to or from. A PvP
+    // filter that hides the station is hiding the escape: reported in game, and
+    // the pilot is left without a way to dock out of the fight they chose.
+    roles: set("ship", "police", "drone", "wreck", "station", "gate"),
     stancePreHides: [
       { role: "ship", stance: "friendly" },
       { role: "drone", stance: "friendly" },
