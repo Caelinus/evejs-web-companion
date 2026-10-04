@@ -29,6 +29,35 @@ test("stock verified no-op retains LOW optional supplies and releases without ga
  const f=stock(),r=await f.apply();assert.equal(r.state,"ALREADY_SATISFIED",JSON.stringify(r));assert.equal(r.finalReview.status.supplies,"MISSING");
  assert.equal(f.calls.filter(c=>/^[A-Z_]+$/.test(c)).length,0);assert.equal(f.operations.size,0);
 });
+test("a pilot already online before selection refuses without manufacturing release recovery",async()=>{
+ const f=stock(),review=f.prepare();f.state.online=true;
+ const r=await f.apply(review);assert.equal(r.state,"REFUSED",JSON.stringify(r));assert.equal(r.reason,"PILOT_BUSY");
+ assert.equal(r.release.state,"NOT_ACQUIRED");assert.equal(r.release.exactSessionReleased,false);
+ assert.deepEqual(f.calls,["status"]);assert.equal(f.state.online,true);
+ assert.equal(f.operations.size,0);assert.equal(f.sessionOperations.size,0);assert.equal(f.heldSessions.size,0);assert.deepEqual(f.service.pending(11),[]);
+ f.state.online=false;assert.equal(f.prepare().canApply,true);assert.equal((await f.apply()).state,"ALREADY_SATISFIED");
+});
+test("failure without selection clears only its own fences while preserving a replacement owner",async()=>{
+ const f=stock(),foreign={kind:"hosted-other"};
+ f.store.listCharactersForAccount=async()=>{f.operations.set(11,foreign);f.state.online=true;return[{accountID:7,characterID:11,corporationID:20}];};
+ const r=await f.apply();assert.equal(r.state,"REFUSED",JSON.stringify(r));assert.equal(r.reason,"PROVISIONING_GENERATION_CHANGED");
+ assert.equal(r.release.state,"NOT_ACQUIRED");assert.equal(f.operations.get(11),foreign);assert.equal(f.sessionOperations.size,0);
+ assert.deepEqual(f.calls,[]);assert.equal(f.state.online,true);assert.equal(f.heldSessions.size,0);
+});
+test("no-selection refusal persists before dropping fences and recovery never selects",async()=>{
+ const f=stock(),review=f.prepare(),put=f.service.journal.put;f.state.online=true;
+ f.service.journal.put=(key,row)=>{if(row.state==="REFUSED")throw new Error("disk failed");return put(key,row);};
+ await assert.rejects(f.apply(review),/disk failed/);assert.equal(f.operations.has(11),true);assert.equal(f.sessionOperations.has("caller"),true);
+ f.service.journal.put=put;const r=await f.service.recover(f.account,review.reviewID);
+ assert.equal(r.state,"REFUSED");assert.equal(r.reason,"PILOT_BUSY");assert.equal(r.release.state,"NOT_ACQUIRED");
+ assert.equal(f.operations.size,0);assert.equal(f.sessionOperations.size,0);assert.deepEqual(f.calls,["status"]);assert.equal(f.state.online,true);
+});
+for(const code of ["EVE_GATEWAY_TIMEOUT","CALL_REFUSED"])test(`a dispatched selection with ${code} still requires offline proof`,async()=>{
+ const f=stock();f.gateway.selectCharacter=async()=>{f.calls.push("select");f.state.online=true;throw Object.assign(new Error("uncertain selection"),{code});};
+ const r=await f.apply();assert.equal(r.state,"UNCERTAIN");assert.equal(r.reason,"CONTROL_RELEASE_UNPROVEN");
+ assert.equal(r.release.state,"UNVERIFIED");assert.equal(r.release.exactSessionReleased,false);assert.equal(f.operations.has(11),true);
+ assert.equal(f.sessionOperations.has("caller"),true);assert.equal(f.calls.includes("release"),false);assert.equal(f.calls.includes("readShip"),false);
+});
 for(const mode of ["browser","hosted","operation","custody","session"])test(`P4-P7 known ${mode} owner refuses before selection`,async()=>{
  const f=stock(),r=f.prepare();
  if(mode==="browser")f.heldSessions.set("other",{characterID:11});

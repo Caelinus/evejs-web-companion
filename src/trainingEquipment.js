@@ -22,6 +22,10 @@ function dutyReady(skills, equipment) { return skills === "READY" && equipment =
 function createTrainingEquipment({ center, readQualification, now = Date.now }) {
   const acceptedReviews=new Map(),selectedEvidence=new Map();
   const evidenceKey=(accountID,characterID,config,source)=>hash([accountID,characterID,config,source]);
+  function discardPilotEvidence(accountID, characterID) {
+    for (const [key, receipt] of selectedEvidence)
+      if (receipt.accountID === accountID && receipt.characterID === characterID) selectedEvidence.delete(key);
+  }
   const inputFor = (characterID, config, source) => ({ characterID, providerCharacterID: characterID,
     corporationID: config.corporationOwnerID, fittingID: config.fittingID, source });
   async function inspect(account, characterID, config, source) {
@@ -40,20 +44,48 @@ function createTrainingEquipment({ center, readQualification, now = Date.now }) 
   }
   async function enrich(account, read, configurations, source = { kind: "hangar" }) {
     source = physicalSource(source);
-    const configs = validateConfigurations(read.report.role, configurations), stages = [];
+    const configs = validateConfigurations(read.report.role, configurations), stages = [], receiptStages = [];
+    const characterID = read.report.pilot.characterID;
+    // Compare against the complete configuration list, not each unrelated stage.
+    // Once intent changes, restoring its old key cannot restore physical proof.
+    for (const [key, receipt] of selectedEvidence) {
+      if (receipt.accountID === account.accountID && receipt.characterID === characterID &&
+          (receipt.at + EVIDENCE_TTL <= now() || hash(receipt.source) !== hash(source) ||
+           !configs.some(config => hash(config) === hash(receipt.config)))) selectedEvidence.delete(key);
+    }
     for (const stage of read.report.stages) {
       const config = configs.find(c => c.configurationID === stage.id);
+      const key = config ? evidenceKey(account.accountID, characterID, config, source) : null;
       let observation;
       try {
         if (!config || stage.fitting.status !== "READY") fail("REVIEW_REQUIRED", stage.fitting.reason || "Accept a readable Training fitting first.");
-        const detail=await inspect(account, read.report.pilot.characterID, config, source);
-        const key=evidenceKey(account.accountID,read.report.pilot.characterID,config,source),receipt=selectedEvidence.get(key);
-        if(receipt && receipt.at+EVIDENCE_TTL<=now())selectedEvidence.delete(key);
-        observation=receipt && receipt.at+EVIDENCE_TTL>now() && detail.pilot.control.owner==="OFF" && detail.pilot.control.online===false ?
+        const detail=await inspect(account, characterID, config, source);
+        if (detail.pilot.control.owner !== "OFF" || detail.pilot.control.online !== false)
+          discardPilotEvidence(account.accountID, characterID);
+        let receipt=selectedEvidence.get(key);
+        if (receipt && (receipt.at + EVIDENCE_TTL <= now() || receipt.definitionFingerprint !== detail.selected.definitionFingerprint)) {
+          selectedEvidence.delete(key); receipt = null;
+        }
+        observation=receipt ?
           equipment(receipt.detail,"Verified by the completed selected maintenance operation.",receipt.at):equipment(detail);
-      } catch (e) { observation = equipment(null, e.code === "PROVISIONING_OFFLINE_AUTHORITY_UNAVAILABLE" ? e.message : e.code || "OBSERVATION_UNAVAILABLE"); }
+        if (receipt) receiptStages.push({ index: stages.length, key, receipt });
+      } catch (e) {
+        if (key) selectedEvidence.delete(key);
+        observation = equipment(null, e.code === "PROVISIONING_OFFLINE_AUTHORITY_UNAVAILABLE" ? e.message : e.code || "OBSERVATION_UNAVAILABLE");
+      }
       stages.push({ ...stage, equipmentReadiness: observation.status.equipment, equipmentReason: observation.reason,
         equipment: observation, dutyReadiness: dutyReady(stage.skillQualification, observation.status.equipment) });
+    }
+    // Later stage reads can invalidate or outlive an earlier stage's receipt.
+    // Publish only evidence that still owns its exact cache entry on return.
+    for (const { index, key, receipt } of receiptStages) {
+      const current = selectedEvidence.get(key) === receipt;
+      if (current && receipt.at + EVIDENCE_TTL > now()) continue;
+      if (current) selectedEvidence.delete(key);
+      const observation = equipment(null, "Selected maintenance evidence expired or was invalidated during qualification.");
+      const stage = stages[index];
+      stages[index] = { ...stage, equipmentReadiness: observation.status.equipment, equipmentReason: observation.reason,
+        equipment: observation, dutyReadiness: dutyReady(stage.skillQualification, observation.status.equipment) };
     }
     return { ...read, report: { ...read.report, stages } };
   }
@@ -82,16 +114,21 @@ function createTrainingEquipment({ center, readQualification, now = Date.now }) 
   }
   async function apply(account,request,callerSessionID=null) {
     const accepted=acceptedReviews.get(request.reviewID);
+    // A new owned maintenance attempt can replace equipment or contradict the
+    // old observation. Completed invocation reads have no retained acceptance.
+    if (accepted?.accountID === account.accountID) discardPilotEvidence(account.accountID, accepted.characterID);
     const outcome=await center.applyService.apply(account,request,CONSUMER,callerSessionID);
+    if (accepted?.accountID === account.accountID) acceptedReviews.delete(request.reviewID);
     if(accepted?.accountID===account.accountID && ["COMPLETE","ALREADY_SATISFIED"].includes(outcome.state) &&
         outcome.release.state==="VERIFIED_OFFLINE" && outcome.finalReview?.status.equipment==="VERIFIED" &&
         Number.isFinite(outcome.finalObservedAt) && outcome.finalObservedAt<=now() && outcome.finalObservedAt+EVIDENCE_TTL>now()) {
       const r=outcome.finalReview;
-      selectedEvidence.set(evidenceKey(account.accountID,accepted.characterID,accepted.config,accepted.source),{at:outcome.finalObservedAt,detail:{
+      selectedEvidence.set(evidenceKey(account.accountID,accepted.characterID,accepted.config,accepted.source),{
+        accountID:account.accountID,characterID:accepted.characterID,config:accepted.config,source:accepted.source,
+        definitionFingerprint:r.contract.definitionFingerprint,at:outcome.finalObservedAt,detail:{
         status:r.status,candidateSource:{...r.source.pin.descriptor,quality:"COMPLETE",query:"ALLOWED",take:r.source.access.take?"ALLOWED":"DENIED",
           contentsLocationID:r.source.pin.locationID,rows:r.source.rows},pilot:{quality:"COMPLETE",observation:{complete:true},revision:outcome.control.generation,
           shipID:r.context.shipID,locationID:r.context.locationID,hullName:null,control:{state:"offline",owner:"OFF",online:false}}}});
-      acceptedReviews.delete(request.reviewID);
     }
     return outcome;
   }

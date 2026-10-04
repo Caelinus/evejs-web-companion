@@ -60,7 +60,14 @@ function createProvisioningCenterApply({ gateway, engine, operations, data, sess
     row.state="RELEASING";
     let persistenceError=null;
     try { save(row);persistenceError=null; } catch(error) { persistenceError=error; }
-    let acknowledged=!run.attempted;
+    // A refusal before the selection call acquired no control to release.
+    // Persist that fact before removing only this invocation's exact fences.
+    if(!run.selectionRequested) {
+      row.release={state:"NOT_ACQUIRED",checkedAt:now(),exactSessionReleased:false,evidence:"NO_SELECTION_DISPATCH"};
+      row.state="REFUSED";save(row);
+      clearReservation(run);active.delete(row.key);return;
+    }
+    let acknowledged=false;
     if(run.selected?.bridgeSessionID) {
       try {
         // Administrative cleanup targets ONLY the returned opaque handle. It
@@ -107,7 +114,7 @@ function createProvisioningCenterApply({ gateway, engine, operations, data, sess
       pin:accepted.pin,input:accepted.input,reviewHash:request.reviewHash,runID:randomUUID(),state:"ACQUIRING_CONTROL",
       release:{state:"NOT_ACQUIRED"},createdAt:now()};
     const reservation={kind:"temporary-provisioning",id:row.key,characterID:pilot,runID:row.runID};
-    const run={row,reservation,sessionKeys,running:true,attempted:false,selected:null,binding:null};
+    const run={row,reservation,sessionKeys,running:true,selectionRequested:false,selected:null,binding:null};
     // Persist before acquiring. If persistence fails, no reservation or session
     // is installed and no mutation is sent.
     save(row);operations.set(pilot,reservation);for(const key of sessionKeys) sessionOperations.set(key,reservation);active.set(row.key,run);
@@ -127,9 +134,11 @@ function createProvisioningCenterApply({ gateway, engine, operations, data, sess
       const status=await gateway.getCharacterStatus(account.accountID,pilot);current();
       if(!isOffline(status,pilot)) fail("PILOT_BUSY");
       await boundary("ACQUIRING_CONTROL");
-      run.attempted=true;row.release={state:"UNVERIFIED"};save(row);
-      try { run.selected=await withLease(reservation,()=>gateway.selectCharacter([pilot,null,true],null,{userid:account.accountID,userName:String(account.username||"")})); }
-      catch(error) { if(["CALL_REFUSED","CHARACTER_IN_USE","PILOT_BUSY"].includes(error.code))run.attempted=false;throw error; }
+      row.release={state:"UNVERIFIED"};save(row);
+      run.selected=await withLease(reservation,()=>{
+        run.selectionRequested=true;
+        return gateway.selectCharacter([pilot,null,true],null,{userid:account.accountID,userName:String(account.username||"")});
+      });
       current();
       if(typeof run.selected?.bridgeSessionID!=="string" || !run.selected.bridgeSessionID || run.selected.session?.characterID!==pilot) fail("PROVISIONING_SESSION_MISMATCH");
       run.binding=attach(account,pilot,run.selected,row.key);current();
