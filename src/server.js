@@ -776,7 +776,11 @@ const provisioningRoutes = registerProvisioningRoutes({ app, requireAuth, requir
   } });
 
 const provisioningCenter = require("./provisioningCenter").registerProvisioningCenter({ app, requireAuth: requireTrainingAuth, gateway, data: staticData,
-  operations: characterOperations, heldSessions: bridgeSessions, botHost, engine: replenishment, sessions: factorySessions,
+  store, operations: characterOperations, sessionOperations, heldSessions: bridgeSessions, botHost, engine: replenishment,
+  withLease: mutationFence.withLease,
+  // Exact administrative release remains available while shared custody blocks
+  // inventory writes. Only the bounded service's acquired handle reaches here.
+  releaseSession: (handle, fields) => (options.eveGatewayClient || eveGatewayClient).releaseBridgeSession(handle, fields),
   selectedAdapter: provisioningRoutes.adapter,
   filePath: options.provisioningCenterJournalPath || (options.eveStore ? null : path.join(config.dataDir, "provisioning-center-control.json")),
   fault: options.provisioningCenterFault || null,
@@ -798,7 +802,7 @@ const trainingEquipment = require("./trainingEquipment").createTrainingEquipment
     return (await readMinerPilot({ store, gateway, data: staticData, account, ...input })).read;
   } });
 for (const action of ["review", "apply", "recover"]) app.post(`/api/pilot-training/equipment/${action}`, requireTrainingAuth, async (req, res, next) => {
-  try { res.json({ ok: true, [action === "review" ? "review" : "outcome"]: await trainingEquipment[action](req.account, req.body || {}) }); }
+  try { res.json({ ok: true, [action === "review" ? "review" : "outcome"]: await trainingEquipment[action](req.account, req.body || {}, req.webSessionID) }); }
   catch (error) { next(error); }
 });
 
@@ -1515,6 +1519,7 @@ function assertCurrentHeldSession(held, webSessionID) {
     throw Object.assign(new Error("The hosted controller generation changed before this call."),
       { code: "HOSTED_GENERATION_CHANGED", statusCode: 409 });
   }
+  held.maintenanceCurrent?.();
 }
 
 // The browser cannot leave the recovery grid while its login check is

@@ -63,6 +63,7 @@ function registerProvisioningRoutes(d) {
   routerPromise.catch(() => {});
   const strictList = async (held, sessionID, place) => {
     const result = await boundCall(held, sessionID, place.spec, "List", place.flag === 0 ? [] : [place.flag], null);
+    currentHeld(held, sessionID);
     return inventoryRows(result.result).sort((a, b) => a.identity.localeCompare(b.identity));
   };
   function adapter(req, held) {
@@ -71,11 +72,13 @@ function registerProvisioningRoutes(d) {
     async function context() {
       currentHeld(held, sessionID);
       const current = (await flight(held, sessionID)).flight;
+      currentHeld(held, sessionID);
       if (held.transition && held.transition.phase !== "ready") fail("PROVISIONING_CONTEXT_UNAVAILABLE");
       if (current.docked !== true || !current.shipID || current.shipID !== held.activeShipID ||
           !current.shipTypeID || !inventoryLocation(held)) fail("PROVISIONING_CONTEXT_UNAVAILABLE");
       if (held.structureID) fail("PROVISIONING_STATION_ONLY", "Initial replenishment supports docked NPC stations; structure qualification is pending.");
       const pilot = (await store.listCharactersForAccount(req.account.accountID)).find(c => c.characterID === held.characterID);
+      currentHeld(held, sessionID);
       if (!pilot || pilot.accountID !== req.account.accountID || pilot.corporationID !== held.corporationID) fail("PILOT_AUTHORITY_CHANGED");
       return { accountID: Number(req.account.accountID), characterID: held.characterID, corporationID: held.corporationID,
         shipID: current.shipID, shipTypeID: current.shipTypeID, locationID: inventoryLocation(held),
@@ -86,6 +89,7 @@ function registerProvisioningRoutes(d) {
       if (!Number.isSafeInteger(input.providerCharacterID) || !Number.isSafeInteger(input.corporationID)) fail("INVALID_DEFINITION_SOURCE");
       const result = await readProvisioningDefinitions({ store, gateway, data, accountID: Number(req.account.accountID),
         providerCharacterID: input.providerCharacterID, supplyPolicy: input.supplyPolicy });
+      currentHeld(held, sessionID);
       if (result.status !== "READY" || result.corporationID !== input.corporationID) fail("FITTING_SOURCE_CHANGED");
       const contracts = result.contracts;
       const contract = contracts.find(c => c.definition.fittingID === input.fittingID);
@@ -96,12 +100,15 @@ function registerProvisioningRoutes(d) {
       const descriptor = input.source;
       if (!descriptor || !["hangar", "corp", "container"].includes(descriptor.kind)) fail("INVALID_SOURCE");
       const place = await resolvePlace(held, sessionID, descriptor);
+      currentHeld(held, sessionID);
       let access = { query: true, take: true }, ownerID = held.characterID;
       if (descriptor.kind === "corp") {
         if (descriptor.corporationID !== scope.corporationID) fail("CORPORATION_SOURCE_CHANGED");
         ownerID = scope.corporationID;
         const member = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetMember", [held.characterID], null)).result);
+        currentHeld(held, sessionID);
         const corp = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetCorporation", [], null)).result);
+        currentHeld(held, sessionID);
         if (Number(member.characterID) !== held.characterID || Number(member.corporationID) !== ownerID ||
             Number(corp.corporationID) !== ownerID) fail("CORPORATION_ACCESS_UNKNOWN");
         access = corporationAccess(member, corp, scope.locationID, descriptor.division);
@@ -131,6 +138,7 @@ function registerProvisioningRoutes(d) {
       try {
         const flags = [...new Set([...slots(), 5, 87, 158, 133, 143])];
         const listed = await boundCall(held, sessionID, cargoBindSpec(held, scope.shipID), "ListByFlags", [flags], null);
+        currentHeld(held, sessionID);
         const rows = inventoryRows(listed.result).sort((a, b) => a.identity.localeCompare(b.identity));
         if (rows.some(r => r.locationID !== scope.shipID || r.ownerID !== scope.characterID || !data.getType(r.typeID))) fail("OBSERVATION_INCOMPLETE");
         return { complete: true, shipTypeID: scope.shipTypeID, rows };
