@@ -60,7 +60,7 @@ import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
 import { preferredResources } from "./resourcePriority.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
-import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
+import { isUnreachable, NO_STEP_ID, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
 import { FALLBACK_CONTROL_RANGE_M } from "./kiteBand.ts";
 import {
@@ -71,7 +71,7 @@ import {
   launchStalled,
   type DroneRoster,
 } from "./droneLaunch.ts";
-import { decideDroneBoat } from "./droneBoatLadder.ts";
+import { decideDroneBoat, type LockRefusals } from "./droneBoatLadder.ts";
 import { settleCombat } from "./combatOwnership.ts";
 import { defenderSiteIdentity } from "./operationDefender.ts";
 import { decideDroneRotation, readRotationMemory } from "./droneRotation.ts";
@@ -146,6 +146,10 @@ function warpIssuedMem(obs: ScriptObservation, target: string | null = null): Ma
 }
 
 const MAX_LOCK_WAIT_TICKS = 8; // ~16s acquiring one rock before moving on
+// A lock refused for range is pressed again only once the rock is this fraction of the
+// refused distance: each re-press must come with real progress, or the runner's ten-refusal
+// cap is spent standing still (150 km to a 40 km lock range is about six presses).
+const LOCK_REPRESS_PROGRESS = 0.8;
 
 function tick(
   action: MacroTick["action"],
@@ -1675,7 +1679,8 @@ function mineWithRocks(
       return tick(WAIT, "Nothing pickable to mine.", "Picking a rock", ACTING, true, {});
     }
     if (step.macro === "fleet-mine") return tick(WAIT, "Choosing the supported resource.", "Fleet Miner — choosing", ACTING, true,
-      { rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID });
+      { rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID,
+        lockRefusalsSeen: refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0 });
     // Orbit the new rock at 5km to get into mining range; lock next tick.
     return tick(
       { kind: "orbit", targetID: pick.itemID, range: ORBIT_RANGE_M },
@@ -1683,13 +1688,88 @@ function mineWithRocks(
       "Approaching a rock",
       ACTING,
       true,
-      clearCloseInStall({ rockID: pick.itemID, lockIssued: false, waited: 0, approachedRockID: pick.itemID }),
+      clearCloseInStall({
+        rockID: pick.itemID,
+        lockIssued: false,
+        waited: 0,
+        approachedRockID: pick.itemID,
+        // ⚠ THE BASELINE FOR "A REFUSAL NEWER THAN THIS PICK". A record lives until a
+        // SUCCESS on the same key clears it, so one left over from a rock dropped and
+        // picked again would otherwise be read as a fresh refusal for ever.
+        lockRefusalsSeen: refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0,
+      }),
     );
   }
 
   const locked = (obs.lockedTargetIDs ?? []).includes(rockID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
+      // ⚠ A REFUSED LOCK COMMITS NOTHING (2fd4a77), so `lockIssued` below is never
+      // set by a press that failed and this block would press again on every tick
+      // until the runner's ten-refusal cap sent the ship home. Live: a rock beyond
+      // lock range, a ship closing at 144 m/s, TargetNotWithinRangeGeneric ten
+      // times in four minutes. What it can read instead is the ledger, against
+      // the baseline committed when the rock was picked.
+      const rockDist = measurement?.distances.get(rockID) ?? null;
+      const lockRange = obs.maxTargetRangeM ?? null;
+      const seen = num(mem, "lockRefusalsSeen") ?? 0;
+      const refusedAt = num(mem, "lockRefusedAtM");
+      const refusal = refusalFor(obs.refusals, step.id, "lock", null);
+      const fresh = refusal !== null && refusal.count > seen;
+      // ⚠ THE COUNTERS ARE CARRIED BY HAND, as in the mining-range wait below: this
+      // block REBUILDS its memory on every return.
+      const closingIn = (seenCount: number, atM: number | null): MacroTick => {
+        const stall = closeInStall(measurement?.shipMode ?? null, mem);
+        const closing: MacroMemory = {
+          rockID,
+          lockIssued: false,
+          waited: 0,
+          approachedRockID: num(mem, "approachedRockID"),
+          lockRefusalsSeen: seenCount,
+          ...(atM !== null ? { lockRefusedAtM: atM } : {}),
+          stallTicks: num(stall.mem, "stallTicks") ?? 0,
+          stallStage: num(stall.mem, "stallStage") ?? 0,
+        };
+        if (stall.step === "reorder") {
+          return tick({ kind: "orbit", targetID: rockID, range: ORBIT_RANGE_M }, STALL_REORDER_WHY, "Approaching a rock", ACTING, true, closing);
+        }
+        if (stall.step === "unstick") {
+          return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Approaching a rock", ACTING, true, closing);
+        }
+        if (stall.step === "stuck") {
+          return tick(WAIT, STALL_STUCK_WHY, "Approaching a rock", { kind: "blocked", reason: STALL_STUCK_REASON });
+        }
+        return tick(WAIT, "Closing in — too far out to lock yet.", "Approaching a rock", ACTING, true, closing);
+      };
+      // A refusal that arrives while the pre-gate holds the press is absorbed, not left
+      // to be read as "new" once the rock is in range.
+      const seenNow = refusal !== null ? Math.max(seen, refusal.count) : seen;
+      // ⚠ NOT FOR FLEET-MINE. That block owns its own movement and only gets here
+      // once it has braked to a stop inside support coverage, so the stall ladder
+      // in `closingIn` would read the stop as a stall and order an orbit it must
+      // never fly. A refused lock there takes the timed path, as it always did.
+      const closes = step.macro !== "fleet-mine";
+      if (closes && rockDist !== null && lockRange !== null && rockDist > lockRange) {
+        return closingIn(seenNow, refusedAt);
+      }
+      // The timed path: exactly what a refused lock did before 2fd4a77.
+      const timed = (seenCount: number): MacroTick => tick(WAIT, "Waiting for the lock.", "Locking on", ACTING, true, {
+        rockID,
+        lockIssued: true,
+        waited: 0,
+        approachedRockID: num(mem, "approachedRockID"),
+        lockRefusalsSeen: seenCount,
+      });
+      if (fresh) {
+        // Far enough that it is a range problem: close in, and press again only after
+        // real progress. Close, or unreadable: not a range problem this block can
+        // measure, so let it time out and move on.
+        return closes && rockDist !== null && rockDist > MINING_RANGE_M ? closingIn(refusal.count, rockDist) : timed(refusal.count);
+      }
+      if (refusedAt !== null) {
+        if (rockDist === null) return timed(seen);
+        if (rockDist > LOCK_REPRESS_PROGRESS * refusedAt) return closingIn(seen, refusedAt);
+      }
       return tick({ kind: "lock", targetID: rockID }, "Locking the rock.", "Locking on", ACTING, true, {
         rockID,
         lockIssued: true,
@@ -2869,10 +2949,41 @@ function isOwnWreck(wreck: SpaceEntity, obs: ScriptObservation): boolean {
   return (me !== null && wreck.ownerID === me) || (corp !== null && wreck.ownerID === corp);
 }
 
+/**
+ * What the ledger says about this step's lock presses, against the count the
+ * block last committed (`lockRefusalsSeen`).
+ *
+ * ⚠ A REFUSED LOCK COMMITS NOTHING (2fd4a77), so a `lockIssued` written by the
+ * pressing tick is not there to read after a refusal: a block that waits on
+ * that flag to give up presses again on every backoff instead, until the
+ * runner's ten-refusal cap sends the ship home. The ledger is what it can read.
+ *
+ * The record is keyed by step and action with NO target and lives until a lock
+ * in the same step succeeds, so the count a block carries is "the count as of
+ * the last tick that was committed": a press carries 0 (it is committed only
+ * when it succeeded, which is also what clears the record) and a wait tick that
+ * has read a refusal carries the count it read.
+ *
+ * ⚠ NO COUNT CARRIED AND A RECORD ON THE LEDGER IS AMBIGUOUS, AND IT IS READ AS
+ * OLD. It is either left over from an earlier visit (step memory is dropped
+ * when a step is left, the ledger is not) or this visit's very first press,
+ * refused. Reading a leftover as fresh would hold the block off a lock it never
+ * asked for — in a fight, sixteen seconds of not shooting — so `unread` has the
+ * block commit the count with one wait tick and press. A first press that
+ * really was refused costs one more before it is believed; every later one is
+ * believed at once.
+ */
+function readLockRefusals(step: MacroStep, obs: ScriptObservation, mem: MacroMemory): LockRefusals {
+  const count = refusalFor(obs.refusals, step.id, "lock", null)?.count ?? 0;
+  const seen = num(mem, "lockRefusalsSeen");
+  return { count, unread: seen === null && count > 0, fresh: seen !== null && count > seen };
+}
+
 // Salvage the grid, nearest wreck first: lock it, send the salvage drones at it,
 // run any fitted salvagers on it. Done (drones home) when no wrecks remain.
 // Salvaging any wreck is legal — only LOOTING is gated.
-const salvageWrecks: MacroDecider = (_step, obs, mem) => {
+const salvageWrecks: MacroDecider = (step, obs, mem) => {
+  const lockRefusals = readLockRefusals(step, obs, mem);
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Salvaging", ACTING, false, mem);
@@ -3001,7 +3112,26 @@ const salvageWrecks: MacroDecider = (_step, obs, mem) => {
   const locked = (obs.lockedTargetIDs ?? []).includes(wreckID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
-      return tick({ kind: "lock", targetID: wreckID }, "Locking the wreck.", "Salvaging", ACTING, true, { ...mem, lockIssued: true, waited: 0 });
+      // See `readLockRefusals`: the flag below is never set by a press that was
+      // refused, so the refusal is read here, before pressing again.
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Salvaging", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
+      if (lockRefusals.fresh) {
+        // The timed wait below, exactly what a refused lock got before 2fd4a77.
+        return tick(WAIT, "Waiting for the lock.", "Salvaging", ACTING, true, {
+          ...mem,
+          lockIssued: true,
+          waited: 0,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      return tick({ kind: "lock", targetID: wreckID }, "Locking the wreck.", "Salvaging", ACTING, true, {
+        ...mem,
+        lockIssued: true,
+        waited: 0,
+        lockRefusalsSeen: 0,
+      });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
     if (waited > MAX_LOCK_WAIT_TICKS) {
@@ -3653,6 +3783,7 @@ function fightRatsLadder(
   role: SquadRoleArg,
   verdict: SiteVerdict,
 ): MacroTick {
+  const lockRefusals = readLockRefusals(step, obs, mem);
   if (hostiles.length === 0) {
     // ⚠ AN EMPTY GRID IS READ THREE TIMES BEFORE IT IS BELIEVED, and the tick
     // this protects is the one right after a warp lands. Caught live on
@@ -3789,13 +3920,30 @@ function fightRatsLadder(
         jammingSourcesOf(obs),
       ) ??
       hostiles[0]!;
+    // ⚠ THE PICK AND THE PRESS ARE ONE TICK, so a refused press leaves no target
+    // in memory either and this branch runs again. See `readLockRefusals`: the
+    // refusal is read here, before pressing again.
+    if (lockRefusals.unread) {
+      return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+    }
+    if (lockRefusals.fresh) {
+      // The timed wait below, exactly what a refused lock got before 2fd4a77.
+      return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
+        ...mem,
+        targetID: primary.itemID,
+        lockIssued: true,
+        waited: 0,
+        dronesOn: null,
+        lockRefusalsSeen: lockRefusals.count,
+      });
+    }
     return tick(
       { kind: "lock", targetID: primary.itemID },
       called !== null ? "Locking what the fleet called." : "Locking the pirate at the top of the list.",
       "Fighting",
       ACTING,
       true,
-      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null },
+      { ...mem, targetID: primary.itemID, lockIssued: true, waited: 0, dronesOn: null, lockRefusalsSeen: 0 },
     );
   }
   const call = callPrimary(role, mem, targetID, "Calling it for the fleet.", "Fighting");
@@ -3805,11 +3953,31 @@ function fightRatsLadder(
   const locked = (obs.lockedTargetIDs ?? []).includes(targetID);
   if (!locked) {
     if (!flag(mem, "lockIssued")) {
-      return tick({ kind: "lock", targetID }, "Locking the pirate.", "Fighting", ACTING, true, { ...mem, lockIssued: true, waited: 0 });
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Fighting", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
+      if (lockRefusals.fresh) {
+        return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, {
+          ...mem,
+          lockIssued: true,
+          waited: 0,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      return tick({ kind: "lock", targetID }, "Locking the pirate.", "Fighting", ACTING, true, {
+        ...mem,
+        lockIssued: true,
+        waited: 0,
+        lockRefusalsSeen: 0,
+      });
     }
     const waited = (num(mem, "waited") ?? 0) + 1;
     if (waited > MAX_LOCK_WAIT_TICKS) {
-      return tick(WAIT, "That one would not lock — picking another.", "Fighting", ACTING, true, {});
+      // The count outlives the reset: without it the next pick would find a record
+      // and no count, and spend a tick deciding the refusal it just sat out is old.
+      const seen = num(mem, "lockRefusalsSeen");
+      return tick(WAIT, "That one would not lock — picking another.", "Fighting", ACTING, true,
+        seen === null ? {} : { lockRefusalsSeen: seen });
     }
     return tick(WAIT, "Waiting for the lock.", "Fighting", ACTING, true, { ...mem, waited });
   }
@@ -4018,6 +4186,7 @@ const fightWithDrones: MacroDecider = (step, obs, mem, board) => {
     propMode: propModeOf(step),
     squad: role,
     calledTargetID: called?.itemID ?? null,
+    lockRefusals: readLockRefusals(step, obs, mem),
   });
   return nameThePropulsionEffect(decided, obs);
 };
@@ -4250,57 +4419,9 @@ function warpToAnomalyOfKind(
       if (warpLanded(obs, mem)) {
         return tick(WAIT, `Arrived at the ${flavour.noun}.`, "Arrived", { kind: "done" });
       }
-      // ⚠ A REFUSED WARP IS NOT A SLOW ONE, AND THIS BLOCK USED TO CALL IT ONE.
-      // It issued the warp, never looked at what came back, and waited out
-      // WARP_START_WAIT_TICKS before stopping the bot with "the warp never
-      // started" — a sentence that sends the reader looking at the ship when the
-      // server had already said no, in the log, on the first tick.
-      //
-      // It happened for real: four pilots were parked INSIDE the den they had
-      // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
-      // — already there — and all four stopped rather than fighting the rats in
-      // front of them.
-      // ⚠ ONLY A REFUSAL NEWER THAN THE LAST ONE THIS STEP SAW. The ledger keys
-      // on step and action with no target, and a record lives until a SUCCESS
-      // clears it — so after moving on from a refused site, the warp to the
-      // next one would read the old refusal on its first tick and give up on a
-      // site it never actually asked for.
-      const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
-      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
-        // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
-        // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
-        // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
-        // right now." Standing in the site and the site having gone arrive in the
-        // SAME WORDS, so the wording is no help and the grid has to answer.
-        if (flavour.alreadyHere(obs, label(mem, "target")) === true) {
-          return tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", {
-            kind: "done",
-          });
-        }
-        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
-        // It happened for real: a pilot came back from unloading, read the
-        // scanner while the site the rest of the fleet had just emptied was
-        // still listed, and warped at it. The server had already torn it down
-        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
-        // scanned down"), and the pilot stopped while the others flew on to the
-        // next site. A refused site is set aside for this step and the pick runs
-        // again. The bot only stops when no site of this kind is left to try.
-        const target = label(mem, "target");
-        const refused = [...listOf(mem, "refused"), ...(target === null ? [] : [target])];
-        if (pickSite(obs.anomalies ?? [], board, refused) !== null) {
-          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
-            refused: refused.join(","),
-            refusalsSeen: refusal.count,
-          });
-        }
-        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
-        // the SERVER said, not with a guess about the warp never starting.
-        return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
-          kind: "blocked",
-          reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
-            "If the ship is already sitting in it, there was nothing left to fly to.",
-        });
-      }
+      // A refused warp is read BEFORE the press, from the target committed by the
+      // phase-1 tick below, so there is nothing to read for it on this path: a
+      // refused issue commits nothing, and `issued` therefore never gets set.
       const waited = (num(mem, "waited") ?? 0) + 1;
       if (waited > WARP_START_WAIT_TICKS) {
         return tick(WAIT, "The warp never started.", "Scanning", {
@@ -4328,6 +4449,96 @@ function warpToAnomalyOfKind(
       });
     }
     const ofKind = anomalies.filter((site) => site.kind === wanted);
+    // ── PHASE 2: a site is committed — read what became of the last warp, or press ──
+    //
+    // ⚠ THE TARGET IS COMMITTED BY A WAIT TICK BEFORE THE WARP IS ISSUED, AND THAT
+    // IS THE WHOLE DESIGN. The runner commits a block's memory only when its
+    // action succeeds (2fd4a77), so a refused warp leaves the memory exactly as
+    // the issuing tick found it: anything the block must know AFTER a refusal —
+    // which site it asked for, what the ledger said before — has to be written
+    // by an earlier tick, before the press. Writing it on the issuing tick
+    // (the old `issued` + `target`) is unreachable under the real runner.
+    const target = label(mem, "target");
+    if (target !== null) {
+      const refused = listOf(mem, "refused");
+      // ⚠ A REFUSED WARP IS NOT A SLOW ONE, AND THIS BLOCK USED TO CALL IT ONE.
+      // It issued the warp, never looked at what came back, and waited out
+      // WARP_START_WAIT_TICKS before stopping the bot with "the warp never
+      // started" — a sentence that sends the reader looking at the ship when the
+      // server had already said no, in the log, on the first tick.
+      //
+      // It happened for real: four pilots were parked INSIDE the den they had
+      // been stranded in, so "warp to the den" came back WARP_DISTANCE_TOO_CLOSE
+      // — already there — and all four stopped rather than fighting the rats in
+      // front of them.
+      // ⚠ ONLY A REFUSAL NEWER THAN THE BASELINE PHASE 1 COMMITTED. The ledger keys
+      // on step and action with no target, and a record lives until a SUCCESS
+      // clears it — so a record left from an earlier visit to this step, or from
+      // a site already set aside, would otherwise be read as a refusal of a warp
+      // that was never issued.
+      const refusal = refusalFor(obs.refusals, step.id, "warpScan", null);
+      if (refusal !== null && refusal.count > (num(mem, "refusalsSeen") ?? 0)) {
+        // ⚠ AND THE REFUSAL CANNOT SAY WHICH ONE IT IS. `_throwWarpFailureUserError`
+        // names six blockers and drops the rest — WARP_DISTANCE_TOO_CLOSE and
+        // SCAN_TARGET_NOT_FOUND both among them — into one "You cannot warp there
+        // right now." Standing in the site and the site having gone arrive in the
+        // SAME WORDS, so the wording is no help and the grid has to answer.
+        if (flavour.alreadyHere(obs, target) === true) {
+          // The patch rides the done tick: `currentOreSiteLabel` reads the last
+          // visited label, and the block after this one needs it. A refused issue
+          // commits no patch of its own any more.
+          return {
+            ...tick(WAIT, `Already in the ${flavour.noun} — working it from here.`, "Arrived", { kind: "done" }),
+            boardPatch: arrivalPatch(target, board).patch,
+          };
+        }
+        // ⚠ A SITE THAT WAS JUST MINED OUT IS STILL ON THE SCANNER FOR A MOMENT.
+        // It happened for real: a pilot came back from unloading, read the
+        // scanner while the site the rest of the fleet had just emptied was
+        // still listed, and warped at it. The server had already torn it down
+        // and refused (DUNGEON_INSTANCE_NOT_AUTHORIZED, which it words as "not
+        // scanned down"), and the pilot stopped while the others flew on to the
+        // next site. A refused site is set aside for this step and the pick runs
+        // again. The bot only stops when no site of this kind is left to try.
+        const setAside = [...refused, target];
+        if (pickSite(anomalies, board, setAside) !== null) {
+          return tick(WAIT, `The ${flavour.noun} could not be warped to — trying another.`, "Scanning", ACTING, false, {
+            refused: setAside.join(","),
+            refusalsSeen: refusal.count,
+          });
+        }
+        // Cannot tell, or told no, and nowhere else to go. Stop — but with what
+        // the SERVER said, not with a guess about the warp never starting.
+        return tick(WAIT, `The ${flavour.noun} could not be warped to.`, "Scanning", {
+          kind: "blocked",
+          reason: `The ship would not warp to the ${flavour.noun}: ${refusal.words} ` +
+            "If the ship is already sitting in it, there was nothing left to fly to.",
+        });
+      }
+      const carried: MacroMemory = {
+        ...(refused.length > 0 ? { refused: refused.join(",") } : {}),
+        ...(num(mem, "refusalsSeen") !== null ? { refusalsSeen: num(mem, "refusalsSeen") } : {}),
+      };
+      // The scanner moved on under the committed target (a site mined out and
+      // torn down in the meantime): drop it and let phase 1 pick again.
+      if (!ofKind.some((site) => site.label === target)) {
+        return tick(WAIT, `The ${flavour.noun} left the scanner — choosing another.`, "Scanning", ACTING, false, carried);
+      }
+      const { patch, lapRestart } = arrivalPatch(target, board);
+      return {
+        ...tick(
+          { kind: "warpScan", target },
+          lapRestart
+            ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
+            : `Warping to the next ${flavour.noun}.`,
+          flavour.flying,
+          ACTING,
+          false,
+          { ...warpIssuedMem(obs, target), ...carried },
+        ),
+        boardPatch: patch,
+      };
+    }
     // ── §13: the sites this run has given up on ────────────────────────────
     //
     // ⚠ THIS IS WHERE THE ARRIVAL COUNT BELONGS, AND IT IS NOT A STYLE CHOICE.
@@ -4366,24 +4577,28 @@ function warpToAnomalyOfKind(
         reason: noSiteReason(flavour, anomalies.length, unreadable),
       });
     }
-    const { next, lapRestart, visited, ledger } = pick;
+    // PHASE 1: commit the pick with a wait tick (no press, no board patch). The
+    // baseline is the ledger count RIGHT NOW, so whatever record is already there
+    // is never read as a refusal of the warp phase 2 is about to issue.
+    const stale = refusalFor(obs.refusals, step.id, "warpScan", null)?.count ?? 0;
+    return tick(WAIT, `Choosing the next ${flavour.noun} to warp to.`, "Scanning", ACTING, false, {
+      target: pick.next.label,
+      refusalsSeen: stale,
+      ...(refused.length > 0 ? { refused: refused.join(",") } : {}),
+    });
+  };
+
+  /**
+   * The board patch the warp to `target` writes — on the issuing tick, and on the
+   * done tick of a refused warp the ship turned out to be standing in.
+   */
+  function arrivalPatch(target: string, board: ScriptBoard) {
+    const visited = visitedLabels(board);
+    const lapRestart = visited.includes(target);
+    const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
     return {
-      ...tick(
-        { kind: "warpScan", target: next.label },
-        lapRestart
-          ? `Every ${flavour.noun} here has been worked once, so starting another lap.`
-          : `Warping to the next ${flavour.noun}.`,
-        flavour.flying,
-        ACTING,
-        false,
-        {
-          ...warpIssuedMem(obs, next.label),
-          ...(refused.length > 0
-            ? { refused: refused.join(","), refusalsSeen: num(mem, "refusalsSeen") }
-            : {}),
-        },
-      ),
-      boardPatch: {
+      lapRestart,
+      patch: {
         // ⚠ THE LAP RESTART WIPES `visited` AND MUST NEVER WIPE THE GIVEN-UP
         // LIST. The two lists answer two different questions — "have I worked
         // this site on THIS lap?" (which is meant to be forgotten, because one
@@ -4397,16 +4612,22 @@ function warpToAnomalyOfKind(
         // given-up list is inside the ledger's own `sites` key, and
         // `encodeLedger` below rewrites that key in full on every arrival —
         // counts and all — whether or not the lap restarted.
-        [flavour.boardKey]: (lapRestart ? [next.label] : [...visited, next.label]).join(","),
+        [flavour.boardKey]: (lapRestart ? [target] : [...visited, target]).join(","),
         // Count the arrival, and publish WHICH SITE THIS IS: the combat block
         // has no other way to know. It reads this same ledger off the board at
         // the top of every tick and takes `siteLabel` from it, which is how a
         // verdict earned on this grid ends up attached to a scanner label
         // rather than to nobody.
-        ...(ledger === null ? {} : encodeLedger(enterSite(ledger, next.label))),
-      },
+        ...(ledger === null ? {} : encodeLedger(enterSite(ledger, target))),
+      } as ScriptBoard,
     };
-  };
+  }
+
+  function visitedLabels(board: ScriptBoard): string[] {
+    return String(board[flavour.boardKey] ?? "")
+      .split(",")
+      .filter((label) => label.length > 0);
+  }
 
   /**
    * The next site to fly to, or null when there is none — skipping any site this
@@ -4417,9 +4638,7 @@ function warpToAnomalyOfKind(
     board: ScriptBoard,
     refused: readonly string[],
   ) {
-    const visited = String(board[flavour.boardKey] ?? "")
-      .split(",")
-      .filter((label) => label.length > 0);
+    const visited = visitedLabels(board);
     const ofKind = anomalies.filter((site) => site.kind === wanted && !refused.includes(site.label));
     const ledger = flavour.givesUpOnSites ? decodeLedger(board) : null;
     const workable =
@@ -5686,6 +5905,7 @@ function remoteRepIDs(obs: ScriptObservation): readonly number[] {
  * as well would fight its own orbit command every tick.
  */
 function repHurtMate(
+  step: MacroStep,
   obs: ScriptObservation,
   mem: MacroMemory,
   phase: string,
@@ -5713,12 +5933,31 @@ function repHurtMate(
       // A NEW mate resets everything counted per-target, or the last one's spent
       // budget silently disarms the reps for this one (the bug the PvP ladder
       // had, where a shared counter outlived the target it was counting for).
+      //
+      // ⚠ `changed` IS READ FROM WHAT THE PRESS WRITES, and a refused press
+      // commits nothing (see `readLockRefusals`): every tick after a refusal was a
+      // "new" mate and a new press, and the timed wait below was never reached.
+      // So the refusal is read here, before pressing again.
+      const lockRefusals = readLockRefusals(step, obs, mem);
+      if (lockRefusals.unread) {
+        // Counted, and the mate left unadopted so the next tick still presses.
+        return tick(WAIT, "Checking the last lock.", phase, ACTING, true, {
+          ...mem,
+          repLockOn: null,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      if (lockRefusals.fresh) {
+        // The timed wait below, exactly what a refused lock got before 2fd4a77.
+        return tick(WAIT, "Waiting for the lock.", phase, ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the hurt fleet-mate.", phase, ACTING, true, {
         ...mem,
         repLockOn: target.itemID,
         repWaited: 0,
         repTries: 0,
         repApproached: null,
+        lockRefusalsSeen: 0,
       });
     }
     const waited = (num(mem, "repWaited") ?? 0) + 1;
@@ -5780,7 +6019,7 @@ function repHurtMate(
 
 // ── remote-rep ───────────────────────────────────────────────────────────────
 // Reactive: rep the most-hurt fleet-mate; done once everyone on grid is full.
-const remoteRep: MacroDecider = (_step, obs, mem) => {
+const remoteRep: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp - nothing decided mid-warp.", "Supporting", ACTING, false, mem);
   }
@@ -5796,7 +6035,7 @@ const remoteRep: MacroDecider = (_step, obs, mem) => {
   if ((obs.fleetMemberCharacterIDs ?? null) === null) {
     return tick(WAIT, "Reading the authoritative fleet roster.", "Supporting", ACTING, false, mem);
   }
-  const rep = repHurtMate(obs, mem, "Supporting");
+  const rep = repHurtMate(step, obs, mem, "Supporting");
   if (rep === null) {
     return tick(WAIT, "Everyone on grid is at full health.", "Supporting", { kind: "done" });
   }
@@ -5807,7 +6046,7 @@ const remoteRep: MacroDecider = (_step, obs, mem) => {
 // Sustained: orbit the nearest fleet-mate up close and keep repping whoever is
 // hurt. Never finishes on its own - a watch or the player stops it. Orbits ONCE
 // (re-issued only when the anchor changes), so it does not spam orbit commands.
-const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
+const orbitAndBoost: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp - nothing decided mid-warp.", "Boosting", ACTING, false, mem);
   }
@@ -5826,7 +6065,7 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
   const snapshot = obs.snapshot;
   const friendlies = fleetMatesOnGrid(obs) ?? [];
   if (friendlies.length === 0) {
-    const settlement = repHurtMate(obs, mem, "Boosting", false);
+    const settlement = repHurtMate(step, obs, mem, "Boosting", false);
     if (settlement !== null) return settlement;
     return tick(WAIT, "No fleet-mate on grid to support yet.", "Boosting", ACTING, false, mem);
   }
@@ -5842,7 +6081,7 @@ const orbitAndBoost: MacroDecider = (_step, obs, mem) => {
     );
   }
   // No approach from in here — the orbit above is this block's way of closing.
-  const rep = repHurtMate(obs, mem, "Boosting", false);
+  const rep = repHurtMate(step, obs, mem, "Boosting", false);
   if (rep !== null) {
     return rep;
   }
@@ -6422,7 +6661,7 @@ const dockAtNearest: MacroDecider = (_step, obs, mem) => {
 // different reading (the snapshot already carries every ship's capacitorRatio).
 const CAP_HUNGRY = 0.9; // below this is worth a cycle
 
-const remoteCap: MacroDecider = (_step, obs, mem) => {
+const remoteCap: MacroDecider = (step, obs, mem) => {
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Feeding cap", ACTING, false, mem);
   }
@@ -6460,13 +6699,26 @@ const remoteCap: MacroDecider = (_step, obs, mem) => {
   const locked = (obs.lockedTargetIDs ?? []).includes(target.itemID);
   if (!locked) {
     if (changed) {
-      // A new mate resets what is counted per-target (see repHurtMate).
+      // A new mate resets what is counted per-target (see repHurtMate), and a
+      // refused press is read off the ledger before pressing again (same place).
+      const lockRefusals = readLockRefusals(step, obs, mem);
+      if (lockRefusals.unread) {
+        return tick(WAIT, "Checking the last lock.", "Feeding cap", ACTING, true, {
+          ...mem,
+          capLockOn: null,
+          lockRefusalsSeen: lockRefusals.count,
+        });
+      }
+      if (lockRefusals.fresh) {
+        return tick(WAIT, "Waiting for the lock.", "Feeding cap", ACTING, true, { ...mem, lockRefusalsSeen: lockRefusals.count });
+      }
       return tick({ kind: "lock", targetID: target.itemID }, "Locking the fleet-mate who needs cap.", "Feeding cap", ACTING, true, {
         ...mem,
         capLockOn: target.itemID,
         capWaited: 0,
         capTries: 0,
         capApproached: null,
+        lockRefusalsSeen: 0,
       });
     }
     const waited = (num(mem, "capWaited") ?? 0) + 1;
@@ -6919,8 +7171,19 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
  */
 const MAX_ESCAPE_ATTEMPTS = 3;
 
-/** The synthetic step the escape borrows the combat blocks under. */
-const ESCAPE_STEP: MacroStep = { id: "__escape__", kind: "macro", macro: "fight-the-rats", args: {} };
+/**
+ * The synthetic step the escape borrows the combat blocks under.
+ *
+ * ⚠ ITS ID IS THE ONE THE RUNNER BOOKS THE TRIP UNDER, NOT A NAME OF ITS OWN. The
+ * borrowed ladder reads the refusal ledger by the id of the step it is handed
+ * (`readLockRefusals`), and the runner keys the trip's presses by the latch: the
+ * watch row that fired, or no step at all. Under a made-up id the ladder never
+ * saw its own refused lock, pressed it ten times, and the run then STOPPED in
+ * space — a second fault under a latch is a stop — with the ship still held.
+ */
+function escapeStep(bookedUnder: string | null): MacroStep {
+  return { id: bookedUnder ?? NO_STEP_ID, kind: "macro", macro: "fight-the-rats", args: {} };
+}
 
 /** The synthetic step the last-resort dock borrows `dock-at-nearest` under. */
 const HARBOUR_STEP: MacroStep = { id: "__harbour__", kind: "macro", macro: "dock-at-nearest", args: {} };
@@ -6990,7 +7253,12 @@ function dockLastResort(obs: ScriptObservation, mem: MacroMemory, blockedReason:
  * no way to shoot it, or the escape budget is spent — and the blocked trip then
  * stands and stops the bot, which is the honest end.
  */
-function fightTheWayOut(obs: ScriptObservation, mem: MacroMemory, stationID: number): MacroTick | null {
+function fightTheWayOut(
+  obs: ScriptObservation,
+  mem: MacroMemory,
+  stationID: number,
+  bookedUnder: string | null,
+): MacroTick | null {
   const snapshot = obs.snapshot ?? null;
   if (snapshot === null || obs.inSpace !== true || obs.inWarp === true) {
     return null; // cannot judge the grid, or already leaving
@@ -7031,20 +7299,21 @@ function fightTheWayOut(obs: ScriptObservation, mem: MacroMemory, stationID: num
   }
   // Held. The tank goes up first, then the guns — the same order the pirate
   // watch uses, and the same blocks.
+  const step = escapeStep(bookedUnder);
   const hardenMem = (mem["escapeHarden"] as MacroMemory | undefined) ?? {};
-  const harden = hardenersOn(ESCAPE_STEP, obs, hardenMem, {});
+  const harden = hardenersOn(step, obs, hardenMem, {});
   if (harden.outcome.kind === "acting") {
     return { ...harden, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeHarden: harden.nextMem } };
   }
   const fightMem = (mem["escapeFight"] as MacroMemory | undefined) ?? {};
-  const fight = fightTheRats(ESCAPE_STEP, obs, fightMem, {});
+  const fight = fightTheRats(step, obs, fightMem, {});
   if (fight.outcome.kind !== "acting") {
     return null; // no way to fight — the blocked trip stands
   }
   return { ...fight, phase: "Fighting free", nextMem: { ...mem, escaping: true, escapeFight: fight.nextMem } };
 }
 
-export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
+export const scriptTravelHome: HomeTravelDecider = (obs, mem, bookedUnder = null) => {
   if (obs.flightStatus?.docked === true) {
     // Docked ANYWHERE is safe — the point of a fired watch is to be in a
     // station, not to commute. Stop here.
@@ -7067,7 +7336,7 @@ export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
   // disarm it in the one moment it needs them.
   const ride = rideAutopilotTo(obs, target, "Heading home", obs.homeDockableKind ?? "station");
   if (ride !== null && ride.outcome.kind === "blocked") {
-    const escape = fightTheWayOut(obs, mem, target);
+    const escape = fightTheWayOut(obs, mem, target, bookedUnder);
     if (escape !== null) {
       return escape;
     }
