@@ -25,7 +25,8 @@ export function scriptScannerSites(sites: readonly ScanSite[]): readonly Scanned
   }]);
 }
 
-export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], ice: readonly number[]): string | null {
+export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], ice: readonly number[],
+  policy: { readonly requireOre?: boolean } = {}): string | null {
   function visit(nodes: BotScript["program"]): string | null {
     for (const node of nodes) {
       if (node.kind === "loop") { const reason = visit(node.body); if (reason) return reason; }
@@ -34,7 +35,7 @@ export function siteMiningFitRefusal(script: BotScript, ore: readonly number[], 
       const belt = node.args["belt"];
       if (belt?.kind !== "belt") continue;
       if (belt.belt.mode === "ice-site" && ice.length === 0) return "ICE_MINING_CAPABILITY_REQUIRED: fit an online Ice Harvester; ore modules are not a fallback.";
-      if (belt.belt.mode === "site" && ore.length === 0) return "ORE_MINING_CAPABILITY_REQUIRED: fit an online ore mining module; Ice/Gas harvesters cannot mine ore.";
+      if (policy.requireOre !== false && belt.belt.mode === "site" && ore.length === 0) return "ORE_MINING_CAPABILITY_REQUIRED: fit an online ore mining module; Ice/Gas harvesters cannot mine ore.";
     }
     return null;
   }

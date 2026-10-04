@@ -1562,6 +1562,10 @@ function mineAtBeltSite(
         reason: "ICE_MINING_CAPABILITY_REQUIRED: fit an online Ice Harvester; ore miners are not a fallback.",
       });
     }
+    if (allRocks.some((rock) => rock.miningResourceFamily == null)) {
+      return tick(WAIT, "A site's resource classification is unreadable.", "Resource authority unavailable",
+        ACTING, false, { ...mem, oreGridEmptyReads: 0 });
+    }
     obs = { ...obs, miningModuleIDs: harvesters };
     allRocks = allRocks.filter((rock) => siteRockMatches(rock, "ICE"));
   }

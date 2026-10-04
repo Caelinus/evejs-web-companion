@@ -140,6 +140,45 @@ test("a mined-out ice field moves on to the next ice field, keeping its own list
   assert.equal(out.boardPatch?.["oreSitesBarren"], undefined, "the ore tour's lists are not touched");
 });
 
+test("unclassified mineable chunks wait and reset the ice tour's consecutive barren proof", () => {
+  const step = beltStep("mine-at-belt", "ice-site");
+  const chunk = entity({ itemID: 50002, miningYieldTypeID: 16265, miningResourceFamily: null });
+  const board: ScriptBoard = { iceAnomsVisited: "ICE-001" };
+  const observation = obs({ snapshot: snapshot([chunk]), iceMiningModuleIDs: [7002], anomalies: [ICE_FIELD, ICE_FIELD_2] });
+  let mem: MacroMemory = { oreGridEmptyReads: 2 };
+  for (let read = 0; read < 3; read += 1) {
+    const out = SCRIPT_MACROS["mine-at-belt"]!(step, observation, mem, board);
+    assert.equal(out.action.kind, "wait");
+    assert.equal(out.phase, "Resource authority unavailable");
+    assert.equal(out.outcome.kind, "acting");
+    assert.equal(out.boardPatch, undefined);
+    mem = out.nextMem;
+  }
+  const identified = SCRIPT_MACROS["mine-at-belt"]!(step,
+    { ...observation, snapshot: snapshot([{ ...chunk, miningResourceFamily: "ice" }]) }, mem, board);
+  assert.deepEqual(identified.action, { kind: "orbit", targetID: 50002, range: 5000 });
+
+  // Once authority returns an empty grid, all three fresh reads are required.
+  const empty = { ...observation, snapshot: snapshot([]) };
+  for (let read = 0; read < 2; read += 1) {
+    const out = SCRIPT_MACROS["mine-at-belt"]!(step, empty, mem, board);
+    assert.equal(out.action.kind, "wait");
+    assert.equal(out.boardPatch, undefined);
+    mem = out.nextMem;
+  }
+  const barren = SCRIPT_MACROS["mine-at-belt"]!(step, empty, mem, board);
+  assert.deepEqual(barren.action, { kind: "warpScan", target: "ICE-002" });
+  assert.equal(barren.boardPatch?.["iceSitesBarren"], "ICE-001");
+});
+
+test("unclassified nonmineable celestials do not block a confirmed ice chunk", () => {
+  const chunk = entity({ itemID: 50002, miningYieldTypeID: 16265, miningResourceFamily: "ice" });
+  const station = entity({ itemID: 60000004, miningResourceFamily: null });
+  const out = SCRIPT_MACROS["mine-at-belt"]!(beltStep("mine-at-belt", "ice-site"),
+    obs({ snapshot: snapshot([station, chunk]), iceMiningModuleIDs: [7002] }), {}, {});
+  assert.deepEqual(out.action, { kind: "orbit", targetID: 50002, range: 5000 });
+});
+
 test("the hold an ice step watches is the ice hold", () => {
   const script: BotScript = { version: 1, name: "Ice", home: { entity: "station", id: 60000004, name: "Home", systemName: null },
     program: [beltStep("mine-at-belt", "ice-site")] } as unknown as BotScript;
