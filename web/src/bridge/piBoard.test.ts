@@ -20,7 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPiBoard, pilotsByAccount, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
+import { buildPiBoard, piHaulDispatchWords, piHaulWords, pilotsByAccount, type PiBoardInput, type PilotAttempt } from "./piBoard.ts";
 import type { PilotColonyReading } from "./piRoster.ts";
 import type { Colony, ColonyPin } from "../store/types.ts";
 
@@ -516,4 +516,47 @@ test("the roster groups by account, and folds only a pilot read with no colony",
       { accountName: null, rows: ["Bo Hauler"], notBuilt: [], colonyCount: 0, readAgeWords: null },
     ],
   );
+});
+
+// ── The Haul button's words (the customs-office export) ──────────────────────
+
+test("the Haul offer says the launchpads go into the customs offices", () => {
+  const { label, words } = piHaulWords("Ada Farmer", 2, "Industry", null);
+  assert.equal(label, "Haul 2 colonies");
+  assert.match(words, /launchpads hold up into their customs offices/);
+  assert.match(words, /server run for Ada Farmer/);
+  assert.match(words, /empties those customs offices/);
+  assert.match(words, /the corporation's Industry/);
+  // Both ways off a colony are said, because the lap does both.
+  assert.match(words, /launches what their command centres hold/);
+  assert.match(words, /collects the launches/);
+});
+
+test("a started haul says what went up before it says the run began", () => {
+  const words = piHaulDispatchWords({
+    kind: "started",
+    exported: { units: 370, colonies: 2, refusals: [] },
+  });
+  assert.equal(
+    words,
+    "Launched 370 units from 2 colonies into their customs offices. The haul has started on the server. Its steps show in the Bot Manager.",
+  );
+});
+
+test("⚠ a colony the server refused is named, and the haul still started", () => {
+  const words = piHaulDispatchWords({
+    kind: "started",
+    exported: { units: 40, colonies: 1, refusals: ["Alpha IX: CannotLaunchCommoditiesNotFound"] },
+  });
+  assert.match(words ?? "", /Alpha IX: CannotLaunchCommoditiesNotFound/);
+  assert.match(words ?? "", /The haul has started/);
+});
+
+test("an empty set of launchpads is said plainly, not as a failure", () => {
+  const words = piHaulDispatchWords({ kind: "started", exported: { units: 0, colonies: 0, refusals: [] } });
+  assert.match(words ?? "", /^Nothing was on the launchpads, so nothing new went up\./);
+});
+
+test("a restart's start carries no export sentence", () => {
+  assert.equal(piHaulDispatchWords({ kind: "started" }), "The haul has started on the server. Its steps show in the Bot Manager.");
 });

@@ -14,6 +14,7 @@ import { register } from "node:module";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { compile } from "svelte/compiler";
 
 register("./svelteSsrHook.ts", import.meta.url);
 
@@ -132,6 +133,20 @@ function panel(entities: readonly Record<string, unknown>[] = [ROCK, DECOR, RAT]
   return render(SpaceOverview as never, {
     props: { store: storeWith(entities), flow: fakeFlow() },
   } as never).body;
+}
+
+async function editorPanel(mode: "create" | "rename"): Promise<string> {
+  // SSR does not press buttons. Invoke the real open handler in the component's
+  // scope so the editor template renders the same draft that a click opens.
+  const filename = path.join(UI_DIR, "SpaceOverview.svelte");
+  const open = mode === "create" ? "openCreate();" : "openRename(activeTabID);";
+  const { js } = compile(SOURCE.replace("</script>", `${open}\n</script>`), {
+    filename, generate: "server",
+  });
+  const code = js.code.replace(/from (['"])([^'"]+)\1/g, (_match, _quote, specifier: string) =>
+    `from ${JSON.stringify(import.meta.resolve(specifier))}`);
+  const { default: Panel } = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  return render(Panel, { props: { store: storeWith([ROCK]), flow: fakeFlow() } }).body;
 }
 
 function visibleText(body: string): string {
@@ -583,6 +598,22 @@ test("the tab editor offers a picker over the five recipes, All included", () =>
     OVERVIEW_RECIPES.some((recipe) => recipe.id === "all"),
     "All is not offered when creating a tab",
   );
+});
+
+test("opening Create offers recipes while opening Rename offers only the saved name", async () => {
+  resetShared();
+  try {
+    overviewTabs.select(tabIDByName("Mining"));
+    const create = await editorPanel("create");
+    assert.match(create, /aria-label="What this tab shows"/);
+    assert.equal((create.match(/<option\b/g) ?? []).length, OVERVIEW_RECIPES.length);
+    const rename = await editorPanel("rename");
+    assert.match(rename, /aria-label="Tab name"[^>]*value="Mining"/);
+    assert.ok(visibleText(rename).includes("Save name"));
+    assert.doesNotMatch(rename, /aria-label="What this tab shows"/, "Rename must not offer a recipe change it discards");
+  } finally {
+    resetShared();
+  }
 });
 
 // --- model-level guards on the shared singletons -----------------------------
