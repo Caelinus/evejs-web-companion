@@ -78,10 +78,14 @@ export function normalizeTabName(raw: string, recipeId: OverviewRecipeID): strin
 
 let minted = 0;
 
-/** An id that cannot collide with a stored one: monotonic within this session. */
-function mintTabID(): string {
-  minted += 1;
-  return `t${minted}-${Math.floor(Date.now() % 1_000_000)}`;
+/** Monotonic in this session and distinct from any tabs loaded from storage. */
+function mintTabID(existing: readonly OverviewTab[] = []): string {
+  let id: string;
+  do {
+    minted += 1;
+    id = `t${minted}-${Math.floor(Date.now() % 1_000_000)}`;
+  } while (existing.some(tab => tab.id === id));
+  return id;
 }
 
 /** The starting tab bar: All, fixed, plus the five that ship as editable. */
@@ -136,7 +140,7 @@ function parseTabs(raw: unknown): readonly OverviewTab[] | null {
   // the tab is called All because it shows everything, and calling it something
   // else would be a lie about what it does.
   const all: OverviewTab = { id: "all", name: "All", recipeId: "all", fixed: true };
-  const editable = parsed.filter((tab) => !tab.fixed);
+  const editable = parsed.filter((tab) => !tab.fixed && tab.id !== "all");
   const unique = editable.filter(
     (tab, index) => editable.findIndex((other) => other.id === tab.id) === index,
   );
@@ -179,7 +183,8 @@ export interface TabBar {
   select(id: string): void;
   /** Create a tab from a recipe. Returns the new tab, already selected. */
   create(recipeId: OverviewRecipeID, name?: string): OverviewTab;
-  rename(id: string, name: string): void;
+  /** Rename, optionally applying the recipe selected in the tab editor. */
+  rename(id: string, name: string, recipeId?: OverviewRecipeID): void;
   /** Delete a tab. The fixed All tab is never deleted. */
   remove(id: string): void;
   /** Move a tab one place left or right. All never moves. */
@@ -232,7 +237,7 @@ export function createTabBar(): TabBar {
     create: (recipeId, name) => {
       const recipe = recipeByID(recipeId);
       const tab: OverviewTab = {
-        id: mintTabID(),
+        id: mintTabID(tabs.get()),
         name: normalizeTabName(name ?? "", recipe.id),
         recipeId: recipe.id,
         fixed: false,
@@ -244,12 +249,13 @@ export function createTabBar(): TabBar {
       select(tab.id);
       return tab;
     },
-    rename: (id, name) => {
+    rename: (id, name, recipeId) => {
       commit(
         tabs.get().map((tab) =>
           tab.fixed || tab.id !== id
             ? tab
-            : { ...tab, name: normalizeTabName(name, tab.recipeId) },
+            : { ...tab, recipeId: recipeByID(recipeId ?? tab.recipeId).id,
+                name: normalizeTabName(name, recipeByID(recipeId ?? tab.recipeId).id) },
         ),
       );
     },
