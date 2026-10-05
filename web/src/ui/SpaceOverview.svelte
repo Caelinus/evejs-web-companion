@@ -27,8 +27,31 @@
   import { onMount } from "svelte";
   import TypeIcon from "./TypeIcon.svelte";
   import { SELECTION_GONE, selectionHasVanished, spaceSelection } from "../space/selection.ts";
-  import { overviewPreset } from "../space/overviewPreset.ts";
-  import { OVERVIEW_PRESETS, applyPreset } from "../space/overviewPresets.ts";
+  import { overviewTabs } from "../space/overviewTabs.ts";
+  import {
+    OVERVIEW_RECIPES,
+    recipeByID,
+    type OverviewRecipeID,
+  } from "../space/overviewRecipes.ts";
+  import {
+    categoryStanceEntryFor,
+    combatStanceHides,
+    combatToggleMap,
+    combatToggles,
+    covers,
+    EMPTY_STATE,
+    presetHidesRow,
+
+    tabHidden,
+    tabHiddenMap,
+    tabShows,
+    type CombatStance,
+  } from "../space/overviewHidden.ts";
+  import {
+    hideCategoryByID,
+    offeredCategoriesFor,
+    type HideCategoryID,
+  } from "../space/hideCategory.ts";
   import {
     buildOverviewRows,
     formatDistance,
@@ -38,6 +61,13 @@
     type OverviewRow,
     type OverviewSort,
   } from "../space/overview.ts";
+  import {
+    stanceContextFrom,
+    stanceOf,
+    stanceRowLabel,
+    type Stance,
+  } from "../space/stance.ts";
+  import { bracketRole } from "../space/tactical.ts";
   import {
     actionsForRow,
     activatableModules,
@@ -94,13 +124,15 @@
   const fitting = store.fitting;
   // svelte-ignore state_referenced_locally
   const mining = store.mining;
+  // svelte-ignore state_referenced_locally
+  const character = store.character;
 
   /**
    * The nearest N rows the list keeps.
    *
-   * ⚠ The preset is applied BEFORE this, never after: filtering afterwards
-   * would let 200 gates crowd every rock off the Mining tab while the tab
-   * claimed to be showing rocks.
+   * ⚠ The tab is applied BEFORE this, never after: filtering afterwards would let
+   * 200 gates crowd every rock off a Mining tab while the tab claimed to be
+   * showing rocks.
    */
   const ROW_CAP = 200;
 
@@ -111,6 +143,21 @@
   let rangeMenu = $state<RangeKind | null>(null);
   let customRange = $state("");
   let customRangeError = $state("");
+  /** The "new tab" / "rename" editor, or null when it is closed. */
+  let tabEditor = $state<{ readonly mode: "create" } | { readonly mode: "rename"; readonly id: string } | null>(null);
+  let draftName = $state("");
+  let draftRecipe = $state<OverviewRecipeID>("mining");
+  let draftError = $state("");
+  /**
+   * The hidden-objects menu for the ACTIVE TAB, collapsed by default and pinned
+   * at the BOTTOM.
+   *
+   * ⚠ IT DOES NOT OPEN ITSELF. Hiding used to flip this on so the player could
+   * not miss the undo, but every tab has its own list now and `All` still shows
+   * everything — the menu is a fallback for when something is lost, not a toast
+   * for the last press. It stays collapsed until the player asks for it.
+   */
+  let hiddenMenuOpen = $state(false);
 
   /**
    * ⚠ A SET, NOT A FLAG. A single shared busy flag greys out every verb because
@@ -127,16 +174,177 @@
 
   // --- the list ---------------------------------------------------------------
 
-  const presetSignal = overviewPreset.preset;
-  const presetIDSignal = overviewPreset.id;
-  const activePreset = $derived($presetSignal);
-  const activePresetID = $derived($presetIDSignal);
+  const tabsSignal = overviewTabs.tabs;
+  const tabIDSignal = overviewTabs.selectedID;
+  const tabSignal = overviewTabs.selected;
+  const allTabs = $derived($tabsSignal);
+  const activeTabID = $derived($tabIDSignal);
+  const activeTab = $derived($tabSignal);
 
+  /**
+   * The active tab's two lists, read off the app-wide map.
+   *
+   * ⚠ EVERY HIDE IS PER-TAB. The map keys state by the tab's opaque id, so
+   * hiding a group here touches only this tab; every other tab — and the All
+   * tab, which is absolute — keeps showing it. The radar answers from the very
+   * same map, so the picture and the list cannot disagree about it.
+   */
+  const activeTabState = $derived($tabHiddenMap.get(activeTabID) ?? EMPTY_STATE);
+
+  /** An empty stance set, reused so a tab with no toggles allocates nothing. */
+  const NO_COMBAT_TOGGLES: ReadonlySet<CombatStance> = new Set<CombatStance>();
+
+  /**
+   * ⚠ THE TOGGLES ARE READ THROUGH THE SUBSCRIBED SIGNAL, AND THAT IS LOAD-BEARING.
+   *
+   * `combatToggles` exposes a `forTab()` helper that reaches the signal with a
+   * plain `.get()`, which does NOT register a Svelte dependency — so a button
+   * bound to it rendered once and then never re-evaluated, and both Hide
+   * Friendly / Hide Neutral looked identical however many times they were
+   * pressed. Reading `$combatToggleMap` subscribes to the store, so the class,
+   * `aria-pressed` and the filtered list all update on a press. The hidden lists
+   * already work this way (`$tabHiddenMap` above); the toggles were the one path
+   * that did not.
+   */
+  const activeCombatToggles = $derived($combatToggleMap.get(activeTabID) ?? NO_COMBAT_TOGGLES);
+
+  /**
+   * Whose is each row — the context every stance question in this panel reads
+   * from, built from the character list the client already holds.
+   *
+   * ⚠ THE IDENTITY READ LIVES IN `stance.ts`, NOT HERE. This component never
+   * names a side of its own: it hands the loaded identity to the stance module
+   * and reads three-word answers ("friendly", "neutral", "hostile") back, which
+   * is what the radar does with the very same context. null until the list
+   * loads, and null must read as "nothing friendly", never as a guess.
+   */
+  const stanceContext = $derived(
+    stanceContextFrom($character.characters, $character.selectedCharacterID),
+  );
+
+  /**
+   * ⚠ ALL IS ABSOLUTE, AND IT IS THE ONLY TAB THAT IS.
+   *
+   * The fixed tab shows every object on the grid, including the ones hidden on
+   * every OTHER tab — it is the way back to seeing everything, and a way back
+   * that quietly respected the hidden lists would not be one. Every OTHER tab
+   * answers through `tabShows` with its own two lists, which is what makes the
+   * Hide control mean anything at all: hide a rock and it leaves the Mining
+   * tab, not merely the All tab.
+   */
   const presetSnapshot = $derived.by(() => {
-    if (!snapshot || activePreset.roles === null) {
+    if (!snapshot) {
       return snapshot;
     }
-    return { ...snapshot, entities: applyPreset(snapshot.entities, activePreset) };
+    // ⚠ THE FRIENDLY / NEUTRAL TOGGLES ARE FILTERED HERE, BESIDE `tabShows` AND
+    // NOT INSIDE IT. They are not hidden entries, so folding them into the
+    // resolver would let them reach the Hidden Items menu and the All tab's
+    // guarantees by accident. `combatStanceHides` is also what keeps them off
+    // the furniture: only combat-capable things qualify, and a hostile is
+    // refused outright.
+    const toggles = activeCombatToggles;
+    return {
+      ...snapshot,
+      entities: snapshot.entities.filter(
+        (entity) =>
+          tabShows(activeTab, entity, activeTabState, stanceContext) &&
+          !combatStanceHides(entity, toggles, stanceContext),
+      ),
+    };
+  });
+
+  /**
+   * ⚠ WHAT THE TAB'S RECIPE EXCLUDES, AS ONE MENU ROW PER CATEGORY — and this is
+   * read STRAIGHT OFF the recipe, not worked out by scanning the grid.
+   *
+   * ⚠ THAT IS THE POINT OF THE MODEL CHANGE. A recipe is a deny-list of the Hide
+   * button's own categories, so a preset's Hidden Items list IS that list. It is
+   * accurate even when nothing of a kind is on the grid right now, which is what
+   * a player asking "what is this tab hiding?" needs to be told.
+   *
+   * ⚠ AND IT IS STILL PER-TAB ON UNDO. Show on one of these records the category
+   * in that tab's `shown` list, which `tabShows` consults before the recipe — so
+   * the override is real, and it does not leak onto any other tab.
+   */
+  const presetGroupRows = $derived.by((): readonly {
+    readonly key: string;
+    readonly label: string;
+    readonly category: HideCategoryID;
+  }[] => {
+    if (activeTab.fixed) {
+      return [];
+    }
+    return [...recipeByID(activeTab.recipeId).hides]
+      .map((category) => ({
+        key: "preset:category:" + category,
+        label: hideCategoryByID(category).label,
+        category,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+/**
+   * THE MENU'S ONE FLAT LIST: everything hidden on this tab, the preset's
+   * pre-hidings and the player's own hides alike — one system, no
+   * subcategories. Each row's Show button undoes that one entry, from
+   * whichever list it came from.
+   *
+   * ⚠ ONLY WHAT IS ON THE GRID RIGHT NOW (PLAN goal 3). An entry whose objects
+   * have all warped off is not listed: the menu answers "what is missing from
+   * what I can see", and a row for a belt that is no longer on this screen is
+   * a list of things that are not missing. The entry is still STORED — the
+   * entries below are filtered on the way out, never dropped from the state.
+   */
+  const hiddenMenuRows = $derived.by(() => {
+    // ⚠ THE LIVE GRID, ONCE. "On the grid" is a question about the current
+    // snapshot, so it is asked of that and of nothing else.
+    const onGrid = (snapshot?.entities ?? []).filter((entity) => !entity.isSelf);
+    const visibleNow = (entry: (typeof activeTabState.hidden)[number]): boolean =>
+      onGrid.some((entity) => covers(entry, entity, stanceContext));
+
+    const rows: {
+      readonly key: string;
+      readonly kind: "category" | "stance" | "preset";
+      readonly category: HideCategoryID | null;
+      readonly role: string | null;
+      readonly stance: Stance | null;
+      readonly label: string;
+      readonly preset: boolean;
+    }[] = activeTabState.hidden
+      .filter(visibleNow)
+      .map((entry) =>
+        entry.kind === "category"
+          ? {
+              key: "player:category:" + entry.category,
+              kind: "category" as const,
+              category: entry.category,
+              role: null,
+              stance: null,
+              label: entry.label,
+              preset: false,
+            }
+          : {
+              key: "player:stance:" + (entry.role ?? entry.category) + ":" + entry.stance,
+              kind: "stance" as const,
+              category: null,
+              role: entry.role ?? entry.category ?? null,
+              stance: entry.stance,
+              label: entry.label,
+              preset: false,
+            },
+      );
+    for (const row of presetGroupRows) {
+      rows.push({
+        key: row.key,
+        kind: "category",
+        category: row.category,
+        role: null,
+        stance: null,
+        label: row.label,
+        preset: true,
+      });
+    }
+    return rows.sort((a, b) => a.label.localeCompare(b.label));
   });
 
   function typeName(entity: SpaceEntity): string {
@@ -254,6 +462,309 @@
     rangeMenu = null;
     concernErrors = {};
     spaceSelection.toggle(itemID);
+  }
+
+  /**
+   * Hide this object's group from THIS TAB, permanently, for this browser.
+   *
+   * ⚠ THE SELECTION IS DROPPED WHEN THE HIDE TAKES EFFECT. The object leaves
+   * this tab's list the instant it is hidden, and the panel's rule is that a
+   * selection must never silently retarget onto whatever row is next — so
+   * without this the action bar would slide its verbs onto a different object
+   * one frame after the player pressed Hide.
+   */
+  // ⚠ NOT A CONTEXT MENU. Right-click is the obvious place for this and it does
+  // not work: the app is a web page, so the browser owns that gesture and the
+  // player gets "Save image as…" or nothing at all. Everything here is an
+  // ordinary left click on a real button.
+  function hideRow(row: OverviewRow): void {
+    // ⚠ THE CATEGORY, NOT THE OBJECT, AND NOT ITS OWN NAME. Pressing Hide on a
+    // planet hides every planet, and the restore menu says "Planets" rather than
+    // naming whichever planet was under the cursor. The word comes from
+    // `hideCategory.ts`, which is also what the classifier read the group
+    // through, so the menu and the grid cannot disagree about the word.
+    // ⚠ PER-TAB, AND SILENT. The entry goes into the active tab's own list only,
+    // and the player is told nothing here: the entry is one line in this tab's
+    // hidden menu, every other tab still shows the category, and All shows it
+    // too. A row that classified as `other` is already refused by the button.
+    if (tabHidden.hide(activeTabID, row) !== null && selectedID === row.itemID) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  }
+
+  /**
+   * ⚠ ONE PER CATEGORY THE PICKED ROW CARRIES (PLAN goal 1b).
+   *
+   * Resolved through the classifier, so a button can never name something the
+   * press would not hide — the refusal `hiddenEntryFor` applies is the same
+   * list this renders from.
+   */
+  const selectedCategories = $derived(
+    selectedRow ? offeredCategoriesFor(selectedRow).map(hideCategoryByID) : [],
+  );
+
+  /** Hide one named category of the picked row, on this tab only. */
+  function hideSelectedCategory(category: HideCategoryID): void {
+    if (hideRefusalReason !== null || !selectedRow) {
+      return;
+    }
+    // ⚠ CAPTURE THE ROW BEFORE THE WRITE, exactly as `hideSelectedStance` does.
+    // `selectedRow` is a derived that reads through the hidden map, and the
+    // write invalidates it — reading it again would re-resolve to null.
+    const row = selectedRow;
+    if (tabHidden.hide(activeTabID, row, category) !== null && selectedID === row.itemID) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  }
+
+  /**
+   * ⚠ THE TWO SIDES THE STANDING TOGGLES COVER. Hostile is absent on purpose
+   * and cannot be added: a threat is never hidden, so a button that claimed to
+   * hide it would be a control that either lies or is refused.
+   */
+  const COMBAT_TOGGLES = ["friendly", "neutral"] as const;
+  const COMBAT_TOGGLE_LABELS: Readonly<Record<(typeof COMBAT_TOGGLES)[number], string>> = {
+    friendly: "Friendly",
+    neutral: "Neutral",
+  };
+
+  /** Is this side currently switched on for this tab? */
+  function combatTogglesOn(side: CombatStance): boolean {
+    return activeCombatToggles.has(side);
+  }
+
+  /** Flip one side on this tab. It never writes a hidden entry. */
+  function toggleCombatStance(side: CombatStance): void {
+    combatToggles.toggle(activeTabID, side);
+  }
+
+  /**
+   * The CATEGORY-AND-SIDE entry the picked row would earn — "Ships
+   * (Friendly)" for a friendly frigate, "Ships (Hostile)" for a rat — or null
+   * when the row's category carries no side at all: gates, rocks, scenery and
+   * celestials have none, and police are the one family that is always
+   * neutral.
+   */
+  const categoryStanceHideEntry = $derived(
+    selectedRow ? categoryStanceEntryFor(selectedRow, stanceContext) : null,
+  );
+
+  /**
+   * Hide the picked row's category AND side, on this tab only — the one verb
+   * that may reach a hostile, because it names the side out loud.
+   */
+  function hideSelectedCategoryStance(): void {
+    if (stanceHideRefusalReason !== null || !selectedRow) {
+      return;
+    }
+    const row = selectedRow;
+    if (
+      tabHidden.hideCategoryStance(activeTabID, row, stanceContext) !== null &&
+      selectedID === row.itemID
+    ) {
+      spaceSelection.dropWithNotice(SELECTION_GONE);
+    }
+  }
+
+  /**
+   * ⚠ WHY Hide IS OFFERED OR WITHHELD, IN WORDS, OR null IF IT MAY BE PRESSED.
+   *
+   * ⚠ THE THREAT CHECK HAS TO BE INSIDE A GUARD. `isHostile` reads
+   * `entity.isNpc` and throws on null, so `isHostile(selectedRow)` evaluated
+   * before the existence test takes the whole panel down on first paint — which
+   * is when nothing is ever selected. Deriving the reason once, in the order
+   * nothing-picked → all-tab → threat → allowed, means the guard is written
+   * once and the button's `disabled` and its tooltip cannot disagree about why.
+   *
+   * A threat is refused rather than silently ignored: `tabShows` would keep it
+   * shown anyway, so a live button that accepted it and did nothing would tell
+   * the player the client understood, and that would be a lie.
+   */
+  const hideRefusalReason = $derived.by<string | null>(() => {
+    if (!selectedRow) {
+      return "Pick something first";
+    }
+    // ⚠ THE ALL TAB HIDES NOTHING, BY DEFINITION. It is the fallback where
+    // everything else's hiding is undone, and a Hide that reached into it would
+    // be the one that could not be seen undone from within.
+    if (activeTab.fixed) {
+      return "All shows everything, so there is nothing to hide";
+    }
+    if (isHostile(selectedRow)) {
+      return "A threat is never hidden";
+    }
+    // ⚠ A ROW THAT CLASSIFIED AS `other` IS REFUSED HERE, not accepted and
+    // ignored. There is genuinely nothing to hide, and the button says so
+    // rather than taking the press.
+    if (offeredCategoriesFor(selectedRow).length === 0) {
+      return "That one has no category to hide it by";
+    }
+    return null;
+  });
+
+  const stanceHideRefusalReason = $derived.by<string | null>(() => {
+    if (!selectedRow || categoryStanceHideEntry === null) {
+      return "Pick something first";
+    }
+    // ⚠ THE SAME ABSOLUTE RULE AS THE CATEGORY HIDE.
+    if (activeTab.fixed) {
+      return "All shows everything, so there is nothing to hide";
+    }
+    // ⚠ AND THIS IS WHERE THE RELAXED INVARIANT SHOWS ITS FACE: a hostile row
+    // is the ONE refusal the category Hide carries that this verb does not.
+    // Hiding "Ships (Hostile)" names the side out loud, which is the explicit
+    // choice the rule allows.
+    return null;
+  });
+
+  /**
+   * Bring back one of THIS tab's hidden rows. The row carries where its hiding
+   * comes from: a group the player hid is dropped from the tab's hidden list,
+   * and one the preset pre-hides gets its pre-hiding recorded as undone —
+   * which is what makes it show on this tab while every other tab keeps its
+   * preset.
+   */
+  function showEntry(row: {
+    readonly kind: "category" | "stance" | "preset";
+    readonly category: HideCategoryID | null;
+    readonly role: string | null;
+    readonly stance: Stance | null;
+    readonly label: string;
+    readonly preset: boolean;
+  }): void {
+    if (row.kind === "stance" && row.role !== null && row.stance !== null) {
+      // ⚠ THE STANCE SIDE OF THE SAME DECISION: undoing a preset pre-hiding
+      // records the pair as shown; undoing a player hide drops it.
+      if (row.preset) {
+        tabHidden.addStance(activeTabID, row.role, row.stance);
+      } else {
+        tabHidden.unhideStance(activeTabID, row.role, row.stance);
+      }
+      return;
+    }
+    if (row.kind === "category" && row.category !== null) {
+      if (row.preset) {
+        tabHidden.addCategory(activeTabID, row.category);
+      } else {
+        tabHidden.unhideCategory(activeTabID, row.category);
+      }
+      return;
+    }
+  }
+
+  /**
+   * "Show everything": undo this tab's hiding wholesale — the player's own
+   * hides AND the preset's pre-hidings, for whatever the grid holds now.
+   * (A group the preset pre-hides later flies in is pre-hidden again: the
+   * preset's advance list applies to what the grid has not shown yet.)
+   */
+  function showEverythingOnTab(): void {
+    if (activeTabState.hidden.length > 0) {
+      tabHidden.clearHidden(activeTabID);
+    }
+    // ⚠ AND THE RECIPE'S OWN OMISSIONS, AS CATEGORIES. Clearing `hidden` alone
+    // leaves the preset's hiding in place, which is why the old single-row
+    // version of this looked like a button that did nothing: the rows came
+    // straight back. Each category the recipe hides is recorded in `shown`,
+    // which `tabShows` consults BEFORE the recipe — so this is a real override.
+    for (const row of presetGroupRows) {
+      tabHidden.addCategory(activeTabID, row.category);
+    }
+  }
+
+  /**
+   * ⚠ THE RECIPE'S OWN NAME, which is what the reset button says (goal 4).
+   *
+   * Not the tab's name — a renamed tab would otherwise produce "Reset Tab
+   * (Rocks)" for a tab that has nothing to do with rocks. The preset is what is
+   * being restored, so the preset is what is named.
+   */
+  const activeRecipeLabel = $derived(recipeByID(activeTab.recipeId).label);
+
+  /**
+   * "Reset Tab (<Preset>)": drop this tab's own edits and let its preset decide
+   * again — goal 4's second whole-tab verb.
+   *
+   * ⚠ DISTINCT FROM "Show everything", and the pair is the point. Show
+   * everything clears the hidden list and leaves the tab showing EVERYTHING.
+   * Reset puts the preset back, so a Mining tab hides what Mining hides again.
+   */
+  function resetTabToPreset(): void {
+    tabHidden.resetTab(activeTabID);
+  }
+
+  // --- the tab editor ---------------------------------------------------------
+
+  function openCreate(): void {
+    draftName = "";
+    // ⚠ THE PICKER OPENS ON MINING, NOT ON "All". "All" is already the tab in
+    // hand and is the one thing a new tab must not be a duplicate of; opening
+    // there would invite the player to create a second one by accident.
+    draftRecipe = "mining";
+    draftError = "";
+    tabEditor = { mode: "create" };
+  }
+
+  function openRename(id: string): void {
+    const tab = allTabs.find((candidate) => candidate.id === id);
+    if (!tab || tab.fixed) {
+      return;
+    }
+    draftName = tab.name;
+    draftRecipe = tab.recipeId;
+    draftError = "";
+    tabEditor = { mode: "rename", id };
+  }
+
+  /**
+   * ⚠ OPEN THE CONFIRMATION, NEVER DELETE STRAIGHT AWAY. A ✕ one click away from
+   * a ✎ one click away from a tab is a misclick waiting to happen, and a deleted
+   * tab is a piece of the player's own arrangement that cannot be rebuilt for
+   * them — `reset` would throw away every other tab too.
+   */
+  function openDelete(id: string): void {
+    const tab = allTabs.find((candidate) => candidate.id === id);
+    if (!tab || tab.fixed) {
+      return;
+    }
+    tabEditor = { mode: "delete", id };
+  }
+
+  function confirmDelete(): void {
+    if (tabEditor?.mode !== "delete") {
+      return;
+    }
+    // ⚠ THE TAB'S HIDDEN STATE GOES WITH THE TAB. It is keyed by the tab's
+    // opaque id, so a list left behind would outlive the tab it belonged to.
+    tabHidden.dropTab(tabEditor.id);
+    overviewTabs.remove(tabEditor.id);
+    closeEditor();
+  }
+
+  function closeEditor(): void {
+    tabEditor = null;
+    draftError = "";
+  }
+
+  /**
+   * ⚟ THE ONLY VALIDATION, AND IT EXISTS BECAUSE OF WHAT A TAB IS. An empty name
+   * falls back to the recipe's label rather than being refused — a tab with no
+   * name is indistinguishable from one that failed to draw. Duplicate names are
+   * NOT refused either: two tabs called "Mining" are confusing but harmless, and
+   * blocking them would stop a player naming a second Mining-shaped tab after a
+   * first one they already deleted.
+   */
+  function submitEditor(): void {
+    if (!tabEditor || tabEditor.mode === "delete") {
+      return;
+    }
+    if (tabEditor.mode === "create") {
+      overviewTabs.create(draftRecipe, draftName);
+    } else {
+      overviewTabs.rename(tabEditor.id, draftName);
+      overviewTabs.select(tabEditor.id);
+    }
+    closeEditor();
   }
 
   // --- doing things -----------------------------------------------------------
@@ -855,19 +1366,215 @@
   {/if}
 
   <!-- ============================================================= filters -->
-  <div class="spc-filters">
+  <!-- ============================================== the tab + verb bars -->
+  <!--
+    ⚠ TWO BARS, NOT ONE: THE TABS OWN THE LINE ABOVE, THE OVERVIEW VERBS (Hide
+    and the stance-Hide) OWN THE LINE UNDER IT. A single row that held both let
+    two wide Hide buttons crowd the tab list off a narrow panel, so each concern
+    now gets its own full-width line. Every control here is an ordinary left
+    click. There is deliberately no context menu anywhere in this feature:
+    right-click belongs to the browser, so "hide this" on a right-click never
+    reached the client at all.
+  -->
+  <div class="spc-tabs-bar">
     <div class="spc-tabs" role="tablist" aria-label="What to show">
-      {#each OVERVIEW_PRESETS as preset (preset.id)}
+      {#each allTabs as tab (tab.id)}
+        <!--
+          ⚠ A TAB IS JUST A TAB NOW. The rename and delete controls used to sit
+          inside this wrapper, which put two more buttons on every tab and made
+          a four-tab bar carry twelve controls. They live beside the "+" now and
+          act on whichever tab is selected, so the bar costs three buttons no
+          matter how many tabs there are.
+        -->
         <button
           type="button"
           role="tab"
           class="spc-tab"
-          class:on={activePresetID === preset.id}
-          aria-selected={activePresetID === preset.id}
-          onclick={() => overviewPreset.choose(preset.id)}
-        >{preset.label}</button>
+          class:on={activeTabID === tab.id}
+          aria-selected={activeTabID === tab.id}
+          title={recipeByID(tab.recipeId).hint}
+          onclick={() => overviewTabs.select(tab.id)}
+        >{tab.name}</button>
       {/each}
     </div>
+    <button
+      type="button"
+      class="spc-tab-add"
+      onclick={openCreate}
+      title="New tab"
+      aria-label="New tab"
+    >+</button>
+    <!--
+      ⚠ RENAME AND DELETE ACT ON THE SELECTED TAB, and are refused on All.
+      The refusal is a disabled control carrying its reason, which is the same
+      rule the Hide button follows.
+    -->
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+      aria-label={activeTab.fixed ? "All cannot be renamed" : `Rename ${activeTab.name}`}
+      disabled={activeTab.fixed}
+      onclick={() => openRename(activeTab.id)}
+    >✎</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+      aria-label={activeTab.fixed ? "All cannot be deleted" : `Delete ${activeTab.name}`}
+      disabled={activeTab.fixed}
+      onclick={() => openDelete(activeTab.id)}
+    >✕</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title="Move {activeTab.name} left"
+      aria-label="Move {activeTab.name} left"
+      disabled={activeTab.fixed}
+      onclick={() => overviewTabs.move(activeTab.id, -1)}
+    >◀</button>
+    <button
+      type="button"
+      class="spc-tab-tool"
+      title="Move {activeTab.name} right"
+      aria-label="Move {activeTab.name} right"
+      disabled={activeTab.fixed || activeTabID === allTabs[allTabs.length - 1]?.id}
+      onclick={() => overviewTabs.move(activeTab.id, 1)}
+    >▶</button>
+  </div>
+
+  <!--
+    ⚠ THE SECOND BAR, ON ITS OWN LINE. The overview verbs (Hide and the
+    stance-Hide) live here rather than beside the tab list, so two wide buttons
+    can never push the tabs off a narrow panel — the tab list owns the line above
+    and the verbs own the line under it, each the full width of the panel.
+  -->
+  <div class="spc-tools-bar">
+    <!--
+      ⚠ THE TWO STANDING TOGGLES, ON THE LEFT (PLAN pivot, 2026-04-10).
+      "Hide Friendly" / "Hide Neutral" clear the whole side's combat-capable
+      traffic off the list, which is the thing a pilot wants when the grid is
+      full of friendlies and one rat. They are TOGGLES, not verbs: pressing one
+      again puts everything back, so they show their state by being struck
+      through rather than by adding a row to the Hidden Items menu — the menu
+      stays a list of things deliberately removed, not of transient modes.
+      ⚠ NO HOSTILE TOGGLE EXISTS, and cannot: a threat is never hidden.
+      ⚠ AND ONLY COMBAT-CAPABLE THINGS. Planets, moons, stations, asteroids,
+      gates and orbitals are almost always neutral, and are left alone.
+    -->
+    {#each COMBAT_TOGGLES as side (side)}
+      <button
+        type="button"
+        class="spc-tool spc-tool-toggle"
+        class:on={combatTogglesOn(side)}
+        aria-pressed={combatTogglesOn(side)}
+        title={combatTogglesOn(side)
+          ? `Stop hiding ${side} things that can shoot at you on ${activeTab.name}`
+          : `Hide every ${side} thing that can shoot at you on ${activeTab.name} — ships, drones, turrets and player structures. Planets, stations, moons and asteroids are not affected.`}
+        onclick={() => toggleCombatStance(side)}
+      >Hide {COMBAT_TOGGLE_LABELS[side]}</button>
+    {/each}
+    <!--
+      ⚠ HIDDEN IS REFUSED, NOT SILENT, WHEN NOTHING IS PICKED. A live button
+      that does nothing is worse than one that says why it cannot act — and it
+      is only disabled here because there is a REAL reason (no selection), not
+      because a request happens to be in flight.
+    -->
+    <!--
+      ⚠ ONE HIDE BUTTON PER CATEGORY THE PICKED ROW CARRIES (PLAN goal 1b). A
+      row is in as many lists as it has categories, and each button hides one
+      of them by name — so the player is always choosing what they mean rather
+      than inferring it. `offeredCategoriesFor` is already the classifier's own
+      answer, so every button here hides something real.
+    -->
+    {#each selectedCategories as category (category.id)}
+      <button
+        type="button"
+        class="spc-tool spc-tool-hide"
+        disabled={hideRefusalReason !== null}
+        title={hideRefusalReason ??
+          `Hide everything of this sort — every ${category.label.toLowerCase()} on ${activeTab.name}, not just this one.`}
+        onclick={() => hideSelectedCategory(category.id)}
+      >Hide {category.label}</button>
+    {/each}
+    <!--
+      ⚠ ONE BLANK "HIDE" WHEN THERE IS NO CATEGORY TO NAME. With nothing picked
+      — or a row that classified as `other` — the per-category loop above
+      renders nothing, and a toolbar with no button on it cannot carry the
+      refusal at all. This button is the refusal made visible: it is always
+      disabled, and its tooltip says why in words rather than leaving the player
+      to wonder where the verb went.
+    -->
+    {#if selectedCategories.length === 0}
+      <button
+        type="button"
+        class="spc-tool spc-tool-hide"
+        disabled={hideRefusalReason !== null}
+        title={hideRefusalReason ?? "Nothing to hide"}
+        onclick={() => {}}
+      >Hide</button>
+    {/if}
+    <!--
+      ⚠ THERE IS NO PER-ROW STANCE HIDE ANY MORE (PLAN pivot, 2026-04-10).
+      A "Hide Ships (Friendly)" button on one picked row was replaced by the two
+      standing toggles above, which do the same job for every ship on the grid
+      instead of one at a time — and which can reach a hostile no more than this
+      button could, because neither offers a hostile toggle.
+    -->
+  </div>
+
+  <!-- ========================================================= the editor -->
+  <!--
+    ⚠ THREE MODES IN ONE PANEL, AND THE DELETE ONE SAYS SO LOUDLY. The
+    confirmation is the same submenu the create and rename use, so there is one
+    place a submenu can appear from — but it is NOT styled like a form, because a
+    destructive action wearing the same clothes as "pick a recipe" is how a
+    misclick becomes a lost tab.
+  -->
+  {#if tabEditor}
+    <div class="spc-editor" class:danger={tabEditor.mode === "delete"}>
+      {#if tabEditor.mode === "delete"}
+        <p class="spc-editor-confirm">
+          Delete the tab <strong>{allTabs.find((tab) => tab.id === tabEditor.id)?.name}</strong>?
+        </p>
+        <div class="spc-editor-actions">
+          <button type="button" class="spc-tool bad" onclick={confirmDelete}>Yes</button>
+          <button type="button" class="spc-tool" onclick={closeEditor}>No</button>
+        </div>
+      {:else}
+        <label class="spc-editor-field">
+          <span class="spc-editor-label">
+            {tabEditor.mode === "create" ? "New tab" : "Rename tab"}
+          </span>
+          <input
+            type="text"
+            maxlength="24"
+            placeholder={recipeByID(draftRecipe).label}
+            aria-label="Tab name"
+            bind:value={draftName}
+          />
+        </label>
+        <label class="spc-editor-field">
+          <span class="spc-editor-label">Show</span>
+          <select aria-label="What this tab shows" bind:value={draftRecipe}>
+            {#each OVERVIEW_RECIPES as recipe (recipe.id)}
+              <option value={recipe.id}>{recipe.label} — {recipe.hint}</option>
+            {/each}
+          </select>
+        </label>
+        {#if draftError}<p class="spc-note bad">{draftError}</p>{/if}
+        <div class="spc-editor-actions">
+          <button type="button" class="spc-tool" onclick={submitEditor}>
+            {tabEditor.mode === "create" ? "Create tab" : "Save name"}
+          </button>
+          <button type="button" class="spc-tool" onclick={closeEditor}>Cancel</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ============================================================= filters -->
+  <div class="spc-filters">
     <label class="spc-search">
       <span class="spc-search-glyph" aria-hidden="true">⌕</span>
       <input type="search" placeholder="name, type or group" aria-label="Search what is around you" bind:value={search} />
@@ -935,6 +1642,13 @@
                 {formatDistance(row.distance)}
               </span>
             </button>
+            <!--
+              ⚠ NO PER-ROW HIDE CONTROL, AND THAT IS THE POINT. The first pass
+              put one on every row. That is 200 extra controls in a scrolling
+              list, and the one a player wants is the one for whatever they
+              just clicked — so hiding moved to the toolbar and acts on the
+              selection, which is a single control in a fixed place.
+            -->
           </li>
         {/each}
       {/if}
@@ -951,4 +1665,104 @@
       <p class="spc-note bad">{$space.error}</p>
     {/if}
   </div>
+
+  <!--
+    ==================================================== the hidden menu, per tab
+    ⚠ AT THE BOTTOM, OUTSIDE THE SCROLLER, COLLAPSED. This is the route back
+    from hiding, so it cannot be something you have to scroll to find: a
+    player who has hidden a belt of scenery and then wanted it back has to be
+    able to see that it is hidden and reach it in one click.
+
+    ⚠ AND IT IS THE ACTIVE TAB'S OWN. Every tab carries its own two lists —
+    hidden here shows up nowhere else, and the All tab (the fallback, which
+    hides nothing) carries no menu at all.
+
+    ⚠ ITS ENTRIES ARE GROUPS, NOT OBJECTS. One entry hides a whole group, so
+    200 identical emitters list as one row, not two hundred.
+
+    ⚠ ONE SYSTEM, ONE LIST. The preset pre-hides its groups in advance, and
+    the player's own hides sit alongside them, so the menu is a single flat
+    list of what this tab hides — no subcategories. A group the player
+    already showed is not listed: the overview shows it. All of it is names
+    the grid already shows; no id ever renders.
+  -->
+  {#if !activeTab.fixed}
+    <div class="spc-hidden-menu">
+      <!--
+        ⚠ THE LABEL IS CONSTANT. The menu is a fallback the player opens when
+        something is missing, not a status line: it says "Hidden Items" whether
+        the tab hides nothing or twenty groups, and the answer is inside.
+      -->
+      <button
+        type="button"
+        class="spc-hidden-toggle"
+        aria-expanded={hiddenMenuOpen}
+        onclick={() => (hiddenMenuOpen = !hiddenMenuOpen)}
+      >
+        <span class="spc-hidden-caret" class:open={hiddenMenuOpen} aria-hidden="true">▾</span>
+        Hidden Items
+      </button>
+
+      {#if hiddenMenuOpen}
+        {#if hiddenMenuRows.length === 0}
+          <p class="spc-note">
+            Pick something in the overview and press Hide, and its category will be listed here.
+          </p>
+        {:else}
+          <!--
+            ⚠ ONE FLAT LIST, NO SUBCATEGORIES. The preset's pre-hidings and
+            the player's own hides are one kind of entry, one row each, and
+            Show undoes that one entry — from whichever list it came from.
+          -->
+          <ul class="spc-hidden-list">
+            {#each hiddenMenuRows as row (row.key)}
+              <li class="spc-hidden-row">
+                <span class="spc-hidden-name">{row.label}</span>
+                <button
+                  type="button"
+                  class="spc-hidden-show"
+                  title="Show {row.label} on this tab"
+                  aria-label="Show {row.label}"
+                  onclick={() => showEntry(row)}
+                >Show</button>
+              </li>
+            {/each}
+          </ul>
+          <!--
+            ⚠ TWO WHOLE-TAB ACTIONS, AND THEY ARE NOT THE SAME THING (goals 3
+            and 4). "Show everything" is a FULL RESET: it forgets every hidden
+            entry this tab holds, including ones whose objects are not on the
+            grid at all — the tooltip says so, because a button that clears more
+            than the list above it looks like a bug. "Reset Tab" is the gentler
+            half: it drops the player's own edits and puts the tab's PRESET back,
+            so the tab is what it was created as.
+          -->
+          <div class="spc-hidden-actions">
+            <button
+              type="button"
+              class="spc-link bad"
+              title="Forget everything hidden on {activeTab.name}, including anything not currently on the grid. This is a full reset of the tab's hidden list."
+              aria-label="Show everything on {activeTab.name}"
+              onclick={() => {
+                showEverythingOnTab();
+                hiddenMenuOpen = false;
+              }}
+            >Show everything</button>
+            {#if !activeTab.fixed}
+              <button
+                type="button"
+                class="spc-link"
+                title="Put {activeTab.name} back to its {activeRecipeLabel} preset, dropping your own hides on this tab."
+                aria-label="Reset {activeTab.name} to the {activeRecipeLabel} preset"
+                onclick={() => {
+                  resetTabToPreset();
+                  hiddenMenuOpen = false;
+                }}
+              >Reset Tab ({activeRecipeLabel})</button>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </div>
