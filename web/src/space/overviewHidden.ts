@@ -684,6 +684,8 @@ export interface TabHiddenStore {
   unhideCategory(tabID: string, category: HideCategoryID): void;
   /** Bring one of THIS tab's hidden role-and-side pairs back. */
   unhideStance(tabID: string, role: string, stance: Stance): void;
+  /** Bring one of THIS tab's hidden category-and-side pairs back. */
+  unhideCategoryStance(tabID: string, category: HideCategoryID, stance: Stance): void;
   /** Add one category to THIS tab beyond what its preset shows. */
   addCategory(tabID: string, category: HideCategoryID): void;
   /** Add one role-and-side pair to THIS tab beyond what its preset shows. */
@@ -827,6 +829,12 @@ export function createTabHiddenStore(): TabHiddenStore {
           (entry) => !(entry.kind === "stance" && entry.role === role && entry.stance === stance),
         ),
       }));
+    },
+    unhideCategoryStance: (tabID, category, stance) => {
+      const matches = (entry: HiddenEntry): boolean =>
+        entry.kind === "stance" && entry.category === category && entry.stance === stance;
+      if (!stateFor(map.get(), tabID).hidden.some(matches)) return;
+      rewrite(tabID, (state) => ({ ...state, hidden: state.hidden.filter(entry => !matches(entry)) }));
     },
     addStance: (tabID, role, stance) => {
       // ⚠ THE SAME ADMISSION RULE AS THE GROUP SIDE. A pair the tab already

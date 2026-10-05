@@ -29,8 +29,8 @@
 // ⚠ THE GROUP IS THE PRIMARY KEY, NOT THE KIND. The runtime `kind` is coarse and
 // lossy — everything the server did not tag arrives as a plain string, and a
 // group is a fact about the TYPE, which is what the player is actually looking
-// at. The kind is only consulted for a row whose group we could not read, so a
-// missing group degrades to something sensible instead of to nothing.
+// at. For an unmapped group, kind distinguishes mobile NPC ships within the
+// broad Entity category and supplies a fallback when the category is unknown.
 //
 // ⚠ NO CATEGORY EVER HIDES A HOSTILE BY ACCIDENT. That rule does not live here
 // — it lives in `tabShows`, and it reads whatever entry kind it is given. This
@@ -213,7 +213,7 @@ const GROUP_CATEGORY: ReadonlyMap<number, HideCategoryID> = new Map([
 // right broad word instead of on nothing.
 const CATEGORY_FALLBACK: Readonly<Record<number, HideCategoryID>> = {
   6: "ship", // Ship
-  11: "turret", // Entity — NPCs: sentries, rats, officers, overseers
+  11: "turret", // Entity — mobile NPC ships are resolved before this fallback
   18: "drone", // Drone
   16: "drone", // Skill — a drone bucket the client still uses
   87: "drone", // Fighter
@@ -323,10 +323,9 @@ export function hideCategoriesFor(entity: SpaceEntity): readonly HideCategoryID[
     if (mapped !== undefined) {
       return [mapped];
     }
-    // An ungrouped-but-known group id. Category 6 is the hull category, so a
-    // ship the group table has not heard of is still a ship — better than the
-    // "scenery by elimination" that made this module necessary.
-    if (entity.categoryID === 6) {
+    // Category 11 includes mobile NPC hulls as well as sentries. The runtime
+    // identifies those hulls as ships; explicit sentry groups already won above.
+    if (entity.categoryID === 6 || (entity.categoryID === 11 && entity.kind === "ship")) {
       return ["ship"];
     }
     // ⚠ AND THEN THE BROADER FALLBACK, BEFORE `kind`. The SDE category says what

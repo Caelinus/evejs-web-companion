@@ -35,6 +35,8 @@
   } from "../space/overviewRecipes.ts";
   import {
     categoryStanceEntryFor,
+    categoryIsHidden,
+    categoryIsShown,
     combatStanceHides,
     combatToggleMap,
     combatToggles,
@@ -275,6 +277,7 @@
       return [];
     }
     return [...recipeByID(activeTab.recipeId).hides]
+      .filter(category => !categoryIsHidden(category, activeTabState) && !categoryIsShown(category, activeTabState))
       .map((category) => ({
         key: "preset:category:" + category,
         label: hideCategoryByID(category).label,
@@ -326,8 +329,8 @@
           : {
               key: "player:stance:" + (entry.role ?? entry.category) + ":" + entry.stance,
               kind: "stance" as const,
-              category: null,
-              role: entry.role ?? entry.category ?? null,
+              category: entry.category ?? null,
+              role: entry.role ?? null,
               stance: entry.stance,
               label: entry.label,
               preset: false,
@@ -632,6 +635,10 @@
     readonly label: string;
     readonly preset: boolean;
   }): void {
+    if (row.kind === "stance" && row.category !== null && row.stance !== null) {
+      tabHidden.unhideCategoryStance(activeTabID, row.category, row.stance);
+      return;
+    }
     if (row.kind === "stance" && row.role !== null && row.stance !== null) {
       // ⚠ THE STANCE SIDE OF THE SAME DECISION: undoing a preset pre-hiding
       // records the pair as shown; undoing a player hide drops it.
@@ -691,6 +698,7 @@
    */
   function resetTabToPreset(): void {
     tabHidden.resetTab(activeTabID);
+    combatToggles.clear(activeTabID);
   }
 
   // --- the tab editor ---------------------------------------------------------
@@ -737,6 +745,7 @@
     // ⚠ THE TAB'S HIDDEN STATE GOES WITH THE TAB. It is keyed by the tab's
     // opaque id, so a list left behind would outlive the tab it belonged to.
     tabHidden.dropTab(tabEditor.id);
+    combatToggles.clear(tabEditor.id);
     overviewTabs.remove(tabEditor.id);
     closeEditor();
   }
@@ -761,7 +770,7 @@
     if (tabEditor.mode === "create") {
       overviewTabs.create(draftRecipe, draftName);
     } else {
-      overviewTabs.rename(tabEditor.id, draftName);
+      overviewTabs.rename(tabEditor.id, draftName, draftRecipe);
       overviewTabs.select(tabEditor.id);
     }
     closeEditor();
@@ -1565,7 +1574,7 @@
         {#if draftError}<p class="spc-note bad">{draftError}</p>{/if}
         <div class="spc-editor-actions">
           <button type="button" class="spc-tool" onclick={submitEditor}>
-            {tabEditor.mode === "create" ? "Create tab" : "Save name"}
+            {tabEditor.mode === "create" ? "Create tab" : "Save tab"}
           </button>
           <button type="button" class="spc-tool" onclick={closeEditor}>Cancel</button>
         </div>

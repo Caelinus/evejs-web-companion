@@ -42,7 +42,7 @@
   import { spaceSelection } from "../space/selection.ts";
   import { showInfo } from "./showInfo.ts";
   import { overviewTabs } from "../space/overviewTabs.ts";
-  import { EMPTY_STATE, tabHiddenMap, tabShows } from "../space/overviewHidden.ts";
+  import { combatStanceHides, combatToggleMap, EMPTY_STATE, tabHiddenMap, tabShows, type CombatStance } from "../space/overviewHidden.ts";
   import { stanceContextFrom } from "../space/stance.ts";
   import { actionsForRow, type RowAction } from "../space/rowActions.ts";
   import { dispatchRowAction, isSingleCallAction } from "../space/rowActionRunner.ts";
@@ -85,6 +85,8 @@
    */
   const tabSignal = overviewTabs.selected;
   const hiddenMapSignal = tabHiddenMap;
+  const combatMapSignal = combatToggleMap;
+  const NO_COMBAT_TOGGLES: ReadonlySet<CombatStance> = new Set();
   /**
    * Whose is each bracket — the same context the list builds, so the picture
    * cannot read a side the list did not (see `stance.ts`).
@@ -102,9 +104,10 @@
     // picture shares with that tab's list.
     const tab = $tabSignal;
     const state = $hiddenMapSignal.get(tab.id) ?? EMPTY_STATE;
+    const toggles = $combatMapSignal.get(tab.id) ?? NO_COMBAT_TOGGLES;
     const context = stanceContext;
     return (snapshot?.entities ?? []).filter((entity) =>
-      tabShows(tab, entity, state, context),
+      tabShows(tab, entity, state, context) && !combatStanceHides(entity, toggles, context),
     );
   });
 

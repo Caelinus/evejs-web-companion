@@ -22,6 +22,8 @@ import {
   type HideCategoryID,
 } from "./hideCategory.ts";
 import { bracketRole } from "./tactical.ts";
+import { decodeSpaceSnapshot } from "../bridge/space.ts";
+import { categoryStanceEntryFor, tabShows } from "./overviewHidden.ts";
 import type { SpaceEntity, SpaceVector } from "../store/types.ts";
 
 const ORIGIN: SpaceVector = { x: 0, y: 0, z: 0 };
@@ -107,6 +109,47 @@ test("a real ship is still a ship, and hiding Ships reaches it", () => {
   assert.equal(categoryCovers("ship", frigate), true);
 });
 
+test("decoded belt rats offer Ships (Hostile), and its hide leaves player ships and sentries visible", () => {
+  // Actual SDE types used by the NPC runtime: Guristas Arrogator (2382/562)
+  // and Angel Rogue (2372/550) are Entity-category hulls, not Ship-category hulls.
+  const snapshot = decodeSpaceSnapshot({
+    entities: [
+      { itemID: 1, typeID: 2382, groupID: 562, categoryID: 11, name: "Guristas Arrogator" },
+      { itemID: 2, typeID: 2372, groupID: 550, categoryID: 11, name: "Angel Rogue" },
+      { itemID: 3, typeID: 1194, groupID: 99, categoryID: 11, name: "Amarr Sentry Gun" },
+    ].map(row => ({
+      ...row,
+      kind: "ship",
+      isNpc: true,
+      npcEntityType: "npc",
+      position: { x: 0, y: 0, z: 0 },
+      velocity: { x: 0, y: 0, z: 0 },
+    })),
+  });
+  const context = { characterID: 9001, corporationID: 1001, allianceID: null };
+  const tab = { id: "combat", name: "Combat", recipeId: "combat" as const, fixed: false };
+  const playerShip = entity({
+    itemID: 4, groupID: 25, categoryID: 6, kind: "ship", characterID: context.characterID,
+  });
+  const [guristas, angel, sentry] = snapshot.entities;
+  assert.ok(guristas && angel && sentry);
+  for (const rat of [guristas, angel]) {
+    assert.deepEqual(hideCategoriesFor(rat), ["ship"], rat.name ?? "belt rat");
+    const entry = categoryStanceEntryFor(rat, context);
+    assert.deepEqual(entry, {
+      kind: "stance", category: "ship", stance: "hostile", label: "Ships (Hostile)",
+    });
+    assert.ok(entry);
+    const state = { hidden: [entry], shown: [] };
+    assert.equal(tabShows(tab, guristas, state, context), false);
+    assert.equal(tabShows(tab, angel, state, context), false);
+    assert.equal(tabShows(tab, playerShip, state, context), true);
+    assert.equal(tabShows(tab, sentry, state, context), true);
+  }
+  assert.deepEqual(hideCategoriesFor(sentry), ["turret"]);
+  assert.equal(categoryStanceEntryFor(sentry, context), null);
+});
+
 test("Scenery and Ships are disjoint, so hiding scenery cannot hide ships", () => {
   const scenery = entity({ itemID: 3, groupID: 226, categoryID: 2 });
   const ship = entity({ itemID: 4, groupID: 25, categoryID: 6 });
@@ -181,7 +224,7 @@ test("⚠ a Sentry Gun is hideable — reported unhidable in game", () => {
   // Group 99 is literally "Sentry Gun", category 11 ("Entity"). The runtime sent
   // no `kind` this module could read, so it used to fall through to `other`,
   // which is never offered as a button — which is exactly "cannot be hidden".
-  for (const kind of [null, "turret", "somethingunknown"]) {
+  for (const kind of [null, "ship", "turret", "somethingunknown"]) {
     const sentry = entity({ itemID: 1, groupID: 99, categoryID: 11, kind });
     assert.deepEqual(hideCategoriesFor(sentry), ["turret"], `sentry tagged ${kind}`);
     assert.deepEqual(offeredCategoriesFor(sentry), ["turret"], `sentry tagged ${kind} offers nothing`);
