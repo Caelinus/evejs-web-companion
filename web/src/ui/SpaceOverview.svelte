@@ -36,6 +36,7 @@
   import {
     categoryStanceEntryFor,
     combatStanceHides,
+    combatToggleMap,
     combatToggles,
     covers,
     EMPTY_STATE,
@@ -190,6 +191,23 @@
    */
   const activeTabState = $derived($tabHiddenMap.get(activeTabID) ?? EMPTY_STATE);
 
+  /** An empty stance set, reused so a tab with no toggles allocates nothing. */
+  const NO_COMBAT_TOGGLES: ReadonlySet<CombatStance> = new Set<CombatStance>();
+
+  /**
+   * ⚠ THE TOGGLES ARE READ THROUGH THE SUBSCRIBED SIGNAL, AND THAT IS LOAD-BEARING.
+   *
+   * `combatToggles` exposes a `forTab()` helper that reaches the signal with a
+   * plain `.get()`, which does NOT register a Svelte dependency — so a button
+   * bound to it rendered once and then never re-evaluated, and both Hide
+   * Friendly / Hide Neutral looked identical however many times they were
+   * pressed. Reading `$combatToggleMap` subscribes to the store, so the class,
+   * `aria-pressed` and the filtered list all update on a press. The hidden lists
+   * already work this way (`$tabHiddenMap` above); the toggles were the one path
+   * that did not.
+   */
+  const activeCombatToggles = $derived($combatToggleMap.get(activeTabID) ?? NO_COMBAT_TOGGLES);
+
   /**
    * Whose is each row — the context every stance question in this panel reads
    * from, built from the character list the client already holds.
@@ -224,7 +242,7 @@
     // guarantees by accident. `combatStanceHides` is also what keeps them off
     // the furniture: only combat-capable things qualify, and a hostile is
     // refused outright.
-    const toggles = combatToggles.forTab(activeTabID);
+    const toggles = activeCombatToggles;
     return {
       ...snapshot,
       entities: snapshot.entities.filter(
@@ -511,8 +529,8 @@
   };
 
   /** Is this side currently switched on for this tab? */
-  function combatTogglesOn(tabID: string, side: CombatStance): boolean {
-    return combatToggles.forTab(tabID).has(side);
+  function combatTogglesOn(side: CombatStance): boolean {
+    return activeCombatToggles.has(side);
   }
 
   /** Flip one side on this tab. It never writes a hidden entry. */
@@ -1448,9 +1466,9 @@
       <button
         type="button"
         class="spc-tool spc-tool-toggle"
-        class:on={combatTogglesOn(activeTabID, side)}
-        aria-pressed={combatTogglesOn(activeTabID, side)}
-        title={combatTogglesOn(activeTabID, side)
+        class:on={combatTogglesOn(side)}
+        aria-pressed={combatTogglesOn(side)}
+        title={combatTogglesOn(side)
           ? `Stop hiding ${side} things that can shoot at you on ${activeTab.name}`
           : `Hide every ${side} thing that can shoot at you on ${activeTab.name} — ships, drones, turrets and player structures. Planets, stations, moons and asteroids are not affected.`}
         onclick={() => toggleCombatStance(side)}

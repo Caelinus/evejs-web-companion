@@ -462,6 +462,34 @@ test("⚠ a switched-on toggle reads as inactive: faded AND struck through", () 
   assert.match(onHover, /opacity/, "hover undoes the active toggle's fade");
 });
 
+test("⚠ the toggles read the SUBSCRIBED signal, so a press actually repaints them", () => {
+  // ⚠ REPORTED AS "the buttons still look identical when clicked". The CSS was
+  // right, and SSR renders the pressed state correctly — but the class and
+  // `aria-pressed` were bound to a plain `combatToggles.forTab(...)` read. That
+  // call reaches the signal with `.get()` and registers NO Svelte dependency, so
+  // the bindings (and the filtered list) never re-evaluated on a press, however
+  // many times the button was clicked. Reading `$combatToggleMap` subscribes to
+  // the store, which is what makes the press observable. SSR cannot catch this
+  // — it never re-renders — so the wiring is pinned from the source, the same
+  // way the suite checks other event wiring the SSR renderer strips.
+  assert.match(SOURCE, /\$combatToggleMap/, "the toggles are not read through the subscribed signal");
+  assert.doesNotMatch(
+    SOURCE,
+    /combatToggles\.forTab/,
+    "a plain .forTab() read is back; the button will not repaint on a press",
+  );
+  assert.match(
+    SOURCE,
+    /class:on=\{combatTogglesOn\(side\)\}/,
+    "the pressed class is not driven by the shared predicate",
+  );
+  assert.match(
+    SOURCE,
+    /aria-pressed=\{combatTogglesOn\(side\)\}/,
+    "the accessible pressed state is not driven by the shared predicate",
+  );
+});
+
 test("⚠ `npm start` does NOT rebuild, so a CSS change needs `npm run build:web`", () => {
   // ⚠ THE CAUSE OF "the toggle shows no indication", reported twice. The rule was
   // correct in `styles.css` the whole time and correct in the SSR render — but
