@@ -17,7 +17,7 @@ const source = (name: string) => readFileSync(new URL(`../ui/${name}`, import.me
 
 test("Ready Fit is one ordinary pilot window: open, focus, restore, close and reopen", () => {
   assert.equal(isGlobalTab("provisioning"), false);
-  for (const docked of [true, false]) assert.ok(launchableTabsFor(docked).some(tab => tab.id === "provisioning" && tab.label === "Готовый фит"));
+  for (const docked of [true, false]) assert.ok(launchableTabsFor(docked).some(tab => tab.id === "provisioning" && tab.label === "Ready Fit"));
   let windows = openWindow([], "provisioning");
   windows = openWindow(windows, "market");
   windows = openWindow(windows, "provisioning");
@@ -165,7 +165,7 @@ test("Ready Fit renders the current held pilot and ship and Neocom launches a wi
   assert.doesNotMatch(panel, /Review hash|Review ID|target pilot/i);
   const rail = render(Neocom, { props: { store, isDocked: true, openIds: new Set(["provisioning"]),
     focusedId: "provisioning", onSelect: () => {} } }).body;
-  assert.match(rail, /<button[^>]+aria-label="Готовый фит"/);
+  assert.match(rail, /<button[^>]+aria-label="Ready Fit"/);
   assert.doesNotMatch(rail, /href="\/ship-provisioning"/);
 });
 

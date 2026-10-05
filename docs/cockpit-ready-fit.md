@@ -1,6 +1,6 @@
 # Current-pilot Ready Fit
 
-The Neocom **Готовый фит** action opens an ordinary cockpit window for the
+The Neocom **Ready Fit** action opens an ordinary cockpit window for the
 currently held pilot. Review, Replenish Consumables and Provision Ship consume
 the shared engine and held authority; there is no pilot selector or Factory
 acquisition. Definition provider and physical item source remain separate.

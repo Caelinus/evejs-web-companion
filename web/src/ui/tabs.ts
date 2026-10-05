@@ -72,7 +72,7 @@ export interface TabDef {
 // ⚠ THE TAB TABLE — the one place tab visibility is decided. Render order is the
 // order of this list (state-specific tabs first, then the shared ones).
 export const TABS: readonly TabDef[] = [
-  { id: "provisioning", label: "Готовый фит", where: "both" },
+  { id: "provisioning", label: "Ready Fit", where: "both" },
   // Docked only — fitting needs a station; route planning is set up while
   // docked. (Station services + guests are NOT a Neocom tab: they live as a
   // tab INSIDE the docked Inventory & Ship dock panel, next to the hangars,
